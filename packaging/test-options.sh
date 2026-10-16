@@ -29,7 +29,8 @@ out=""; url=""
 while [ $# -gt 0 ]; do
     case "$1" in
         -o) out=$2; shift 2 ;;
-        -m|-H|-d) shift 2 ;;
+        -d) echo "$2" >> "$T/body.log"; shift 2 ;;
+        -m|-H) shift 2 ;;
         -*) shift ;;
         *) url=$1; shift ;;
     esac
@@ -61,7 +62,7 @@ tar -czf "$T/rel.tar.gz" -C "$T/pkg" hydranos
 enrol() { # enrol <home> <args...>: the user install, everything stubbed
     h=$1; shift
     mkdir -p "$h"
-    : > "$T/curl.log"
+    : > "$T/curl.log"; : > "$T/body.log"
     env HOME="$h" PATH="$T/bin:$PATH" XDG_CONFIG_HOME="" XDG_DATA_HOME="" \
         sh "$root/install.sh" --user --register-to http://controller.example --token t0k3n \
         --port 18199 "$@" > "$T/enrol.log" 2>&1 || { echo "install.sh failed:"; cat "$T/enrol.log"; return 1; }
@@ -83,6 +84,7 @@ enrol "$h" --harden --listen 192.168.99.5 || fail=1
 has "--listen: written as api_host" "$(conf_of "$h")" 'api_host = "192.168.99.5"'
 hasnt "--listen: no wildcard left" "$(conf_of "$h")" 'api_host = "0.0.0.0"'
 has "--listen: the node is probed where it listens" "$T/curl.log" "http://192.168.99.5:18199/health"
+has "--listen: registered on that address, not the route's" "$T/body.log" '"url":"http://192.168.99.5:18199"'
 has "--harden: NoNewPrivileges" "$(unit_of "$h")" "NoNewPrivileges=yes"
 has "--harden: LockPersonality" "$(unit_of "$h")" "LockPersonality=yes"
 has "--harden: the daemon is still started" "$(unit_of "$h")" "ExecStart="
@@ -90,6 +92,24 @@ has "--harden: the daemon is still started" "$(unit_of "$h")" "ExecStart="
 hasnt "--harden: no ProtectHome" "$(unit_of "$h")" "ProtectHome"
 hasnt "--harden: no ProtectSystem" "$(unit_of "$h")" "ProtectSystem"
 hasnt "--harden: no empty capability set" "$(unit_of "$h")" "CapabilityBoundingSet"
+
+echo "== install.sh --listen with another precise address, and an IPv6 literal"
+h=$T/h2
+enrol "$h" --listen 192.168.99.77 || fail=1
+has "--listen ADDR: registered on ADDR" "$T/body.log" '"url":"http://192.168.99.77:18199"'
+hasnt "--listen ADDR: not on the route's address" "$T/body.log" '192.168.99.5'
+h=$T/h3
+enrol "$h" --listen ::1 || fail=1
+has "--listen ::1: written bare as api_host" "$(conf_of "$h")" 'api_host = "::1"'
+has "--listen ::1: probed with brackets" "$T/curl.log" "http://[::1]:18199/health"
+has "--listen ::1: registered with brackets" "$T/body.log" '"url":"http://[::1]:18199"'
+h=$T/h4
+enrol "$h" --listen "[::1]" || fail=1
+has "--listen [::1]: written bare as api_host" "$(conf_of "$h")" 'api_host = "::1"'
+has "--listen [::1]: registered with brackets" "$T/body.log" '"url":"http://[::1]:18199"'
+h=$T/h5
+enrol "$h" || fail=1
+has "default: still registered on the route's address" "$T/body.log" '"url":"http://192.168.99.5:18199"'
 
 if [ "$(id -u)" = 0 ] && [ -e /.dockerenv ] && ! command -v docker >/dev/null 2>&1; then
     echo "== install.sh system mode (root, in a container)"
