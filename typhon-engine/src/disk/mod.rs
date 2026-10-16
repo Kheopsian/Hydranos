@@ -263,8 +263,12 @@ impl DiskManager {
                     save_path.join(&op.path)
                 };
 
+                // Said as what it is: swallowed, a folder that could not be
+                // made (permissions, quota, a file in the way) came back as
+                // an open error that no longer named the cause.
                 if let Some(parent) = full_path.parent() {
-                    std::fs::create_dir_all(parent).ok();
+                    std::fs::create_dir_all(parent)
+                        .map_err(|e| format!("create folder {:?}: {}", parent, e))?;
                 }
 
                 let file = get_or_open_rw(&full_path)
@@ -679,6 +683,19 @@ mod disk_tests {
 
         let back = f.disk.read_block(&f.torrent, 0, 0, content.len() as u32).await.unwrap();
         assert_eq!(&back[..], &content[..], "what was written is what comes back");
+    }
+
+    /// A folder that cannot be made is the error reported, not the open that
+    /// fails after it for a reason it no longer says.
+    #[tokio::test]
+    async fn a_folder_that_cannot_be_made_is_the_error() {
+        let content = vec![7u8; 4096];
+        let f = fixture("nofolder", &content);
+        let blocker = f.root.join("not-a-folder");
+        std::fs::write(&blocker, b"x").unwrap();
+        *f.torrent.save_path.write() = blocker.join("sub");
+        let e = f.disk.write_piece(&f.torrent, 0, content).await.unwrap_err();
+        assert!(e.contains("create folder"), "{e}");
     }
 
     /// A block is a window into a piece, not the whole of it.
