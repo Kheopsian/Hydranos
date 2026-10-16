@@ -338,6 +338,18 @@ mod tests {
         assert_eq!((cfg.race.enable_lsd, cfg.hoard.enable_lsd), (Some(true), Some(false)));
     }
 
+    /// A top-level option documented in the template as a commented line is
+    /// read as top-level once uncommented where it stands: written under a
+    /// table header, it would land in that table and be silently ignored.
+    #[test]
+    fn an_uncommented_top_level_option_is_read_at_the_top_level() {
+        let line = "# announce_cleartext_passkey = \"warn\"";
+        assert!(TEMPLATE.contains(line), "the template documents the option");
+        let edited = TEMPLATE.replace(line, "announce_cleartext_passkey = \"refuse\"");
+        let cfg: crate::config::Config = toml::from_str(&edited).expect("the edited template parses");
+        assert_eq!(cfg.announce_cleartext_passkey, "refuse");
+    }
+
     /// A file carried over from 3.x: every dead key it holds is named once,
     /// with the reason and the replacement.
     #[test]
