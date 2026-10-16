@@ -50,6 +50,16 @@ pub struct MseHandshakeResult {
     pub extended_protocol: bool,
 }
 
+/// 0-512 random bytes (length uniform, content random), for PadA/PadB/PadC/PadD.
+/// A fixed length would make the handshake recognisable on the wire.
+fn random_pad() -> Vec<u8> {
+    use rand::{Rng, RngCore};
+    let mut rng = rand::thread_rng();
+    let mut pad = vec![0u8; rng.gen_range(0..=MAX_PAD_C)];
+    rng.fill_bytes(&mut pad);
+    pad
+}
+
 fn get_prime() -> BigUint {
     BigUint::parse_bytes(P_HEX.as_bytes(), 16).unwrap()
 }
@@ -125,10 +135,10 @@ pub async fn handshake_outgoing(
         .await
         .map_err(|e| format!("spawn_blocking(gen_keypair): {}", e))?;
 
-    // Step 1: Send Ya + PadA (random 0-64 bytes for simplicity)
-    let mut pad_a = vec![0u8; 0]; // no padding for now
-    stream.write_all(&ya_bytes).await.map_err(|e| format!("step1 write Ya: {}", e))?;
-    stream.write_all(&pad_a).await.map_err(|e| format!("step1 write PadA: {}", e))?;
+    // Step 1: Send Ya + PadA (0-512 random bytes), in one write.
+    let mut first = ya_bytes.clone();
+    first.extend_from_slice(&random_pad());
+    stream.write_all(&first).await.map_err(|e| format!("step1 write Ya+PadA: {}", e))?;
 
     // Step 2: Read Yb (96 bytes) — may be followed by PadB which we read later
     let mut yb_bytes = [0u8; 96];
@@ -163,15 +173,16 @@ pub async fn handshake_outgoing(
     let mut enc = make_rc4_keys(b"keyA", &s, skey);
     let mut dec = make_rc4_keys(b"keyB", &s, skey);
 
-    // Send encrypted: VC + crypto_provide + len(padC=0) + padC + len(IA=68) + IA
+    // Send encrypted: VC + crypto_provide + len(padC) + padC + len(IA=68) + IA
     // IA = the BT handshake
     let bt_handshake = build_bt_handshake(info_hash, peer_id);
 
     let mut payload = Vec::new();
     payload.extend_from_slice(&VC);                         // 8 bytes VC
     payload.extend_from_slice(&(CRYPTO_RC4 | CRYPTO_PLAIN).to_be_bytes()); // 4 bytes crypto_provide
-    payload.extend_from_slice(&0u16.to_be_bytes());         // 2 bytes len(padC)
-    // padC = empty
+    let pad_c = random_pad();
+    payload.extend_from_slice(&(pad_c.len() as u16).to_be_bytes()); // 2 bytes len(padC)
+    payload.extend_from_slice(&pad_c);                      // padC, 0-512 random bytes
     payload.extend_from_slice(&(bt_handshake.len() as u16).to_be_bytes()); // 2 bytes len(IA)
     payload.extend_from_slice(&bt_handshake);               // 68 bytes IA
 
@@ -291,8 +302,10 @@ pub async fn handshake_incoming(
         ya_bytes.extend_from_slice(&more);
     }
 
-    // Send Yb
-    stream.write_all(&yb_bytes).await.map_err(|e| e.to_string())?;
+    // Send Yb + PadB (0-512 random bytes), in one write.
+    let mut first = yb_bytes.clone();
+    first.extend_from_slice(&random_pad());
+    stream.write_all(&first).await.map_err(|e| e.to_string())?;
 
     // Compute shared secret (offload modpow to blocking pool).
     let s = {
@@ -409,11 +422,13 @@ pub async fn handshake_incoming(
         CRYPTO_PLAIN
     };
 
-    // Send our response: encrypted(VC + crypto_select + len(padD=0) + padD)
+    // Send our response: encrypted(VC + crypto_select + len(padD) + padD)
+    let pad_d = random_pad();
     let mut response = Vec::new();
     response.extend_from_slice(&VC);
     response.extend_from_slice(&crypto_select.to_be_bytes());
-    response.extend_from_slice(&0u16.to_be_bytes()); // padD = 0
+    response.extend_from_slice(&(pad_d.len() as u16).to_be_bytes());
+    response.extend_from_slice(&pad_d); // padD, 0-512 random bytes
     enc.process(&mut response);
     stream.write_all(&response).await.map_err(|e| e.to_string())?;
 
@@ -613,6 +628,38 @@ mod crypto_tests {
         let p = get_prime();
         // The MSE/PE modulus is 768 bits.
         assert_eq!(p.bits(), 768, "the shared modulus is the 768-bit MSE prime");
+    }
+
+    /// ⭐ The first thing an outgoing dial sends is `Ya | PadA`. A fixed 96
+    /// bytes every time is a fingerprint; the spec allows 0-512 random pad
+    /// bytes, so the length must vary and stay inside that bound.
+    #[tokio::test]
+    async fn the_first_volley_varies_in_length_within_the_spec_bound() {
+        use std::time::Duration;
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let at = l.local_addr().unwrap();
+        let mut lens = std::collections::BTreeSet::new();
+        for _ in 0..24 {
+            let dial = tokio::spawn(async move {
+                let s = tokio::net::TcpStream::connect(at).await.unwrap();
+                let mut t = PeerTransport::Tcp(s);
+                let _ = handshake_outgoing(&mut t, &[0x11; 20], &[7u8; 20]).await;
+            });
+            let (mut s, _) = l.accept().await.unwrap();
+            let mut n = 0usize;
+            let mut buf = [0u8; 2048];
+            // The dialer then waits for Yb, so the volley ends at the first lull.
+            while let Ok(Ok(k)) = tokio::time::timeout(Duration::from_millis(150), s.read(&mut buf)).await {
+                if k == 0 {
+                    break;
+                }
+                n += k;
+            }
+            dial.abort();
+            assert!((96..=96 + MAX_PAD_C).contains(&n), "Ya + PadA is 96..=608 bytes, got {n}");
+            lens.insert(n);
+        }
+        assert!(lens.len() > 1, "the first volley had the same length every time: {lens:?}");
     }
 }
 
