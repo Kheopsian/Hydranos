@@ -13948,30 +13948,32 @@ async fn post_transmission_upload(
 ) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    // Kept as the Bytes the multipart reader filled: copying them into a Vec
-    // held the archive twice, up to twice the 4 GiB this route accepts.
-    let mut zip: Option<bytes::Bytes> = None;
-    while let Ok(Some(field)) = multipart.next_field().await {
-        if field.name() == Some("file") {
-            match field.bytes().await {
-                Ok(b) => zip = Some(b),
-                Err(e) => return bad_request(&format!("upload: {e}")),
-            }
-        }
-    }
-    let Some(zip) = zip.filter(|z| !z.is_empty()) else {
-        return bad_request("no zip in request");
-    };
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    let into = std::path::Path::new(&state.cfg().daemon.data_dir)
-        .join("import")
-        .join(format!("transmission-{nanos}"));
+    let import = std::path::Path::new(&state.cfg().daemon.data_dir).join("import");
+    let into = import.join(format!("transmission-{nanos}"));
+    // To disk as it arrives, not into memory: the limit on this route is
+    // 4 GiB, and the whole archive used to sit in RAM before a byte was
+    // unpacked.
+    let archive = import.join(format!("transmission-{nanos}.zip"));
+    let received = receive_zip(&mut multipart, &archive).await;
+    match received {
+        Ok(n) if n > 0 => {}
+        Ok(_) => {
+            let _ = tokio::fs::remove_file(&archive).await;
+            return bad_request("no zip in request");
+        }
+        Err(e) => {
+            let _ = tokio::fs::remove_file(&archive).await;
+            return bad_request(&format!("upload: {e}"));
+        }
+    }
     let unpacked = tokio::task::spawn_blocking(move || {
         std::fs::create_dir_all(&into).map_err(|e| format!("{}: {e}", into.display()))?;
-        let got = crate::importer::unpack_zip(&zip, &into);
+        let got = crate::importer::unpack_zip_file(&archive, &into);
+        let _ = std::fs::remove_file(&archive);
         if got.is_err() {
             let _ = std::fs::remove_dir_all(&into);
         }
@@ -13983,6 +13985,29 @@ async fn post_transmission_upload(
         Ok(dir) => Json(serde_json::json!({"dir": dir.to_string_lossy()})).into_response(),
         Err(e) => bad_request(&e),
     }
+}
+
+/// Write the `file` field of an upload to `to`, chunk by chunk. Returns the
+/// bytes written: 0 when the request had no such field.
+async fn receive_zip(multipart: &mut axum::extract::Multipart, to: &std::path::Path) -> Result<u64, String> {
+    use tokio::io::AsyncWriteExt;
+    if let Some(dir) = to.parent() {
+        tokio::fs::create_dir_all(dir).await.map_err(|e| format!("{}: {e}", dir.display()))?;
+    }
+    let mut written = 0u64;
+    while let Some(mut field) = multipart.next_field().await.map_err(|e| e.to_string())? {
+        if field.name() != Some("file") {
+            continue;
+        }
+        let mut out = tokio::fs::File::create(to).await.map_err(|e| format!("{}: {e}", to.display()))?;
+        written = 0;
+        while let Some(chunk) = field.chunk().await.map_err(|e| e.to_string())? {
+            out.write_all(&chunk).await.map_err(|e| e.to_string())?;
+            written += chunk.len() as u64;
+        }
+        out.flush().await.map_err(|e| e.to_string())?;
+    }
+    Ok(written)
 }
 
 async fn post_transmission_preview(

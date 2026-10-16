@@ -1042,8 +1042,18 @@ const ZIP_MAX_BYTES: u64 = 8 << 30;
 /// Entries escaping the target (`../`, absolute names) are refused, not
 /// skipped: an archive carrying one is not a Transmission folder.
 pub fn unpack_zip(bytes: &[u8], into: &Path) -> Result<PathBuf, String> {
+    unpack_zip_from(std::io::Cursor::new(bytes), into)
+}
+
+/// `unpack_zip`, reading the archive from a file rather than from memory.
+pub fn unpack_zip_file(archive: &Path, into: &Path) -> Result<PathBuf, String> {
+    let f = std::fs::File::open(archive).map_err(|e| format!("{}: {e}", archive.display()))?;
+    unpack_zip_from(f, into)
+}
+
+fn unpack_zip_from<R: std::io::Read + std::io::Seek>(archive: R, into: &Path) -> Result<PathBuf, String> {
     use std::io::Read;
-    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).map_err(|e| format!("not a zip: {e}"))?;
+    let mut zip = zip::ZipArchive::new(archive).map_err(|e| format!("not a zip: {e}"))?;
     if zip.len() > ZIP_MAX_ENTRIES {
         return Err(format!("{} entries: not a Transmission folder", zip.len()));
     }
