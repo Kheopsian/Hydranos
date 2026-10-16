@@ -153,7 +153,24 @@ struct Asset {
 }
 
 /// The GitHub API address of a release: the latest, or the one `tag` names.
+/// A tag is `[v]X.Y.Z` with an optional `-suffix` of letters, digits and dots,
+/// nothing that could reach another API path.
 fn release_url(tag: Option<&str>) -> Result<String, String> {
+    if let Some(t) = tag {
+        let bare = t.strip_prefix('v').unwrap_or(t);
+        let (core, suffix) = match bare.split_once('-') {
+            Some((c, s)) => (c, Some(s)),
+            None => (bare, None),
+        };
+        let numbers = core.split('.').collect::<Vec<_>>();
+        let core_ok = numbers.len() == 3
+            && numbers.iter().all(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+        let suffix_ok = suffix
+            .is_none_or(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.'));
+        if !core_ok || !suffix_ok {
+            return Err(format!("--tag {t:?} is not a release tag (expected vX.Y.Z)"));
+        }
+    }
     Ok(match tag {
         Some(t) => format!("https://api.github.com/repos/{REPO}/releases/tags/{t}"),
         None => format!("https://api.github.com/repos/{REPO}/releases/latest"),
@@ -586,6 +603,20 @@ fn confirm(tag: &str) -> Result<bool, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_release_tag_reaches_the_release_address() {
+        assert_eq!(
+            release_url(Some("v4.4.4")).unwrap(),
+            format!("https://api.github.com/repos/{REPO}/releases/tags/v4.4.4")
+        );
+        assert!(release_url(Some("4.5.0")).is_ok());
+        assert!(release_url(Some("v4.4.0-rc8")).is_ok());
+        assert!(release_url(None).unwrap().ends_with("/releases/latest"));
+        for bad in ["../../../user/repos", "v4.4.4/../../x", "v4.4.4?x=1", "v4.4.4#", "", "latest", "v4.4", "v4.4.4 "] {
+            assert!(release_url(Some(bad)).is_err(), "{bad:?} must be refused");
+        }
+    }
 
     #[test]
     fn the_updater_leaves_the_way_the_daemon_does() {
