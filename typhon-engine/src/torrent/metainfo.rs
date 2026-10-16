@@ -37,6 +37,23 @@ fn check_contained(rel: &std::path::Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Where a file of the torrent lands, relative to the save path, checked.
+///
+/// In a multi-file torrent the file's own path must name something: an empty
+/// one, or one of only `""` and `.`, joined onto the folder is the folder
+/// itself, and every write to it fails.
+fn check_file(name: &str, path: &std::path::Path, multi_file: bool) -> Result<(), String> {
+    use std::path::Component;
+    if multi_file {
+        if !path.components().any(|c| matches!(c, Component::Normal(_))) {
+            return Err("unsafe path in torrent: a file has no name".into());
+        }
+        check_contained(&std::path::Path::new(name).join(path))
+    } else {
+        check_contained(path)
+    }
+}
+
 pub fn parse_torrent_file(path: &str) -> Result<TorrentMeta, String> {
     let data = std::fs::read(path).map_err(|e| format!("read {}: {}", path, e))?;
     parse_torrent_bytes(&data)
@@ -142,8 +159,7 @@ pub fn parse_torrent_bytes(data: &[u8]) -> Result<TorrentMeta, String> {
     // rewritten -- a legitimate torrent never contains either, and a silently
     // renamed file is one the other seeders' layout no longer matches.
     for f in &files {
-        let rel = if multi_file { std::path::Path::new(&name).join(&f.path) } else { f.path.clone() };
-        check_contained(&rel)?;
+        check_file(&name, &f.path, multi_file)?;
     }
 
     // Trackers
@@ -327,8 +343,7 @@ fn parse_v2(dict: BencodeDict, info: &BencodeDict, info_raw: &[u8]) -> Result<To
         }
     }
     for f in &files {
-        let rel = if multi_file { std::path::Path::new(&name).join(&f.path) } else { f.path.clone() };
-        check_contained(&rel)?;
+        check_file(&name, &f.path, multi_file)?;
     }
     let num_pieces = u32::try_from(end.div_ceil(pl)).map_err(|_| "too many pieces")?;
     let (trackers, url_list) = trackers_and_seeds(&dict);
@@ -824,6 +839,27 @@ mod tests {
         refused(&with_paths("../x.bin", &[]));
         refused(&with_paths("..", &[&["a.bin"]]));
         refused(&with_paths("/abs", &[]));
+    }
+
+    /// A file whose path names nothing resolves to the torrent's own folder.
+    #[test]
+    fn a_file_without_a_name_is_refused() {
+        for parts in [&[][..], &[""], &["."], &["", "."]] {
+            let e = refused(&with_paths("show", &[parts]));
+            assert!(e.contains("no name"), "{parts:?}: {e}");
+        }
+        let m = parse_torrent_bytes(&with_paths("show", &[&["", "e01.mkv"]]))
+            .expect("an empty component before a name is harmless");
+        assert_eq!(m.files[0].path, std::path::PathBuf::from("e01.mkv"));
+        // v2: a file under the empty name at the top of the tree.
+        let mut t = b"d4:infod".to_vec();
+        t.extend(bstr(b"file tree"));
+        t.extend(b"d0:d0:d6:lengthi10e");
+        t.extend(bstr(b"pieces root"));
+        t.extend(bstr(&[3u8; 32]));
+        t.extend(b"eee");
+        t.extend(b"12:meta versioni2e4:name1:x12:piece lengthi16384eee");
+        assert!(parse_torrent_bytes(&t).unwrap_err().contains("no name"));
     }
 
     #[test]
