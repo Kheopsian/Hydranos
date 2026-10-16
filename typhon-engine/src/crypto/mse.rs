@@ -128,6 +128,17 @@ pub async fn handshake_outgoing(
     info_hash: &[u8; 20],
     peer_id: &[u8; 20],
 ) -> Result<(Rc4, Rc4, MseHandshakeResult), String> {
+    handshake_outgoing_with(stream, info_hash, peer_id, false).await
+}
+
+/// `handshake_outgoing`, optionally offering RC4 only (`rc4_only`): the peer
+/// cannot answer with the plaintext method, and a reply that does is an error.
+pub async fn handshake_outgoing_with(
+    stream: &mut PeerTransport,
+    info_hash: &[u8; 20],
+    peer_id: &[u8; 20],
+    rc4_only: bool,
+) -> Result<(Rc4, Rc4, MseHandshakeResult), String> {
     // DH modpow is ~1-3 ms of CPU. If run directly on a tokio worker thread,
     // it blocks the reactor — with N concurrent dials we serialize those ms
     // across workers and starve all other async tasks on those cores.
@@ -179,7 +190,8 @@ pub async fn handshake_outgoing(
 
     let mut payload = Vec::new();
     payload.extend_from_slice(&VC);                         // 8 bytes VC
-    payload.extend_from_slice(&(CRYPTO_RC4 | CRYPTO_PLAIN).to_be_bytes()); // 4 bytes crypto_provide
+    let provide = if rc4_only { CRYPTO_RC4 } else { CRYPTO_RC4 | CRYPTO_PLAIN };
+    payload.extend_from_slice(&provide.to_be_bytes()); // 4 bytes crypto_provide
     let pad_c = random_pad();
     payload.extend_from_slice(&(pad_c.len() as u16).to_be_bytes()); // 2 bytes len(padC)
     payload.extend_from_slice(&pad_c);                      // padC, 0-512 random bytes
@@ -234,6 +246,9 @@ pub async fn handshake_outgoing(
     stream.read_exact(&mut cs_buf).await.map_err(|e| format!("step5 crypto_select: {}", e))?;
     dec.process(&mut cs_buf);
     let crypto_select = u32::from_be_bytes(cs_buf);
+    if rc4_only && crypto_select & CRYPTO_RC4 == 0 {
+        return Err("peer selected plaintext, encryption required".into());
+    }
 
     // Read len(padD) (2 bytes)
     let mut pad_len_buf = [0u8; 2];
@@ -288,6 +303,19 @@ pub async fn handshake_incoming(
     remaining_ya: &[u8], // 95 bytes (we already read 1 to detect MSE vs plain)
     our_peer_id: &[u8; 20],
     info_hash_lookup: impl Fn(&[u8; 20]) -> Option<[u8; 20]>,
+) -> Result<(Rc4, Rc4, MseHandshakeResult), String> {
+    handshake_incoming_with(stream, first_byte, remaining_ya, our_peer_id, info_hash_lookup, false).await
+}
+
+/// `handshake_incoming`, optionally refusing a peer that does not offer RC4
+/// (`rc4_only`) instead of settling on the plaintext method.
+pub async fn handshake_incoming_with(
+    stream: &mut PeerTransport,
+    first_byte: u8,
+    remaining_ya: &[u8],
+    our_peer_id: &[u8; 20],
+    info_hash_lookup: impl Fn(&[u8; 20]) -> Option<[u8; 20]>,
+    rc4_only: bool,
 ) -> Result<(Rc4, Rc4, MseHandshakeResult), String> {
     let (xb, yb_bytes) = tokio::task::spawn_blocking(gen_keypair)
         .await
@@ -415,6 +443,9 @@ pub async fn handshake_incoming(
         dec.process(&mut ia);
     }
 
+    if rc4_only && crypto_provide & CRYPTO_RC4 == 0 {
+        return Err("peer offers plaintext only, encryption required".into());
+    }
     // Select crypto method (prefer RC4)
     let crypto_select = if crypto_provide & CRYPTO_RC4 != 0 {
         CRYPTO_RC4

@@ -129,6 +129,12 @@ pub struct EngineConfig {
     /// `PeerPolicy::set_idle_timeout_secs` for the floor.
     #[serde(default = "default_peer_timeout")]
     pub peer_timeout: u64,
+    /// Peer-wire encryption: `allow` (default: plaintext first, MSE as the
+    /// fallback, both accepted), `prefer` (MSE first, plaintext fallback) or
+    /// `require` (never plaintext, inbound plaintext refused). See
+    /// `peer::extension::Encryption`.
+    #[serde(default)]
+    pub peer_encryption: String,
     #[serde(default = "default_peer_timeout")]
     pub inactivity_timeout: u64,
     /// Engine-wide upload cap, BYTES per second. 0 = unlimited. Hydra fills

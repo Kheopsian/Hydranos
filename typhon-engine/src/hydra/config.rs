@@ -274,6 +274,12 @@ pub struct Session {
     /// `PeerPolicy::set_idle_timeout_secs`). Applied live.
     #[serde(default)]
     pub peer_timeout: u64,
+    /// Peer-wire encryption (MSE/PE): `allow` (default, also when absent:
+    /// plaintext first, MSE as the fallback, both accepted), `prefer` (MSE
+    /// first, plaintext fallback) or `require` (never plaintext, in either
+    /// direction; peers without MSE are turned away). Applied live.
+    #[serde(default)]
+    pub peer_encryption: String,
     #[serde(default)]
     pub enable_ipv6: bool,
     #[serde(default)]
