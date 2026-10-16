@@ -250,7 +250,9 @@ pub async fn start(
     mgr.limiter().set_max_dials_per_sec(config.max_dials_per_sec);
     let budget = match config.piece_memory_mb {
         0 => crate::torrent::piece_picker::default_budget(),
-        mb => mb << 20,
+        // Saturating: a figure past what a u64 of bytes holds is "as much as
+        // there is", not the few bits a plain shift would leave of it.
+        mb => mb.saturating_mul(1 << 20),
     };
     mgr.piece_mem().set_budget(budget);
     tracing::info!(budget_mb = budget >> 20, "download memory budget");
@@ -292,7 +294,11 @@ pub async fn start(
     tokio::spawn(async move {
         use std::collections::HashMap;
         use std::sync::atomic::Ordering;
-        let mut last: HashMap<[u8; 20], (u64, u64, u8, usize, usize)> = HashMap::new();
+        // The last stamp is the tick the torrent was last seen on: a removed
+        // torrent stops being seen, and its entry goes at the next purge
+        // instead of staying for the life of the process.
+        let mut last: HashMap<[u8; 20], (u64, u64, u8, usize, usize, u64)> = HashMap::new();
+        let mut tick: u64 = 0;
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             // Skip the whole scan when nobody listens — saves 13k atomic loads
@@ -300,6 +306,7 @@ pub async fn start(
             if tm_stats.bus().receiver_count() == 0 {
                 continue;
             }
+            tick += 1;
             let mut changed: Vec<crate::rpc::events::TorrentStatsMini> = Vec::new();
             for t in tm_stats.all().iter() {
                 let ih = t.info_hash;
@@ -308,9 +315,10 @@ pub async fn start(
                 let st = t.status.load(Ordering::Relaxed);
                 let peers = t.peers_connected.load(Ordering::Relaxed);
                 let interested = t.peers_interested.load(Ordering::Relaxed);
-                let prev = last.get(&ih);
-                let moved = match prev {
-                    Some(&(pul, pdl, pst, pp, pi)) => {
+                let moved = match last.get_mut(&ih) {
+                    Some(prev) => {
+                        prev.5 = tick;
+                        let (pul, pdl, pst, pp, pi, _) = *prev;
                         ul != pul || dl != pdl || st != pst || peers != pp || interested != pi
                     }
                     None => true, // first-time entry always sent
@@ -337,8 +345,11 @@ pub async fn start(
                         peers_interested: interested as u32,
                         progress,
                     });
-                    last.insert(ih, (ul, dl, st, peers, interested));
+                    last.insert(ih, (ul, dl, st, peers, interested, tick));
                 }
+            }
+            if tick % 300 == 0 {
+                last.retain(|_, e| e.5 == tick);
             }
             if !changed.is_empty() {
                 tm_stats.bus().publish(crate::rpc::events::Event::StatsSnapshot { torrents: changed });
