@@ -35,6 +35,8 @@ const READ_BUF_TARGET: usize = 32 * 1024;
 /// Sized so a full 16 KiB Piece plus its header always fits after a swap: an
 /// actively serving connection must never trade a shrink for a regrow.
 const WRITE_BUF_HIGH_WATER: usize = 64 * 1024;
+/// The most a partial frame reserves at once; see `decode`.
+const READ_RESERVE_STEP: usize = 32 * 1024;
 const WRITE_BUF_TARGET: usize = 32 * 1024;
 
 impl Decoder for BtCodec {
@@ -58,7 +60,11 @@ impl Decoder for BtCodec {
                 format!("frame too large: {}", len)));
         }
         if src.len() < 4 + len {
-            src.reserve(4 + len - src.len());
+            // Room for what has to arrive next, never more than a step at a
+            // time: the length is the peer's claim, and reserving all of it
+            // up front would hold 256 KiB per connection for a frame that a
+            // silent peer never sends. A 16 KiB Piece still fits in one step.
+            src.reserve((4 + len - src.len()).min(READ_RESERVE_STEP));
             return Ok(None);
         }
         src.advance(4);
@@ -161,6 +167,39 @@ mod tests {
         codec.encode(Message::KeepAlive, &mut buf).expect("encode must not error");
         assert_eq!(&buf[..4], &[1u8, 2, 3, 4], "queued bytes were dropped");
         assert_eq!(buf.len(), 8, "keepalive should append 4 bytes");
+    }
+
+    /// ⭐ A frame's announced length is not reserved whole before its bytes
+    /// arrive: a peer announcing 256 KiB and sending nothing costs a step,
+    /// not 256 KiB, for as long as it stays connected.
+    #[test]
+    fn an_announced_length_is_not_reserved_ahead_of_the_bytes() {
+        let mut codec = BtCodec::new();
+        let mut buf = BytesMut::with_capacity(8 * 1024);
+        buf.extend_from_slice(&(1u32 << 18).to_be_bytes());
+        assert!(codec.decode(&mut buf).expect("a partial frame is not an error").is_none());
+        assert!(buf.capacity() <= 64 * 1024, "reserved {} bytes for a frame not yet sent", buf.capacity());
+    }
+
+    /// The frame still decodes when its bytes come in pieces.
+    #[test]
+    fn a_large_frame_arriving_in_pieces_still_decodes() {
+        let mut codec = BtCodec::new();
+        let mut frame = (1u32 + 100_000).to_be_bytes().to_vec();
+        frame.push(5); // Bitfield
+        frame.extend(std::iter::repeat(0xAAu8).take(100_000));
+        let mut buf = BytesMut::new();
+        let mut out = None;
+        for chunk in frame.chunks(7000) {
+            buf.extend_from_slice(chunk);
+            if let Some(m) = codec.decode(&mut buf).expect("decodes") {
+                out = Some(m);
+            }
+        }
+        match out {
+            Some(Message::Bitfield { data }) => assert_eq!(data.len(), 100_000),
+            other => panic!("got {other:?}"),
+        }
     }
 
     /// A full keepalive still decodes with the swap in front of it.

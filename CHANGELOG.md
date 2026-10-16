@@ -88,6 +88,9 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 - A connected peer's hole-punch `Connect` messages are acted on ten per
   minute at most; the rest are ignored and counted
   (`holepunch_connects_ignored`).
+- A peer message's announced length is no longer reserved in full before
+  its bytes arrive: the read buffer grows 32 KiB at a time, so a frame
+  announced and never sent does not hold 256 KiB per connection.
 
 Each of these was reproduced by a failing test before the fix, except the
 refusal of the address, which was shown on an isolated bench only.
