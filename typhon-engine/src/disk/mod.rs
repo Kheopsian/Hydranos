@@ -858,6 +858,43 @@ mod disk_tests {
         assert_eq!(offset, 0);
     }
 
+    fn holds_descriptor_for(path: &std::path::Path) -> bool {
+        fd_cache().lock().contains(&path.to_path_buf())
+    }
+
+    /// ⭐ A torrent that leaves the engine with its data kept (a move, a
+    /// graduation) gives back its descriptors: the move unlinks the old file
+    /// next, and a cached descriptor would keep its blocks allocated.
+    #[tokio::test]
+    async fn a_torrent_removed_with_its_data_kept_lets_go_of_its_files() {
+        let content = vec![4u8; 4096];
+        let f = fixture("keepdata", &content);
+        assert!(f.disk.write_piece(&f.torrent, 0, content.clone()).await.unwrap());
+        let path = f.root.join("data").join("payload.bin");
+        assert!(holds_descriptor_for(&path), "the write cached its descriptor");
+
+        f._mgr.remove_torrent(&f.torrent.info_hash, true).unwrap();
+        assert!(path.exists(), "the data stays");
+        assert!(!holds_descriptor_for(&path), "but no descriptor holds it any more");
+    }
+
+    /// Changing where a torrent lives drops the descriptors of where it was.
+    #[tokio::test]
+    async fn a_new_save_path_lets_go_of_the_old_files() {
+        let content = vec![6u8; 4096];
+        let f = fixture("relocate", &content);
+        assert!(f.disk.write_piece(&f.torrent, 0, content.clone()).await.unwrap());
+        let old = f.root.join("data").join("payload.bin");
+        assert!(holds_descriptor_for(&old));
+
+        let moved = f.root.join("moved");
+        std::fs::create_dir_all(&moved).unwrap();
+        f._mgr
+            .set_save_path(&f.torrent.info_hash, moved.to_string_lossy().as_ref())
+            .unwrap();
+        assert!(!holds_descriptor_for(&old), "the old path is no longer this torrent's");
+    }
+
     #[tokio::test]
     async fn the_zero_copy_path_declines_a_request_it_cannot_satisfy_whole() {
         let content = vec![2u8; 1024];

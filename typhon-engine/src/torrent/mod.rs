@@ -977,6 +977,10 @@ impl TorrentManager {
         let entry = self.torrents.get(info_hash);
         let got = Instant::now();
         tm.map_wait = got - asked;
+        // Files left in place still lose their cached descriptors: the data
+        // is about to be moved or handed to another engine, and a descriptor
+        // kept on the old path pins the old inode once the move unlinks it.
+        let mut kept: Vec<std::path::PathBuf> = Vec::new();
         let to_delete: Option<(Vec<std::path::PathBuf>, Option<std::path::PathBuf>)> =
             if let Some(t) = entry {
                 t.is_removed.store(true, Ordering::Relaxed);
@@ -988,21 +992,18 @@ impl TorrentManager {
                 // is_removed is only observed when the get_peers stream next
                 // yields, which may be never — cancel the task outright.
                 self.untrack_in_dht(info_hash);
-                if !keep_data {
-                    let files: Vec<std::path::PathBuf> = t.meta.files.iter().map(|f| {
-                        if t.meta.multi_file {
-                            t.save_path.read().join(&t.meta.name).join(&f.path)
-                        } else {
-                            t.save_path.read().join(&f.path)
-                        }
-                    }).collect();
+                let files = data_files(&t);
+                if keep_data {
+                    kept = files;
+                    None
+                } else {
                     let folder = if t.meta.multi_file {
                         Some(t.save_path.read().join(&t.meta.name))
                     } else {
                         None
                     };
                     Some((files, folder))
-                } else { None }
+                }
             } else { None };
         tm.map_hold = got.elapsed();
         let stage = Instant::now();
@@ -1054,6 +1055,9 @@ impl TorrentManager {
                     remove_empty_dirs_recursive(&folder);
                     tm.dirs = stage.elapsed();
                 }
+            }
+            if !kept.is_empty() {
+                (tm.evict_wait, tm.evict_hold) = crate::disk::evict_fds_timed(&kept);
             }
         }
         tm.total = started.elapsed();
@@ -1800,7 +1804,11 @@ impl TorrentManager {
 
     pub fn set_save_path(&self, info_hash: &InfoHash, new_path: &str) -> Result<(), String> {
         let t = self.get(info_hash).ok_or("torrent not found")?;
+        let old = data_files(&t);
         *t.save_path.write() = new_path.into();
+        // The old paths are no longer this torrent's: keeping their cached
+        // descriptors would pin the files a move is about to unlink.
+        crate::disk::evict_fds(&old);
         let rd = Self::build_resume_data(&t);
         self.persist(info_hash, &rd);
         Ok(())
@@ -2060,6 +2068,18 @@ fn hex_decode_bytes(hex: &str) -> Vec<u8> {
         }
     }
     out
+}
+
+/// Where a torrent's files are on disk, at its current save path.
+fn data_files(t: &TorrentState) -> Vec<std::path::PathBuf> {
+    let root = t.save_path.read().clone();
+    t.meta.files.iter().map(|f| {
+        if t.meta.multi_file {
+            root.join(&t.meta.name).join(&f.path)
+        } else {
+            root.join(&f.path)
+        }
+    }).collect()
 }
 
 fn remove_empty_dirs_recursive(dir: &std::path::Path) {
