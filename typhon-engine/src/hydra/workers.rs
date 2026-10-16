@@ -1070,17 +1070,23 @@ pub fn spawn_race_drain(
                 Ok(g) => g.clone(),
                 Err(e) => e.into_inner().clone(),
             };
-            for volume in crate::volumes::discover(&state, &manager, &cfg.race_drain) {
-                if !volume.policy.enabled {
-                    continue;
+            // A stat per torrent, then removals: blocking work, off the
+            // async workers.
+            let (state, manager, engine_id) = (state.clone(), manager.clone(), engine_id.clone());
+            let _ = tokio::task::spawn_blocking(move || {
+                for volume in crate::volumes::discover(&state, &manager, &cfg.race_drain) {
+                    if !volume.policy.enabled {
+                        continue;
+                    }
+                    // ALLOCATION, not occupancy: the add is refused on what is
+                    // promised, so the drain must start on what is promised too.
+                    if volume.alloc_pct() < volume.policy.high as f64 {
+                        continue;
+                    }
+                    drain_once(&state, &manager, &volume, &cfg, &engine_id);
                 }
-                // ALLOCATION, not occupancy: the add is refused on what is
-                // promised, so the drain must start on what is promised too.
-                if volume.alloc_pct() < volume.policy.high as f64 {
-                    continue;
-                }
-                drain_once(&state, &manager, &volume, &cfg, &engine_id);
-            }
+            })
+            .await;
         }
     });
 }
@@ -1578,88 +1584,95 @@ pub fn spawn_store_reconcile(
         let mut tick = tokio::time::interval(Duration::from_secs(5 * 60));
         loop {
             tick.tick().await;
-            // Per engine, because the store keys its rows by session: a
-            // hoard row is not an orphan just because the race does not hold
-            // that torrent.
-            for engine in engines.engines() {
-                // Listed on the read connection -- a million rows, and it used
-                // to hold every write for a second -- and dropped through the
-                // shared one, below: the read connection cannot write, and a
-                // delete sent there fails without a word.
-                let listed = store.read().unwrap().all_hashes(&engine.id);
-                let known = match listed {
-                    Ok(h) => h,
-                    Err(e) => {
-                        tracing::warn!(engine = %engine.id, error = %e, "store reconcile: cannot list");
-                        continue;
-                    }
-                };
-                // The engine is looked at AFTER the rows are listed. The other
-                // way round, a torrent added between the two -- the listing
-                // takes seconds at a million rows -- was in the rows and not in
-                // the engine's picture, and lost its row while it kept running
-                // (13/10/2026: no metainfo, every piece refused as "cannot
-                // write to disk"). A row written but not yet loaded is covered
-                // by the grace of `delete_settled_copy` below.
-                let live: std::collections::HashSet<String> = engine
-                    .manager
-                    .all()
-                    .iter()
-                    .map(|t| t.info_hash.iter().map(|b| format!("{b:02x}")).collect())
-                    .collect();
-                // An engine that failed to load its resume data reports
-                // nothing, and taking that at face value would empty its half
-                // of the store. A reconcile with no live torrent is refused.
-                if live.is_empty() {
-                    tracing::warn!(engine = %engine.id, "store reconcile: no torrent, skipping");
-                    continue;
-                }
-                // A record the loader REFUSED is not an orphan: its .torrent
-                // on disk holds a different torrent, so the store row is the
-                // last copy of its metainfo and the next start can repair from
-                // it. Deleting it here is what turned a recoverable collision
-                // into a torrent lost for good.
-                let refused = engine.manager.refused_records();
-                let total = known.len();
-                let doomed = match rows_to_drop(known, &live, &refused) {
-                    Ok(rows) => rows,
-                    Err(would_drop) => {
-                        tracing::warn!(
-                            engine = %engine.id,
-                            would_drop,
-                            of = total,
-                            "store reconcile: refusing to drop that many rows at once -- \
-                             load them or repair them first"
-                        );
-                        continue;
-                    }
-                };
+            // A listing of up to a million rows and a delete per orphan:
+            // blocking work, off the async workers.
+            let (engines, store) = (engines.clone(), store.clone());
+            let _ = tokio::task::spawn_blocking(move || reconcile_pass(&engines, &store)).await;
+        }
+    });
+}
 
-                let mut dropped = 0usize;
-                if !doomed.is_empty() {
-                    let store = store.lock().unwrap();
-                    for hash in doomed {
-                        // This engine's row only: `all_hashes` listed this
-                        // engine's half, and 4.3's delete by info hash took
-                        // another engine's copy of the same torrent with it.
-                        if store.delete_settled_copy(&hash, &engine.id, RECONCILE_GRACE).unwrap_or(false) {
-                            dropped += 1;
-                        }
-                    }
-                }
-                if dropped > 0 {
-                    tracing::info!(engine = %engine.id, dropped, "store reconcile: rows without a torrent removed");
-                }
-                if !refused.is_empty() {
-                    tracing::info!(
-                        engine = %engine.id,
-                        kept = refused.len(),
-                        "store reconcile: rows kept for records the loader refused"
-                    );
+fn reconcile_pass(engines: &crate::engines::EngineHost, store: &crate::store::StoreLock) {
+    // Per engine, because the store keys its rows by session: a
+    // hoard row is not an orphan just because the race does not hold
+    // that torrent.
+    for engine in engines.engines() {
+        // Listed on the read connection -- a million rows, and it used
+        // to hold every write for a second -- and dropped through the
+        // shared one, below: the read connection cannot write, and a
+        // delete sent there fails without a word.
+        let listed = store.read().unwrap().all_hashes(&engine.id);
+        let known = match listed {
+            Ok(h) => h,
+            Err(e) => {
+                tracing::warn!(engine = %engine.id, error = %e, "store reconcile: cannot list");
+                continue;
+            }
+        };
+        // The engine is looked at AFTER the rows are listed. The other
+        // way round, a torrent added between the two -- the listing
+        // takes seconds at a million rows -- was in the rows and not in
+        // the engine's picture, and lost its row while it kept running
+        // (13/10/2026: no metainfo, every piece refused as "cannot
+        // write to disk"). A row written but not yet loaded is covered
+        // by the grace of `delete_settled_copy` below.
+        let live: std::collections::HashSet<String> = engine
+            .manager
+            .all()
+            .iter()
+            .map(|t| t.info_hash.iter().map(|b| format!("{b:02x}")).collect())
+            .collect();
+        // An engine that failed to load its resume data reports
+        // nothing, and taking that at face value would empty its half
+        // of the store. A reconcile with no live torrent is refused.
+        if live.is_empty() {
+            tracing::warn!(engine = %engine.id, "store reconcile: no torrent, skipping");
+            continue;
+        }
+        // A record the loader REFUSED is not an orphan: its .torrent
+        // on disk holds a different torrent, so the store row is the
+        // last copy of its metainfo and the next start can repair from
+        // it. Deleting it here is what turned a recoverable collision
+        // into a torrent lost for good.
+        let refused = engine.manager.refused_records();
+        let total = known.len();
+        let doomed = match rows_to_drop(known, &live, &refused) {
+            Ok(rows) => rows,
+            Err(would_drop) => {
+                tracing::warn!(
+                    engine = %engine.id,
+                    would_drop,
+                    of = total,
+                    "store reconcile: refusing to drop that many rows at once -- \
+                     load them or repair them first"
+                );
+                continue;
+            }
+        };
+
+        let mut dropped = 0usize;
+        if !doomed.is_empty() {
+            let store = store.lock().unwrap();
+            for hash in doomed {
+                // This engine's row only: `all_hashes` listed this
+                // engine's half, and 4.3's delete by info hash took
+                // another engine's copy of the same torrent with it.
+                if store.delete_settled_copy(&hash, &engine.id, RECONCILE_GRACE).unwrap_or(false) {
+                    dropped += 1;
                 }
             }
         }
-    });
+        if dropped > 0 {
+            tracing::info!(engine = %engine.id, dropped, "store reconcile: rows without a torrent removed");
+        }
+        if !refused.is_empty() {
+            tracing::info!(
+                engine = %engine.id,
+                kept = refused.len(),
+                "store reconcile: rows kept for records the loader refused"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
