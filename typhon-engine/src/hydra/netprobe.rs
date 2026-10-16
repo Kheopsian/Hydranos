@@ -210,6 +210,15 @@ pub(crate) async fn echo_daemon(url: &str) -> Option<String> {
 
 /// Ask one echo service what address it saw, optionally out through `device`.
 async fn echo(device: Option<&str>, url: &str) -> Option<String> {
+    echo_via(device, url, device.map(typhon_engine::tunneldns::Resolver::new)).await
+}
+
+/// `echo`, with the resolver of the bound request given.
+async fn echo_via(
+    device: Option<&str>,
+    url: &str,
+    #[allow(unused_variables)] resolver: Option<std::sync::Arc<typhon_engine::tunneldns::Resolver>>,
+) -> Option<String> {
     let mut builder = reqwest::Client::builder().timeout(ATTEMPT);
     // ⚠ Binding a request to a named interface is SO_BINDTODEVICE, which only
     // exists on Linux -- reqwest does not expose `interface()` anywhere else.
@@ -219,7 +228,13 @@ async fn echo(device: Option<&str>, url: &str) -> Option<String> {
     // answer here reads as "the VPN is up" when it is not.
     #[cfg(target_os = "linux")]
     if let Some(dev) = device {
+        // The echo service's name is resolved the way the engine's own names
+        // are: through the tunnel's DNS, or refused under
+        // `dns_no_host_fallback`, never silently by the host.
         builder = builder.interface(dev);
+        if let Some(r) = resolver {
+            builder = builder.dns_resolver(r);
+        }
     }
     #[cfg(not(target_os = "linux"))]
     if device.is_some() {
@@ -251,5 +266,35 @@ mod tests {
         assert_eq!(r["state"], "ok");
         assert_eq!(super::row(race, true, None, None)["state"], "warn");
         assert_eq!(super::row(race, false, None, None)["state"], "bad");
+    }
+
+    /// `dns_no_host_fallback`: the exit probe bound to an interface resolves
+    /// the echo service's name like the engine does. With the switch on and
+    /// no tunnel DNS for the device, the name is refused (no address); with
+    /// it off, the host's resolver answers as before.
+    #[tokio::test]
+    async fn a_bound_echo_does_not_resolve_its_name_by_the_host_when_refused() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut s, _)) = listener.accept().await else { return };
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut buf = [0u8; 1024];
+                    let _ = s.read(&mut buf).await;
+                    let _ = s
+                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\nConnection: close\r\n\r\n203.0.113.5\n")
+                        .await;
+                });
+            }
+        });
+        let url = format!("http://localhost:{port}/");
+        // The refusal is given to the resolver, not set on the process-wide
+        // switch other tests read.
+        let via = |refuse| super::echo_via(Some("lo"), &url, Some(typhon_engine::tunneldns::Resolver::with_host_refusal("lo", refuse)));
+        assert_eq!(via(false).await.as_deref(), Some("203.0.113.5"), "switch off: the host resolves");
+        let refused = via(true).await;
+        assert_eq!(refused, None, "switch on: the name is refused, not resolved by the host");
     }
 }

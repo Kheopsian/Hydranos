@@ -339,11 +339,20 @@ fn decode_answer(msg: &[u8]) -> Result<(Vec<IpAddr>, Duration), String> {
 /// tunnel's server once it has one.
 pub struct Resolver {
     device: String,
+    /// `Some`: the host-resolver refusal is this, not the process-wide switch.
+    refuse_host: Option<bool>,
 }
 
 impl Resolver {
     pub fn new(device: &str) -> Arc<Self> {
-        Arc::new(Resolver { device: device.trim().to_string() })
+        Arc::new(Resolver { device: device.trim().to_string(), refuse_host: None })
+    }
+
+    /// A resolver whose refusal of the host's resolver is fixed rather than
+    /// read from the process-wide switch (a caller that must not depend on
+    /// what another thread set, a test among them).
+    pub fn with_host_refusal(device: &str, refuse_host: bool) -> Arc<Self> {
+        Arc::new(Resolver { device: device.trim().to_string(), refuse_host: Some(refuse_host) })
     }
 }
 
@@ -351,8 +360,13 @@ impl reqwest::dns::Resolve for Resolver {
     fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
         let device = self.device.clone();
         let host = name.as_str().to_string();
+        let refuse_host = self.refuse_host;
         Box::pin(async move {
-            let ips = resolve(&device, &host).await.map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
+            let ips = match refuse_host {
+                Some(r) => resolve_with(&device, &host, r).await,
+                None => resolve(&device, &host).await,
+            }
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
             let addrs: reqwest::dns::Addrs = Box::new(ips.into_iter().map(|ip| SocketAddr::new(ip, 0)));
             Ok(addrs)
         })
