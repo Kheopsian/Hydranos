@@ -151,7 +151,9 @@ refusal of the address, which was shown on an isolated bench only.
   `/config` and the `/data` folder itself to that user at start, not what is
   inside `/data`. An install whose downloads were written by an older, root
   container must either `chown -R 1000:1000` them (or set PUID/PGID to their
-  owner), or set `PUID=0` and `PGID=0` to keep running as root.
+  owner), or set `PUID=0` and `PGID=0` to keep running as root. A container
+  granted `NET_ADMIN` (managed WireGuard) keeps it after the drop, with no
+  extra setting; `HYDRANOS_CAP_NET_ADMIN=0` drops it.
 
 ### Fixed
 
