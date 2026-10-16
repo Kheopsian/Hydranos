@@ -999,6 +999,7 @@ fn engine_config(
         "listen_port": session.listen_port,
         "bind_device": session.bind_interface,
         "dht_enabled": session.enable_dht,
+        "dht_follow_seeds": session.dht_follow_seeds.unwrap_or(true),
         "pex_enabled": session.enable_pex,
         // Resolved by the caller from the role (`Session::lsd_on`); a session
         // that was not resolved runs none.
@@ -1060,6 +1061,13 @@ mod network_wiring_tests {
         assert!(cfg_of(&session("")).webseed_private, "absent = private torrents may use webseeds");
         assert!(!cfg_of(&session("webseed_private = false
 ")).webseed_private);
+    }
+
+    /// `dht_follow_seeds` reaches the engine; absent keeps the old behaviour.
+    #[test]
+    fn dht_follow_seeds_reaches_the_engine() {
+        assert!(cfg_of(&session("")).dht_follow_seeds);
+        assert!(!cfg_of(&session("dht_follow_seeds = false\n")).dht_follow_seeds);
     }
 
     /// `lsd_announce_seeds` reaches the engine; absent keeps the old behaviour.

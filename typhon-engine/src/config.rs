@@ -162,6 +162,12 @@ pub struct EngineConfig {
     /// `private` torrents (BEP 27) are skipped either way.
     #[serde(default = "default_true")]
     pub dht_enabled: bool,
+    /// Keep a `get_peers` stream running for torrents that have finished
+    /// downloading. On by default, as it has always been. Off, a finished
+    /// torrent is not tracked (and a tracked one stops at its next peer);
+    /// only torrents still downloading use the DHT. A stop/start re-checks.
+    #[serde(default = "default_true")]
+    pub dht_follow_seeds: bool,
     /// Take part in BEP 11 peer exchange. On by default. Off, we do not
     /// advertise `ut_pex` in our extended handshake and we ignore any PEX
     /// message that still arrives, so no peer address is learned from, or
