@@ -2850,7 +2850,27 @@ impl Store {
                 return Ok(false);
             }
         }
+        // A torrent being moved or graduated is out of its engine on purpose,
+        // for as long as its files take to copy, and its row still names the
+        // engine it left. That row holds the only metainfo the target engine
+        // will adopt it with.
+        if self.job_in_flight_for(info_hash) {
+            return Ok(false);
+        }
         self.delete_copy(info_hash, session)
+    }
+
+    /// Any job still queued or running for this torrent.
+    fn job_in_flight_for(&self, info_hash: &str) -> bool {
+        self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM jobs
+                 WHERE info_hash = ?1 AND state IN ('queued','running','cancelling','waiting')",
+                rusqlite::params![info_hash],
+                |r| r.get::<_, i64>(0),
+            )
+            // Unreadable: keep the row. A reconcile that waits loses nothing.
+            .map_or(true, |n| n > 0)
     }
 
     /// Re-home a torrent to another engine of this node.
@@ -4426,6 +4446,23 @@ mod absorb_and_copies_tests {
         assert_eq!(s.sessions_of(H), vec!["hoard".to_string()]);
         assert!(s.delete_settled_copy(H, "hoard", std::time::Duration::ZERO).unwrap(), "settled: dropped");
         assert!(s.sessions_of(H).is_empty());
+    }
+
+    /// ⭐ A graduation takes the torrent out of its engine before copying its
+    /// files, minutes or hours of it, and the row keeps naming the engine it
+    /// left until the end. The reconcile took that row for an orphan and
+    /// deleted it with the metainfo the target engine was about to adopt.
+    #[test]
+    fn the_reconcile_leaves_a_row_whose_torrent_is_being_moved() {
+        let s = store();
+        add(&s, H, "race");
+        s.create_job("graduate", H, "{}", 100).unwrap();
+        let running = s.claim_next_job().expect("claimed");
+        assert!(!s.delete_settled_copy(H, "race", std::time::Duration::ZERO).unwrap(), "moving: kept");
+        assert!(s.torrent_blob(H).unwrap().is_some(), "the metainfo is still there");
+
+        s.job_finish(&running.id, "").unwrap();
+        assert!(s.delete_settled_copy(H, "race", std::time::Duration::ZERO).unwrap(), "done: dropped");
     }
 
     #[test]
