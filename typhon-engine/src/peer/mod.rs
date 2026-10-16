@@ -1435,3 +1435,81 @@ mod handshake_cap_tests {
         assert!(!text.contains("incoming"), "logged at info: {text}");
     }
 }
+
+#[cfg(test)]
+mod holepunch_flood_tests {
+    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    const NAME: &str = "peer::holepunch_flood_tests::a_peer_cannot_have_us_dial_more_than_ten_connects_a_minute";
+
+    /// ⭐ A connected peer sending fifty hole-punch `Connect` in a row has us
+    /// act on ten. Each would otherwise queue a dial to the address it names.
+    /// Counted through `enqueue_dial`'s counters, so run alone in a child
+    /// process where no other test feeds them.
+    #[test]
+    fn a_peer_cannot_have_us_dial_more_than_ten_connects_a_minute() {
+        if std::env::var_os("TYPHON_PUNCH_CHILD").is_none() {
+            let out = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", NAME, "--nocapture", "--test-threads=1"])
+                .env("TYPHON_PUNCH_CHILD", "1")
+                .output()
+                .unwrap();
+            let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+            assert!(out.status.success() && text.contains("1 passed"), "{text}");
+            return;
+        }
+        let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
+        rt.block_on(async {
+            let root = std::env::temp_dir().join(format!("typhon-punch-{}", std::process::id()));
+            std::fs::create_dir_all(root.join("r")).unwrap();
+            let disk = Arc::new(crate::disk::DiskManager::new(1));
+            let mgr = Arc::new(crate::torrent::TorrentManager::new(
+                root.to_string_lossy().into_owned(),
+                root.join("r").to_string_lossy().into_owned(),
+                disk.clone(),
+            ));
+            let mut info = b"d6:lengthi16384e4:name5:punch12:piece lengthi16384e6:pieces20:".to_vec();
+            info.extend_from_slice(&[0x5Au8; 20]);
+            info.push(b'e');
+            let mut torrent = b"d4:info".to_vec();
+            torrent.extend_from_slice(&info);
+            torrent.push(b'e');
+            let (ih, _) = mgr.add_torrent_bytes(&torrent, root.to_str().unwrap(), false, false).unwrap();
+
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let at = listener.local_addr().unwrap();
+            let (m, d) = (mgr.clone(), disk.clone());
+            tokio::spawn(async move {
+                let (s, addr) = listener.accept().await.unwrap();
+                super::handle_incoming(super::PeerTransport::Tcp(s), addr, m, d, [7u8; 20], None, at.port()).await;
+            });
+            let mut c = tokio::net::TcpStream::connect(at).await.unwrap();
+            let mut hs = vec![19u8];
+            hs.extend_from_slice(b"BitTorrent protocol");
+            hs.extend_from_slice(&[0, 0, 0, 0, 0, 0x10, 0, 0x04]);
+            hs.extend_from_slice(&ih);
+            hs.extend_from_slice(&[9u8; 20]);
+            c.write_all(&hs).await.unwrap();
+            let mut reply = [0u8; 68];
+            c.read_exact(&mut reply).await.unwrap();
+            let before = crate::tracker::DIAL_ENQUEUED.load(Ordering::Relaxed)
+                + crate::tracker::DIAL_ENQUEUE_DROPPED.load(Ordering::Relaxed);
+            for i in 1..=50u8 {
+                let target: std::net::SocketAddr = format!("93.184.216.{i}:6881").parse().unwrap();
+                let payload = crate::peer::holepunch::Punch::Connect(target).encode();
+                let mut frame = ((payload.len() + 2) as u32).to_be_bytes().to_vec();
+                frame.extend_from_slice(&[20, crate::peer::holepunch::OUR_UT_HOLEPUNCH_ID]);
+                frame.extend_from_slice(&payload);
+                c.write_all(&frame).await.unwrap();
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            let dials = crate::tracker::DIAL_ENQUEUED.load(Ordering::Relaxed)
+                + crate::tracker::DIAL_ENQUEUE_DROPPED.load(Ordering::Relaxed)
+                - before;
+            assert!(dials >= 1, "the fixture reaches the Connect handling at all");
+            assert_eq!(dials, 10, "fifty Connect, ten dials");
+        });
+    }
+}
