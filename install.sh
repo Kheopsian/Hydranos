@@ -22,6 +22,14 @@
 #   system  root without docker: /usr/local/bin and a system unit
 #   user    neither root nor docker (a seedbox account), or --user: the binary
 #           in ~/.local/bin, config and data under XDG, a systemd --user unit
+#
+# Options that tighten the install (both off by default):
+#   --harden        add sandboxing to the systemd unit (system and user modes):
+#                   no new privileges, private /tmp, no realtime, no setuid files
+#                   created ... nothing that restricts which directories the
+#                   daemon may read or write, or which capabilities it has
+#   --listen ADDR   the address the node's API binds to (default 0.0.0.0, every
+#                   interface); the controller must be able to reach it
 set -eu
 
 REGISTER_TO=""
@@ -32,6 +40,8 @@ DIR=""
 CONTAINER="hydranos"
 IMAGE=""
 MODE=""
+HARDEN=0
+LISTEN="0.0.0.0"
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -43,12 +53,15 @@ while [ $# -gt 0 ]; do
         --container)   CONTAINER="$2";   shift 2 ;;
         --image)       IMAGE="$2";       shift 2 ;;
         --user)        MODE="user";      shift ;;
+        --harden)      HARDEN=1;         shift ;;
+        --listen)      LISTEN="$2";      shift 2 ;;
         *) echo "unknown option: $1" >&2; exit 2 ;;
     esac
 done
 
 [ -n "$REGISTER_TO" ] || { echo "--register-to is required" >&2; exit 2; }
 [ -n "$TOKEN" ]       || { echo "--token is required" >&2; exit 2; }
+[ -n "$LISTEN" ]      || { echo "--listen needs an address" >&2; exit 2; }
 
 if [ -z "$MODE" ]; then
     if command -v docker >/dev/null 2>&1; then
@@ -88,6 +101,38 @@ case "$MODE" in
 esac
 CONFIG="$CFG_DIR/default.toml"
 
+# --harden: lines added at the end of the unit's [Service] section. Only what
+# costs a torrent client nothing. Left out on purpose, because they break paths
+# or privileges the operator chose: ProtectHome, ProtectSystem (the downloads
+# and the config live wherever --dir and the config say), an empty
+# CapabilityBoundingSet (managed WireGuard needs NET_ADMIN), ProtectKernelTunables
+# and ProtectKernelModules. Each string starts with a newline on purpose, so an
+# empty one adds nothing to the unit.
+SANDBOX_USER=""
+SANDBOX_SYSTEM=""
+if [ "$HARDEN" = 1 ]; then
+    # A user manager cannot set up the mount or namespace sandboxes, so the user
+    # unit only gets the ones that need neither.
+    SANDBOX_USER="
+NoNewPrivileges=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native"
+    SANDBOX_SYSTEM="$SANDBOX_USER
+PrivateTmp=yes
+ProtectControlGroups=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes"
+fi
+# Where the node answers on this machine: loopback, unless --listen narrowed it.
+case "$LISTEN" in
+    0.0.0.0|::|"[::]") HEALTH_HOST="127.0.0.1" ;;
+    *) HEALTH_HOST="$LISTEN" ;;
+esac
+
 if [ "$MODE" = "system" ] && [ "$(id -u)" -ne 0 ]; then
     echo "the system install needs root: rerun with sudo, or pass --user" >&2
     exit 1
@@ -125,7 +170,7 @@ if [ ! -f "$CONFIG" ]; then
     umask 077
     cat > "$CONFIG" <<TOML
 [daemon]
-api_host = "0.0.0.0"
+api_host = "$LISTEN"
 api_port = $PORT
 api_key = "$API_KEY"
 data_dir = "$CONFIG_DATA_DIR"
@@ -255,7 +300,7 @@ RestartSec=5
 # Above HYDRANOS_STOP_TIMEOUT (120 s) plus 5 s of departures; systemd's
 # default of 90 s killed the resume flush midway.
 TimeoutStopSec=150
-LimitNOFILE=1000000
+LimitNOFILE=1000000${SANDBOX_SYSTEM}
 
 [Install]
 WantedBy=multi-user.target
@@ -299,7 +344,7 @@ ExecStart=/bin/sh -c 'ulimit -n "\$\$(ulimit -Hn)" 2>/dev/null; exec "$BIN" --co
 Restart=always
 RestartSec=5
 # Above HYDRANOS_STOP_TIMEOUT (120 s) plus 5 s of departures.
-TimeoutStopSec=150
+TimeoutStopSec=150${SANDBOX_USER}
 
 [Install]
 WantedBy=default.target
@@ -372,7 +417,7 @@ i=0
 while [ $i -lt 60 ]; do
     # The port opens while the catalogue still loads, and /health then says
     # "starting": the controller would be handed a node that answers 503.
-    h=$(curl -fsS -m 2 "http://127.0.0.1:$PORT/health" 2>/dev/null) && \
+    h=$(curl -fsS -m 2 "http://$HEALTH_HOST:$PORT/health" 2>/dev/null) && \
         ! printf '%s' "$h" | grep -q '"status": *"starting"' && break
     i=$((i + 1)); sleep 1
 done
