@@ -340,8 +340,9 @@ impl TorrentManager {
     /// nothing was downloaded, and neither a tracker nor a workflow is owed a
     /// completion for it.
     pub fn on_completed(&self, ih: &InfoHash) {
-        // The data before the record that says it is whole.
-        self.disk.sync_written();
+        // The data before the record that says it is whole: this torrent's
+        // files only.
+        self.disk.sync_torrent(ih);
         self.persist_completed(ih);
         // `completed` is how a tracker records the snatch: say it now, not at
         // the next scheduled announce half an hour away.
