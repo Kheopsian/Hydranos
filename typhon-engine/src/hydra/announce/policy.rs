@@ -76,17 +76,6 @@ impl CleartextPasskey {
     }
 }
 
-/// Whether `s` looks like a key: alphanumeric (plus `-` and `_`), at least 16
-/// characters with at least one digit and one letter, so `announce`,
-/// `announce.php` and compound words like `public-tracker-announce` never
-/// qualify.
-fn looks_like_key(s: &str) -> bool {
-    s.len() >= 16
-        && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-        && s.bytes().any(|b| b.is_ascii_digit())
-        && s.bytes().any(|b| b.is_ascii_alphabetic())
-}
-
 /// Whether announcing to `tracker_url` would put a passkey on a plain-text
 /// connection: an `http://` URL with a passkey configured for its host, or a
 /// path segment that looks like a key (anywhere in the path), or a query
@@ -99,13 +88,7 @@ pub fn sends_passkey_in_clear(policy: &Policy, tracker_url: &str) -> bool {
     if passkey_for(policy, tracker_url).is_some() {
         return true;
     }
-    let (base, query) = match tracker_url[7..].split_once('?') {
-        Some((b, q)) => (b, q),
-        None => (&tracker_url[7..], ""),
-    };
-    let path = base.split_once('/').map(|(_, p)| p).unwrap_or("");
-    path.split('/').any(looks_like_key)
-        || query.split('&').filter_map(|kv| kv.split_once('=')).any(|(_, v)| looks_like_key(v))
+    typhon_engine::tracker::carries_key_in_clear(tracker_url)
 }
 
 /// Whether the policy is `refuse` and this announce would carry a passkey in

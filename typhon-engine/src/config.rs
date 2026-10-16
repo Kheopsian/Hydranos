@@ -135,6 +135,11 @@ pub struct EngineConfig {
     /// `peer::extension::Encryption`.
     #[serde(default)]
     pub peer_encryption: String,
+    /// `refuse`: a magnet's resolution does not contact a plain `http://`
+    /// tracker whose URL carries a key. Anything else = contact it. The
+    /// daemon's `announce_cleartext_passkey`, passed on for the magnets.
+    #[serde(default)]
+    pub announce_cleartext_passkey: String,
     /// Inbound handshakes naming an info_hash this engine does not have, per
     /// source IP per minute, before the source is ignored for ten minutes.
     /// 0 (default) = no limit. See `peer::UnknownHashLimiter`.

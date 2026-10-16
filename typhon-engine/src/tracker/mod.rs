@@ -3,6 +3,35 @@ pub mod http;
 pub mod scrape;
 pub mod udp;
 
+/// Whether `s` looks like a key: alphanumeric (plus `-` and `_`), at least 16
+/// characters with at least one digit and one letter, so `announce`,
+/// `announce.php` and compound words like `public-tracker-announce` never
+/// qualify.
+fn looks_like_key(s: &str) -> bool {
+    s.len() >= 16
+        && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        && s.bytes().any(|b| b.is_ascii_digit())
+        && s.bytes().any(|b| b.is_ascii_alphabetic())
+}
+
+/// Whether the URL itself puts a key on a plain-text connection: an `http://`
+/// URL with a path segment that looks like a key (anywhere in the path), or a
+/// query parameter whose value looks like a key (the name does not matter).
+/// A passkey configured for the host is not in the URL, so it is not seen here.
+pub fn carries_key_in_clear(tracker_url: &str) -> bool {
+    let is_http = tracker_url.get(..7).map(|p| p.eq_ignore_ascii_case("http://")).unwrap_or(false);
+    if !is_http {
+        return false;
+    }
+    let (base, query) = match tracker_url[7..].split_once('?') {
+        Some((b, q)) => (b, q),
+        None => (&tracker_url[7..], ""),
+    };
+    let path = base.split_once('/').map(|(_, p)| p).unwrap_or("");
+    path.split('/').any(looks_like_key)
+        || query.split('&').filter_map(|kv| kv.split_once('=')).any(|(_, v)| looks_like_key(v))
+}
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicI64, Ordering as AtomicOrdering};
 use std::time::Duration;
