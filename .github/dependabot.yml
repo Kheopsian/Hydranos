@@ -1,0 +1,13 @@
+# The actions and base images are pinned by commit SHA and digest
+# (.github/scripts/pin_guard.py). This proposes the new pins as pull
+# requests, so a pin never goes stale unseen.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
