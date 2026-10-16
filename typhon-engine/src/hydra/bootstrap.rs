@@ -259,7 +259,7 @@ pub async fn login(State(state): State<AppState>, body: String) -> Response {
             .into_response();
     }
     let ok = req.username == cfg.auth.username
-        && bcrypt_verify(&req.password, &cfg.auth.password_hash);
+        && crate::session::verify_password(&req.password, &cfg.auth.password_hash).await;
     if !ok {
         // One message for a wrong name and a wrong password alike: saying
         // which was right tells an attacker they found the account.
@@ -375,11 +375,6 @@ fn is_private(ip: &str) -> bool {
         }
         Err(_) => false,
     }
-}
-
-/// bcrypt verification, the same cost the Go side pays.
-fn bcrypt_verify(password: &str, hash: &str) -> bool {
-    bcrypt::verify(password, hash).unwrap_or(false)
 }
 
 #[cfg(test)]
