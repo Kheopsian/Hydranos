@@ -208,12 +208,21 @@ impl Schedule {
 /// peers need a walk of the catalogue; it runs once per `ROUND` and reads one
 /// map length per torrent, the same order of cost as the DHT's boot loop.
 pub fn candidates(mgr: &TorrentManager) -> Vec<Candidate> {
+    candidates_with(mgr, true)
+}
+
+/// `candidates`, with `lsd_announce_seeds` applied: false leaves out the
+/// torrents that are not downloading.
+pub fn candidates_with(mgr: &TorrentManager, announce_seeds: bool) -> Vec<Candidate> {
     let downloading = mgr.collect_incomplete(usize::MAX, |t| may_use_lsd(t));
     let seen: HashSet<InfoHash> = downloading.iter().copied().collect();
     let mut out: Vec<Candidate> = downloading
         .into_iter()
         .map(|info_hash| Candidate { info_hash, downloading: true })
         .collect();
+    if !announce_seeds {
+        return out;
+    }
     let with_peers = mgr.collect_torrents(usize::MAX, |t| {
         !t.connected_addrs.is_empty() && may_use_lsd(t) && !seen.contains(&t.info_hash)
     });
@@ -430,6 +439,7 @@ pub async fn start(mgr: Arc<TorrentManager>, config: &crate::config::EngineConfi
     });
 
     let configured_port = config.listen_port;
+    let announce_seeds = config.lsd_announce_seeds;
     let (s, m) = (session.clone(), mgr);
     tokio::spawn(async move {
         // Give the listeners a moment: an announce names a port that must
@@ -439,7 +449,7 @@ pub async fn start(mgr: Arc<TorrentManager>, config: &crate::config::EngineConfi
         let mut tick = tokio::time::interval(ROUND);
         loop {
             tick.tick().await;
-            let plan = schedule.plan(&candidates(&m), Instant::now());
+            let plan = schedule.plan(&candidates_with(&m, announce_seeds), Instant::now());
             // The port the listener holds: a LAN peer connects to it directly,
             // never through the VPN's translated port.
             let port = m.listen_port_now(configured_port);
@@ -597,6 +607,40 @@ mod tests {
         // `offer` needs a session; the predicate it applies is this one.
         assert!(!may_use_lsd(&p));
         assert!(may_use_lsd(&mgr.get(&public).unwrap()));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Default unchanged (no new symbol, so it also compiles on the parent): a
+    /// seed with a connected peer is a candidate, not downloading.
+    #[test]
+    fn a_seed_with_a_peer_is_announced_by_default() {
+        let (mgr, root) = manager("seeddefault");
+        let (seed, _) = mgr.add_torrent_bytes(&torrent_bytes("seeddef", false), "/tmp", false, true).unwrap();
+        mgr.get(&seed).unwrap().connected_addrs.insert("192.0.2.1:1".parse().unwrap(), ());
+        let got = candidates(&mgr);
+        assert_eq!(got.len(), 1);
+        assert_eq!((got[0].info_hash, got[0].downloading), (seed, false));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// With `lsd_announce_seeds = false` only torrents still downloading are
+    /// announced; a seed with peers is announced as before by default. A seed
+    /// still dials the LAN peers that announce the hash (`offer` has no seed
+    /// filter), so a LAN downloader is found either way.
+    #[test]
+    fn seeds_are_announced_only_when_the_option_says_so() {
+        let (mgr, root) = manager("seedopt");
+        let (down, _) = mgr.add_torrent_bytes(&torrent_bytes("down", false), "/tmp", false, false).unwrap();
+        let (seed, _) = mgr.add_torrent_bytes(&torrent_bytes("seed", false), "/tmp", false, true).unwrap();
+        mgr.get(&seed).unwrap().connected_addrs.insert("192.0.2.1:1".parse().unwrap(), ());
+        let sorted = |mut v: Vec<InfoHash>| {
+            v.sort();
+            v
+        };
+        let got = |seeds| sorted(candidates_with(&mgr, seeds).iter().map(|c| c.info_hash).collect());
+        assert_eq!(got(true), sorted(vec![down, seed]), "default: the seed with a peer is announced");
+        assert_eq!(got(false), vec![down], "option off: only the download");
+        assert_eq!(sorted(candidates(&mgr).iter().map(|c| c.info_hash).collect()), got(true));
         let _ = std::fs::remove_dir_all(root);
     }
 

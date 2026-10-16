@@ -1003,6 +1003,7 @@ fn engine_config(
         // Resolved by the caller from the role (`Session::lsd_on`); a session
         // that was not resolved runs none.
         "lsd_enabled": session.enable_lsd.unwrap_or(false),
+        "lsd_announce_seeds": session.lsd_announce_seeds.unwrap_or(true),
         "enable_webseed": session.enable_webseed,
         "webseed_private": session.webseed_private.unwrap_or(true),
         "enable_ipv6": session.enable_ipv6,
@@ -1059,6 +1060,13 @@ mod network_wiring_tests {
         assert!(cfg_of(&session("")).webseed_private, "absent = private torrents may use webseeds");
         assert!(!cfg_of(&session("webseed_private = false
 ")).webseed_private);
+    }
+
+    /// `lsd_announce_seeds` reaches the engine; absent keeps the old behaviour.
+    #[test]
+    fn lsd_announce_seeds_reaches_the_engine() {
+        assert!(cfg_of(&session("")).lsd_announce_seeds);
+        assert!(!cfg_of(&session("lsd_announce_seeds = false\n")).lsd_announce_seeds);
     }
 
     /// `enable_lsd` reaches the engine, and only once resolved: the start
