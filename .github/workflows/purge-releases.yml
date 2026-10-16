@@ -72,8 +72,14 @@ jobs:
           DELTAGS: ${{ github.event.inputs.delete_tags }}
         run: |
           set -u
+          # Split on spaces, never globbed, and only tag-shaped words reach
+          # the API: a "*" or a "../" in the input is refused, not expanded.
+          set -f
           rc=0
           for t in $TAGS; do
+            case "$t" in
+              *[!A-Za-z0-9._-]*|.*) echo "  $t: not a tag name, skipped"; rc=1; continue ;;
+            esac
             # Resolve the release id from the tag. A tag with no release is not
             # an error: several of these may already have been cleaned up.
             id=$(gh api "repos/$REPO/releases/tags/$t" --jq .id 2>/dev/null || true)
