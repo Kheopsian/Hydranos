@@ -266,6 +266,9 @@ pub struct PeerPolicy {
     block_mse: AtomicBool,
     /// `peer_encryption`: see `Encryption`. Stored as its `u8` tag.
     encryption: AtomicU8,
+    /// The unknown `peer_encryption` value already warned about, so a settings
+    /// save that repeats it does not repeat the warning.
+    warned_encryption: std::sync::Mutex<Option<String>>,
     /// `max_unknown_infohash_per_ip`: 0 = off. See `peer::UnknownHashLimiter`.
     unknown_hash_limit: AtomicU32,
     /// Seconds a peer may send us nothing useful before it is dropped
@@ -309,6 +312,7 @@ impl Default for PeerPolicy {
             ipv6: AtomicBool::new(false),
             block_mse: AtomicBool::new(false),
             encryption: AtomicU8::new(Encryption::Allow as u8),
+            warned_encryption: std::sync::Mutex::new(None),
             unknown_hash_limit: AtomicU32::new(0),
             idle_timeout_secs: AtomicU64::new(DEFAULT_PEER_IDLE_TIMEOUT_SECS),
             choking: AtomicBool::new(false),
@@ -369,8 +373,20 @@ impl PeerPolicy {
         Encryption::from_tag(self.encryption.load(Ordering::Relaxed))
     }
 
-    /// Set the mode from its config spelling; anything unknown is `allow`.
+    /// Set the mode from its config spelling; anything unknown is `allow`,
+    /// and a non-empty unknown value is named in a warning (once, until the
+    /// value changes).
     pub fn set_encryption(&self, mode: &str) {
+        let value = mode.trim();
+        let known = matches!(value.to_ascii_lowercase().as_str(), "" | "allow" | "prefer" | "require");
+        if let Ok(mut warned) = self.warned_encryption.lock() {
+            if known {
+                *warned = None;
+            } else if warned.as_deref() != Some(value) {
+                tracing::warn!("peer_encryption = {value:?} is not one of allow, prefer, require: applying allow");
+                *warned = Some(value.to_string());
+            }
+        }
         self.encryption.store(Encryption::parse(mode) as u8, Ordering::Relaxed);
     }
 
@@ -541,6 +557,58 @@ mod tests {
             assert_eq!(p.encryption(), want, "{s:?}");
         }
         assert_eq!(Encryption::Require.as_str(), "require");
+    }
+
+    #[derive(Clone, Default)]
+    struct Captured(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for Captured {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Captured {
+        type Writer = Captured;
+        fn make_writer(&'a self) -> Captured {
+            self.clone()
+        }
+    }
+
+    /// An unknown `peer_encryption` is `allow`, and the log says so once,
+    /// naming the value. Run alone in a child process: `tracing` caches per
+    /// call site whether anyone listens.
+    #[test]
+    fn an_unknown_peer_encryption_is_warned_about_once() {
+        const NAME: &str = "peer::extension::tests::an_unknown_peer_encryption_is_warned_about_once";
+        if std::env::var_os("TYPHON_LOG_CHILD").is_none() {
+            let out = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", NAME, "--nocapture", "--test-threads=1"])
+                .env("TYPHON_LOG_CHILD", "1")
+                .output()
+                .unwrap();
+            let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+            assert!(out.status.success() && text.contains("1 passed"), "{text}");
+            return;
+        }
+        let out = Captured::default();
+        let sub = tracing_subscriber::fmt().with_max_level(tracing::Level::INFO).with_writer(out.clone()).finish();
+        let _g = tracing::subscriber::set_default(sub);
+        let p = PeerPolicy::default();
+        p.set_encryption("requier");
+        p.set_encryption("requier");
+        p.set_encryption("prefer");
+        p.set_encryption("");
+        p.set_encryption("Require");
+        let text = String::from_utf8_lossy(&out.0.lock().unwrap()).into_owned();
+        assert_eq!(text.matches("requier").count(), 1, "one warning naming the value: {text}");
+        assert!(text.contains("allow"), "it says allow is applied: {text}");
+        assert_eq!(text.matches("WARN").count(), 1, "only the unknown value warns: {text}");
+        p.set_encryption("requier");
+        let text = String::from_utf8_lossy(&out.0.lock().unwrap()).into_owned();
+        assert_eq!(text.matches("requier").count(), 2, "a value set again after a valid one warns again: {text}");
     }
 
     /// ⭐ `peer_timeout`: absent / 0 = the 300 s every session ran before the
