@@ -395,11 +395,12 @@ mod tests {
     /// did (no new symbol: this compiles on the parent commit too).
     #[test]
     fn a_passkey_over_plain_http_is_announced_unchanged_by_default() {
-        let p = policy();
+        let mut p = policy();
+        p.passkeys.insert("clear-default.example".into(), "NEWKEY".into());
         let ih = "ab".repeat(20);
-        let r = prepare(&p, "http://tr4ker.net/announce/OLDKEY", &ih, 6881, 0, 0, 0, "", None, None).expect("announces");
+        let r = prepare(&p, "http://clear-default.example/announce/OLDKEY", &ih, 6881, 0, 0, 0, "", None, None).expect("announces");
         let expected = format!(
-            "http://tr4ker.net/announce/NEWKEY?info_hash={}&peer_id=-TY0001-abcdefghijkl&port=6881&uploaded=0&downloaded=0&left=0&compact=1&numwant=0&key={}",
+            "http://clear-default.example/announce/NEWKEY?info_hash={}&peer_id=-TY0001-abcdefghijkl&port=6881&uploaded=0&downloaded=0&left=0&compact=1&numwant=0&key={}",
             "%AB".repeat(20),
             url::key_for(&p.peer_id, &"ab".repeat(20)),
         );
