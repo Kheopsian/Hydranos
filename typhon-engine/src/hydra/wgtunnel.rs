@@ -446,15 +446,48 @@ impl Runner for System {
                 pipe.write_all(text.as_bytes()).map_err(|e| format!("{prog}: {e}"))?;
             }
         }
-        let out = child.wait_with_output().map_err(|e| format!("{prog}: {e}"))?;
-        if out.status.success() {
-            Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+        // Bounded: these run on the way out as well, after the state is
+        // flushed, and an `ip` or `wg` that never returns held the exit until
+        // the supervisor's SIGKILL.
+        let drain = |pipe: Option<Box<dyn std::io::Read + Send>>| {
+            std::thread::spawn(move || {
+                let mut buf = Vec::new();
+                if let Some(mut p) = pipe {
+                    let _ = p.read_to_end(&mut buf);
+                }
+                buf
+            })
+        };
+        use std::io::Read;
+        let stdout = drain(child.stdout.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
+        let stderr = drain(child.stderr.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
+        let started = std::time::Instant::now();
+        let status = loop {
+            match child.try_wait().map_err(|e| format!("{prog}: {e}"))? {
+                Some(status) => break status,
+                None if started.elapsed() < COMMAND_DEADLINE => {
+                    std::thread::sleep(std::time::Duration::from_millis(20))
+                }
+                None => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!("{prog}: no answer after {}s, stopped", COMMAND_DEADLINE.as_secs()));
+                }
+            }
+        };
+        let out = stdout.join().unwrap_or_default();
+        let err = stderr.join().unwrap_or_default();
+        if status.success() {
+            Ok(String::from_utf8_lossy(&out).into_owned())
         } else {
-            let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
-            Err(if err.is_empty() { format!("exit {}", out.status) } else { err })
+            let err = String::from_utf8_lossy(&err).trim().to_string();
+            Err(if err.is_empty() { format!("exit {status}") } else { err })
         }
     }
 }
+
+/// How long one `ip` or `wg` call may take before it is stopped.
+const COMMAND_DEADLINE: std::time::Duration = std::time::Duration::from_secs(20);
 
 // ---------------------------------------------------------------------------
 // Can this process do it at all
