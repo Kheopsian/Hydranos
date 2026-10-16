@@ -509,6 +509,8 @@ impl TorrentManager {
     pub fn new(data_dir: String, resume_dir: String, disk: Arc<DiskManager>) -> Self {
         std::fs::create_dir_all(&resume_dir).ok();
         let (completed_tx, completed_rx) = tokio::sync::mpsc::unbounded_channel();
+        // One policy per engine, shared by its torrents and its magnet jobs.
+        let policy: Arc<crate::peer::extension::PeerPolicy> = Default::default();
         let mirror_json = std::env::var("TYPHON_RESUME_JSON").map(|v| v == "1").unwrap_or(false);
         let state_db = if std::env::var("TYPHON_STATE_DB").map(|v| v == "0").unwrap_or(false) {
             info!("[statedb] disabled by TYPHON_STATE_DB=0, using legacy resume JSON only");
@@ -558,8 +560,8 @@ impl TorrentManager {
             dht: std::sync::OnceLock::new(),
             lsd: std::sync::OnceLock::new(),
             webseed: Default::default(),
-            magnet: Default::default(),
-            policy: Default::default(),
+            magnet: Arc::new(crate::magnet::MagnetJobs::with_policy(policy.clone())),
+            policy,
             trusted_proxy_sources: std::sync::OnceLock::new(),
             rebind_tx: std::sync::OnceLock::new(),
             live_port: std::sync::atomic::AtomicU16::new(0),

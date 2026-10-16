@@ -63,9 +63,17 @@ struct Job {
 #[derive(Default)]
 pub struct MagnetJobs {
     map: Mutex<HashMap<[u8; 20], Job>>,
+    /// The engine's peer policy, so the peers a resolution dials follow
+    /// `peer_encryption` like the torrent's own dials do.
+    policy: Arc<crate::peer::extension::PeerPolicy>,
 }
 
 impl MagnetJobs {
+    /// Jobs whose peer dials follow `policy` (the engine's).
+    pub fn with_policy(policy: Arc<crate::peer::extension::PeerPolicy>) -> Self {
+        Self { map: Mutex::new(HashMap::new()), policy }
+    }
+
     fn set_state(&self, info_hash: [u8; 20], state: JobState) {
         if let Ok(mut map) = self.map.lock() {
             if let Some(job) = map.get_mut(&info_hash) {
@@ -148,6 +156,7 @@ pub fn start(
     let ip_mode = announce_ip_mode(config.enable_ipv6);
     let refuse_cleartext_key = config.announce_cleartext_passkey.trim().eq_ignore_ascii_case("refuse");
     let jobs = self.clone();
+    let policy = self.policy.clone();
     tokio::spawn(async move {
         // Rounds until the budget runs out, not one. A peer that is still
         // checking the torrent refuses the connection (libtorrent does, for
@@ -186,6 +195,7 @@ pub fn start(
                     None,
                     port,
                     egress.clone(),
+                    policy.clone(),
                     crate::peer::metadata::DEFAULT_CONCURRENCY,
                 )
                 .await
@@ -533,6 +543,66 @@ mod tests {
             assert_eq!(seen(&keyed), keyed_is_contacted, "mode {mode:?}: the keyed http:// tracker");
             jobs.forget(&ih(7));
         }
+    }
+
+    /// What a fake peer sees as the opening of each connection a magnet
+    /// resolution makes to it: true = a plaintext BitTorrent handshake.
+    async fn magnet_openings(mode: &str) -> Vec<bool> {
+        let tcp = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let peer = tcp.local_addr().unwrap();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let log = seen.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut s, _)) = tcp.accept().await else { return };
+                let log = log.clone();
+                tokio::spawn(async move {
+                    use tokio::io::AsyncReadExt;
+                    let mut buf = [0u8; 20];
+                    let n = tokio::time::timeout(Duration::from_secs(2), s.read(&mut buf)).await;
+                    log.lock().unwrap().push(matches!(n, Ok(Ok(20))) && buf == *b"\x13BitTorrent protocol");
+                });
+            }
+        });
+        let root = std::env::temp_dir().join(format!("typhon-magnet-enc-{mode}-{}", std::process::id()));
+        let (data, resume) = (root.join("data"), root.join("resume"));
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::create_dir_all(&resume).unwrap();
+        let mgr = Arc::new(crate::torrent::TorrentManager::new(
+            data.to_string_lossy().into_owned(),
+            resume.to_string_lossy().into_owned(),
+            Arc::new(crate::disk::DiskManager::new(16)),
+        ));
+        mgr.policy().set_encryption(mode);
+        assert!(mgr.magnet().start(ih(9), vec![], vec![peer], &test_config(), None, None));
+        // The first round dials at once; the fake peer drops every connection
+        // after reading it, so the legs follow one another quickly.
+        for _ in 0..100 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            if seen.lock().unwrap().len() >= 2 {
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let v = seen.lock().unwrap().clone();
+        let _ = std::fs::remove_dir_all(&root);
+        v
+    }
+
+    /// A magnet resolution follows the engine's `peer_encryption`: under
+    /// `require` the BEP 9 fetch never opens in the clear.
+    #[tokio::test]
+    async fn magnet_metadata_fetch_never_dials_plaintext_under_require() {
+        let seen = magnet_openings("require").await;
+        assert!(!seen.is_empty(), "the fetch dialled the peer");
+        assert!(!seen.contains(&true), "a plaintext handshake went out: {seen:?}");
+    }
+
+    /// Control: the default mode still opens in the clear first.
+    #[tokio::test]
+    async fn magnet_metadata_fetch_dials_plaintext_under_allow() {
+        let seen = magnet_openings("allow").await;
+        assert_eq!(seen.first(), Some(&true), "{seen:?}");
     }
 
     /// The budget exists so a resolution cannot sit forever; a ceiling below
