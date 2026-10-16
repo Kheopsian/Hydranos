@@ -876,12 +876,22 @@ pub async fn dial_peer(
     .await;
 }
 
+/// ⚠️ SELF_IPS and OWN_IPS are process-wide and `cargo test` runs tests in
+/// parallel: every test that writes either takes this one lock. Two modules
+/// each had their own, so a test here could clear the set another was
+/// asserting on.
+#[cfg(test)]
+static SELF_IP_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+fn self_ip_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    SELF_IP_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 #[cfg(test)]
 mod self_ip_tests {
     use super::*;
     use std::net::IpAddr;
-
-    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// ⭐ The regression of 2026-08-29: production held only the public IPv4 in
     /// the pushed set, so every address we held in v6 was invisible to the
@@ -889,7 +899,7 @@ mod self_ip_tests {
     /// cover us on its own, with nothing pushed at all.
     #[test]
     fn discovered_addresses_stand_alone_without_a_push() {
-        let _g = LOCK.lock().unwrap();
+        let _g = self_ip_test_lock();
         set_self_ips(vec![]);
         let mine: IpAddr = "2a01:db8::200".parse().unwrap();
         *OWN_IPS.write().unwrap() = vec![mine];
@@ -902,7 +912,7 @@ mod self_ip_tests {
     /// torrent across two engines share bandwidth that way.
     #[test]
     fn same_address_other_port_is_another_agent() {
-        let _g = LOCK.lock().unwrap();
+        let _g = self_ip_test_lock();
         let mine: IpAddr = "2a01:db8::200".parse().unwrap();
         *OWN_IPS.write().unwrap() = vec![mine];
         let ours = std::net::SocketAddr::new(mine, 16172);
@@ -914,7 +924,7 @@ mod self_ip_tests {
 
     #[test]
     fn a_pushed_address_still_counts() {
-        let _g = LOCK.lock().unwrap();
+        let _g = self_ip_test_lock();
         let pushed: IpAddr = "203.0.113.7".parse().unwrap();
         set_self_ips(vec![pushed]);
         assert!(is_self_ip(pushed));
@@ -926,7 +936,7 @@ mod self_ip_tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn discovery_keeps_only_global_scope() {
-        let _g = LOCK.lock().unwrap();
+        let _g = self_ip_test_lock();
         refresh_own_ips();
         for ip in OWN_IPS.read().unwrap().iter() {
             if let IpAddr::V6(v6) = ip {
@@ -942,17 +952,10 @@ mod self_dial_tests {
     use super::*;
     use std::net::{IpAddr, SocketAddr};
 
-    /// ⚠️⚠️ SELF_IPS and OWN_IPS are process-wide, and `cargo test` runs tests
-    /// in PARALLEL. Splitting these assertions across several tests made them
-    /// fail each other -- one clearing the set while another was asserting on
-    /// it. They share a lock, and the env-seed test takes it too.
-    static IP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
+    /// The lock every test writing SELF_IPS or OWN_IPS shares, the env-seed
+    /// test included (`self_ip_test_lock`).
     fn ip_guard() -> std::sync::MutexGuard<'static, ()> {
-        match IP_LOCK.lock() {
-            Ok(g) => g,
-            Err(poisoned) => poisoned.into_inner(),
-        }
+        self_ip_test_lock()
     }
 
     ///
