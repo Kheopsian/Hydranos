@@ -2988,7 +2988,6 @@ dependencies = [
  "lru",
  "nix",
  "num-bigint",
- "num-integer",
  "num-traits",
  "parking_lot",
  "png",
