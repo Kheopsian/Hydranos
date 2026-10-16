@@ -447,6 +447,19 @@ pub(super) async fn announce_one(
                     numwant_this,
                     tracker_id.as_deref(),
                 ) else {
+                    if policy::refused_for_cleartext(policy, tracker_url) {
+                        let e = "refused: the announce URL carries a passkey over plain http:// (announce_cleartext_passkey = \"refuse\")".to_string();
+                        let result: Result<typhon_engine::tracker::http::AnnounceResponse, String> = Err(e.clone());
+                        {
+                            let mut book = torrent.announce_book.lock().unwrap_or_else(|e| e.into_inner());
+                            book::record(book::slot_mut(&mut book, tracker_url), event, &result, typhon_engine::torrent::meta::now_secs());
+                        }
+                        cache.count_failed_message(&host, "refused", &e, &job.info_hash, &event.to_string());
+                        torrent.last_announce_ok.store(false, Ordering::Relaxed);
+                        if let Ok(mut g) = torrent.last_announce_error.lock() {
+                            *g = e;
+                        }
+                    }
                     break;
                 };
                 let result = match &req.udp {
