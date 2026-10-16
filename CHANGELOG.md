@@ -35,6 +35,12 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   them all back, and be queued again on the next drain; the drain now counts
   it as stuck and logs which categories hold a copy on both sides.
 
+### Security
+
+- First-run setup behind a reverse proxy requires every address in
+  `X-Forwarded-For`, `X-Real-IP` and `Forwarded` to be local, not only the
+  first one.
+
 ## v4.5.4 -- a write the store did not keep is never acknowledged
 
 ### Added

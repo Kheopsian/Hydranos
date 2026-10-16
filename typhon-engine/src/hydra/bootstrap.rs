@@ -221,21 +221,57 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
 ///
 /// The socket peer decides first: a public peer is refused whatever headers
 /// it sends, since anyone can write `X-Forwarded-For: 127.0.0.1`. A private
-/// peer may be a reverse proxy, so its forwarding header, when present, must
-/// name a private client too. 4.3 read only the header and let a direct call
+/// peer may be a reverse proxy, so every address its forwarding headers name
+/// must be private too. 4.3 read only the header and let a direct call
 /// without one through, which made the guard a no-op on a forwarded port.
+///
+/// Every hop, not the first: a proxy appends the address it saw to whatever
+/// the client already sent, so the leftmost entry is the client's own claim
+/// and only the ones after it were written by a proxy. Which of those is the
+/// client depends on how many proxies there are, which this guard cannot
+/// know; requiring all of them to be local needs no such count. The same
+/// goes for `X-Real-IP` and `Forwarded`, which some proxies set instead, and
+/// an entry that does not parse is not taken for a local one.
 fn is_local_request(peer: std::net::IpAddr, headers: &HeaderMap) -> bool {
     if !is_private(&peer.to_canonical().to_string()) {
         return false;
     }
-    let forwarded = headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.split(',').next())
-        .map(|s| s.trim().to_string());
-    match forwarded {
-        Some(ip) => is_private(&ip),
-        None => true,
+    forwarded_hops(headers).iter().all(|hop| is_private_hop(hop))
+}
+
+/// Every client address the forwarding headers name, in no particular order.
+fn forwarded_hops(headers: &HeaderMap) -> Vec<String> {
+    let mut hops = Vec::new();
+    for name in ["x-forwarded-for", "x-real-ip"] {
+        for value in headers.get_all(name) {
+            // A value that is not text still names a hop, one that can't be checked.
+            let text = value.to_str().unwrap_or("?");
+            hops.extend(text.split(',').map(|s| s.trim().to_string()));
+        }
+    }
+    for value in headers.get_all("forwarded") {
+        let text = value.to_str().unwrap_or("for=?");
+        for pair in text.split([',', ';']) {
+            let mut kv = pair.splitn(2, '=');
+            let key = kv.next().unwrap_or("").trim();
+            if key.eq_ignore_ascii_case("for") {
+                hops.push(kv.next().unwrap_or("").trim().trim_matches('"').to_string());
+            }
+        }
+    }
+    hops
+}
+
+/// One forwarded address, as proxies write them: bare, with a port, or
+/// bracketed IPv6 with or without one.
+fn is_private_hop(hop: &str) -> bool {
+    if let Ok(sa) = hop.parse::<std::net::SocketAddr>() {
+        return is_private(&sa.ip().to_canonical().to_string());
+    }
+    let bare = hop.trim_start_matches('[').trim_end_matches(']');
+    match bare.parse::<std::net::IpAddr>() {
+        Ok(ip) => is_private(&ip.to_canonical().to_string()),
+        Err(_) => false,
     }
 }
 
@@ -282,8 +318,43 @@ mod tests {
         let proxy: std::net::IpAddr = "192.168.99.1".parse().unwrap();
         let mut h = HeaderMap::new();
         h.insert("x-forwarded-for", "203.0.113.9, 192.168.99.1".parse().unwrap());
-        assert!(!is_local_request(proxy, &h), "the first hop is the client, not the proxy");
+        assert!(!is_local_request(proxy, &h), "a public hop anywhere in the chain is refused");
         h.insert("x-forwarded-for", "192.168.99.50".parse().unwrap());
+        assert!(is_local_request(proxy, &h));
+    }
+
+    /// A proxy appends what it saw after what the client sent: the address
+    /// it vouches for is on the right, and the left is the client's to write.
+    #[test]
+    fn a_client_written_hop_does_not_hide_the_one_the_proxy_appended() {
+        let proxy: std::net::IpAddr = "127.0.0.1".parse().unwrap();
+        let refused = |name: &str, value: &str| {
+            let mut h = HeaderMap::new();
+            h.insert(
+                axum::http::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                value.parse().unwrap(),
+            );
+            assert!(!is_local_request(proxy, &h), "{name}: {value}");
+        };
+        refused("x-forwarded-for", "10.0.0.1, 203.0.113.9");
+        refused("x-forwarded-for", "10.0.0.1,203.0.113.9:4711");
+        refused("x-forwarded-for", "10.0.0.1, [2001:db8::1]:443");
+        refused("x-forwarded-for", "10.0.0.1, unknown");
+        refused("x-real-ip", "203.0.113.9");
+        refused("forwarded", "for=10.0.0.1, for=203.0.113.9;proto=https");
+        refused("forwarded", "for=\"[2001:db8::1]:4711\"");
+
+        // Two header lines are one list: the second may be the proxy's.
+        let mut h = HeaderMap::new();
+        h.append("x-forwarded-for", "10.0.0.1".parse().unwrap());
+        h.append("x-forwarded-for", "203.0.113.9".parse().unwrap());
+        assert!(!is_local_request(proxy, &h), "a second header line counts");
+
+        // A chain that stays on the LAN is still a local caller.
+        let mut h = HeaderMap::new();
+        h.insert("x-forwarded-for", "192.168.1.5, 10.0.0.2:8080, [fd00::7]".parse().unwrap());
+        h.insert("x-real-ip", "192.168.1.5".parse().unwrap());
+        h.insert("forwarded", "for=192.168.1.5;proto=http".parse().unwrap());
         assert!(is_local_request(proxy, &h));
     }
 
