@@ -221,6 +221,38 @@ pub async fn announce_on(
     device: &str,
     proxy: &str,
 ) -> Result<AnnounceResponse, String> {
+    announce_on_mode(tracker_url, info_hash, peer_id, port, uploaded, downloaded, left, event, device, proxy, IpMode::Auto).await
+}
+
+/// The local address that pins a direct announce to one family, none for
+/// `Auto` (one request, the resolver's choice) and none through a proxy (the
+/// socket goes to the proxy, whose family says nothing about ours).
+pub(crate) fn family_bind(mode: IpMode, proxied: bool) -> Option<std::net::IpAddr> {
+    if proxied {
+        return None;
+    }
+    match mode {
+        IpMode::V4 => Some(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)),
+        IpMode::V6 => Some(std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED)),
+        IpMode::Auto => None,
+    }
+}
+
+/// `announce_on` held to one address family (`IpMode::Auto` = no hold).
+#[allow(clippy::too_many_arguments)]
+pub async fn announce_on_mode(
+    tracker_url: &str,
+    info_hash: &[u8; 20],
+    peer_id: &[u8; 20],
+    port: u16,
+    uploaded: u64,
+    downloaded: u64,
+    left: u64,
+    event: &str,
+    device: &str,
+    proxy: &str,
+    mode: IpMode,
+) -> Result<AnnounceResponse, String> {
     // URL-encode info_hash and peer_id (binary -> %XX)
     let ih_encoded = url_encode_binary(info_hash);
     let pid_encoded = url_encode_binary(peer_id);
@@ -269,7 +301,11 @@ pub async fn announce_on(
             .user_agent(crate::config::user_agent()),
         device,
     )?;
-    if let Some(px) = proxy_for(proxy)? {
+    let px = proxy_for(proxy)?;
+    if let Some(bind) = family_bind(mode, px.is_some()) {
+        builder = builder.local_address(bind);
+    }
+    if let Some(px) = px {
         builder = builder.proxy(px);
     }
     let client = builder
@@ -909,6 +945,26 @@ mod announce_wire_tests {
         let resp = resp.expect("resolved by the tunnel server, then announced on lo");
         assert_eq!(resp.complete, 5);
         assert!(asked.lock().unwrap().iter().any(|n| n == "tracker.tunnel-dns.invalid"));
+    }
+
+    /// A direct announce held to a family binds that family's wildcard; a
+    /// proxied one, or `Auto`, binds nothing.
+    #[test]
+    fn a_held_family_binds_its_wildcard_and_a_proxy_or_auto_binds_none() {
+        assert_eq!(family_bind(IpMode::V4, false), Some("0.0.0.0".parse().unwrap()));
+        assert_eq!(family_bind(IpMode::V6, false), Some("::".parse().unwrap()));
+        assert_eq!(family_bind(IpMode::Auto, false), None);
+        assert_eq!(family_bind(IpMode::V4, true), None);
+    }
+
+    /// The hold is real: a v6-held announce cannot reach a v4-only tracker.
+    #[tokio::test]
+    async fn a_v6_held_announce_does_not_reach_a_v4_tracker() {
+        let t = fake_tracker(OK_BODY).await;
+        let ih = [0xABu8; 20];
+        let ask = |m| announce_on_mode(&t.url, &ih, &[0xCDu8; 20], 16371, 0, 0, 0, "", "", "", m);
+        ask(IpMode::V4).await.expect("v4 reaches a v4 tracker");
+        ask(IpMode::V6).await.expect_err("a v6-bound socket cannot dial v4");
     }
 
     /// ⭐ A tracker refusing us answers 200 with a `failure reason`. Treating
