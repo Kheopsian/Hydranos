@@ -897,7 +897,9 @@ fn move_data(state: &AppState, job: &crate::store::Job) -> Result<(), String> {
     let hash = job.info_hash.clone();
     let engine = state.engines.get(&engine_id).ok_or("the engine is gone")?;
     let ih = typhon_engine::torrent::hex_decode(&hash)?;
-    let t = engine.manager.get(&ih).ok_or("the engine no longer holds it")?;
+    let Some(t) = engine.manager.get(&ih) else {
+        return finish_interrupted_move(state, job, engine, &p, &save_path, &category, allow);
+    };
     let plan = plan_move_checked(state, &t, std::path::Path::new(&save_path));
     if let Some((_, why)) = plan.refusal() {
         return Err(format!("{why}; nothing was moved"));
@@ -981,6 +983,15 @@ fn move_data(state: &AppState, job: &crate::store::Job) -> Result<(), String> {
             return Err("the engine no longer holds it; the copies were removed, nothing moved".into());
         }
     };
+    // Written down before it leaves the engine: a process stopped between
+    // here and the re-import finishes the move from it when the job runs
+    // again, instead of failing on a torrent no engine holds.
+    if let Err(e) = set_carried_record(state, job, &p, Some(&original)) {
+        for c in &copied {
+            let _ = std::fs::remove_file(c);
+        }
+        return Err(format!("cannot write down the torrent's record: {e}; the copies were removed, nothing moved"));
+    }
     if let Err(e) = engine.manager.remove_torrent(&ih, true) {
         for c in &copied {
             let _ = std::fs::remove_file(c);
@@ -1027,8 +1038,100 @@ fn move_data(state: &AppState, job: &crate::store::Job) -> Result<(), String> {
         }
     }
     prune_empty_dirs(&plan);
+    let _ = set_carried_record(state, job, &p, None);
     tracing::info!(hash = %hash, engine = %engine_id, from = %plan.old_root.display(),
                    to = %new_root, copied_bytes = need, "moved");
+    Ok(())
+}
+
+/// Store the job's params with `record` carried in them, or without it.
+fn set_carried_record(
+    state: &AppState,
+    job: &crate::store::Job,
+    p: &serde_json::Value,
+    record: Option<&typhon_engine::torrent::fastresume::ResumeData>,
+) -> Result<(), String> {
+    let mut params = p.clone();
+    let Some(m) = params.as_object_mut() else {
+        return Err("job params are not an object".into());
+    };
+    match record {
+        Some(rd) => {
+            m.insert("record".into(), serde_json::to_value(rd).map_err(|e| e.to_string())?);
+        }
+        None => {
+            m.remove("record");
+        }
+    }
+    let store = match state.store.lock() {
+        Ok(s) => s,
+        Err(e) => e.into_inner(),
+    };
+    store.set_job_params(&job.id, &params.to_string()).map_err(|e| e.to_string())
+}
+
+/// A move stopped after its torrent left the engine: put each file where
+/// the move was taking it, hand the torrent back to the engine there, then
+/// drop the originals of what had been copied.
+fn finish_interrupted_move(
+    state: &AppState,
+    job: &crate::store::Job,
+    engine: &crate::engines::Engine,
+    p: &serde_json::Value,
+    save_path: &str,
+    category: &str,
+    allow: bool,
+) -> Result<(), String> {
+    let original: typhon_engine::torrent::fastresume::ResumeData = p
+        .get("record")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .ok_or("the engine no longer holds it")?;
+    let hash = job.info_hash.clone();
+    let ih = typhon_engine::torrent::hex_decode(&hash)?;
+    let metainfo = {
+        let store = match state.store.lock() {
+            Ok(s) => s,
+            Err(e) => e.into_inner(),
+        };
+        store.torrent_blob(&hash).ok().flatten()
+    }
+    .ok_or("the engine no longer holds it, and there is no metainfo to re-add it with")?;
+    let meta = typhon_engine::torrent::metainfo::parse_torrent_bytes(&metainfo)?;
+    let old_root = std::path::PathBuf::from(&original.save_path);
+    let files = graduation_files(&meta, &old_root, save_path);
+    tracing::warn!(hash = %hash, engine = %engine.id, "move interrupted after leaving its engine; finishing it");
+    for (from, to) in &files {
+        if from != to && !to.exists() && from.exists() {
+            crate::jobs::run_move_allowing(from, to, allow)
+                .map_err(|e| format!("moving {}: {e}", from.display()))?;
+        }
+    }
+    let mut record = original.clone();
+    record.save_path = save_path.to_string();
+    if engine.manager.get(&ih).is_none() {
+        engine
+            .manager
+            .import_state_bytes(&record, &metainfo)
+            .map_err(|e| format!("the engine refused it at {save_path}: {e}"))?;
+    }
+    // The originals of the files that had been copied: the torrent reads the
+    // new ones now.
+    for (from, to) in &files {
+        if from != to && from.exists() && to.exists() {
+            let _ = std::fs::remove_file(from);
+        }
+    }
+    {
+        let store = match state.store.lock() {
+            Ok(s) => s,
+            Err(e) => e.into_inner(),
+        };
+        let _ = store.set_save_path(&hash, save_path);
+        if !category.is_empty() {
+            let _ = store.set_category_in(&hash, &engine.id, category);
+        }
+    }
+    let _ = set_carried_record(state, job, p, None);
     Ok(())
 }
 
@@ -1172,6 +1275,48 @@ mod graduate_tests {
         assert!(t.is_paused.load(std::sync::atomic::Ordering::Relaxed), "a stopped torrent stays stopped");
         assert_eq!(t.total_uploaded.load(std::sync::atomic::Ordering::Relaxed), 5_000);
         assert_eq!(*t.save_path.read(), dst);
+        assert!(dst.join("grad").exists() && !src.join("grad").exists());
+    }
+
+    /// ⭐ A move stopped between taking the torrent out of its engine and
+    /// putting it back is finished when its job runs again: the torrent is
+    /// back in its engine, at the new place, as it was.
+    #[test]
+    fn a_move_interrupted_after_leaving_its_engine_is_finished_when_run_again() {
+        let s = state_from("move-interrupted", "");
+        let src = s.dir.join("race-data");
+        let dst = s.dir.join("elsewhere");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("grad"), vec![7u8; 16384]).unwrap();
+        let blob = torrent_bytes("grad");
+        let root = src.display().to_string();
+        let race = s.state.engines.get("race").unwrap();
+        let (ih, _) = race.manager.add_torrent_bytes(&blob, &root, true, false).expect("added");
+        let hash = typhon_engine::torrent::hex_encode(&ih);
+        race.manager.get(&ih).unwrap().restore_lifetime(5_000, 700);
+        let params = serde_json::json!({
+            "engine": "race", "category": "", "save_path": dst.display().to_string(),
+        })
+        .to_string();
+        let running = {
+            let store = s.state.store.lock().unwrap();
+            store.insert_torrent(&hash, "race", &blob, &root, "", 0.0, true, "").unwrap();
+            store.create_job("move_data", &hash, &params, 16384).unwrap();
+            store.claim_next_job().expect("claimed")
+        };
+        STOP_AFTER_LEAVING_SOURCE.with(|c| c.set(true));
+        move_data(&s.state, &running).expect_err("stopped where a crash would");
+        assert!(race.manager.get(&ih).is_none(), "out of its engine");
+        let again = {
+            let store = s.state.store.lock().unwrap();
+            store.requeue_running_jobs();
+            store.claim_next_job().expect("claimed again")
+        };
+
+        move_data(&s.state, &again).expect("finished");
+        let t = race.manager.get(&ih).expect("back in race");
+        assert_eq!(*t.save_path.read(), dst);
+        assert_eq!(t.total_uploaded.load(std::sync::atomic::Ordering::Relaxed), 5_000);
         assert!(dst.join("grad").exists() && !src.join("grad").exists());
     }
 
