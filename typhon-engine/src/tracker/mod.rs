@@ -202,10 +202,20 @@ pub static DIAL_MSE_FAIL: AtomicU64 = AtomicU64::new(0);
 pub static MSE_INBOUND_REFUSED: AtomicU64 = AtomicU64::new(0);
 pub static MSE_OUTBOUND_SKIPPED: AtomicU64 = AtomicU64::new(0);
 pub static MSE_SESSIONS_DROPPED: AtomicU64 = AtomicU64::new(0);
-// Queue accounting: `enqueue_dial` is fire-and-forget into an unbounded
-// channel, so a peer that never reaches a dial worker leaves no trace at all.
+// Queue accounting: `enqueue_dial` is fire-and-forget, so a peer that never
+// reaches a dial worker would otherwise leave no trace at all.
 pub static DIAL_ENQUEUED: AtomicU64 = AtomicU64::new(0);
 pub static DIAL_ENQUEUE_DROPPED: AtomicU64 = AtomicU64::new(0);
+/// Dials dropped because their engine's queue was full (`DIAL_QUEUE_CAP`).
+/// Also counted in `DIAL_ENQUEUE_DROPPED`.
+pub static DIAL_QUEUE_FULL: AtomicU64 = AtomicU64::new(0);
+
+/// How many dials an engine's queue holds. The consumer drains it at the
+/// pacer's rate (50/s by default); peers arriving faster than that from
+/// trackers, PEX, DHT or hole-punch are dropped here rather than held, each
+/// with its torrent, until memory runs out. A dropped peer is handed back by
+/// the next announce.
+pub const DIAL_QUEUE_CAP: usize = 4096;
 
 /// Single-torrent dial trace, armed with `TYPHON_DIAL_TRACE_IH=<40 hex chars>`.
 /// The global counters run at several hundred dials/s, which drowns the ~40
@@ -291,14 +301,14 @@ pub static PEX_EXT_HANDSHAKES_RECV: AtomicU64 = AtomicU64::new(0);
 /// prove Send, since recursion-through-async-fn has unresolved Send inference).
 /// Initialized by `start_announce_loop`. A consumer task reads the queue and
 /// spawns `dial_peer` for each entry.
-static DIAL_TX: std::sync::OnceLock<tokio::sync::mpsc::UnboundedSender<(std::net::SocketAddr, Arc<TorrentState>)>> = std::sync::OnceLock::new();
+static DIAL_TX: std::sync::OnceLock<DialTx> = std::sync::OnceLock::new();
 
 /// One dial queue per engine, keyed by the engine's limiter (every torrent
 /// carries its engine's). 4.3 had one queue for the process: the first engine
 /// to start owned it, and every other engine's dials left with that engine's
 /// binding, peer id, uTP socket and connection limits -- out of the wrong
 /// tunnel, under the wrong identity.
-type DialTx = tokio::sync::mpsc::UnboundedSender<(std::net::SocketAddr, Arc<TorrentState>)>;
+type DialTx = tokio::sync::mpsc::Sender<(std::net::SocketAddr, Arc<TorrentState>)>;
 static ENGINE_DIAL_TX: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<usize, DialTx>>> =
     std::sync::OnceLock::new();
 
@@ -316,14 +326,21 @@ fn dial_tx_for(torrent: &TorrentState) -> Option<DialTx> {
 pub fn enqueue_dial(addr: std::net::SocketAddr, torrent: Arc<TorrentState>) {
     let traced = is_traced(&torrent.info_hash);
     match dial_tx_for(&torrent) {
-        Some(tx) => match tx.send((addr, torrent)) {
+        Some(tx) => match tx.try_send((addr, torrent)) {
             Ok(()) => {
                 DIAL_ENQUEUED.fetch_add(1, AtomicOrdering::Relaxed);
                 if traced {
                     info!("[dialtrace] {} enqueued", addr);
                 }
             }
-            Err(_) => {
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                DIAL_QUEUE_FULL.fetch_add(1, AtomicOrdering::Relaxed);
+                DIAL_ENQUEUE_DROPPED.fetch_add(1, AtomicOrdering::Relaxed);
+                if traced {
+                    info!("[dialtrace] {} dropped (dial queue full)", addr);
+                }
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
                 // Consumer task is gone: every future dial is a silent no-op.
                 DIAL_ENQUEUE_DROPPED.fetch_add(1, AtomicOrdering::Relaxed);
                 if traced {
@@ -403,7 +420,7 @@ pub fn start_announce_loop(
     // spawns dial_peer (breaking the recursive-async-fn Send cycle). Per-dial
     // it picks one binding by hashing the peer addr → consistent peer_id+src
     // per peer across reconnects.
-    let (dial_tx, mut dial_rx) = tokio::sync::mpsc::unbounded_channel::<(std::net::SocketAddr, Arc<TorrentState>)>();
+    let (dial_tx, mut dial_rx) = tokio::sync::mpsc::channel::<(std::net::SocketAddr, Arc<TorrentState>)>(DIAL_QUEUE_CAP);
     // This engine's queue, for this engine's torrents. The first one is also
     // the fallback for a torrent that has no engine handle yet.
     ENGINE_DIAL_TX
@@ -1048,13 +1065,39 @@ mod per_engine_dial_tests {
         t
     }
 
+    /// ⭐ An engine's dial queue is bounded: peers pushed faster than the pacer
+    /// lets them out are dropped and counted, not held without limit. Here the
+    /// pacer lets one dial out every 1000 s and 10 000 are pushed.
+    #[tokio::test]
+    async fn a_dial_queue_fed_faster_than_it_drains_drops_the_excess() {
+        let root = std::env::temp_dir().join(format!("typhon-dialq-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("r")).unwrap();
+        let disk = Arc::new(crate::disk::DiskManager::new(1));
+        let mgr = Arc::new(crate::torrent::TorrentManager::new(
+            root.to_string_lossy().into_owned(),
+            root.join("r").to_string_lossy().into_owned(),
+            disk.clone(),
+        ));
+        let limiter = Arc::new(dial_limiter::DialLimiter::default());
+        limiter.set_max_dials_per_sec(0.001);
+        start_announce_loop(disk, Vec::new(), crate::peer::UtpHandle::off(), 0.001, limiter.clone(), mgr);
+        let t = torrent_of(&limiter, 9);
+        let before = DIAL_ENQUEUE_DROPPED.load(AtomicOrdering::Relaxed);
+        for i in 0..10_000u32 {
+            let peer = std::net::SocketAddr::from(([192, 0, 2, 1], 1024 + (i % 60000) as u16));
+            enqueue_dial(peer, t.clone());
+        }
+        let dropped = DIAL_ENQUEUE_DROPPED.load(AtomicOrdering::Relaxed) - before;
+        assert!(dropped >= 5000, "only {dropped} of 10000 dropped: the queue kept the rest");
+    }
+
     /// Each engine's torrents reach that engine's queue, so a dial leaves with
     /// that engine's binding. 4.3 sent every engine's dials to the first one.
     #[test]
     fn a_torrent_dials_through_its_own_engine() {
         let (a, b) = (Arc::new(dial_limiter::DialLimiter::default()), Arc::new(dial_limiter::DialLimiter::default()));
-        let (tx_a, mut rx_a) = tokio::sync::mpsc::unbounded_channel();
-        let (tx_b, mut rx_b) = tokio::sync::mpsc::unbounded_channel();
+        let (tx_a, mut rx_a) = tokio::sync::mpsc::channel(8);
+        let (tx_b, mut rx_b) = tokio::sync::mpsc::channel(8);
         {
             let mut map = ENGINE_DIAL_TX.get_or_init(Default::default).lock().unwrap();
             map.insert(Arc::as_ptr(&a) as usize, tx_a);
