@@ -151,8 +151,9 @@ it is set.
 
 - `announce_cleartext_passkey` = `warn` (default), `allow` or `refuse`: what
   to do with a passkey on a plain `http://` tracker. `warn` logs the tracker's
-  host once and announces as before; `refuse` does not announce to it and
-  shows a tracker error.
+  host once and announces as before; `refuse` does not announce to it,
+  scrape it or ask it for a magnet's peers, and shows a tracker error. It is a
+  top-level key, above the first `[table]` of the config file.
 - `[race]`/`[hoard]` `peer_encryption` = `allow` (default), `prefer` or
   `require`. `prefer` dials with MSE first and falls back to plaintext;
   `require` never connects in plaintext, in or out (RC4 on every byte, no

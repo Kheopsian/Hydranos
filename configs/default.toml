@@ -1,5 +1,11 @@
 # Hydra Torrent Daemon - Configuration
 
+# A passkey on a plain http:// tracker travels unencrypted. "warn" (default):
+# one log line per tracker host (never the URL), the announce goes out as
+# usual. "allow": silent. "refuse": no announce, scrape or magnet lookup to it,
+# shown as a tracker error. A top-level key: it stays above the first [table].
+# announce_cleartext_passkey = "warn"
+
 [daemon]
 api_host = "0.0.0.0"
 api_port = 8199
@@ -341,11 +347,6 @@ low_watermark_pct = 85
 # fleet-wide, so a passkey is written in one place rather than in each node.
 # [announce_passkeys]
 # "tracker.example.net" = "your-passkey-here"
-
-# A passkey on a plain http:// tracker travels unencrypted. "warn" (default):
-# one log line per tracker host (never the URL), the announce goes out as
-# usual. "allow": silent. "refuse": no announce, shown as a tracker error.
-# announce_cleartext_passkey = "warn"
 
 [auth]
 username = "admin"
