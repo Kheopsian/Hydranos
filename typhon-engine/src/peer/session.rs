@@ -259,6 +259,11 @@ pub async fn run(
 ) {
     let client = choking::client_from_peer_id(&remote_peer_id);
     tracing::debug!("[peer-debug] {} SESSION-START remote_peer_id={:02x?} client={:?} encrypted={} fast_ext={} lt_ext={}", addr, remote_peer_id, client, is_encrypted, fast_ext, lt_ext);
+    // Cut off on this torrent for sending pieces that failed their hash.
+    if torrent.picker.get().is_some_and(|p| p.lock().unwrap().is_banned(addr.ip())) {
+        tracing::debug!("[peer-debug] {} EARLY-RETURN banned on this torrent", addr);
+        return;
+    }
     let stats = Arc::new(PeerStats::new(addr, remote_peer_id, client, is_encrypted, fast_ext));
     // RAII: inserts into torrent.peer_stats and bumps peers_connected;
     // removes + decrements on drop (panic-safe).
@@ -714,6 +719,13 @@ pub async fn run(
                                     framed.send(Message::Have { piece: completed }).await.ok();
                                 }
                                 stats.total_downloaded.fetch_add(len, Ordering::Relaxed);
+                                if dl.cut_off() {
+                                    if let Some(p) = torrent.picker.get() {
+                                        p.lock().unwrap().ban(addr.ip());
+                                    }
+                                    tracing::debug!("[peer-debug] {} BREAK cut off for bad pieces", addr);
+                                    break;
+                                }
                             }
                             Message::Extended { ext_id, payload } => {
                                 if ext_id == 0 {

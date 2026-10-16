@@ -295,6 +295,9 @@ pub struct PiecePicker {
     /// The torrent's download order, when it is not the default. Boxed so the
     /// default costs one null pointer, and checked once per pick.
     order: Option<Box<PickOrder>>,
+    /// Addresses cut off for sending pieces that failed their hash, refused
+    /// for as long as this torrent downloads.
+    banned: std::collections::HashSet<std::net::IpAddr>,
 }
 
 /// A piece somebody is fetching.
@@ -317,6 +320,9 @@ struct PendingPiece {
     /// piece is asked of several peers on purpose. The piece and its blocks go
     /// when the last of them lets go.
     owners: Vec<Owner>,
+    /// Who delivered its blocks. One name means a failed hash is that peer's
+    /// doing; several (endgame) prove nothing about any of them.
+    sources: Vec<Owner>,
 }
 
 impl PendingPiece {
@@ -356,6 +362,7 @@ impl PiecePicker {
             reserved_bytes: 0,
             mem: None,
             order: None,
+            banned: std::collections::HashSet::new(),
         }
     }
 
@@ -663,6 +670,7 @@ impl PiecePicker {
             block_size,
             piece_size,
             owners: vec![owner],
+            sources: Vec::new(),
         };
         let requests = p.missing(piece);
         self.pending.insert(piece, p);
@@ -674,13 +682,36 @@ impl PiecePicker {
         requests
     }
 
-    /// Store a received block, at its exact size.
+    /// Store a block a peer sent, at its exact size.
     ///
-    /// Anyone's block for a piece in flight is taken, not only its owners':
-    /// the bytes are checked against the piece hash before anything is kept,
-    /// so where they came from does not matter. A block for a piece no longer
-    /// in flight -- released, completed -- is refused and costs nothing.
+    /// Only from a peer holding the piece: any other could fill a piece
+    /// somebody else is fetching with bytes of its choosing, and the piece
+    /// would fail its hash and be fetched again, as often as it pleased. The
+    /// sender is remembered, so a piece that fails can be charged to it. A
+    /// block for a piece no longer in flight -- released, completed -- is
+    /// refused and costs nothing.
+    pub fn receive_block_from(&mut self, piece: u32, offset: u32, data: &[u8], from: Owner) -> Block {
+        if !self.holds(piece, from) {
+            return Block::Refused;
+        }
+        let b = self.store_block(piece, offset, data);
+        if matches!(b, Block::Stored | Block::Complete) {
+            if let Some(p) = self.pending.get_mut(&piece) {
+                if !p.sources.contains(&from) {
+                    p.sources.push(from);
+                }
+            }
+        }
+        b
+    }
+
+    /// Store a block fetched by the caller itself (a webseed run), whose
+    /// origin needs no checking.
     pub fn receive_block(&mut self, piece: u32, offset: u32, data: &[u8]) -> Block {
+        self.store_block(piece, offset, data)
+    }
+
+    fn store_block(&mut self, piece: u32, offset: u32, data: &[u8]) -> Block {
         let Some(pending) = self.pending.get_mut(&piece) else {
             return Block::Refused;
         };
@@ -729,6 +760,12 @@ impl PiecePicker {
     /// here to the end of the write, for the one piece being committed, and
     /// each block is freed as soon as it has been copied in.
     pub fn take_piece_data(&mut self, piece: u32) -> Option<Vec<u8>> {
+        self.take_piece(piece).map(|(data, _)| data)
+    }
+
+    /// `take_piece_data`, with the one peer that sent every block of it, if
+    /// a single one did.
+    pub fn take_piece(&mut self, piece: u32) -> Option<(Vec<u8>, Option<Owner>)> {
         let ready = self
             .pending
             .get(&piece)
@@ -737,11 +774,24 @@ impl PiecePicker {
             return None;
         }
         let p = self.drop_pending(piece)?;
+        let sole = match p.sources[..] {
+            [one] => Some(one),
+            _ => None,
+        };
         let mut out = Vec::with_capacity(p.piece_size as usize);
         for b in p.blocks.into_iter().flatten() {
             out.extend_from_slice(&b);
         }
-        Some(out)
+        Some((out, sole))
+    }
+
+    /// Refuse this address for as long as the torrent downloads.
+    pub fn ban(&mut self, ip: std::net::IpAddr) {
+        self.banned.insert(ip);
+    }
+
+    pub fn is_banned(&self, ip: std::net::IpAddr) -> bool {
+        self.banned.contains(&ip)
     }
 
     /// Should `owner` still ask for this block? Not when the piece left its

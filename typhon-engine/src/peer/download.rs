@@ -20,6 +20,9 @@ const BLOCK_SIZE: u32 = 16384;
 /// fetched from the swarm again, so guessing high is paid in other people's
 /// upload.
 const DISK_FAILURES_BEFORE_ERROR: u32 = 3;
+/// Pieces sent entirely by one peer that failed their hash before that peer is
+/// cut off. One can be bad luck -- a flipped bit on its disk -- a second is not.
+const BAD_PIECES_BEFORE_CUT: u32 = 2;
 const MAX_PIPELINE: usize = 32; // max in-flight requests (was 16; bumped — MAX_PIPELINE=32 doubles the in-flight window without overwhelming the picker mutex on multi-peer scenarios)
 /// How long a peer may hold a piece without sending a block of it before the
 /// piece is given back, blocks and all.
@@ -78,6 +81,11 @@ pub struct DownloadState {
     /// The last refill stopped on the engine's download budget: wake on the
     /// next write that frees some (see `PieceMem`).
     held_back: bool,
+    /// Pieces this peer alone sent that failed their hash.
+    bad_pieces: u32,
+    /// Too many of them: asked for nothing more, and nothing it sends is
+    /// kept. The session ends the connection (see `cut_off`).
+    cut_off: bool,
 }
 
 impl DownloadState {
@@ -93,7 +101,15 @@ impl DownloadState {
             pending_block_queue: VecDeque::new(),
             started: HashMap::new(),
             held_back: false,
+            bad_pieces: 0,
+            cut_off: false,
         }
+    }
+
+    /// This peer sent too many pieces that failed their hash: the session
+    /// should hang up, and the address should not be let back in.
+    pub fn cut_off(&self) -> bool {
+        self.cut_off
     }
 
     /// The engine's totals, when the last refill was held back by its budget.
@@ -269,6 +285,9 @@ impl DownloadState {
     /// piece) — otherwise only the first 16 blocks were ever requested and
     /// pieces never completed.
     pub fn get_requests(&mut self) -> Vec<(u32, u32, u32)> {
+        if self.cut_off {
+            return Vec::new();
+        }
         self.get_requests_gated(|_| true)
     }
 
@@ -369,6 +388,9 @@ impl DownloadState {
 
     /// Process received Piece data. Returns Some(piece_index) if a piece completed.
     pub async fn on_piece(&mut self, index: u32, begin: u32, data: &[u8]) -> Option<u32> {
+        if self.cut_off {
+            return None;
+        }
         if let Some(i) = self.inflight.iter().position(|r| r.0 == index && r.1 == begin) {
             self.inflight.remove(i);
         }
@@ -388,8 +410,8 @@ impl DownloadState {
         // peers finishing the same endgame piece cannot both hand it over.
         let (outcome, piece_data) = {
             let mut p = picker.lock().unwrap();
-            let outcome = p.receive_block(index, begin, data);
-            let piece_data = if outcome == Block::Complete { p.take_piece_data(index) } else { None };
+            let outcome = p.receive_block_from(index, begin, data, self.owner);
+            let piece_data = if outcome == Block::Complete { p.take_piece(index) } else { None };
             (outcome, piece_data)
         };
         if matches!(outcome, Block::Stored | Block::Complete | Block::Duplicate) {
@@ -399,12 +421,27 @@ impl DownloadState {
             }
         }
 
-        if let Some(piece_data) = piece_data {
+        if let Some((piece_data, sole)) = piece_data {
             // Off this peer's books either way: the picker no longer holds it,
             // and blocks of it still queued are skipped by `wants_block`.
             self.started.remove(&index);
-            if commit_piece(&self.torrent, &self.disk, index, piece_data).await {
-                return Some(index);
+            match commit(&self.torrent, &self.disk, index, piece_data).await {
+                Commit::Owned => return Some(index),
+                // Every block of it came from this peer: the bad bytes are its.
+                // The last block is ours, so a sole sender can only be us.
+                Commit::BadHash if sole == Some(self.owner) => {
+                    self.bad_pieces += 1;
+                    if self.bad_pieces >= BAD_PIECES_BEFORE_CUT {
+                        tracing::warn!(
+                            "[download] {}: cutting off a peer after {} pieces that failed their hash",
+                            &crate::torrent::hex_encode(&self.torrent.info_hash)[..8],
+                            self.bad_pieces
+                        );
+                        self.cut_off = true;
+                        self.on_disconnect();
+                    }
+                }
+                Commit::BadHash | Commit::Failed => {}
             }
         }
         None
@@ -480,9 +517,29 @@ pub async fn commit_piece(
     index: u32,
     piece_data: Vec<u8>,
 ) -> bool {
+    commit(torrent, disk, index, piece_data).await == Commit::Owned
+}
+
+/// How `commit` ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Commit {
+    /// Verified, written, ours.
+    Owned,
+    /// The bytes do not match the piece hash.
+    BadHash,
+    /// Not written: no picker, no hash table, or the disk refused.
+    Failed,
+}
+
+async fn commit(
+    torrent: &Arc<TorrentState>,
+    disk: &Arc<DiskManager>,
+    index: u32,
+    piece_data: Vec<u8>,
+) -> Commit {
     let picker = match torrent.picker.get() {
         Some(p) => p,
-        None => return false,
+        None => return Commit::Failed,
     };
     let len = piece_data.len() as u64;
     // Counted in the engine's download budget until the write returns.
@@ -534,7 +591,7 @@ pub async fn commit_piece(
             }
             // The disk answered. Whatever was wrong before is not wrong now.
             torrent.disk_write_failures.store(0, Ordering::Relaxed);
-            true
+            Commit::Owned
         }
         Ok(false) => {
             // The peer lied about its data. Asking somebody else is exactly
@@ -542,7 +599,7 @@ pub async fn commit_piece(
             // Nothing to release: the piece left the picker when it was taken
             // for this write, and is picked again like any missing piece.
             tracing::warn!("[download] piece {} SHA1 mismatch, re-requesting", index);
-            false
+            Commit::BadHash
         }
         Err(e) => {
             // The disk refused. Re-requesting cannot fix a full volume or a
@@ -566,7 +623,7 @@ pub async fn commit_piece(
                      writable, then recheck this torrent"
                 ));
             }
-            false
+            Commit::Failed
         }
     }
 }
@@ -1198,5 +1255,118 @@ mod release_tests {
         assert_eq!(mem.bytes(), 3 * BLOCK_SIZE as u64);
         drop(a);
         assert_eq!((mem.pieces(), mem.bytes()), (0, 0));
+    }
+}
+
+#[cfg(test)]
+mod poison_tests {
+    use super::*;
+    use crate::torrent::meta::TorrentMeta;
+    use sha1::{Digest, Sha1};
+    use std::path::PathBuf;
+
+    const PIECE: u32 = 2 * BLOCK_SIZE;
+
+    fn good() -> Vec<u8> {
+        vec![0x5A; PIECE as usize]
+    }
+
+    /// A torrent whose every piece is `good()`, its hash table in the store,
+    /// so a wrong piece fails its hash rather than the write.
+    fn torrent(num_pieces: u32) -> Arc<TorrentState> {
+        let t = Arc::new(TorrentState::new(
+            TorrentMeta {
+                info_hash: [5u8; 20],
+                name: "t".into(),
+                num_pieces,
+                piece_length: PIECE,
+                total_size: num_pieces as u64 * PIECE as u64,
+                files: Vec::new(),
+                trackers: Vec::new(),
+                url_list: Vec::new(),
+                private: false,
+                multi_file: false,
+                info_dict_len: 0,
+                v2: false,
+            },
+            PathBuf::from("/nonexistent"),
+            false,
+        ));
+        t.status.store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+        let h = Sha1::digest(good());
+        let mut blob = format!("d4:infod6:pieces{}:", num_pieces * 20).into_bytes();
+        for _ in 0..num_pieces {
+            blob.extend_from_slice(&h);
+        }
+        blob.extend_from_slice(b"ee");
+        t.blob_source.set(Arc::new(move |_: &str| Some(blob.clone()))).ok();
+        t
+    }
+
+    fn peer(t: &Arc<TorrentState>) -> DownloadState {
+        let mut dl = DownloadState::new(t.clone(), Arc::new(DiskManager::new(4)));
+        dl.on_have_all();
+        dl.on_unchoke();
+        dl
+    }
+
+    fn in_flight(t: &TorrentState) -> (usize, u64) {
+        t.picker.get().unwrap().lock().unwrap().in_flight()
+    }
+
+    fn rt() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap()
+    }
+
+    /// ⭐ A peer cannot fill a piece it was never asked for: its blocks are
+    /// dropped and the piece stays with the peer fetching it.
+    #[test]
+    fn a_block_this_peer_was_not_asked_for_is_dropped() {
+        let t = torrent(1);
+        let mut a = peer(&t);
+        let mut b = peer(&t);
+        let ra = a.get_requests();
+        assert_eq!(ra.len(), 2);
+        let rt = rt();
+        for r in &ra {
+            rt.block_on(b.on_piece(r.0, r.1, &vec![0u8; r.2 as usize]));
+        }
+        assert_eq!(in_flight(&t), (1, 0), "a block nobody asked B for was kept");
+    }
+
+    /// ⭐ Two pieces from this peer alone that fail their hash, and it is cut
+    /// off: asked for nothing more.
+    #[test]
+    fn a_peer_whose_pieces_fail_twice_is_asked_for_nothing_more() {
+        // Past the endgame: each piece is this peer's alone.
+        let t = torrent(64);
+        let mut a = peer(&t);
+        let ra = a.get_requests();
+        let rt = rt();
+        let bad: Vec<_> = ra.iter().filter(|r| r.0 == ra[0].0 || r.0 == ra[2].0).copied().collect();
+        assert_eq!(bad.len(), 4, "two pieces of two blocks");
+        for r in &bad {
+            rt.block_on(a.on_piece(r.0, r.1, &vec![0u8; r.2 as usize]));
+        }
+        let again = a.get_requests();
+        assert!(again.is_empty(), "still asked for {again:?} after two bad pieces");
+        assert_eq!(in_flight(&t), (0, 0), "what it held went back for others to fetch");
+    }
+
+    /// An endgame piece filled by two peers that fails proves nothing about
+    /// either: neither is charged.
+    #[test]
+    fn a_bad_piece_from_two_peers_charges_neither() {
+        let t = torrent(1);
+        let rt = rt();
+        let mut a = peer(&t);
+        let mut b = peer(&t);
+        for _ in 0..3 {
+            assert_eq!(a.get_requests().len(), 2);
+            assert_eq!(b.get_requests().len(), 2, "B joins the endgame piece");
+            rt.block_on(a.on_piece(0, 0, &vec![0u8; BLOCK_SIZE as usize]));
+            rt.block_on(b.on_piece(0, BLOCK_SIZE, &good()[BLOCK_SIZE as usize..]));
+            assert_eq!(in_flight(&t), (0, 0), "handed over and failed");
+        }
     }
 }
