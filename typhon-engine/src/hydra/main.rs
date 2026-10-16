@@ -882,7 +882,6 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
         Arc::new(tokio::sync::Mutex::new((String::new(), String::new())));
     let net_engines: netprobe::Snapshot =
         Arc::new(tokio::sync::Mutex::new((Vec::new(), 0)));
-    netprobe::spawn(engine_host.clone(), net_engines.clone(), public_ip.clone());
 
     // Warm the Records card before anyone asks. The scan takes seconds and the
     // overview header waits on its request, so computing it lazily meant the
@@ -920,6 +919,9 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
         bench,
         sessions: Default::default(),
     };
+    // Started once the shared config exists, so a changed `[daemon] exit_probe`
+    // applies at the next pass.
+    netprobe::spawn(state.engines.clone(), net_engines.clone(), public_ip.clone(), state.config_handle());
     // The client-wide rate caps (qBittorrent's global limit) live in the
     // store, not the TOML: a qBit client sets them over the shim, and the
     // TOML editor refuses keys a file does not already have.
