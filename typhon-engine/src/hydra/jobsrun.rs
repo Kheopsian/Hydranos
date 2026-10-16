@@ -126,6 +126,25 @@ pub(crate) fn run_job(state: &AppState, job: &crate::store::Job) -> Result<(), S
     }
 }
 
+/// Each file of a graduating torrent: where it is, where it goes.
+fn graduation_files(
+    meta: &typhon_engine::torrent::meta::TorrentMeta,
+    old_root: &std::path::Path,
+    dest_root: &str,
+) -> Vec<(std::path::PathBuf, std::path::PathBuf)> {
+    meta.files
+        .iter()
+        .map(|f| {
+            let rel: std::path::PathBuf = if meta.multi_file {
+                std::path::Path::new(&meta.name).join(&f.path)
+            } else {
+                std::path::PathBuf::from(&f.path)
+            };
+            (old_root.join(&rel), std::path::Path::new(dest_root).join(&rel))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 thread_local! {
     /// Ends the next graduation on this thread right after the torrent left
@@ -153,43 +172,6 @@ fn graduate(state: &AppState, job: &crate::store::Job) -> Result<(), String> {
 
     let src = state.engines.get(&from).ok_or("source engine is gone")?;
     let ih = typhon_engine::torrent::hex_decode(&hash).map_err(|e| e)?;
-    let t = src.manager.get(&ih).ok_or("the source engine no longer holds it")?;
-
-    // The same checks a move inside an engine makes, before anything stops:
-    // 4.4 renamed each file onto its destination unseen, so the drain could
-    // overwrite another torrent's file of the same name in the hoard folder.
-    let plan = plan_move_checked(state, &t, std::path::Path::new(&dest_root));
-    if let Some((_, why)) = plan.refusal() {
-        return Err(format!("{why}; nothing was moved"));
-    }
-
-    // The torrent's own resume record, captured BEFORE it leaves the engine:
-    // pieces, edited trackers, byte counters, seed time, stopped state. 4.3
-    // re-added the .torrent in seed mode instead, which marked incomplete data
-    // complete, dropped tracker edits, reset the counters and restarted a
-    // stopped torrent.
-    let original = src
-        .manager
-        .export_state(&ih)
-        .ok_or("the source engine no longer holds it")?;
-    let seeded = original.seed_secs;
-    let old_root = t.save_path.read().clone();
-    let multi = t.meta.multi_file;
-    let name = t.meta.name.clone();
-    let files: Vec<(std::path::PathBuf, std::path::PathBuf)> = t
-        .meta
-        .files
-        .iter()
-        .map(|f| {
-            let rel: std::path::PathBuf = if multi {
-                std::path::Path::new(&name).join(&f.path)
-            } else {
-                std::path::PathBuf::from(&f.path)
-            };
-            (old_root.join(&rel), std::path::Path::new(&dest_root).join(&rel))
-        })
-        .collect();
-    drop(t);
     let dst = state.engines.get(&to).ok_or("target engine is gone")?;
     // The metainfo must be reachable before anything moves: the target
     // adopts by reading it from the store.
@@ -202,12 +184,72 @@ fn graduate(state: &AppState, job: &crate::store::Job) -> Result<(), String> {
     }
     .ok_or("no metainfo in the store; nothing was moved")?;
 
-    // Out of the engine first, KEEPING the data: moving files under a running
-    // torrent is how a seed starts serving bytes that are no longer there.
-    src.manager
-        .remove_torrent(&ih, true)
-        .map_err(|e| format!("the source engine refused to release it: {e}"))?;
-    src.announce_cache.forget(&hash);
+    // ⭐ Between leaving its source engine and reaching the target, the
+    // torrent is in neither, for as long as its files take to copy. A process
+    // stopped in that window -- a kill, an OOM, a power cut -- used to come
+    // back to a job that failed on "the source engine no longer holds it",
+    // with the files split over two disks and the record gone. The record now
+    // rides in the job, written before the torrent leaves, and a job run again
+    // finishes the move from it.
+    let carried: Option<typhon_engine::torrent::fastresume::ResumeData> =
+        p.get("record").and_then(|v| serde_json::from_value(v.clone()).ok());
+    let (original, old_root, files, resumed) = match src.manager.get(&ih) {
+        Some(t) => {
+            // The same checks a move inside an engine makes, before anything
+            // stops: 4.4 renamed each file onto its destination unseen, so the
+            // drain could overwrite another torrent's file of the same name in
+            // the hoard folder.
+            let plan = plan_move_checked(state, &t, std::path::Path::new(&dest_root));
+            if let Some((_, why)) = plan.refusal() {
+                return Err(format!("{why}; nothing was moved"));
+            }
+            // The torrent's own resume record, captured BEFORE it leaves the
+            // engine: pieces, edited trackers, byte counters, seed time,
+            // stopped state. 4.3 re-added the .torrent in seed mode instead,
+            // which marked incomplete data complete, dropped tracker edits,
+            // reset the counters and restarted a stopped torrent.
+            let original = src
+                .manager
+                .export_state(&ih)
+                .ok_or("the source engine no longer holds it")?;
+            let old_root = t.save_path.read().clone();
+            let files = graduation_files(&t.meta, &old_root, &dest_root);
+            let mut carrying = p.clone();
+            carrying["record"] = serde_json::to_value(&original).map_err(|e| e.to_string())?;
+            {
+                let store = match state.store.lock() {
+                    Ok(s) => s,
+                    Err(e) => e.into_inner(),
+                };
+                store
+                    .set_job_params(&job.id, &carrying.to_string())
+                    .map_err(|e| format!("cannot write down the torrent's record: {e}; nothing was moved"))?;
+            }
+            (original, old_root, files, false)
+        }
+        None => {
+            let Some(original) = carried else {
+                return Err("the source engine no longer holds it".into());
+            };
+            let meta = typhon_engine::torrent::metainfo::parse_torrent_bytes(&metainfo)?;
+            let old_root = std::path::PathBuf::from(&original.save_path);
+            let files = graduation_files(&meta, &old_root, &dest_root);
+            tracing::warn!(hash = %hash, from = %from, to = %to,
+                           "graduation interrupted after leaving its engine; finishing it");
+            (original, old_root, files, true)
+        }
+    };
+    let seeded = original.seed_secs;
+
+    if !resumed {
+        // Out of the engine first, KEEPING the data: moving files under a
+        // running torrent is how a seed starts serving bytes that are no
+        // longer there.
+        src.manager
+            .remove_torrent(&ih, true)
+            .map_err(|e| format!("the source engine refused to release it: {e}"))?;
+        src.announce_cache.forget(&hash);
+    }
     #[cfg(test)]
     if STOP_AFTER_LEAVING_SOURCE.with(|c| c.replace(false)) {
         return Err("stopped where a crash would".into());
@@ -234,6 +276,11 @@ fn graduate(state: &AppState, job: &crate::store::Job) -> Result<(), String> {
     let mut moved: Vec<(std::path::PathBuf, std::path::PathBuf)> = Vec::new();
     for (from_path, to_path) in &files {
         if !from_path.exists() {
+            // Moved before the interruption: it goes back with the rest if
+            // this run has to undo.
+            if resumed && to_path.exists() {
+                moved.push((from_path.clone(), to_path.clone()));
+            }
             continue;
         }
         let size = std::fs::metadata(from_path).map(|m| m.len()).unwrap_or(0) as i64;
@@ -262,8 +309,12 @@ fn graduate(state: &AppState, job: &crate::store::Job) -> Result<(), String> {
 
     let mut record = original.clone();
     record.save_path = dest_root.clone();
-    if let Err(e) = dst.manager.import_state_bytes(&record, &metainfo) {
-        return Err(put_back(&moved, format!("the target engine refused it: {e}")));
+    // Interrupted after the target adopted it: only the store is left to do.
+    let adopted = resumed && dst.manager.get(&ih).is_some();
+    if !adopted {
+        if let Err(e) = dst.manager.import_state_bytes(&record, &metainfo) {
+            return Err(put_back(&moved, format!("the target engine refused it: {e}")));
+        }
     }
     if dst.manager.get(&ih).is_none() {
         return Err(put_back(&moved, "the target engine accepted it and does not hold it".into()));
@@ -282,6 +333,18 @@ fn graduate(state: &AppState, job: &crate::store::Job) -> Result<(), String> {
             // copy and to no other.
             let _ = store.set_category_in(&hash, &to, &category);
         }
+    }
+    {
+        // Done: the job no longer needs its copy of the record.
+        let mut finished = p.clone();
+        if let Some(m) = finished.as_object_mut() {
+            m.remove("record");
+        }
+        let store = match state.store.lock() {
+            Ok(s) => s,
+            Err(e) => e.into_inner(),
+        };
+        let _ = store.set_job_params(&job.id, &finished.to_string());
     }
     tracing::info!(hash = %hash, from = %from, to = %to, moved_bytes = done, seed_secs = seeded,
                    "graduated");
@@ -1122,6 +1185,63 @@ mod graduate_tests {
         assert!(src.join("grad").exists());
         let ih = typhon_engine::torrent::hex_decode(&hash).unwrap();
         assert!(s.state.engines.get("race").unwrap().manager.get(&ih).is_some(), "still in race");
+    }
+
+    /// A graduation stopped right after its torrent left the source engine,
+    /// then the process back up: its job is queued again and claimed.
+    fn interrupted(tag: &str) -> (TestState, String, std::path::PathBuf, std::path::PathBuf, crate::store::Job) {
+        let (s, hash, src, dst) = setup(tag);
+        let params = job(&hash, &dst).params;
+        let running = {
+            let store = s.state.store.lock().unwrap();
+            store.create_job("graduate", &hash, &params, 16384).unwrap();
+            store.claim_next_job().expect("claimed")
+        };
+        STOP_AFTER_LEAVING_SOURCE.with(|c| c.set(true));
+        graduate(&s.state, &running).expect_err("stopped where a crash would");
+        let again = {
+            let store = s.state.store.lock().unwrap();
+            assert_eq!(store.requeue_running_jobs(), 1, "the restart queues it again");
+            store.claim_next_job().expect("claimed again")
+        };
+        let ih = typhon_engine::torrent::hex_decode(&hash).unwrap();
+        assert!(s.state.engines.get("race").unwrap().manager.get(&ih).is_none());
+        assert!(s.state.engines.get("hoard").unwrap().manager.get(&ih).is_none(), "in neither engine");
+        (s, hash, src, dst, again)
+    }
+
+    fn graduated_to_hoard(s: &TestState, hash: &str, dst: &std::path::Path) {
+        let ih = typhon_engine::torrent::hex_decode(hash).unwrap();
+        let t = s.state.engines.get("hoard").unwrap().manager.get(&ih).expect("in hoard");
+        assert_eq!(*t.save_path.read(), dst);
+        assert!(t.is_paused.load(std::sync::atomic::Ordering::Relaxed), "a stopped torrent stays stopped");
+        let store = s.state.store.lock().unwrap();
+        assert_eq!(store.sessions_of(hash), vec!["hoard".to_string()]);
+        assert!(store.torrent_blob(hash).unwrap().is_some(), "with its metainfo");
+    }
+
+    /// ⭐ Stopped between leaving its engine and reaching the other -- a kill,
+    /// an OOM, a power cut in the middle of a copy -- the graduation is
+    /// finished when its job runs again, instead of failing with the torrent
+    /// in no engine and its record gone.
+    #[test]
+    fn a_graduation_interrupted_after_leaving_its_engine_is_finished_when_run_again() {
+        let (s, hash, src, dst, again) = interrupted("grad-interrupted");
+        graduate(&s.state, &again).expect("finished");
+        graduated_to_hoard(&s, &hash, &dst);
+        assert!(dst.join("grad").exists() && !src.join("grad").exists());
+    }
+
+    /// The files that had already moved before the interruption stay where
+    /// they went; the run finishes from there.
+    #[test]
+    fn an_interrupted_graduation_keeps_the_files_it_had_moved() {
+        let (s, hash, src, dst, again) = interrupted("grad-half-moved");
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::rename(src.join("grad"), dst.join("grad")).unwrap();
+        graduate(&s.state, &again).expect("finished");
+        graduated_to_hoard(&s, &hash, &dst);
+        assert_eq!(std::fs::read(dst.join("grad")).unwrap(), vec![7u8; 16384]);
     }
 
     /// ⭐ A target that refuses puts everything back: the files return and the
