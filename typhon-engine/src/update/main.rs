@@ -209,6 +209,19 @@ fn resolve(tag: Option<&str>) -> Result<Release, String> {
     Ok(Release { tag, assets })
 }
 
+/// Where the release index may send a download: GitHub itself, over TLS. The
+/// index is data from the network; a URL in it is followed only if it names
+/// the host the release is published on (GitHub's own redirect to its object
+/// store is followed by the client afterwards, and is not ours to vet).
+fn asset_url_ok(url: &str) -> Result<(), String> {
+    let u = url::Url::parse(url).map_err(|_| format!("{url:?} is not a URL"))?;
+    if u.scheme() == "https" && u.host_str() == Some("github.com") {
+        Ok(())
+    } else {
+        Err(format!("{url:?} is not a github.com address -- refusing to download from it"))
+    }
+}
+
 /// The archive for THIS platform.
 fn pick_asset(r: &Release) -> Result<Asset, String> {
     let (os, arch) = (platform_os(), platform_arch());
@@ -226,6 +239,7 @@ fn pick_asset(r: &Release) -> Result<Asset, String> {
                 r.assets.iter().map(|a| a.name.as_str()).collect::<Vec<_>>().join(", ")
             )
         })
+        .and_then(|a| asset_url_ok(&a.url).map(|()| a))
 }
 
 fn platform_os() -> &'static str {
@@ -247,6 +261,7 @@ fn expected_sha(r: &Release, archive: &str) -> Result<String, String> {
         .iter()
         .find(|a| a.name == name)
         .ok_or_else(|| format!("no {name} published beside the archive -- refusing to install unverified bytes"))?;
+    asset_url_ok(&a.url)?;
     let text = get_text(&a.url)?;
     // "<hex>  <filename>", the sha256sum format.
     text.split_whitespace()
@@ -623,6 +638,46 @@ fn confirm(tag: &str) -> Result<bool, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn release_with(url: &str) -> Release {
+        let ext = if cfg!(windows) { ".zip" } else { ".tar.gz" };
+        Release {
+            tag: "v4.4.4".into(),
+            assets: vec![Asset {
+                name: format!("hydranos-v4.4.4-{}-{}{ext}", platform_os(), platform_arch()),
+                url: url.into(),
+                size: 1,
+            }],
+        }
+    }
+
+    #[test]
+    fn an_asset_is_only_taken_from_github() {
+        let ok = "https://github.com/Kheopsian/Hydranos/releases/download/v4.4.4/x";
+        assert!(pick_asset(&release_with(ok)).is_ok());
+        for bad in [
+            "https://192.168.99.7/hydranos.tar.gz",
+            "https://evil.example/releases/download/v4.4.4/x",
+            "https://github.com.evil.example/x",
+            "https://github.com@evil.example/x",
+            "http://github.com/Kheopsian/Hydranos/releases/download/v4.4.4/x",
+            "file:///etc/passwd",
+            "not a url",
+        ] {
+            assert!(pick_asset(&release_with(bad)).is_err(), "{bad:?} must be refused");
+        }
+        // The checksum comes from the same list, so it gets the same refusal
+        // (and before any request is made).
+        let mut r = release_with(ok);
+        r.assets.push(Asset {
+            name: format!("{}.sha256", r.assets[0].name),
+            url: "https://192.168.99.7/x.sha256".into(),
+            size: 1,
+        });
+        let archive = r.assets[0].name.clone();
+        let e = expected_sha(&r, &archive).unwrap_err();
+        assert!(e.contains("github.com"), "{e}");
+    }
 
     #[test]
     fn a_download_is_refused_past_its_cap() {
