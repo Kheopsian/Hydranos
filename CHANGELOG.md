@@ -108,6 +108,35 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 
 Each of these was reproduced by a failing test before the fix, except the
 refusal of the address, which was shown on an isolated bench only.
+- The node enrolment script (`install.sh`) checks the release archive against
+  the SHA-256 published beside it and installs nothing if they differ or if
+  there is none. The node's config, which holds its API key, is created
+  readable by its owner only in every install mode, not just `--user`.
+- The enrolment command printed on the Nodes page saves the script, checks it
+  against the SHA-256 of the one the controller serves, and only then runs it,
+  instead of piping the download straight into `sh`.
+- The bare-metal installer (`packaging/install.sh`) gives `/opt/hydranos` to
+  root, so the service account cannot replace a binary an administrator later
+  runs with `sudo`; re-running it fixes an existing install. The config is
+  kept at 0600.
+- `hydranos-update --tag` accepts a release tag (`vX.Y.Z`) and nothing else.
+- The API's HTTP server gives a connection 30 s to send a request's headers
+  and serves at most 1024 connections at once; further ones wait in the
+  listen backlog. Responses, the event stream included, are not time-limited.
+- rustls 0.23.46, rustls-webpki 0.103.15 and crossbeam-epoch 0.9.21, the
+  versions their RustSec advisories name as fixed. CI now runs `cargo audit`.
+- The systemd unit shipped in the tarball is sandboxed (`NoNewPrivileges`,
+  `PrivateTmp`, `ProtectSystem=true`, kernel and control-group protections,
+  an empty capability bounding set, four address families). An existing unit
+  is never overwritten: the new one lands beside it as `hydranos.service.new`.
+  The NET_ADMIN drop-in for managed WireGuard still applies.
+- Builds are reproducible from the repository: GitHub Actions are pinned by
+  commit SHA, base images by digest, and every cargo build is `--locked`. CI
+  enforces it.
+- The release purge workflow only acts on tag-shaped names (hardened without
+  a reproduction).
+- A Transmission library upload is held in memory once instead of twice
+  (hardened without a reproduction).
 
 ### Fixed
 
@@ -119,6 +148,18 @@ refusal of the address, which was shown on an isolated bench only.
   sweep; the state is saved regardless.
 - A download folder that cannot be created is reported as such, instead of
   as the failed open that followed it.
+- The default piece budget (`piece_memory_mb = 0`) reads the memory limit of
+  the cgroup the daemon runs in, so a systemd `MemoryMax=` bounds it; it used
+  to see only a container's own limit and otherwise sized itself on the whole
+  machine.
+
+### Removed
+
+- The standalone `typhon-engine` binary, its JSON-RPC socket and the
+  `tokio-console` build feature that only it used. The daemon has run the
+  engine in-process since 4.0; the binary was built by the release workflow
+  but shipped in no tarball or image.
+- `proto/hydra_agent.proto`, the 3.x agent channel's definition.
 
 ### Correction to v4.4.4
 
