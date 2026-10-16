@@ -286,7 +286,9 @@ pub async fn discover_at(target: SocketAddr) -> Result<Gateway, String> {
 
 /// Fetch a description document and find the mapping service in it.
 pub async fn describe(location: &str) -> Result<Gateway, String> {
+    // The router is on the LAN: a proxy in the environment is not for it.
     let client = reqwest::Client::builder()
+        .no_proxy()
         .timeout(HTTP_TIMEOUT)
         .redirect(reqwest::redirect::Policy::none())
         .build()
@@ -328,7 +330,9 @@ pub async fn add_mapping(
         protocol,
         lease,
     );
+    // The router is on the LAN: a proxy in the environment is not for it.
     let client = reqwest::Client::builder()
+        .no_proxy()
         .timeout(HTTP_TIMEOUT)
         .build()
         .map_err(|e| format!("http client: {e}"))?;
@@ -720,5 +724,41 @@ mod io_tests {
             "gave up in {:?}, which is longer than the window",
             started.elapsed()
         );
+    }
+
+    /// The child half of the proxy test below: it runs in a process of its own
+    /// (so the proxy variables never touch the other tests) and does nothing
+    /// unless the parent handed it a router.
+    #[test]
+    fn proxy_probe_child() {
+        let Ok(url) = std::env::var("IGD_PROBE_URL") else { return };
+        let g = rt().block_on(describe(&url)).expect("the router described itself");
+        let gw = Gateway { control_url: url, service_type: g.service_type };
+        rt().block_on(add_mapping(&gw, "192.168.99.5", 6881, 6881, "TCP", Duration::from_secs(60)))
+            .expect("the router mapped the port");
+    }
+
+    /// ⭐ The router is on the LAN: a proxy in the environment never sees the
+    /// description fetch or the SOAP request.
+    #[test]
+    fn a_proxy_in_the_environment_is_not_used_for_the_router() {
+        let (url, router_hits) = counting_router("127.0.0.1", DESC_DOC);
+        let (proxy_url, proxy_hits) = counting_router("127.0.0.1", "");
+        let proxy = proxy_url.trim_end_matches("/rootDesc.xml").to_string();
+        let out = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args(["proxy_probe_child", "--nocapture", "--test-threads=1"])
+            .env("IGD_PROBE_URL", &url)
+            .env("HTTP_PROXY", &proxy)
+            .env("http_proxy", &proxy)
+            .env("ALL_PROXY", &proxy)
+            .env("all_proxy", &proxy)
+            .env_remove("NO_PROXY")
+            .env_remove("no_proxy")
+            .output()
+            .expect("run the probe");
+        let log = String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
+        assert_eq!(proxy_hits.load(std::sync::atomic::Ordering::Relaxed), 0, "the proxy was asked: {log}");
+        assert!(out.status.success(), "the probe failed: {log}");
+        assert_eq!(router_hits.load(std::sync::atomic::Ordering::Relaxed), 2, "describe and the mapping");
     }
 }
