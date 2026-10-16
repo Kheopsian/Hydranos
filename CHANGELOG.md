@@ -144,8 +144,67 @@ refusal of the address, which was shown on an isolated bench only.
 - A Transmission library upload is held in memory once instead of twice
   (hardened without a reproduction).
 
+### Added
+
+Privacy options. Every one of them is off, or keeps today's behaviour, unless
+it is set.
+
+- `announce_cleartext_passkey` = `warn` (default), `allow` or `refuse`: what
+  to do with a passkey on a plain `http://` tracker. `warn` logs the tracker's
+  host once and announces as before; `refuse` does not announce to it and
+  shows a tracker error.
+- `[race]`/`[hoard]` `peer_encryption` = `allow` (default), `prefer` or
+  `require`. `prefer` dials with MSE first and falls back to plaintext;
+  `require` never connects in plaintext, in or out (RC4 on every byte, no
+  zero-copy serving, and peers without MSE are lost).
+- `[race]`/`[hoard]` `max_unknown_infohash_per_ip` (default 0, no limit):
+  inbound handshakes for torrents this client does not have, per source per
+  minute; past it the source is ignored for ten minutes. Everyone behind a
+  shared NAT or VPN address counts as one source.
+- `[race]`/`[hoard]` `webseed_private = false`: private torrents do not use
+  the web seeds their `.torrent` lists.
+- `[race]`/`[hoard]` `lsd_announce_seeds = false`: Local Service Discovery
+  announces only torrents still downloading. A seed still connects to a local
+  downloader that announces.
+- `[race]`/`[hoard]` `dht_follow_seeds = false`: finished torrents are not
+  announced or looked up on the DHT.
+- `[race]`/`[hoard]` `listen_when_proxied = false`: an engine going out
+  through a SOCKS5 proxy opens no listening port (no inbound peers, no seeding
+  through a forwarded port).
+- `[daemon] exit_probe = false` stops the exit-address lookup (the header,
+  `/api/public-ip` and the Network check then read "unknown");
+  `exit_probe_url` points it at another address-echo service.
+- `[daemon] gluetun_verify` = `off` (default), `warn` or `block`: in gluetun
+  mode, compare the exit address with the one gluetun reports at startup;
+  `block` keeps the engines offline on a mismatch, or when the comparison
+  cannot be made.
+- `[daemon] dns_no_host_fallback = true`: while the kill switch is armed, an
+  engine pinned to an interface with no tunnel DNS does not fall back to the
+  host's resolver.
+- `[daemon] private_files = true`: `hydranos.log` (and its rotations), the
+  config file, `hydra.db` and `bench.db` (with their `-wal`/`-shm`/`-journal`)
+  are created 0600, and existing ones are set to 0600 at startup. Anything
+  reading them under another user then loses access. Downloaded files are not
+  touched.
+- `[daemon] health_detail_requires_key = true`: without the API key `/health`
+  answers only its status and version (same status code). `[daemon]
+  metrics_require_key = true`: `/metrics` wants the API key (`X-Api-Key` or
+  `?apikey=`).
+- `[daemon] public_url`: the address the enrolment command on the Nodes page
+  uses, instead of the `Host` the browser sent.
+- `install.sh --harden` adds systemd sandboxing directives that leave data
+  folders and WireGuard alone; `install.sh --listen ADDR` sets the node's
+  `api_host` instead of `0.0.0.0`. `HYDRANOS_HEAP_PROFILE=off` in the image
+  removes jemalloc's profiling settings from `MALLOC_CONF` (no heap dump on
+  SIGUSR1).
+
 ### Changed
 
+- **Tracker passkeys are read back masked.** `GET /api/settings`,
+  `GET /api/announce/passkeys` and the response to its POST return `********`
+  for each tracker that has one, like the other credentials. Saving the mask
+  back keeps the stored passkey; a new value is written as before. A script
+  that read a passkey back through the API no longer gets it.
 - **The container no longer runs the daemon as root.** With PUID/PGID unset it
   runs as 1000:1000, as qBittorrent's image does; the entrypoint hands
   `/config` and the `/data` folder itself to that user at start, not what is
