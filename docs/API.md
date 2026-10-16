@@ -202,7 +202,7 @@ Body: `{"selection": ..., "params": {...}}`, strict (unknown keys → 400).
 |---|---|---|---|
 | `/api/announce/{health,policy}`, `/api/announce/errors?host=` | GET | Tracker health, live policy, error details. Every engine (extra ones included, keyed by id); `badges` count distinct trackers, not one per engine. | ✓ |
 | `/api/announce/ip-modes` | GET, POST | `{"host","mode"}` IP family per tracker. | ✓ |
-| `/api/announce/passkeys` | GET, POST | `{"host","passkey"}` (empty passkey clears). | ✓ |
+| `/api/announce/passkeys` | GET, POST | GET: `{host: "********"}` for each host that has a passkey (the value is never returned). POST `{"host","passkey"}` (empty passkey clears; the mask leaves it unchanged). | ✓ |
 | `/api/announce/min-seed` | POST | `{"host","hours"}` or `{"host","clear":true}`. | ✓ |
 | `/api/announce/{mute,hidden}` | POST | `{"host","muted"}` / `{"host","hidden"}` or `{"hosts":[...],"hidden"}`. | ✓ |
 
@@ -325,7 +325,7 @@ What works and what does not on the Network tab: [Networking](https://github.com
 | `/api/setup` | GET, POST | First run: `{"needs_setup","network_storage",...}` (`network_storage` is `"network share"` when `data_dir` is on NFS, SMB or FUSE, where the database cannot use WAL; `""` otherwise; always `""` up to 4.3.1) / create the admin `{"username","password"}` (8+ chars) → API key. Public, loopback or private network only. | ✓ |
 | `/api/login` | POST | `{"username","password"}` → `{"api_key"}`. Public. | ✓ |
 | `/api/auth/password` | POST | `{"password"}` (8+ chars): stored hashed in `[auth] password_hash`, as setup does. | ✓ |
-| `/api/settings` | GET, POST | Whole config as JSON, **secrets included** / `{"changes":[{"section","key","value"}]}` edits existing keys only, except the live engine keys of `[race]`/`[hoard]` (`upload_rate_limit`, `download_rate_limit`, `peer_timeout`, `choking`, `max_uploads_per_torrent`), which are created when absent, and `enable_lsd`, created when absent too but applied at the next start. Those are put on the running engines at once; the answer carries `applied_live` (engines updated) and `restart_required` (false when every change is one of them). | ✓ |
+| `/api/settings` | GET, POST | Whole config as JSON; the SOCKS5 passwords, the gluetun key, the proxy URL's password and every tracker passkey come back as `********` (posting that mask back leaves the stored value alone) / `{"changes":[{"section","key","value"}]}` edits existing keys only, except the live engine keys of `[race]`/`[hoard]` (`upload_rate_limit`, `download_rate_limit`, `peer_timeout`, `choking`, `max_uploads_per_torrent`), which are created when absent, and `enable_lsd`, created when absent too but applied at the next start. Those are put on the running engines at once; the answer carries `applied_live` (engines updated) and `restart_required` (false when every change is one of them). | ✓ |
 | `/api/settings/reset` | POST | Reset to defaults (keeps login, key, data dir). | ✓ |
 | `/api/settings/restart`, `/api/restart` | POST | Answer, then stop cleanly (the same path as SIGTERM: `stopped` to trackers, resume data flushed) and exit with code **75** for the supervisor to restart (systemd `Restart=on-failure` included). | ✓ |
 | `/api/fs/browse?path=` | GET | List folders on the Hydranos host. | ✓ |
