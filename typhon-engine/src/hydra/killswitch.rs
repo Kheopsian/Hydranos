@@ -371,7 +371,12 @@ pub fn log_startup(cfg: &Config, tunnel_dns_leak: &dyn Fn(&str) -> Option<bool>)
 /// network, so a change here is a restart like any other network change.
 pub fn blocking_changed(cfg: &Config, host: &crate::engines::EngineHost) -> bool {
     let p = plan(cfg);
-    host.engines().iter().any(|e| e.blocked.get().is_some() != p.blocked(&e.id).is_some())
+    // An engine kept off by `gluetun_verify = "block"` is not the plan's
+    // doing: it is decided at boot from the live exit, not from the file.
+    host.engines().iter().any(|e| {
+        let verify = e.blocked.get().is_some_and(|w| w.starts_with(crate::gluetun::VERIFY_BLOCK));
+        !verify && e.blocked.get().is_some() != p.blocked(&e.id).is_some()
+    })
 }
 
 /// Why an engine's port is NOT asked of the home router, if it is not.

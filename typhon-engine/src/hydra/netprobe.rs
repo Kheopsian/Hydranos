@@ -192,7 +192,7 @@ fn row(engine: &crate::engines::Engine, bound: bool, v4: Option<String>, v6: Opt
 }
 
 /// Ask one echo service what address the daemon's own requests leave with.
-async fn echo_daemon(url: &str) -> Option<String> {
+pub(crate) async fn echo_daemon(url: &str) -> Option<String> {
     let body = typhon_engine::egress::client()
         .ok()?
         .get(url)

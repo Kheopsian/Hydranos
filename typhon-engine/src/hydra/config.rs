@@ -68,6 +68,13 @@ pub struct Daemon {
     /// system picks, so the IPv6-only measurement is not made for it.
     #[serde(default)]
     pub exit_probe_url: String,
+    /// In gluetun mode: whether to check that the address the daemon leaves
+    /// by is the one gluetun reports for its tunnel. "off" (empty, the
+    /// default) checks nothing; "warn" logs a mismatch; "block" keeps every
+    /// engine off the network on a mismatch, or when the check cannot be made
+    /// (`exit_probe = false`, gluetun's control server unreachable).
+    #[serde(default)]
+    pub gluetun_verify: String,
 }
 
 /// The echo service asked when `[daemon] exit_probe_url` is empty.

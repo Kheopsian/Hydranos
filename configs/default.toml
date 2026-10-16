@@ -50,6 +50,16 @@ create_torrent_folder = false
 # service only.
 # exit_probe = true
 # exit_probe_url = "https://api.ipify.org/"
+# In gluetun mode, check at startup that the address the daemon leaves by (the
+# exit probe above) is the one gluetun's control server reports for its tunnel
+# (GET /v1/publicip/ip, with gluetun_url / gluetun_api_key of the engine that
+# follows the forwarded port).
+#   "off"    check nothing (the default)
+#   "warn"   say a mismatch in the log
+#   "block"  keep every engine off the network on a mismatch, or when the check
+#            cannot be made (exit_probe = false, control server unreachable);
+#            the reason is on /api/network/egress and the Network tab
+# gluetun_verify = "off"
 
 # SOCKS5 proxy for the daemon's own requests with egress = "proxy" (socks5h:
 # names are resolved by the proxy). The engines' proxy is socks5_outbound_* in

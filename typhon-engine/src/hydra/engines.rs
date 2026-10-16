@@ -386,6 +386,9 @@ impl EngineHost {
         // Which engines the kill switch keeps off the network. Before the
         // switch below, so a bench run with the network off still says it.
         let plan = crate::killswitch::plan(config);
+        // `[daemon] gluetun_verify = "block"`: decided once for the node, like
+        // the rest of the kill switch.
+        let verify_block = if networking_enabled() { crate::gluetun::gate(config).await } else { None };
         for engine in &self.engines {
             // The engine's own merged session. NOT config.race / config.hoard:
             // an engine that is neither is a legitimate configuration.
@@ -396,6 +399,14 @@ impl EngineHost {
                     "kill switch: BLOCKED, kept off the network (no listener, no dial, no announce, no DHT, no LSD): {why}"
                 );
                 let _ = engine.blocked.set(why);
+                continue;
+            }
+            if let Some(why) = &verify_block {
+                tracing::warn!(
+                    engine = %engine.id,
+                    "kill switch: BLOCKED, kept off the network (no listener, no dial, no announce, no DHT, no LSD): {why}"
+                );
+                let _ = engine.blocked.set(why.clone());
                 continue;
             }
             if !networking_enabled() {
@@ -862,6 +873,73 @@ mod tests {
             // Its port is free: nothing bound it, on any address.
             std::net::TcpListener::bind(("0.0.0.0", e.listen_port)).unwrap_or_else(|err| panic!("{}: port {} taken: {err}", e.id, e.listen_port));
             std::net::UdpSocket::bind(("0.0.0.0", e.listen_port)).unwrap_or_else(|err| panic!("{}: UDP {} taken: {err}", e.id, e.listen_port));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Two local servers: an address-echo service and a gluetun control
+    /// server, each answering one fixed address.
+    async fn echo_and_control(echo_ip: &'static str, control_ip: &'static str) -> (String, String) {
+        async fn serve(app: axum::Router) -> String {
+            let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = l.local_addr().unwrap();
+            tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+            format!("http://{addr}")
+        }
+        let echo = serve(axum::Router::new().route("/", axum::routing::get(move || async move { echo_ip }))).await;
+        let control = serve(axum::Router::new().route(
+            "/v1/publicip/ip",
+            axum::routing::get(move || async move { format!("{{\"public_ip\":\"{control_ip}\"}}") }),
+        ))
+        .await;
+        (echo, control)
+    }
+
+    async fn gluetun_engines(tag: &str, daemon_extra: &str, echo: &str, control: &str) -> (EngineHost, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("hydra-engtest-{tag}-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let free = || std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let text = format!(
+            "[daemon]\ndata_dir = {:?}\nexit_probe_url = \"{echo}\"\n{daemon_extra}\n\
+             [race]\nlisten_port = {}\ngluetun_port_forward = true\ngluetun_url = \"{control}\"\n\
+             [hoard]\nlisten_port = {}\n",
+            dir.to_string_lossy(),
+            free(),
+            free()
+        );
+        let config: Config = toml::from_str(&text).unwrap();
+        let phase = crate::startup::phase();
+        let host = EngineHost::start(&config, &dir).await;
+        crate::startup::set_phase(phase);
+        (host, dir)
+    }
+
+    /// `[daemon] gluetun_verify = "block"`: an exit that is not the address
+    /// gluetun reports for its tunnel keeps every engine off the network, and
+    /// each says why.
+    #[tokio::test]
+    async fn gluetun_verify_block_keeps_engines_off_when_the_exit_is_not_the_tunnel() {
+        let (echo, control) = echo_and_control("203.0.113.5", "198.51.100.9").await;
+        let (host, dir) = gluetun_engines("gluetun-block", "gluetun_verify = \"block\"", &echo, &control).await;
+        for e in host.engines() {
+            let why = e.blocked.get().unwrap_or_else(|| panic!("{} was not blocked", e.id));
+            assert!(why.contains("gluetun_verify") && why.contains("203.0.113.5") && why.contains("198.51.100.9"), "{why}");
+            assert!(e.engine_config.get().is_none() && !e.listening.load(std::sync::atomic::Ordering::Relaxed), "{}: on the network", e.id);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// With the exit probe off there is no exit address to compare: `block`
+    /// blocks, and the reason names the probe rather than leaving the engines
+    /// silently offline.
+    #[tokio::test]
+    async fn gluetun_verify_block_without_an_exit_probe_says_so() {
+        let (echo, control) = echo_and_control("203.0.113.5", "203.0.113.5").await;
+        let (host, dir) =
+            gluetun_engines("gluetun-block-noprobe", "gluetun_verify = \"block\"\nexit_probe = false", &echo, &control).await;
+        for e in host.engines() {
+            let why = e.blocked.get().unwrap_or_else(|| panic!("{} was not blocked", e.id));
+            assert!(why.contains("gluetun_verify") && why.contains("exit_probe = false"), "{why}");
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
