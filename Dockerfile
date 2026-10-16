@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 # Stage 1: Typhon engine builder — the BitTorrent engine.
-FROM rust:1-bookworm AS typhon-builder
+FROM rust:1-bookworm@sha256:e12566d5abc17a0da741628782cdb504b68b8961f5bfcf677936bf3e8b32de29 AS typhon-builder
 
 WORKDIR /build/typhon-engine
 COPY typhon-engine/Cargo.toml typhon-engine/Cargo.lock ./
@@ -33,11 +33,11 @@ ENV RUSTFLAGS="--cfg tokio_unstable"
 # that exited instantly with "executable file not found in $PATH".
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/build/typhon-engine/target,sharing=locked \
-    cargo build --release --bin hydranos \
+    cargo build --release --locked --bin hydranos \
     && cp target/release/hydranos /usr/local/bin/hydranos
 
 # Stage 2: Runtime.
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates iperf3 iproute2 tzdata libssl3 \
