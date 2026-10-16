@@ -118,6 +118,11 @@ echo "==> data   : $DATA_DIR"
 
 mkdir -p "$CFG_DIR" "$DATA_DIR"
 if [ ! -f "$CONFIG" ]; then
+    # Created owner-only rather than chmod-ed afterwards: the key in here is the
+    # node's whole authority, and it must never sit readable by other accounts,
+    # even for an instant.
+    old_umask=$(umask)
+    umask 077
     cat > "$CONFIG" <<TOML
 [daemon]
 api_host = "0.0.0.0"
@@ -133,15 +138,16 @@ enable_ipv6 = true
 listen_port = 16372
 enable_ipv6 = true
 TOML
-    # The key in here is the node's whole authority. On a shared seedbox the
-    # default umask leaves it readable by every other account on the host.
-    if [ "$MODE" = "user" ]; then chmod 600 "$CONFIG"; fi
+    umask "$old_umask"
 else
     # An existing install keeps its key: re-running enrolment must not lock the
     # operator out of a node they already had.
     API_KEY=$(grep -m1 '^api_key' "$CONFIG" | cut -d'"' -f2)
     echo "==> keeping the existing config and key"
 fi
+# Every mode, an older config included: the system and docker installs used to
+# leave it at the umask's 0644.
+chmod 600 "$CONFIG"
 
 # Download the release binary into a temporary directory and print its path.
 fetch_binary() {
@@ -168,6 +174,21 @@ fetch_binary() {
         echo "could not download the release tarball" >&2
         rm -rf "$tmp"; exit 1
     fi
+    # Every release publishes <archive>.sha256 beside the archive (the format of
+    # sha256sum). Nothing is unpacked unless the two agree.
+    want=$(curl -fsSL "$URL.sha256" 2>/dev/null | awk '{print $1; exit}' | tr 'A-F' 'a-f')
+    got=$(sha256sum "$tmp/hydranos.tar.gz" | awk '{print $1}')
+    if [ -z "$want" ]; then
+        echo "no checksum published beside $URL -- refusing to install unverified bytes" >&2
+        rm -rf "$tmp"; exit 1
+    fi
+    if [ "$want" != "$got" ]; then
+        echo "checksum mismatch for $URL -- nothing installed" >&2
+        echo "  expected $want" >&2
+        echo "  got      $got" >&2
+        rm -rf "$tmp"; exit 1
+    fi
+    echo "==> sha256 ok" >&2
     tar -xzf "$tmp/hydranos.tar.gz" -C "$tmp"
     bin=$(find "$tmp" -maxdepth 2 -type f -name hydranos | head -1)
     [ -n "$bin" ] || { echo "no hydranos binary inside the tarball" >&2; rm -rf "$tmp"; exit 1; }
