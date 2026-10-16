@@ -19,6 +19,13 @@ refuse_legacy_env() {
 }
 if [ -n "$HYDRANOS_ENGINE_ID" ]; then refuse_legacy_env HYDRANOS_ENGINE_ID; fi
 if [ -n "$HYDRANOS_ENGINES" ]; then refuse_legacy_env HYDRANOS_ENGINES; fi
+# HYDRANOS_HEAP_PROFILE=off: no jemalloc heap profiling. The image turns it on
+# through MALLOC_CONF (sampling every 512 KiB, a dump on SIGUSR1); this drops the
+# prof* settings from it and keeps the others. Unset, MALLOC_CONF is untouched.
+if [ "${HYDRANOS_HEAP_PROFILE:-}" = "off" ] && [ -n "${MALLOC_CONF:-}" ]; then
+    MALLOC_CONF=$(printf '%s' "$MALLOC_CONF" | tr ',' '\n' | grep -v '^\(lg_\)\{0,1\}prof' | paste -sd, - || true)
+    if [ -n "$MALLOC_CONF" ]; then export MALLOC_CONF; else unset MALLOC_CONF; fi
+fi
 # First run: seed the config so an empty volume just works.
 if [ ! -f "$CFG_DIR/default.toml" ]; then
     mkdir -p "$CFG_DIR"

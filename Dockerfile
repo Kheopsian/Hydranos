@@ -46,6 +46,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # jemalloc heap profiling (low-overhead sampling every 512KB). Dumps triggered
 # on SIGUSR1 by the watchdog. One process now, so this covers all of it.
+# HYDRANOS_HEAP_PROFILE=off (container environment) drops the prof* settings at
+# start-up, see entrypoint.sh; unset, this is what runs.
 ENV MALLOC_CONF=prof:true,prof_active:true,lg_prof_sample:19,prof_prefix:/config/jeprof
 # One binary. The front and the engines are the same process in 4.0.0, so
 # there is no hydranos-engine to ship and no unix socket between them.
