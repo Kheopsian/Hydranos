@@ -117,15 +117,17 @@ impl StateDb {
     }
 
     pub fn count(&self) -> usize {
+        self.try_count().unwrap_or(0)
+    }
+
+    /// `count`, telling an empty table from one that could not be read.
+    pub fn try_count(&self) -> Result<usize, rusqlite::Error> {
         let conn = match self.conn.lock() {
             Ok(c) => c,
             Err(e) => e.into_inner(),
         };
         conn.query_row("SELECT COUNT(*) FROM torrent_state", [], |r| r.get::<_, i64>(0))
-            .optional()
-            .ok()
-            .flatten()
-            .unwrap_or(0) as usize
+            .map(|n| n as usize)
     }
 
     /// Upsert one record. Used on the paths that must be durable immediately
@@ -188,6 +190,13 @@ impl StateDb {
     /// Read every record back. Shape-compatible with `fastresume::load_all`
     /// so the startup path does not care which backend it came from.
     pub fn load_all(&self) -> Vec<ResumeData> {
+        self.load_all_reporting().0
+    }
+
+    /// `load_all`, plus the info hash of every row that could not be read.
+    /// Such a torrent is not loaded, and is not gone either: whoever keeps
+    /// other copies of its state must not take its absence for a removal.
+    pub fn load_all_reporting(&self) -> (Vec<ResumeData>, Vec<String>) {
         let conn = match self.conn.lock() {
             Ok(c) => c,
             Err(e) => e.into_inner(),
@@ -201,10 +210,14 @@ impl StateDb {
             Ok(s) => s,
             Err(e) => {
                 warn!("[statedb] prepare load_all failed: {}", e);
-                return Vec::new();
+                return (Vec::new(), Vec::new());
             }
         };
         let rows = stmt.query_map([], |row| {
+            let key: Option<String> = row.get(0).ok();
+            Ok(read_row(row).map_err(|e| (key, e)))
+        });
+        fn read_row(row: &rusqlite::Row) -> Result<ResumeData, rusqlite::Error> {
             let trackers_json: String = row.get(9)?;
             Ok(ResumeData {
                 info_hash: row.get(0)?,
@@ -222,22 +235,27 @@ impl StateDb {
                 down_limit: row.get::<_, i64>(12).unwrap_or(0).max(0) as u64,
                 download_order: decode_order(&row.get::<_, String>(13).unwrap_or_default()),
             })
-        });
+        }
         let rows = match rows {
             Ok(r) => r,
             Err(e) => {
                 warn!("[statedb] query load_all failed: {}", e);
-                return Vec::new();
+                return (Vec::new(), Vec::new());
             }
         };
         let mut out = Vec::new();
+        let mut unreadable = Vec::new();
         for r in rows {
             match r {
-                Ok(rd) => out.push(rd),
+                Ok(Ok(rd)) => out.push(rd),
+                Ok(Err((key, e))) => {
+                    warn!("[statedb] bad row {}: {}", key.as_deref().unwrap_or("?"), e);
+                    unreadable.extend(key);
+                }
                 Err(e) => warn!("[statedb] bad row: {}", e),
             }
         }
-        out
+        (out, unreadable)
     }
 
     /// One-shot import of a legacy `resume/` directory.

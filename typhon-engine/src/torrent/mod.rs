@@ -1190,13 +1190,28 @@ impl TorrentManager {
             Some(db) => db,
             None => return fastresume::load_all(&self.resume_dir),
         };
-        if db.count() == 0 {
-            let imported = db.import_legacy(&self.resume_dir);
-            if imported > 0 {
-                info!("[statedb] first start on SQLite state: {} records carried over", imported);
+        // Only a table KNOWN to be empty is a first start. One that cannot
+        // be counted is a database in trouble, and importing a stale
+        // directory over it is the resurrection the paragraph above forbids.
+        match db.try_count() {
+            Ok(0) => {
+                let imported = db.import_legacy(&self.resume_dir);
+                if imported > 0 {
+                    info!("[statedb] first start on SQLite state: {} records carried over", imported);
+                }
+            }
+            Ok(_) => {}
+            Err(e) => warn!("[statedb] cannot count the records ({}); not importing resume/", e),
+        }
+        let (records, unreadable) = db.load_all_reporting();
+        // A row that cannot be read is refused, not forgotten: refused records
+        // keep their row in the store, which holds the metainfo to repair from.
+        if !unreadable.is_empty() {
+            if let Ok(mut refused) = self.refused_records.lock() {
+                refused.extend(unreadable.iter().map(|h| h.to_lowercase()));
             }
         }
-        db.load_all()
+        records
     }
 
     /// Point the manager at the store's metainfo blobs. Set once at startup,
@@ -3626,5 +3641,44 @@ mod manager_tests {
         assert_eq!(dst.moved(), (25, 0), "and counts what it moves from there");
         let _ = std::fs::remove_dir_all(root);
         let _ = std::fs::remove_dir_all(root2);
+    }
+}
+
+#[cfg(test)]
+mod unreadable_state_tests {
+    use super::*;
+
+    /// ⭐ A state row that cannot be read is not a torrent that was removed.
+    /// It used to be skipped with a warning, so the torrent came up missing
+    /// and the store's own reconcile, finding a row with no torrent behind
+    /// it, deleted that row and the only metainfo it had. Refused records
+    /// keep their row: an unreadable one is refused.
+    #[test]
+    fn an_unreadable_state_row_is_refused_not_forgotten() {
+        let root = std::env::temp_dir().join(format!("typhon-unreadable-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (data, resume) = (root.join("data"), root.join("resume"));
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::create_dir_all(&resume).unwrap();
+        let hash = "ab".repeat(20);
+        {
+            let db = statedb::StateDb::open(&root.join("state.db")).unwrap();
+            drop(db);
+            let conn = rusqlite::Connection::open(root.join("state.db")).unwrap();
+            conn.execute(
+                "INSERT INTO torrent_state (info_hash, total_uploaded) VALUES (?1, 'not a number')",
+                [&hash],
+            )
+            .unwrap();
+        }
+
+        let mgr = TorrentManager::new(
+            data.to_string_lossy().into_owned(),
+            resume.to_string_lossy().into_owned(),
+            Arc::new(crate::disk::DiskManager::new(16)),
+        );
+        mgr.load_resume_data();
+        assert!(mgr.refused_records().contains(&hash), "its row must be kept");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
