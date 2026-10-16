@@ -15759,6 +15759,40 @@ async fn get_health(State(state): State<AppState>) -> Response {
     (code, Json(body)).into_response()
 }
 
+/// `/health` as the router serves it. `[daemon] health_detail_requires_key`
+/// (off by default) keeps the detail -- engines, store, problems, uptime --
+/// for a caller with the key; any other caller gets the status word and the
+/// version (what a probe and `install.sh` read), with the same status code.
+async fn get_health_gated(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+) -> Response {
+    let query = query.unwrap_or_default();
+    if state.cfg().daemon.health_detail_requires_key && !authorised(&state, &headers, &query) {
+        let (ok, body) = crate::obs::health(&state);
+        let code = if ok { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE };
+        return (code, Json(serde_json::json!({"status": body["status"], "version": body["version"]})))
+            .into_response();
+    }
+    get_health(State(state)).await
+}
+
+/// `/metrics` as the router serves it: public unless `[daemon]
+/// metrics_require_key` is on, in which case it wants the key like the rest of
+/// the API (`X-Api-Key`, or `?apikey=` for a scraper that cannot set a header).
+async fn get_metrics_gated(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+) -> Response {
+    let query = query.unwrap_or_default();
+    if state.cfg().daemon.metrics_require_key {
+        guard!(state, headers, query);
+    }
+    crate::bootstrap::metrics(State(state)).await
+}
+
 /// An engine selector to a concrete engine ID.
 ///
 /// ⭐⭐ BY ID ONLY, and that is a measured decision rather than a shortcut.
@@ -15972,7 +16006,7 @@ async fn engine_dial_limits_by_id(
 
 pub fn router(state: AppState) -> Router {
     Router::new()
-        .route("/health", get(get_health))
+        .route("/health", get(get_health_gated))
         .route("/api/dedup/stats", get(get_dedup_stats))
         .route("/api/dedup/config", axum::routing::post(post_dedup_config))
         .route("/api/torrents/add-defaults", get(get_add_defaults))
@@ -16174,7 +16208,7 @@ pub fn router(state: AppState) -> Router {
                              .post(crate::bootstrap::setup_password))
         .route("/api/login", axum::routing::post(crate::bootstrap::login))
         .route("/api/startup", get(crate::bootstrap::startup))
-        .route("/metrics", get(crate::bootstrap::metrics))
+        .route("/metrics", get(get_metrics_gated))
         .route("/", get(crate::web::index))
         .route("/static/*path", get(crate::web::static_file))
         .route("/api/status", get(get_status))

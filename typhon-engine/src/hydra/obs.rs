@@ -692,6 +692,66 @@ mod tests {
         (status, String::from_utf8_lossy(&bytes).into_owned())
     }
 
+    async fn get_with(s: &TestState, path: &str, key: Option<&str>) -> (StatusCode, String) {
+        let mut req = Request::builder().uri(path);
+        if let Some(k) = key {
+            req = req.header("X-Api-Key", k);
+        }
+        let resp = crate::api::router(s.state.clone()).oneshot(req.body(Body::empty()).unwrap()).await.unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        (status, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    fn with_daemon_options(tag: &str, options: &str) -> TestState {
+        state_from(tag, &format!("[daemon]\napi_key = \"{KEY}\"\n{options}\n"))
+    }
+
+    /// `health_detail_requires_key`: without a key `/health` is the status
+    /// word and the version (what a probe and the installer read); the
+    /// engines, the store and the problems need the key. Off (the default),
+    /// everything stays public.
+    #[tokio::test]
+    async fn health_detail_can_require_a_key() {
+        let open = with_daemon_options("obs-health-open", "");
+        let (st, body) = get_with(&open, "/health", None).await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert!(v["checks"].is_object(), "the default stays public: {v}");
+
+        let s = with_daemon_options("obs-health-gated", "health_detail_requires_key = true");
+        let (st, body) = get_with(&s, "/health", None).await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["status"], "healthy");
+        assert!(v["version"].is_string(), "the installer reads the version here: {v}");
+        assert!(v.get("checks").is_none() && v.get("problems").is_none() && v.get("uptime").is_none(), "{v}");
+
+        let (st, body) = get_with(&s, "/health", Some(KEY)).await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert!(v["checks"]["engines"].is_array(), "the key brings the detail back: {v}");
+    }
+
+    /// `metrics_require_key`: `/metrics` answers 401 without a key. Off (the
+    /// default), it is public as before.
+    #[tokio::test]
+    async fn metrics_can_require_a_key() {
+        let open = with_daemon_options("obs-metrics-open", "");
+        let (st, _) = get_with(&open, "/metrics", None).await;
+        assert_eq!(st, StatusCode::OK, "the default stays public");
+
+        let s = with_daemon_options("obs-metrics-gated", "metrics_require_key = true");
+        let (st, body) = get_with(&s, "/metrics", None).await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED, "{body}");
+        assert!(!body.contains("hydra_up"), "{body}");
+        let (st, body) = get_with(&s, &format!("/metrics?apikey={KEY}"), None).await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        let (st, body) = get_with(&s, "/metrics", Some(KEY)).await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        assert!(body.contains("hydra_up"), "{body}");
+    }
+
     /// #88: one series per engine, the extra one included, with HELP and
     /// TYPE, from counters -- not the three lines 4.3 printed.
     #[tokio::test]

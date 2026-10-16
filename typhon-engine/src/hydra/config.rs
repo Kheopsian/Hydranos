@@ -43,6 +43,15 @@ pub struct Daemon {
     /// "direct", "proxy" (`[proxy]`) or "engine:<id>". See `egress::resolve`.
     #[serde(default)]
     pub egress: String,
+    /// `/health` answers anyone with the status word and the version; with
+    /// this on, the engines, the store, the problems and the uptime need the
+    /// API key. The status code is the same either way. Off by default.
+    #[serde(default)]
+    pub health_detail_requires_key: bool,
+    /// `/metrics` needs the API key (`X-Api-Key`, or `?apikey=`). Off by
+    /// default: it is public, as a Prometheus scrape without a key expects.
+    #[serde(default)]
+    pub metrics_require_key: bool,
 }
 
 /// `[proxy]`: the SOCKS5 proxy the daemon's own requests go through. The
