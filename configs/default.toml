@@ -77,7 +77,8 @@ create_torrent_folder = false
 # While the kill switch is armed, refuse to resolve a tracker name with the
 # host's own resolver: a lookup for an engine pinned to an interface with no
 # tunnel DNS server (an interface Hydranos did not create, or a WireGuard file
-# without a `DNS =` line) fails instead. Default false (the host's resolver is
+# without a `DNS =` line) fails instead, the echo service name of an engine's
+# exit probe included. Default false (the host's resolver is
 # used, as before); no other resolver is ever added.
 # dns_no_host_fallback = false
 
