@@ -160,7 +160,8 @@ fetch_binary() {
     # 404 from the day it was written. The tag comes from the API first.
     [ -n "$VER" ] || VER="$(curl -fsSL https://api.github.com/repos/Kheopsian/Hydranos/releases/latest | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -1)"
     [ -n "$VER" ] || { echo "could not resolve the latest release tag" >&2; exit 1; }
-    URL="https://github.com/Kheopsian/Hydranos/releases/download/$VER/hydranos-$VER-linux-$ARCH.tar.gz"
+    # HYDRANOS_RELEASE_BASE points at a mirror of the release downloads.
+    URL="${HYDRANOS_RELEASE_BASE:-https://github.com/Kheopsian/Hydranos/releases/download}/$VER/hydranos-$VER-linux-$ARCH.tar.gz"
     echo "==> fetching $URL" >&2
     tmp=$(mktemp -d)
     if ! curl -fsSL "$URL" -o "$tmp/hydranos.tar.gz"; then
