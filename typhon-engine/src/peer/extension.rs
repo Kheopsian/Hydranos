@@ -10,7 +10,7 @@
 
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
 use std::collections::BTreeMap;
 
@@ -266,6 +266,8 @@ pub struct PeerPolicy {
     block_mse: AtomicBool,
     /// `peer_encryption`: see `Encryption`. Stored as its `u8` tag.
     encryption: AtomicU8,
+    /// `max_unknown_infohash_per_ip`: 0 = off. See `peer::UnknownHashLimiter`.
+    unknown_hash_limit: AtomicU32,
     /// Seconds a peer may send us nothing useful before it is dropped
     /// (`peer_timeout`). Read by every session on every turn, so a new value
     /// reaches the connections already open.
@@ -307,6 +309,7 @@ impl Default for PeerPolicy {
             ipv6: AtomicBool::new(false),
             block_mse: AtomicBool::new(false),
             encryption: AtomicU8::new(Encryption::Allow as u8),
+            unknown_hash_limit: AtomicU32::new(0),
             idle_timeout_secs: AtomicU64::new(DEFAULT_PEER_IDLE_TIMEOUT_SECS),
             choking: AtomicBool::new(false),
             unchoke_slots: AtomicUsize::new(DEFAULT_UNCHOKE_SLOTS),
@@ -349,6 +352,16 @@ impl PeerPolicy {
 
     pub fn set_block_mse(&self, on: bool) {
         self.block_mse.store(on, Ordering::Relaxed);
+    }
+
+    /// Unknown-info_hash handshakes one source may make per window before it
+    /// is ignored for a while. 0 = no limit (the default).
+    pub fn unknown_hash_limit(&self) -> u32 {
+        self.unknown_hash_limit.load(Ordering::Relaxed)
+    }
+
+    pub fn set_unknown_hash_limit(&self, n: u32) {
+        self.unknown_hash_limit.store(n, Ordering::Relaxed);
     }
 
     /// `peer_encryption`, applied live to new connections.

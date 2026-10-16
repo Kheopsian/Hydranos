@@ -822,6 +822,92 @@ pub static INBOUND_REFUSED_BUSY: std::sync::atomic::AtomicU64 = std::sync::atomi
 /// Inbound plaintext handshakes closed because `peer_encryption = require`.
 pub static PLAINTEXT_INBOUND_REFUSED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// Inbound handshakes dropped because their source is being ignored
+/// (`max_unknown_infohash_per_ip`).
+pub static INBOUND_REFUSED_IGNORED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Window over which a source's unknown-info_hash handshakes are counted.
+const UNKNOWN_HASH_WINDOW: Duration = Duration::from_secs(60);
+/// How long a source over the limit is ignored.
+const UNKNOWN_HASH_IGNORE: Duration = Duration::from_secs(600);
+/// Sources tracked at once. Full of live entries, a new source is simply not
+/// tracked: the table never grows past this, whatever the senders do.
+const UNKNOWN_HASH_MAX_TRACKED: usize = 4096;
+
+struct UnknownHashEntry {
+    window_start: std::time::Instant,
+    count: u32,
+    ignored_until: Option<std::time::Instant>,
+}
+
+impl UnknownHashEntry {
+    /// Nothing left to remember about this source.
+    fn expired(&self, now: std::time::Instant) -> bool {
+        match self.ignored_until {
+            Some(t) => now >= t,
+            None => now.duration_since(self.window_start) >= UNKNOWN_HASH_WINDOW,
+        }
+    }
+}
+
+/// Per-source count of inbound handshakes that named an info_hash we do not
+/// have (`max_unknown_infohash_per_ip`). Over the limit within a window, the
+/// source is ignored for a while. Bounded: at most `UNKNOWN_HASH_MAX_TRACKED`
+/// entries, expired ones swept when it fills.
+#[derive(Default)]
+pub struct UnknownHashLimiter {
+    sources: dashmap::DashMap<std::net::IpAddr, UnknownHashEntry>,
+}
+
+impl UnknownHashLimiter {
+    /// Whether this source is currently being ignored.
+    pub fn is_ignored(&self, ip: std::net::IpAddr, now: std::time::Instant) -> bool {
+        let key = handshake_source(ip);
+        match self.sources.get(&key) {
+            Some(e) => e.ignored_until.is_some_and(|t| now < t),
+            None => false,
+        }
+    }
+
+    /// Record one unknown-info_hash handshake. `limit` 0 = off. Returns true
+    /// when this one puts the source over the limit.
+    pub fn note_unknown(&self, ip: std::net::IpAddr, now: std::time::Instant, limit: u32) -> bool {
+        if limit == 0 {
+            return false;
+        }
+        let key = handshake_source(ip);
+        if !self.sources.contains_key(&key) && self.sources.len() >= UNKNOWN_HASH_MAX_TRACKED {
+            self.sources.retain(|_, e| !e.expired(now));
+            if self.sources.len() >= UNKNOWN_HASH_MAX_TRACKED {
+                return false;
+            }
+        }
+        let mut e = self.sources.entry(key).or_insert(UnknownHashEntry { window_start: now, count: 0, ignored_until: None });
+        if e.expired(now) {
+            *e = UnknownHashEntry { window_start: now, count: 0, ignored_until: None };
+        }
+        if e.ignored_until.is_some() {
+            return true;
+        }
+        e.count = e.count.saturating_add(1);
+        if e.count > limit {
+            e.ignored_until = Some(now + UNKNOWN_HASH_IGNORE);
+            return true;
+        }
+        false
+    }
+
+    pub fn tracked(&self) -> usize {
+        self.sources.len()
+    }
+}
+
+static UNKNOWN_HASHES: std::sync::OnceLock<UnknownHashLimiter> = std::sync::OnceLock::new();
+
+fn unknown_hashes() -> &'static UnknownHashLimiter {
+    UNKNOWN_HASHES.get_or_init(Default::default)
+}
+
 fn handshake_source(ip: std::net::IpAddr) -> std::net::IpAddr {
     use std::net::IpAddr;
     match ip {
@@ -890,6 +976,11 @@ async fn handle_incoming(
         crate::ipfilter::BLOCKED_IN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         return;
     }
+    let unknown_limit = torrent_mgr.policy().unknown_hash_limit();
+    if unknown_limit > 0 && unknown_hashes().is_ignored(addr.ip(), std::time::Instant::now()) {
+        INBOUND_REFUSED_IGNORED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        return;
+    }
     let Some(slot) = HandshakeSlot::take(addr.ip()) else {
         INBOUND_REFUSED_BUSY.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         return;
@@ -950,7 +1041,10 @@ async fn handle_incoming(
                 INBOUND_REFUSED_PAUSED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 return;
             }
-            None => return,
+            None => {
+                unknown_hashes().note_unknown(addr.ip(), std::time::Instant::now(), unknown_limit);
+                return;
+            }
         };
         if at_connection_cap(&torrent) {
             return;
@@ -992,6 +1086,7 @@ async fn handle_incoming(
         }
 
         let tm_clone = torrent_mgr.clone();
+        let unknown_skey = std::sync::atomic::AtomicBool::new(false);
         let mse_res = tokio::time::timeout(
             HS_TIMEOUT,
             crate::crypto::mse::handshake_incoming_with(
@@ -1000,7 +1095,13 @@ async fn handle_incoming(
                 &ya_rest,
                 &peer_id,
                 // resolved per torrent below, same rule as the plaintext path
-                |req2_hash| tm_clone.lookup_skey(req2_hash),
+                |req2_hash| {
+                    let found = tm_clone.lookup_skey(req2_hash);
+                    if found.is_none() {
+                        unknown_skey.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    found
+                },
                 torrent_mgr.policy().encryption() == crate::peer::extension::Encryption::Require,
             ),
         ).await;
@@ -1027,6 +1128,9 @@ async fn handle_incoming(
                 (CryptoStream::new(stream, Some(enc), Some(dec)), torrent, hs.fast_extension, hs.extended_protocol, hs.peer_id, true)
             }
             Err(e) => {
+                if unknown_skey.load(std::sync::atomic::Ordering::Relaxed) {
+                    unknown_hashes().note_unknown(addr.ip(), std::time::Instant::now(), unknown_limit);
+                }
                 warn!("[peer] {} MSE handshake failed: {}", addr, e);
                 return;
             }
@@ -1212,6 +1316,74 @@ mod proxy_v2_accept_tests {
 }
 
 #[cfg(test)]
+mod unknown_hash_limiter_tests {
+    use super::*;
+    use std::time::Instant;
+
+    fn ip(s: &str) -> std::net::IpAddr {
+        s.parse().unwrap()
+    }
+
+    /// Within one window the limit is allowed; the next one tips the source
+    /// into being ignored, which lasts, then ends.
+    #[test]
+    fn a_source_over_the_limit_is_ignored_for_a_while() {
+        let l = UnknownHashLimiter::default();
+        let t0 = Instant::now();
+        let a = ip("192.168.99.1");
+        for _ in 0..3 {
+            assert!(!l.note_unknown(a, t0, 3));
+        }
+        assert!(!l.is_ignored(a, t0));
+        assert!(l.note_unknown(a, t0, 3), "the fourth is over");
+        assert!(l.is_ignored(a, t0 + Duration::from_secs(599)));
+        assert!(!l.is_ignored(a, t0 + UNKNOWN_HASH_IGNORE), "the ban ends");
+        assert!(!l.is_ignored(ip("192.168.99.2"), t0), "another source is untouched");
+        assert!(!l.note_unknown(a, t0, 0), "limit 0 counts nothing");
+    }
+
+    /// Slow guessing under the limit per window never trips it.
+    #[test]
+    fn the_count_restarts_with_each_window() {
+        let l = UnknownHashLimiter::default();
+        let t0 = Instant::now();
+        let a = ip("192.168.99.1");
+        for w in 0..10u64 {
+            let t = t0 + UNKNOWN_HASH_WINDOW * w as u32;
+            assert!(!l.note_unknown(a, t, 2));
+            assert!(!l.note_unknown(a, t, 2));
+        }
+        assert!(!l.is_ignored(a, t0 + UNKNOWN_HASH_WINDOW * 10));
+    }
+
+    /// A flood of distinct sources cannot grow the table past its cap, and a
+    /// full table sheds only what has expired.
+    #[test]
+    fn the_table_is_bounded() {
+        let l = UnknownHashLimiter::default();
+        let t0 = Instant::now();
+        for i in 0..(UNKNOWN_HASH_MAX_TRACKED as u32 + 500) {
+            let o = i.to_be_bytes();
+            l.note_unknown(ip(&format!("10.{}.{}.{}", o[1], o[2], o[3])), t0, 5);
+        }
+        assert_eq!(l.tracked(), UNKNOWN_HASH_MAX_TRACKED);
+        // A window later every entry is stale: a newcomer sweeps them out.
+        l.note_unknown(ip("203.0.113.9"), t0 + UNKNOWN_HASH_WINDOW, 5);
+        assert_eq!(l.tracked(), 1);
+    }
+
+    /// One IPv6 host spreading over its /64 is one source.
+    #[test]
+    fn an_ipv6_64_is_one_source() {
+        let l = UnknownHashLimiter::default();
+        let t0 = Instant::now();
+        assert!(!l.note_unknown(ip("2001:db8::1"), t0, 1));
+        assert!(l.note_unknown(ip("2001:db8::2"), t0, 1));
+        assert!(l.is_ignored(ip("2001:db8::3"), t0));
+    }
+}
+
+#[cfg(test)]
 mod paused_inbound_tests {
     use super::handle_incoming;
     use crate::torrent::TorrentManager;
@@ -1304,6 +1476,54 @@ mod paused_inbound_tests {
         mgr.policy().set_encryption("require");
         let refused = knock(mgr.clone(), disk.clone(), ih).await;
         assert!(refused.is_empty(), "require: plaintext closed unanswered, got {} bytes", refused.len());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Parent-compatible control: with no setting, a source that sends fifty
+    /// handshakes for unknown info_hashes is still answered for a real one.
+    /// Uses no `max_unknown_infohash_per_ip` symbol.
+    #[tokio::test]
+    async fn by_default_unknown_infohashes_never_get_a_source_ignored() {
+        let (mgr, disk, root) = manager("unknown-default");
+        let (ih, _) = mgr
+            .add_torrent_bytes(&torrent_bytes(), root.join("data").to_str().unwrap(), false, false)
+            .unwrap();
+        for i in 0..50u8 {
+            assert!(knock(mgr.clone(), disk.clone(), [i.wrapping_add(100); 20]).await.is_empty());
+        }
+        assert_eq!(knock(mgr, disk, ih).await.len(), 68);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// `max_unknown_infohash_per_ip`: at 0 (default) a source may name any
+    /// number of unknown info_hashes. Set to 3, the fourth is the last it is
+    /// heard on: the source is then ignored, even for a torrent we have. The
+    /// limit applies per source, so a different IP is untouched.
+    #[tokio::test]
+    async fn unknown_infohash_limit_ignores_a_source_that_keeps_guessing() {
+        let (mgr, disk, root) = manager("unknown");
+        let (ih, _) = mgr
+            .add_torrent_bytes(&torrent_bytes(), root.join("data").to_str().unwrap(), false, false)
+            .unwrap();
+
+        for i in 0..6u8 {
+            let r = knock(mgr.clone(), disk.clone(), [i; 20]).await;
+            assert!(r.is_empty());
+        }
+        assert_eq!(knock(mgr.clone(), disk.clone(), ih).await.len(), 68, "limit 0: never ignored");
+
+        mgr.policy().set_unknown_hash_limit(3);
+        for i in 0..3u8 {
+            assert!(knock(mgr.clone(), disk.clone(), [i; 20]).await.is_empty());
+        }
+        assert_eq!(knock(mgr.clone(), disk.clone(), ih).await.len(), 68, "three guesses in: still heard");
+        assert!(knock(mgr.clone(), disk.clone(), [9u8; 20]).await.is_empty());
+        assert!(
+            knock(mgr.clone(), disk.clone(), ih).await.is_empty(),
+            "past the limit the source is ignored, a real info_hash included"
+        );
+        mgr.policy().set_unknown_hash_limit(0);
+        assert_eq!(knock(mgr.clone(), disk.clone(), ih).await.len(), 68, "limit off: heard again");
         let _ = std::fs::remove_dir_all(root);
     }
 

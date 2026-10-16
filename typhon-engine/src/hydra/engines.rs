@@ -132,6 +132,7 @@ pub fn apply_live_settings(manager: &TorrentManager, session: &crate::config::Se
     manager.rates().engine.down.set_rate(down);
     manager.policy().set_idle_timeout_secs(session.peer_timeout);
     manager.policy().set_encryption(&session.peer_encryption);
+    manager.policy().set_unknown_hash_limit(session.max_unknown_infohash_per_ip);
     manager.policy().set_choking(session.choking);
     manager.policy().set_unchoke_slots(session.max_uploads_per_torrent);
 }
@@ -1150,6 +1151,7 @@ fn engine_config(
         "download_limit": session.rate_caps().1,
         "peer_timeout": session.peer_timeout,
         "peer_encryption": session.peer_encryption,
+        "max_unknown_infohash_per_ip": session.max_unknown_infohash_per_ip,
         "file_pool_size": session.file_pool_size(),
         // The proxy and the PROXY v2 relay. Typed in the session and never
         // passed on, so the engine dialled every peer directly and started no

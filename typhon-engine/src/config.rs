@@ -135,6 +135,11 @@ pub struct EngineConfig {
     /// `peer::extension::Encryption`.
     #[serde(default)]
     pub peer_encryption: String,
+    /// Inbound handshakes naming an info_hash this engine does not have, per
+    /// source IP per minute, before the source is ignored for ten minutes.
+    /// 0 (default) = no limit. See `peer::UnknownHashLimiter`.
+    #[serde(default)]
+    pub max_unknown_infohash_per_ip: u32,
     #[serde(default = "default_peer_timeout")]
     pub inactivity_timeout: u64,
     /// Engine-wide upload cap, BYTES per second. 0 = unlimited. Hydra fills
