@@ -10596,7 +10596,7 @@ const CLIENT_RATE_LIMITS_KEY: &str = "client_rate_limits";
 /// the live config on every pass (`workers::spawn_download_slots`,
 /// `workers::spawn_share_limits`), not because `apply_config` carries them.
 const LIVE_SESSION_KEYS: &[&str] = &[
-    "upload_rate_limit", "download_rate_limit", "peer_timeout", "choking", "max_uploads_per_torrent",
+    "upload_rate_limit", "download_rate_limit", "peer_timeout", "peer_encryption", "choking", "max_uploads_per_torrent",
     "active_downloads", "queueing", "active_seeds", "active_limit",
     "dont_count_slow_torrents", "slow_torrent_dl_rate_threshold", "slow_torrent_ul_rate_threshold",
     "slow_torrent_inactive_timer",
@@ -23240,6 +23240,21 @@ mod qbit_shim_post_tests {
         assert_eq!(json(&b)["upload_kib"], 128);
         let file = std::fs::read_to_string(&s.state.config_path).unwrap();
         assert!(file.contains("upload_rate_limit = 131072"), "{file}");
+    }
+
+    /// `peer_encryption` is a live engine key: `allow` until saved, then the
+    /// running engine follows the file without a restart.
+    #[tokio::test]
+    async fn saving_peer_encryption_moves_the_running_engine() {
+        use typhon_engine::peer::extension::Encryption;
+        let s = state_from("live-peer-encryption", &format!("[daemon]\napi_key = \"{KEY}\"\n\n[race]\nlisten_port = 1\n"));
+        let race = s.state.engines.get("race").unwrap();
+        assert_eq!(race.manager.policy().encryption(), Encryption::Allow, "allow by default");
+        let body = serde_json::json!({"changes": [{"section": "race", "key": "peer_encryption", "value": "require"}]});
+        let (st, b) = call(&s, "POST", "/api/settings", &body.to_string()).await;
+        assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
+        assert_eq!(json(&b)["restart_required"], false);
+        assert_eq!(race.manager.policy().encryption(), Encryption::Require);
     }
 
     /// ⭐⭐ The REAL ratio: what the torrent uploaded and downloaded, in

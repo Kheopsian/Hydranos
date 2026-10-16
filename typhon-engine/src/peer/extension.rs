@@ -10,7 +10,7 @@
 
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
 use std::collections::BTreeMap;
 
@@ -207,6 +207,51 @@ pub fn build_metadata_data(piece: u32, total_size: usize, block: &[u8]) -> Vec<u
     out
 }
 
+/// How this engine treats peer-wire encryption (MSE/PE), `peer_encryption`.
+///
+/// * `Allow` (default, what every install has run with): plaintext first on
+///   the way out, MSE only as the fallback; plaintext and MSE both accepted.
+/// * `Prefer`: MSE first on the way out, plaintext as the fallback. Inbound
+///   is unchanged. Costs RC4 on every byte of the sessions it opens.
+/// * `Require`: never plaintext. Outbound dials offer RC4 only, and an
+///   inbound plaintext handshake is closed unanswered. Peers that cannot do
+///   MSE are turned away.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Encryption {
+    Allow = 0,
+    Prefer = 1,
+    Require = 2,
+}
+
+impl Encryption {
+    /// The config spelling. Absent, empty or unknown = `Allow`: a typo must
+    /// not silently turn a client into an encryption-only one.
+    pub fn parse(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "prefer" => Encryption::Prefer,
+            "require" => Encryption::Require,
+            _ => Encryption::Allow,
+        }
+    }
+
+    fn from_tag(t: u8) -> Self {
+        match t {
+            1 => Encryption::Prefer,
+            2 => Encryption::Require,
+            _ => Encryption::Allow,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Encryption::Allow => "allow",
+            Encryption::Prefer => "prefer",
+            Encryption::Require => "require",
+        }
+    }
+}
+
 /// Whether to take the IPv6 peers a PEX message offers. Off unless the engine
 /// was started with `enable_ipv6`: without a v6 listener, dialling them would
 /// mean advertising a return path we cannot serve.
@@ -219,6 +264,8 @@ pub struct PeerPolicy {
     pex: AtomicBool,
     ipv6: AtomicBool,
     block_mse: AtomicBool,
+    /// `peer_encryption`: see `Encryption`. Stored as its `u8` tag.
+    encryption: AtomicU8,
     /// Seconds a peer may send us nothing useful before it is dropped
     /// (`peer_timeout`). Read by every session on every turn, so a new value
     /// reaches the connections already open.
@@ -259,6 +306,7 @@ impl Default for PeerPolicy {
             pex: AtomicBool::new(true),
             ipv6: AtomicBool::new(false),
             block_mse: AtomicBool::new(false),
+            encryption: AtomicU8::new(Encryption::Allow as u8),
             idle_timeout_secs: AtomicU64::new(DEFAULT_PEER_IDLE_TIMEOUT_SECS),
             choking: AtomicBool::new(false),
             unchoke_slots: AtomicUsize::new(DEFAULT_UNCHOKE_SLOTS),
@@ -301,6 +349,16 @@ impl PeerPolicy {
 
     pub fn set_block_mse(&self, on: bool) {
         self.block_mse.store(on, Ordering::Relaxed);
+    }
+
+    /// `peer_encryption`, applied live to new connections.
+    pub fn encryption(&self) -> Encryption {
+        Encryption::from_tag(self.encryption.load(Ordering::Relaxed))
+    }
+
+    /// Set the mode from its config spelling; anything unknown is `allow`.
+    pub fn set_encryption(&self, mode: &str) {
+        self.encryption.store(Encryption::parse(mode) as u8, Ordering::Relaxed);
     }
 
     /// Set the idle timeout. 0 means the default; anything under the floor is
@@ -458,6 +516,19 @@ fn encode_compact_v4(addrs: &[SocketAddr]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `peer_encryption`: absent, empty or unknown is `allow`; the policy
+    /// starts there and takes the three spellings live.
+    #[test]
+    fn peer_encryption_parses_and_defaults_to_allow() {
+        let p = PeerPolicy::default();
+        assert_eq!(p.encryption(), Encryption::Allow);
+        for (s, want) in [("prefer", Encryption::Prefer), (" Require ", Encryption::Require), ("allow", Encryption::Allow), ("", Encryption::Allow), ("x", Encryption::Allow)] {
+            p.set_encryption(s);
+            assert_eq!(p.encryption(), want, "{s:?}");
+        }
+        assert_eq!(Encryption::Require.as_str(), "require");
+    }
 
     /// ⭐ `peer_timeout`: absent / 0 = the 300 s every session ran before the
     /// key was read, and the template's old 30 / 20 are raised to the floor

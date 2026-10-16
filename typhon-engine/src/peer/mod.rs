@@ -819,6 +819,9 @@ static HANDSHAKING_BY_SOURCE: std::sync::OnceLock<dashmap::DashMap<std::net::IpA
 /// handshake, from that source or overall.
 pub static INBOUND_REFUSED_BUSY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// Inbound plaintext handshakes closed because `peer_encryption = require`.
+pub static PLAINTEXT_INBOUND_REFUSED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 fn handshake_source(ip: std::net::IpAddr) -> std::net::IpAddr {
     use std::net::IpAddr;
     match ip {
@@ -927,6 +930,12 @@ async fn handle_incoming(
             Err(_) => { HS_TIMED_OUT.fetch_add(1, std::sync::atomic::Ordering::Relaxed); return; }
         }
         if &rest[0..19] != b"BitTorrent protocol" { return; }
+        // `peer_encryption = require`: a plaintext handshake is closed before
+        // the torrent is even looked up, so it learns nothing.
+        if torrent_mgr.policy().encryption() == crate::peer::extension::Encryption::Require {
+            PLAINTEXT_INBOUND_REFUSED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return;
+        }
 
         let mut info_hash = [0u8; 20];
         info_hash.copy_from_slice(&rest[27..47]);
@@ -985,13 +994,14 @@ async fn handle_incoming(
         let tm_clone = torrent_mgr.clone();
         let mse_res = tokio::time::timeout(
             HS_TIMEOUT,
-            crate::crypto::mse::handshake_incoming(
+            crate::crypto::mse::handshake_incoming_with(
                 &mut stream,
                 first[0],
                 &ya_rest,
                 &peer_id,
                 // resolved per torrent below, same rule as the plaintext path
                 |req2_hash| tm_clone.lookup_skey(req2_hash),
+                torrent_mgr.policy().encryption() == crate::peer::extension::Encryption::Require,
             ),
         ).await;
         let mse_res = match mse_res {
@@ -1260,6 +1270,41 @@ mod paused_inbound_tests {
         server.abort();
         got.truncate(n);
         got
+    }
+
+    /// Parent-compatible control: by default a plaintext handshake for a
+    /// known torrent is answered. Uses no `peer_encryption` symbol.
+    #[tokio::test]
+    async fn by_default_a_plaintext_handshake_for_a_known_torrent_is_answered() {
+        let (mgr, disk, root) = manager("plain-default");
+        let (ih, _) = mgr
+            .add_torrent_bytes(&torrent_bytes(), root.join("data").to_str().unwrap(), false, false)
+            .unwrap();
+        assert_eq!(knock(mgr, disk, ih).await.len(), 68);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// `peer_encryption = require`: a plaintext handshake for a torrent we do
+    /// have is closed unanswered. At the default (`allow`) the same handshake
+    /// is answered, so the refusal is the option, not the fixture.
+    #[tokio::test]
+    async fn require_encryption_refuses_an_inbound_plaintext_handshake() {
+        let (mgr, disk, root) = manager("require");
+        let (ih, _) = mgr
+            .add_torrent_bytes(&torrent_bytes(), root.join("data").to_str().unwrap(), false, false)
+            .unwrap();
+
+        let answered = knock(mgr.clone(), disk.clone(), ih).await;
+        assert_eq!(answered.len(), 68, "allow (default) answers a plaintext handshake");
+
+        mgr.policy().set_encryption("prefer");
+        let answered = knock(mgr.clone(), disk.clone(), ih).await;
+        assert_eq!(answered.len(), 68, "prefer still accepts plaintext inbound");
+
+        mgr.policy().set_encryption("require");
+        let refused = knock(mgr.clone(), disk.clone(), ih).await;
+        assert!(refused.is_empty(), "require: plaintext closed unanswered, got {} bytes", refused.len());
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// ⭐ A stopped torrent takes no inbound session: the handshake is closed

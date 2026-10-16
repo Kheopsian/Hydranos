@@ -158,6 +158,11 @@ max_uploads_per_torrent = 100
 # Seconds a peer may send nothing useful (keep-alives do not count) before it
 # is dropped. Under 120 is raised to 120.
 peer_timeout = 300
+# Peer-wire encryption (MSE/PE): "allow" (plaintext first, MSE as the fallback,
+# both accepted), "prefer" (MSE first, plaintext fallback) or "require" (never
+# plaintext, in either direction: peers without MSE are turned away). MSE costs
+# RC4 on every byte and bypasses the zero-copy serve path.
+peer_encryption = "allow"
 inactivity_timeout = 20
 
 # The queue, qBittorrent's. active_downloads (0 or -1 = unlimited) always
@@ -249,6 +254,7 @@ download_rate_limit = 0
 choking = false
 max_uploads_per_torrent = -1
 peer_timeout = 300
+peer_encryption = "allow"
 inactivity_timeout = 20
 
 # The queue (see [race]); 10 downloads at a time, seeds unlimited.
