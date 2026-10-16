@@ -107,6 +107,11 @@ pub struct Session {
     pub enable_pex: bool,
     #[serde(default = "default_true")]
     pub enable_webseed: bool,
+    /// Let private torrents use the webseed mirrors their .torrent lists.
+    /// Absent means yes (the behaviour so far); `false` keeps them off the
+    /// mirrors. Only matters while `enable_webseed` is on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub webseed_private: Option<bool>,
     /// Announce to `udp://` trackers (BEP 15). Absent means yes: a tracker a
     /// torrent lists is one it expects to hear from. An Option rather than a
     /// bool with a serde default, because a missing `[race]`/`[hoard]` table
