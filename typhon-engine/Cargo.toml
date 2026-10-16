@@ -30,6 +30,11 @@ serde_json = "1"
 anyhow = "1"
 toml = "0.8"
 axum = { version = "0.7", features = ["multipart"] }
+# The API's own accept loop (hydra/httpserve.rs): axum::serve sets no header
+# timeout and no connection limit. Both already come in through axum, and
+# like axum here (no "http2" feature) they speak HTTP/1 only.
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["server", "server-graceful", "tokio", "http1"] }
 # `oneshot` on the router: the MCP endpoint runs its writes through the real
 # /api routes in-process. Already in the tree through axum, same version.
 tower = { version = "0.5", features = ["util"] }
