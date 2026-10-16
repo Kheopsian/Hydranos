@@ -146,6 +146,7 @@ pub fn start(
     // this host's address before the torrent even exists.
     let http_proxy = config.http_proxy();
     let ip_mode = announce_ip_mode(config.enable_ipv6);
+    let refuse_cleartext_key = config.announce_cleartext_passkey.trim().eq_ignore_ascii_case("refuse");
     let jobs = self.clone();
     tokio::spawn(async move {
         // Rounds until the budget runs out, not one. A peer that is still
@@ -166,7 +167,7 @@ pub fn start(
             round += 1;
             if discovered_at.map_or(true, |t| t.elapsed() >= DISCOVERY_EVERY) {
                 discovered_at = Some(Instant::now());
-                for p in discover(info_hash, &trackers, seed_peers.clone(), &peer_id, port, dht.clone(), &egress.device, &http_proxy, ip_mode).await {
+                for p in discover(info_hash, &trackers, seed_peers.clone(), &peer_id, port, dht.clone(), &egress.device, &http_proxy, ip_mode, refuse_cleartext_key).await {
                     if !peers.contains(&p) {
                         peers.push(p);
                     }
@@ -232,6 +233,9 @@ async fn discover(
     // The family the announces keep to: the engine's own announces are v4
     // only unless `enable_ipv6`, and a magnet's must not be the exception.
     ip_mode: crate::tracker::http::IpMode,
+    // `announce_cleartext_passkey = "refuse"`: a plain http:// tracker whose
+    // URL carries a key is not contacted.
+    refuse_cleartext_key: bool,
 ) -> Vec<SocketAddr> {
     let mut out: Vec<SocketAddr> = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -242,6 +246,10 @@ async fn discover(
     }
 
     for url in trackers {
+        if refuse_cleartext_key && crate::tracker::carries_key_in_clear(url) {
+            debug!("[magnet] tracker {} skipped: its URL carries a key over plain http://", log_host(url));
+            continue;
+        }
         let asked = if crate::tracker::udp::is_udp(url) {
             // Most public magnets list only UDP trackers.
             let a = crate::tracker::udp::UdpAnnounce {
@@ -473,6 +481,57 @@ mod tests {
                 assert!(msg.contains("binding"), "the reason names the binding: {msg}")
             }
             other => panic!("expected a binding failure, got {other:?}"),
+        }
+    }
+
+    /// A tracker that answers every announce with a refusal and notes it was
+    /// asked: (its port, whether anything connected).
+    async fn tracker() -> (u16, Arc<std::sync::atomic::AtomicBool>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = l.local_addr().unwrap().port();
+        let asked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = asked.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut c, _)) = l.accept().await else { return };
+                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                let mut buf = [0u8; 2048];
+                let _ = c.read(&mut buf).await;
+                let body = "d14:failure reason4:nopee";
+                let _ = c.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await;
+            }
+        });
+        (port, asked)
+    }
+
+    /// `announce_cleartext_passkey = "refuse"`: a plain http:// `tr=` that
+    /// carries a key is not contacted; the other trackers of the magnet still
+    /// are. Left at its default the same tracker is contacted as before.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn refuse_keeps_a_magnet_from_announcing_to_a_plain_http_tracker_with_a_key() {
+        for (mode, keyed_is_contacted) in [("", true), ("refuse", false)] {
+            let (keyed_port, keyed) = tracker().await;
+            let (plain_port, plain) = tracker().await;
+            let trackers = vec![
+                format!("http://127.0.0.1:{keyed_port}/announce?passkey=0123456789abcdef0123"),
+                format!("http://127.0.0.1:{plain_port}/announce"),
+            ];
+            let cfg: crate::config::EngineConfig =
+                toml::from_str(&format!("announce_cleartext_passkey = \"{mode}\"")).expect("config");
+            assert!(!cfg.resolved_bindings().is_empty(), "the job needs a binding to run");
+            let jobs = Arc::new(MagnetJobs::default());
+            assert!(jobs.start(ih(7), trackers, vec![], &cfg, None, None));
+            let seen = |f: &std::sync::atomic::AtomicBool| f.load(std::sync::atomic::Ordering::SeqCst);
+            for _ in 0..50 {
+                if seen(&plain) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            assert!(seen(&plain), "mode {mode:?}: a tracker without a key is announced to");
+            assert_eq!(seen(&keyed), keyed_is_contacted, "mode {mode:?}: the keyed http:// tracker");
+            jobs.forget(&ih(7));
         }
     }
 
