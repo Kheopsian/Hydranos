@@ -352,7 +352,9 @@ pub async fn start(
         let tm_done = mgr.clone();
         tokio::spawn(async move {
             while let Some(ih) = rx.recv().await {
-                tm_done.on_completed(&ih);
+                // An fsync and a SQLite write: off the async workers.
+                let tm = tm_done.clone();
+                let _ = tokio::task::spawn_blocking(move || tm.on_completed(&ih)).await;
             }
         });
     }
@@ -362,7 +364,10 @@ pub async fn start(
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(300)).await;
-            tm3.save_all_resume();
+            // Syncs the files written since the last sweep, then commits:
+            // blocking work, kept off the async workers.
+            let tm = tm3.clone();
+            let _ = tokio::task::spawn_blocking(move || tm.save_all_resume()).await;
         }
     });
 }

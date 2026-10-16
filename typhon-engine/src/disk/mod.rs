@@ -1,4 +1,5 @@
 use std::fs::File;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -121,8 +122,8 @@ pub fn evict_fds_timed(paths: &[PathBuf]) -> (std::time::Duration, std::time::Du
 pub struct DiskManager {
     fd_cache: Mutex<LruCache<PathBuf, Arc<File>>>,
     read_cache: Mutex<LruCache<CacheKey, CacheEntry>>,
-    /// Files written since the last `sync_written`.
-    written: Arc<Mutex<std::collections::HashSet<PathBuf>>>,
+    /// Files written and not yet synced, per torrent.
+    written: Arc<Mutex<HashMap<[u8; 20], std::collections::HashSet<PathBuf>>>>,
 }
 
 impl DiskManager {
@@ -134,34 +135,51 @@ impl DiskManager {
             read_cache: Mutex::new(LruCache::new(
                 NonZeroUsize::new(CACHE_MAX_ENTRIES).unwrap()
             )),
-            written: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            written: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
-    /// Make every file written since the last call durable, and say how many.
+    /// Make every file written since the last sync durable, and say how many.
     ///
-    /// Called before the state that records which pieces we hold is saved.
-    /// SQLite syncs its own file, not ours: without this, after a power cut
-    /// the record could be on disk while the bytes it vouches for were still
-    /// in the page cache, and we would serve zeros as verified pieces. Each
-    /// file is synced once however many pieces went to it; most of it has
-    /// usually reached the disk on its own by then.
+    /// Called by the resume sweep before it saves the bitfields. SQLite syncs
+    /// its own file, not ours: without this, after a power cut the record
+    /// could be on disk while the bytes it vouches for were still in the page
+    /// cache, and we would serve zeros as verified pieces. Each file is synced
+    /// once however many pieces went to it, and the set holds only what was
+    /// written since the last sweep; most of it has reached the disk on its own
+    /// by then. Blocking: callers run it off the async workers.
     pub fn sync_written(&self) -> usize {
-        let files = std::mem::take(&mut *self.written.lock());
+        let all = std::mem::take(&mut *self.written.lock());
+        all.into_iter().map(|(ih, files)| self.sync_files(ih, files)).sum()
+    }
+
+    /// `sync_written` for one torrent: what its completion record needs.
+    pub fn sync_torrent(&self, info_hash: &[u8; 20]) -> usize {
+        let files = self.written.lock().remove(info_hash);
+        files.map_or(0, |f| self.sync_files(*info_hash, f))
+    }
+
+    /// A file that fails to sync goes back in the set, to be tried again by
+    /// the next sweep; the state is saved anyway -- this hardens the order of
+    /// writes, it does not make a failing disk durable.
+    fn sync_files(&self, info_hash: [u8; 20], files: std::collections::HashSet<PathBuf>) -> usize {
         let mut synced = 0;
-        for path in &files {
-            let cached = fd_cache().lock().peek(path).cloned();
+        for path in files {
+            let cached = fd_cache().lock().peek(&path).cloned();
             // Never created here: a file deleted since was meant to go.
             let file = match cached {
                 Some(f) => f,
-                None => match std::fs::OpenOptions::new().write(true).open(path) {
+                None => match std::fs::OpenOptions::new().write(true).open(&path) {
                     Ok(f) => Arc::new(f),
                     Err(_) => continue,
                 },
             };
             match file.sync_data() {
                 Ok(()) => synced += 1,
-                Err(e) => tracing::warn!("[disk] sync {:?}: {}", path, e),
+                Err(e) => {
+                    tracing::warn!("[disk] sync {:?}: {}", path, e);
+                    self.written.lock().entry(info_hash).or_default().insert(path);
+                }
             }
         }
         synced
@@ -269,6 +287,7 @@ impl DiskManager {
         let name = torrent.meta.name.clone();
         let multi_file = torrent.meta.multi_file;
         let written = self.written.clone();
+        let info_hash = torrent.info_hash;
 
         // A piece we cannot check is a piece we refuse, not one we accept.
         let check = match torrent.piece_check(piece) {
@@ -312,7 +331,7 @@ impl DiskManager {
                     pwrite_all(&file, chunk, op.file_offset)
                         .map_err(|e| format!("pwrite {:?}: {}", full_path, e))?;
                 }
-                written.lock().insert(full_path);
+                written.lock().entry(info_hash).or_default().insert(full_path);
 
                 data_offset += op.length as usize;
             }
@@ -745,6 +764,18 @@ mod disk_tests {
         assert!(f.disk.write_piece(&f.torrent, 0, content).await.unwrap());
         f._mgr.save_all_resume();
         assert_eq!(f.disk.sync_written(), 0, "the sweep synced it first");
+    }
+
+    /// A completion syncs its own torrent's files, not every file every
+    /// torrent wrote since the last sweep.
+    #[tokio::test]
+    async fn a_completion_syncs_only_its_own_torrent() {
+        let content = vec![7u8; 4096];
+        let f = fixture("synconly", &content);
+        assert!(f.disk.write_piece(&f.torrent, 0, content).await.unwrap());
+        assert_eq!(f.disk.sync_torrent(&[0u8; 20]), 0, "another torrent wrote nothing");
+        assert_eq!(f.disk.sync_torrent(&f.torrent.info_hash), 1, "its one file");
+        assert_eq!(f.disk.sync_written(), 0, "and it left the set");
     }
 
     /// A block is a window into a piece, not the whole of it.
