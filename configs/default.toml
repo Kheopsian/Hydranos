@@ -38,6 +38,10 @@ create_torrent_folder = false
 # /metrics is public. With this on it wants the API key (X-Api-Key, or ?apikey=
 # for a scraper that cannot set a header): give Prometheus one before enabling it.
 # metrics_require_key = false
+# The address a node being enrolled is told to reach this daemon on (the command
+# the Nodes page prints). Empty = the Host header of the request that asked for
+# it, which is whatever name the browser used. Set it behind a reverse proxy.
+# public_url = "https://hydra.example.net:9443"
 
 # SOCKS5 proxy for the daemon's own requests with egress = "proxy" (socks5h:
 # names are resolved by the proxy). The engines' proxy is socks5_outbound_* in

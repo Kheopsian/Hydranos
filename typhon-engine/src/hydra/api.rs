@@ -659,11 +659,20 @@ async fn post_node_enrol(
             }
         }
     };
-    let host = headers
-        .get(axum::http::header::HOST)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("this-hydra:8199");
-    let base = format!("http://{host}");
+    // `[daemon] public_url`, when set, is the address a new machine is told to
+    // come back on; empty, it is the one the caller used (its `Host` header).
+    let configured = state.cfg().daemon.public_url.trim().trim_end_matches('/').to_string();
+    let base = if configured.is_empty() {
+        let host = headers
+            .get(axum::http::header::HOST)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("this-hydra:8199");
+        format!("http://{host}")
+    } else if configured.starts_with("http://") || configured.starts_with("https://") {
+        configured
+    } else {
+        format!("http://{configured}")
+    };
     // The script travels over the same plain link as the command's address,
     // so the command carries its hash: a script altered on the way fails the
     // check and is never run.
@@ -20151,6 +20160,32 @@ mod node_route_tests {
         let check = cmd.find("sha256sum -c").expect("the command checks the hash");
         let run = cmd.find("sh hydranos-enrol.sh").expect("the command runs the checked file");
         assert!(check < run, "checked before it runs: {cmd}");
+    }
+
+    /// `[daemon] public_url` is the base of the enrolment command when set;
+    /// empty (the default), the caller's `Host` header is, as before.
+    #[tokio::test]
+    async fn the_enrol_command_uses_the_public_url_when_one_is_set() {
+        let mut h = keyed(KEY);
+        h.insert(axum::http::header::HOST, "10.0.0.2:8199".parse().unwrap());
+
+        let s = st("node-enrol-host");
+        let cmd = body_json(super::post_node_enrol(State(s.state.clone()), RawQuery(None), h.clone()).await)
+            .await["command"].as_str().unwrap().to_string();
+        assert!(cmd.contains("http://10.0.0.2:8199/install.sh"), "the default follows Host: {cmd}");
+
+        for (configured, base) in [
+            ("https://hydra.example.net:9443", "https://hydra.example.net:9443"),
+            ("https://hydra.example.net/hydra/", "https://hydra.example.net/hydra"),
+            ("hydra.example.net:8199", "http://hydra.example.net:8199"),
+        ] {
+            let s = state_from("node-enrol-public", &format!("[daemon]\napi_key = \"{KEY}\"\npublic_url = \"{configured}\"\n"));
+            let cmd = body_json(super::post_node_enrol(State(s.state.clone()), RawQuery(None), h.clone()).await)
+                .await["command"].as_str().unwrap().to_string();
+            assert!(cmd.contains(&format!("curl -fsSL {base}/install.sh ")), "{configured}: {cmd}");
+            assert!(cmd.contains(&format!("--register-to {base} ")), "{configured}: {cmd}");
+            assert!(!cmd.contains("10.0.0.2"), "the caller's Host is not used: {cmd}");
+        }
     }
 
     /// Registering with a token nobody minted is refused: the token is the
