@@ -69,6 +69,10 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   backs off from 10 ms to a second between attempts, and logs the 1st, 2nd,
   4th... failure, instead of retrying at once: the retry loop held a core at
   100% and wrote a warning per turn.
+- At most 32 inbound connections per source (an IPv4 address or an IPv6
+  /64), and 4096 in all, may sit in the handshake at once; past that a new
+  one is closed unread. Counted as `inbound_refused_busy` in the engine
+  counters. Each inbound connection is logged at debug rather than info.
 
 Each of these was reproduced by a failing test before the fix, except the
 refusal of the address, which was shown on an isolated bench only.
