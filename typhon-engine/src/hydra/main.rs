@@ -543,6 +543,7 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
     config::ensure_api_key(&mut config, &config_path);
     let config = config;
     workers::start_memory_watch(config.daemon.memory_alert_bytes());
+    bootstrap::announce_setup_code(&config);
     // Keys the file holds and nothing reads: said once, never fatal -- an old
     // config must still start, but its owner must not believe it acts.
     deadkeys::warn_config(&config_path);

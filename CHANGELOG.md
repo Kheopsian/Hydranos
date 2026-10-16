@@ -40,6 +40,13 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 - First-run setup behind a reverse proxy requires every address in
   `X-Forwarded-For`, `X-Real-IP` and `Forwarded` to be local, not only the
   first one.
+- First-run setup asks for a one-time setup code, printed in the log at
+  startup (`docker logs hydranos`, `journalctl -u hydranos` or
+  `hydranos.log`), as well as a local caller. The code changes at every
+  start and stops working once the admin account exists. Installs that
+  already have an account are not affected. A script that creates the
+  account through `POST /api/setup` must now send the code as
+  `setup_code`, or set the password with `hydranos reset-password`.
 
 ## v4.5.4 -- a write the store did not keep is never acknowledged
 
