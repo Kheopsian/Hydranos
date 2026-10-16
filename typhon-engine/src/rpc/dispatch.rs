@@ -628,6 +628,7 @@ fn get_diagnostics(mgr: &Arc<TorrentManager>, config: &EngineConfig) -> Value {
     put_u!("dial_attempted", crate::tracker::DIAL_ATTEMPTED.load(Ordering::Relaxed));
     put_u!("dial_enqueued", crate::tracker::DIAL_ENQUEUED.load(Ordering::Relaxed));
     put_u!("dial_enqueue_dropped", crate::tracker::DIAL_ENQUEUE_DROPPED.load(Ordering::Relaxed));
+    put_u!("dial_queue_full", crate::tracker::DIAL_QUEUE_FULL.load(Ordering::Relaxed));
     put_u!("dial_plain_ok", crate::tracker::DIAL_PLAIN_OK.load(Ordering::Relaxed));
     put_u!("dial_plain_fail", crate::tracker::DIAL_PLAIN_FAIL.load(Ordering::Relaxed));
     put_u!("dial_mse_attempted", crate::tracker::DIAL_MSE_ATTEMPTED.load(Ordering::Relaxed));

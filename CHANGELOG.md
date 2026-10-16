@@ -76,6 +76,10 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 - An incoming encrypted (MSE) handshake whose PadC or initial payload is
   declared longer than 512 bytes is refused on that length, before anything
   is allocated or read.
+- An engine's outbound dial queue holds at most 4096 peers. Peers arriving
+  faster than the dial pacer lets them out are dropped and counted
+  (`dial_queue_full`), not queued without limit; the next announce hands
+  them back.
 
 Each of these was reproduced by a failing test before the fix, except the
 refusal of the address, which was shown on an isolated bench only.
