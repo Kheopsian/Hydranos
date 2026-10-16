@@ -107,7 +107,8 @@ struct CacheEntry {
 /// dropped and the kernel reclaims the blocks of a just-unlinked file.
 /// `remove_torrent` unlinks files but, without this, the cached fd pins the
 /// inode (and its disk blocks) alive until LRU eviction — a space leak that
-/// fills /race under drain churn (nofile is huge, so the LRU never evicts).
+/// fills /race under drain churn (10 000 entries: a drain unlinks far fewer
+/// before the LRU gets round to them).
 pub fn evict_fds(paths: &[PathBuf]) {
     let _ = evict_fds_timed(paths);
 }
@@ -127,7 +128,6 @@ pub fn evict_fds_timed(paths: &[PathBuf]) -> (std::time::Duration, std::time::Du
 }
 
 pub struct DiskManager {
-    fd_cache: Mutex<LruCache<PathBuf, Arc<File>>>,
     read_cache: Mutex<LruCache<CacheKey, CacheEntry>>,
     /// Files written and not yet synced, per torrent.
     written: Arc<Mutex<HashMap<[u8; 20], std::collections::HashSet<PathBuf>>>>,
@@ -146,11 +146,12 @@ fn gen_stripe(key: &CacheKey) -> usize {
 }
 
 impl DiskManager {
-    pub fn new(max_open_files: usize) -> Self {
+    /// `max_open_files` is not used: descriptors live in the process-wide
+    /// cache (`fd_cache`), fixed at 10 000. The per-manager pool this sized
+    /// was never read, and a setting that looks like it acts is worse than
+    /// none.
+    pub fn new(_max_open_files: usize) -> Self {
         Self {
-            fd_cache: Mutex::new(LruCache::new(
-                NonZeroUsize::new(max_open_files.max(100)).unwrap()
-            )),
             read_cache: Mutex::new(LruCache::new(
                 NonZeroUsize::new(CACHE_MAX_ENTRIES).unwrap()
             )),
