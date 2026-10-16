@@ -77,6 +77,11 @@ enable_pex = true
 # proxy. On by default for race, as in qBittorrent.
 enable_lsd = true
 max_connections = 4000
+# Cap on OUTBOUND peer connections started per second (a token bucket; the burst
+# equals the rate). Bounds how fast this engine dials the peers a tracker, PEX
+# or the DHT hands back, so a reply full of peers can never be turned into a
+# flood of connection attempts toward one host. 0 = unlimited.
+max_dials_per_sec = 50
 # Download memory budget, MiB: the pieces being downloaded plus the pieces
 # waiting to be written. Over it, no new piece is started until writes catch
 # up, so a disk slower than the network (a USB disk, an SD card) slows the
@@ -171,6 +176,8 @@ enable_pex = true
 # mostly private torrents downloads little and LSD never announces those.
 enable_lsd = false
 max_connections = 12000
+# Cap on OUTBOUND peer connections started per second (see [race]). 0 = unlimited.
+max_dials_per_sec = 50
 # Download memory budget, MiB (see [race]). 0 = automatic.
 piece_memory_mb = 0
 # Speed caps, bytes/s, 0 = unlimited (see [race]).
