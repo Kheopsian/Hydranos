@@ -1817,7 +1817,7 @@ async fn get_passkeys(
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
     let cfg = state.cfg();
-    Json(&cfg.announce_passkeys).into_response()
+    Json(masked_passkeys(&cfg.announce_passkeys)).into_response()
 }
 
 /// Defaults the UI pre-fills the "add torrent" form with.
@@ -4963,6 +4963,12 @@ pub(crate) fn is_kept_secret(key: &str, v: &serde_json::Value) -> bool {
     SECRET_KEYS.contains(&key) && v.as_str() == Some(SECRET_MASK)
 }
 
+/// The per-host passkeys as a GET answers them: the hosts that have one, the
+/// passkey itself replaced by the mask.
+fn masked_passkeys(all: &std::collections::BTreeMap<String, String>) -> std::collections::BTreeMap<String, &'static str> {
+    all.iter().map(|(h, p)| (h.clone(), mask_secret(p))).collect()
+}
+
 /// The proxy URL whose password is masked: `announce_proxy` carries one in
 /// `scheme://user:pass@host`, and went out in clear where the SOCKS5 password
 /// beside it was masked.
@@ -5005,7 +5011,15 @@ fn mask_secrets(v: &mut serde_json::Value) {
     match v {
         serde_json::Value::Object(m) => {
             for (k, x) in m.iter_mut() {
-                if PROXY_URL_KEYS.contains(&k.as_str()) {
+                if k == "announce_passkeys" && x.is_object() {
+                    // One passkey per host: the keys are host names, so the
+                    // values are masked whatever the host is called.
+                    for pk in x.as_object_mut().into_iter().flat_map(|m| m.values_mut()) {
+                        if let Some(p) = pk.as_str() {
+                            *pk = serde_json::Value::String(mask_secret(p).to_string());
+                        }
+                    }
+                } else if PROXY_URL_KEYS.contains(&k.as_str()) {
                     if let Some(s) = x.as_str() {
                         *x = serde_json::Value::String(mask_proxy_url(s));
                     }
@@ -8075,14 +8089,19 @@ async fn set_announce_passkey(
         return (StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({"error": "host is required"}))).into_response();
     }
-    let persisted = set_host_entry(&state, "announce_passkeys", req.host.trim(), &req.passkey);
+    // The mask posted back (a form saved as it was) means "unchanged".
+    let persisted = if req.passkey == SECRET_MASK {
+        true
+    } else {
+        set_host_entry(&state, "announce_passkeys", req.host.trim(), &req.passkey)
+    };
     // Hand the new tables to the runners before answering, so the
     // reply cannot claim an override that is not live yet.
     let engines_reloaded = refresh_announce_policies(&state);
     Json(serde_json::json!({
         "engines_reloaded": engines_reloaded,
         "status": "ok",
-        "passkeys": state.cfg().announce_passkeys,
+        "passkeys": masked_passkeys(&state.cfg().announce_passkeys),
         "agents_failed": 0,
         "persisted": persisted,
     }))
@@ -10270,7 +10289,9 @@ async fn post_settings(
     };
 
     for change in &req.changes {
-        if is_kept_secret(&change.key, &change.value) {
+        if is_kept_secret(&change.key, &change.value)
+            || (change.section == "announce_passkeys" && change.value.as_str() == Some(SECRET_MASK))
+        {
             continue;
         }
         let unmasked;
@@ -23338,6 +23359,40 @@ mod network_mode_tests {
         }))).await;
         assert_eq!(st, StatusCode::OK, "{body}");
         assert_eq!(s.cfg().race.socks5_outbound_pass, "new-pw", "a new one is written");
+    }
+
+    /// ⭐ A tracker passkey does not leave the daemon either: `/api/settings`
+    /// and `/api/announce/passkeys` answer the mask for a host that has one,
+    /// and posting the mask back (a form saved as it was) keeps the real value.
+    #[tokio::test]
+    async fn tracker_passkeys_are_masked_and_a_masked_save_keeps_them() {
+        let file = format!("{DIRECT_FILE}\n[announce_passkeys]\n\"tracker.example\" = \"pk-s3cr3t\"\n");
+        let s = state_from("passkey-mask", &file);
+
+        let settings = body_json(get_settings(State(s.clone()), RawQuery(None), keyed(KEY)).await).await;
+        assert!(!settings.to_string().contains("pk-s3cr3t"), "{settings}");
+        assert_eq!(settings["announce_passkeys"]["tracker.example"], SECRET_MASK);
+        let list = body_json(get_passkeys(State(s.clone()), RawQuery(None), keyed(KEY)).await).await;
+        assert!(!list.to_string().contains("pk-s3cr3t"), "{list}");
+        assert_eq!(list["tracker.example"], SECRET_MASK, "which hosts have one stays readable");
+
+        let kept = |s: &TestState| s.cfg().announce_passkeys.get("tracker.example").cloned().unwrap_or_default();
+        let change = |v: &str| serde_json::json!({"changes": [
+            {"section": "announce_passkeys", "key": "tracker.example", "value": v}]}).to_string();
+
+        let r = post_settings(State(s.clone()), RawQuery(None), keyed(KEY), change(SECRET_MASK)).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        assert_eq!(kept(&s), "pk-s3cr3t", "the mask was written as the passkey");
+
+        let body = serde_json::json!({"host": "tracker.example", "passkey": SECRET_MASK}).to_string();
+        let r = set_announce_passkey(State(s.clone()), RawQuery(None), keyed(KEY), body).await;
+        let answer = body_json(r).await;
+        assert!(!answer.to_string().contains("pk-s3cr3t"), "{answer}");
+        assert_eq!(kept(&s), "pk-s3cr3t", "the tracker form wrote the mask");
+
+        let r = post_settings(State(s.clone()), RawQuery(None), keyed(KEY), change("pk-new")).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        assert_eq!(kept(&s), "pk-new", "a new one is written");
     }
 
     #[test]
