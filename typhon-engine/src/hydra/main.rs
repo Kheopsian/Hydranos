@@ -34,6 +34,7 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 mod allocdiag;
 mod api;
+mod httpserve;
 mod platform;
 mod tray;
 mod trayicon;
@@ -601,13 +602,15 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
     // the sender cannot know which of ITS addresses the receiver can reach --
     // tunnels, NAT, several interfaces. The receiver can: it is the address the
     // request arrived from.
-    let mut serve = tokio::spawn(std::future::IntoFuture::into_future(
-        axum::serve(listener, gate.into_make_service_with_connect_info::<std::net::SocketAddr>())
-            .with_graceful_shutdown(async move {
-                shutdown_signal().await;
-                shutdown::begin_stop();
-                drain_started.notify_one();
-            }),
+    let mut serve = tokio::spawn(httpserve::serve(
+        listener,
+        gate,
+        httpserve::Limits::default(),
+        async move {
+            shutdown_signal().await;
+            shutdown::begin_stop();
+            drain_started.notify_one();
+        },
     ));
 
     // The engines live here now, not in a child process behind a socket.
