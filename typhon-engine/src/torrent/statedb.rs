@@ -81,6 +81,9 @@ CREATE TABLE IF NOT EXISTS torrent_state (
 );
 ";
 
+/// Rows per commit in `put_batch`.
+const PUT_BATCH_SLICE: usize = 2000;
+
 impl StateDb {
     /// Open (creating if absent) the state database at `path`.
     ///
@@ -143,22 +146,27 @@ impl StateDb {
         tx.commit()
     }
 
-    /// Upsert many records in a single transaction. This is the whole point of
-    /// the module: the caller hands over only the rows whose fingerprint moved,
-    /// and the entire sweep costs one commit instead of one file per torrent.
+    /// Upsert many records, a few thousand per transaction. This is the
+    /// whole point of the module: the caller hands over only the rows whose
+    /// fingerprint moved, and a sweep costs a handful of commits instead of
+    /// one file per torrent.
+    ///
+    /// Not one transaction for everything: the shutdown flush rewrites every
+    /// row, and a process stopped before a single commit of 300k rows lost all
+    /// of them. In slices, what is committed stays committed, and a removal
+    /// waiting for the connection gets it between two slices.
     pub fn put_batch(&self, records: &[ResumeData]) -> Result<usize, rusqlite::Error> {
-        if records.is_empty() {
-            return Ok(0);
+        for slice in records.chunks(PUT_BATCH_SLICE) {
+            let mut conn = match self.conn.lock() {
+                Ok(c) => c,
+                Err(e) => e.into_inner(),
+            };
+            let tx = conn.transaction()?;
+            for rd in slice {
+                put_in(&tx, rd)?;
+            }
+            tx.commit()?;
         }
-        let mut conn = match self.conn.lock() {
-            Ok(c) => c,
-            Err(e) => e.into_inner(),
-        };
-        let tx = conn.transaction()?;
-        for rd in records {
-            put_in(&tx, rd)?;
-        }
-        tx.commit()?;
         Ok(records.len())
     }
 

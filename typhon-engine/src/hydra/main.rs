@@ -1345,9 +1345,9 @@ fn flush_on_shutdown(engines: &std::sync::Arc<engines::EngineHost>, budget: std:
 
     // The budget is enforced here: past it, the process leaves with what is
     // written. 4.3 joined every thread unconditionally, so the variable only
-    // chose which log line to print. Each engine's resume store commits per
-    // transaction, so leaving mid-sweep loses the unwritten rest, not the
-    // written part.
+    // chose which log line to print. Each engine's resume store commits a
+    // few thousand rows at a time, so leaving mid-sweep loses the unwritten
+    // rest, not the written part.
     for h in handles {
         while !h.is_finished() && started.elapsed() < budget {
             std::thread::sleep(std::time::Duration::from_millis(50));
