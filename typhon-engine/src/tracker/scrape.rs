@@ -72,7 +72,9 @@ pub async fn http_scrape_on(
     if !resp.status().is_success() {
         return Err(format!("scrape: HTTP {}", resp.status().as_u16()));
     }
-    let body = resp.bytes().await.map_err(|e| format!("scrape body: {}", e.without_url()))?;
+    let body = super::http::read_capped(resp, super::http::MAX_TRACKER_BODY)
+        .await
+        .map_err(|e| format!("scrape body: {e}"))?;
     parse_http_scrape(&body)
 }
 
@@ -191,6 +193,21 @@ mod tests {
         // it must error out before overflowing the stack and aborting.
         let bomb = vec![b'l'; 200_000];
         assert!(parse_http_scrape(&bomb).is_err());
+    }
+
+    /// A scrape answer that keeps streaming is refused at the cap, not read
+    /// into memory to the end of the timeout.
+    #[tokio::test]
+    async fn a_scrape_answer_past_the_cap_is_refused_unread() {
+        let (base, _) = crate::tracker::http::endless::server("200 OK", b"d5:filesd".to_vec(), b'l').await;
+        let out = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            http_scrape_on(&format!("{base}/scrape"), &[[0x41u8; 20]], "t", "", ""),
+        )
+        .await
+        .expect("the client gave up on its own, before its 20 s timeout");
+        let e = out.expect_err("refused");
+        assert!(e.contains("larger than"), "refused for its size: {e}");
     }
 
     #[test]

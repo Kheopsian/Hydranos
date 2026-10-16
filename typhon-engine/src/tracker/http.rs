@@ -282,11 +282,47 @@ pub async fn announce_on(
         return Err(http_error(resp).await);
     }
 
-    let body = resp.bytes().await
-        .map_err(|e| format!("http body: {}", fmt_err_chain(&e)))?;
+    let body = read_capped(resp, MAX_TRACKER_BODY).await
+        .map_err(|e| format!("http body: {e}"))?;
 
     // Parse bencoded response
     parse_announce_response(&body)
+}
+
+/// The most of a tracker answer (announce or scrape) that is read. A compact
+/// answer for 200 peers is 1.2 KB, a scrape of `scrape::BATCH` torrents a few;
+/// a megabyte is a tracker sending something else.
+pub(crate) const MAX_TRACKER_BODY: usize = 1 << 20;
+
+/// The most peers taken from one answer. We ask for 200; the rest of a longer
+/// list would only queue dials nobody asked for.
+pub(crate) const MAX_PEERS_PER_ANSWER: usize = 1000;
+
+/// The body of `resp`, refused past `max` bytes. Read chunk by chunk, so a
+/// server streaming gigabytes costs `max` bytes of memory and not gigabytes.
+pub(crate) async fn read_capped(resp: reqwest::Response, max: usize) -> Result<Vec<u8>, String> {
+    if resp.content_length().is_some_and(|n| n > max as u64) {
+        return Err(format!("larger than {max} bytes"));
+    }
+    let (body, more) = read_prefix(resp, max).await?;
+    if more {
+        return Err(format!("larger than {max} bytes"));
+    }
+    Ok(body)
+}
+
+/// At most `max` bytes of `resp`'s body, and whether there was more.
+pub(crate) async fn read_prefix(mut resp: reqwest::Response, max: usize) -> Result<(Vec<u8>, bool), String> {
+    let mut out = Vec::new();
+    while let Some(chunk) = resp.chunk().await.map_err(|e| fmt_err_chain(&e.without_url()))? {
+        let room = max - out.len();
+        if chunk.len() > room {
+            out.extend_from_slice(&chunk[..room]);
+            return Ok((out, true));
+        }
+        out.extend_from_slice(&chunk);
+    }
+    Ok((out, false))
 }
 
 fn parse_announce_response(data: &[u8]) -> Result<AnnounceResponse, String> {
@@ -351,7 +387,7 @@ fn parse_announce_response(data: &[u8]) -> Result<AnnounceResponse, String> {
                     let port = u16::from_be_bytes([chunk[4], chunk[5]]);
                     // Port 0 is not a listening peer; dialling it is a
                     // connection attempt to nothing.
-                    if port != 0 {
+                    if port != 0 && peers.len() < MAX_PEERS_PER_ANSWER {
                         peers.push(SocketAddr::new(IpAddr::V4(ip), port));
                     }
                 }
@@ -367,6 +403,9 @@ fn parse_announce_response(data: &[u8]) -> Result<AnnounceResponse, String> {
                         Some(p) if (1..=65535).contains(&p) => p as u16,
                         _ => continue,
                     };
+                    if peers.len() >= MAX_PEERS_PER_ANSWER {
+                        break;
+                    }
                     if let Ok(ip) = ip_str.parse::<IpAddr>() {
                         peers.push(SocketAddr::new(ip, port));
                     }
@@ -385,7 +424,7 @@ fn parse_announce_response(data: &[u8]) -> Result<AnnounceResponse, String> {
                     ip_bytes.copy_from_slice(&chunk[0..16]);
                     let ip = std::net::Ipv6Addr::from(ip_bytes);
                     let port = u16::from_be_bytes([chunk[16], chunk[17]]);
-                    if port != 0 {
+                    if port != 0 && peers.len() < MAX_PEERS_PER_ANSWER {
                         peers.push(SocketAddr::new(IpAddr::V6(ip), port));
                     }
                 }
@@ -554,8 +593,12 @@ pub(crate) fn merge_announce(
 ) -> Result<AnnounceResponse, String> {
     match (v4, v6) {
         (Ok(mut a), Ok(b)) => {
+            let mut seen: std::collections::HashSet<SocketAddr> = a.peers.iter().copied().collect();
             for p in b.peers {
-                if !a.peers.contains(&p) {
+                if a.peers.len() >= MAX_PEERS_PER_ANSWER {
+                    break;
+                }
+                if seen.insert(p) {
                     a.peers.push(p);
                 }
             }
@@ -628,8 +671,9 @@ async fn http_error(resp: reqwest::Response) -> String {
         .get(reqwest::header::RETRY_AFTER)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.trim().parse::<u64>().ok());
-    let body = resp.text().await.unwrap_or_default();
-    let snip: String = body.chars().take(200).collect();
+    // 200 characters are at most 800 bytes of UTF-8: nothing past that is read.
+    let (body, _) = read_prefix(resp, 800).await.unwrap_or_default();
+    let snip: String = String::from_utf8_lossy(&body).chars().take(200).collect();
     match retry_after {
         Some(secs) => format!("http {}: {} [retry-after {}s]", st, snip.trim(), secs),
         None => format!("http {}: {}", st, snip.trim()),
@@ -643,10 +687,9 @@ async fn finish_announce(resp: reqwest::Response) -> Result<AnnounceResponse, St
         return Err(http_error(resp).await);
     }
 
-    let body = resp
-        .bytes()
+    let body = read_capped(resp, MAX_TRACKER_BODY)
         .await
-        .map_err(|e| format!("http body: {}", fmt_err_chain(&e)))?;
+        .map_err(|e| format!("http body: {e}"))?;
     parse_announce_response(&body)
 }
 
@@ -665,11 +708,132 @@ pub(crate) fn url_encode_binary(data: &[u8]) -> String {
     result
 }
 
+/// An HTTP server that never stops talking, for the tests of what a client
+/// reads from a hostile one.
+#[cfg(test)]
+pub(crate) mod endless {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// Answers every connection with `status` (e.g. `"200 OK"`), no length,
+    /// `prefix`, then `fill` bytes until the client hangs up. Returns its base
+    /// URL and the count of bytes written, all connections together.
+    pub(crate) async fn server(status: &'static str, prefix: Vec<u8>, fill: u8) -> (String, Arc<AtomicUsize>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let written = Arc::new(AtomicUsize::new(0));
+        let w = written.clone();
+        tokio::spawn(async move {
+            while let Ok((mut s, _)) = listener.accept().await {
+                let (prefix, w) = (prefix.clone(), w.clone());
+                tokio::spawn(async move {
+                    let mut req = [0u8; 4096];
+                    let _ = s.read(&mut req).await;
+                    let head = format!("HTTP/1.1 {status}\r\nConnection: close\r\n\r\n");
+                    if s.write_all(head.as_bytes()).await.is_err() || s.write_all(&prefix).await.is_err() {
+                        return;
+                    }
+                    let block = vec![fill; 64 * 1024];
+                    while s.write_all(&block).await.is_ok() {
+                        w.fetch_add(block.len(), Ordering::Relaxed);
+                    }
+                });
+            }
+        });
+        (format!("http://{addr}"), written)
+    }
+}
+
 #[cfg(test)]
 mod announce_wire_tests {
     use super::*;
     use axum::routing::get;
     use axum::Router;
+
+    /// A compact list of `n` distinct peers, as a tracker would send it.
+    fn compact_peers(n: usize) -> Vec<u8> {
+        let mut out = format!("d8:intervali1800e5:peers{}:", n * 6).into_bytes();
+        for i in 0..n {
+            out.extend_from_slice(&[10, (i >> 16) as u8, (i >> 8) as u8, i as u8, 0x1a, 0xe1]);
+        }
+        out.push(b'e');
+        out
+    }
+
+    /// ⭐ A tracker that keeps streaming is cut off at the cap, not read into
+    /// memory to the end of the timeout. The answer it sends is a valid one
+    /// that never ends: the peer list's declared length is ten megabytes, and
+    /// a client reading it whole would return two million peers.
+    #[tokio::test]
+    async fn an_announce_answer_past_the_cap_is_refused_unread() {
+        for v6_path in [false, true] {
+            let (base, written) =
+                endless::server("200 OK", b"d8:intervali1800e5:peers12000000:".to_vec(), 0x01).await;
+            let url = format!("{base}/announce");
+            let out = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                if v6_path {
+                    send_announce(&url, "t", IpMode::V4).await
+                } else {
+                    announce(&url, &[0xABu8; 20], &[0xCDu8; 20], 16371, 0, 0, 0, "").await
+                }
+            })
+            .await
+            .expect("the client gave up on its own, before the test's timeout");
+            let e = out.expect_err("a body this size is refused");
+            assert!(e.contains("larger than"), "refused for its size: {e}");
+            let w = written.load(std::sync::atomic::Ordering::Relaxed);
+            assert!(w < 32 << 20, "{w} bytes went out before the client hung up");
+        }
+    }
+
+    /// One answer yields at most a thousand peers (`MAX_PEERS_PER_ANSWER`),
+    /// whatever the tracker lists.
+    #[tokio::test]
+    async fn one_answer_yields_at_most_a_thousand_peers() {
+        let body: &'static [u8] = Box::leak(compact_peers(5000).into_boxed_slice());
+        let t = fake_tracker(body).await;
+        let resp = announce(&t.url, &[0xABu8; 20], &[0xCDu8; 20], 16371, 0, 0, 1, "")
+            .await
+            .expect("answered");
+        assert_eq!(resp.peers.len(), 1000);
+    }
+
+    /// The v4 and v6 answers, each under the cap, merged stay under it too,
+    /// without a quadratic pass over the two lists.
+    #[test]
+    fn a_merged_answer_stays_under_the_peer_cap() {
+        let one = |base: u8| AnnounceResponse {
+            interval: 1800,
+            min_interval: 0,
+            peers: (0..800u32)
+                .map(|i| SocketAddr::new(IpAddr::V4(Ipv4Addr::new(base, (i >> 16) as u8, (i >> 8) as u8, i as u8)), 6881))
+                .collect(),
+            complete: 0,
+            incomplete: 0,
+            failure: None,
+            tracker_id: None,
+            warning: None,
+        };
+        let merged = merge_announce(Ok(one(10)), Ok(one(11))).expect("both answered");
+        assert_eq!(merged.peers.len(), 1000);
+    }
+
+    /// A refusal's body is quoted, 200 characters of it, and only that much
+    /// is read: a tracker streaming an endless error page cannot hold the
+    /// announce for the whole timeout.
+    #[tokio::test]
+    async fn an_endless_error_page_is_quoted_without_being_read_whole() {
+        let (base, _) = endless::server("503 Service Unavailable", b"busy ".to_vec(), b'x').await;
+        let out = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            announce(&format!("{base}/announce"), &[0xABu8; 20], &[0xCDu8; 20], 16371, 0, 0, 0, ""),
+        )
+        .await
+        .expect("answered before the 15 s client timeout");
+        let e = out.expect_err("a 503 is an error");
+        assert!(e.contains("503") && e.contains("busy xxx"), "the start of the body is quoted: {e}");
+    }
 
     struct FakeTracker {
         url: String,
