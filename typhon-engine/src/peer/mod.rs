@@ -902,12 +902,6 @@ impl UnknownHashLimiter {
     }
 }
 
-static UNKNOWN_HASHES: std::sync::OnceLock<UnknownHashLimiter> = std::sync::OnceLock::new();
-
-fn unknown_hashes() -> &'static UnknownHashLimiter {
-    UNKNOWN_HASHES.get_or_init(Default::default)
-}
-
 fn handshake_source(ip: std::net::IpAddr) -> std::net::IpAddr {
     use std::net::IpAddr;
     match ip {
@@ -977,7 +971,7 @@ async fn handle_incoming(
         return;
     }
     let unknown_limit = torrent_mgr.policy().unknown_hash_limit();
-    if unknown_limit > 0 && unknown_hashes().is_ignored(addr.ip(), std::time::Instant::now()) {
+    if unknown_limit > 0 && torrent_mgr.unknown_hashes().is_ignored(addr.ip(), std::time::Instant::now()) {
         INBOUND_REFUSED_IGNORED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         return;
     }
@@ -1042,7 +1036,7 @@ async fn handle_incoming(
                 return;
             }
             None => {
-                unknown_hashes().note_unknown(addr.ip(), std::time::Instant::now(), unknown_limit);
+                torrent_mgr.unknown_hashes().note_unknown(addr.ip(), std::time::Instant::now(), unknown_limit);
                 return;
             }
         };
@@ -1129,7 +1123,7 @@ async fn handle_incoming(
             }
             Err(e) => {
                 if unknown_skey.load(std::sync::atomic::Ordering::Relaxed) {
-                    unknown_hashes().note_unknown(addr.ip(), std::time::Instant::now(), unknown_limit);
+                    torrent_mgr.unknown_hashes().note_unknown(addr.ip(), std::time::Instant::now(), unknown_limit);
                 }
                 warn!("[peer] {} MSE handshake failed: {}", addr, e);
                 return;
@@ -1525,6 +1519,38 @@ mod paused_inbound_tests {
         mgr.policy().set_unknown_hash_limit(0);
         assert_eq!(knock(mgr.clone(), disk.clone(), ih).await.len(), 68, "limit off: heard again");
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The limit is an engine's own: guesses made at one engine are not
+    /// counted at another, and a source banned by one is heard by the other.
+    /// Two engines in one process, both at 2, each guessed at twice from the
+    /// same address: neither is over its limit.
+    #[tokio::test]
+    async fn the_unknown_infohash_count_belongs_to_each_engine() {
+        let (race, race_disk, root_a) = manager("unknown-race");
+        let (hoard, hoard_disk, root_b) = manager("unknown-hoard");
+        let mut known = [0u8; 20];
+        for (mgr, root) in [(&race, &root_a), (&hoard, &root_b)] {
+            let (ih, _) = mgr
+                .add_torrent_bytes(&torrent_bytes(), root.join("data").to_str().unwrap(), false, false)
+                .unwrap();
+            known = ih;
+            mgr.policy().set_unknown_hash_limit(2);
+        }
+        for i in 0..2u8 {
+            assert!(knock(race.clone(), race_disk.clone(), [i + 40; 20]).await.is_empty());
+        }
+        for i in 0..2u8 {
+            assert!(knock(hoard.clone(), hoard_disk.clone(), [i + 60; 20]).await.is_empty());
+        }
+        assert_eq!(knock(hoard.clone(), hoard_disk.clone(), known).await.len(), 68, "the hoard counted only its own two");
+        assert_eq!(knock(race.clone(), race_disk.clone(), known).await.len(), 68, "the race counted only its own two");
+        // The race goes over its own limit: only the race ignores the source.
+        assert!(knock(race.clone(), race_disk.clone(), [99u8; 20]).await.is_empty());
+        assert!(knock(race.clone(), race_disk.clone(), known).await.is_empty(), "the race ignores the source");
+        assert_eq!(knock(hoard.clone(), hoard_disk.clone(), known).await.len(), 68, "the hoard still hears it");
+        let _ = std::fs::remove_dir_all(root_a);
+        let _ = std::fs::remove_dir_all(root_b);
     }
 
     /// ⭐ A stopped torrent takes no inbound session: the handshake is closed
