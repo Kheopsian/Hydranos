@@ -73,8 +73,11 @@ jobs:
           shellcheck -s sh entrypoint.sh
           shellcheck tools/interop/run.sh
           shellcheck -s sh packaging/install.sh packaging/test-install.sh
+          shellcheck -s sh install.sh packaging/test-enrol.sh
       - name: Bare-metal installer, run as root in a container
         run: sh packaging/test-install.sh
+      - name: Node enrolment script, against a stand-in controller
+        run: sh packaging/test-enrol.sh
 
   # The conformance suite in `rust` checks the client against OUR reading of
   # the BEPs, on trackers we wrote for the purpose. This checks it against
