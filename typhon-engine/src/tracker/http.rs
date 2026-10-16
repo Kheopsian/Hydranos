@@ -141,22 +141,26 @@ pub fn retry_hint(err: &str) -> Option<RetryHint> {
     None
 }
 
-/// The `key` announce parameter for a peer id.
+/// The `key` announce parameter for a peer id on one torrent.
 ///
 /// `key` lets a tracker recognise a peer whose address changed, which only
 /// works if nobody else can produce it. Hashing the peer id alone would make
 /// it public: every peer we connect to reads our peer id in the handshake. So
 /// the hash is salted with a secret drawn once per process -- stable for the
 /// whole session, unguessable from anything we put on the wire.
-pub fn announce_key(peer_id: &[u8]) -> String {
+///
+/// The info hash is part of the input: a tracker only compares keys within a
+/// torrent, so one key per torrent loses nothing, and the same value does not
+/// tie every torrent we announce together.
+pub fn announce_key(peer_id: &[u8], info_hash: &[u8; 20]) -> String {
     static SALT: OnceLock<u64> = OnceLock::new();
-    key_with_salt(*SALT.get_or_init(rand::random::<u64>), peer_id)
+    key_with_salt(*SALT.get_or_init(rand::random::<u64>), peer_id, info_hash)
 }
 
-fn key_with_salt(salt: u64, peer_id: &[u8]) -> String {
+fn key_with_salt(salt: u64, peer_id: &[u8], info_hash: &[u8; 20]) -> String {
     // FNV-1a, 32 bits. Opaque, stable, and cheap; secrecy comes from the salt.
     let mut h: u32 = 0x811c_9dc5;
-    for b in salt.to_le_bytes().iter().chain(peer_id.iter()) {
+    for b in salt.to_le_bytes().iter().chain(peer_id.iter()).chain(info_hash.iter()) {
         h ^= *b as u32;
         h = h.wrapping_mul(0x0100_0193);
     }
@@ -251,7 +255,7 @@ pub async fn announce_on(
         // port staying reachable; if the port forward breaks, upload stops dead
         // rather than degrading.
         if left == 0 { 0 } else { 200 },
-        announce_key(peer_id),
+        announce_key(peer_id, info_hash),
         if event.is_empty() { String::new() } else { format!("&event={}", event) },
     );
 
@@ -1105,9 +1109,10 @@ mod announce_wire_tests {
     #[test]
     fn the_key_is_stable_and_not_derivable_from_the_peer_id() {
         let pid = b"-HY4240-abcdefghijkl";
-        assert_eq!(announce_key(pid), announce_key(pid), "stable for the session");
-        assert_ne!(key_with_salt(1, pid), key_with_salt(2, pid), "the salt changes it");
-        let k = announce_key(pid);
+        let ih = [7u8; 20];
+        assert_eq!(announce_key(pid, &ih), announce_key(pid, &ih), "stable for the session");
+        assert_ne!(key_with_salt(1, pid, &ih), key_with_salt(2, pid, &ih), "the salt changes it");
+        let k = announce_key(pid, &ih);
         assert_eq!(k.len(), 8);
         assert!(k.chars().all(|c| c.is_ascii_hexdigit()), "{k}");
     }

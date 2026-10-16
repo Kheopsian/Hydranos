@@ -82,9 +82,15 @@ pub fn query_escape(s: &str) -> String {
 /// Stable for the whole process and secret: it is salted with a value drawn
 /// at startup, because a key computable from the peer id -- which every peer
 /// reads in our handshake -- would let anyone who connected to us announce as
-/// us. See `typhon_engine::tracker::http::announce_key`.
-pub fn key_for(peer_id: &str) -> String {
-    typhon_engine::tracker::http::announce_key(peer_id.as_bytes())
+/// us. One per torrent: see `typhon_engine::tracker::http::announce_key`.
+pub fn key_for(peer_id: &str, info_hash: &str) -> String {
+    let mut ih = [0u8; 20];
+    if info_hash.len() == 40 {
+        for (i, b) in ih.iter_mut().enumerate() {
+            *b = u8::from_str_radix(&info_hash[2 * i..2 * i + 2], 16).unwrap_or(0);
+        }
+    }
+    typhon_engine::tracker::http::announce_key(peer_id.as_bytes(), &ih)
 }
 
 /// How many peers to ask for. Shared by the HTTP URL and the UDP packet, so the
@@ -127,7 +133,7 @@ pub fn build(a: &Announce) -> Option<String> {
     url.push_str("&compact=1&numwant=");
     url.push_str(&numwant.to_string());
     url.push_str("&key=");
-    url.push_str(&key_for(a.peer_id));
+    url.push_str(&key_for(a.peer_id, a.info_hash));
     if !a.event.is_empty() {
         url.push_str("&event=");
         url.push_str(a.event);

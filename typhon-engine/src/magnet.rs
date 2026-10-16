@@ -239,7 +239,7 @@ async fn discover(
                 uploaded: 0,
                 event: crate::tracker::udp::event_code("started"),
                 ip: 0,
-                key: u32::from_str_radix(&crate::tracker::http::announce_key(peer_id), 16).unwrap_or(0),
+                key: u32::from_str_radix(&crate::tracker::http::announce_key(peer_id, &info_hash), 16).unwrap_or(0),
                 num_want: 200,
                 port,
             };
