@@ -1401,6 +1401,52 @@ mod graduate_tests {
         assert!(dst.join("grad").exists() && !src.join("grad").exists());
     }
 
+    /// A move to a category that was interrupted after leaving its engine
+    /// still labels the torrent when it is finished; a move that names no
+    /// category leaves the label the torrent already wears.
+    #[test]
+    fn a_resumed_move_sets_its_category_and_an_empty_one_keeps_the_old() {
+        for (asked, expected) in [("series", "series"), ("", "old")] {
+            let s = state_from(&format!("move-category-{expected}"), "");
+            let src = s.dir.join("race-data");
+            let dst = s.dir.join("elsewhere");
+            std::fs::create_dir_all(&src).unwrap();
+            std::fs::write(src.join("grad"), vec![7u8; 16384]).unwrap();
+            let blob = torrent_bytes("grad");
+            let root = src.display().to_string();
+            let race = s.state.engines.get("race").unwrap();
+            let (ih, _) = race.manager.add_torrent_bytes(&blob, &root, true, false).expect("added");
+            let hash = typhon_engine::torrent::hex_encode(&ih);
+            let params = serde_json::json!({
+                "engine": "race", "category": asked, "save_path": dst.display().to_string(),
+            })
+            .to_string();
+            let running = {
+                let store = s.state.store.lock().unwrap();
+                store.insert_torrent(&hash, "race", &blob, &root, "old", 0.0, true, "").unwrap();
+                store.create_job("move_data", &hash, &params, 16384).unwrap();
+                store.claim_next_job().expect("claimed")
+            };
+            STOP_AFTER_LEAVING_SOURCE.with(|c| c.set(true));
+            move_data(&s.state, &running).expect_err("stopped where a crash would");
+            assert!(race.manager.get(&ih).is_none(), "out of its engine");
+            let again = {
+                let store = s.state.store.lock().unwrap();
+                store.requeue_running_jobs();
+                store.claim_next_job().expect("claimed again")
+            };
+
+            move_data(&s.state, &again).expect("finished");
+            let store = s.state.store.lock().unwrap();
+            assert_eq!(
+                store.category_of(&hash, "race").as_deref(),
+                Some(expected),
+                "category after a resumed move asking for {asked:?}"
+            );
+            assert_eq!(store.save_path_of(&hash).as_deref(), Some(dst.display().to_string().as_str()));
+        }
+    }
+
     /// ⭐ A file that appears at a graduation's destination while it is
     /// stopped is somebody else's: the resumed run neither overwrites it nor
     /// loses the original, and the torrent goes back where it was.
