@@ -187,8 +187,11 @@ jobs:
             ~/.cargo/git
             ~/.cargo/bin
             typhon-engine/target
-          key: cargo-${{ runner.os }}-${{ hashFiles('typhon-engine/Cargo.lock') }}
-          restore-keys: cargo-${{ runner.os }}-
+          # v2: the v1 cache carried the instrumented build of a removed
+          # binary, which `cargo clean -p` does not reach (it only knows the
+          # targets the package still declares). Bump it when a target goes.
+          key: cargo-v2-${{ runner.os }}-${{ hashFiles('typhon-engine/Cargo.lock') }}
+          restore-keys: cargo-v2-${{ runner.os }}-
       # Same cfg release.yml builds with: the engine uses tokio's unstable
       # runtime metrics, and without it the code behind that cfg is never
       # compiled here -- so CI would miss exactly what ships.
