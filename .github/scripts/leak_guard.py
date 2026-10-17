@@ -70,7 +70,15 @@ IPV6_RE = re.compile(r"\b(?:[0-9a-fA-F]{1,4}:){2,7}[0-9a-fA-F]{1,4}\b")
 # something that calls itself a secret.
 SECRETISH_RE = re.compile(
     r"(?i)\b(?:api[_-]?key|passkey|secret|token|password|passwd)\b"
-    r"\s*[:=]\s*[\"\']?[0-9a-fA-F]{16,}")
+    r"\s*[:=]\s*[\"\']?([0-9a-fA-F]{16,})")
+
+
+def is_placeholder_secret(value: str) -> bool:
+    """`0123456789abcdef0123...`: the hex digits in order, which no generator
+    hands out. Tests use it as the obvious fake key; like the documentation
+    addresses above, it is a fixture by construction and never somebody's."""
+    seq = "0123456789abcdef"
+    return all(c == seq[i % 16] for i, c in enumerate(value.lower()))
 PRIVKEY_RE = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")
 TOKEN_RE = re.compile(
     r"\b(?:AKIA[0-9A-Z]{16}"          # AWS access key
@@ -161,7 +169,7 @@ def scan(path: str, deny: list[str]) -> list[tuple[int, str]]:
             found.append((n, "private key block"))
         if TOKEN_RE.search(line):
             found.append((n, "provider token"))
-        if SECRETISH_RE.search(line):
+        if any(not is_placeholder_secret(m.group(1)) for m in SECRETISH_RE.finditer(line)):
             found.append((n, "a secret-looking value assigned to a secret-looking name"))
         low = line.lower()
         for needle in deny:
