@@ -1566,4 +1566,50 @@ mod graduate_tests {
         let back = s.state.engines.get("race").unwrap().manager.get(&ih).expect("back in race");
         assert_eq!(*back.save_path.read(), src);
     }
+
+    /// A move interrupted after its torrent left the engine, with the job's
+    /// record in its params, picked up again.
+    fn interrupted_move(
+        tag: &str,
+        dest_is_source: bool,
+    ) -> (TestState, typhon_engine::torrent::meta::InfoHash, std::path::PathBuf, std::path::PathBuf, crate::store::Job) {
+        let s = state_from(tag, "");
+        let src = s.dir.join("race-data");
+        let dst = if dest_is_source { src.clone() } else { s.dir.join("elsewhere") };
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("grad"), vec![7u8; 16384]).unwrap();
+        let blob = torrent_bytes("grad");
+        let root = src.display().to_string();
+        let race = s.state.engines.get("race").unwrap();
+        let (ih, _) = race.manager.add_torrent_bytes(&blob, &root, true, false).expect("added");
+        let hash = typhon_engine::torrent::hex_encode(&ih);
+        let original = race.manager.export_state(&ih).expect("exported");
+        race.manager.remove_torrent(&ih, true).expect("out of its engine");
+        let params = serde_json::json!({
+            "engine": "race", "category": "", "save_path": dst.display().to_string(),
+            "record": serde_json::to_value(&original).unwrap(),
+        })
+        .to_string();
+        let again = {
+            let store = s.state.store.lock().unwrap();
+            store.insert_torrent(&hash, "race", &blob, &root, "", 0.0, true, "").unwrap();
+            store.create_job("move_data", &hash, &params, 16384).unwrap();
+            store.claim_next_job().expect("claimed")
+        };
+        (s, ih, src, dst, again)
+    }
+
+    /// A resumed move whose destination is the very path it started from has
+    /// nothing to copy and nothing to drop: the file is the torrent's only one.
+    #[test]
+    fn a_resumed_move_onto_its_own_path_keeps_the_file() {
+        let (s, ih, src, dst, again) = interrupted_move("move-same-path", true);
+        assert_eq!(src, dst);
+
+        move_data(&s.state, &again).expect("finished");
+
+        assert_eq!(std::fs::read(src.join("grad")).unwrap(), vec![7u8; 16384], "the only copy stays");
+        let t = s.state.engines.get("race").unwrap().manager.get(&ih).expect("back in race");
+        assert_eq!(*t.save_path.read(), src);
+    }
 }
