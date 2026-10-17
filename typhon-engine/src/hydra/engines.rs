@@ -750,6 +750,23 @@ impl EngineHost {
 mod tests {
     use super::*;
 
+    /// A port for an engine under test. Not asked of the kernel (`bind(0)`,
+    /// then release): that picks from the ephemeral range, where any other
+    /// test's outgoing or UDP socket can take the port back before the engine
+    /// binds it. These come from below that range (it starts at 32768), one
+    /// per call in this process, and are checked free for TCP and UDP.
+    pub(super) fn free_port() -> u16 {
+        use std::sync::atomic::{AtomicU16, Ordering};
+        static NEXT: AtomicU16 = AtomicU16::new(0);
+        let base = 20000 + (std::process::id() % 6000) as u16;
+        loop {
+            let port = base + NEXT.fetch_add(1, Ordering::Relaxed) % 6000;
+            if std::net::TcpListener::bind(("0.0.0.0", port)).is_ok() && std::net::UdpSocket::bind(("0.0.0.0", port)).is_ok() {
+                return port;
+            }
+        }
+    }
+
     #[test]
     fn held_scopes_are_sorted_and_only_include_paused_engines() {
         // Built by hand rather than through start(): the ordering rule is what
@@ -852,7 +869,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("hydra-engtest-blocked-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         // Free ports, so "nobody bound it" is checked on ports nobody else holds.
-        let free = || std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let free = free_port;
         let text = format!(
             "[daemon]\ndata_dir = {:?}\n[network]\nmode = \"wireguard\"\n[race]\nlisten_port = {}\n[hoard]\nlisten_port = {}\n",
             dir.to_string_lossy(),
@@ -900,7 +917,7 @@ mod tests {
     async fn gluetun_engines(tag: &str, daemon_extra: &str, echo: &str, control: &str) -> (EngineHost, std::path::PathBuf) {
         let dir = std::env::temp_dir().join(format!("hydra-engtest-{tag}-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
-        let free = || std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let free = free_port;
         let text = format!(
             "[daemon]\ndata_dir = {:?}\nexit_probe_url = \"{echo}\"\n{daemon_extra}\n\
              [race]\nlisten_port = {}\ngluetun_port_forward = true\ngluetun_url = \"{control}\"\n\
@@ -949,7 +966,7 @@ mod tests {
     async fn proxied_engine(tag: &str, extra: &str) -> (EngineHost, std::path::PathBuf, u16) {
         let dir = std::env::temp_dir().join(format!("hydra-engtest-{tag}-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
-        let free = || std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let free = free_port;
         let port = free();
         let text = format!(
             "[daemon]\ndata_dir = {:?}\n[race]\nlisten_port = {port}\n\
@@ -1359,7 +1376,7 @@ mod network_wiring_tests {
     /// and the trusted sources were never handed to the engine.
     #[tokio::test]
     async fn the_proxy_v2_listener_starts_with_its_trusted_sources() {
-        let free = || std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let free = super::tests::free_port;
         let (listen, pv2) = (free(), free());
         let s = session(&format!(
             "listen_port = {listen}\nenable_dht = false\nenable_webseed = false\n\
@@ -1389,7 +1406,7 @@ mod network_wiring_tests {
 
     /// Bring one engine up from a session, the way `connect` does.
     async fn started(tag: &str, toml_text: &str) -> Arc<TorrentManager> {
-        let free = || std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let free = super::tests::free_port;
         let s = session(&format!("listen_port = {}\nenable_webseed = false\n{toml_text}", free()));
         let dir = std::env::temp_dir().join(format!("hydra-dht-{tag}-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
@@ -1425,7 +1442,7 @@ mod network_wiring_tests {
     async fn an_engine_whose_tunnel_is_down_reaches_nobody() {
         const GONE: &str = "wg-hy-gone";
         let listening = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let free = || std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let free = super::tests::free_port;
         let s = session(&format!("listen_port = {}\nenable_webseed = false\nenable_dht = true\nbind_interface = \"{GONE}\"\n", free()));
         let dir = std::env::temp_dir().join(format!("hydra-closed-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
