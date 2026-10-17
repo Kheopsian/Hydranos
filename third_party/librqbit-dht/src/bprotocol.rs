@@ -799,6 +799,44 @@ mod tests {
         assert!(e.contains("too deep"), "{e}");
     }
 
+    /// An integer is stepped over whole: `i..e` leaves the depth where it was,
+    /// at the start of the datagram as well as inside a structure.
+    #[test]
+    fn the_nesting_scan_steps_over_an_integer_without_moving_the_depth() {
+        use crate::bprotocol::krpc_depth_within_limit as within;
+        // An integer first: the scan must not step back before byte 0.
+        assert!(within(b"i5e"));
+        assert!(within(b"d1:ai5ee"));
+        // The `e` that ends an integer is not a close: 100 lists, an integer
+        // and one more list are 101 levels deep, and are refused.
+        let mut deep = vec![b'l'; 100];
+        deep.extend(b"i1e");
+        assert!(within(&deep), "100 open lists and an integer are within the cap");
+        deep.push(b'l');
+        assert!(!within(&deep), "the integer's `e` closed a list: depth was undercounted");
+        // The closers after the integer still balance it.
+        let mut balanced = vec![b'l'; 100];
+        balanced.extend(b"i1e");
+        balanced.extend(vec![b'e'; 100]);
+        balanced.extend(b"l");
+        assert!(within(&balanced));
+    }
+
+    /// A datagram cut off inside an integer or inside a string length is read
+    /// to its last byte, never past it.
+    #[test]
+    fn the_nesting_scan_survives_a_datagram_cut_short() {
+        use crate::bprotocol::krpc_depth_within_limit as within;
+        // Cut inside an integer, before its `e`.
+        assert!(within(b"i5"));
+        assert!(within(b"d1:ai5"));
+        // Cut inside a string length, before its `:`.
+        assert!(within(b"12"));
+        assert!(within(b"d1:a12"));
+        // Cut right after the introducer.
+        assert!(within(b"i"));
+    }
+
     /// Bytes inside a string are never structure: a string full of `l`s is not
     /// nesting, and a forged length is left to the decoder to reject, with no
     /// panic in the pre-scan.
