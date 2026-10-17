@@ -1192,3 +1192,110 @@ mod announce_wire_tests {
         assert_eq!(m.tracker_id.as_deref(), Some("t"));
     }
 }
+
+/// A tracker that answers with a redirect to a second listener, and that
+/// second listener, which counts who reaches it. For the tests of what a
+/// client does with a `Location` it was handed.
+#[cfg(test)]
+pub(crate) mod redirect_trap {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    pub(crate) struct Trap {
+        /// The first listener, base URL: it always answers with the redirect.
+        pub(crate) base: String,
+        /// Requests the first listener received.
+        pub(crate) asked: Arc<AtomicUsize>,
+        /// Connections the target of the redirect received.
+        pub(crate) reached: Arc<AtomicUsize>,
+    }
+
+    /// `status` is the redirect line (e.g. `"302 Found"`); the target answers
+    /// 200 with `target_body`.
+    pub(crate) async fn start(status: &'static str, target_body: &'static [u8]) -> Trap {
+        let target = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind target");
+        let target_addr = target.local_addr().expect("addr");
+        let reached = Arc::new(AtomicUsize::new(0));
+        let r = reached.clone();
+        tokio::spawn(async move {
+            while let Ok((mut s, _)) = target.accept().await {
+                r.fetch_add(1, Ordering::SeqCst);
+                tokio::spawn(async move {
+                    let mut req = [0u8; 4096];
+                    let _ = s.read(&mut req).await;
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        target_body.len()
+                    );
+                    let _ = s.write_all(head.as_bytes()).await;
+                    let _ = s.write_all(target_body).await;
+                });
+            }
+        });
+
+        let front = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind front");
+        let front_addr = front.local_addr().expect("addr");
+        let asked = Arc::new(AtomicUsize::new(0));
+        let a = asked.clone();
+        tokio::spawn(async move {
+            while let Ok((mut s, _)) = front.accept().await {
+                a.fetch_add(1, Ordering::SeqCst);
+                tokio::spawn(async move {
+                    let mut req = [0u8; 4096];
+                    let _ = s.read(&mut req).await;
+                    let head = format!(
+                        "HTTP/1.1 {status}\r\nLocation: http://{target_addr}/announce?passkey=SECRET\r\n\
+                         Content-Length: 0\r\nConnection: close\r\n\r\n"
+                    );
+                    let _ = s.write_all(head.as_bytes()).await;
+                });
+            }
+        });
+        Trap { base: format!("http://{front_addr}"), asked, reached }
+    }
+}
+
+#[cfg(test)]
+mod redirect_tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    const ANSWER: &[u8] = b"d8:intervali1800e5:peers0:e";
+    const DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
+
+    /// ⭐ The announce URL carries the passkey. A tracker (or anything on the
+    /// path to it) that answers with a redirect must not get the client to
+    /// replay that URL somewhere else: the redirect is an error, and the second
+    /// listener is never contacted.
+    #[tokio::test]
+    async fn an_announce_does_not_follow_a_redirect() {
+        for status in ["301 Moved Permanently", "302 Found", "307 Temporary Redirect", "308 Permanent Redirect"] {
+            let trap = redirect_trap::start(status, ANSWER).await;
+            let url = format!("{}/announce?passkey=SECRET", trap.base);
+            let out = tokio::time::timeout(
+                DEADLINE,
+                announce(&url, &[0xABu8; 20], &[0xCDu8; 20], 16371, 0, 0, 0, ""),
+            )
+            .await
+            .expect("the client gave up on its own");
+            assert_eq!(trap.reached.load(Ordering::SeqCst), 0, "{status}: the redirect target was contacted");
+            assert!(out.is_err(), "{status}: a redirect is not an answer: {:?}", out.map(|r| r.interval));
+            assert_eq!(trap.asked.load(Ordering::SeqCst), 1, "{status}: the tracker was asked once");
+        }
+    }
+
+    /// The same, on the per-family client the announcer uses.
+    #[tokio::test]
+    async fn a_family_announce_does_not_follow_a_redirect() {
+        for status in ["302 Found", "307 Temporary Redirect"] {
+            let trap = redirect_trap::start(status, ANSWER).await;
+            let url = format!("{}/announce?passkey=SECRET", trap.base);
+            let out = tokio::time::timeout(DEADLINE, send_announce(&url, "t", IpMode::V4))
+                .await
+                .expect("the client gave up on its own");
+            assert_eq!(trap.reached.load(Ordering::SeqCst), 0, "{status}: the redirect target was contacted");
+            assert!(out.is_err(), "{status}: a redirect is not an answer: {:?}", out.map(|r| r.interval));
+        }
+    }
+}
