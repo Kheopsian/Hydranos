@@ -228,6 +228,11 @@ jobs:
           # puts region, function and line coverage in three columns of the
           # same shape, and picking the wrong one reads a number that is right
           # about something else.
+          # The cached target still holds the instrumented binary of a target
+          # since removed (src/main.rs); measured with the rest, it counted
+          # 7 900 lines no build compiles any more. Clean the workspace's
+          # coverage artifacts first, so only what this tree builds is measured.
+          cargo llvm-cov clean --workspace
           cargo llvm-cov --workspace --summary-only --json --output-path cov.json
           pct=$(python3 -c "import json;print(json.load(open('cov.json'))['data'][0]['totals']['lines']['percent'])")
           echo "line coverage: $pct%  (floor $floor%)"
