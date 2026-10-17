@@ -60,7 +60,7 @@ bcrypt = "0.15"
 sha2 = "0.10"
 # Streaming zip export (hydra/export.rs). Already in the tree through `zip`.
 crc32fast = "1"
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 flate2 = "1"
 tar = "0.4"
 

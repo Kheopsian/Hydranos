@@ -468,7 +468,8 @@ fn unpack(bytes: &[u8], name: &str) -> Result<Vec<(String, Vec<u8>)>, String> {
             .map_err(|e| format!("the archive is not a zip: {e}"))?;
         for i in 0..zip.len() {
             let mut f = zip.by_index(i).map_err(|e| format!("reading the zip: {e}"))?;
-            let Some(base) = f.name().rsplit(['/', '\\']).next().map(str::to_string) else {
+            // zip 9: `name()` is fallible (a name that is not valid text is not ours).
+            let Some(base) = f.name().ok().and_then(|n| n.rsplit(['/', '\\']).next().map(str::to_string)) else {
                 continue;
             };
             if !is_ours(&base) {
