@@ -1314,4 +1314,17 @@ mod tests {
         t.push(b'e');
         within(move || assert!(info_dict_from_bytes(&t).is_err()));
     }
+
+    /// ⭐ A torrent named `.` is the download folder itself: neither a single
+    /// file nor a folder of files may be written under that name.
+    #[test]
+    fn a_torrent_named_dot_is_refused() {
+        let e = refused(&with_paths(".", &[]));
+        assert!(e.contains("unsafe path"), "{e}");
+        let e = refused(&with_paths(".", &[&["a.bin"]]));
+        assert!(e.contains("unsafe path"), "{e}");
+        // A dot inside a name is still a name.
+        parse_torrent_bytes(&with_paths(".x", &[])).expect("a dot-prefixed name is plain");
+        parse_torrent_bytes(&with_paths("x.", &[&["a.bin"]])).expect("a trailing dot is plain");
+    }
 }
