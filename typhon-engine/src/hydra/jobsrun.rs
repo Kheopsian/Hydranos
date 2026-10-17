@@ -1711,4 +1711,57 @@ mod graduate_tests {
         std::fs::write(&to, [0u8]).unwrap();
         assert!(!ours(&dir_original, &to, false));
     }
+
+    /// ⭐ Giving up an interrupted move changes the disk like this: a file that
+    /// had moved goes back, our own copies go, the originals stay, and what is
+    /// not ours -- another file, or the same file under another name -- stays.
+    #[test]
+    fn giving_up_an_interrupted_move_puts_the_disk_back() {
+        let (s, ih, _src, _dst, job) = interrupted_move("undo-disk", false);
+        let race = s.state.engines.get("race").unwrap();
+        let p: serde_json::Value = serde_json::from_str(&job.params).unwrap();
+        let original: typhon_engine::torrent::fastresume::ResumeData =
+            serde_json::from_value(p["record"].clone()).unwrap();
+        let metainfo = torrent_bytes("grad");
+        assert!(race.manager.get(&ih).is_none(), "out of its engine");
+
+        let d = s.dir.join("undo");
+        std::fs::create_dir_all(&d).unwrap();
+        let put = |name: &str, bytes: &[u8]| {
+            let f = d.join(name);
+            std::fs::write(&f, bytes).unwrap();
+            f
+        };
+        let (gone_from, moved_to) = (d.join("gone-from"), put("moved-to", b"moved"));
+        let (ours_from, ours_to) = (put("ours-from", b"same bytes"), put("ours-to", b"same bytes"));
+        let (other_from, other_to) = (put("other-from", b"same bytes"), put("other-to", b"another file"));
+        let same = put("same", b"one path");
+        let (link_from, link_to) = (put("link-from", b"one inode"), d.join("link-to"));
+        std::fs::hard_link(&link_from, &link_to).unwrap();
+        let (lone_from, lone_to) = (put("lone-from", b"lone"), d.join("lone-to"));
+        let files = vec![
+            (gone_from.clone(), moved_to.clone()),
+            (ours_from.clone(), ours_to.clone()),
+            (other_from.clone(), other_to.clone()),
+            (same.clone(), same.clone()),
+            (link_from.clone(), link_to.clone()),
+            (lone_from.clone(), lone_to.clone()),
+        ];
+
+        let said = undo_interrupted_move(race, &files, &original, &metainfo);
+
+        assert!(said.starts_with("the move was given up"), "{said}");
+        assert_eq!(std::fs::read(&gone_from).expect("what had moved is back at its source"), b"moved", "what had moved goes back");
+        assert!(!moved_to.exists());
+        assert_eq!(std::fs::read(&ours_from).expect("the original stays"), b"same bytes", "the original stays");
+        assert!(!ours_to.exists(), "our copy goes");
+        assert_eq!(std::fs::read(&other_from).unwrap(), b"same bytes");
+        assert_eq!(std::fs::read(&other_to).expect("another file stays"), b"another file", "another file stays");
+        assert_eq!(std::fs::read(&same).unwrap(), b"one path", "from == to is left alone");
+        assert_eq!(std::fs::read(&link_from).unwrap(), b"one inode");
+        assert_eq!(std::fs::read(&link_to).expect("the other name stays"), b"one inode", "the other name of a file stays");
+        assert_eq!(std::fs::read(&lone_from).unwrap(), b"lone");
+        assert!(!lone_to.exists());
+        assert!(race.manager.get(&ih).is_some(), "the torrent is back in its engine");
+    }
 }
