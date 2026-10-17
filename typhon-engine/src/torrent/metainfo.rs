@@ -1249,4 +1249,69 @@ mod tests {
         assert_eq!(info_dict_from_bytes(&t).expect("the real info dict"), real);
         parse_torrent_bytes(&t).expect("a valid torrent");
     }
+
+    /// Run a scanner off the test thread with a deadline: one that spins, or
+    /// panics, fails the test instead of hanging or aborting the run.
+    fn within<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(f());
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the scanner neither returned nor errored: it looped or panicked")
+    }
+
+    fn nested(depth: usize) -> Vec<u8> {
+        let mut v = vec![b'l'; depth];
+        v.extend(vec![b'e'; depth]);
+        v
+    }
+
+    /// ⭐ `find_dict_end` refuses a structure nested past 100 levels, and still
+    /// reads one at the limit.
+    #[test]
+    fn the_dict_end_scanner_refuses_deep_nesting() {
+        let ok = within(|| find_dict_end(&nested(100), 0));
+        assert_eq!(ok, Ok(200), "100 levels is the last that is read");
+        let e = within(|| find_dict_end(&nested(101), 0)).expect_err("101 levels accepted");
+        assert!(e.contains("too deep"), "{e}");
+        let e = within(|| find_dict_end(&nested(50_000), 0)).expect_err("50 000 levels accepted");
+        assert!(e.contains("too deep"), "{e}");
+    }
+
+    /// The same bound holds on the way in: nesting in a key that is not `info`
+    /// is skipped by that scanner, so it must be refused there too.
+    #[test]
+    fn deep_nesting_beside_the_info_dict_is_refused() {
+        let build = |depth: usize| {
+            let mut t = b"d1:z".to_vec();
+            t.extend(nested(depth));
+            t.extend(b"4:info");
+            t.extend(one_piece_info("a.bin", 1));
+            t.push(b'e');
+            t
+        };
+        within(move || {
+            info_dict_from_bytes(&build(5)).expect("a shallow one is fine");
+            info_dict_from_bytes(&build(1000)).map(|v| v.len()).expect_err("1000 levels accepted");
+        });
+    }
+
+    /// ⭐ A string length that overflows the position is an error. Unchecked, it
+    /// panics a debug build and wraps `i` backwards in a release one, where the
+    /// scanner then walks the same bytes forever.
+    #[test]
+    fn the_dict_end_scanner_refuses_a_forged_string_length() {
+        for forged in ["18446744073709551615", "18446744073709551614", "9223372036854775808"] {
+            let data = format!("l{forged}:xe").into_bytes();
+            within(move || assert!(find_dict_end(&data, 0).is_err(), "length {forged} accepted"));
+        }
+        assert_eq!(find_dict_end(b"l5:abcdee", 0), Ok(9), "an honest length still reads");
+        // The same forged length behind a key, as a torrent carries it.
+        let mut t = b"d1:z".to_vec();
+        t.extend(b"l18446744073709551615:xe4:info");
+        t.extend(one_piece_info("a.bin", 1));
+        t.push(b'e');
+        within(move || assert!(info_dict_from_bytes(&t).is_err()));
+    }
 }

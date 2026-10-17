@@ -766,4 +766,55 @@ mod tests {
         debug_hex_bencode("another resp from some random IP", FIND_NODE_RESPONSE_3);
         debug_hex_bencode("req to another node", WHAT_IS_THAT);
     }
+
+    /// An announce_peer query carrying, under a key it does not use, `depth`
+    /// nested lists.
+    fn announce_with_nesting(depth: usize) -> Vec<u8> {
+        let head = b"d1:ad2:id20:abcdefghij012345678912:implied_porti1e9:info_hash20:mnopqrstuvwxyz1234564:porti6881e5:token8:aoeusnthe1:q13:announce_peer1:t2:aa1:y1:q1:z";
+        let mut msg = head.to_vec();
+        msg.extend(vec![b'l'; depth]);
+        msg.extend(vec![b'e'; depth]);
+        msg.push(b'e');
+        msg
+    }
+
+    /// ⭐ A datagram nested past 100 levels is refused before the recursive
+    /// decoder sees it, even when the nesting sits in a field the message
+    /// ignores; the same query with shallow nesting is still answered.
+    #[test]
+    fn a_datagram_nested_too_deep_is_refused() {
+        fn parse(depth: usize) -> Result<(), String> {
+            let msg = announce_with_nesting(depth);
+            bprotocol::deserialize_message::<ByteBuf>(&msg)
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        }
+        assert_eq!(parse(5), Ok(()), "a shallow extra field is accepted");
+        assert_eq!(parse(99), Ok(()), "99 levels under the message is within the cap");
+
+        let e = parse(150).expect_err("150 levels accepted");
+        assert!(e.contains("too deep"), "{e}");
+        // A packet's worth (16 KiB) of nesting: the cap answers before any recursion.
+        let e = parse(8000).expect_err("8000 levels accepted");
+        assert!(e.contains("too deep"), "{e}");
+    }
+
+    /// Bytes inside a string are never structure: a string full of `l`s is not
+    /// nesting, and a forged length is left to the decoder to reject, with no
+    /// panic in the pre-scan.
+    #[test]
+    fn the_nesting_scan_reads_strings_by_length_and_survives_forged_ones() {
+        let mut msg = b"d1:ad2:id20:abcdefghij01234567891:x".to_vec();
+        msg.extend(b"300:");
+        msg.extend(vec![b'l'; 300]);
+        msg.extend(b"e1:q4:ping1:t2:aa1:y1:qe");
+        let ok = bprotocol::deserialize_message::<ByteBuf>(&msg);
+        assert!(ok.is_ok(), "300 `l` bytes inside a string are not nesting: {:?}", ok.err());
+
+        for forged in ["99999999999999999999999", "100000000"] {
+            let msg = format!("d1:ad2:id20:abcdefghij01234567891:x{forged}:ye1:q4:ping1:t2:aa1:y1:qe");
+            let r = std::panic::catch_unwind(|| bprotocol::deserialize_message::<ByteBuf>(msg.as_bytes()).is_err());
+            assert_eq!(r.ok(), Some(true), "length {forged}: must be an error, not a panic");
+        }
+    }
 }
