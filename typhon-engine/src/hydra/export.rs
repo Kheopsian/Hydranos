@@ -293,7 +293,10 @@ fn skip_depth(data: &[u8], pos: usize, depth: usize) -> Result<usize, String> {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .ok_or("invalid string length")?;
-            let end = colon.checked_add(1 + len).ok_or("string length overflows")?;
+            let end = colon
+                .checked_add(1)
+                .and_then(|c| c.checked_add(len))
+                .ok_or("string length overflows")?;
             if end > data.len() {
                 return Err("string runs past the end".into());
             }
@@ -848,7 +851,7 @@ mod tests {
     /// space, is an error.
     #[test]
     fn the_tracker_stripper_refuses_a_forged_length() {
-        for forged in ["999999999", "18446744073709551614"] {
+        for forged in ["999999999", "18446744073709551614", "18446744073709551615"] {
             let t = format!("d1:x{forged}:ye").into_bytes();
             assert!(without_trackers(&t).is_err(), "length {forged} accepted");
         }
