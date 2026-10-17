@@ -251,6 +251,11 @@ struct Family {
     /// socket is then registered with a reactor that no longer runs, and the
     /// family has to be built again on the current one.
     alive: Arc<AtomicBool>,
+    /// The runtime the socket and its reading task belong to. Told apart from
+    /// the caller's own, because `alive` only flips once the reading task has
+    /// been dropped: a runtime that is shutting down still lends out a socket
+    /// whose reactor is gone (sends fail, or go out and are never read back).
+    runtime: tokio::runtime::Id,
 }
 
 /// Flips `alive` when the reading task ends, however it ends.
@@ -313,7 +318,7 @@ impl Family {
                 }
             });
         }
-        Ok(Family { sock, pending, alive })
+        Ok(Family { sock, pending, alive, runtime: tokio::runtime::Handle::current().id() })
     }
 
     /// Send, wait, send again with a new transaction id, as WAITS says.
@@ -368,10 +373,13 @@ impl Client {
     fn family(&self, v6: bool) -> Result<Arc<Family>, String> {
         let cell = if v6 { &self.v6 } else { &self.v4 };
         let mut slot = cell.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some(f) = slot.as_ref().filter(|f| f.alive.load(Ordering::Relaxed)) {
+        let here = tokio::runtime::Handle::current().id();
+        if let Some(f) = slot.as_ref().filter(|f| f.alive.load(Ordering::Relaxed) && f.runtime == here) {
             return Ok(f.clone());
         }
         let f = Arc::new(Family::open(v6, &self.device)?);
+        // Connection ids were issued to the old socket's source address.
+        self.conns.clear();
         *slot = Some(f.clone());
         Ok(f)
     }
@@ -793,5 +801,20 @@ mod tests {
         spoofer.send_to(&forged, local).await.unwrap();
         assert!(tokio::time::timeout(Duration::from_millis(300), rx).await.is_err(), "not delivered");
         assert!(fam.pending.contains_key(&77), "still waiting for the real one");
+    }
+
+    /// The socket belongs to the runtime it was opened on: another runtime is
+    /// handed its own (the first one's reactor may be going down), while the
+    /// same runtime keeps getting the same socket -- no reopening per announce.
+    #[test]
+    fn a_family_is_kept_per_runtime() {
+        let client = Client::default();
+        let rt = || tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let (a, b) = (rt(), rt());
+        let first = a.block_on(async { client.family(false).unwrap() });
+        let again = a.block_on(async { client.family(false).unwrap() });
+        assert!(Arc::ptr_eq(&first, &again), "same runtime, same socket");
+        let other = b.block_on(async { client.family(false).unwrap() });
+        assert!(!Arc::ptr_eq(&first, &other), "another runtime, its own socket");
     }
 }
