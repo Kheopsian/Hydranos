@@ -246,4 +246,25 @@ mod tests {
         assert!(parse_http_scrape(b"d5:filesd20:short").is_err());
         assert_eq!(parse_http_scrape(b"d5:filesdee").unwrap(), vec![], "nothing known is an empty answer");
     }
+
+    /// ⭐ The scrape URL carries the passkey like the announce one: a redirect
+    /// is an error, and the listener it points at is never contacted.
+    #[tokio::test]
+    async fn a_scrape_does_not_follow_a_redirect() {
+        use crate::tracker::http::redirect_trap;
+        use std::sync::atomic::Ordering;
+        for status in ["301 Moved Permanently", "302 Found", "307 Temporary Redirect", "308 Permanent Redirect"] {
+            let trap = redirect_trap::start(status, b"d5:filesdee").await;
+            let url = format!("{}/scrape?passkey=SECRET", trap.base);
+            let out = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                http_scrape_on(&url, &[[0xABu8; 20]], "t", "", ""),
+            )
+            .await
+            .expect("the client gave up on its own");
+            assert_eq!(trap.reached.load(Ordering::SeqCst), 0, "{status}: the redirect target was contacted");
+            assert!(out.is_err(), "{status}: a redirect is not an answer: {:?}", out.map(|v| v.len()));
+            assert_eq!(trap.asked.load(Ordering::SeqCst), 1, "{status}: the tracker was asked once");
+        }
+    }
 }
