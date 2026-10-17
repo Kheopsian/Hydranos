@@ -1061,7 +1061,7 @@ fn unpack_zip_from<R: std::io::Read + std::io::Seek>(archive: R, into: &Path) ->
     for i in 0..zip.len() {
         let mut entry = zip.by_index(i).map_err(|e| format!("zip entry {i}: {e}"))?;
         let Some(rel) = entry.enclosed_name() else {
-            return Err(format!("zip entry {:?} points outside the archive", entry.name()));
+            return Err(format!("zip entry {:?} points outside the archive", entry.name().map_or_else(|e| e.to_string(), |n| n.into_owned())));
         };
         let target = into.join(rel);
         if entry.is_dir() {
@@ -1204,6 +1204,54 @@ mod transmission_tests {
         assert!(!into.parent().unwrap().join("escape.txt").exists());
         assert!(unpack_zip(&zip_of(&[("readme.txt", b"x")]), &into).unwrap_err().contains("no torrents/"));
         let _ = std::fs::remove_dir_all(&into);
+    }
+
+    /// A symlink entry (unix mode S_IFLNK) is stored by zip as a file whose
+    /// content is the link target. Unpacking must write it as that plain file:
+    /// never a link, and nothing created or written at the place it points to.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_entry_never_becomes_a_symlink_nor_reaches_outside() {
+        let base = std::env::temp_dir().join(format!("tr-zip-lnk-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let into = base.join("into");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&into).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+
+        let mut buf = std::io::Cursor::new(Vec::new());
+        {
+            let mut z = zip::ZipWriter::new(&mut buf);
+            let opts = zip::write::SimpleFileOptions::default();
+            z.start_file("transmission/torrents/A.torrent", opts).unwrap();
+            z.write_all(b"x").unwrap();
+            // A link out of the folder, then a file written "through" it.
+            z.add_symlink("transmission/escape", "../../outside", opts).unwrap();
+            z.add_symlink("transmission/abs", outside.to_str().unwrap(), opts).unwrap();
+            z.start_file("transmission/escape/pwned.txt", opts).unwrap();
+            z.write_all(b"pwned").unwrap();
+            z.finish().unwrap();
+        }
+        let bytes = buf.into_inner();
+        // Whether the archive is accepted or refused, the guarantees hold.
+        let _ = unpack_zip(&bytes, &into);
+
+        fn symlinks_under(dir: &Path, found: &mut Vec<PathBuf>) {
+            for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+                let p = e.path();
+                let ft = e.file_type().unwrap();
+                if ft.is_symlink() {
+                    found.push(p);
+                } else if ft.is_dir() {
+                    symlinks_under(&p, found);
+                }
+            }
+        }
+        let mut links = Vec::new();
+        symlinks_under(&into, &mut links);
+        assert!(links.is_empty(), "no symlink may be created: {links:?}");
+        assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0, "nothing may appear outside `into`");
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
 
