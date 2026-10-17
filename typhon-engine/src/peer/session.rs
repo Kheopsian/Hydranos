@@ -1061,3 +1061,76 @@ mod metadata_serve_tests {
         assert_eq!(reads.load(Ordering::SeqCst), 1);
     }
 }
+
+#[cfg(test)]
+mod request_bounds_tests {
+    use super::*;
+
+    const PIECE: u32 = 16384;
+    /// Two whole pieces and a last one of 100 bytes.
+    const TOTAL: u32 = 2 * PIECE + 100;
+
+    /// A seeding torrent that has every piece, with an unchoked peer.
+    fn seeding() -> (Arc<TorrentState>, PeerStats) {
+        let mut info = format!("d6:lengthi{TOTAL}e4:name9:bound.bin12:piece lengthi{PIECE}e6:pieces60:").into_bytes();
+        info.extend([3u8; 60]);
+        info.push(b'e');
+        let mut bytes = b"d4:info".to_vec();
+        bytes.extend(info);
+        bytes.push(b'e');
+        let meta = crate::torrent::metainfo::parse_torrent_bytes(&bytes).unwrap();
+        assert_eq!(meta.num_pieces(), 3);
+        let t = Arc::new(TorrentState::new(meta, std::path::PathBuf::from("/tmp"), true));
+        t.status.store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+        let stats = PeerStats::new("192.168.99.7:6881".parse().unwrap(), [1u8; 20], "test".into(), false, false);
+        stats.choked.store(false, Ordering::Relaxed);
+        (t, stats)
+    }
+
+    fn ask(t: &TorrentState, s: &PeerStats, index: u32, begin: u32, length: u32) -> bool {
+        may_serve(t, s, index, begin, length)
+    }
+
+    #[test]
+    fn a_request_inside_the_torrent_is_served() {
+        let (t, s) = seeding();
+        assert!(ask(&t, &s, 0, 0, PIECE), "a whole first piece");
+        assert!(ask(&t, &s, 1, PIECE - 1, 1), "the last byte of a piece");
+        assert!(ask(&t, &s, 2, 0, 100), "the short last piece, whole");
+        assert!(ask(&t, &s, 2, 50, 50), "the end of the short last piece");
+    }
+
+    /// ⭐ A seeding torrent "has" every index, so only the bounds stand between
+    /// a peer's numbers and the disk layer.
+    #[test]
+    fn a_piece_index_past_the_end_is_refused() {
+        let (t, s) = seeding();
+        assert!(!ask(&t, &s, 3, 0, 1), "the first index past the end");
+        assert!(!ask(&t, &s, 3, 0, PIECE), "a whole block of it");
+        assert!(!ask(&t, &s, u32::MAX, 0, 1), "an index at the top of the range");
+    }
+
+    #[test]
+    fn a_block_past_the_end_of_its_piece_is_refused() {
+        let (t, s) = seeding();
+        assert!(!ask(&t, &s, 0, PIECE, 1), "a block starting past its piece");
+        assert!(!ask(&t, &s, 0, PIECE - 1, 2), "a block running one byte past its piece");
+        assert!(!ask(&t, &s, 2, 0, 101), "past the end of the short last piece");
+        assert!(!ask(&t, &s, 2, 100, 1), "starting at the end of the last piece");
+    }
+
+    /// `begin + length` must be added wide: as a u32 it wraps back into range.
+    #[test]
+    fn a_begin_and_length_that_wrap_are_refused() {
+        let (t, s) = seeding();
+        assert!(!ask(&t, &s, 0, u32::MAX, PIECE), "begin + length wrapping a u32");
+        assert!(!ask(&t, &s, 0, u32::MAX - 100, 200), "a smaller wrap");
+        assert!(!ask(&t, &s, 0, u32::MAX, 1), "a begin at the top of the range");
+    }
+
+    #[test]
+    fn an_empty_block_is_refused() {
+        let (t, s) = seeding();
+        assert!(!ask(&t, &s, 0, 0, 0));
+    }
+}

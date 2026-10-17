@@ -795,6 +795,21 @@ mod disk_tests {
         assert_eq!(&back[..], &content[..], "what was written is what comes back");
     }
 
+    /// ⭐ A read that starts past the end of the torrent is an error, not a
+    /// subtraction that wraps into a read of gigabytes.
+    #[tokio::test]
+    async fn a_read_starting_past_the_end_is_an_error() {
+        let content = vec![7u8; 4096];
+        let f = fixture("pastend", &content);
+        assert!(f.disk.write_piece(&f.torrent, 0, content.clone()).await.unwrap());
+        // 4096-byte torrent: offset 3 MiB is far beyond its only cache block.
+        let r = f.disk.read_block(&f.torrent, 0, 3 << 20, 16).await;
+        assert!(r.is_err(), "read past the end returned {:?}", r.map(|b| b.len()));
+        // A read inside it still works.
+        let back = f.disk.read_block(&f.torrent, 0, 100, 16).await.unwrap();
+        assert_eq!(&back[..], &content[100..116]);
+    }
+
     /// A folder that cannot be made is the error reported, not the open that
     /// fails after it for a reason it no longer says.
     #[tokio::test]
