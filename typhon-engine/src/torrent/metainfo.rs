@@ -1203,4 +1203,50 @@ mod tests {
         assert!(piece_hashes_from_file(&path).is_err(), "truncated table accepted");
         std::fs::remove_file(&path).ok();
     }
+
+    /// The info dict of a one-piece torrent named `name`, whose single piece
+    /// hash is `fill` repeated.
+    fn one_piece_info(name: &str, fill: u8) -> Vec<u8> {
+        let mut i = format!("d6:lengthi16384e4:name{}:{name}12:piece lengthi16384e6:pieces20:", name.len()).into_bytes();
+        i.extend([fill; 20]);
+        i.push(b'e');
+        i
+    }
+
+    /// ⭐ The identity of a torrent is the hash of ITS top-level `info`, not of
+    /// the first `4:info` anywhere in the file. A `comment` sorts before `info`
+    /// and may hold any bytes, another torrent's info entry included.
+    #[test]
+    fn the_info_hash_is_read_from_the_top_level_info_key() {
+        let real = one_piece_info("real.bin", 7);
+        let decoy = one_piece_info("decoy.bin", 9);
+        let comment = [b"4:info".as_slice(), &decoy].concat();
+        let mut t = b"d7:comment".to_vec();
+        t.extend(format!("{}:", comment.len()).into_bytes());
+        t.extend(&comment);
+        t.extend(b"4:info");
+        t.extend(&real);
+        t.push(b'e');
+
+        assert_eq!(info_dict_from_bytes(&t).expect("the real info dict"), real, "the dict handed to BEP 9");
+        let m = parse_torrent_bytes(&t).expect("a valid torrent");
+        assert_eq!(m.name, "real.bin");
+        assert_eq!(m.info_hash, sha1_hash(&real), "hashed the dict that names the files");
+        assert_ne!(m.info_hash, sha1_hash(&decoy), "took the identity of the dict in the comment");
+    }
+
+    /// A comment that merely mentions `4:info` is a string, not a key.
+    #[test]
+    fn a_comment_mentioning_info_does_not_break_the_torrent() {
+        let real = one_piece_info("real.bin", 7);
+        let comment = b"see 4:info for the dict";
+        let mut t = b"d7:comment".to_vec();
+        t.extend(format!("{}:", comment.len()).into_bytes());
+        t.extend(comment);
+        t.extend(b"4:info");
+        t.extend(&real);
+        t.push(b'e');
+        assert_eq!(info_dict_from_bytes(&t).expect("the real info dict"), real);
+        parse_torrent_bytes(&t).expect("a valid torrent");
+    }
 }
