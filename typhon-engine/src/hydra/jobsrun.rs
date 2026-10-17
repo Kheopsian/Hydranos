@@ -1764,4 +1764,83 @@ mod graduate_tests {
         assert!(!lone_to.exists());
         assert!(race.manager.get(&ih).is_some(), "the torrent is back in its engine");
     }
+
+    fn two_file_torrent_bytes() -> Vec<u8> {
+        let info = format!(
+            "d5:filesld6:lengthi16384e4:pathl1:aeed6:lengthi16384e4:pathl1:beee4:name4:pair12:piece lengthi16384e6:pieces40:{}e",
+            "G".repeat(40)
+        );
+        let announce = "https://tracker.example/announce";
+        format!("d8:announce{}:{announce}4:info{info}e", announce.len()).into_bytes()
+    }
+
+    /// A graduation of a two-file torrent, a cancelled before it reaches its
+    /// second file. The first file's two places are set by the caller.
+    fn cancelled_pair(
+        tag: &str,
+        stop_first: bool,
+        prepare: impl FnOnce(&std::path::Path, &std::path::Path),
+    ) -> (TestState, std::path::PathBuf, std::path::PathBuf, String) {
+        let s = state_from(tag, "");
+        let src = s.dir.join("race-data");
+        let dst = s.dir.join("hoard-data");
+        std::fs::create_dir_all(src.join("pair")).unwrap();
+        std::fs::write(src.join("pair").join("a"), vec![1u8; 16384]).unwrap();
+        std::fs::write(src.join("pair").join("b"), vec![2u8; 16384]).unwrap();
+        let (hash, _) = crate::api::add_torrent_bytes(
+            &s.state, &two_file_torrent_bytes(), "", &src.display().to_string(), "", true, true, "race",
+        )
+        .expect("added");
+        let params = job(&hash, &dst).params;
+        let running = {
+            let store = s.state.store.lock().unwrap();
+            store.create_job("graduate", &hash, &params, 32768).unwrap();
+            store.claim_next_job().expect("claimed")
+        };
+        let run = if stop_first {
+            STOP_AFTER_LEAVING_SOURCE.with(|c| c.set(true));
+            graduate(&s.state, &running).expect_err("stopped where a crash would");
+            let store = s.state.store.lock().unwrap();
+            store.requeue_running_jobs();
+            store.claim_next_job().expect("claimed again")
+        } else {
+            running
+        };
+        prepare(&src.join("pair"), &dst.join("pair"));
+        s.state.store.lock().unwrap().cancel_job(&run.id);
+        let err = graduate(&s.state, &run).expect_err("cancelled");
+        (s, src, dst, err)
+    }
+
+    /// A resumed graduation does not count as moved a file it finds at neither
+    /// place: should it have to undo, there is nothing of it to carry back.
+    #[test]
+    fn a_resumed_graduation_does_not_carry_back_a_file_that_is_nowhere() {
+        let (s, src, dst, err) = cancelled_pair("grad-nowhere", true, |from, _to| {
+            std::fs::remove_file(from.join("a")).unwrap();
+        });
+        assert!(err.contains("cancelled"), "{err}");
+        assert!(err.contains("rolled back"), "a clean undo, not a failed carry-back: {err}");
+        assert!(!err.contains("did not move back"), "{err}");
+        assert!(std::fs::read(src.join("pair").join("b")).is_ok());
+        assert!(!dst.join("pair").join("a").exists());
+        let _ = s;
+    }
+
+    /// A graduation that is not a resumed one does not count as its own a file
+    /// that sits at the destination while the source has none: undoing must not
+    /// carry that file anywhere.
+    #[test]
+    fn a_fresh_graduation_does_not_carry_back_a_file_that_was_already_at_its_destination() {
+        let (s, src, dst, err) = cancelled_pair("grad-already-there", false, |from, to| {
+            std::fs::remove_file(from.join("a")).unwrap();
+            std::fs::create_dir_all(to).unwrap();
+            std::fs::write(to.join("a"), b"somebody else's a").unwrap();
+        });
+        assert!(err.contains("cancelled"), "{err}");
+        assert_eq!(std::fs::read(dst.join("pair").join("a")).expect("the file at the destination is still there"), b"somebody else's a");
+        assert!(!src.join("pair").join("a").exists(), "nothing was carried to the source");
+        assert!(src.join("pair").join("b").exists());
+        let _ = s;
+    }
 }
