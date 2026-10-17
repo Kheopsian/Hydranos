@@ -825,4 +825,32 @@ mod tests {
         assert_eq!(date, ((2026 - 1980) << 9 | 9 << 5 | 29) as u16);
         assert_eq!(time, (17 << 11 | 45 << 5 | 15) as u16);
     }
+
+    /// The walker that strips the trackers recurses once per level, so a stored
+    /// file nested past the cap is an error, not a stack to run out of.
+    #[test]
+    fn the_tracker_stripper_refuses_deep_nesting() {
+        let nested = |depth: usize| {
+            let mut t = b"d1:x".to_vec();
+            t.extend(vec![b'l'; depth]);
+            t.extend(vec![b'e'; depth]);
+            t.push(b'e');
+            t
+        };
+        let shallow = nested(50);
+        assert_eq!(without_trackers(&shallow).expect("50 levels is fine"), shallow);
+        let deep = nested(200);
+        let e = without_trackers(&deep).map(|v| v.len()).expect_err("200 levels accepted");
+        assert!(e.contains("too deep"), "{e}");
+    }
+
+    /// A declared string length that runs past the data, or past the address
+    /// space, is an error.
+    #[test]
+    fn the_tracker_stripper_refuses_a_forged_length() {
+        for forged in ["999999999", "18446744073709551614"] {
+            let t = format!("d1:x{forged}:ye").into_bytes();
+            assert!(without_trackers(&t).is_err(), "length {forged} accepted");
+        }
+    }
 }
