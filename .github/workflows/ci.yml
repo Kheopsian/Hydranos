@@ -231,6 +231,31 @@ jobs:
           cargo llvm-cov --workspace --summary-only --json --output-path cov.json
           pct=$(python3 -c "import json;print(json.load(open('cov.json'))['data'][0]['totals']['lines']['percent'])")
           echo "line coverage: $pct%  (floor $floor%)"
+          # The run's logs need an account to read; its annotations do not.
+          # These say what was measured, so a number that differs from a
+          # local run can be traced to the tool, the line count or the files.
+          echo "::notice::$(cargo llvm-cov --version) / $(rustc --version)"
+          python3 - <<'PY'
+          import json
+          d = json.load(open("cov.json"))["data"][0]
+          t = d["totals"]["lines"]
+          print(f"::notice::lines {t['covered']}/{t['count']} covered")
+          # Every file, so that a local run can be subtracted from it file by
+          # file. A step keeps ten notices and a long one may be cut, so the
+          # list goes out in numbered parts of under 3 000 characters.
+          rows = sorted(
+              f"{f['filename'].split('typhon-engine/')[-1]}:{f['summary']['lines']['covered']}/{f['summary']['lines']['count']}"
+              for f in d["files"])
+          parts, cur = [], ""
+          for r in rows:
+              if cur and len(cur) + len(r) + 1 > 3000:
+                  parts.append(cur)
+                  cur = ""
+              cur = f"{cur};{r}" if cur else r
+          parts.append(cur)
+          for i, p in enumerate(parts, 1):
+              print(f"::notice::files {i}/{len(parts)} {p}")
+          PY
           python3 - "$pct" "$floor" <<'PY'
           import sys
           pct, floor = float(sys.argv[1]), float(sys.argv[2])
