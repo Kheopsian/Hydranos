@@ -190,3 +190,60 @@ mod tests {
         assert!(lookup("nope.js").is_none());
     }
 }
+
+#[cfg(test)]
+mod security_header_tests {
+    use crate::startup::{gate, Early};
+    use axum::body::Body;
+    use axum::http::{header, Request, StatusCode};
+    use std::sync::{Arc, OnceLock};
+    use tower::ServiceExt;
+
+    /// The headers every page answer must carry, whichever way the page is
+    /// served: one that can be framed by another site, or that lets a plugin or
+    /// a `<base>` tag in, is a page someone else can drive.
+    fn assert_page_is_locked_down(h: &axum::http::HeaderMap, what: &str) {
+        let xfo = h
+            .get(header::X_FRAME_OPTIONS)
+            .unwrap_or_else(|| panic!("{what}: no X-Frame-Options"));
+        assert_eq!(xfo, "DENY", "{what}: the interface must not be framable");
+        let csp = h
+            .get(header::CONTENT_SECURITY_POLICY)
+            .unwrap_or_else(|| panic!("{what}: no Content-Security-Policy"))
+            .to_str()
+            .expect("the policy is text");
+        for directive in ["frame-ancestors 'none'", "object-src 'none'", "base-uri 'self'"] {
+            assert!(csp.contains(directive), "{what}: policy lacks `{directive}`: {csp}");
+        }
+    }
+
+    /// The page as the listener serves it: through the gate, on the real `/`
+    /// route, with and without the engine panels.
+    #[tokio::test]
+    async fn the_interface_page_forbids_framing_and_plugins() {
+        for front_only in [false, true] {
+            let early = Early { front_only, needs_setup: false, network_storage: "" };
+            let router = gate(Arc::new(OnceLock::new()), early);
+            let resp = router
+                .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            assert_page_is_locked_down(resp.headers(), &format!("GET / (front_only={front_only})"));
+            assert_eq!(
+                resp.headers().get(header::CONTENT_TYPE).map(|v| v.to_str().unwrap()),
+                Some("text/html; charset=utf-8"),
+                "the page keeps its content type"
+            );
+        }
+    }
+
+    /// The handler on its own, which the full router also reaches.
+    #[tokio::test]
+    async fn the_page_handler_sets_the_same_headers() {
+        for front_only in [false, true] {
+            let resp = super::page(front_only);
+            assert_page_is_locked_down(resp.headers(), &format!("page({front_only})"));
+        }
+    }
+}
