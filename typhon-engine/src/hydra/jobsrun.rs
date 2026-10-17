@@ -1612,4 +1612,103 @@ mod graduate_tests {
         let t = s.state.engines.get("race").unwrap().manager.get(&ih).expect("back in race");
         assert_eq!(*t.save_path.read(), src);
     }
+
+    /// ⭐ A destination that is a whole, identical copy of the original is the
+    /// move's own copy: the resumed run adopts it and lets the original go.
+    #[test]
+    fn a_resumed_move_takes_a_whole_identical_file_for_its_copy() {
+        let (s, ih, src, dst, again) = interrupted_move("move-own-copy", false);
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::write(dst.join("grad"), vec![7u8; 16384]).unwrap();
+
+        move_data(&s.state, &again).expect("finished");
+
+        assert!(!src.join("grad").exists(), "the original is released");
+        assert_eq!(std::fs::read(dst.join("grad")).unwrap(), vec![7u8; 16384]);
+        let t = s.state.engines.get("race").unwrap().manager.get(&ih).expect("back in race");
+        assert_eq!(*t.save_path.read(), dst);
+    }
+
+    /// `is_our_copy`, off a thread: a loop that never ends must fail the test,
+    /// not hang the run.
+    fn ours(from: &std::path::Path, to: &std::path::Path, whole: bool) -> bool {
+        let (from, to) = (from.to_path_buf(), to.to_path_buf());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(is_our_copy(&from, &to, whole));
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(20)).expect("is_our_copy did not return")
+    }
+
+    fn pattern(len: usize) -> Vec<u8> {
+        (0..len).map(|i| (i % 251) as u8).collect()
+    }
+
+    /// The comparison runs by blocks of 1 MiB: whole, prefix and different
+    /// copies are told apart across less than a block, exactly one, and several.
+    #[test]
+    fn a_copy_is_recognised_by_its_bytes_block_by_block() {
+        const MIB: usize = 1 << 20;
+        let s = state_from("our-copy-bytes", "");
+        let d = s.dir.join("copies");
+        std::fs::create_dir_all(&d).unwrap();
+        let from = d.join("original");
+        let to = d.join("copy");
+        for len in [0usize, 1, 100, MIB - 1, MIB, MIB + 1, 2 * MIB + 5] {
+            let full = pattern(len);
+            std::fs::write(&from, &full).unwrap();
+            // The same bytes: ours, whole or not.
+            std::fs::write(&to, &full).unwrap();
+            assert!(ours(&from, &to, true), "{len}: identical, whole");
+            assert!(ours(&from, &to, false), "{len}: identical, prefix");
+            if len == 0 {
+                continue;
+            }
+            // Only the last byte differs: another file, whole or not.
+            let mut last = full.clone();
+            last[len - 1] ^= 0xff;
+            std::fs::write(&to, &last).unwrap();
+            assert!(!ours(&from, &to, true), "{len}: last byte differs, whole");
+            assert!(!ours(&from, &to, false), "{len}: last byte differs, prefix");
+            // Only the first byte differs.
+            let mut first = full.clone();
+            first[0] ^= 0xff;
+            std::fs::write(&to, &first).unwrap();
+            assert!(!ours(&from, &to, false), "{len}: first byte differs");
+            // Cut short: a prefix, ours only when a prefix is asked for.
+            let cut = len - 1;
+            std::fs::write(&to, &full[..cut]).unwrap();
+            assert!(ours(&from, &to, false), "{len}: cut at {cut}, prefix");
+            assert!(!ours(&from, &to, true), "{len}: cut at {cut}, whole");
+            // Longer than the original: never ours.
+            let mut longer = full.clone();
+            longer.push(0);
+            std::fs::write(&to, &longer).unwrap();
+            assert!(!ours(&from, &to, false), "{len}: longer, prefix");
+            assert!(!ours(&from, &to, true), "{len}: longer, whole");
+        }
+        // An empty file is the empty prefix of anything.
+        std::fs::write(&from, pattern(300)).unwrap();
+        std::fs::write(&to, b"").unwrap();
+        assert!(ours(&from, &to, false), "empty, prefix");
+        assert!(!ours(&from, &to, true), "empty, whole");
+        // The same file under two names is its own copy.
+        let link = d.join("link");
+        std::fs::hard_link(&from, &link).unwrap();
+        assert!(ours(&from, &link, true));
+    }
+
+    /// An original that cannot be read is not matched by whatever zeros sit at
+    /// the destination.
+    #[test]
+    fn an_original_that_cannot_be_read_is_not_matched_by_zeros() {
+        let s = state_from("our-copy-unreadable", "");
+        let d = s.dir.join("copies");
+        let dir_original = d.join("a-directory");
+        std::fs::create_dir_all(&dir_original).unwrap();
+        std::fs::write(dir_original.join("x"), b"x").unwrap();
+        let to = d.join("zero");
+        std::fs::write(&to, [0u8]).unwrap();
+        assert!(!ours(&dir_original, &to, false));
+    }
 }
