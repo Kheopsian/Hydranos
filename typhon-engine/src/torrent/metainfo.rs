@@ -788,6 +788,21 @@ mod tests {
         assert!(bencode_decode(&bomb).is_err());
     }
 
+    /// A top-level dict cut off before its closing `e` (a partial download, a
+    /// truncated store file) is read to its last byte and refused cleanly: the
+    /// scan must stop at the end of the data, not index one past it.
+    #[test]
+    fn find_info_raw_on_a_truncated_head_dict_errors_instead_of_indexing_past_the_end() {
+        // Complete pairs, no info key, no closing `e`.
+        let e = find_info_raw(b"d3:foo3:bar").expect_err("no info dict");
+        assert!(e.contains("cannot find info dict"), "{e}");
+        // A key whose value is the last thing in the data.
+        assert!(find_info_raw(b"d1:ai1e").is_err());
+        // The info dict is found even when the head is cut after it.
+        assert_eq!(find_info_raw(b"d4:infod1:ai1eee").unwrap(), b"d1:ai1ee");
+        assert_eq!(find_info_raw(b"d4:infod1:ai1ee").unwrap(), b"d1:ai1ee");
+    }
+
     #[test]
     fn huge_string_length_does_not_panic() {
         // A length that overflows start + len must error, not panic on slice.
