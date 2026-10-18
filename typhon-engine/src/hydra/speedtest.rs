@@ -277,4 +277,193 @@ mod tests {
         let direct = format!("[race]\nallow_direct = true\n{on}");
         assert!(plan(&cfg(&direct)).is_ok(), "allow_direct: the kill switch lets the engine out, so the run too");
     }
+
+    #[test]
+    fn the_plan_bounds_the_length_and_trims_what_the_file_holds() {
+        let long = plan(&cfg("[vpn_speedtest]\nenabled = true\niperf3_server = \"  s.example \"\nduration_secs = 600\n")).unwrap();
+        assert_eq!((long.server.as_str(), long.secs), ("s.example", 60), "an hour-long saturation is cut to a minute");
+        let zero = plan(&cfg("[vpn_speedtest]\nenabled = true\niperf3_server = \"s.example\"\nduration_secs = 0\n")).unwrap();
+        assert_eq!(zero.secs, 1, "never zero seconds");
+        let blank = plan(&cfg("[vpn_speedtest]\nenabled = true\niperf3_server = \"   \"\n")).unwrap_err();
+        assert!(blank.contains("iperf3_server"), "{blank}");
+        let spaced = plan(&cfg("[race]\nbind_interface = \"  wg0 \"\n[vpn_speedtest]\nenabled = true\niperf3_server = \"s\"\n")).unwrap();
+        assert_eq!(spaced.device, "wg0");
+    }
+
+    /// A proxy plus an interface of its own is fine: the interface is what
+    /// iperf3 will bind to, and the proxy is not on its path.
+    #[test]
+    fn an_interface_wins_over_a_proxy_host() {
+        let ok = plan(&cfg(
+            "[race]\nbind_interface = \"wg0\"\nsocks5_outbound_host = \"10.0.0.1\"\n[vpn_speedtest]\nenabled = true\niperf3_server = \"s\"\n",
+        ))
+        .unwrap();
+        assert_eq!(ok.device, "wg0");
+    }
+
+    /// The measured engine is the race one, and not the hoard's way out.
+    #[test]
+    fn the_race_engine_is_the_one_measured() {
+        let p = plan(&cfg(
+            "[race]\nbind_interface = \"wg-race\"\n[hoard]\nbind_interface = \"wg-hoard\"\n\
+             [vpn_speedtest]\nenabled = true\niperf3_server = \"s\"\n",
+        ))
+        .unwrap();
+        assert_eq!(p.device, "wg-race");
+    }
+
+    // ---- the measurement itself, against a stand-in iperf3 on PATH ----
+    //
+    // The binary is looked up by name, so a script called `iperf3` in a
+    // directory put first on PATH is what runs. It answers by the server name
+    // it is given, which keeps tests running in parallel apart, and logs the
+    // arguments it was called with.
+
+    #[cfg(unix)]
+    mod with_iperf3 {
+        use super::*;
+
+        const SCRIPT: &str = r#"#!/bin/sh
+dir=$(dirname "$0")
+echo "$@" >> "$dir/args.log"
+server=$2
+reverse=no
+for a in "$@"; do [ "$a" = "-R" ] && reverse=yes; done
+rate() { if [ $reverse = yes ]; then echo 800000000.0; else echo 400000000.0; fi; }
+good() { echo "{\"end\":{\"sum_sent\":{\"bits_per_second\":9000000000.0},\"sum_received\":{\"bits_per_second\":$(rate)}}}"; }
+case "$server" in
+  *-ok.example) good ;;
+  *-upfail.example) if [ $reverse = no ]; then echo '{"error":"the up leg is shut"}'; exit 1; else good; fi ;;
+  *-downfail.example) if [ $reverse = yes ]; then echo '{"error":"the down leg is shut"}'; exit 1; else good; fi ;;
+  *-json-error.example) echo '{"error":"unable to connect to server"}'; exit 1 ;;
+  *-stderr-error.example) echo "  boom on stderr  " >&2; exit 2 ;;
+  *-long-error.example) printf '{"error":"%s"}' "$(printf 'x%.0s' $(seq 1 300))"; exit 1 ;;
+  *-garbage.example) echo "not json" ;;
+  *-no-rate.example) echo '{"end":{}}' ;;
+esac
+"#;
+
+        fn install() -> std::path::PathBuf {
+            static DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+            DIR.get_or_init(|| {
+                use std::os::unix::fs::PermissionsExt;
+                let dir = std::env::temp_dir().join(format!("hydra-fake-iperf3-{}", std::process::id()));
+                std::fs::create_dir_all(&dir).unwrap();
+                let bin = dir.join("iperf3");
+                std::fs::write(&bin, SCRIPT).unwrap();
+                std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+                let old = std::env::var("PATH").unwrap_or_default();
+                std::env::set_var("PATH", format!("{}:{old}", dir.display()));
+                dir
+            })
+            .clone()
+        }
+
+        fn plan_for(server: &str) -> Plan {
+            install();
+            Plan { server: server.into(), port: 5202, secs: 1, device: String::new() }
+        }
+
+        #[tokio::test]
+        async fn each_direction_is_its_own_call_and_reports_the_received_rate() {
+            let dir = install();
+            let mut p = plan_for("args-ok.example");
+            p.secs = 3;
+            p.device = "wg0".into();
+            let up = run_iperf3(&p, false).await.expect("upload leg");
+            let down = run_iperf3(&p, true).await.expect("download leg");
+            assert_eq!((up, down), (400.0, 800.0), "megabits per second, from sum_received, not the 9000 sent");
+            let log = std::fs::read_to_string(dir.join("args.log")).unwrap();
+            let calls: Vec<&str> = log.lines().filter(|l| l.contains("args-ok.example")).collect();
+            assert!(calls.contains(&"-c args-ok.example -p 5202 -J -t 3 --bind-dev wg0"), "{calls:?}");
+            assert!(calls.contains(&"-c args-ok.example -p 5202 -J -t 3 --bind-dev wg0 -R"), "{calls:?}");
+        }
+
+        #[tokio::test]
+        async fn no_interface_means_no_bind_dev_argument() {
+            let dir = install();
+            let p = plan_for("nodev-ok.example");
+            run_iperf3(&p, false).await.unwrap();
+            let log = std::fs::read_to_string(dir.join("args.log")).unwrap();
+            let call = log.lines().find(|l| l.contains("nodev-ok.example")).unwrap();
+            assert_eq!(call, "-c nodev-ok.example -p 5202 -J -t 1", "the default route: nothing to bind");
+        }
+
+        /// iperf3 puts its own error in the JSON and leaves stderr empty; when
+        /// it does not, stderr is the message, and neither is unbounded.
+        #[tokio::test]
+        async fn a_failed_run_says_why_in_iperf3s_own_words() {
+            let e = run_iperf3(&plan_for("a-json-error.example"), false).await.unwrap_err();
+            assert_eq!(e, "unable to connect to server");
+            let e = run_iperf3(&plan_for("a-stderr-error.example"), false).await.unwrap_err();
+            assert_eq!(e, "boom on stderr", "trimmed");
+            let e = run_iperf3(&plan_for("a-long-error.example"), false).await.unwrap_err();
+            assert_eq!(e.chars().count(), 200, "cut to 200 characters");
+        }
+
+        #[tokio::test]
+        async fn an_answer_that_is_not_a_measurement_is_an_error() {
+            let e = run_iperf3(&plan_for("a-garbage.example"), false).await.unwrap_err();
+            assert!(e.starts_with("iperf3 json"), "{e}");
+            let e = run_iperf3(&plan_for("a-no-rate.example"), false).await.unwrap_err();
+            assert!(e.contains("sum_received"), "{e}");
+        }
+
+        /// Upload then download, the engines' rates read in the middle of each
+        /// leg: the upload figure from the first, the download from the second.
+        #[tokio::test]
+        async fn a_measurement_pairs_each_leg_with_the_engines_rate_of_its_direction() {
+            let m = measure(&plan_for("m-ok.example"), || (8_000_000, 16_000_000)).await.expect("measured");
+            assert_eq!((m.ul_mbps, m.dl_mbps), (400.0, 800.0));
+            assert_eq!(m.ul_torrent_mbps, 64.0, "8 MB/s of torrent upload is 64 Mbps");
+            assert_eq!(m.dl_torrent_mbps, 128.0, "16 MB/s of torrent download is 128 Mbps");
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+            assert!((now - m.ts).abs() < 30, "stamped when the run began: {}", m.ts);
+        }
+
+        /// "iperf3 failed" would send an operator to the whole tunnel when only
+        /// one leg is shut.
+        #[tokio::test]
+        async fn a_failure_names_the_leg_that_failed() {
+            let e = measure(&plan_for("m-upfail.example"), || (0, 0)).await.unwrap_err();
+            assert_eq!(e, "upload: the up leg is shut");
+            let e = measure(&plan_for("m-downfail.example"), || (0, 0)).await.unwrap_err();
+            assert_eq!(e, "download: the down leg is shut");
+            let e = measure(&plan_for("m-json-error.example"), || (0, 0)).await.unwrap_err();
+            assert_eq!(e, "upload: unable to connect to server, download: unable to connect to server");
+        }
+
+        /// The whole run: planned from the settings, measured, recorded in the
+        /// bench database and returned. The slot is process-wide and another
+        /// test takes it for a moment, so a refusal for that is retried.
+        #[tokio::test]
+        async fn a_run_is_recorded_for_the_history_routes() {
+            let mut s = crate::api::testing::state_from(
+                "st-run",
+                "[vpn_speedtest]\nenabled = true\niperf3_server = \"r-ok.example\"\nduration_secs = 1\n",
+            );
+            install();
+            let bench: crate::benchdb::Shared =
+                Arc::new(std::sync::Mutex::new(crate::benchdb::BenchDb::open_in_memory().unwrap()));
+            s.state.bench = Some(bench.clone());
+            let mut m = run(&s.state).await;
+            for _ in 0..40 {
+                if m.as_ref().err().is_some_and(|e| e.contains("already running")) {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    m = run(&s.state).await;
+                }
+            }
+            let m = m.expect("measured");
+            assert_eq!((m.ul_mbps, m.dl_mbps), (400.0, 800.0));
+            let stored = bench.lock().unwrap().latest_speedtest().expect("recorded");
+            assert_eq!(stored, m, "what the latest route will read is what the run returned");
+        }
+
+        #[tokio::test]
+        async fn a_run_with_nothing_configured_is_refused_before_it_takes_the_slot() {
+            let s = crate::api::testing::state_from("st-off", "");
+            let e = run(&s.state).await.unwrap_err();
+            assert!(e.contains("iperf3_server"), "{e}");
+        }
+    }
 }
