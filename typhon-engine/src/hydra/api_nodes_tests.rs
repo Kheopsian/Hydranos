@@ -277,6 +277,8 @@ async fn editing_a_node_is_refused_for_loopback_unknown_nodes_and_empty_bodies()
 /// on, and the new one is in the node's default.toml for the next boot.
 #[tokio::test]
 async fn rotating_a_nodes_key_switches_both_sides_and_retires_the_old_key() {
+    // The pending key is process-wide: nothing else may mint one meanwhile.
+    let _pending = crate::nodes::PENDING_KEY_TEST_LOCK.lock().await;
     let controller = st("rotate-controller");
     let node = state_from("rotate-node", &format!("[daemon]\napi_key = \"{NODE_KEY}\"\n"));
     let served = serve(crate::api::router(node.state.clone())).await;
