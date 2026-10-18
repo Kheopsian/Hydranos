@@ -347,6 +347,12 @@ mod tests {
         let added = events.iter().find(|e| e.event == "added").unwrap();
         assert_eq!((added.name.as_str(), added.size, added.upload_total, added.peers), ("rr", 16384, 4096, 1));
         assert!((0.0..60.0).contains(&added.time_since_add), "seconds since it was added: {}", added.time_since_add);
+        // Exactly the event's instant minus the torrent's own added time (whole
+        // seconds, so always short of the real moment): neither a ratio nor 0.
+        let added_time = typhon_engine::rpc::dispatch::torrent_to_json(&t)["added_time"].as_i64().unwrap() as f64;
+        assert!(added_time > 0.0);
+        assert!(added.time_since_add > 0.0, "{}", added.time_since_add);
+        assert!((added.time_since_add - (added.ts - added_time)).abs() < 1e-6, "{} vs {} - {}", added.time_since_add, added.ts, added_time);
         assert_eq!((added.uploader.as_str(), added.injected_peers), ("", 0));
 
         let snaps = bench.lock().unwrap().snapshots_for(&hash).unwrap();
@@ -356,5 +362,42 @@ mod tests {
         let detail: Vec<serde_json::Value> = serde_json::from_str(&snaps[0].peers_json).expect("peer detail kept");
         assert_eq!(detail.len(), 1);
         assert_eq!(detail[0]["ip"], "192.0.2.9");
+    }
+
+    /// Only a race still downloading is sampled: one that is exactly complete
+    /// is past the part of the curve worth keeping.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_race_that_is_exactly_complete_is_not_sampled() {
+        use typhon_engine::torrent::meta::TorrentStatus;
+        let s = state_from("re-complete", "");
+        let bench: crate::benchdb::Shared =
+            Arc::new(std::sync::Mutex::new(crate::benchdb::BenchDb::open_in_memory().unwrap()));
+        spawn(s.engines.clone(), bench.clone());
+        tokio::time::sleep(std::time::Duration::from_millis(1300)).await;
+        let (done, d) = add_race(&s, "cd");
+        d.status.store(TorrentStatus::Seeding as u8, Relaxed);
+        peer(&d, 8);
+        d.peers_connected.store(1, Relaxed);
+        let (running, r) = add_race(&s, "dl");
+        peer(&r, 7);
+        r.peers_connected.store(1, Relaxed);
+
+        // The first peer of each is the marker that the look has been made: a
+        // look writes its snapshot before it reports a moment.
+        let mut seen = (false, false);
+        for _ in 0..120 {
+            let db = bench.lock().unwrap();
+            let has = |h: &str| db.events_for(h).unwrap().iter().any(|e| e.event == "first_peer");
+            seen = (has(&done), has(&running));
+            drop(db);
+            if seen == (true, true) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert_eq!(seen, (true, true), "both were looked at");
+        let db = bench.lock().unwrap();
+        assert_eq!(db.snapshots_for(&running).unwrap().len(), 1, "the one still downloading is sampled");
+        assert!(db.snapshots_for(&done).unwrap().is_empty(), "progress 1.0 is not below 1.0");
     }
 }
