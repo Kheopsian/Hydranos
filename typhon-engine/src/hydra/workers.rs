@@ -1393,6 +1393,12 @@ fn disk_usage(path: &std::path::Path) -> Option<(u64, u64)> {
 /// the ceiling, and it still matters, because the way this ends otherwise is
 /// the OOM killer taking the whole thing with no warning and no dump.
 pub fn spawn_memory_watch(limit_bytes: u64) {
+    watch_memory(limit_bytes, resident_bytes)
+}
+
+/// `spawn_memory_watch` with the resident-size reader given, so a test can
+/// set the reading instead of growing the whole test process to cross it.
+fn watch_memory(limit_bytes: u64, mut read: impl FnMut() -> Option<u64> + Send + 'static) {
     if limit_bytes == 0 {
         return;
     }
@@ -1400,7 +1406,7 @@ pub fn spawn_memory_watch(limit_bytes: u64) {
         let mut over = false;
         loop {
             tokio::time::sleep(Duration::from_secs(30)).await;
-            let Some(rss) = resident_bytes() else { continue };
+            let Some(rss) = read() else { continue };
             if rss > limit_bytes && !over {
                 // Edge-triggered: a process sitting over the line for an hour
                 // is one problem, not one hundred and twenty alerts.
@@ -3681,27 +3687,38 @@ mod decision_tests {
     /// process is, a gigabyte is held and let go.
     #[tokio::test(start_paused = true)]
     async fn the_memory_watch_alerts_once_per_crossing_of_the_ceiling() {
+        use std::sync::atomic::{AtomicU64, Ordering};
         let log = capture();
-        let rss = resident_bytes().expect("resident size");
-        spawn_memory_watch(rss + (512 << 20));
+        const LIMIT: u64 = 1 << 30;
+        // u64::MAX stands for "no reading": the reader returns None then.
+        let rss = std::sync::Arc::new(AtomicU64::new(LIMIT - 1));
+        let r = rss.clone();
+        watch_memory(LIMIT, move || match r.load(Ordering::SeqCst) {
+            u64::MAX => None,
+            v => Some(v),
+        });
         after(31).await;
-        after(30).await;
         assert!(lines(&log, "resident memory").is_empty(), "under the ceiling: nothing to say");
 
-        let held = std::hint::black_box(vec![1u8; 1 << 30]);
+        rss.store(LIMIT, Ordering::SeqCst);
+        after(30).await;
+        assert!(lines(&log, "resident memory").is_empty(), "at the ceiling exactly: not over it");
+
+        rss.store(LIMIT + 1, Ordering::SeqCst);
         after(30).await;
         let over = lines(&log, "resident memory over the configured ceiling");
         assert_eq!(over.len(), 1, "{:?}", lines(&log, "resident memory"));
         assert!(over[0].starts_with("ERROR"));
         after(30).await;
+        rss.store(u64::MAX, Ordering::SeqCst);
         after(30).await;
-        assert_eq!(lines(&log, "resident memory over").len(), 1, "edge-triggered: still above, no second alert");
+        assert_eq!(lines(&log, "resident memory over").len(), 1, "edge-triggered, and a missing reading changes nothing");
         assert!(lines(&log, "back under").is_empty());
 
-        drop(held);
+        rss.store(LIMIT, Ordering::SeqCst);
         after(30).await;
         let back = lines(&log, "resident memory back under the ceiling");
-        assert_eq!(back.len(), 1, "{:?}", lines(&log, "resident memory"));
+        assert_eq!(back.len(), 1, "back at the ceiling is back under it: {:?}", lines(&log, "resident memory"));
         assert!(back[0].starts_with("INFO"));
         after(30).await;
         assert_eq!(lines(&log, "back under").len(), 1, "and only once");
