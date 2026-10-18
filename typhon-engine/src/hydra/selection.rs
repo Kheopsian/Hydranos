@@ -1561,6 +1561,785 @@ mod tests {
             assert_eq!(j["tally"][expected], 3, "{j}");
         }
     }
+
+    // ---- Target and the small pure helpers ----------------------------------
+
+    fn target(hash: &str, agent: &str, mode: &str) -> Target {
+        Target { hash: hash.into(), agent: agent.into(), mode: mode.into() }
+    }
+
+    /// Which engine a copy sits in, from whatever the row said.
+    #[test]
+    fn a_target_names_the_engine_its_agent_or_mode_points_at() {
+        assert_eq!(target("h", "local-vpn1", "hoard").engine(), "vpn1", "the agent wins over the mode");
+        assert_eq!(target("h", "", "race").engine(), "race", "an empty agent is this node, in the row's mode");
+        assert_eq!(target("h", "local", "hoard").engine(), "hoard");
+        assert_eq!(target("h", "nas-race", "hoard").engine(), "race", "a remote row: the part after the last hyphen");
+        assert_eq!(target("h", "nas", "hoard").engine(), "", "no hyphen, no guess");
+    }
+
+    #[test]
+    fn only_the_local_spellings_are_this_node() {
+        for yes in ["", "local", "local-race", "local-"] {
+            assert!(target("h", yes, "hoard").is_local(), "{yes:?}");
+        }
+        for no in ["nas-race", "locale", "localhost-race", "Local", "remote"] {
+            assert!(!target("h", no, "hoard").is_local(), "{no:?}");
+        }
+    }
+
+    /// An info hash is 40 hex (v1) or 64 hex (v2), trimmed and lower-cased;
+    /// anything else is not one.
+    #[test]
+    fn a_hash_is_forty_or_sixty_four_hex_characters_and_nothing_else() {
+        let v1 = "AB".repeat(20);
+        assert_eq!(clean_hash(&format!("  {v1}\n")), Some(v1.to_lowercase()));
+        let v2 = "0f".repeat(32);
+        assert_eq!(clean_hash(&v2), Some(v2.clone()));
+        for bad in ["", "abc", &"a".repeat(39), &"a".repeat(41), &"g".repeat(40), &format!("{}z", "a".repeat(39))] {
+            assert_eq!(clean_hash(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn url_encoding_keeps_unreserved_characters_and_escapes_the_rest() {
+        assert_eq!(enc("vpn-1_a.b~c"), "vpn-1_a.b~c");
+        assert_eq!(enc("a b/c?d&e=é"), "a%20b%2Fc%3Fd%26e%3D%C3%A9");
+        assert_eq!(enc(""), "");
+    }
+
+    /// A route's refusal is read in the order the routes speak: an `error`
+    /// field, a bare string, then the bare status.
+    #[test]
+    fn an_error_is_read_from_the_field_then_the_string_then_the_status() {
+        assert_eq!(error_of(StatusCode::CONFLICT, &json!({"error": "taken"})), "taken");
+        assert_eq!(error_of(StatusCode::BAD_GATEWAY, &Value::String("upstream down".into())), "upstream down");
+        assert_eq!(error_of(StatusCode::BAD_GATEWAY, &Value::String(String::new())), "HTTP 502");
+        assert_eq!(error_of(StatusCode::NOT_FOUND, &json!({"detail": "x"})), "HTTP 404");
+        assert_eq!(error_of(StatusCode::NOT_FOUND, &Value::Null), "HTTP 404");
+    }
+
+    /// Flags left alone are left out of the body: `null` would not parse as
+    /// "keep" on the far side.
+    #[test]
+    fn the_download_order_body_carries_only_the_flags_that_were_given() {
+        assert_eq!(download_order_body(None, None), json!({}));
+        assert_eq!(download_order_body(Some(true), None), json!({"sequential": true}));
+        assert_eq!(download_order_body(None, Some(false)), json!({"first_last_piece": false}));
+        assert_eq!(download_order_body(Some(false), Some(true)), json!({"sequential": false, "first_last_piece": true}));
+    }
+
+    #[test]
+    fn a_failure_names_the_torrent_by_its_first_eight_characters() {
+        let o = Outcome::failed("0123456789abcdef", "boom".into());
+        assert_eq!(o.key, "failed");
+        assert_eq!(o.error.as_deref(), Some("01234567: boom"));
+        assert_eq!(Outcome::failed("abc", "x".into()).error.as_deref(), Some("abc: x"), "a short hash does not panic");
+        assert_eq!(Outcome::skip("not_here").key, "not_here");
+        assert!(Outcome::skip("not_here").error.is_none());
+    }
+
+    // ---- Action::parse -------------------------------------------------------
+
+    fn refused(name: &str, params: Value) -> Refusal {
+        Action::parse(name, &params).expect_err(&format!("{name} {params} must be refused"))
+    }
+
+    #[test]
+    fn the_simple_actions_take_no_params_and_a_null_is_an_empty_object() {
+        assert!(matches!(Action::parse("stop", &Value::Null), Ok(Action::Pause(true))));
+        assert!(matches!(Action::parse("start", &json!({})), Ok(Action::Pause(false))));
+        assert!(matches!(Action::parse("pin", &Value::Null), Ok(Action::Pin(true))));
+        assert!(matches!(Action::parse("unpin", &Value::Null), Ok(Action::Pin(false))));
+        assert!(matches!(Action::parse("reannounce", &Value::Null), Ok(Action::Reannounce)));
+        assert!(matches!(Action::parse("recheck", &Value::Null), Ok(Action::Recheck)));
+        for name in ["stop", "start", "pin", "unpin", "reannounce", "recheck"] {
+            let r = refused(name, json!({"force": true}));
+            assert_eq!(r.status, StatusCode::BAD_REQUEST, "{name}");
+            let msg = r.body["error"].as_str().unwrap();
+            assert!(msg.starts_with("params:") && msg.contains("force"), "{name}: {msg}");
+        }
+    }
+
+    #[test]
+    fn tags_need_an_op_and_at_least_one_real_tag() {
+        match Action::parse("tags", &json!({"tags": ["a", "b"], "op": "remove"})) {
+            Ok(Action::Tags { tags, op }) => assert_eq!((tags, op), (vec!["a".to_string(), "b".to_string()], "remove".to_string())),
+            other => panic!("{other:?}"),
+        }
+        assert!(refused("tags", json!({"tags": ["a"], "op": "set"})).body["error"].as_str().unwrap().contains("add"));
+        assert!(refused("tags", json!({"tags": [], "op": "add"})).body["error"].as_str().unwrap().contains("empty"));
+        assert!(refused("tags", json!({"tags": ["  ", ""], "op": "add"})).body["error"].as_str().unwrap().contains("empty"));
+        refused("tags", json!({"tags": ["a"]}));
+        refused("tags", Value::Null);
+    }
+
+    #[test]
+    fn category_location_and_remove_default_their_flags_to_off() {
+        match Action::parse("category", &json!({"category": "movies"})) {
+            Ok(Action::Category { category, move_files, allow_breaking_hardlinks }) => {
+                assert_eq!((category.as_str(), move_files, allow_breaking_hardlinks), ("movies", false, false))
+            }
+            other => panic!("{other:?}"),
+        }
+        match Action::parse("category", &json!({"category": "", "move_files": true, "allow_breaking_hardlinks": true})) {
+            Ok(Action::Category { category, move_files, allow_breaking_hardlinks }) => {
+                assert_eq!((category.as_str(), move_files, allow_breaking_hardlinks), ("", true, true), "an empty category clears it")
+            }
+            other => panic!("{other:?}"),
+        }
+        refused("category", json!({}));
+        match Action::parse("location", &json!({"location": "/data/x"})) {
+            Ok(Action::Location { location, allow_breaking_hardlinks }) => assert_eq!((location.as_str(), allow_breaking_hardlinks), ("/data/x", false)),
+            other => panic!("{other:?}"),
+        }
+        assert!(refused("location", json!({"location": "   "})).body["error"].as_str().unwrap().contains("empty"));
+        assert!(matches!(Action::parse("remove", &Value::Null), Ok(Action::Remove { delete_files: false })));
+        assert!(matches!(Action::parse("remove", &json!({"delete_files": true})), Ok(Action::Remove { delete_files: true })));
+    }
+
+    #[test]
+    fn engine_and_node_actions_need_their_targets_named() {
+        assert!(matches!(Action::parse("copy", &json!({"engine": "race"})), Ok(Action::Copy { engine }) if engine == "race"));
+        assert!(matches!(Action::parse("move-engine", &json!({"engine": "hoard"})), Ok(Action::MoveEngine { engine }) if engine == "hoard"));
+        refused("copy", json!({}));
+        refused("move-engine", Value::Null);
+
+        match Action::parse("handoff", &json!({"node": "nas", "engine": "race", "then": "remove"})) {
+            Ok(Action::Handoff { node, engine, then }) => assert_eq!((node.as_str(), engine.as_str(), then.as_str()), ("nas", "race", "remove")),
+            other => panic!("{other:?}"),
+        }
+        assert!(refused("handoff", json!({"node": "nas", "engine": "race", "then": "delete"})).body["error"]
+            .as_str()
+            .unwrap()
+            .contains("keep"));
+        refused("handoff", json!({"node": "nas", "engine": "race"}));
+
+        match Action::parse("node-fetch", &json!({"node": "nas", "engine": "race"})) {
+            Ok(Action::NodeFetch { node, from_engine, engine }) => assert_eq!((node.as_str(), from_engine.as_str(), engine.as_str()), ("nas", "", "race")),
+            other => panic!("{other:?}"),
+        }
+        match Action::parse("node-move", &json!({"node": "nas", "engine": "vpn1"})) {
+            Ok(Action::NodeMove { node, engine }) => assert_eq!((node.as_str(), engine.as_str()), ("nas", "vpn1")),
+            other => panic!("{other:?}"),
+        }
+        refused("node-move", json!({"node": "nas"}));
+    }
+
+    /// An action that changes nothing is a refusal, not a job that touches
+    /// the whole selection to no effect.
+    #[test]
+    fn a_limits_or_order_action_that_sets_nothing_is_refused() {
+        refused("limits", json!({}));
+        refused("share_limits", json!({}));
+        refused("download_order", Value::Null);
+        assert!(matches!(
+            Action::parse("limits", &json!({"up_kib": 0})),
+            Ok(Action::Limits { up_kib: Some(0), down_kib: None })
+        ));
+        assert!(matches!(
+            Action::parse("limits", &json!({"down_kib": 50})),
+            Ok(Action::Limits { up_kib: None, down_kib: Some(50) })
+        ));
+        match Action::parse("share_limits", &json!({"inactive_seeding_time_limit": 30})) {
+            Ok(Action::ShareLimits { ratio, seeding, inactive }) => assert_eq!((ratio, seeding, inactive), (None, None, Some(30))),
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(
+            Action::parse("download_order", &json!({"first_last_piece": true})),
+            Ok(Action::DownloadOrder { sequential: None, first_last_piece: Some(true) })
+        ));
+    }
+
+    #[test]
+    fn an_unknown_action_is_a_404_that_names_it() {
+        let r = refused("explode", Value::Null);
+        assert_eq!(r.status, StatusCode::NOT_FOUND);
+        assert!(r.body["error"].as_str().unwrap().contains("explode"));
+    }
+
+    #[test]
+    fn only_a_reannounce_runs_eight_at_a_time() {
+        assert_eq!(Action::Reannounce.concurrency(), 8);
+        for a in [Action::Recheck, Action::Pause(true), Action::Remove { delete_files: true }, Action::Copy { engine: "x".into() }] {
+            assert_eq!(a.concurrency(), 1, "{a:?}");
+        }
+    }
+
+    // ---- which edits go to the store as one write ------------------------------
+
+    #[test]
+    fn a_relabel_is_a_set_edit_but_moving_the_files_is_not() {
+        let relabel = Action::Category { category: "movies".into(), move_files: false, allow_breaking_hardlinks: false };
+        assert!(matches!(SetEdit::of(&relabel), Some(SetEdit::Category(c)) if c == "movies"));
+        let moving = Action::Category { category: "movies".into(), move_files: true, allow_breaking_hardlinks: false };
+        assert!(SetEdit::of(&moving).is_none(), "moving files is real work per torrent");
+        for a in [Action::Recheck, Action::Reannounce, Action::Remove { delete_files: false }, Action::Limits { up_kib: Some(1), down_kib: None }] {
+            assert!(SetEdit::of(&a).is_none(), "{a:?}");
+        }
+        assert!(matches!(SetEdit::of(&Action::Pause(true)), Some(SetEdit::Paused(true))));
+        assert!(matches!(SetEdit::of(&Action::Pin(false)), Some(SetEdit::Pinned(false))));
+    }
+
+    /// Tags are trimmed and blanks dropped before they reach the store; `op`
+    /// decides add or remove.
+    #[test]
+    fn tags_are_trimmed_and_the_op_picks_add_or_remove() {
+        let a = Action::Tags { tags: vec![" keep ".into(), "  ".into(), "x".into()], op: "add".into() };
+        match SetEdit::of(&a) {
+            Some(SetEdit::Tags { tags, add }) => assert_eq!((tags, add), (vec!["keep".to_string(), "x".to_string()], true)),
+            _ => panic!("tags are a set edit"),
+        }
+        match SetEdit::of(&Action::Tags { tags: vec!["x".into()], op: "remove".into() }) {
+            Some(SetEdit::Tags { add, .. }) => assert!(!add),
+            _ => panic!("tags are a set edit"),
+        }
+    }
+
+    /// Pins and tags exist for the hoard's rows only, as the single routes
+    /// decide; a pause, a relabel and share limits reach every mode.
+    #[test]
+    fn pins_and_tags_apply_to_hoard_rows_only() {
+        let hoard = target("h", "local-hoard", "hoard");
+        let race = target("h", "local-race", "race");
+        for e in [SetEdit::Pinned(true), SetEdit::Tags { tags: vec![], add: true }] {
+            assert!(e.applies(&hoard));
+            assert!(!e.applies(&race));
+        }
+        for e in [SetEdit::Paused(true), SetEdit::Category("c".into()), SetEdit::ShareLimits { ratio: None, seeding: None, inactive: None }] {
+            assert!(e.applies(&hoard) && e.applies(&race));
+        }
+    }
+
+    // ---- resolve: items ----------------------------------------------------------
+
+    #[tokio::test]
+    async fn items_are_normalised_deduplicated_and_given_the_views_mode() {
+        let (s, _) = library("sel-items-norm");
+        let a = "AA".repeat(20);
+        let b = "bb".repeat(20);
+        let got = resolve(
+            &s.state,
+            &sel(json!({"view": "race", "items": [
+                {"hash": a},
+                {"hash": a.to_lowercase(), "agent": "local"},
+                {"hash": a, "agent": "local-race"},
+                {"hash": a, "agent": "local-hoard", "mode": "hoard"},
+                {"hash": format!(" {b} "), "agent": "nas-race", "mode": "race"},
+            ]})),
+        )
+        .await
+        .unwrap();
+        let got: Vec<(String, String, String)> = got.into_iter().map(|t| (t.hash, t.agent, t.mode)).collect();
+        assert_eq!(
+            got,
+            vec![
+                (a.to_lowercase(), "local-race".to_string(), "race".to_string()),
+                (a.to_lowercase(), "local-hoard".to_string(), "hoard".to_string()),
+                (b.clone(), "nas-race".to_string(), "race".to_string()),
+            ],
+            "three spellings of one copy collapse; the same hash in another engine stays"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_item_that_is_not_a_hash_or_a_view_that_is_not_an_engine_is_refused() {
+        let (s, _) = library("sel-items-bad");
+        let r = resolve(&s.state, &sel(json!({"items": [{"hash": "not-a-hash"}]}))).await.unwrap_err();
+        assert_eq!(r.status, StatusCode::BAD_REQUEST);
+        assert!(r.body["error"].as_str().unwrap().contains("`not-a-hash` is not an info hash"));
+        let r = resolve(&s.state, &sel(json!({"view": "nope", "items": [{"hash": "aa".repeat(20)}]}))).await.unwrap_err();
+        assert_eq!(r.status, StatusCode::BAD_REQUEST);
+        assert!(r.body["error"].as_str().unwrap().contains("no engine `nope`"));
+        let r = resolve(&s.state, &sel(json!({"filter": "limit=5", "expect": 1}))).await.unwrap_err();
+        assert!(r.body["error"].as_str().unwrap().contains("`limit` is not a filter"), "an unknown filter key is refused through resolve too");
+    }
+
+    /// An excluded copy is matched by hash AND agent, with the same
+    /// normalisation as the selection: excluding `local-race` leaves the
+    /// hoard copy of the same hash.
+    #[tokio::test]
+    async fn an_exclusion_is_matched_on_hash_and_agent_after_normalising() {
+        let (s, h) = library("sel-exclude");
+        let all = sel(json!({"filter": "", "expect": 3, "exclude": [
+            {"hash": h[0].to_uppercase(), "agent": "local"},
+            {"hash": h[1], "agent": "local-race"},
+            {"hash": "garbage"}
+        ]}));
+        let got = resolve(&s.state, &all).await.unwrap();
+        let mut hashes: Vec<String> = got.into_iter().map(|t| t.hash).collect();
+        hashes.sort();
+        let mut want = vec![h[1].clone(), h[2].clone()];
+        want.sort();
+        assert_eq!(hashes, want, "h0 excluded as local-hoard; h1's exclusion names the race copy, which is not selected");
+    }
+
+    // ---- jobs --------------------------------------------------------------------
+
+    #[test]
+    fn a_job_keeps_the_exact_failure_count_and_only_the_first_hundred_errors() {
+        let job = new_job("test", 150);
+        for i in 0..150 {
+            record(&job, 1, Outcome::failed(&format!("{i:040x}"), "boom".into()));
+        }
+        record(&job, 3, Outcome::ok("ok"));
+        let j = job.lock().unwrap();
+        assert_eq!((j.done, j.failed), (153, 150));
+        assert_eq!(j.errors.len(), ERRORS_KEPT);
+        assert_eq!(j.tally["failed"], 150);
+        assert_eq!(j.tally["ok"], 3);
+        assert!(j.errors[0].ends_with(": boom"));
+    }
+
+    #[test]
+    fn consent_requests_accumulate_with_their_file_and_byte_counts() {
+        let job = new_job("category", 2);
+        for (hash, files, bytes) in [("a", 3u64, 1000u64), ("b", 2, 500)] {
+            let item = Item { hash: hash.into(), agent: "local-hoard".into(), mode: "hoard".into() };
+            record(&job, 1, Outcome { key: "needs_consent".into(), error: None, consent: Some((item, files, bytes)) });
+        }
+        let j = job.lock().unwrap();
+        assert_eq!(j.consent.items.iter().map(|i| i.hash.as_str()).collect::<Vec<_>>(), vec!["a", "b"]);
+        assert_eq!((j.consent.files, j.consent.bytes), (5, 1500));
+        assert_eq!(j.failed, 0, "waiting for a yes is not a failure");
+    }
+
+    /// A finished job stays readable for an hour; the next job started after
+    /// that sweeps it. A running job is never swept.
+    #[test]
+    fn a_job_finished_long_ago_is_forgotten_when_the_next_one_starts() {
+        let old = new_job("old", 1);
+        let running = new_job("running", 1);
+        let recent = new_job("recent", 1);
+        let (old_id, running_id, recent_id) = (
+            old.lock().unwrap().id.clone(),
+            running.lock().unwrap().id.clone(),
+            recent.lock().unwrap().id.clone(),
+        );
+        let now = std::time::Instant::now();
+        old.lock().unwrap().ended = Some(now.checked_sub(JOB_TTL + std::time::Duration::from_secs(5)).expect("host up long enough"));
+        recent.lock().unwrap().ended = Some(now);
+        let _next = new_job("next", 1);
+        assert!(get_job(&old_id).is_none(), "swept");
+        assert!(get_job(&running_id).is_some(), "no end time, still running");
+        assert!(get_job(&recent_id).is_some(), "finished a moment ago");
+    }
+
+    /// Drive a job to its end the way the route does, without going through
+    /// HTTP, and hand back its final state.
+    async fn run_to_end(s: &TestState, action: Action, targets: Vec<Target>) -> Job {
+        let job = new_job("test", targets.len());
+        run(s.state.clone(), job.clone(), action, targets).await;
+        let j = job.lock().unwrap().clone();
+        j
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_job_does_nothing_more_and_says_it_was_cancelled() {
+        let (s, h) = library("sel-cancel-run");
+        let targets: Vec<Target> = h.iter().map(|x| target(x, "local-hoard", "hoard")).collect();
+        for action in [Action::Recheck, Action::Pause(true), Action::Reannounce] {
+            let job = new_job("test", targets.len());
+            job.lock().unwrap().cancel = true;
+            run(s.state.clone(), job.clone(), action, targets.clone()).await;
+            let j = job.lock().unwrap();
+            assert!(j.finished && j.cancelled, "finished, and flagged as cancelled");
+            assert_eq!((j.done, j.failed), (0, 0), "nothing was touched");
+        }
+        assert!(s.state.store.read().unwrap().paused_hashes("hoard").unwrap().is_empty(), "no pause was written");
+    }
+
+    #[tokio::test]
+    async fn the_job_routes_answer_unknown_ids_and_cancel_a_known_one() {
+        let (s, _) = library("sel-job-routes");
+        let r = get_job_route(State(s.state.clone()), Path("sel-nope".into()), RawQuery(None), keyed(KEY)).await;
+        assert_eq!(r.status(), StatusCode::NOT_FOUND);
+        let r = cancel_job(State(s.state.clone()), Path("sel-nope".into()), RawQuery(None), keyed(KEY)).await;
+        assert_eq!(r.status(), StatusCode::NOT_FOUND);
+        let r = cancel_job(State(s.state.clone()), Path("sel-nope".into()), RawQuery(None), HeaderMap::new()).await;
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+
+        let job = new_job("test", 1);
+        let id = job.lock().unwrap().id.clone();
+        let r = cancel_job(State(s.state.clone()), Path(id.clone()), RawQuery(None), HeaderMap::new()).await;
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+        assert!(!job.lock().unwrap().cancel, "a caller with no key cancels nothing");
+        let r = cancel_job(State(s.state.clone()), Path(id.clone()), RawQuery(None), keyed(KEY)).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        assert!(job.lock().unwrap().cancel);
+        // A running job reads its elapsed time live.
+        let r = get_job_route(State(s.state.clone()), Path(id), RawQuery(None), keyed(KEY)).await;
+        let v: Value = serde_json::from_slice(&axum::body::to_bytes(r.into_body(), usize::MAX).await.unwrap()).unwrap();
+        assert_eq!((v["finished"].clone(), v["total"].clone()), (json!(false), json!(1)));
+        assert!(v.get("cancel").is_none() && v.get("started").is_none(), "internals are not serialised");
+    }
+
+    #[tokio::test]
+    async fn a_malformed_request_is_refused_before_a_job_exists() {
+        let (s, h) = library("sel-malformed");
+        for body in ["not json", "{}", r#"{"selection": {"items": []}}"#] {
+            let r = post_action(State(s.state.clone()), Path("stop".into()), RawQuery(None), keyed(KEY), body.into()).await;
+            assert_eq!(r.status(), StatusCode::BAD_REQUEST, "{body}");
+        }
+        let r = post_action(
+            State(s.state.clone()),
+            Path("stop".into()),
+            RawQuery(None),
+            keyed(KEY),
+            json!({"selection": {"items": [{"hash": h[0]}]}, "extra": 1}).to_string(),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST, "an unknown top-level key is named, not dropped");
+        let r = post_action(
+            State(s.state.clone()),
+            Path("stop".into()),
+            RawQuery(None),
+            keyed(KEY),
+            json!({"selection": {"filter": "", "expect": 1}}).to_string(),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::CONFLICT, "3 torrents against 1 confirmed");
+        let v: Value = serde_json::from_slice(&axum::body::to_bytes(r.into_body(), usize::MAX).await.unwrap()).unwrap();
+        assert_eq!((v["reason"].clone(), v["count"].clone(), v["expected"].clone()), (json!("grew"), json!(3), json!(1)));
+        assert!(s.state.store.read().unwrap().paused_hashes("hoard").unwrap().is_empty(), "the refusal touched nothing");
+    }
+
+    // ---- a node that holds some of the copies ------------------------------------------
+
+    type Calls = Arc<Mutex<Vec<(String, String, String)>>>;
+
+    /// A loopback Hydra standing in for the declared node `nas`: it records
+    /// every request (method, path+query, body) and answers by the hash the
+    /// path carries, so one test can show every kind of answer.
+    ///   aaaa..  200 {}            bbbb..  202 {"kind":"graduate"}
+    ///   cccc..  202 {}            dddd..  500 {"error":"disk full"}
+    ///   eeee..  502 (no JSON)
+    /// `/api/<engine>/page` answers the selection universe.
+    struct Nas {
+        url: String,
+        calls: Calls,
+        _stop: tokio::sync::oneshot::Sender<()>,
+    }
+
+    async fn nas() -> Nas {
+        let calls: Calls = Arc::default();
+        let log = calls.clone();
+        let app = axum::Router::new().fallback(move |method: Method, uri: axum::http::Uri, body: String| {
+            let log = log.clone();
+            async move {
+                let pq = uri.path_and_query().map(|p| p.to_string()).unwrap_or_default();
+                log.lock().unwrap().push((method.to_string(), pq.clone(), body));
+                if pq.starts_with("/api/hoard/page") {
+                    let h = "aa".repeat(20);
+                    return (StatusCode::OK, Json(json!({
+                        "total": 1, "filtered": 1,
+                        "copies": [{"hash": h, "agent": "local-hoard"}, {"hash": "bad", "agent": "local-hoard"}],
+                    })))
+                    .into_response();
+                }
+                if pq.contains(&"bb".repeat(20)) {
+                    (StatusCode::ACCEPTED, Json(json!({"kind": "graduate"}))).into_response()
+                } else if pq.contains(&"cc".repeat(20)) {
+                    (StatusCode::ACCEPTED, Json(json!({}))).into_response()
+                } else if pq.contains(&"dd".repeat(20)) {
+                    (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "disk full"}))).into_response()
+                } else if pq.contains(&"ee".repeat(20)) {
+                    (StatusCode::BAD_GATEWAY, "upstream").into_response()
+                } else {
+                    (StatusCode::OK, Json(json!({}))).into_response()
+                }
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).with_graceful_shutdown(async { let _ = rx.await; }).await;
+        });
+        Nas { url, calls, _stop: tx }
+    }
+
+    fn declare_nas(s: &TestState, url: &str) {
+        s.state
+            .store
+            .lock()
+            .unwrap()
+            .put_node(&crate::store::Node { name: "nas".into(), url: url.into(), api_key: "node-key".into(), enabled: true, added_at: 0 })
+            .unwrap();
+    }
+
+    fn calls_of(n: &Nas) -> Vec<(String, String, Value)> {
+        n.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, pq, _)| !pq.starts_with("/api/hoard/page"))
+            .map(|(m, pq, b)| (m.clone(), pq.clone(), serde_json::from_str(b).unwrap_or(Value::Null)))
+            .collect()
+    }
+
+    fn remote(hash_pair: &str, engine: &str, mode: &str) -> Target {
+        target(&hash_pair.repeat(20), &format!("nas-{engine}"), mode)
+    }
+
+    /// A filter over a fleet resolves to the node's copies too, labelled
+    /// `<node>-<engine>`, and a hash the node made up is dropped.
+    #[tokio::test]
+    async fn a_filter_over_the_fleet_includes_the_nodes_copies_under_its_name() {
+        let (s, h) = library("sel-fleet-filter");
+        let n = nas().await;
+        declare_nas(&s, &n.url);
+        let got = resolve(&s.state, &sel(json!({"filter": "category=movies", "expect": 3}))).await.unwrap();
+        let mut copies: Vec<(String, String)> = got.into_iter().map(|t| (t.hash, t.agent)).collect();
+        copies.sort();
+        let mut want = vec![
+            (h[0].clone(), "local-hoard".to_string()),
+            (h[1].clone(), "local-hoard".to_string()),
+            ("aa".repeat(20), "nas-hoard".to_string()),
+        ];
+        want.sort();
+        assert_eq!(copies, want);
+        let asked = n.calls.lock().unwrap().clone();
+        assert_eq!(asked.len(), 1);
+        assert_eq!(asked[0].1, "/api/hoard/page?fields=hash&category=movies", "the filter travels to the node as written");
+        // Fewer than confirmed is fine; more is refused with the count.
+        let r = resolve(&s.state, &sel(json!({"filter": "category=movies", "expect": 2}))).await.unwrap_err();
+        assert_eq!((r.status, r.body["count"].clone()), (StatusCode::CONFLICT, json!(3)));
+    }
+
+    /// Every kind of answer a node gives is a distinct outcome, and a refusal
+    /// carries the node's name and its reason.
+    #[tokio::test]
+    async fn a_remote_category_move_reports_how_the_node_answered() {
+        let (s, _) = library("sel-remote-answers");
+        let n = nas().await;
+        declare_nas(&s, &n.url);
+        let action = Action::Category { category: "movies".into(), move_files: true, allow_breaking_hardlinks: true };
+        let targets = vec![
+            remote("aa", "hoard", "hoard"),
+            remote("bb", "hoard", "hoard"),
+            remote("cc", "hoard", "hoard"),
+            remote("dd", "hoard", "hoard"),
+            remote("ee", "hoard", "hoard"),
+        ];
+        let j = run_to_end(&s, action, targets).await;
+        assert_eq!(j.done, 5);
+        assert_eq!(j.tally.get("ok"), Some(&1), "{:?}", j.tally);
+        assert_eq!(j.tally.get("graduating"), Some(&1), "202 + kind graduate");
+        assert_eq!(j.tally.get("moving"), Some(&1), "202 alone");
+        assert_eq!(j.tally.get("failed"), Some(&2));
+        assert_eq!(j.failed, 2);
+        assert!(j.errors.iter().any(|e| e == &format!("{}: nas: disk full", "dddddddd")), "{:?}", j.errors);
+        assert!(j.errors.iter().any(|e| e.starts_with("eeeeeeee: nas: 502")), "a bare status when the node sent no reason: {:?}", j.errors);
+        let calls = calls_of(&n);
+        assert_eq!(calls[0].0, "POST");
+        assert_eq!(calls[0].1, format!("/api/hoard/torrents/{}/category?engine=hoard", "aa".repeat(20)));
+        assert_eq!(calls[0].2, json!({"category": "movies", "move_files": true, "allow_breaking_hardlinks": true}));
+    }
+
+    /// Each action has its own route on the node, built for THAT copy: the
+    /// engine of the row (encoded), the mode of the row, the body it needs.
+    #[tokio::test]
+    async fn each_action_reaches_the_nodes_own_route_for_that_copy() {
+        let (s, _) = library("sel-remote-routes");
+        let n = nas().await;
+        declare_nas(&s, &n.url);
+        let h = "aa".repeat(20);
+        let race = remote("aa", "vpn 1", "race");
+        let cases: Vec<(Action, Target, &str, String, Value)> = vec![
+            (
+                Action::Location { location: "/srv/x".into(), allow_breaking_hardlinks: false },
+                race.clone(),
+                "POST",
+                format!("/api/race/torrents/{h}/location?engine=vpn%201"),
+                json!({"location": "/srv/x", "allow_breaking_hardlinks": false}),
+            ),
+            (Action::Reannounce, race.clone(), "POST", format!("/api/torrents/{h}/reannounce?engine=vpn%201"), Value::Null),
+            (Action::Recheck, race.clone(), "POST", format!("/api/hoard/torrents/{h}/verify?engine=vpn%201"), Value::Null),
+            (
+                Action::Pause(true),
+                race.clone(),
+                "POST",
+                "/api/engines/vpn%201/pause".to_string(),
+                json!({"hashes": [h], "paused": true}),
+            ),
+            (
+                Action::Limits { up_kib: Some(10), down_kib: None },
+                race.clone(),
+                "POST",
+                format!("/api/torrents/{h}/limits?engine=vpn%201"),
+                json!({"up_kib": 10, "down_kib": null}),
+            ),
+            (
+                Action::DownloadOrder { sequential: Some(true), first_last_piece: None },
+                race.clone(),
+                "POST",
+                format!("/api/torrents/{h}/download-order?engine=vpn%201"),
+                json!({"sequential": true}),
+            ),
+            (
+                Action::Remove { delete_files: true },
+                race.clone(),
+                "DELETE",
+                format!("/api/torrents/{h}?delete_files=true&engine=vpn%201"),
+                Value::Null,
+            ),
+        ];
+        for (action, t, method, path, body) in cases {
+            let before = calls_of(&n).len();
+            let j = run_to_end(&s, action.clone(), vec![t]).await;
+            assert_eq!(j.tally.get("ok"), Some(&1), "{action:?}: {:?} {:?}", j.tally, j.errors);
+            let calls = calls_of(&n);
+            assert_eq!(calls.len(), before + 1, "{action:?}: exactly one call");
+            let (m, pq, b) = calls.last().unwrap();
+            assert_eq!((m.as_str(), pq.as_str()), (method, path.as_str()), "{action:?}");
+            assert_eq!(b, &body, "{action:?}");
+        }
+        // A copy that is not a race row goes to the hoard's routes.
+        let h2 = "aa".repeat(20);
+        run_to_end(&s, Action::Location { location: "/y".into(), allow_breaking_hardlinks: true }, vec![remote("aa", "hoard", "hoard")]).await;
+        assert_eq!(calls_of(&n).last().unwrap().1, format!("/api/hoard/torrents/{h2}/location?engine=hoard"));
+    }
+
+    /// What has no relay is reported as not here, and a copy whose node is
+    /// not declared fails with the agent it asked for.
+    #[tokio::test]
+    async fn actions_without_a_relay_or_for_an_undeclared_node_are_not_sent() {
+        let (s, _) = library("sel-remote-skip");
+        let n = nas().await;
+        declare_nas(&s, &n.url);
+        for action in [
+            Action::Copy { engine: "race".into() },
+            Action::MoveEngine { engine: "race".into() },
+            Action::Handoff { node: "nas".into(), engine: "race".into(), then: "keep".into() },
+        ] {
+            let j = run_to_end(&s, action.clone(), vec![remote("aa", "hoard", "hoard")]).await;
+            assert_eq!(j.tally.get("not_here"), Some(&1), "{action:?}");
+        }
+        assert!(calls_of(&n).is_empty(), "nothing was sent to the node");
+
+        let ghost = target(&"aa".repeat(20), "elsewhere-hoard", "hoard");
+        let j = run_to_end(&s, Action::Reannounce, vec![ghost]).await;
+        assert_eq!(j.failed, 1);
+        assert_eq!(j.errors, vec!["aaaaaaaa: no declared node holds elsewhere-hoard".to_string()]);
+        // A set action that has no relay on a node is reported, not dropped.
+        let j = run_to_end(&s, Action::Tags { tags: vec!["x".into()], op: "add".into() }, vec![remote("aa", "hoard", "hoard")]).await;
+        assert_eq!(j.tally.get("not_here"), Some(&1));
+        assert!(calls_of(&n).is_empty());
+    }
+
+    /// A node that is down fails its copies with the node's name and the
+    /// class of the failure, and the local ones go on.
+    #[tokio::test]
+    async fn a_node_that_is_down_fails_only_its_own_copies() {
+        let (s, h) = library("sel-remote-down");
+        declare_nas(&s, "http://127.0.0.1:1");
+        let targets = vec![target(&h[0], "local-hoard", "hoard"), remote("aa", "hoard", "hoard")];
+        let j = run_to_end(&s, Action::Pause(true), targets).await;
+        assert_eq!(j.done, 2);
+        assert_eq!(j.errors, vec!["aaaaaaaa: nas: injoignable".to_string()]);
+        assert_eq!(j.tally.get("ok"), Some(&1));
+        let (_, t) = crate::api::find_torrent(&s.state, &h[0]).unwrap();
+        assert!(t.is_paused.load(std::sync::atomic::Ordering::Relaxed), "the local copy was stopped");
+    }
+
+    /// Set-based edits over a mixed selection: a pause and a relabel are
+    /// relayed to the node, a tag or pin is not (and a race row is skipped
+    /// by them, as the single routes do).
+    #[tokio::test]
+    async fn a_set_edit_over_local_and_remote_copies_relays_only_what_the_node_can_take() {
+        let (s, h) = library("sel-remote-set");
+        let n = nas().await;
+        declare_nas(&s, &n.url);
+        let local = target(&h[2], "local-hoard", "hoard");
+        let node_copy = remote("aa", "hoard", "hoard");
+
+        let j = run_to_end(&s, Action::Pause(true), vec![local.clone(), node_copy.clone()]).await;
+        assert_eq!((j.done, j.failed), (2, 0), "{:?}", j.errors);
+        assert_eq!(j.tally.get("ok"), Some(&2));
+        assert_eq!(calls_of(&n)[0].1, "/api/engines/hoard/pause");
+
+        let relabel = Action::Category { category: "movies".into(), move_files: false, allow_breaking_hardlinks: false };
+        let j = run_to_end(&s, relabel, vec![local.clone(), node_copy.clone()]).await;
+        assert_eq!(j.tally.get("ok"), Some(&2), "{:?}", j.tally);
+        let c = calls_of(&n);
+        assert_eq!(c[1].1, format!("/api/hoard/torrents/{}/category?engine=hoard", "aa".repeat(20)));
+        assert_eq!(c[1].2, json!({"category": "movies", "move_files": false, "allow_breaking_hardlinks": false}));
+
+        let tags = Action::Tags { tags: vec!["t".into()], op: "add".into() };
+        let race_row = target(&h[0], "local-race", "race");
+        let j = run_to_end(&s, tags, vec![local, node_copy, race_row]).await;
+        assert_eq!(j.tally.get("ok"), Some(&1), "the local hoard row");
+        assert_eq!(j.tally.get("not_here"), Some(&1), "the node's copy has no tag relay");
+        assert_eq!(j.tally.get("skipped"), Some(&1), "tags are the hoard's");
+        assert_eq!(calls_of(&n).len(), 2, "no tag call was made");
+        assert!(tags_of(&s, &h[2]).contains(&"t".to_string()));
+    }
+
+    /// A cancel seen between two remote relays stops the rest.
+    #[tokio::test]
+    async fn a_cancel_stops_the_relays_that_have_not_gone_yet() {
+        let (s, _) = library("sel-remote-cancel");
+        let n = nas().await;
+        declare_nas(&s, &n.url);
+        let job = new_job("test", 2);
+        job.lock().unwrap().cancel = true;
+        run(s.state.clone(), job.clone(), Action::Pause(true), vec![remote("aa", "hoard", "hoard"), remote("bb", "hoard", "hoard")]).await;
+        assert_eq!(job.lock().unwrap().done, 0);
+        assert!(calls_of(&n).is_empty());
+    }
+
+    // ---- per-torrent actions on this node ----------------------------------------------
+
+    #[tokio::test]
+    async fn actions_that_fail_on_this_node_say_so_per_torrent() {
+        let (s, h) = library("sel-local-fail");
+        let t = |i: usize| target(&h[i], "local-hoard", "hoard");
+        // Copying or moving into an engine that does not exist, handing off
+        // to or fetching from a node nobody declared: each torrent fails with
+        // its own reason, none succeeds by accident.
+        for action in [
+            Action::Copy { engine: "no-such-engine".into() },
+            Action::MoveEngine { engine: "no-such-engine".into() },
+            Action::NodeMove { node: "ghost".into(), engine: "race".into() },
+            Action::NodeFetch { node: "ghost".into(), from_engine: String::new(), engine: "race".into() },
+            Action::Handoff { node: "ghost".into(), engine: "race".into(), then: "remove".into() },
+        ] {
+            let j = run_to_end(&s, action.clone(), vec![t(0), t(1)]).await;
+            assert_eq!((j.done, j.failed), (2, 2), "{action:?}: {:?}", j.tally);
+            assert_eq!(j.tally.get("failed"), Some(&2), "{action:?}");
+            assert!(j.errors.iter().all(|e| e.starts_with(&h[0][..8]) || e.starts_with(&h[1][..8])), "{:?}", j.errors);
+            assert!(j.tally.get("ok").is_none() && j.tally.get("waiting_node").is_none(), "{action:?}");
+        }
+        // Nothing was copied or moved on the way.
+        assert!(s.state.engines.get("race").unwrap().manager.all().is_empty());
+        assert_eq!(s.state.engines.get("hoard").unwrap().manager.all().len(), 3);
+    }
+
+    /// Copying a torrent to another engine leaves the original where it is.
+    #[tokio::test]
+    async fn a_copy_to_another_engine_adds_it_there_and_keeps_the_original() {
+        let (s, h) = library("sel-local-copy");
+        let j = run_to_end(&s, Action::Copy { engine: "race".into() }, vec![target(&h[0], "local-hoard", "hoard")]).await;
+        assert_eq!((j.failed, j.tally.get("ok").copied()), (0, Some(1)), "{:?}", j.errors);
+        let race = s.state.engines.get("race").unwrap();
+        assert!(race.manager.get(&typhon_engine::torrent::hex_decode(&h[0]).unwrap()).is_some(), "now in race");
+        let hoard = s.state.engines.get("hoard").unwrap();
+        assert!(hoard.manager.get(&typhon_engine::torrent::hex_decode(&h[0]).unwrap()).is_some(), "and still in hoard");
+    }
+
+    /// A hash this node does not hold fails on the local routes with the
+    /// route's own words.
+    #[tokio::test]
+    async fn a_torrent_this_node_does_not_hold_fails_with_the_routes_reason() {
+        let (s, _) = library("sel-local-unknown");
+        let stranger = target(&"9f".repeat(20), "local-hoard", "hoard");
+        for action in [Action::Recheck, Action::Remove { delete_files: false }, Action::Limits { up_kib: Some(1), down_kib: None }] {
+            let j = run_to_end(&s, action.clone(), vec![stranger.clone()]).await;
+            assert_eq!(j.failed, 1, "{action:?}: {:?}", j.tally);
+            assert!(j.errors[0].starts_with("9f9f9f9f: "), "{:?}", j.errors);
+        }
+    }
 }
 
 
