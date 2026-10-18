@@ -40,7 +40,12 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 - On a node with several engines of one role, the detail panel of a torrent
   held by an engine not named after its role (`hoard`, `race`) read the store
   session of the engine that bears the role's name, and showed no category.
-  It now reads the session of the engine that holds the torrent.
+  It now reads the session of the engine that holds the torrent. For such a
+  torrent the API returns different values in five fields: `category` and
+  `save_path` now come from its row (they were empty, and the engine's own
+  folder), `added_time` and `completed_time` from its row too (they were the
+  engine's), and `share_limits.engine` is the id of the engine that holds it
+  (it was the role's name).
 
 ## v4.5.1 -- zip 9, and a CI that measures what it builds
 
