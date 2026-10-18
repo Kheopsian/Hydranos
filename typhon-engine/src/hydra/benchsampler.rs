@@ -717,8 +717,20 @@ mod tests {
         let s = state_from("bs-pass", "");
         add(&s, "race", "p1", Some("https://pass-only.example/announce"));
         let bench = memory_bench();
-        sample_trackers(&s.engines, &bench, &s.store).expect("pass");
-        assert!(latest_trackers().is_some(), "the live table has a pass to show");
+        // The published rows are process-wide and another test's sampler task
+        // may publish its own pass between ours and the read: take another
+        // pass until the rows read back are the ones we just made.
+        let mut live = None;
+        for _ in 0..50 {
+            sample_trackers(&s.engines, &bench, &s.store).expect("pass");
+            live = latest_trackers().filter(|rows| rows.iter().any(|r| r.tracker == "pass-only.example"));
+            if live.is_some() {
+                break;
+            }
+        }
+        let live = live.expect("the live table shows the pass just made, not nothing or a placeholder row");
+        let row = live.iter().find(|r| r.tracker == "pass-only.example").unwrap();
+        assert_eq!((row.engine.as_str(), row.torrents), ("race", 1));
         let stored = bench.lock().unwrap().tracker_samples_latest().unwrap();
         let mine: Vec<_> = stored.iter().filter(|r| r["tracker"] == "pass-only.example").collect();
         assert_eq!(mine.len(), 1);
@@ -795,6 +807,164 @@ mod tests {
         assert!((ok / failed - 2.5).abs() < 1e-6, "5 ok to 2 failed over the same interval: {ok} / {failed}");
         let iowait = last["iowait_pct"].as_f64().unwrap();
         assert!((0.0..=100.0).contains(&iowait), "a share of the CPU time: {iowait}");
+    }
+
+    /// The rates of the loaded torrents are summed per tracker, then per
+    /// (engine, tracker) over the stored baseline; `active` counts the
+    /// torrents with a peer, not the peers.
+    #[test]
+    fn tracker_rows_sum_the_rates_and_count_the_torrents_with_a_peer() {
+        use std::sync::atomic::Ordering::Relaxed;
+        let s = state_from("bs-rates", "");
+        s.store.lock().unwrap().set_counter(&tracker_key("race", "tk-r.example"), 10, 20).unwrap();
+        let r1 = add(&s, "race", "r1", Some("https://tk-r.example/announce"));
+        let r2 = add(&s, "race", "r2", Some("https://tk-r.example/announce"));
+        let r3 = add(&s, "race", "r3", Some("https://tk-r.example/announce"));
+        let h1 = add(&s, "hoard", "h1", Some("https://tk-r.example/announce"));
+        r1.peers_connected.store(3, Relaxed);
+        r2.peers_connected.store(5, Relaxed);
+        r3.peers_connected.store(0, Relaxed);
+        h1.peers_connected.store(2, Relaxed);
+        // A rate is measured between two updates: the first only seeds it.
+        let all = [(&r1, 6_000, 3_000), (&r2, 12_000, 9_000), (&r3, 0, 0), (&h1, 30_000, 15_000)];
+        for (t, _, _) in &all {
+            t.upload_rate.update(0);
+            t.download_rate.update(0);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(700));
+        for (t, up, down) in &all {
+            t.upload_rate.update(*up);
+            t.download_rate.update(*down);
+        }
+        let (u1, u2, d1, d2) = (r1.upload_rate.get(), r2.upload_rate.get(), r1.download_rate.get(), r2.download_rate.get());
+        let (uh, dh) = (h1.upload_rate.get(), h1.download_rate.get());
+        assert!(u1 > 0 && u2 > 0 && d1 > 0 && d2 > 0 && uh > 0 && dh > 0, "the fixtures do have rates");
+        assert_eq!(r3.upload_rate.get(), 0);
+
+        let rows = tracker_totals(&s.engines, &s.store, 1);
+        let row = |e: &str| rows.iter().find(|r| r.engine == e && r.tracker == "tk-r.example").unwrap().clone();
+        let race = row("race");
+        assert_eq!(race.upload_rate, (u1 + u2) as i64, "the loaded torrents' upload rates add up");
+        assert_eq!(race.download_rate, (d1 + d2) as i64);
+        assert_eq!((race.torrents, race.peers), (3, 8));
+        assert_eq!(race.active, 2, "two of the three torrents have a peer; the peers do not count");
+        assert_eq!((race.cum_uploaded, race.cum_downloaded), (10, 20), "the stored baseline is kept under them");
+        let hoard = row("hoard");
+        assert_eq!((hoard.upload_rate, hoard.download_rate), (uh as i64, dh as i64));
+        assert_eq!((hoard.torrents, hoard.peers, hoard.active), (1, 2, 1));
+    }
+
+    /// `/proc/stat` with exactly the five fields up to iowait is readable.
+    #[test]
+    fn iowait_reads_a_cpu_line_that_stops_at_iowait() {
+        let mut prev = None;
+        assert_eq!(iowait_pct("cpu  10 0 10 70 10\n", &mut prev), 0.0);
+        assert_eq!(prev, Some((10, 100)), "five fields are enough to be the baseline");
+        let pct = iowait_pct("cpu  10 0 10 90 30\n", &mut prev);
+        assert!((pct - 50.0).abs() < 1e-9, "20 of the 40 new ticks were iowait: {pct}");
+    }
+
+    /// The hit rate is hits over hits plus misses, whatever the balance
+    /// between them; no hit at all is 0 % when there were misses.
+    #[test]
+    fn the_arc_hit_rate_holds_when_the_misses_outnumber_the_hits() {
+        let run = |h: u32, m: u32| {
+            let (mut prev, mut out) = (None, System::default());
+            arc_interval("hits 4 100\nmisses 4 100\nsize 4 1\ndemand_data_hits 4 100\ndemand_data_misses 4 100\n", 0.0, &mut prev, &mut out);
+            let b = format!(
+                "hits 4 {}\nmisses 4 {}\nsize 4 1\ndemand_data_hits 4 {}\ndemand_data_misses 4 {}\n",
+                100 + h, 100 + m, 100 + h, 100 + m
+            );
+            arc_interval(&b, 10.0, &mut prev, &mut out);
+            out
+        };
+        let few_hits = run(10, 90);
+        assert!((few_hits.arc_hit_rate_pct - 10.0).abs() < 1e-9, "{}", few_hits.arc_hit_rate_pct);
+        assert!((few_hits.arc_demand_hit_rate_pct - 10.0).abs() < 1e-9);
+        assert!((few_hits.arc_miss_per_sec - 9.0).abs() < 1e-9);
+        let none = run(0, 50);
+        assert_eq!(none.arc_hit_rate_pct, 0.0, "every access missed");
+        assert_eq!(none.arc_demand_hit_rate_pct, 0.0);
+        let all = run(50, 0);
+        assert_eq!(all.arc_hit_rate_pct, 100.0);
+    }
+
+    /// An announce rate is the counter's delta over the real time since the
+    /// previous sample -- not a ratio, not a delta over nothing -- and a
+    /// predecessor stamped in the future (a clock that stepped back) gives 0.
+    #[test]
+    fn the_announce_rate_is_the_delta_over_the_elapsed_seconds() {
+        let s = state_from("bs-rate", "");
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64();
+        let (race, hoard) = (s.engines.get("race").unwrap(), s.engines.get("hoard").unwrap());
+        for _ in 0..500 {
+            race.announce_cache.count_ok("tk-s.example");
+        }
+        for _ in 0..100 {
+            race.announce_cache.count_failed();
+        }
+        for _ in 0..50 {
+            hoard.announce_cache.count_ok("tk-s.example");
+        }
+        let bench = memory_bench();
+        let (mut previous, mut system) = (Previous::new(), SystemPrev::default());
+        previous.insert("race".into(), (0, 0, now - 100.0));
+        previous.insert("hoard".into(), (0, 0, now + 1.0e6));
+        sample_once(&s.engines, &bench, &s.store, &mut previous, &mut system).expect("sample");
+        let rows = bench.lock().unwrap().samples_in_range(0.0, 1e12).unwrap();
+        let r = &rows[0];
+        let ok = r["race_announce_rate"].as_f64().unwrap();
+        let failed = r["race_announce_fail_rate"].as_f64().unwrap();
+        assert!(ok > 4.5 && ok <= 5.0, "500 announces over ~100 s: {ok}");
+        assert!(failed > 0.9 && failed <= 1.0, "100 failures over ~100 s: {failed}");
+        assert_eq!(r["hoard_announce_rate"].as_f64(), Some(0.0), "a predecessor from the future is not a measurement");
+        assert_eq!(previous["hoard"].0, 50, "and it is replaced by this sample as the baseline");
+    }
+
+    #[derive(Clone, Default)]
+    struct Captured(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for Captured {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Captured {
+        type Writer = Captured;
+        fn make_writer(&'a self) -> Captured {
+            self.clone()
+        }
+    }
+
+    /// A pass that took milliseconds is a debug line, not the warning for a
+    /// pass past the slow threshold. Run alone in a child process: `tracing`
+    /// caches per call site whether anyone listens.
+    #[test]
+    fn a_quick_tracker_pass_is_logged_quietly() {
+        const NAME: &str = "benchsampler::tests::a_quick_tracker_pass_is_logged_quietly";
+        if std::env::var_os("TYPHON_LOG_CHILD").is_none() {
+            let out = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", NAME, "--nocapture", "--test-threads=1"])
+                .env("TYPHON_LOG_CHILD", "1")
+                .output()
+                .unwrap();
+            let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+            assert!(out.status.success() && text.contains("1 passed"), "{text}");
+            return;
+        }
+        let s = state_from("bs-log", "");
+        add(&s, "race", "l1", Some("https://tk-log.example/announce"));
+        let bench = memory_bench();
+        let out = Captured::default();
+        let sub = tracing_subscriber::fmt().with_max_level(tracing::Level::DEBUG).with_ansi(false).with_writer(out.clone()).finish();
+        let _g = tracing::subscriber::set_default(sub);
+        sample_trackers(&s.engines, &bench, &s.store).expect("pass");
+        let text = String::from_utf8_lossy(&out.0.lock().unwrap()).into_owned();
+        assert!(text.contains("DEBUG") && text.contains("tracker pass"), "the pass says how long it took: {text}");
+        assert!(!text.contains("WARN") && !text.contains("slow"), "a fast pass is no warning: {text}");
     }
 
     /// The task itself: the first tick is immediate, so a sample and a tracker
