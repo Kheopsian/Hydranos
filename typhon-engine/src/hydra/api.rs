@@ -11889,7 +11889,7 @@ async fn get_race_torrent(
             .into_response();
     }
 
-    Json(detail_payload(&state, "race", &hash, &torrent, &admission_of(&state, &engine_id))).into_response()
+    Json(detail_payload(&state, &engine_id, &hash, &torrent, &admission_of(&state, &engine_id))).into_response()
 }
 
 /// This engine's scheduler progress, by its real id.
@@ -12048,7 +12048,7 @@ async fn get_hoard_torrent(
         )
             .into_response();
     }
-    Json(detail_payload(&state, "hoard", &hash, &torrent, &admission_of(&state, &engine_id))).into_response()
+    Json(detail_payload(&state, &engine_id, &hash, &torrent, &admission_of(&state, &engine_id))).into_response()
 }
 
 /// Add a torrent, native API: a `torrent_path` already on this node's disk, a
@@ -24069,5 +24069,43 @@ mod detail_panel_tests {
         }
         let body = get(&s, &format!("/api/hoard/torrents/{hash}")).await;
         assert_eq!(body["category"], "movies", "the panel keeps its own row's category");
+    }
+
+    /// An install whose second engine of each role has an id that is not the
+    /// role. Each engine has its own session in the store.
+    fn tunnelled(tag: &str) -> TestState {
+        state_from(
+            tag,
+            &format!(
+                "[daemon]\napi_key = \"{KEY}\"\n\n\
+                 [[engine]]\nengine_id = \"hoard2\"\nrole = \"hoard\"\n\
+                 [engine.session]\nlisten_port = 26981\n\n\
+                 [[engine]]\nengine_id = \"vpn1\"\nrole = \"race\"\n\
+                 [engine.session]\nlisten_port = 26982\n"
+            ),
+        )
+    }
+
+    /// ⭐⭐ The panel reads the session of the engine that carries the torrent,
+    /// not the one called after the role. A node may run several hoard
+    /// engines; the panel of a torrent held by `hoard2` was filled from the
+    /// session named "hoard" and showed no category.
+    #[tokio::test]
+    async fn a_hoard_panel_reads_the_session_of_the_engine_holding_the_torrent() {
+        let s = tunnelled("detail-hoard2");
+        assert_eq!(s.state.engines.get("hoard2").expect("fixture engine").role, "hoard");
+        let hash = hold(&s, "hoard2", "gamma", "tv");
+        let body = get(&s, &format!("/api/hoard/torrents/{hash}?engine=hoard2")).await;
+        assert_eq!(body["category"], "tv");
+    }
+
+    /// The same on the race side, which passed the literal "race".
+    #[tokio::test]
+    async fn a_race_panel_reads_the_session_of_the_engine_holding_the_torrent() {
+        let s = tunnelled("detail-vpn1");
+        assert_eq!(s.state.engines.get("vpn1").expect("fixture engine").role, "race");
+        let hash = hold(&s, "vpn1", "delta", "Race");
+        let body = get(&s, &format!("/api/race/torrents/{hash}?engine=vpn1")).await;
+        assert_eq!(body["category"], "Race");
     }
 }

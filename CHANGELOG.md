@@ -36,6 +36,10 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   store, under the store lock, to keep the one row it shows; it now reads that
   row alone. A row elsewhere in the session that cannot be read no longer
   blanks this panel's category and save path either.
+- On a node with several engines of one role, the detail panel of a torrent
+  held by an engine not named after its role (`hoard`, `race`) read the store
+  session of the engine that bears the role's name, and showed no category.
+  It now reads the session of the engine that holds the torrent.
 
 ## v4.5.1 -- zip 9, and a CI that measures what it builds
 
