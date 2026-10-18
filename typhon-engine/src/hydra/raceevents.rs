@@ -226,4 +226,135 @@ mod tests {
         let secs = super::TICK.as_secs();
         assert!((1..=10).contains(&secs), "tick de {secs}s hors bande");
     }
+
+    use super::*;
+    use crate::api::testing::{state_from, TestState};
+    use std::sync::atomic::Ordering::Relaxed;
+    use typhon_engine::torrent::meta::{PeerStats, TorrentState};
+
+    fn torrent_bytes(name: &str) -> Vec<u8> {
+        let mut piece = [0xABu8; 20];
+        piece[..name.len().min(20)].copy_from_slice(&name.as_bytes()[..name.len().min(20)]);
+        let mut info = format!("d6:lengthi16384e4:name{}:{name}12:piece lengthi16384e6:pieces20:", name.len()).into_bytes();
+        info.extend_from_slice(&piece);
+        info.push(b'e');
+        let mut out = b"d4:info".to_vec();
+        out.extend_from_slice(&info);
+        out.push(b'e');
+        out
+    }
+
+    fn add_race(s: &TestState, name: &str) -> (String, Arc<TorrentState>) {
+        let race = s.engines.get("race").expect("race engine");
+        let (ih, _) = race
+            .manager
+            .add_torrent_bytes(&torrent_bytes(name), "/tmp/hydra-raceevents-test", false, false)
+            .expect("added");
+        (typhon_engine::torrent::hex_encode(&ih), race.manager.get(&ih).expect("loaded"))
+    }
+
+    fn peer(t: &TorrentState, n: u8) -> Arc<PeerStats> {
+        let addr: std::net::SocketAddr = format!("192.0.2.{n}:6881").parse().unwrap();
+        let p = Arc::new(PeerStats::new(addr, [n; 20], format!("TestClient {n}"), false, false));
+        t.peer_stats.insert(addr, p.clone());
+        p
+    }
+
+    #[test]
+    fn a_torrent_with_no_peer_has_no_peer_rows() {
+        let s = state_from("re-nopeers", "");
+        let (_, t) = add_race(&s, "np");
+        assert_eq!(peers_for(&t), "", "nothing to store, not an empty JSON array");
+    }
+
+    /// The panel reads `dl_speed`/`ul_speed`, the live peer table `dl_rate`/
+    /// `ul_rate`: the stored rows use the panel's names, keep the ten fastest
+    /// and nothing else of the live payload.
+    #[test]
+    fn the_stored_peer_rows_are_the_ten_fastest_under_the_panels_names() {
+        let s = state_from("re-peers", "");
+        let (_, t) = add_race(&s, "pp");
+        let peers: Vec<_> = (1..=12u8).map(|n| peer(&t, n)).collect();
+        peers[4].is_seed.store(true, Relaxed);
+        peers[4].interested.store(true, Relaxed);
+        peers[4].choked.store(false, Relaxed);
+        peers[4].num_pieces_have.store(1, Relaxed);
+        // The first sample only seeds the rate trackers; the second, after the
+        // 0.5 s guard, measures: peer n has downloaded n MB since.
+        typhon_engine::rpc::dispatch::peers_json(&t);
+        std::thread::sleep(std::time::Duration::from_millis(700));
+        for (i, p) in peers.iter().enumerate() {
+            p.total_downloaded.store((i as u64 + 1) * 1_000_000, Relaxed);
+        }
+        peers[0].total_uploaded.store(5_000_000, Relaxed);
+
+        let rows: Vec<serde_json::Value> = serde_json::from_str(&peers_for(&t)).expect("a JSON array");
+        assert_eq!(rows.len(), PEER_ROWS, "the head of the swarm, not all twelve");
+        let ips: Vec<&str> = rows.iter().map(|r| r["ip"].as_str().unwrap()).collect();
+        assert_eq!(ips[0], "192.0.2.12", "fastest first");
+        assert_eq!(ips[9], "192.0.2.3");
+        assert!(!ips.contains(&"192.0.2.1") && !ips.contains(&"192.0.2.2"), "the two slowest are dropped: {ips:?}");
+        let speeds: Vec<u64> = rows.iter().map(|r| r["dl_speed"].as_u64().unwrap()).collect();
+        assert!(speeds.windows(2).all(|w| w[0] >= w[1]), "sorted by download rate: {speeds:?}");
+        let five = rows.iter().find(|r| r["ip"] == "192.0.2.5").unwrap();
+        assert_eq!(five["client"], "TestClient 5");
+        assert_eq!(five["flags"], "iUS", "interested, unchoked, seed");
+        assert_eq!(five["progress"].as_f64(), Some(1.0), "its one piece of one");
+        assert_eq!(
+            five.as_object().unwrap().keys().cloned().collect::<std::collections::BTreeSet<_>>(),
+            ["client", "dl_speed", "flags", "ip", "progress", "ul_speed"].iter().map(|s| s.to_string()).collect(),
+            "exactly the panel's columns"
+        );
+    }
+
+    #[test]
+    fn now_is_unix_seconds_with_a_fraction() {
+        let a = now_secs();
+        assert!(a > 1_600_000_000.0, "{a}");
+        assert!(now_secs() >= a);
+    }
+
+    /// The recorder end to end, against a real race engine and a real bench
+    /// database: a torrent that appears while it watches, with a peer and
+    /// some upload, gets its three firsts on the next look, plus one snapshot
+    /// with the peer detail the panel needs. The tick is five seconds and is
+    /// not injectable, so this waits for the first one.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_recorder_writes_the_moments_it_witnesses_and_a_snapshot() {
+        let s = state_from("re-spawn", "");
+        let bench: crate::benchdb::Shared =
+            Arc::new(std::sync::Mutex::new(crate::benchdb::BenchDb::open_in_memory().unwrap()));
+        spawn(s.engines.clone(), bench.clone());
+        // After the watch began, and in a later whole second than its start: the
+        // torrent's added time is in whole seconds.
+        tokio::time::sleep(std::time::Duration::from_millis(1300)).await;
+        let (hash, t) = add_race(&s, "rr");
+        peer(&t, 9);
+        t.peers_connected.store(1, Relaxed);
+        t.total_uploaded.store(4096, Relaxed);
+
+        let mut events = Vec::new();
+        for _ in 0..120 {
+            events = bench.lock().unwrap().events_for(&hash).unwrap();
+            if events.len() >= 3 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        let mut kinds: Vec<&str> = events.iter().map(|e| e.event.as_str()).collect();
+        kinds.sort();
+        assert_eq!(kinds, vec!["added", "first_peer", "first_upload"]);
+        let added = events.iter().find(|e| e.event == "added").unwrap();
+        assert_eq!((added.name.as_str(), added.size, added.upload_total, added.peers), ("rr", 16384, 4096, 1));
+        assert!((0.0..60.0).contains(&added.time_since_add), "seconds since it was added: {}", added.time_since_add);
+        assert_eq!((added.uploader.as_str(), added.injected_peers), ("", 0));
+
+        let snaps = bench.lock().unwrap().snapshots_for(&hash).unwrap();
+        assert_eq!(snaps.len(), 1, "one look, one snapshot while it is still downloading");
+        assert_eq!(snaps[0].progress, 0.0);
+        assert_eq!((snaps[0].peers, snaps[0].total_upload), (1, 4096));
+        let detail: Vec<serde_json::Value> = serde_json::from_str(&snaps[0].peers_json).expect("peer detail kept");
+        assert_eq!(detail.len(), 1);
+        assert_eq!(detail[0]["ip"], "192.0.2.9");
+    }
 }
