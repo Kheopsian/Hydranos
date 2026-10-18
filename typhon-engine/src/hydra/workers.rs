@@ -2258,3 +2258,884 @@ mod queue_tests {
         let _ = std::fs::remove_dir_all(root);
     }
 }
+
+// ---------------------------------------------------------------------------
+// What the workers decide, and what they leave alone
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod decision_tests {
+    use super::*;
+    use crate::api::testing::{state_from, TestState};
+    use std::collections::HashSet;
+    use typhon_engine::torrent::meta::{InfoHash, TorrentState};
+
+    const KEY: &str = "0123456789abcdef0123456789abcdef";
+    const SIZE: u64 = 16_384;
+
+    /// A single-file torrent, unique per name (the piece hash carries it).
+    fn torrent_bytes(name: &str) -> Vec<u8> {
+        let mut info = Vec::new();
+        info.extend_from_slice(format!("d6:lengthi{SIZE}e4:name{}:{name}", name.len()).as_bytes());
+        info.extend_from_slice(b"12:piece lengthi16384e6:pieces20:");
+        let mut piece = [0xABu8; 20];
+        for (i, b) in name.bytes().enumerate().take(20) {
+            piece[i] = b;
+        }
+        info.extend_from_slice(&piece);
+        info.push(b'e');
+        let announce = "https://tracker.example/announce";
+        let mut out = Vec::new();
+        out.extend_from_slice(format!("d8:announce{}:{announce}4:info", announce.len()).as_bytes());
+        out.extend_from_slice(&info);
+        out.push(b'e');
+        out
+    }
+
+    fn st(tag: &str, extra: &str) -> TestState {
+        state_from(tag, &format!("[daemon]\napi_key = \"{KEY}\"\n{extra}"))
+    }
+
+    fn engine_manager(s: &TestState, id: &str) -> Arc<TorrentManager> {
+        s.engines.engines().iter().find(|e| e.id == id).expect("engine").manager.clone()
+    }
+
+    /// A seed on `engine`, with its file on disk and a row in the store:
+    /// announcing to `tracker`, filed under `category`, `seeded_secs` served.
+    fn put(
+        s: &TestState,
+        engine: &str,
+        name: &str,
+        category: &str,
+        tracker: &str,
+        seeded_secs: i64,
+    ) -> (String, Arc<TorrentState>, std::path::PathBuf) {
+        let dir = s.dir.join("data");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join(name);
+        std::fs::write(&file, vec![0u8; SIZE as usize]).unwrap();
+        let (hash, _) = crate::api::add_torrent_bytes(
+            &s.state,
+            &torrent_bytes(name),
+            category,
+            dir.to_str().unwrap(),
+            "",
+            false,
+            true,
+            engine,
+        )
+        .expect("added");
+        let t = engine_manager(s, engine).get(&typhon_engine::torrent::hex_decode(&hash).unwrap()).expect("held");
+        {
+            let mut live = t.live_trackers.write();
+            live.clear();
+            live.push(vec![tracker.to_string()]);
+        }
+        t.status.store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+        t.is_paused.store(false, Ordering::Relaxed);
+        t.seed_secs.store(seeded_secs, Ordering::Relaxed);
+        t.seed_since.store(0, Ordering::Relaxed);
+        (hash, t, file)
+    }
+
+    const TRACKER: &str = "https://tracker.example/announce";
+
+    fn volume_on(s: &TestState, id: &str, total: u64, used: u64, low: i64) -> crate::volumes::Volume {
+        let dev = crate::volumes::device_of_nearest(&s.dir).expect("the test dir is on a device");
+        crate::volumes::Volume::measure(
+            id.into(),
+            dev,
+            (used, total, total - used),
+            None,
+            0,
+            0,
+            3,
+            crate::volumes::Policy { enabled: true, high: 90, low, inherited: true },
+        )
+    }
+
+    /// A volume id that is no path: the measure after the drain finds nothing,
+    /// so no TRIM is ever considered and "freed" is exactly 0.
+    const NO_SUCH_MOUNT: &str = "/nonexistent-mount-for-the-drain-tests";
+
+    fn in_store(s: &TestState, hash: &str) -> bool {
+        s.store.read().unwrap().all_hashes("race").unwrap().iter().any(|h| h == hash)
+            || s.store.read().unwrap().all_hashes("hoard").unwrap().iter().any(|h| h == hash)
+    }
+
+    fn history(s: &TestState) -> Vec<serde_json::Value> {
+        s.store.read().unwrap().drain_history(10).unwrap()
+    }
+
+    fn write_categories(s: &TestState, doc: serde_json::Value) {
+        s.store.lock().unwrap().put_meta("categories", &doc.to_string()).unwrap();
+    }
+
+    // ---- the drain: what it frees, in what order, and what it will not touch ----
+
+    /// ⭐ Over its watermark, a volume is brought back to the LOW one and no
+    /// further: one torrent here frees more than the gap, so exactly one goes
+    /// -- data, store row and engine copy together.
+    #[test]
+    fn the_drain_removes_only_what_the_gap_to_the_low_watermark_needs() {
+        let s = st("dec-drain-gap", "\n[announce_min_seed_hours]\n\"tracker.example\" = \"0\"\n");
+        let mgr = engine_manager(&s, "race");
+        let all: Vec<_> = ["da", "db", "dc"].iter().map(|n| put(&s, "race", n, "", TRACKER, 100)).collect();
+        // 90 000 of 100 000 used, low = 80: 10 000 to free, a torrent is 16 384.
+        let v = volume_on(&s, NO_SUCH_MOUNT, 100_000, 90_000, 80);
+        let out = drain_once(&s.state, &mgr, &v, &s.cfg(), "race");
+        assert_eq!((out.deleted, out.graduated, out.stuck), (1, 0, 0));
+        assert_eq!(out.freed_bytes, 0, "the disk delta is measured, not assumed: this id is no mount");
+        assert_eq!(mgr.all().len(), 2);
+        let gone: Vec<_> = all.iter().filter(|(h, _, _)| mgr.get(&typhon_engine::torrent::hex_decode(h).unwrap()).is_none()).collect();
+        assert_eq!(gone.len(), 1);
+        let (hash, _, file) = gone[0];
+        assert!(!in_store(&s, hash), "the store row went with the torrent");
+        assert!(!file.exists(), "and its payload, since this was its last copy");
+        for (h, _, f) in all.iter().filter(|(h, _, _)| h != hash) {
+            assert!(f.exists() && in_store(&s, h), "the others are untouched");
+        }
+        let hist = history(&s);
+        assert_eq!(hist.len(), 1);
+        assert_eq!((hist[0]["deleted"].clone(), hist[0]["graduated"].clone(), hist[0]["stuck"].clone()), (serde_json::json!(1), serde_json::json!(0), serde_json::json!(0)));
+        assert_eq!(hist[0]["volume"], NO_SUCH_MOUNT);
+    }
+
+    /// A bigger gap takes more torrents: two (32 768) do not cover 40 000,
+    /// three do.
+    #[test]
+    fn a_bigger_gap_takes_more_torrents() {
+        let s = st("dec-drain-big", "\n[announce_min_seed_hours]\n\"tracker.example\" = \"0\"\n");
+        let mgr = engine_manager(&s, "race");
+        for n in ["ea", "eb", "ec"] {
+            put(&s, "race", n, "", TRACKER, 100);
+        }
+        // 40 000 to free: two torrents (32 768) are not enough, three are.
+        let out = drain_once(&s.state, &mgr, &volume_on(&s, NO_SUCH_MOUNT, 100_000, 80_000, 40), &s.cfg(), "race");
+        assert_eq!(out.deleted, 3);
+        assert!(mgr.all().is_empty());
+    }
+
+    /// The torrents of another disk are not candidates, however full this
+    /// one is.
+    #[test]
+    fn a_torrent_on_another_device_is_not_a_candidate() {
+        let s = st("dec-drain-dev", "\n[announce_min_seed_hours]\n\"tracker.example\" = \"0\"\n");
+        let mgr = engine_manager(&s, "race");
+        let (hash, _, file) = put(&s, "race", "fa", "", TRACKER, 100);
+        let mut v = volume_on(&s, NO_SUCH_MOUNT, 100_000, 99_000, 80);
+        v.dev = v.dev.wrapping_add(1);
+        let out = drain_once(&s.state, &mgr, &v, &s.cfg(), "race");
+        assert_eq!((out.deleted, out.graduated, out.stuck), (0, 0, 0));
+        assert!(file.exists() && in_store(&s, &hash));
+        assert!(history(&s).is_empty(), "a pass that did nothing writes no history");
+    }
+
+    /// A torrent that still owes seeding time AND has nowhere to go is
+    /// neither deleted nor moved: it is counted as stuck, and the history
+    /// says so.
+    #[test]
+    fn a_torrent_owing_time_with_no_graduation_target_is_stuck_not_deleted() {
+        let s = st("dec-drain-stuck", "\n[announce_min_seed_hours]\n\"tracker.example\" = \"72\"\n");
+        let mgr = engine_manager(&s, "race");
+        let (hash, _, file) = put(&s, "race", "ga", "", TRACKER, 3600);
+        let out = drain_once(&s.state, &mgr, &volume_on(&s, NO_SUCH_MOUNT, 100_000, 99_000, 80), &s.cfg(), "race");
+        assert_eq!((out.deleted, out.graduated, out.stuck), (0, 0, 1));
+        assert!(file.exists() && in_store(&s, &hash), "never deleted for want of somewhere to put it");
+        assert_eq!(history(&s)[0]["stuck"], 1);
+    }
+
+    fn graduation_state(tag: &str, hours: &str, to_mode: &str) -> TestState {
+        let s = st(tag, &format!("\n[announce_min_seed_hours]\n\"tracker.example\" = \"{hours}\"\n"));
+        let pool = s.dir.join("pool");
+        std::fs::create_dir_all(&pool).unwrap();
+        write_categories(
+            &s,
+            serde_json::json!({
+                "ssd": {"save_path": s.dir.join("data").to_str().unwrap(), "mode": "race", "graduate_to": "pool"},
+                "pool": {"save_path": pool.to_str().unwrap(), "mode": to_mode},
+            }),
+        );
+        s
+    }
+
+    /// ⭐ The fate is the torrent's own: owing time, it LEAVES the disk by
+    /// moving to its graduation target. A job is queued and charged to the
+    /// budget, the data stays until the copy is done, and the next pass does
+    /// not queue it twice.
+    #[test]
+    fn a_torrent_owing_time_graduates_instead_of_being_deleted() {
+        let s = graduation_state("dec-drain-grad", "72", "hoard");
+        let mgr = engine_manager(&s, "race");
+        let (hash, _, file) = put(&s, "race", "ha", "ssd", TRACKER, 3600);
+        let v = volume_on(&s, NO_SUCH_MOUNT, 100_000, 99_000, 80);
+        let out = drain_once(&s.state, &mgr, &v, &s.cfg(), "race");
+        assert_eq!((out.deleted, out.graduated, out.stuck), (0, 1, 0));
+        assert!(file.exists() && in_store(&s, &hash), "nothing is deleted by a graduation");
+        assert!(s.store.read().unwrap().job_pending_for("graduate", &hash), "the move is queued");
+        let jobs = s.store.read().unwrap().list_jobs(10).unwrap();
+        let job = jobs.iter().find(|j| j.info_hash == hash).expect("the job");
+        let params: serde_json::Value = serde_json::from_str(&job.params).unwrap();
+        assert_eq!((job.kind.as_str(), job.total_bytes), ("graduate", SIZE as i64));
+        assert_eq!(params["to_engine"], "hoard");
+        assert_eq!(params["to_category"], "pool");
+        assert_eq!(params["from_engine"], "race");
+
+        let again = drain_once(&s.state, &mgr, &v, &s.cfg(), "race");
+        assert_eq!((again.graduated, again.deleted), (0, 0), "a duplicate is refused, not queued again");
+        assert_eq!(history(&s)[0]["graduated"], 1);
+    }
+
+    /// A graduation target that files under the SAME engine moves nothing,
+    /// so it is counted as stuck instead of being queued forever.
+    #[test]
+    fn a_graduation_back_onto_the_same_engine_is_stuck() {
+        let s = graduation_state("dec-drain-same", "72", "race");
+        let mgr = engine_manager(&s, "race");
+        let (hash, _, _) = put(&s, "race", "ia", "ssd", TRACKER, 3600);
+        let out = drain_once(&s.state, &mgr, &volume_on(&s, NO_SUCH_MOUNT, 100_000, 99_000, 80), &s.cfg(), "race");
+        assert_eq!((out.graduated, out.stuck, out.deleted), (0, 1, 0));
+        assert!(!s.store.read().unwrap().job_pending_for("graduate", &hash));
+    }
+
+    /// Files of the same name already at the destination: the job would
+    /// refuse, so the drain does not queue it every tick.
+    #[test]
+    fn a_graduation_onto_existing_files_is_stuck_not_queued() {
+        let s = graduation_state("dec-drain-taken", "72", "hoard");
+        let mgr = engine_manager(&s, "race");
+        let (hash, _, file) = put(&s, "race", "ja", "ssd", TRACKER, 3600);
+        std::fs::write(s.dir.join("pool").join("ja"), b"someone else's bytes").unwrap();
+        let out = drain_once(&s.state, &mgr, &volume_on(&s, NO_SUCH_MOUNT, 100_000, 99_000, 80), &s.cfg(), "race");
+        assert_eq!((out.graduated, out.stuck, out.deleted), (0, 1, 0));
+        assert!(!s.store.read().unwrap().job_pending_for("graduate", &hash));
+        assert!(file.exists());
+        assert_eq!(std::fs::read(s.dir.join("pool").join("ja")).unwrap(), b"someone else's bytes");
+    }
+
+    /// Mixed fates in one pass: the one that has paid is deleted, the one that
+    /// has not graduates.
+    #[test]
+    fn one_pass_deletes_what_has_paid_and_graduates_what_has_not() {
+        let s = graduation_state("dec-drain-mixed", "1", "hoard");
+        let mgr = engine_manager(&s, "race");
+        let (paid, _, paid_file) = put(&s, "race", "ka", "ssd", TRACKER, 7200);
+        let (owing, _, owing_file) = put(&s, "race", "kb", "ssd", TRACKER, 60);
+        let out = drain_once(&s.state, &mgr, &volume_on(&s, NO_SUCH_MOUNT, 100_000, 99_000, 0), &s.cfg(), "race");
+        assert_eq!((out.deleted, out.graduated, out.stuck), (1, 1, 0));
+        assert!(!in_store(&s, &paid) && !paid_file.exists());
+        assert!(in_store(&s, &owing) && owing_file.exists());
+        assert!(s.store.read().unwrap().job_pending_for("graduate", &owing));
+    }
+
+    // ---- the workers on a timer ---------------------------------------------------
+
+    /// Let the spawned task run up to its next await, advance the paused clock,
+    /// and let it run again.
+    async fn after(secs: u64) {
+        for _ in 0..5 {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::advance(Duration::from_secs(secs)).await;
+        for _ in 0..5 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    /// Wait (in real time) for work that runs on the blocking pool.
+    async fn eventually(what: &str, mut cond: impl FnMut() -> bool) {
+        for _ in 0..1000 {
+            if cond() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+            tokio::task::yield_now().await;
+        }
+        panic!("never happened: {what}");
+    }
+
+    fn alive_tasks() -> usize {
+        tokio::runtime::Handle::current().metrics().num_alive_tasks()
+    }
+
+    fn queued_downloads(mgr: &Arc<TorrentManager>, names: &[&str]) -> Vec<Arc<TorrentState>> {
+        names
+            .iter()
+            .map(|n| {
+                let (ih, _) = mgr.add_torrent_bytes(&torrent_bytes(n), "/tmp", true, false).unwrap();
+                let t = mgr.get(&ih).unwrap();
+                t.status.store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+                t.is_paused.store(true, Ordering::Relaxed);
+                t
+            })
+            .collect()
+    }
+
+    fn running(ts: &[Arc<TorrentState>]) -> usize {
+        ts.iter().filter(|t| !t.is_paused.load(Ordering::Relaxed)).count()
+    }
+
+    /// ⭐ The slot manager waits for the engine to settle, then enforces the
+    /// ceiling every 30 s from the LIVE config: raising it in the settings
+    /// applies on the next pass.
+    #[tokio::test(start_paused = true)]
+    async fn the_slot_manager_enforces_the_live_ceiling_every_pass() {
+        let s = st("dec-slots", "\n[race]\nlisten_port = 16171\nactive_downloads = 1\n");
+        let mgr = engine_manager(&s, "race");
+        let ts = queued_downloads(&mgr, &["sa", "sb", "sc"]);
+        spawn_download_slots(mgr.clone(), Arc::new(Cache::default()), s.config.clone(), s.store.clone(), "race".into());
+        after(29).await;
+        assert_eq!(running(&ts), 0, "nothing moves while the engine settles");
+        after(2).await; // 31 s: settled, the loop's first sleep started
+        after(30).await; // the first pass
+        assert_eq!(running(&ts), 1, "one slot");
+
+        let raised: crate::config::Config =
+            toml::from_str(&format!("[daemon]\napi_key = \"{KEY}\"\n[race]\nlisten_port = 16171\nactive_downloads = 3\n")).unwrap();
+        *s.config.write().unwrap() = Arc::new(raised);
+        after(30).await;
+        assert_eq!(running(&ts), 3, "the next pass reads the new ceiling");
+    }
+
+    /// An operator's stop is not the queue's to undo, pass after pass.
+    #[tokio::test(start_paused = true)]
+    async fn the_slot_manager_never_starts_what_the_operator_stopped() {
+        let s = st("dec-slots-paused", "\n[race]\nlisten_port = 16171\nactive_downloads = 2\n");
+        let mgr = engine_manager(&s, "race");
+        let ts = queued_downloads(&mgr, &["pa", "pb", "pc"]);
+        let stopped = typhon_engine::torrent::hex_encode(&ts[0].info_hash);
+        s.store.lock().unwrap().insert_torrent(&stopped, "race", b"x", "/tmp", "", 0.0, true, "").unwrap();
+        s.store.lock().unwrap().set_paused(&stopped, "race", true).unwrap();
+        spawn_download_slots(mgr.clone(), Arc::new(Cache::default()), s.config.clone(), s.store.clone(), "race".into());
+        after(31).await;
+        after(30).await;
+        after(30).await;
+        assert!(ts[0].is_paused.load(Ordering::Relaxed), "still stopped");
+        assert_eq!(running(&ts[1..]), 2, "the two others have the two slots");
+    }
+
+    /// With no ceiling configured the loop wakes and does nothing.
+    #[tokio::test(start_paused = true)]
+    async fn with_no_ceiling_the_slot_manager_touches_nothing() {
+        let s = st("dec-slots-none", "");
+        let mgr = engine_manager(&s, "race");
+        let ts = queued_downloads(&mgr, &["na", "nb"]);
+        spawn_download_slots(mgr.clone(), Arc::new(Cache::default()), s.config.clone(), s.store.clone(), "race".into());
+        after(31).await;
+        after(30).await;
+        after(30).await;
+        assert_eq!(running(&ts), 0);
+    }
+
+    /// The stagger start resumes what the operator did not stop, and leaves
+    /// the stopped ones stopped.
+    #[tokio::test]
+    async fn the_stagger_start_keeps_a_stopped_torrent_stopped() {
+        let (mgr, root) = {
+            let s = st("dec-stagger", "");
+            // the state dir is removed on drop; build a manager that outlives it
+            let root = std::env::temp_dir().join(format!("hydra-stagger-{}", std::process::id()));
+            let (data, resume) = (root.join("data"), root.join("resume"));
+            std::fs::create_dir_all(&data).unwrap();
+            std::fs::create_dir_all(&resume).unwrap();
+            drop(s);
+            (
+                Arc::new(TorrentManager::new(
+                    data.to_string_lossy().into_owned(),
+                    resume.to_string_lossy().into_owned(),
+                    Arc::new(typhon_engine::disk::DiskManager::new(16)),
+                )),
+                root,
+            )
+        };
+        let (ih_stopped, _) = mgr.add_torrent_bytes(&torrent_bytes("stopped"), "/tmp", true, false).unwrap();
+        let (ih_a, _) = mgr.add_torrent_bytes(&torrent_bytes("wa"), "/tmp", false, false).unwrap();
+        let (ih_b, _) = mgr.add_torrent_bytes(&torrent_bytes("wb"), "/tmp", false, false).unwrap();
+        for ih in [&ih_a, &ih_b] {
+            mgr.get(ih).unwrap().is_paused.store(false, Ordering::Relaxed);
+        }
+        spawn_stagger_start(mgr.clone());
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+        assert!(mgr.get(&ih_stopped).unwrap().is_paused.load(Ordering::Relaxed), "the operator's stop survives a restart");
+        for ih in [&ih_a, &ih_b] {
+            assert!(!mgr.get(ih).unwrap().is_paused.load(Ordering::Relaxed));
+        }
+        // An empty engine is a clean no-op, not a panic.
+        let empty = Arc::new(TorrentManager::new(
+            root.join("data").to_string_lossy().into_owned(),
+            root.join("resume2").to_string_lossy().into_owned(),
+            Arc::new(typhon_engine::disk::DiskManager::new(16)),
+        ));
+        spawn_stagger_start(empty);
+        for _ in 0..5 {
+            tokio::task::yield_now().await;
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The verify throttle is a boot job: it ends as soon as nothing is
+    /// checking, and keeps ticking while something is.
+    #[tokio::test(start_paused = true)]
+    async fn the_verify_throttle_ends_when_nothing_is_left_to_check() {
+        let s = st("dec-verify", "");
+        let mgr = engine_manager(&s, "race");
+        let base = alive_tasks();
+        spawn_verify_throttle(mgr.clone());
+        after(0).await;
+        assert_eq!(alive_tasks(), base + 1);
+        after(5).await;
+        after(10).await;
+        assert_eq!(alive_tasks(), base, "nothing was checking: it stopped");
+
+        let (ih, _) = mgr.add_torrent_bytes(&torrent_bytes("checking"), "/tmp", true, false).unwrap();
+        mgr.get(&ih).unwrap().status.store(TorrentStatus::Checking as u8, Ordering::Relaxed);
+        spawn_verify_throttle(mgr.clone());
+        after(0).await;
+        after(5).await;
+        for _ in 0..3 {
+            after(10).await;
+        }
+        assert_eq!(alive_tasks(), base + 1, "a torrent is still checking: it keeps watching");
+        mgr.get(&ih).unwrap().status.store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+        after(10).await;
+        assert_eq!(alive_tasks(), base);
+    }
+
+    /// No ceiling, no watcher.
+    #[tokio::test]
+    async fn a_memory_ceiling_of_zero_starts_no_watcher() {
+        let base = alive_tasks();
+        spawn_memory_watch(0);
+        tokio::task::yield_now().await;
+        assert_eq!(alive_tasks(), base);
+        spawn_memory_watch(1 << 30);
+        tokio::task::yield_now().await;
+        assert_eq!(alive_tasks(), base + 1);
+    }
+
+    /// ⭐ The daily sync copies the engine's seeding time into the store's
+    /// fallback column, in chunks, once per day.
+    #[tokio::test(start_paused = true)]
+    async fn the_seed_time_sync_copies_the_engines_figure_into_the_store() {
+        let s = st("dec-seedsync", "");
+        let mgr = engine_manager(&s, "race");
+        let (a, ta, _) = put(&s, "race", "ya", "", TRACKER, 1234);
+        let (b, _, _) = put(&s, "race", "yb", "", TRACKER, 99);
+        let seeded = |h: &str| s.store.read().unwrap().workflow_facts_of("race", h).unwrap().unwrap().seeding_time;
+        assert_eq!((seeded(&a), seeded(&b)), (0, 0));
+        spawn_seed_time_sync(mgr.clone(), s.store.clone(), "race".into());
+        after(3599).await;
+        assert_eq!(seeded(&a), 0, "not at boot: the first pass waits an hour");
+        after(2).await;
+        for _ in 0..5 {
+            after(1).await;
+        }
+        assert_eq!((seeded(&a), seeded(&b)), (1234, 99));
+
+        // A day later only what moved is written again.
+        ta.seed_secs.store(5000, Ordering::Relaxed);
+        after(24 * 3600).await;
+        for _ in 0..5 {
+            after(1).await;
+        }
+        assert_eq!((seeded(&a), seeded(&b)), (5000, 99));
+    }
+
+    /// ⭐⭐ The transit sweep is scoped to graduation TARGETS: a torrent there
+    /// that has paid its time goes, with its files; one still owing, one on an
+    /// undeclared tracker, and one in an ordinary library category stay.
+    #[tokio::test(start_paused = true)]
+    async fn the_transit_sweep_deletes_only_paid_torrents_in_a_transit_category() {
+        let s = st("dec-transit", "\n[announce_min_seed_hours]\n\"tracker.example\" = \"1\"\n");
+        let mgr = engine_manager(&s, "hoard");
+        write_categories(
+            &s,
+            serde_json::json!({
+                "ssd": {"save_path": s.dir.join("data").to_str().unwrap(), "mode": "race", "graduate_to": "transit"},
+                "transit": {"save_path": s.dir.join("data").to_str().unwrap(), "mode": "hoard", "transit": true},
+                "library": {"save_path": s.dir.join("data").to_str().unwrap(), "mode": "hoard"},
+            }),
+        );
+        let (paid, _, paid_file) = put(&s, "hoard", "ta", "transit", TRACKER, 7200);
+        let (owing, _, owing_file) = put(&s, "hoard", "tb", "transit", TRACKER, 60);
+        let (undeclared, _, undeclared_file) = put(&s, "hoard", "tc", "transit", "https://other.example/announce", 999_999);
+        let (library, _, library_file) = put(&s, "hoard", "td", "library", TRACKER, 999_999);
+        spawn_transit_sweep(s.state.clone(), mgr.clone(), s.config.clone(), "hoard".into());
+        after(89).await;
+        assert!(in_store(&s, &paid), "not before its first delay");
+        after(2).await;
+        assert!(!in_store(&s, &paid) && !paid_file.exists(), "paid and in transit: gone, files too");
+        assert!(mgr.get(&typhon_engine::torrent::hex_decode(&paid).unwrap()).is_none());
+        for (h, f) in [(&owing, &owing_file), (&undeclared, &undeclared_file), (&library, &library_file)] {
+            assert!(in_store(&s, h) && f.exists(), "{h} must stay");
+        }
+    }
+
+    /// With no transit category nothing is even looked at.
+    #[tokio::test(start_paused = true)]
+    async fn the_transit_sweep_does_nothing_without_a_transit_category() {
+        let s = st("dec-transit-none", "\n[announce_min_seed_hours]\n\"tracker.example\" = \"0\"\n");
+        let mgr = engine_manager(&s, "hoard");
+        let (h, _, f) = put(&s, "hoard", "ua", "", TRACKER, 999_999);
+        spawn_transit_sweep(s.state.clone(), mgr, s.config.clone(), "hoard".into());
+        after(91).await;
+        after(300).await;
+        assert!(in_store(&s, &h) && f.exists());
+    }
+
+    /// ⭐ The race drain, whole: the timer finds the volume under the engine's
+    /// torrents, sees it over ITS watermark, and drains it -- only when that
+    /// volume's policy is on.
+    #[tokio::test(start_paused = true)]
+    async fn the_race_drain_worker_drains_an_enabled_volume_and_spares_a_disabled_one() {
+        let s = st(
+            "dec-drain-worker",
+            "\n[announce_min_seed_hours]\n\"tracker.example\" = \"0\"\n[race_drain]\ncheck_interval_seconds = 60\n",
+        );
+        let mgr = engine_manager(&s, "race");
+        let (h, _, f) = put(&s, "race", "va", "", TRACKER, 100);
+        let mount = crate::volumes::mount_point_of(&s.dir).to_string_lossy().to_string();
+        let off = crate::volumes::Policy { enabled: false, high: 0, low: 0, inherited: false };
+        crate::volumes::save_policy(&s.state, &mount, &off).unwrap();
+        spawn_race_drain(s.state.clone(), mgr.clone(), s.config.clone(), "race".into());
+        after(11).await;
+        after(60).await;
+        std::thread::sleep(Duration::from_millis(200));
+        after(0).await;
+        assert!(in_store(&s, &h) && f.exists(), "a disabled volume is never drained");
+
+        let on = crate::volumes::Policy { enabled: true, high: 0, low: 0, inherited: false };
+        crate::volumes::save_policy(&s.state, &mount, &on).unwrap();
+        after(60).await;
+        eventually("the drain removed the torrent", || {
+            std::thread::sleep(Duration::from_millis(10));
+            mgr.all().is_empty()
+        })
+        .await;
+        assert!(!in_store(&s, &h));
+        assert!(!f.exists());
+        assert!(history(&s).iter().any(|r| r["deleted"] == 1 && r["volume"] == mount.as_str()), "{:?}", history(&s));
+    }
+
+    /// ⭐ The share-limit worker, on its timer: after its delay it stops a
+    /// seed past the engine's ratio and leaves the others running.
+    #[tokio::test(start_paused = true)]
+    async fn the_share_limit_worker_applies_the_engines_ratio_on_its_timer() {
+        let s = st(
+            "dec-sharelimit",
+            "\n[race]\nlisten_port = 16171\nmax_ratio = 2.0\n[announce_min_seed_hours]\n\"tracker.example\" = \"0\"\n",
+        );
+        let mgr = engine_manager(&s, "race");
+        let (over, t_over, _) = put(&s, "race", "wa", "", TRACKER, 0);
+        let (_, t_under, _) = put(&s, "race", "wb", "", TRACKER, 0);
+        t_over.total_uploaded.store(3 * SIZE, Ordering::Relaxed);
+        t_under.total_uploaded.store(SIZE, Ordering::Relaxed);
+        spawn_share_limits(s.state.clone(), mgr.clone(), s.config.clone(), "race".into());
+        after(89).await;
+        assert!(!t_over.is_paused.load(Ordering::Relaxed), "not before SETTLE + 60 s");
+        after(2).await;
+        eventually("the pass stopped the seed over its ratio", || t_over.is_paused.load(Ordering::Relaxed)).await;
+        assert!(!t_under.is_paused.load(Ordering::Relaxed));
+        assert!(s.store.read().unwrap().paused_hashes("race").unwrap().contains(&over), "as the operator's own stop");
+    }
+
+    // ---- the store reconcile ----------------------------------------------------
+
+    /// A row the store holds for a torrent the engine does not, written by an
+    /// EARLIER process (so not inside the grace period).
+    fn orphan(s: &TestState, engine: &str, hash: &str) {
+        s.store.lock().unwrap().execute_batch_for_tests(&format!(
+            "INSERT INTO torrents (info_hash, session, torrent) VALUES ('{hash}', '{engine}', x'00');"
+        ));
+    }
+
+    fn rows(s: &TestState, engine: &str) -> Vec<String> {
+        s.store.read().unwrap().all_hashes(engine).unwrap()
+    }
+
+    fn live_one(s: &TestState, engine: &str, name: &str) -> String {
+        let mgr = engine_manager(s, engine);
+        let (ih, _) = mgr.add_torrent_bytes(&torrent_bytes(name), "/tmp", true, true).unwrap();
+        typhon_engine::torrent::hex_encode(&ih)
+    }
+
+    const O1: &str = "1111111111111111111111111111111111111111";
+    const O2: &str = "2222222222222222222222222222222222222222";
+
+    /// A row whose torrent is gone is dropped; one the engine holds is not;
+    /// and an engine that holds NOTHING is never trusted to say what is gone.
+    #[test]
+    fn the_reconcile_drops_rows_without_a_torrent_but_never_for_an_empty_engine() {
+        let s = st("dec-recon", "");
+        let live = live_one(&s, "race", "ra");
+        s.store.lock().unwrap().insert_torrent(&live, "race", b"x", "/tmp", "", 0.0, false, "").unwrap();
+        orphan(&s, "race", O1);
+        orphan(&s, "hoard", O2);
+        reconcile_pass(&s.engines, &s.store);
+        assert_eq!(rows(&s, "race"), vec![live.clone()], "the orphan went, the live row stayed");
+        assert_eq!(rows(&s, "hoard"), vec![O2.to_string()], "the hoard holds no torrent: nothing may be concluded");
+    }
+
+    /// A row this process wrote moments ago may be an add still on its way to
+    /// the engine: it is spared, even though the engine does not hold it yet.
+    #[test]
+    fn a_row_written_a_moment_ago_is_spared() {
+        let s = st("dec-recon-fresh", "");
+        live_one(&s, "race", "rb");
+        s.store.lock().unwrap().insert_torrent(O1, "race", b"x", "/tmp", "", 0.0, false, "").unwrap();
+        orphan(&s, "race", O2);
+        reconcile_pass(&s.engines, &s.store);
+        let left = rows(&s, "race");
+        assert!(left.contains(&O1.to_string()), "fresh: spared");
+        assert!(!left.contains(&O2.to_string()), "old: dropped");
+    }
+
+    /// A torrent being moved is out of its engine on purpose; its row holds
+    /// the only metainfo the target will adopt it with.
+    #[test]
+    fn a_row_with_a_job_in_flight_is_spared() {
+        let s = st("dec-recon-job", "");
+        live_one(&s, "race", "rc");
+        orphan(&s, "race", O1);
+        orphan(&s, "race", O2);
+        s.store.lock().unwrap().create_job("graduate", O1, "{}", 1).unwrap();
+        reconcile_pass(&s.engines, &s.store);
+        let left = rows(&s, "race");
+        assert!(left.contains(&O1.to_string()), "being moved");
+        assert!(!left.contains(&O2.to_string()));
+    }
+
+    /// A library that mostly failed to load looks exactly like a mass
+    /// deletion, and this worker cannot tell the two apart: past the ceiling
+    /// it drops nothing.
+    #[test]
+    fn the_reconcile_refuses_to_drop_a_flood_of_rows() {
+        let s = st("dec-recon-flood", "");
+        live_one(&s, "race", "rd");
+        let hashes: Vec<String> = (0..60).map(|i| format!("{i:040x}")).collect();
+        for h in &hashes {
+            orphan(&s, "race", h);
+        }
+        reconcile_pass(&s.engines, &s.store);
+        assert_eq!(rows(&s, "race").len(), 60, "60 of 60 orphans is over the ceiling of 50: all kept");
+        // Under the ceiling they go.
+        let s2 = st("dec-recon-few", "");
+        live_one(&s2, "race", "re");
+        for h in &hashes[..10] {
+            orphan(&s2, "race", h);
+        }
+        reconcile_pass(&s2.engines, &s2.store);
+        assert!(rows(&s2, "race").is_empty());
+    }
+
+    /// The timer runs a pass at once, then every five minutes.
+    #[tokio::test]
+    async fn the_reconcile_worker_runs_a_pass_as_soon_as_it_starts() {
+        let s = st("dec-recon-worker", "");
+        live_one(&s, "race", "rf");
+        orphan(&s, "race", O1);
+        spawn_store_reconcile(s.engines.clone(), s.store.clone());
+        eventually("the first tick dropped the orphan", || rows(&s, "race").is_empty()).await;
+    }
+
+    // ---- the queue: the branches the happy paths do not reach -----------------------
+
+    fn seeders(c: &Cache, t: &TorrentState, n: i64) {
+        c.record(
+            &typhon_engine::torrent::hex_encode(&t.info_hash),
+            crate::announce::cache::Entry {
+                complete: n,
+                incomplete: 0,
+                tracker: "tracker.example".into(),
+                at: std::time::Instant::now(),
+                interval: Duration::from_secs(1800),
+            },
+        );
+    }
+
+    fn now() -> std::time::Instant {
+        std::time::Instant::now()
+    }
+
+    fn lim(toml_src: &str) -> QueueLimits {
+        QueueLimits::from_session(&toml::from_str(toml_src).unwrap())
+    }
+
+    /// Over the ceiling, the torrent with the FEWEST seeders in the swarm
+    /// gives its slot back -- it keeps its progress and waits.
+    #[test]
+    fn over_the_ceiling_the_least_seeded_running_download_is_parked() {
+        let s = st("dec-queue-over", "");
+        let mgr = engine_manager(&s, "race");
+        let ts = queued_downloads(&mgr, &["qa", "qb", "qc"]);
+        let cache = Cache::default();
+        for (t, n) in ts.iter().zip([9, 5, 1]) {
+            t.is_paused.store(false, Ordering::Relaxed);
+            seeders(&cache, t, n);
+        }
+        enforce_queue(&mgr, &cache, &lim("active_downloads = 2"), &HashSet::new(), &HashSet::new(), &mut HashSet::new(), &mut SlowClock::new(), now());
+        assert_eq!(ts.iter().map(|t| t.is_paused.load(Ordering::Relaxed)).collect::<Vec<_>>(), vec![false, false, true]);
+        assert_eq!(ts[2].status.load(Ordering::Relaxed), TorrentStatus::Stopped as u8);
+    }
+
+    /// And the free slot goes to the best-seeded waiting torrent.
+    #[test]
+    fn a_free_slot_goes_to_the_best_seeded_waiting_download() {
+        let s = st("dec-queue-best", "");
+        let mgr = engine_manager(&s, "race");
+        let ts = queued_downloads(&mgr, &["qd", "qe", "qf"]);
+        let cache = Cache::default();
+        for (t, n) in ts.iter().zip([2, 40, 7]) {
+            seeders(&cache, t, n);
+        }
+        enforce_queue(&mgr, &cache, &lim("active_downloads = 1"), &HashSet::new(), &HashSet::new(), &mut HashSet::new(), &mut SlowClock::new(), now());
+        assert_eq!(ts.iter().map(|t| !t.is_paused.load(Ordering::Relaxed)).collect::<Vec<_>>(), vec![false, true, false]);
+    }
+
+    /// A torrent in error is out of the queue: it takes no slot and is not
+    /// started.
+    #[test]
+    fn a_torrent_in_error_neither_takes_a_slot_nor_is_started() {
+        let s = st("dec-queue-err", "");
+        let mgr = engine_manager(&s, "race");
+        let ts = queued_downloads(&mgr, &["qg", "qh"]);
+        ts[0].status.store(TorrentStatus::Error as u8, Ordering::Relaxed);
+        let cache = Cache::default();
+        seeders(&cache, &ts[0], 1000);
+        enforce_queue(&mgr, &cache, &lim("active_downloads = 1"), &HashSet::new(), &HashSet::new(), &mut HashSet::new(), &mut SlowClock::new(), now());
+        assert!(ts[0].is_paused.load(Ordering::Relaxed), "the errored one stays as it was");
+        assert!(!ts[1].is_paused.load(Ordering::Relaxed), "the slot went to the healthy one");
+    }
+
+    /// `active_limit` is shared: downloads take their slots first and the
+    /// seeds get what is left.
+    #[test]
+    fn the_total_ceiling_gives_seeds_what_the_downloads_leave() {
+        let s = st("dec-queue-total", "");
+        let mgr = engine_manager(&s, "race");
+        let dl = queued_downloads(&mgr, &["qi"]);
+        dl[0].is_paused.store(false, Ordering::Relaxed);
+        let seeds: Vec<_> = ["qj", "qk"]
+            .iter()
+            .map(|n| {
+                let (ih, _) = mgr.add_torrent_bytes(&torrent_bytes(n), "/tmp", false, true).unwrap();
+                let t = mgr.get(&ih).unwrap();
+                t.status.store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+                t.is_paused.store(false, Ordering::Relaxed);
+                t
+            })
+            .collect();
+        let mut parked = HashSet::new();
+        enforce_queue(&mgr, &Cache::default(), &lim("queueing = true\nactive_limit = 2"), &HashSet::new(), &HashSet::new(), &mut parked, &mut SlowClock::new(), now());
+        assert!(!dl[0].is_paused.load(Ordering::Relaxed), "the download keeps its slot");
+        assert_eq!(running(&seeds), 1, "one slot left for the seeds");
+        assert_eq!(parked.len(), 1, "and the other is parked by the queue, to be resumed by it");
+        let stopped = seeds.iter().find(|t| t.is_paused.load(Ordering::Relaxed)).unwrap();
+        assert!(parked.contains(&stopped.info_hash));
+    }
+
+    /// A parked seed that left the catalogue is forgotten, not remembered
+    /// forever.
+    #[test]
+    fn a_parked_seed_that_was_removed_is_forgotten() {
+        let s = st("dec-queue-forget", "");
+        let mgr = engine_manager(&s, "race");
+        let seeds: Vec<_> = ["ql", "qm", "qn"]
+            .iter()
+            .map(|n| {
+                let (ih, _) = mgr.add_torrent_bytes(&torrent_bytes(n), "/tmp", false, true).unwrap();
+                let t = mgr.get(&ih).unwrap();
+                t.status.store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+                t.is_paused.store(false, Ordering::Relaxed);
+                t
+            })
+            .collect();
+        let mut parked = HashSet::new();
+        let l = lim("queueing = true\nactive_seeds = 1");
+        enforce_queue(&mgr, &Cache::default(), &l, &HashSet::new(), &HashSet::new(), &mut parked, &mut SlowClock::new(), now());
+        assert_eq!(parked.len(), 2);
+        let gone = *parked.iter().next().unwrap();
+        mgr.remove_torrent(&gone, true).unwrap();
+        enforce_queue(&mgr, &Cache::default(), &l, &HashSet::new(), &HashSet::new(), &mut parked, &mut SlowClock::new(), now());
+        assert_eq!(parked.len(), 1);
+        assert!(!parked.contains(&gone));
+        assert_eq!(running(&seeds) + 1, 2, "the removed one is no longer counted");
+    }
+
+    /// A forced torrent that was parked is started and is no longer the
+    /// queue's to resume.
+    #[test]
+    fn forcing_a_parked_seed_starts_it_and_forgets_it() {
+        let s = st("dec-queue-force", "");
+        let mgr = engine_manager(&s, "race");
+        let (ih, _) = mgr.add_torrent_bytes(&torrent_bytes("qo"), "/tmp", true, true).unwrap();
+        let t = mgr.get(&ih).unwrap();
+        t.status.store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+        let mut parked: HashSet<InfoHash> = [ih].into();
+        let forced: HashSet<String> = [typhon_engine::torrent::hex_encode(&ih)].into();
+        enforce_queue(&mgr, &Cache::default(), &lim("queueing = true\nactive_seeds = 1"), &HashSet::new(), &forced, &mut parked, &mut SlowClock::new(), now());
+        assert!(!t.is_paused.load(Ordering::Relaxed));
+        assert!(parked.is_empty());
+    }
+
+    // ---- the queue's small rules -------------------------------------------------
+
+    /// What counts as a slow torrent: under the threshold for at least the
+    /// timer; the clock starts when it is first seen under it, and a torrent
+    /// back over the threshold is forgotten.
+    #[test]
+    fn a_torrent_is_slow_only_after_the_timer_and_forgotten_when_it_speeds_up() {
+        let ih: InfoHash = [7u8; 20];
+        let t0 = now();
+        let after = Duration::from_secs(60);
+        let mut next = SlowClock::new();
+        // First sight under the threshold: noted, not slow yet.
+        assert!(!slow_long_enough(after, 2048, 100, &ih, &SlowClock::new(), &mut next, t0));
+        assert_eq!(next.get(&ih), Some(&t0));
+        // Under it since t0: 59 s is not enough, 60 s is.
+        let prev = next.clone();
+        let mut n2 = SlowClock::new();
+        assert!(!slow_long_enough(after, 2048, 100, &ih, &prev, &mut n2, t0 + Duration::from_secs(59)));
+        assert_eq!(n2.get(&ih), Some(&t0), "the clock keeps its start");
+        assert!(slow_long_enough(after, 2048, 100, &ih, &prev, &mut n2, t0 + Duration::from_secs(60)));
+        // At or over the threshold: not slow, and not carried forward.
+        let mut n3 = SlowClock::new();
+        assert!(!slow_long_enough(after, 2048, 2048, &ih, &prev, &mut n3, t0 + Duration::from_secs(600)));
+        assert!(n3.is_empty());
+        // A zero timer makes it slow at first sight.
+        assert!(slow_long_enough(Duration::ZERO, 2048, 0, &ih, &SlowClock::new(), &mut SlowClock::new(), t0));
+    }
+
+    #[test]
+    fn the_slow_rule_reads_its_thresholds_in_kib_and_defaults_the_timer() {
+        let l = lim("dont_count_slow_torrents = true");
+        let rule = l.slow.expect("on");
+        assert_eq!((rule.dl_bps, rule.ul_bps, rule.after), (2048, 2048, Duration::from_secs(60)));
+        let l = lim("dont_count_slow_torrents = true\nslow_torrent_dl_rate_threshold = 10\nslow_torrent_ul_rate_threshold = -5\nslow_torrent_inactive_timer = -1");
+        let rule = l.slow.unwrap();
+        assert_eq!((rule.dl_bps, rule.ul_bps, rule.after), (10 * 1024, 0, Duration::ZERO), "a negative figure is none");
+        assert!(lim("dont_count_slow_torrents = false").slow.is_none());
+        // Slow torrents do not make a ceiling: only the three caps decide is_empty.
+        assert!(lim("dont_count_slow_torrents = true").is_empty());
+    }
+
+    /// Whether a torrent holds all of its data, as far as the status and the
+    /// picker can tell.
+    #[test]
+    fn a_torrent_holds_everything_by_status_then_by_its_picker() {
+        let s = st("dec-holds", "");
+        let mgr = engine_manager(&s, "race");
+        let (ih, _) = mgr.add_torrent_bytes(&torrent_bytes("hold"), "/tmp", true, true).unwrap();
+        let t = mgr.get(&ih).unwrap();
+        t.status.store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+        assert!(holds_everything(&t), "seeding says so");
+        t.status.store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+        assert!(!holds_everything(&t), "downloading says not");
+        // Added in seed mode: no picker, its data trusted whole.
+        t.status.store(TorrentStatus::Stopped as u8, Ordering::Relaxed);
+        assert!(t.picker.get().is_none());
+        assert!(holds_everything(&t));
+    }
+}
