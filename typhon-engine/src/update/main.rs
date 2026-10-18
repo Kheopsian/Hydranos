@@ -263,12 +263,17 @@ fn expected_sha(r: &Release, archive: &str) -> Result<String, String> {
         .ok_or_else(|| format!("no {name} published beside the archive -- refusing to install unverified bytes"))?;
     asset_url_ok(&a.url)?;
     let text = get_text(&a.url)?;
-    // "<hex>  <filename>", the sha256sum format.
+    sha_from_text(&text).ok_or_else(|| format!("{name} does not hold a sha256"))
+}
+
+/// The digest in a `.sha256` file: "<hex>  <filename>", the sha256sum format.
+/// Exactly 64 hex digits, or nothing: a shorter, longer or non-hex first word
+/// is no checksum to compare against.
+fn sha_from_text(text: &str) -> Option<String> {
     text.split_whitespace()
         .next()
         .map(|s| s.to_lowercase())
         .filter(|s| s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit()))
-        .ok_or_else(|| format!("{name} does not hold a sha256"))
 }
 
 // ---------------------------------------------------------------------------
@@ -1283,5 +1288,17 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(installed_version(&scratch("version-none").join("missing")), None, "no binary there");
         let _ = std::fs::remove_dir_all(scratch("version-none"));
+    }
+
+    /// Only a whole sha256 is taken from a `.sha256` file: 64 hex digits,
+    /// lowercased, the file name after it ignored.
+    #[test]
+    fn a_checksum_file_yields_only_a_whole_sha256() {
+        let hex = "0123456789ABCDEF".repeat(4);
+        assert_eq!(sha_from_text(&format!("{hex}  hydranos.tar.gz\n")), Some(hex.to_lowercase()));
+        assert_eq!(sha_from_text(&hex[..63]), None, "one digit short");
+        assert_eq!(sha_from_text(&format!("{hex}0")), None, "one digit long");
+        assert_eq!(sha_from_text(&format!("{}g", &hex[..63])), None, "a letter that is not hex");
+        assert_eq!(sha_from_text(""), None, "an empty file");
     }
 }
