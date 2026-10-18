@@ -47,6 +47,15 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   engine's), and `share_limits.engine` is the id of the engine that holds it
   (it was the role's name).
 
+### Tests
+
+- Line coverage goes from 84.8% to over 87%, and the CI floor from 81% to
+  85%. Every new test was checked by mutation testing: each altered condition
+  in the code it covers makes a test fail, or is shown to change nothing that
+  can be observed. Two checks moved into their own functions to be testable
+  (the updater's checksum reading, the slow tracker-pass threshold), and the
+  memory watch takes its reader as a parameter; none changes behaviour.
+
 ## v4.5.1 -- zip 9, and a CI that measures what it builds
 
 ### Security
