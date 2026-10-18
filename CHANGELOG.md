@@ -21,6 +21,17 @@ decided when the release is cut, by looking at what went in: whoever tags it
 renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 `HYDRANOS_VERSION` in the same commit.
 
+## Unreleased -- a resumed move does not finish without a file it had
+
+### Fixed
+
+- A move interrupted after its torrent left the engine, then resumed, did not
+  notice when a file the torrent had data in was no longer at its old place
+  nor at its new one: it said nothing and finished without it. It now stops
+  on an error that names the file, deletes nothing, and hands the torrent back
+  to its engine at its old place. A file the torrent never downloaded is still
+  stepped over.
+
 ## v4.5.1 -- zip 9, and a CI that measures what it builds
 
 ### Security
