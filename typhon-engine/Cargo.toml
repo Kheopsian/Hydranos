@@ -133,6 +133,9 @@ default = []
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
+# A paused clock (`start_paused`, `advance`) lets a test cross a 30 s or a 24 h
+# timer without waiting for it. Test builds only; adds no crate.
+tokio = { version = "1", features = ["test-util"] }
 
 [[bench]]
 name = "rate_tracker"
