@@ -866,6 +866,92 @@ mod tests {
         assert_eq!((named.kind, named.engine.as_str()), ("engine_direct", "race"));
     }
 
+    // ---- the deductions of the mode and of the engines' exits ----
+
+    /// The pre-4.4 deduction reads the proxy_v2 listener of EITHER engine,
+    /// and a mode that needs a proxy nobody has refuses rather than going out
+    /// the default route.
+    #[test]
+    fn either_engines_proxy_v2_listener_deduces_the_proxy_v2_mode() {
+        for section in ["race", "hoard"] {
+            let r = resolved(&format!("[{section}]\nlisten_port_proxy_v2 = 9000\n"));
+            assert_eq!(r.kind, "refused", "[{section}] alone: proxy_v2 mode, armed, and no proxy to lend");
+            assert!(r.route.kill_switch);
+        }
+        assert_eq!(resolved("[race]\nlisten_port_proxy_v2 = 0\n").kind, "direct", "a zero port is no listener");
+    }
+
+    /// A block named like a role's engine IS that engine: it keeps the role's
+    /// "direct on purpose" and its tunnel, which only a differently named
+    /// extra engine loses.
+    #[test]
+    fn a_block_named_like_a_role_keeps_that_roles_direct_and_tunnel() {
+        for role in ["race", "hoard"] {
+            let direct = resolved(&format!(
+                "[daemon]\negress = \"engine:{role}\"\n[network]\nmode = \"socks5\"\n[{role}]\nallow_direct = true\n\
+                 [[engine]]\nengine_id = \"{role}\"\nrole = \"{role}\"\n"
+            ));
+            assert_eq!((direct.kind, direct.engine.as_str()), ("engine_direct", role), "{role}");
+            let tunnel = resolved(&format!(
+                "[daemon]\negress = \"engine:{role}\"\n[network]\nmode = \"wireguard\"\n\
+                 [{role}]\nwireguard_enabled = true\nwireguard_config = \"a.conf\"\n\
+                 [[engine]]\nengine_id = \"{role}\"\nrole = \"{role}\"\n"
+            ));
+            assert_eq!((tunnel.kind, tunnel.engine.as_str()), ("engine_tunnel", role), "{role}");
+            assert_eq!(tunnel.route.interface, typhon_engine::egress::tunnel_device(role));
+        }
+    }
+
+    /// A tunnel is a tunnel only in WireGuard mode, switched on, with a
+    /// config to bring it up: a config alone lends nothing.
+    #[test]
+    fn a_wireguard_config_alone_does_not_make_a_tunnel() {
+        // Switched off on purpose: the engine goes direct.
+        let off = resolved(
+            "[daemon]\negress = \"engine:race\"\n[network]\nmode = \"wireguard\"\n[race]\nwireguard_enabled = false\nwireguard_config = \"a.conf\"\n",
+        );
+        assert_eq!((off.kind, off.engine.as_str()), ("engine_direct", "race"));
+        // Switched on with no config: nothing to bring up, so blocked.
+        let bare = resolved(
+            "[daemon]\negress = \"engine:race\"\n[network]\nmode = \"wireguard\"\n[race]\nwireguard_enabled = true\n",
+        );
+        assert_eq!(bare.kind, "refused");
+        // Another mode: the config is ignored and the engine's proxy is what it lends.
+        let socks = resolved(
+            "[daemon]\negress = \"engine:race\"\n[network]\nmode = \"socks5\"\n[race]\nwireguard_enabled = true\n\
+             wireguard_config = \"a.conf\"\nsocks5_outbound_host = \"10.0.0.4\"\n",
+        );
+        assert_eq!((socks.kind, socks.engine.as_str()), ("engine_proxy", "race"));
+        assert_eq!(socks.route.proxy, "socks5h://10.0.0.4:1080");
+    }
+
+    /// An engine with only a bound interface, or only a proxy host, has a way
+    /// out of its own.
+    #[test]
+    fn an_interface_alone_or_a_proxy_host_alone_is_a_way_out() {
+        let iface = resolved("[daemon]\negress = \"engine:race\"\n[race]\nbind_interface = \"eth9\"\n");
+        assert_eq!((iface.kind, iface.engine.as_str()), ("engine_interface", "race"));
+        assert_eq!(iface.route.interface, "eth9");
+        let host = resolved("[daemon]\negress = \"engine:hoard\"\n[hoard]\nsocks5_outbound_host = \"10.0.0.6\"\n");
+        assert_eq!((host.kind, host.engine.as_str()), ("engine_proxy", "hoard"));
+        assert_eq!(host.route.proxy, "socks5h://10.0.0.6:1080");
+    }
+
+    /// "Direct on purpose" is `allow_direct`, or a tunnel switched OFF in
+    /// WireGuard mode -- not WireGuard mode alone, nor a tunnel flag in
+    /// another mode.
+    #[test]
+    fn only_a_deliberate_direct_exempts_an_engine_from_the_kill_switch() {
+        let unset = resolved("[daemon]\negress = \"engine:race\"\n[network]\nmode = \"wireguard\"\n");
+        assert_eq!(unset.kind, "refused", "WireGuard mode with the tunnel flag absent is a hole, not a choice");
+        assert!(unset.via.contains("blocked by the kill switch"), "{}", unset.via);
+        let other_mode = resolved(
+            "[daemon]\negress = \"engine:race\"\n[network]\nmode = \"socks5\"\n[race]\nwireguard_enabled = false\n",
+        );
+        assert_eq!(other_mode.kind, "refused", "a tunnel switched off means nothing outside WireGuard mode");
+        assert!(other_mode.via.contains("blocked by the kill switch"), "{}", other_mode.via);
+    }
+
     // ---- reading and unpacking an archive ----
 
     #[test]
