@@ -68,6 +68,12 @@ const TRACKER_EVERY: u64 = 6;
 /// interval, past which passes start being skipped.
 const TRACKER_PASS_SLOW: Duration = Duration::from_secs(5);
 
+/// Whether a tracker pass took long enough to say so in the log (warn,
+/// shown in the Logs tab) rather than at debug: strictly over the limit.
+fn slow_tracker_pass(took: Duration) -> bool {
+    took > TRACKER_PASS_SLOW
+}
+
 /// One (engine, tracker) row of the Trackers tab, live and as stored.
 ///
 /// Fields in alphabetical order: that is the order 3.x published them in.
@@ -487,7 +493,7 @@ fn sample_trackers(
     let started = std::time::Instant::now();
     let rows = tracker_totals(engines, store, ts);
     let took = started.elapsed();
-    if took > TRACKER_PASS_SLOW {
+    if slow_tracker_pass(took) {
         tracing::warn!(ms = took.as_millis() as u64, "tracker pass is slow");
     } else {
         tracing::debug!(ms = took.as_millis() as u64, "tracker pass");
@@ -990,5 +996,14 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
         assert_eq!(got, (1, 1), "one sample row and one row for the tracker, from the very first tick");
+    }
+
+    /// A tracker pass is reported as slow only strictly over its limit.
+    #[test]
+    fn a_tracker_pass_is_slow_only_past_its_limit() {
+        assert!(!slow_tracker_pass(Duration::from_secs(1)), "a steady-state pass");
+        assert!(!slow_tracker_pass(TRACKER_PASS_SLOW), "exactly at the limit");
+        assert!(slow_tracker_pass(TRACKER_PASS_SLOW + Duration::from_nanos(1)), "just past it");
+        assert!(slow_tracker_pass(TRACKER_PASS_SLOW * 3), "well past it");
     }
 }
