@@ -534,4 +534,291 @@ mod tests {
         assert!((out.arc_miss_per_sec - 2.0).abs() < 1e-9, "10 misses in 5 s");
         assert!((out.arc_demand_hit_rate_pct - 90.0).abs() < 1e-9);
     }
+
+    // ---- /proc readers: the edges the happy-path tests above do not reach ----
+
+    #[test]
+    fn iowait_reads_nothing_it_cannot_trust() {
+        let mut prev = Some((10, 100));
+        assert_eq!(iowait_pct("cpu0 1 2 3 4 5\nintr 9\n", &mut prev), 0.0, "no aggregate cpu line");
+        assert_eq!(prev, Some((10, 100)), "a read that found nothing leaves the baseline alone");
+        assert_eq!(iowait_pct("cpu  1 2 3 4\n", &mut prev), 0.0, "fewer than the five fields up to iowait");
+        assert_eq!(prev, Some((10, 100)));
+    }
+
+    #[test]
+    fn iowait_does_not_divide_by_an_interval_that_did_not_advance() {
+        let mut prev = None;
+        let a = "cpu  100 0 100 700 100 0 0 0 0 0\n";
+        iowait_pct(a, &mut prev);
+        // Same totals again (a counter that did not tick): 0, not NaN or inf.
+        assert_eq!(iowait_pct(a, &mut prev), 0.0);
+        assert_eq!(prev, Some((100, 1000)), "the baseline is still the latest read");
+    }
+
+    #[test]
+    fn iowait_counts_eight_columns_and_not_the_guest_time_twice() {
+        let mut prev = None;
+        // Columns 9 and 10 (guest, guest_nice) are already inside user and nice.
+        iowait_pct("cpu  100 0 100 700 100 0 0 0 5000 5000\n", &mut prev);
+        assert_eq!(prev, Some((100, 1000)), "total = the first eight columns only");
+        // 100 more ticks, 50 of them iowait; the guest columns grow a lot and must not dilute it.
+        let pct = iowait_pct("cpu  100 0 100 750 150 0 0 0 9000 9000\n", &mut prev);
+        assert!((pct - 50.0).abs() < 1e-9, "{pct}");
+    }
+
+    #[test]
+    fn a_counter_that_goes_backwards_never_reports_a_negative_rate() {
+        let mut prev = None;
+        let mut out = System::default();
+        let a = "hits 4 1000\nmisses 4 100\nsize 4 1\nmru_ghost_hits 4 10\nmfu_ghost_hits 4 10\n";
+        arc_interval(a, 10.0, &mut prev, &mut out);
+        // The module was reloaded: every counter restarted from a lower value.
+        let b = "hits 4 5\nmisses 4 2\nsize 4 1\nmru_ghost_hits 4 1\nmfu_ghost_hits 4 1\n";
+        arc_interval(b, 20.0, &mut prev, &mut out);
+        assert!(out.measured);
+        assert_eq!(out.arc_miss_per_sec, 0.0);
+        assert_eq!(out.arc_ghost_hits_per_sec, 0.0);
+        assert_eq!(out.arc_hit_rate_pct, 100.0, "no hits and no misses in the interval is not a 0% hit rate");
+    }
+
+    #[test]
+    fn arc_ghost_hits_and_demand_misses_add_their_two_halves() {
+        let mut prev = None;
+        let mut out = System::default();
+        let a = "hits 4 0\nmisses 4 0\nsize 4 4096\ndemand_data_misses 4 0\ndemand_metadata_misses 4 0\n\
+                 demand_data_hits 4 0\ndemand_metadata_hits 4 0\nmru_ghost_hits 4 0\nmfu_ghost_hits 4 0\n";
+        arc_interval(a, 0.0, &mut prev, &mut out);
+        let b = "hits 4 30\nmisses 4 10\nsize 4 4096\ndemand_data_misses 4 2\ndemand_metadata_misses 4 6\n\
+                 demand_data_hits 4 10\ndemand_metadata_hits 4 10\nmru_ghost_hits 4 3\nmfu_ghost_hits 4 7\n";
+        arc_interval(b, 10.0, &mut prev, &mut out);
+        assert!((out.arc_demand_miss_per_sec - 0.8).abs() < 1e-9, "(2 + 6) / 10 s");
+        assert!((out.arc_ghost_hits_per_sec - 1.0).abs() < 1e-9, "(3 + 7) / 10 s");
+        assert!((out.arc_demand_hit_rate_pct - 20.0 / 28.0 * 100.0).abs() < 1e-9);
+        assert!((out.arc_hit_rate_pct - 75.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn an_arc_read_with_no_elapsed_time_is_not_a_measurement() {
+        let mut prev = None;
+        let mut out = System::default();
+        arc_interval("hits 4 1\nmisses 4 1\nsize 4 8\n", 50.0, &mut prev, &mut out);
+        arc_interval("hits 4 9\nmisses 4 9\nsize 4 16\n", 50.0, &mut prev, &mut out);
+        assert!(!out.measured, "dt = 0 cannot give a rate");
+        assert_eq!(out.arc_size_bytes, 16.0, "the size is a gauge and still follows");
+    }
+
+    #[test]
+    fn the_fd_count_is_this_processs_own() {
+        // At least stdin, stdout, stderr and the directory handle being read.
+        assert!(open_fd_count() >= 4.0);
+    }
+
+    // ---- the pass over the torrents, against a real (offline) engine host ----
+
+    use crate::api::testing::{state_from, TestState};
+
+    fn torrent_bytes(name: &str, announce: Option<&str>) -> Vec<u8> {
+        let mut piece = [0xABu8; 20];
+        let n = name.len().min(20);
+        piece[..n].copy_from_slice(&name.as_bytes()[..n]);
+        let mut info = format!("d6:lengthi16384e4:name{}:{name}12:piece lengthi16384e6:pieces20:", name.len()).into_bytes();
+        info.extend_from_slice(&piece);
+        info.push(b'e');
+        let mut out = match announce {
+            Some(a) => format!("d8:announce{}:{a}4:info", a.len()).into_bytes(),
+            None => b"d4:info".to_vec(),
+        };
+        out.extend_from_slice(&info);
+        out.push(b'e');
+        out
+    }
+
+    fn add(s: &TestState, engine: &str, name: &str, announce: Option<&str>) -> std::sync::Arc<typhon_engine::torrent::meta::TorrentState> {
+        let e = s.engines.get(engine).expect("engine");
+        let (ih, _) = e
+            .manager
+            .add_torrent_bytes(&torrent_bytes(name, announce), "/tmp/hydra-benchsampler-test", false, false)
+            .expect("added");
+        e.manager.get(&ih).expect("loaded")
+    }
+
+    fn tracker_key(engine: &str, host: &str) -> String {
+        crate::store::Store::tracker_counter_key(engine, host)
+    }
+
+    fn memory_bench() -> crate::benchdb::Shared {
+        std::sync::Arc::new(std::sync::Mutex::new(crate::benchdb::BenchDb::open_in_memory().unwrap()))
+    }
+
+    /// The Trackers tab is the stored baseline plus what is loaded, one row per
+    /// (engine, tracker); a tracker with nothing loaded keeps its stored row,
+    /// and a torrent with no announce URL has a bucket of its own.
+    #[test]
+    fn tracker_rows_add_the_loaded_torrents_to_the_stored_baseline() {
+        use std::sync::atomic::Ordering::Relaxed;
+        use typhon_engine::torrent::meta::TorrentStatus;
+        let s = state_from("bs-rows", "");
+        {
+            let store = s.store.lock().unwrap();
+            store.set_counter(&tracker_key("race", "tk-a.example"), 1000, 500).unwrap();
+            store.set_counter(&tracker_key("hoard", "stored-only.example"), 7, 3).unwrap();
+        }
+        let a1 = add(&s, "race", "a1", Some("https://tk-a.example/announce"));
+        a1.total_uploaded.store(100, Relaxed);
+        a1.total_downloaded.store(40, Relaxed);
+        a1.peers_connected.store(3, Relaxed);
+        a1.status.store(TorrentStatus::Downloading as u8, Relaxed);
+        let a2 = add(&s, "race", "a2", Some("https://tk-a.example:8443/announce"));
+        a2.status.store(TorrentStatus::Seeding as u8, Relaxed);
+        let b = add(&s, "race", "b1", Some("https://tk-b.example/announce"));
+        b.status.store(TorrentStatus::Seeding as u8, Relaxed);
+        b.is_paused.store(true, Relaxed);
+        add(&s, "race", "n1", None);
+        let h = add(&s, "hoard", "h1", Some("https://tk-a.example/announce"));
+        h.status.store(TorrentStatus::Seeding as u8, Relaxed);
+        h.peers_connected.store(1, Relaxed);
+
+        let rows = tracker_totals(&s.engines, &s.store, 1_700_000_123);
+        let keys: Vec<(&str, &str)> = rows.iter().map(|r| (r.engine.as_str(), r.tracker.as_str())).collect();
+        assert_eq!(
+            keys,
+            vec![
+                ("hoard", "stored-only.example"),
+                ("hoard", "tk-a.example"),
+                ("race", "(no tracker)"),
+                ("race", "tk-a.example"),
+                ("race", "tk-b.example"),
+            ],
+            "sorted by engine then tracker, the port stripped from the host"
+        );
+        assert!(rows.iter().all(|r| r.ts == 1_700_000_123), "every row carries the pass's instant");
+
+        let row = |e: &str, t: &str| rows.iter().find(|r| r.engine == e && r.tracker == t).unwrap().clone();
+        let stored_only = row("hoard", "stored-only.example");
+        assert_eq!((stored_only.cum_uploaded, stored_only.cum_downloaded, stored_only.torrents), (7, 3, 0));
+        let a = row("race", "tk-a.example");
+        assert_eq!(a.cum_uploaded, 1100, "stored 1000 + the loaded torrent's 100");
+        assert_eq!(a.cum_downloaded, 540);
+        assert_eq!(a.torrents, 2, "the torrent count comes from what is loaded");
+        assert_eq!((a.peers, a.active), (3, 1), "one of the two has a peer");
+        assert_eq!(a.seed_size, 16384, "only the seeding one counts as seed size");
+        let b = row("race", "tk-b.example");
+        assert_eq!((b.torrents, b.seed_size), (1, 0), "paused keeps its state word but is credited nothing");
+        let n = row("race", "(no tracker)");
+        assert_eq!((n.torrents, n.seed_size, n.peers), (1, 0, 0));
+        let hoard_a = row("hoard", "tk-a.example");
+        assert_eq!((hoard_a.torrents, hoard_a.seed_size, hoard_a.peers), (1, 16384, 1));
+        assert_eq!(hoard_a.cum_uploaded, 0, "the race engine's stored row is not the hoard's");
+    }
+
+    #[test]
+    fn a_tracker_pass_is_published_and_stored() {
+        let s = state_from("bs-pass", "");
+        add(&s, "race", "p1", Some("https://pass-only.example/announce"));
+        let bench = memory_bench();
+        sample_trackers(&s.engines, &bench, &s.store).expect("pass");
+        assert!(latest_trackers().is_some(), "the live table has a pass to show");
+        let stored = bench.lock().unwrap().tracker_samples_latest().unwrap();
+        let mine: Vec<_> = stored.iter().filter(|r| r["tracker"] == "pass-only.example").collect();
+        assert_eq!(mine.len(), 1);
+        assert_eq!(mine[0]["engine"], "race");
+        assert_eq!(mine[0]["torrents"].as_f64(), Some(1.0));
+    }
+
+    /// One 5-second sample: headline gauges from the engines, the extra
+    /// engines apart, the schedule's health read from each admission, and the
+    /// announce rate differenced between two samples rather than since boot.
+    #[test]
+    fn a_sample_records_the_engines_and_differences_the_announce_counters() {
+        use std::sync::atomic::Ordering::Relaxed;
+        let s = state_from(
+            "bs-sample",
+            "[[engine]]\nengine_id = \"vpn1\"\nrole = \"race\"\n[engine.session]\nlisten_port = 26991\n",
+        );
+        s.store.lock().unwrap().set_counter("global", 1000, 2000).unwrap();
+        let t = add(&s, "race", "s1", Some("https://tk-s.example/announce"));
+        t.total_uploaded.store(300, Relaxed);
+        add(&s, "vpn1", "x1", None);
+        add(&s, "vpn1", "x2", None);
+        let race = s.engines.get("race").unwrap();
+        race.admission.needed_milli.store(2500, Relaxed);
+        race.admission.late.store(4, Relaxed);
+        race.admission.lag_p50_s.store(11, Relaxed);
+        race.admission.lag_p90_s.store(33, Relaxed);
+        race.admission.concurrency.store(16, Relaxed);
+        race.admission.latency_ms.store(120, Relaxed);
+        race.admission.throttled_permille.store(250, Relaxed);
+        race.admission.in_flight.store(7, Relaxed);
+
+        let bench = memory_bench();
+        let (mut previous, mut system) = (Previous::new(), SystemPrev::default());
+        let (session_up, session_down) = s.engines.session_totals();
+        sample_once(&s.engines, &bench, &s.store, &mut previous, &mut system).expect("first sample");
+
+        let rows = bench.lock().unwrap().samples_in_range(0.0, 1e12).unwrap();
+        assert_eq!(rows.len(), 1);
+        let r = &rows[0];
+        let f = |k: &str| r[k].as_f64().unwrap_or_else(|| panic!("{k} missing from {r}"));
+        assert_eq!(f("race_torrents"), 1.0, "the race engine's own count");
+        assert_eq!(f("race_announce_needed"), 2.5, "milli-announces per second to announces per second");
+        assert_eq!(f("race_announce_late"), 4.0);
+        assert_eq!((f("race_announce_lag_p50"), f("race_announce_lag_p90")), (11.0, 33.0));
+        assert_eq!((f("race_announce_concurrency"), f("race_announce_latency_ms")), (16.0, 120.0));
+        assert_eq!(f("race_announce_throttled_pct"), 25.0, "permille to percent");
+        assert_eq!(f("race_announce_in_flight"), 7.0);
+        assert_eq!(f("hoard_announce_needed"), 0.0, "the hoard engine published nothing");
+        assert_eq!(f("global_uploaded"), (1000 + session_up) as f64, "the stored baseline plus the loaded torrents");
+        assert_eq!(f("global_downloaded"), (2000 + session_down) as f64);
+        assert_eq!(f("race_announce_rate"), 0.0, "the first sample has no predecessor to difference against");
+        assert!(f("open_fds") >= 4.0);
+
+        // The extra engine has its own row; it is in neither the race nor the hoard column.
+        let extra = bench.lock().unwrap().engine_samples_in_range(0.0, 1e12, 1.0).unwrap();
+        assert_eq!(extra.keys().collect::<Vec<_>>(), vec!["vpn1"]);
+        assert_eq!(extra["vpn1"][0]["torrents"].as_f64(), Some(2.0));
+
+        // Five successful announces and two failures since: rates over the elapsed time.
+        for _ in 0..5 {
+            race.announce_cache.count_ok("tk-s.example");
+        }
+        race.announce_cache.count_failed();
+        race.announce_cache.count_failed();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        sample_once(&s.engines, &bench, &s.store, &mut previous, &mut system).expect("second sample");
+        let rows = bench.lock().unwrap().samples_in_range(0.0, 1e12).unwrap();
+        assert_eq!(rows.len(), 2);
+        let last = &rows[1];
+        let ok = last["race_announce_rate"].as_f64().unwrap();
+        let failed = last["race_announce_fail_rate"].as_f64().unwrap();
+        assert!(ok > 0.0 && failed > 0.0, "the counters moved, so the rates are not zero: {ok} {failed}");
+        assert!((ok / failed - 2.5).abs() < 1e-6, "5 ok to 2 failed over the same interval: {ok} / {failed}");
+        let iowait = last["iowait_pct"].as_f64().unwrap();
+        assert!((0.0..=100.0).contains(&iowait), "a share of the CPU time: {iowait}");
+    }
+
+    /// The task itself: the first tick is immediate, so a sample and a tracker
+    /// pass both land without waiting for the 5 s interval.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_sampler_task_writes_its_first_rows_at_once() {
+        let s = state_from("bs-spawn", "");
+        add(&s, "race", "z1", Some("https://tk-spawn.example/announce"));
+        let bench = memory_bench();
+        spawn(s.engines.clone(), bench.clone(), s.store.clone());
+        let mut got = (0, 0);
+        for _ in 0..100 {
+            got = {
+                let db = bench.lock().unwrap();
+                (
+                    db.samples_in_range(0.0, 1e12).unwrap().len(),
+                    db.tracker_samples_latest().unwrap().iter().filter(|r| r["tracker"] == "tk-spawn.example").count(),
+                )
+            };
+            if got.0 >= 1 && got.1 >= 1 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert_eq!(got, (1, 1), "one sample row and one row for the tracker, from the very first tick");
+    }
 }
