@@ -21,6 +21,37 @@ decided when the release is cut, by looking at what went in: whoever tags it
 renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 `HYDRANOS_VERSION` in the same commit.
 
+## v4.5.1 -- zip 9, and a CI that measures what it builds
+
+### Security
+
+- `zip` goes from 2.4.2 to 9.0.5, past RUSTSEC-2026-0367, 0368 and 0369. Those
+  concern `ZipArchive::extract`, which Hydranos never called: it reads an
+  archive entry by entry, refuses an entry that points outside its folder, and
+  writes a symbolic-link entry as a plain file (now covered by a test).
+  `cargo audit` is clean again.
+
+### Fixed
+
+- The UDP announce client keeps one socket per address family; it now belongs
+  to the runtime it was opened on and is reopened for another. The daemon runs
+  its announcers on one runtime, so this showed in the test process, where
+  announce tests failed about one run in ten when run together.
+- CI line coverage read 76% because the build cache still held the
+  instrumented build of the removed standalone engine binary, measured with the
+  rest. The cache starts afresh and the measure cleans first: 84.6%.
+
+### Tests
+
+- Mutation testing of the audit fixes found conditions no test could tell
+  apart. Each now has a test that fails on the altered code: resuming an
+  interrupted move onto its own path, onto a whole copy, after some originals
+  were already removed, with a file never downloaded, with or without a
+  category; giving it up; a graduation carrying back only what it moved; the
+  info-dict and DHT nesting scanners on input cut short.
+- Engine tests pick their ports below the ephemeral range, so another test's
+  socket cannot take one between the check and the bind.
+
 ## v4.5.0 -- a passkey only goes to its own tracker
 
 ### Security
