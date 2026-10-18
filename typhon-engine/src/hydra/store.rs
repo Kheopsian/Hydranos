@@ -1469,6 +1469,12 @@ impl Store {
         self.conn.query_row("SELECT count(*) FROM temp.slim_dirty", [], |r| r.get(0)).unwrap_or(-1)
     }
 
+    /// Run raw SQL, for tests that need a row the API would never write.
+    #[cfg(test)]
+    pub fn execute_batch_for_tests(&self, sql: &str) {
+        self.conn.execute_batch(sql).expect("test SQL");
+    }
+
     /// One-time enrolment tokens.
     ///
     /// A node enrols itself: the operator never hands this Hydra a credential

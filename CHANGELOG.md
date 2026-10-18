@@ -31,6 +31,11 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   on an error that names the file, deletes nothing, and hands the torrent back
   to its engine at its old place. A file the torrent never downloaded is still
   stepped over.
+- Opening a torrent's detail panel on a large library no longer waits on the
+  whole library. The panel read every torrent of the engine's session from the
+  store, under the store lock, to keep the one row it shows; it now reads that
+  row alone. A row elsewhere in the session that cannot be read no longer
+  blanks this panel's category and save path either.
 
 ## v4.5.1 -- zip 9, and a CI that measures what it builds
 

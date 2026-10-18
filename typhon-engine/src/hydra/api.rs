@@ -11924,9 +11924,15 @@ fn detail_payload(
     admission: &crate::announce::scheduler::Admission,
 ) -> serde_json::Value {
     let raw = typhon_engine::rpc::dispatch::torrent_to_json(torrent);
+    // This torrent's row only. The whole session used to be read into a map
+    // to keep one entry of it, which on a big library held the store for
+    // seconds -- and let any unreadable neighbour blank this panel's category
+    // and save path.
     let facts = {
         let store = state.store.read().unwrap();
-        store.facts_by_session(engine_id).unwrap_or_default()
+        store
+            .facts_for_hashes(&[hash.to_string()], engine_id)
+            .unwrap_or_default()
     };
     let empty = crate::row::StoreFacts::default();
     let row = crate::row::build(&raw, facts.get(hash).unwrap_or(&empty), "");
@@ -23986,5 +23992,82 @@ mod job_view_tests {
         let view = job_view(&job);
         assert!(view["params"].get("record").is_none());
         assert_eq!(view["params"]["to_engine"], "hoard", "the rest is still shown");
+    }
+}
+
+/// The torrent panel reads one torrent's row, and the row of the engine that
+/// holds it.
+#[cfg(test)]
+mod detail_panel_tests {
+    use super::testing::*;
+    use super::*;
+    use tower::ServiceExt;
+
+    const KEY: &str = "0123456789abcdef0123456789abcdef";
+
+    fn torrent_bytes(name: &str) -> Vec<u8> {
+        let info = format!(
+            "d6:lengthi16384e4:name{}:{name}12:piece lengthi16384e6:pieces20:{}e",
+            name.len(),
+            name.chars().next().unwrap().to_string().repeat(20)
+        );
+        let announce = "https://tracker.example/announce";
+        format!("d8:announce{}:{announce}4:info{info}e", announce.len()).into_bytes()
+    }
+
+    /// `name` held by `engine`, with a store row in that engine's session
+    /// carrying `category`.
+    fn hold(s: &TestState, engine: &str, name: &str, category: &str) -> String {
+        let blob = torrent_bytes(name);
+        let (ih, _) = s
+            .state
+            .engines
+            .get(engine)
+            .unwrap()
+            .manager
+            .add_torrent_bytes(&blob, "/tmp", true, true)
+            .expect("added");
+        let hash = typhon_engine::torrent::hex_encode(&ih);
+        s.state
+            .store
+            .lock()
+            .unwrap()
+            .insert_torrent(&hash, engine, &blob, "/tmp", category, 0.0, false, "")
+            .unwrap();
+        hash
+    }
+
+    async fn get(s: &TestState, uri: &str) -> serde_json::Value {
+        let req = axum::http::Request::builder()
+            .uri(uri)
+            .header("X-API-Key", KEY)
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = super::router(s.state.clone()).oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "{uri}");
+        body_json(resp).await
+    }
+
+    /// ⭐⭐ The panel depends on its own row and on no other. A neighbour in the
+    /// same session whose row cannot be read used to fail the whole-session
+    /// read, and the healthy torrent's panel lost its category with it.
+    #[tokio::test]
+    async fn a_torrent_panel_does_not_depend_on_the_other_rows_of_its_session() {
+        let s = state_from("detail-own-row", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+        let hash = hold(&s, "hoard", "alpha", "movies");
+        let neighbour = "b".repeat(40);
+        {
+            let store = s.state.store.lock().unwrap();
+            store.insert_torrent(&neighbour, "hoard", b"x", "", "", 0.0, false, "").unwrap();
+            store.execute_batch_for_tests(&format!(
+                "UPDATE torrents SET added_time = 'not a number' WHERE info_hash = '{neighbour}'"
+            ));
+            assert!(
+                store.facts_by_session("hoard").is_err(),
+                "the fixture: the neighbour row must be unreadable as a session"
+            );
+        }
+        let body = get(&s, &format!("/api/hoard/torrents/{hash}")).await;
+        assert_eq!(body["category"], "movies", "the panel keeps its own row's category");
     }
 }
