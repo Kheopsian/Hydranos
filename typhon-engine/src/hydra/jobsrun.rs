@@ -1121,6 +1121,21 @@ fn finish_interrupted_move(
         let undo = undo_interrupted_move(engine, &files, &original, &metainfo);
         return Err(format!("{} already holds another file; {undo}", to.display()));
     }
+    // ⭐ A file at neither place is skipped only if the torrent never had
+    // data in it -- not downloaded, or not selected. One the record says held
+    // data has been lost while the job was stopped: finishing would hand the
+    // engine a torrent short of it with nothing said. The move is given up,
+    // nothing deleted, so the loss is seen where it happened.
+    if let Some((_, (_, (from, to)))) = meta.files.iter().zip(&files).enumerate().find(|(i, (f, (from, to)))| {
+        !from.exists() && !to.exists() && record_had_data(&original, meta.piece_length, meta.total_size, *i, f)
+    }) {
+        let undo = undo_interrupted_move(engine, &files, &original, &metainfo);
+        return Err(format!(
+            "{} is lost: the torrent had data in it, and it is neither there nor at {}; {undo}",
+            from.display(),
+            to.display()
+        ));
+    }
     for (from, to) in &files {
         if from != to && !to.exists() && from.exists() {
             crate::jobs::run_move_allowing(from, to, allow)
@@ -1154,6 +1169,53 @@ fn finish_interrupted_move(
     }
     let _ = set_carried_record(state, job, p, None);
     Ok(())
+}
+
+/// Did the torrent hold data in file `index`, by the record the move carried.
+///
+/// A selected file had data if a piece the torrent had overlaps it at all:
+/// that piece was verified whole, its bytes in this file included, however
+/// small the file (a subtitle inside one piece shared with the film). A file
+/// the record does not select (priority 0) can still sit in a piece had for
+/// the file next to it without a byte of its own ever being wanted, so for it
+/// only a piece lying wholly inside it counts: such a file smaller than a
+/// piece, or with no whole piece had, never stops the move. The engine never
+/// stores a priority 0 -- it fetches every file -- so today every file is
+/// selected; the second rule is for a record that says otherwise.
+///
+/// A seed-mode record carries no bitfield: the engine trusts it complete, and
+/// so does this. A bitfield that is not hex says nothing, the way the engine
+/// reads it, and a short one says nothing of the pieces past its end: an
+/// unknown is never taken for data, so it never invents a loss.
+fn record_had_data(
+    record: &typhon_engine::torrent::fastresume::ResumeData,
+    piece_length: u32,
+    total_size: u64,
+    index: usize,
+    file: &typhon_engine::torrent::meta::FileEntry,
+) -> bool {
+    if file.length == 0 {
+        return false;
+    }
+    let hex = record.bitfield.as_bytes();
+    if hex.len() % 2 != 0 || !hex.iter().all(u8::is_ascii_hexdigit) {
+        return false;
+    }
+    let selected = record.download_order.as_ref().is_none_or(|o| o.file_priority(index) != 0);
+    let pl = u64::from(piece_length);
+    let end = file.offset + file.length;
+    // The pieces that overlap the file, or only those wholly inside it; the
+    // torrent's last piece is short and ends where the stream does.
+    let first = if selected { file.offset / pl } else { file.offset.div_ceil(pl) };
+    let past = if selected || end == total_size { end.div_ceil(pl) } else { end / pl };
+    // One hex digit is four pieces, the first in its high bit.
+    (first..past).any(|i| {
+        record.seed_mode
+            || hex
+                .get((i / 4) as usize)
+                .and_then(|&h| (h as char).to_digit(16))
+                .is_some_and(|v| (v >> (3 - i % 4)) & 1 == 1)
+    })
 }
 
 /// Is `to` our own copy of `from`: the bytes it holds are the first bytes of
@@ -1826,18 +1888,53 @@ mod graduate_tests {
     fn interrupted_pair_move(
         tag: &str,
     ) -> (TestState, typhon_engine::torrent::meta::InfoHash, std::path::PathBuf, std::path::PathBuf, crate::store::Job) {
+        interrupted_pair_move_with(tag, |_| {})
+    }
+
+    /// `interrupted_pair_move`, with the record the job carries changed by
+    /// `edit` first. As added, the record has no piece: the torrent's
+    /// piece hashes match nothing on disk.
+    fn interrupted_pair_move_with(
+        tag: &str,
+        edit: impl FnOnce(&mut typhon_engine::torrent::fastresume::ResumeData),
+    ) -> (TestState, typhon_engine::torrent::meta::InfoHash, std::path::PathBuf, std::path::PathBuf, crate::store::Job) {
+        interrupted_files_move_with(tag, &[("a", 16384), ("b", 16384)], edit)
+    }
+
+    /// A torrent named `pair` with these files, in pieces of 16 KiB.
+    fn files_torrent_bytes(files: &[(&str, usize)]) -> Vec<u8> {
+        let list: String = files.iter().map(|(p, l)| format!("d6:lengthi{l}e4:pathl{}:{p}ee", p.len())).collect();
+        let pieces = files.iter().map(|(_, l)| l).sum::<usize>().div_ceil(16384);
+        let info = format!(
+            "d5:filesl{list}e4:name4:pair12:piece lengthi16384e6:pieces{}:{}e",
+            20 * pieces,
+            "G".repeat(20 * pieces)
+        );
+        let announce = "https://tracker.example/announce";
+        format!("d8:announce{}:{announce}4:info{info}e", announce.len()).into_bytes()
+    }
+
+    /// `interrupted_pair_move_with` for a torrent of these files; the n-th
+    /// file is filled with the byte n + 1.
+    fn interrupted_files_move_with(
+        tag: &str,
+        files: &[(&str, usize)],
+        edit: impl FnOnce(&mut typhon_engine::torrent::fastresume::ResumeData),
+    ) -> (TestState, typhon_engine::torrent::meta::InfoHash, std::path::PathBuf, std::path::PathBuf, crate::store::Job) {
         let s = state_from(tag, "");
         let src = s.dir.join("race-data");
         let dst = s.dir.join("elsewhere");
         std::fs::create_dir_all(src.join("pair")).unwrap();
-        std::fs::write(src.join("pair").join("a"), vec![1u8; 16384]).unwrap();
-        std::fs::write(src.join("pair").join("b"), vec![2u8; 16384]).unwrap();
-        let blob = two_file_torrent_bytes();
+        for (n, (name, len)) in files.iter().enumerate() {
+            std::fs::write(src.join("pair").join(name), vec![n as u8 + 1; *len]).unwrap();
+        }
+        let blob = files_torrent_bytes(files);
         let root = src.display().to_string();
         let race = s.state.engines.get("race").unwrap();
         let (ih, _) = race.manager.add_torrent_bytes(&blob, &root, true, false).expect("added");
         let hash = typhon_engine::torrent::hex_encode(&ih);
-        let original = race.manager.export_state(&ih).expect("exported");
+        let mut original = race.manager.export_state(&ih).expect("exported");
+        edit(&mut original);
         race.manager.remove_torrent(&ih, true).expect("out of its engine");
         let params = serde_json::json!({
             "engine": "race", "category": "", "save_path": dst.display().to_string(),
@@ -1847,7 +1944,7 @@ mod graduate_tests {
         let again = {
             let store = s.state.store.lock().unwrap();
             store.insert_torrent(&hash, "race", &blob, &root, "", 0.0, true, "").unwrap();
-            store.create_job("move_data", &hash, &params, 32768).unwrap();
+            store.create_job("move_data", &hash, &params, files.iter().map(|(_, l)| *l as i64).sum()).unwrap();
             store.claim_next_job().expect("claimed")
         };
         (s, ih, src.join("pair"), dst.join("pair"), again)
@@ -1887,6 +1984,155 @@ mod graduate_tests {
         assert!(!src.join("b").exists() && !dst.join("b").exists(), "nothing was made of the missing file");
         let t = s.state.engines.get("race").unwrap().manager.get(&ih).expect("back in race");
         assert_eq!(*t.save_path.read(), dst.parent().unwrap());
+    }
+
+    /// The same, with a record that has the first file's piece and not the
+    /// second's: a file never downloaded is stepped over, the others move.
+    #[test]
+    fn a_resumed_move_steps_over_a_file_it_never_had() {
+        let (s, ih, src, dst, again) = interrupted_pair_move_with("move-file-never-had", |rd| rd.bitfield = "80".into());
+        std::fs::remove_file(src.join("b")).unwrap();
+
+        move_data(&s.state, &again).expect("finished");
+
+        assert_eq!(std::fs::read(dst.join("a")).unwrap(), vec![1u8; 16384]);
+        assert!(!src.join("a").exists());
+        assert!(!src.join("b").exists() && !dst.join("b").exists());
+        let t = s.state.engines.get("race").unwrap().manager.get(&ih).expect("back in race");
+        assert_eq!(*t.save_path.read(), dst.parent().unwrap());
+    }
+
+    /// ⭐ A file the record says held data, found at neither place, was lost
+    /// while the job was stopped. The resumed run does not finish without it:
+    /// it fails naming the file, puts back what had moved, deletes nothing,
+    /// and the torrent is back in its engine where it was.
+    #[test]
+    fn a_resumed_move_stops_on_a_file_it_had_and_that_is_nowhere() {
+        let (s, ih, src, dst, again) = interrupted_pair_move_with("move-file-lost", |rd| rd.bitfield = "c0".into());
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::rename(src.join("a"), dst.join("a")).unwrap();
+        std::fs::remove_file(src.join("b")).unwrap();
+
+        let err = move_data(&s.state, &again).expect_err("a file it had is lost");
+
+        assert!(err.contains(&src.join("b").display().to_string()), "the lost file is named: {err}");
+        assert!(err.contains("lost"), "{err}");
+        assert!(err.contains("given up"), "{err}");
+        assert_eq!(std::fs::read(src.join("a")).expect("what had moved is back"), vec![1u8; 16384]);
+        assert!(!dst.join("a").exists());
+        assert!(!src.join("b").exists() && !dst.join("b").exists(), "nothing was made of the lost file");
+        let t = s.state.engines.get("race").unwrap().manager.get(&ih).expect("back in race");
+        assert_eq!(*t.save_path.read(), src.parent().unwrap(), "at its old save path");
+    }
+
+    /// A film, a subtitle of 384 bytes and a second film: piece 0 holds the
+    /// first film and the whole subtitle, piece 1 the second film. The record
+    /// has piece 0 only.
+    const FILM_SUB_FILM: [(&str, usize); 3] = [("a", 16000), ("s", 384), ("b", 16384)];
+
+    /// ⭐ A small selected file, inside a piece it shares with another file,
+    /// had its bytes once that piece was had: lost, it stops the move like
+    /// any other file the torrent had.
+    #[test]
+    fn a_resumed_move_stops_on_a_small_file_it_had_in_a_shared_piece() {
+        let (s, ih, src, dst, again) = interrupted_files_move_with("move-sub-lost", &FILM_SUB_FILM, |rd| rd.bitfield = "80".into());
+        std::fs::remove_file(src.join("s")).unwrap();
+
+        let err = move_data(&s.state, &again).expect_err("the subtitle it had is lost");
+
+        assert!(err.contains(&src.join("s").display().to_string()), "the lost file is named: {err}");
+        assert!(err.contains("given up"), "{err}");
+        assert_eq!(std::fs::read(src.join("a")).unwrap(), vec![1u8; 16000], "nothing deleted");
+        assert_eq!(std::fs::read(src.join("b")).unwrap(), vec![3u8; 16384], "nothing deleted");
+        assert!(!dst.join("a").exists() && !dst.join("s").exists() && !dst.join("b").exists());
+        let t = s.state.engines.get("race").unwrap().manager.get(&ih).expect("back in race");
+        assert_eq!(*t.save_path.read(), src.parent().unwrap(), "at its old save path");
+    }
+
+    /// The same subtitle, not selected: the shared piece was had for the film
+    /// beside it, and says nothing of a file whose bytes were never wanted.
+    /// Missing, it is stepped over and the move finishes.
+    #[test]
+    fn a_resumed_move_steps_over_an_unselected_file_in_a_shared_piece() {
+        let (s, ih, src, dst, again) = interrupted_files_move_with("move-sub-unselected", &FILM_SUB_FILM, |rd| {
+            rd.bitfield = "80".into();
+            rd.download_order = Some(typhon_engine::torrent::piece_picker::DownloadOrder {
+                file_prio: vec![1, 0, 1],
+                ..Default::default()
+            });
+        });
+        std::fs::remove_file(src.join("s")).unwrap();
+
+        move_data(&s.state, &again).expect("finished");
+
+        assert_eq!(std::fs::read(dst.join("a")).unwrap(), vec![1u8; 16000]);
+        assert_eq!(std::fs::read(dst.join("b")).unwrap(), vec![3u8; 16384]);
+        assert!(!src.join("s").exists() && !dst.join("s").exists());
+        let t = s.state.engines.get("race").unwrap().manager.get(&ih).expect("back in race");
+        assert_eq!(*t.save_path.read(), dst.parent().unwrap());
+    }
+
+    /// Whether a file had data is read off the pieces that cover it: for a
+    /// selected file, a piece at its edge counts, one just past its end does
+    /// not; for an unselected one, only a piece wholly inside it counts. A
+    /// record that cannot say says no.
+    #[test]
+    fn a_file_had_data_when_a_piece_it_overlaps_was_had() {
+        let rd = |seed_mode: bool, bitfield: &str| -> typhon_engine::torrent::fastresume::ResumeData {
+            serde_json::from_value(serde_json::json!({
+                "info_hash": "", "save_path": "", "seed_mode": seed_mode, "paused": false,
+                "total_uploaded": 0, "total_downloaded": 0, "added_time": 0, "completed_time": 0,
+                "bitfield": bitfield,
+            }))
+            .unwrap()
+        };
+        let file = |offset: u64, length: u64| typhon_engine::torrent::meta::FileEntry { path: "f".into(), offset, length };
+        let had = |seed_mode: bool, bitfield: &str, offset: u64, length: u64| {
+            record_had_data(&rd(seed_mode, bitfield), 100, 1000, 0, &file(offset, length))
+        };
+        // File 1 of an order that selects file 0 and not file 1.
+        let order = typhon_engine::torrent::piece_picker::DownloadOrder { file_prio: vec![1, 0], ..Default::default() };
+        let with = |seed_mode: bool, bitfield: &str, total: u64, index: usize, offset: u64, length: u64| {
+            let mut r = rd(seed_mode, bitfield);
+            r.download_order = Some(order.clone());
+            record_had_data(&r, 100, total, index, &file(offset, length))
+        };
+        let unsel = |bitfield: &str, offset: u64, length: u64| with(false, bitfield, 1000, 1, offset, length);
+        // Selected by the order: as with no order at all.
+        assert!(with(false, "40", 1000, 0, 0, 150), "priority 1 is selected");
+        // Not selected: a piece shared with the next file is not its own.
+        assert!(!unsel("40", 0, 150) && unsel("80", 0, 150));
+        assert!(!unsel("40", 150, 150) && unsel("20", 150, 150));
+        assert!(unsel("40", 0, 250), "piece 1 is wholly inside [0, 250)");
+        assert!(!unsel("20", 250, 10) && !unsel("ff", 250, 10), "inside one piece, no piece of its own");
+        assert!(!with(true, "", 1000, 1, 250, 10), "even complete");
+        assert!(with(true, "", 1000, 1, 200, 100));
+        // The torrent's last piece is short: [900, 950) holds all of it.
+        assert!(with(false, "0040", 950, 1, 900, 50), "the short last piece is wholly inside");
+        assert!(!with(false, "0040", 1000, 1, 900, 50), "a full piece 9 is not");
+        // a = [0,150) and b = [150,300) share piece 1.
+        assert!(had(false, "40", 0, 150) && had(false, "40", 150, 150), "a shared piece is had by both files");
+        assert!(had(false, "80", 0, 150) && !had(false, "80", 150, 150));
+        assert!(!had(false, "20", 0, 150) && had(false, "20", 150, 150));
+        // A piece just past either end of the file is not one of its pieces.
+        assert!(!had(false, "40", 0, 100), "ends where piece 1 starts");
+        assert!(!had(false, "a0", 100, 100), "between pieces 0 and 2");
+        assert!(had(false, "20", 250, 10), "inside piece 2");
+        // The second hex digit: piece 4 is its high bit.
+        assert!(had(false, "08", 400, 50));
+        assert!(!had(false, "f7", 400, 50), "every piece but 4");
+        assert!(had(false, "04", 500, 1) && had(false, "01", 700, 1));
+        assert!(!had(false, "fe", 700, 1));
+        // A record that cannot say: no bitfield, a short one, one not hex.
+        assert!(!had(false, "", 0, 150));
+        assert!(!had(false, "ff", 800, 10), "past the bitfield's end");
+        assert!(had(false, "ff", 0, 10));
+        assert!(!had(false, "fff", 0, 10), "odd length");
+        assert!(!had(false, "fg", 0, 10), "not hex");
+        // Seed mode: complete, no bitfield.
+        assert!(had(true, "", 300, 10));
+        // An empty file holds nothing to have.
+        assert!(!had(true, "", 0, 0) && !had(false, "ff", 0, 0) && !had(false, "ff", 100, 0));
     }
 
     /// A graduation of a two-file torrent, a cancelled before it reaches its
