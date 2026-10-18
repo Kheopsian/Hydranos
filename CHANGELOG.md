@@ -28,9 +28,10 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 - A move interrupted after its torrent left the engine, then resumed, did not
   notice when a file the torrent had data in was no longer at its old place
   nor at its new one: it said nothing and finished without it. It now stops
-  on an error that names the file, deletes nothing, and hands the torrent back
-  to its engine at its old place. A file the torrent never downloaded is still
-  stepped over.
+  on an error that names the file, removes only the whole copies it had
+  already made at the new place (each original is kept), and hands the
+  torrent back to its engine at its old place. A file the torrent never
+  downloaded is still stepped over.
 - Opening a torrent's detail panel on a large library no longer waits on the
   whole library. The panel read every torrent of the engine's session from the
   store, under the store lock, to keep the one row it shows; it now reads that
