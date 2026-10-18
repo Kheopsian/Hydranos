@@ -1820,6 +1820,75 @@ mod graduate_tests {
         format!("d8:announce{}:{announce}4:info{info}e", announce.len()).into_bytes()
     }
 
+    /// A move of a two-file torrent interrupted after it left its engine,
+    /// with the job's record in its params, picked up again. Both files are
+    /// at the source; the caller sets the disk the interruption left.
+    fn interrupted_pair_move(
+        tag: &str,
+    ) -> (TestState, typhon_engine::torrent::meta::InfoHash, std::path::PathBuf, std::path::PathBuf, crate::store::Job) {
+        let s = state_from(tag, "");
+        let src = s.dir.join("race-data");
+        let dst = s.dir.join("elsewhere");
+        std::fs::create_dir_all(src.join("pair")).unwrap();
+        std::fs::write(src.join("pair").join("a"), vec![1u8; 16384]).unwrap();
+        std::fs::write(src.join("pair").join("b"), vec![2u8; 16384]).unwrap();
+        let blob = two_file_torrent_bytes();
+        let root = src.display().to_string();
+        let race = s.state.engines.get("race").unwrap();
+        let (ih, _) = race.manager.add_torrent_bytes(&blob, &root, true, false).expect("added");
+        let hash = typhon_engine::torrent::hex_encode(&ih);
+        let original = race.manager.export_state(&ih).expect("exported");
+        race.manager.remove_torrent(&ih, true).expect("out of its engine");
+        let params = serde_json::json!({
+            "engine": "race", "category": "", "save_path": dst.display().to_string(),
+            "record": serde_json::to_value(&original).unwrap(),
+        })
+        .to_string();
+        let again = {
+            let store = s.state.store.lock().unwrap();
+            store.insert_torrent(&hash, "race", &blob, &root, "", 0.0, true, "").unwrap();
+            store.create_job("move_data", &hash, &params, 32768).unwrap();
+            store.claim_next_job().expect("claimed")
+        };
+        (s, ih, src.join("pair"), dst.join("pair"), again)
+    }
+
+    /// ⭐ A move stopped while it dropped the originals: one original is gone,
+    /// its copy at the destination, the other is still there beside its whole
+    /// copy. The resumed run does not move again what has already moved, and
+    /// finishes: the torrent at the destination, the last original dropped.
+    #[test]
+    fn a_move_stopped_while_dropping_its_originals_is_finished_when_run_again() {
+        let (s, ih, src, dst, again) = interrupted_pair_move("move-dropping-originals");
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::rename(src.join("a"), dst.join("a")).unwrap();
+        std::fs::write(dst.join("b"), vec![2u8; 16384]).unwrap();
+
+        move_data(&s.state, &again).expect("finished");
+
+        assert_eq!(std::fs::read(dst.join("a")).unwrap(), vec![1u8; 16384]);
+        assert_eq!(std::fs::read(dst.join("b")).unwrap(), vec![2u8; 16384]);
+        assert!(!src.join("a").exists() && !src.join("b").exists(), "no original is left behind");
+        let t = s.state.engines.get("race").unwrap().manager.get(&ih).expect("back in race");
+        assert_eq!(*t.save_path.read(), dst.parent().unwrap());
+    }
+
+    /// A file the torrent never had -- not downloaded, at neither place -- is
+    /// not a file to move: the resumed run moves the others and finishes.
+    #[test]
+    fn a_resumed_move_steps_over_a_file_that_is_nowhere() {
+        let (s, ih, src, dst, again) = interrupted_pair_move("move-file-nowhere");
+        std::fs::remove_file(src.join("b")).unwrap();
+
+        move_data(&s.state, &again).expect("finished");
+
+        assert_eq!(std::fs::read(dst.join("a")).unwrap(), vec![1u8; 16384]);
+        assert!(!src.join("a").exists());
+        assert!(!src.join("b").exists() && !dst.join("b").exists(), "nothing was made of the missing file");
+        let t = s.state.engines.get("race").unwrap().manager.get(&ih).expect("back in race");
+        assert_eq!(*t.save_path.read(), dst.parent().unwrap());
+    }
+
     /// A graduation of a two-file torrent, a cancelled before it reaches its
     /// second file. The first file's two places are set by the caller.
     fn cancelled_pair(
