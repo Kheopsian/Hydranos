@@ -2228,6 +2228,23 @@ mod tests {
         assert!(calls_of(&n).is_empty());
     }
 
+    /// A handoff that the node accepted is counted by what `then` promises:
+    /// "remove" is only waiting on the node (the local copy goes once it holds
+    /// it all), "keep" is done.
+    #[tokio::test]
+    async fn a_handoff_counts_waiting_node_when_it_moves_and_ok_when_it_keeps() {
+        let (s, h) = library("sel-handoff-then");
+        let n = nas().await;
+        declare_nas(&s, &n.url);
+        for (then, want, other) in [("remove", "waiting_node", "ok"), ("keep", "ok", "waiting_node")] {
+            let action = Action::Handoff { node: "nas".into(), engine: "race".into(), then: then.into() };
+            let j = run_to_end(&s, action, vec![target(&h[0], "local-hoard", "hoard")]).await;
+            assert_eq!((j.done, j.failed), (1, 0), "{then}: {:?}", j.errors);
+            assert_eq!(j.tally.get(want), Some(&1), "{then}: {:?}", j.tally);
+            assert!(j.tally.get(other).is_none(), "{then}: only {want}: {:?}", j.tally);
+        }
+    }
+
     /// A node that is down fails its copies with the node's name and the
     /// class of the failure, and the local ones go on.
     #[tokio::test]
