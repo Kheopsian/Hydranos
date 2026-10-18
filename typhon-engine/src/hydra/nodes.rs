@@ -1297,6 +1297,24 @@ mod relay_tests {
         assert_eq!(rotate_key(&node.url, "old").await, Err("the node's answer did not parse".to_string()));
     }
 
+    /// The length floor is exact: a 16-character key is the shortest adopted
+    /// (and is confirmed with itself), a 15-character one is refused.
+    #[tokio::test]
+    async fn a_pending_key_is_adopted_from_sixteen_characters_and_not_below() {
+        let shortest = "0123456789abcdef";
+        assert_eq!(shortest.len(), 16);
+        let seen: Arc<Mutex<Vec<String>>> = Arc::default();
+        let node = fake_node(rotation_node((200, serde_json::json!({"pending_key": shortest})), 200, seen.clone())).await;
+        assert_eq!(rotate_key(&node.url, "old").await, Ok(shortest.to_string()));
+        assert_eq!(*seen.lock().unwrap(), vec![shortest.to_string()], "confirmed with itself");
+
+        let too_short = &shortest[..15];
+        let seen: Arc<Mutex<Vec<String>>> = Arc::default();
+        let node = fake_node(rotation_node((200, serde_json::json!({"pending_key": too_short})), 200, seen.clone())).await;
+        assert_eq!(rotate_key(&node.url, "old").await, Err("the node answered no usable key".to_string()));
+        assert!(seen.lock().unwrap().is_empty(), "a 15-character key is never confirmed");
+    }
+
     /// A node that does not confirm keeps its old key, and the error says so.
     #[tokio::test]
     async fn a_failed_confirmation_is_reported_as_keeping_the_old_key() {
