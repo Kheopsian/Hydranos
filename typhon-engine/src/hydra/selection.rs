@@ -2340,6 +2340,229 @@ mod tests {
             assert!(j.errors[0].starts_with("9f9f9f9f: "), "{:?}", j.errors);
         }
     }
+
+    // ---- what this node's own routes answered, one torrent at a time -----------------
+
+    /// A stand-in for this node's `/api`: records every request and answers by
+    /// the hash the path carries, so each kind of answer a route gives is one
+    /// torrent. `one` is handed it in place of the real router.
+    ///   aa 200 {}                       bb 202 {"kind":"graduate"}
+    ///   cc 202 {}                       dd 500 {"error":"disk full"}
+    ///   ee 409 hardlinks (3 files, 4096 bytes)
+    ///   ff 409 {"reason":"space"}       11 200 {"reason":"hardlinks"}
+    ///   33 429 {"status":"cooldown"}    44 200 {"status":"in_flight"}
+    ///   55 200 {"status":"queued"}      66 200 {"status":"ok"}
+    ///   77 200 {"status":"weird"}       88 500 {"status":"weird"}
+    fn stub_caller() -> (Caller, Calls) {
+        let calls: Calls = Arc::default();
+        let log = calls.clone();
+        let router = axum::Router::new().fallback(move |method: Method, uri: axum::http::Uri, body: String| {
+            let log = log.clone();
+            async move {
+                let pq = uri.path_and_query().map(|p| p.to_string()).unwrap_or_default();
+                log.lock().unwrap().push((method.to_string(), pq.clone(), body));
+                let has = |pair: &str| pq.contains(&pair.repeat(20));
+                if has("bb") {
+                    (StatusCode::ACCEPTED, Json(json!({"kind": "graduate"}))).into_response()
+                } else if has("cc") {
+                    (StatusCode::ACCEPTED, Json(json!({}))).into_response()
+                } else if has("dd") {
+                    (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "disk full"}))).into_response()
+                } else if has("ee") {
+                    (
+                        StatusCode::CONFLICT,
+                        Json(json!({"reason": "hardlinks", "hardlinked_files": 3, "hardlinked_bytes": 4096})),
+                    )
+                        .into_response()
+                } else if has("ff") {
+                    (StatusCode::CONFLICT, Json(json!({"reason": "space", "error": "not enough free space"}))).into_response()
+                } else if has("11") {
+                    (StatusCode::OK, Json(json!({"reason": "hardlinks"}))).into_response()
+                } else if has("33") {
+                    (StatusCode::TOO_MANY_REQUESTS, Json(json!({"status": "cooldown"}))).into_response()
+                } else if has("44") {
+                    (StatusCode::OK, Json(json!({"status": "in_flight"}))).into_response()
+                } else if has("55") {
+                    (StatusCode::OK, Json(json!({"status": "queued"}))).into_response()
+                } else if has("66") {
+                    (StatusCode::OK, Json(json!({"status": "ok"}))).into_response()
+                } else if has("77") {
+                    (StatusCode::OK, Json(json!({"status": "weird"}))).into_response()
+                } else if has("88") {
+                    (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"status": "weird"}))).into_response()
+                } else {
+                    (StatusCode::OK, Json(json!({}))).into_response()
+                }
+            }
+        });
+        (Caller { router, key: KEY.into() }, calls)
+    }
+
+    fn category_move() -> Action {
+        Action::Category { category: "movies".into(), move_files: true, allow_breaking_hardlinks: false }
+    }
+
+    /// Every answer a local category or location route gives is its own
+    /// outcome: a 200 is done, a 202 is a move (a graduation when the route
+    /// says so), a refusal is a failure with the route's words, and a 409 about
+    /// hardlinks -- only that one -- is a request for the operator's yes.
+    #[tokio::test]
+    async fn a_local_category_or_location_move_reports_each_answer_of_the_route() {
+        let (s, _) = library("sel-one-answers");
+        let (caller, _) = stub_caller();
+        let move_location = Action::Location { location: "/srv/x".into(), allow_breaking_hardlinks: false };
+        for action in [category_move(), move_location] {
+            for (pair, key) in [("aa", "ok"), ("bb", "graduating"), ("cc", "moving"), ("dd", "failed"), ("ee", "needs_consent"), ("ff", "failed"), ("11", "ok")] {
+                let o = one(&s.state, &caller, &action, &target(&pair.repeat(20), "local-hoard", "hoard")).await;
+                assert_eq!(o.key, key, "{action:?} on {pair}");
+                match pair {
+                    "dd" => assert_eq!(o.error.as_deref(), Some(format!("{}: disk full", &pair.repeat(4)).as_str())),
+                    "ff" => assert_eq!(o.error.as_deref(), Some("ffffffff: not enough free space")),
+                    "ee" => {
+                        let (item, files, bytes) = o.consent.expect("the operator is asked");
+                        assert_eq!((item.hash, item.agent, item.mode), ("ee".repeat(20), "local-hoard".to_string(), "hoard".to_string()));
+                        assert_eq!((files, bytes), (3, 4096));
+                        assert!(o.error.is_none(), "waiting for a yes is not a failure");
+                    }
+                    _ => assert!(o.consent.is_none() && (o.key == "failed") == o.error.is_some(), "{pair}"),
+                }
+            }
+        }
+    }
+
+    /// The route a local row's move is sent to is built from the row: the
+    /// mode picks `race` or `hoard`, the agent names an extra engine (and
+    /// `local`, or `local-` with nothing after, names none), and the body
+    /// carries the action's own fields.
+    #[tokio::test]
+    async fn a_local_move_is_sent_to_the_route_of_the_rows_mode_and_engine() {
+        let (s, _) = library("sel-one-routes");
+        let (caller, calls) = stub_caller();
+        let h = "aa".repeat(20);
+        let cat = category_move();
+        let loc = Action::Location { location: "/srv/x".into(), allow_breaking_hardlinks: true };
+        let cases = [
+            (&cat, "local-hoard", "hoard", format!("/api/hoard/torrents/{h}/category?engine=hoard")),
+            (&cat, "local-race", "race", format!("/api/race/torrents/{h}/category?engine=race")),
+            (&cat, "local-vpn 1", "hoard", format!("/api/hoard/torrents/{h}/category?engine=vpn%201")),
+            (&cat, "local-", "race", format!("/api/race/torrents/{h}/category")),
+            (&cat, "local", "hoard", format!("/api/hoard/torrents/{h}/category")),
+            (&cat, "", "hoard", format!("/api/hoard/torrents/{h}/category")),
+            (&loc, "local-race", "race", format!("/api/race/torrents/{h}/location?engine=race")),
+            (&loc, "local-", "hoard", format!("/api/hoard/torrents/{h}/location")),
+        ];
+        for (action, agent, mode, want) in cases {
+            calls.lock().unwrap().clear();
+            let o = one(&s.state, &caller, action, &target(&h, agent, mode)).await;
+            assert_eq!(o.key, "ok", "{agent:?} {mode}");
+            let sent = calls.lock().unwrap().clone();
+            assert_eq!(sent.len(), 1, "exactly one call");
+            assert_eq!((sent[0].0.as_str(), sent[0].1.as_str()), ("POST", want.as_str()), "{agent:?} {mode}");
+            let body: Value = serde_json::from_str(&sent[0].2).unwrap();
+            if std::ptr::eq(action, &cat) {
+                assert_eq!(body, json!({"category": "movies", "move_files": true, "allow_breaking_hardlinks": false}));
+            } else {
+                assert_eq!(body, json!({"location": "/srv/x", "allow_breaking_hardlinks": true}));
+            }
+        }
+    }
+
+    /// Only a 409 that says `hardlinks` asks for consent: a 409 with another
+    /// reason, or a hardlinks reason on a 200, is read for what it is.
+    #[tokio::test]
+    async fn only_a_conflict_about_hardlinks_asks_for_consent() {
+        let (s, _) = library("sel-one-consent");
+        let (caller, _) = stub_caller();
+        async fn ask(s: &TestState, caller: &Caller, pair: &str) -> Outcome {
+            one(&s.state, caller, &category_move(), &target(&pair.repeat(20), "local-hoard", "hoard")).await
+        }
+        assert!(ask(&s, &caller, "ee").await.consent.is_some());
+        assert!(ask(&s, &caller, "ff").await.consent.is_none(), "a conflict over space is a failure");
+        assert_eq!(ask(&s, &caller, "ff").await.key, "failed");
+        assert!(ask(&s, &caller, "11").await.consent.is_none(), "a 200 is not a conflict");
+        assert!(ask(&s, &caller, "aa").await.consent.is_none());
+    }
+
+    /// A reannounce is told by the route's own `status` word, whatever the
+    /// HTTP code (a cooldown is a 429 and still not a failure); without one,
+    /// the code decides.
+    #[tokio::test]
+    async fn a_reannounce_is_told_by_the_routes_status_word_then_by_its_code() {
+        let (s, _) = library("sel-one-reannounce");
+        let (caller, calls) = stub_caller();
+        for (pair, key) in [("33", "cooldown"), ("44", "in_flight"), ("55", "queued"), ("66", "ok"), ("77", "ok"), ("88", "failed"), ("dd", "failed"), ("aa", "ok")] {
+            let o = one(&s.state, &caller, &Action::Reannounce, &target(&pair.repeat(20), "local-hoard", "hoard")).await;
+            assert_eq!(o.key, key, "{pair}");
+            assert_eq!(o.error.is_some(), key == "failed", "{pair}: {:?}", o.error);
+        }
+        let h = "33".repeat(20);
+        assert_eq!(calls.lock().unwrap()[0].1, format!("/api/torrents/{h}/reannounce"));
+    }
+
+    /// A node's 202 is a graduation only when its body says so; the same
+    /// answers, one torrent at a time, so a swap between the two shows.
+    #[tokio::test]
+    async fn a_nodes_202_is_a_graduation_only_when_it_says_so() {
+        let (s, _) = library("sel-remote-202");
+        let n = nas().await;
+        declare_nas(&s, &n.url);
+        for (pair, key) in [("aa", "ok"), ("bb", "graduating"), ("cc", "moving")] {
+            let action = Action::Category { category: "movies".into(), move_files: true, allow_breaking_hardlinks: false };
+            let j = run_to_end(&s, action, vec![remote(pair, "hoard", "hoard")]).await;
+            assert_eq!(j.tally.len(), 1, "{pair}: {:?}", j.tally);
+            assert_eq!(j.tally.get(key), Some(&1), "{pair}: {:?}", j.tally);
+        }
+    }
+
+    /// A batch half changed reports both halves, and a batch wholly changed or
+    /// wholly unchanged reports only the one: no empty entry in the tally.
+    #[tokio::test]
+    async fn a_partly_changed_set_edit_counts_what_changed_and_what_did_not() {
+        let (s, h) = library("sel-partial");
+        let tally = |j: &Job| serde_json::to_value(&j.tally).unwrap();
+        let all: Vec<Target> = h.iter().map(|x| target(x, "local-hoard", "hoard")).collect();
+        let series = vec![all[2].clone()];
+
+        let j = run_to_end(&s, Action::Pause(true), series).await;
+        assert_eq!((tally(&j), j.done), (json!({"ok": 1}), 1), "everything changed: no `unchanged` entry");
+        let j = run_to_end(&s, Action::Pause(true), all.clone()).await;
+        assert_eq!((tally(&j), j.done), (json!({"ok": 2, "unchanged": 1}), 3), "two changed, one was already stopped");
+        let j = run_to_end(&s, Action::Pause(true), all.clone()).await;
+        assert_eq!((tally(&j), j.done), (json!({"unchanged": 3}), 3), "nothing changed: no `ok` entry");
+        let j = run_to_end(&s, Action::Pause(false), all).await;
+        assert_eq!(tally(&j), json!({"ok": 3}));
+    }
+
+    /// A job carries the action it was started for, and a running one reads
+    /// its elapsed time live while a finished one keeps the time it took.
+    #[tokio::test]
+    async fn a_job_names_its_action_and_times_itself_while_running_only() {
+        let (s, _) = library("sel-job-time");
+        let running = new_job("category", 4);
+        let finished = new_job("stop", 1);
+        assert_eq!(running.lock().unwrap().action, "category");
+        {
+            let mut f = finished.lock().unwrap();
+            f.finished = true;
+            f.elapsed_ms = 7;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+        let read = |job: &Shared| {
+            let id = job.lock().unwrap().id.clone();
+            let st = s.state.clone();
+            async move {
+                let r = get_job_route(State(st), Path(id), RawQuery(None), keyed(KEY)).await;
+                serde_json::from_slice::<Value>(&axum::body::to_bytes(r.into_body(), usize::MAX).await.unwrap()).unwrap()
+            }
+        };
+        let v = read(&running).await;
+        assert_eq!((v["action"].as_str(), v["total"].as_u64()), (Some("category"), Some(4)));
+        let ms = v["elapsed_ms"].as_u64().unwrap();
+        assert!((50..60_000).contains(&ms), "a running job reads its clock: {ms}");
+        let v = read(&finished).await;
+        assert_eq!(v["elapsed_ms"], 7, "a finished job keeps the time it took");
+        assert_eq!(v["action"], "stop");
+    }
 }
 
 
