@@ -11626,6 +11626,18 @@ function _rssSay(el, msg, kind) {
     el.className = "result-msg " + kind;
 }
 
+// An article's link comes from the feed. It is made a link only when it is an
+// absolute http(s) address; anything else (javascript:, data:, a relative
+// path, garbage) is shown as plain text. Returns the normalised address or "".
+function _rssSafeLink(raw) {
+    try {
+        const u = new URL(String(raw == null ? "" : raw).trim());
+        return u.protocol === "http:" || u.protocol === "https:" ? u.href : "";
+    } catch (e) {
+        return "";
+    }
+}
+
 function _rssWhen(ts) {
     return ts ? new Date(ts * 1000).toLocaleString() : t("never");
 }
@@ -11770,8 +11782,9 @@ async function rssOpenArticles(id) {
         return;
     }
     body.innerHTML = _rssArticles.map((a, i) => {
-        const title = a.link
-            ? `<a href="${esc(a.link)}" target="_blank" rel="noopener noreferrer">${esc(a.title)}</a>`
+        const link = _rssSafeLink(a.link);
+        const title = link
+            ? `<a href="${esc(link)}" target="_blank" rel="noopener noreferrer">${esc(a.title)}</a>`
             : esc(a.title);
         const state = a.taken
             ? esc(t("taken by {rule}: {outcome}", { rule: a.taken.rule, outcome: a.taken.outcome }))
