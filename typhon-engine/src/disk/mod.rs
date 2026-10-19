@@ -633,25 +633,43 @@ fn pread_exact(file: &std::fs::File, buf: &mut [u8], offset: u64) -> std::io::Re
     Ok(())
 }
 
+/// What reading a piece back for a hash check came to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PieceRead {
+    /// Read whole; whether it matches its hash.
+    Checked(bool),
+    /// Not there to be read: a backing file is missing or too short, or there
+    /// is no hash to check against. The piece is simply not had.
+    Absent,
+    /// The disk refused the read (an I/O error, a file that cannot be opened).
+    /// Says nothing about the piece itself.
+    Unreadable(String),
+}
+
 /// Read a full piece from disk and check it against its hash, both on the
 /// blocking pool: hashing a piece of several MiB on an async worker held that
-/// worker for the whole digest. `None` if a backing file is missing or too
-/// short (the piece isn't fully present on disk), on any read error, or when
-/// there is no hash to check against -- the caller treats all of it as "not
-/// have". Bypasses the read cache: a one-shot cold recheck scan should not
-/// evict the hot blocks we are actively serving.
-pub async fn check_piece_on_disk(torrent: &TorrentState, piece: u32) -> Option<bool> {
+/// worker for the whole digest. Bypasses the read cache: a one-shot cold
+/// recheck scan should not evict the hot blocks we are actively serving.
+pub async fn read_piece_on_disk(torrent: &TorrentState, piece: u32) -> PieceRead {
     let plen = torrent.meta.piece_size(piece);
     if plen == 0 {
-        return None;
+        return PieceRead::Absent;
     }
-    let check = torrent.piece_check(piece)?;
+    let Some(check) = torrent.piece_check(piece) else {
+        return PieceRead::Absent;
+    };
     let ops = torrent.meta.map_block(piece, 0, plen);
     let save_path = torrent.save_path.read().clone();
     let name = torrent.meta.name.clone();
     let multi_file = torrent.meta.multi_file;
 
-    tokio::task::spawn_blocking(move || {
+    let out = tokio::task::spawn_blocking(move || {
+        // A file that is not there, or ends early, is a piece not had; any
+        // other failure is the disk's.
+        let classify = |e: std::io::Error| match e.kind() {
+            std::io::ErrorKind::NotFound | std::io::ErrorKind::UnexpectedEof => PieceRead::Absent,
+            _ => PieceRead::Unreadable(e.to_string()),
+        };
         // Read straight into the piece: one buffer, no copy per file.
         let mut data = vec![0u8; plen as usize];
         let mut at = 0usize;
@@ -663,16 +681,32 @@ pub async fn check_piece_on_disk(torrent: &TorrentState, piece: u32) -> Option<b
                 } else {
                     save_path.join(&op.path)
                 };
-                let file = get_or_open(&full_path).ok()?;
-                pread_exact(&file, data.get_mut(at..at + len)?, op.file_offset).ok()?;
+                let file = match get_or_open(&full_path) {
+                    Ok(f) => f,
+                    Err(e) => return classify(e),
+                };
+                let Some(buf) = data.get_mut(at..at + len) else {
+                    return PieceRead::Absent;
+                };
+                if let Err(e) = pread_exact(&file, buf, op.file_offset) {
+                    return classify(e);
+                }
             }
             at += len;
         }
-        Some(check.matches(&data))
+        PieceRead::Checked(check.matches(&data))
     })
-    .await
-    .ok()
-    .flatten()
+    .await;
+    out.unwrap_or(PieceRead::Absent)
+}
+
+/// `read_piece_on_disk` as the callers that only ask "do we have it" see it:
+/// `None` when the piece cannot be said to be had, for whatever reason.
+pub async fn check_piece_on_disk(torrent: &TorrentState, piece: u32) -> Option<bool> {
+    match read_piece_on_disk(torrent, piece).await {
+        PieceRead::Checked(ok) => Some(ok),
+        PieceRead::Absent | PieceRead::Unreadable(_) => None,
+    }
 }
 
 #[cfg(test)]
