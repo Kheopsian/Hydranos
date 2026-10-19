@@ -780,6 +780,12 @@ impl TorrentManager {
         self.torrents.is_empty()
     }
 
+    /// Visit every torrent in place, with no Vec of Arcs. `f` runs under the map's
+    /// shard read lock: keep it to loads, and never touch the disk in it.
+    pub fn for_each(&self, mut f: impl FnMut(&TorrentState)) {
+        self.torrents.iter().for_each(|r| f(r.value()));
+    }
+
     /// How many torrents match `pred`, counted in place rather than over a copy.
     pub fn count_matching(&self, pred: impl Fn(&TorrentState) -> bool) -> usize {
         self.torrents.iter().filter(|r| pred(r.value())).count()

@@ -120,6 +120,10 @@ pub struct EngineHost {
     /// `<data_dir>/wireguard`: the provider files and the list of devices
     /// this node made.
     wireguard_dir: std::path::PathBuf,
+    /// Volumes in fault, `(mount point, reason)`, as the last 30 s pass of
+    /// `obs::refresh_volume_faults` found them. `/health` reads this and walks
+    /// nothing.
+    volume_faults: std::sync::RwLock<Vec<(String, String)>>,
 }
 
 /// The per-engine settings a RUNNING engine takes without a restart: the rate
@@ -285,6 +289,7 @@ impl EngineHost {
             completions: std::sync::Mutex::new(Some(completed_rx)),
             link_summary: Default::default(),
             catalogue_usage: Default::default(),
+            volume_faults: Default::default(),
             client_rates,
             wireguard: Default::default(),
             wireguard_dir: crate::wgtunnel::conf_dir(&config.daemon.data_dir),
@@ -345,6 +350,16 @@ impl EngineHost {
 
     /// The last counted space on disk with its unix time, `None` before the
     /// link scanner's first count.
+    pub fn volume_faults(&self) -> Vec<(String, String)> {
+        self.volume_faults.read().map(|g| g.clone()).unwrap_or_default()
+    }
+
+    pub fn publish_volume_faults(&self, faults: Vec<(String, String)>) {
+        if let Ok(mut g) = self.volume_faults.write() {
+            *g = faults;
+        }
+    }
+
     pub fn catalogue_usage(&self) -> Option<(crate::linkindex::DiskUsage, i64)> {
         self.catalogue_usage.read().ok().and_then(|g| *g)
     }
