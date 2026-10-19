@@ -34,6 +34,10 @@ pub struct Plan {
     pub secs: u64,
     /// SO_BINDTODEVICE, empty = the default route.
     pub device: String,
+    /// The iperf3 to run: the bare name, found on PATH. A field so a test can
+    /// point at a stand-in without touching the environment every test in the
+    /// process shares.
+    pub program: std::path::PathBuf,
 }
 
 /// The plan for this config, or why there is none.
@@ -67,6 +71,7 @@ pub fn plan(cfg: &crate::config::Config) -> Result<Plan, String> {
         port: v.iperf3_port.unwrap_or(5201),
         secs: v.duration_secs.unwrap_or(10).clamp(1, 60),
         device,
+        program: "iperf3".into(),
     })
 }
 
@@ -98,7 +103,15 @@ fn take_slot_of(flag: &AtomicBool) -> Option<Slot<'_>> {
 
 /// Run one test now, record it, return it.
 pub async fn run(state: &AppState) -> Result<Measurement, String> {
-    let plan = plan(&state.cfg())?;
+    run_with(state, None).await
+}
+
+/// `run` with the iperf3 to execute given, for a test.
+async fn run_with(state: &AppState, program: Option<std::path::PathBuf>) -> Result<Measurement, String> {
+    let mut plan = plan(&state.cfg())?;
+    if let Some(program) = program {
+        plan.program = program;
+    }
     let _slot = take_slot().ok_or("a speedtest is already running")?;
     let engines = state.engines.clone();
     let m = measure(&plan, move || {
@@ -176,7 +189,7 @@ async fn measure(plan: &Plan, rates: impl Fn() -> (u64, u64)) -> Result<Measurem
 
 /// One direction. Returns megabits per second.
 async fn run_iperf3(plan: &Plan, reverse: bool) -> Result<f64, String> {
-    let mut cmd = tokio::process::Command::new("iperf3");
+    let mut cmd = tokio::process::Command::new(&plan.program);
     cmd.arg("-c").arg(&plan.server).arg("-p").arg(plan.port.to_string()).arg("-J").arg("-t").arg(plan.secs.to_string());
     if !plan.device.is_empty() {
         cmd.arg("--bind-dev").arg(&plan.device);
@@ -323,10 +336,10 @@ mod tests {
         assert_eq!(p.device, "wg-race");
     }
 
-    // ---- the measurement itself, against a stand-in iperf3 on PATH ----
+    // ---- the measurement itself, against a stand-in iperf3 ----
     //
-    // The binary is looked up by name, so a script called `iperf3` in a
-    // directory put first on PATH is what runs. It answers by the server name
+    // The plan names the program to run, so a script called `iperf3` in a
+    // directory of its own is what runs; PATH is not touched. It answers by the server name
     // it is given, which keeps tests running in parallel apart, and logs the
     // arguments it was called with.
 
@@ -364,16 +377,13 @@ esac
                 let bin = dir.join("iperf3");
                 std::fs::write(&bin, SCRIPT).unwrap();
                 std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-                let old = std::env::var("PATH").unwrap_or_default();
-                std::env::set_var("PATH", format!("{}:{old}", dir.display()));
                 dir
             })
             .clone()
         }
 
         fn plan_for(server: &str) -> Plan {
-            install();
-            Plan { server: server.into(), port: 5202, secs: 1, device: String::new() }
+            Plan { server: server.into(), port: 5202, secs: 1, device: String::new(), program: install().join("iperf3") }
         }
 
         #[tokio::test]
@@ -454,15 +464,15 @@ esac
                 "st-run",
                 "[vpn_speedtest]\nenabled = true\niperf3_server = \"r-ok.example\"\nduration_secs = 1\n",
             );
-            install();
+            let program = install().join("iperf3");
             let bench: crate::benchdb::Shared =
                 Arc::new(std::sync::Mutex::new(crate::benchdb::BenchDb::open_in_memory().unwrap()));
             s.state.bench = Some(bench.clone());
-            let mut m = run(&s.state).await;
+            let mut m = run_with(&s.state, Some(program.clone())).await;
             for _ in 0..40 {
                 if m.as_ref().err().is_some_and(|e| e.contains("already running")) {
                     tokio::time::sleep(Duration::from_millis(50)).await;
-                    m = run(&s.state).await;
+                    m = run_with(&s.state, Some(program.clone())).await;
                 }
             }
             let m = m.expect("measured");
@@ -513,7 +523,7 @@ esac
                 "st-sum",
                 "[vpn_speedtest]\nenabled = true\niperf3_server = \"sum-ok.example\"\nduration_secs = 1\n",
             );
-            install();
+            let program = install().join("iperf3");
             s.state.bench = None;
             let engines = s.state.engines.engines();
             assert!(engines.len() >= 2, "a sum needs more than one engine");
@@ -529,11 +539,11 @@ esac
             }
             let (up, down) = engines.iter().fold((0u64, 0u64), |a, e| (a.0 + e.manager.upload_rate.get(), a.1 + e.manager.download_rate.get()));
             assert!(engines.iter().all(|e| e.manager.upload_rate.get() > 0 && e.manager.download_rate.get() > 0));
-            let mut m = run(&s.state).await;
+            let mut m = run_with(&s.state, Some(program.clone())).await;
             for _ in 0..40 {
                 if m.as_ref().err().is_some_and(|e| e.contains("already running")) {
                     tokio::time::sleep(Duration::from_millis(50)).await;
-                    m = run(&s.state).await;
+                    m = run_with(&s.state, Some(program.clone())).await;
                 }
             }
             let m = m.expect("measured");
