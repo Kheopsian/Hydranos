@@ -157,12 +157,34 @@ pub(crate) fn fail_sync_of(path: PathBuf) {
 
 pub struct DiskManager {
     read_cache: Mutex<LruCache<CacheKey, CacheEntry>>,
-    /// Files written and not yet synced, per torrent.
-    written: Arc<Mutex<HashMap<[u8; 20], std::collections::HashSet<PathBuf>>>>,
+    /// Files written and not yet synced, per torrent, with the pieces that
+    /// went to each: a file that then fails to sync says which pieces it
+    /// takes down with it.
+    written: Arc<Mutex<HashMap<[u8; 20], HashMap<PathBuf, Vec<u32>>>>>,
     /// Bumped after every piece write, per stripe of cache blocks. A read
     /// that saw another value before going to disk may hold bytes the write
     /// has since replaced, so it serves them once but does not cache them.
     write_gen: Box<[AtomicU64]>,
+}
+
+/// What a sync pass did: how many files it made durable, and the files that
+/// refused, with the pieces written to them since the last good sync.
+#[derive(Debug, Default)]
+pub struct SyncReport {
+    pub synced: usize,
+    pub failed: Vec<SyncFailure>,
+}
+
+/// A file that would not sync. Its `pieces` are in the page cache at best:
+/// nothing vouches for them on disk, and trying again vouches for nothing
+/// either (after a failed flush the kernel may drop the dirty pages and
+/// report the next one clean).
+#[derive(Debug)]
+pub struct SyncFailure {
+    pub info_hash: [u8; 20],
+    pub path: PathBuf,
+    pub error: String,
+    pub pieces: Vec<u32>,
 }
 
 const WRITE_GEN_STRIPES: usize = 256;
@@ -188,7 +210,8 @@ impl DiskManager {
         }
     }
 
-    /// Make every file written since the last sync durable, and say how many.
+    /// Make every file written since the last sync durable, and say how many
+    /// did, and which did not.
     ///
     /// Called by the resume sweep before it saves the bitfields. SQLite syncs
     /// its own file, not ours: without this, after a power cut the record
@@ -197,23 +220,30 @@ impl DiskManager {
     /// once however many pieces went to it, and the set holds only what was
     /// written since the last sweep; most of it has reached the disk on its own
     /// by then. Blocking: callers run it off the async workers.
-    pub fn sync_written(&self) -> usize {
+    pub fn sync_written(&self) -> SyncReport {
         let all = std::mem::take(&mut *self.written.lock());
-        all.into_iter().map(|(ih, files)| self.sync_files(ih, files)).sum()
+        let mut report = SyncReport::default();
+        for (ih, files) in all {
+            let one = self.sync_files(ih, files);
+            report.synced += one.synced;
+            report.failed.extend(one.failed);
+        }
+        report
     }
 
     /// `sync_written` for one torrent: what its completion record needs.
-    pub fn sync_torrent(&self, info_hash: &[u8; 20]) -> usize {
+    pub fn sync_torrent(&self, info_hash: &[u8; 20]) -> SyncReport {
         let files = self.written.lock().remove(info_hash);
-        files.map_or(0, |f| self.sync_files(*info_hash, f))
+        files.map_or_else(SyncReport::default, |f| self.sync_files(*info_hash, f))
     }
 
-    /// A file that fails to sync goes back in the set, to be tried again by
-    /// the next sweep; the state is saved anyway -- this hardens the order of
-    /// writes, it does not make a failing disk durable.
-    fn sync_files(&self, info_hash: [u8; 20], files: std::collections::HashSet<PathBuf>) -> usize {
-        let mut synced = 0;
-        for path in files {
+    /// A file that fails to sync is NOT put back to be tried again: a second
+    /// attempt can succeed with the data gone. It is reported with its pieces
+    /// instead, and the caller stops counting them as held before any state
+    /// vouching for them is saved.
+    fn sync_files(&self, info_hash: [u8; 20], files: HashMap<PathBuf, Vec<u32>>) -> SyncReport {
+        let mut report = SyncReport::default();
+        for (path, mut pieces) in files {
             let cached = fd_cache().lock().peek(&path).cloned();
             // Never created here: a file deleted since was meant to go.
             let file = match cached {
@@ -224,14 +254,21 @@ impl DiskManager {
                 },
             };
             match sync_data(&file, &path) {
-                Ok(()) => synced += 1,
+                Ok(()) => report.synced += 1,
                 Err(e) => {
                     tracing::warn!("[disk] sync {:?}: {}", path, e);
-                    self.written.lock().entry(info_hash).or_default().insert(path);
+                    pieces.sort_unstable();
+                    pieces.dedup();
+                    report.failed.push(SyncFailure {
+                        info_hash,
+                        path,
+                        error: e.to_string(),
+                        pieces,
+                    });
                 }
             }
         }
-        synced
+        report
     }
 
     /// Read a block from disk for a torrent piece request.
@@ -380,7 +417,13 @@ impl DiskManager {
                     pwrite_all(&file, chunk, op.file_offset)
                         .map_err(|e| format!("pwrite {:?}: {}", full_path, e))?;
                 }
-                written.lock().entry(info_hash).or_default().insert(full_path);
+                {
+                    let mut w = written.lock();
+                    let pieces = w.entry(info_hash).or_default().entry(full_path).or_default();
+                    if pieces.last() != Some(&piece) {
+                        pieces.push(piece);
+                    }
+                }
 
                 data_offset += op.length as usize;
             }
@@ -921,11 +964,11 @@ mod disk_tests {
         let content = vec![7u8; 4096];
         let f = fixture("sync", &content);
         assert!(f.disk.write_piece(&f.torrent, 0, content.clone()).await.unwrap());
-        assert_eq!(f.disk.sync_written(), 1, "the one file written");
-        assert_eq!(f.disk.sync_written(), 0, "nothing new since");
+        assert_eq!(f.disk.sync_written().synced, 1, "the one file written");
+        assert_eq!(f.disk.sync_written().synced, 0, "nothing new since");
         assert!(f.disk.write_piece(&f.torrent, 0, content).await.unwrap());
         f._mgr.save_all_resume();
-        assert_eq!(f.disk.sync_written(), 0, "the sweep synced it first");
+        assert_eq!(f.disk.sync_written().synced, 0, "the sweep synced it first");
     }
 
     /// A completion syncs its own torrent's files, not every file every
@@ -935,9 +978,9 @@ mod disk_tests {
         let content = vec![7u8; 4096];
         let f = fixture("synconly", &content);
         assert!(f.disk.write_piece(&f.torrent, 0, content).await.unwrap());
-        assert_eq!(f.disk.sync_torrent(&[0u8; 20]), 0, "another torrent wrote nothing");
-        assert_eq!(f.disk.sync_torrent(&f.torrent.info_hash), 1, "its one file");
-        assert_eq!(f.disk.sync_written(), 0, "and it left the set");
+        assert_eq!(f.disk.sync_torrent(&[0u8; 20]).synced, 0, "another torrent wrote nothing");
+        assert_eq!(f.disk.sync_torrent(&f.torrent.info_hash).synced, 1, "its one file");
+        assert_eq!(f.disk.sync_written().synced, 0, "and it left the set");
     }
 
     /// A block is a window into a piece, not the whole of it.
@@ -1095,6 +1138,104 @@ mod disk_tests {
             .set_save_path(&f.torrent.info_hash, moved.to_string_lossy().as_ref())
             .unwrap();
         assert!(!holds_descriptor_for(&old), "the old path is no longer this torrent's");
+    }
+
+    fn four_piece_fixture(tag: &str) -> (Fixture, Vec<Vec<u8>>) {
+        let mut content = Vec::new();
+        for i in 0..4u8 {
+            content.extend(std::iter::repeat(i + 1).take(4096));
+        }
+        let chunks = content.chunks(4096).map(|c| c.to_vec()).collect();
+        let f = fixture_in_pieces(tag, &content, 4096);
+        // The fixture is added stopped; these are downloads under way.
+        f.torrent
+            .status
+            .store(crate::torrent::meta::TorrentStatus::Downloading as u8, Ordering::Relaxed);
+        (f, chunks)
+    }
+
+    /// What `commit` does once a piece is down: written, then counted held.
+    async fn download(f: &Fixture, piece: u32, data: &[u8]) {
+        assert!(f.disk.write_piece(&f.torrent, piece, data.to_vec()).await.unwrap());
+        f.torrent.picker.get().unwrap().lock().unwrap().set_have(piece);
+    }
+
+    fn held(f: &Fixture) -> Vec<u32> {
+        let p = f.torrent.picker.get().unwrap().lock().unwrap();
+        (0..4).filter(|i| p.has_piece(*i)).collect()
+    }
+
+    fn saved_bitfield(f: &Fixture) -> String {
+        let db = crate::torrent::statedb::StateDb::open(&f.root.join("state.db")).unwrap();
+        db.load_all().into_iter().next().expect("a record was saved").bitfield
+    }
+
+    /// ⭐ A file that will not sync takes its pieces out of what we hold, and
+    /// out of the record, before the record is written. Retrying the sync
+    /// proves nothing: after a failed flush the kernel may drop the dirty
+    /// pages and report the next one clean.
+    #[tokio::test]
+    async fn pieces_written_to_a_file_that_failed_to_sync_are_not_held() {
+        let (f, chunks) = four_piece_fixture("syncfail");
+        for (i, c) in chunks.iter().enumerate() {
+            download(&f, i as u32, c).await;
+        }
+        assert_eq!(held(&f), vec![0, 1, 2, 3]);
+        fail_sync_of(f.root.join("data").join("payload.bin"));
+
+        f._mgr.save_all_resume();
+
+        assert_eq!(held(&f), Vec::<u32>::new(), "nothing durable is vouched for");
+        assert_eq!(saved_bitfield(&f), "00", "and the record says so");
+        let msg = f.torrent.error_msg.lock().unwrap().clone();
+        assert!(msg.contains("sync"), "the torrent says why: {msg:?}");
+        assert_eq!(
+            f.torrent.status.load(Ordering::Relaxed),
+            crate::torrent::meta::TorrentStatus::Error as u8,
+            "and shows as an error"
+        );
+    }
+
+    /// Pieces that reached the disk in an earlier, good sweep stay held; the
+    /// failure takes only what was written since.
+    #[tokio::test]
+    async fn a_failed_sync_leaves_pieces_synced_before_it_alone() {
+        let (f, chunks) = four_piece_fixture("syncpart");
+        download(&f, 0, &chunks[0]).await;
+        download(&f, 1, &chunks[1]).await;
+        f._mgr.save_all_resume();
+        assert_eq!(held(&f), vec![0, 1]);
+
+        download(&f, 2, &chunks[2]).await;
+        fail_sync_of(f.root.join("data").join("payload.bin"));
+        f._mgr.save_all_resume();
+
+        assert_eq!(held(&f), vec![0, 1], "only the piece written since is lost");
+        assert_eq!(saved_bitfield(&f), "c0");
+    }
+
+    /// The completion record is written after the same check: a download whose
+    /// last flush failed is not recorded as whole.
+    #[tokio::test]
+    async fn a_completion_whose_sync_failed_is_not_recorded_whole() {
+        let (f, chunks) = four_piece_fixture("synccomplete");
+        for (i, c) in chunks.iter().enumerate() {
+            download(&f, i as u32, c).await;
+        }
+        f.torrent
+            .status
+            .store(crate::torrent::meta::TorrentStatus::Seeding as u8, Ordering::Relaxed);
+        fail_sync_of(f.root.join("data").join("payload.bin"));
+
+        f._mgr.on_completed(&f.torrent.info_hash);
+
+        assert_eq!(held(&f), Vec::<u32>::new());
+        assert_eq!(saved_bitfield(&f), "00");
+        assert_ne!(
+            f.torrent.status.load(Ordering::Relaxed),
+            crate::torrent::meta::TorrentStatus::Seeding as u8,
+            "no longer announced as a seed"
+        );
     }
 
     #[tokio::test]
