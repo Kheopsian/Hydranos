@@ -383,11 +383,12 @@ impl DownloadState {
             // The engine's download memory is spent: start nothing new until
             // pieces in flight finish and their writes return. Joining one
             // already in flight (endgame) costs nothing more.
-            if !picker.is_pending(piece) && !picker.may_start(piece_size) {
+            // The check and the reservation are one step: other torrents start
+            // pieces on the same budget under their own locks.
+            let Some(piece_requests) = picker.start_piece_within_budget(piece, piece_size, BLOCK_SIZE, self.owner) else {
                 self.held_back = true;
                 break;
-            }
-            let piece_requests = picker.start_piece(piece, piece_size, BLOCK_SIZE, self.owner);
+            };
             self.pending_block_queue.extend(piece_requests);
             self.started.insert(piece, Started { since: now, got: 0 });
         }
@@ -1296,6 +1297,41 @@ mod release_tests {
         assert_eq!(mem.bytes(), 3 * BLOCK_SIZE as u64);
         drop(a);
         assert_eq!((mem.pieces(), mem.bytes()), (0, 0));
+    }
+
+    /// Sessions of DIFFERENT torrents start pieces at the same moment on one
+    /// engine's budget, each under its own picker lock. The budget is checked
+    /// and spent in one step, so what they hold together never passes it.
+    #[test]
+    fn sessions_of_different_torrents_starting_pieces_together_stay_within_the_budget() {
+        use std::sync::Barrier;
+        const SESSIONS: usize = 8;
+        let budget = 2 * PIECE as u64;
+        let mut worst = 0;
+        for _ in 0..200 {
+            let mem = Arc::new(crate::torrent::piece_picker::PieceMem::default());
+            mem.set_budget(budget);
+            let ready = Arc::new(Barrier::new(SESSIONS));
+            let fired = Arc::new(Barrier::new(SESSIONS));
+            let handles: Vec<_> = (0..SESSIONS)
+                .map(|_| {
+                    let (mem, ready, fired) = (mem.clone(), ready.clone(), fired.clone());
+                    std::thread::spawn(move || {
+                        let t = torrent(64, PIECE);
+                        t.picker.get().unwrap().lock().unwrap().attach_mem(mem.clone());
+                        let mut dl = peer(&t);
+                        ready.wait();
+                        let _ = dl.get_requests();
+                        fired.wait();
+                        mem.committed()
+                    })
+                })
+                .collect();
+            for h in handles {
+                worst = worst.max(h.join().unwrap());
+            }
+        }
+        assert!(worst <= budget, "the sessions committed {worst} bytes on a budget of {budget}");
     }
 }
 
