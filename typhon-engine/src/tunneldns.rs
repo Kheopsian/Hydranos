@@ -45,6 +45,9 @@ struct Entry {
     servers: Vec<SocketAddr>,
     /// The leak is logged once per tunnel, not once per announce.
     leak_logged: AtomicBool,
+    /// The tunnel did not come up: its engine is pinned to a device that is
+    /// not there, and its names are resolved by nobody.
+    down: bool,
 }
 
 fn registry() -> &'static RwLock<HashMap<String, Arc<Entry>>> {
@@ -70,7 +73,21 @@ pub fn set_servers(device: &str, servers: &[IpAddr]) {
     let entry = Arc::new(Entry {
         servers: servers.iter().map(|ip| SocketAddr::new(*ip, 53)).collect(),
         leak_logged: AtomicBool::new(false),
+        down: false,
     });
+    registry().write().unwrap_or_else(|p| p.into_inner()).insert(device.to_string(), entry);
+    cache().lock().unwrap_or_else(|p| p.into_inner()).retain(|(d, _), _| d != device);
+}
+
+/// Record a tunnel that was asked for and did not come up. Its engine stays
+/// pinned to the missing device, and a name it looks up fails: forgetting the
+/// device instead would hand the name to the host's resolver.
+pub fn set_unavailable(device: &str) {
+    let device = device.trim();
+    if device.is_empty() {
+        return;
+    }
+    let entry = Arc::new(Entry { servers: Vec::new(), leak_logged: AtomicBool::new(false), down: true });
     registry().write().unwrap_or_else(|p| p.into_inner()).insert(device.to_string(), entry);
     cache().lock().unwrap_or_else(|p| p.into_inner()).retain(|(d, _), _| d != device);
 }
@@ -154,6 +171,9 @@ async fn resolve_with(device: &str, host: &str, refuse_host: bool) -> Result<Vec
         }
         return host_lookup(host).await;
     };
+    if entry.down {
+        return Err(format!("dns lookup of {host} refused: the tunnel {device} is not up"));
+    }
     if entry.servers.is_empty() {
         if refuse_host {
             return Err(refusal());
@@ -417,7 +437,7 @@ pub(crate) mod tests {
     /// `.conf`'s addresses and assumes 53, the test needs another one.
     pub(crate) fn register(device: &str, server: SocketAddr) {
         cache().lock().unwrap().retain(|(d, _), _| d != device);
-        let entry = Arc::new(Entry { servers: vec![server], leak_logged: AtomicBool::new(false) });
+        let entry = Arc::new(Entry { servers: vec![server], leak_logged: AtomicBool::new(false), down: false });
         registry().write().unwrap().insert(device.to_string(), entry);
     }
 
@@ -514,6 +534,25 @@ pub(crate) mod tests {
     async fn a_pinned_unmanaged_device_resolves_by_the_host_by_default() {
         let _ = resolve("wg-default-unmanaged", "default-host.example.invalid").await;
         assert!(host_lookups().lock().unwrap().iter().any(|n| n == "default-host.example.invalid"));
+    }
+
+    #[tokio::test]
+    async fn a_tunnel_that_is_down_resolves_nothing_by_the_host() {
+        set_unavailable("wg-down-test");
+        assert!(is_tunnel("wg-down-test"));
+        for refuse in [false, true] {
+            let e = resolve_with("wg-down-test", "down.example.invalid", refuse).await.unwrap_err();
+            assert!(e.contains("not up"), "{e}");
+        }
+        assert!(
+            !host_lookups().lock().unwrap().iter().any(|n| n == "down.example.invalid"),
+            "the host's resolver was not asked"
+        );
+        // Literals still need no resolver, and a later success replaces the entry.
+        assert!(resolve_with("wg-down-test", "203.0.113.4", false).await.is_ok());
+        set_servers("wg-down-test", &[]);
+        assert_eq!(servers("wg-down-test"), Some(vec![]));
+        forget("wg-down-test");
     }
 
     #[test]
