@@ -1280,6 +1280,7 @@ impl TorrentManager {
         let _ = state.limiter.set(self.limiter.clone());
         let _ = state.rates.set(self.rates.clone());
         let _ = state.completed_tx.set(self.completed_tx.clone());
+        let _ = state.piece_mem.set(self.piece_mem.clone());
         if let Some(p) = state.picker.get() {
             p.lock().unwrap().attach_mem(self.piece_mem.clone());
         }
@@ -1757,32 +1758,13 @@ impl TorrentManager {
         }
     }
 
-    /// Take `pieces` out of what this torrent holds and report `msg` as its
-    /// error. A torrent with no picker (loaded complete, or trusted by
-    /// skip_checking) gets one holding everything else, since the bitfield is
-    /// where the loss is recorded.
+    /// `TorrentState::retract_pieces`, and the bookkeeping only the engine
+    /// holds: the torrent is incomplete again, and what the sweep last saved
+    /// vouched for these pieces.
     pub(crate) fn retract_pieces(&self, ih: &InfoHash, pieces: &[u32], msg: &str) {
         let Some(t) = self.get(ih) else { return };
-        let mut created = false;
-        let picker = t.picker.get_or_init(|| {
-            created = true;
-            let mut p = crate::torrent::piece_picker::PiecePicker::new(t.meta.num_pieces());
-            p.import_bitfield(&full_bitfield(t.meta.num_pieces()));
-            std::sync::Arc::new(std::sync::Mutex::new(p))
-        });
-        if created {
-            picker.lock().unwrap().attach_mem(self.piece_mem.clone());
-            t.apply_download_order();
-        }
-        {
-            let mut p = picker.lock().unwrap();
-            for piece in pieces {
-                p.clear_have(*piece);
-            }
-        }
-        t.mark_data_lost(msg);
+        t.retract_pieces(pieces, msg);
         self.incomplete.insert(*ih);
-        // Whatever the sweep last saved vouched for these pieces.
         self.last_saved.remove(ih);
     }
 
