@@ -921,7 +921,9 @@ pub fn reconcile(runner: &mut dyn Runner, dir: &Path, wants: &[Want], registry: 
             }
             Err(e) => {
                 let _ = execute(runner, &teardown_plan(&w.device));
-                typhon_engine::tunneldns::forget(&w.device);
+                // Not forgotten: the engine is still pinned to this device,
+                // and an unknown device would resolve by the host.
+                typhon_engine::tunneldns::set_unavailable(&w.device);
                 tracing::error!(
                     engine = %w.engine, device = %w.device, error = %e,
                     "wireguard: the tunnel did not come up; the engine stays pinned to it and reaches nobody (no direct fallback)"
@@ -1063,6 +1065,29 @@ Endpoint = 192.0.2.10:51820
 
         down_all(&mut Fake::new(|_| None), &dir, &reg);
         assert_eq!(typhon_engine::tunneldns::servers(&w.device), None, "a tunnel taken down is forgotten");
+        force_support(None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A tunnel that did not come up leaves its engine pinned to a missing
+    /// device: the names that engine looks up must fail, not be handed to the
+    /// host's resolver.
+    #[test]
+    fn a_tunnel_that_failed_resolves_no_name_by_the_host() {
+        force_support(Some(Ok(())));
+        let dir = std::env::temp_dir().join(format!("wgtunnel-failed-dns-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let reg = Registry::default();
+        let w = want("faileddns"); // no file stored: the tunnel cannot come up
+        reconcile(&mut Fake::new(|_| None), &dir, std::slice::from_ref(&w), &reg);
+        let t = reg.get("faileddns").unwrap();
+        assert!(!t.created && !t.last_error.is_empty(), "{t:?}");
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        // `localhost` is what the host's resolver answers without any network.
+        let got = rt.block_on(typhon_engine::tunneldns::resolve(&w.device, "localhost"));
+        assert!(got.is_err(), "resolved by the host through a tunnel that is down: {got:?}");
+        down_all(&mut Fake::new(|_| None), &dir, &reg);
+        assert_eq!(typhon_engine::tunneldns::servers(&w.device), None, "taken down means forgotten");
         force_support(None);
         let _ = std::fs::remove_dir_all(&dir);
     }
