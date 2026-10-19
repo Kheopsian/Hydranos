@@ -32,6 +32,11 @@ create_torrent_folder = false
 # and every downloaded file. Off by default: another account on the host (a
 # backup job, a reader of this file) keeps reading them. Unix only.
 # private_files = false
+# Memory alert: the daemon's resident memory ceiling, in MiB. Past it, one error
+# line in the log (the Logs tab) -- and one more when it is back under -- before
+# the kernel's out-of-memory killer takes the process without a word. Checked
+# every 30 s. 0 = off (the default); a negative value is refused at startup.
+# memory_alert_mb = 0
 # Interface the daemon's own requests are bound to when they go "direct" or
 # through "proxy". The engines have their own, in [race]/[hoard].
 # bind_interface = "wg0"
