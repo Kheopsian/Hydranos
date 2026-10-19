@@ -2396,6 +2396,10 @@ impl TorrentManager {
         // Without this the torrent came back working and went on displaying the
         // fault it no longer had.
         t.clear_error();
+        // A torrent in error told its trackers `stopped` (or owes it) and the
+        // announcer will not look at it again for half an hour. If this
+        // recheck brings it back, that wait is not its own.
+        let was_error = t.status.load(Ordering::Relaxed) == TorrentStatus::Error as u8;
         if !t.is_paused.load(Ordering::Relaxed) {
             t.status
                 .store(TorrentStatus::Checking as u8, Ordering::Relaxed);
@@ -2405,6 +2409,20 @@ impl TorrentManager {
         tokio::spawn(async move {
             let _permit = recheck_sem().acquire().await;
             mgr.run_recheck(ih, t.clone()).await;
+            if was_error {
+                let back = t.status.load(Ordering::Relaxed);
+                if back == TorrentStatus::Downloading as u8 || back == TorrentStatus::Seeding as u8 {
+                    // Same as a resume: a new announce session, `started` to
+                    // every tracker, no departure left over, and the announcer
+                    // asked to go now.
+                    t.pending_announce_event.fetch_and(
+                        !crate::torrent::meta::ANNOUNCE_EVENT_STOPPED,
+                        Ordering::Relaxed,
+                    );
+                    t.begin_announce_session();
+                    mgr.announce_soon(&ih);
+                }
+            }
             t.rechecking.store(false, Ordering::SeqCst);
         });
         Ok(())
@@ -3057,6 +3075,89 @@ mod lifecycle_tests {
             "what was known is kept: an unreadable disk says nothing about the pieces"
         );
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// ⭐ A torrent parked in error has told its trackers `stopped` and will not
+    /// be announced for half an hour. The recheck that brings it back must not
+    /// wait for that: its announce goes out now, with a fresh `started`, so
+    /// its peers come back instead of leaving it at 50% for the interval.
+    /// Both ways in: lost data (`mark_data_lost`) and a refused write.
+    #[tokio::test]
+    async fn a_recheck_that_lifts_an_error_announces_started_now() {
+        for cause in ["data_lost", "write_error"] {
+            let (mgr, root) = manager(&format!("recheckerr-{cause}"));
+            let data: Vec<u8> = (0..32768u32).map(|i| (i % 241) as u8).collect();
+            // Piece 0 is on disk and good; piece 1 is on disk and wrong.
+            let mut on_disk = data.clone();
+            for b in on_disk[16384..].iter_mut() {
+                *b ^= 0xFF;
+            }
+            std::fs::write(root.join("data").join("half"), &on_disk).unwrap();
+            let mut info = Vec::new();
+            info.extend_from_slice(b"d6:lengthi32768e4:name4:half12:piece lengthi16384e6:pieces40:");
+            for chunk in data.chunks(16384) {
+                let mut hasher = Sha1::new();
+                hasher.update(chunk);
+                info.extend_from_slice(&hasher.finalize());
+            }
+            info.push(b'e');
+            let mut bytes = b"d4:info".to_vec();
+            bytes.extend_from_slice(&info);
+            bytes.push(b'e');
+            let blob = bytes.clone();
+            mgr.set_blob_source(Arc::new(move |_: &str| Some(blob.clone())));
+            let save = root.join("data").to_string_lossy().into_owned();
+            let ih = mgr.add_torrent_bytes(&bytes, &save, false, false).expect("added").0;
+            let t = mgr.get(&ih).unwrap();
+            t.picker.get().expect("a download has a picker").lock().unwrap().set_have(0);
+            t.announce_book.lock().unwrap().push(crate::torrent::meta::TrackerSlot {
+                key: 1,
+                started: true,
+                ..Default::default()
+            });
+            t.status.store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+
+            match cause {
+                "data_lost" => t.mark_data_lost("sync failed"),
+                _ => t.mark_write_error("disk full"),
+            }
+            assert_eq!(t.status.load(Ordering::Relaxed), TorrentStatus::Error as u8, "{cause}");
+            // The runner saw the error and said `stopped`: the trackers dropped us.
+            t.announce_book.lock().unwrap()[0].started = false;
+            t.pending_announce_event.store(0, Ordering::Relaxed);
+
+            let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let a = asked.clone();
+            mgr.set_announce_hook(Arc::new(move |_ih| {
+                a.fetch_add(1, Ordering::Relaxed);
+            }));
+
+            mgr.recheck(&ih).expect("recheck starts");
+            for _ in 0..300 {
+                if !t.rechecking.load(Ordering::SeqCst) {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            assert!(!t.rechecking.load(Ordering::SeqCst), "{cause}: the recheck ended");
+            assert_eq!(t.status.load(Ordering::Relaxed), TorrentStatus::Downloading as u8, "{cause}");
+
+            assert_eq!(
+                asked.load(Ordering::Relaxed),
+                1,
+                "{cause}: the torrent is back in work, so its announce is asked for now, not in 30 min"
+            );
+            assert_eq!(
+                t.pending_announce_event.load(Ordering::Relaxed) & ANNOUNCE_EVENT_STOPPED,
+                0,
+                "{cause}: no departure is owed to a torrent that is back"
+            );
+            assert!(
+                t.announce_book.lock().unwrap().iter().all(|s| !s.started && !s.stopped_owed),
+                "{cause}: every tracker is owed a fresh started"
+            );
+            std::fs::remove_dir_all(&root).ok();
+        }
     }
 
     /// ⭐ A recheck that finds the data whole is not a completion. Nothing was
