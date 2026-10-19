@@ -497,6 +497,13 @@ impl PiecePicker {
         }
     }
 
+    /// Stop counting a piece as held: its bytes are not known to be on disk.
+    pub fn clear_have(&mut self, index: u32) {
+        if let Some(h) = self.have.get_mut(index as usize) {
+            *h = false;
+        }
+    }
+
     /// Update availability from a peer's bitfield.
     pub fn add_bitfield(&mut self, bitfield: &[u8]) {
         for piece in 0..self.num_pieces {

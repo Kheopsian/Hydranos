@@ -345,8 +345,15 @@ impl TorrentManager {
     pub fn on_completed(&self, ih: &InfoHash) {
         // The data before the record that says it is whole: this torrent's
         // files only.
-        self.disk.sync_torrent(ih);
+        let report = self.disk.sync_torrent(ih);
+        let lost = !report.failed.is_empty();
+        self.retract_unsynced(report);
         self.persist_completed(ih);
+        // Not a completion: the data is not all on the disk. The trackers
+        // and the workflows hear of it when it is.
+        if lost {
+            return;
+        }
         // `completed` is how a tracker records the snatch: say it now, not at
         // the next scheduled announce half an hour away.
         self.announce_soon(ih);
@@ -1651,7 +1658,8 @@ impl TorrentManager {
     pub fn save_all_resume(&self) {
         // The pieces written since the last sweep reach the disk before the
         // bitfields that claim them.
-        self.disk.sync_written();
+        let report = self.disk.sync_written();
+        self.retract_unsynced(report);
         let db = match &self.state_db {
             Some(db) => db.clone(),
             None => {
@@ -1721,6 +1729,63 @@ impl TorrentManager {
     /// between save_all_resume (periodic) and set_save_path (immediate
     /// flush after a category move).
     /// Write one torrent's record to the store right now.
+    /// Stop counting as held the pieces written to files that would not sync,
+    /// and say so in the torrent's error. Runs BEFORE the state that vouches
+    /// for those pieces is saved.
+    fn retract_unsynced(&self, report: crate::disk::SyncReport) {
+        let mut by_torrent: std::collections::BTreeMap<InfoHash, Vec<crate::disk::SyncFailure>> =
+            Default::default();
+        for f in report.failed {
+            by_torrent.entry(f.info_hash).or_default().push(f);
+        }
+        for (ih, failures) in by_torrent {
+            let mut pieces: Vec<u32> = failures.iter().flat_map(|f| f.pieces.iter().copied()).collect();
+            pieces.sort_unstable();
+            pieces.dedup();
+            let files = failures
+                .iter()
+                .take(3)
+                .map(|f| format!("{} ({})", f.path.display(), f.error))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let msg = format!(
+                "disk sync failed for {files}: {} piece(s) written since the last good sync are \
+                 no longer counted as held. Check the disk, then recheck this torrent",
+                pieces.len()
+            );
+            self.retract_pieces(&ih, &pieces, &msg);
+        }
+    }
+
+    /// Take `pieces` out of what this torrent holds and report `msg` as its
+    /// error. A torrent with no picker (loaded complete, or trusted by
+    /// skip_checking) gets one holding everything else, since the bitfield is
+    /// where the loss is recorded.
+    pub(crate) fn retract_pieces(&self, ih: &InfoHash, pieces: &[u32], msg: &str) {
+        let Some(t) = self.get(ih) else { return };
+        let mut created = false;
+        let picker = t.picker.get_or_init(|| {
+            created = true;
+            let mut p = crate::torrent::piece_picker::PiecePicker::new(t.meta.num_pieces());
+            p.import_bitfield(&full_bitfield(t.meta.num_pieces()));
+            std::sync::Arc::new(std::sync::Mutex::new(p))
+        });
+        if created {
+            picker.lock().unwrap().attach_mem(self.piece_mem.clone());
+            t.apply_download_order();
+        }
+        {
+            let mut p = picker.lock().unwrap();
+            for piece in pieces {
+                p.clear_have(*piece);
+            }
+        }
+        t.mark_data_lost(msg);
+        self.incomplete.insert(*ih);
+        // Whatever the sweep last saved vouched for these pieces.
+        self.last_saved.remove(ih);
+    }
+
     pub fn persist_completed(&self, ih: &InfoHash) {
         if let Some(t) = self.get(ih) {
             let rd = Self::build_resume_data(&t);
@@ -1749,7 +1814,7 @@ impl TorrentManager {
         fastresume::ResumeData {
             info_hash: hex_encode(&t.info_hash),
             save_path: t.save_path.read().to_string_lossy().to_string(),
-            seed_mode: t.seed_mode,
+            seed_mode: trusted_whole(t),
             paused: t.is_paused.load(Ordering::Relaxed),
             total_uploaded: t.total_uploaded.load(Ordering::Relaxed),
             total_downloaded: t.total_downloaded.load(Ordering::Relaxed),
@@ -1995,6 +2060,14 @@ impl TorrentManager {
 /// piece count stands in for the bitfield itself, because the bitfield cannot
 /// change without the count changing too, and comparing a u32 is free next to
 /// exporting and comparing a multi-kilobyte bitfield per torrent.
+/// What a record says about `seed_mode`: trusted whole on load, bitfield
+/// unread. True only while nothing has been found missing -- a torrent whose
+/// picker holds gaps (a recheck, a piece given back) must come back as the
+/// download it is.
+fn trusted_whole(t: &TorrentState) -> bool {
+    t.seed_mode && t.picker.get().map_or(true, |p| p.lock().unwrap().is_complete())
+}
+
 fn fingerprint_of(t: &TorrentState) -> statedb::Fingerprint {
     statedb::Fingerprint {
         total_uploaded: t.total_uploaded.load(Ordering::Relaxed),
@@ -2361,7 +2434,7 @@ impl TorrentManager {
         let rd = fastresume::ResumeData {
             info_hash: hex_encode(&ih),
             save_path: t.save_path.read().to_string_lossy().to_string(),
-            seed_mode: t.seed_mode,
+            seed_mode: trusted_whole(&t),
             paused: t.is_paused.load(Ordering::Relaxed),
             total_uploaded: t.total_uploaded.load(Ordering::Relaxed),
             total_downloaded: t.total_downloaded.load(Ordering::Relaxed),

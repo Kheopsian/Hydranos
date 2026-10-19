@@ -1149,6 +1149,25 @@ impl TorrentState {
         tracing::error!(torrent = %self.meta.name, "stopped fetching: {}", msg);
     }
 
+    /// Pieces we counted as held are not on the disk any more, or never
+    /// were: say so where the API says torrent errors, and stop presenting
+    /// the torrent as whole.
+    ///
+    /// Like `mark_write_error` and for the same reason it does not suspend
+    /// serving: the pieces still held are good. A seed becomes an errored
+    /// download; the lost pieces are fetched again once a recheck says the
+    /// disk is dealt with. Always replaces the message -- this is news.
+    pub fn mark_data_lost(&self, msg: &str) {
+        if let Ok(mut g) = self.error_msg.lock() {
+            *g = msg.to_string();
+        }
+        let cur = self.status.load(Ordering::Relaxed);
+        if cur == TorrentStatus::Seeding as u8 || cur == TorrentStatus::Downloading as u8 {
+            self.status.store(TorrentStatus::Error as u8, Ordering::Relaxed);
+        }
+        tracing::error!(torrent = %self.meta.name, "{}", msg);
+    }
+
     /// Forget a fault the operator has dealt with.
     ///
     /// Called when a recheck starts, which is the one moment somebody has
