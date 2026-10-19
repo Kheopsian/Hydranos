@@ -33,6 +33,9 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   (length byte and protocol string); anything else is handed to the encrypted
   handshake with those bytes intact.
 
+- ut_metadata replies use the id the peer announced, as libtorrent does: they
+  are sent under that id, and not at all to a peer that announced none.
+
 ## v4.5.2 -- a resumed move does not finish without a file it had
 
 ### Fixed

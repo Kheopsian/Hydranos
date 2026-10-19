@@ -340,6 +340,68 @@ fn bep27_a_private_torrent_dials_no_peer_a_hole_punch_names() {
     });
 }
 
+/// BEP 10: an extended message goes out under the id the RECEIVER announced
+/// in its handshake. A peer that maps ut_metadata to 3 is answered under 3;
+/// one that announced no id, or 0, is sent no ut_metadata message.
+async fn metadata_reply_id(announce: Option<i64>) -> Option<u8> {
+    use std::collections::BTreeMap;
+    use typhon_engine::peer::bencode::Bencode;
+    use typhon_engine::peer::extension::{build_metadata_request, OUR_UT_METADATA_ID};
+    let (ours, theirs) = pair().await;
+    let mut peer = start_extended(seeding(8), ours, theirs);
+    wait_for(&mut peer, "unchoke", |m| matches!(m, Message::Unchoke)).await;
+    let mut m = BTreeMap::new();
+    if let Some(id) = announce {
+        m.insert(b"ut_metadata".to_vec(), Bencode::Int(id));
+    }
+    let mut root = BTreeMap::new();
+    root.insert(b"m".to_vec(), Bencode::Dict(m));
+    peer.send(Message::Extended {
+        ext_id: 0,
+        payload: bytes::Bytes::from(Bencode::Dict(root).to_vec()),
+    })
+    .await
+    .expect("sent");
+    peer.send(Message::Extended {
+        ext_id: OUR_UT_METADATA_ID,
+        payload: bytes::Bytes::from(build_metadata_request(0)),
+    })
+    .await
+    .expect("sent");
+    // A reply, if one comes, comes at once; the wait only bounds the case
+    // where none does.
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(800);
+    while let Ok(Some(Ok(msg))) = tokio::time::timeout_at(deadline, peer.next()).await {
+        if let Message::Extended { ext_id, payload } = msg {
+            if ext_id != 0 && typhon_engine::peer::extension::parse_metadata_message(&payload).is_some() {
+                return Some(ext_id);
+            }
+        }
+    }
+    None
+}
+
+#[test]
+fn a_metadata_reply_goes_out_under_the_id_the_peer_announced() {
+    rt().block_on(async {
+        assert_eq!(
+            metadata_reply_id(Some(3)).await,
+            Some(3),
+            "the reply must carry the ut_metadata id the peer announced (3), not ours"
+        );
+        assert_eq!(
+            metadata_reply_id(None).await,
+            None,
+            "a peer that announced no ut_metadata is sent no metadata message"
+        );
+        assert_eq!(
+            metadata_reply_id(Some(0)).await,
+            None,
+            "an announced id of 0 withdraws ut_metadata: nothing is sent"
+        );
+    });
+}
+
 // ---------------------------------------------------------------------------
 // Upload rate cap
 // ---------------------------------------------------------------------------
