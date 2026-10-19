@@ -381,8 +381,30 @@ pub async fn start(
         });
     }
 
-    // Periodic resume save (every 5 min)
-    let tm3 = mgr.clone();
+    spawn_resume_sweeps(mgr.clone(), config.resume_fast_secs);
+}
+
+/// Default of `resume_fast_secs`: seconds between the quick resume passes
+/// over the downloads that moved (0 = off: only the full sweep, every 5 min). A kill -9 costs at most this
+/// much progress instead of five minutes of it.
+pub const RESUME_FAST_SECS: u64 = 60;
+
+/// The two resume sweeps: the full one every 5 min, and (if `fast_secs` > 0)
+/// a quick one over the downloads that have moved.
+pub fn spawn_resume_sweeps(mgr: Arc<TorrentManager>, fast_secs: u64) {
+    // The quick pass: only the downloads whose progress moved since their
+    // last save. Costs the incomplete index, not the catalogue.
+    if fast_secs > 0 {
+        let tm = mgr.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(fast_secs)).await;
+                let tm = tm.clone();
+                let _ = tokio::task::spawn_blocking(move || tm.save_downloading_resume()).await;
+            }
+        });
+    }
+    let tm3 = mgr;
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(300)).await;
