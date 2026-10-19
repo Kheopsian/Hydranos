@@ -49,7 +49,8 @@ class H(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
     def do_GET(self):
         if self.path == "/health":
-            return self.reply(200, b'{"status": "ok", "version": "9.9.9"}')
+            ver = open("/tmp/health_ver").read().strip() if os.path.exists("/tmp/health_ver") else "9.9.9"
+            return self.reply(200, ('{"status": "ok", "version": "%s"}' % ver).encode())
         p = os.path.join(srv, self.path.lstrip("/"))
         if os.path.isfile(p):
             return self.reply(200, open(p, "rb").read(), "application/octet-stream")
@@ -80,5 +81,22 @@ if enrol; then status=installed; else status=refused; cat /tmp/enrol.log; fi
 check "matching archive" installed "$status"
 check "installed binary" "hydranos 9.9.9 good" "$(/usr/local/bin/hydranos 2>/dev/null || true)"
 check "mode of the config" 600 "$(stat -c %a /opt/hydranos/default.toml)"
+
+echo "== a controller version that is not a plain version number"
+# The version is spliced into the download URL, so a value with path
+# segments would send the download somewhere else, next to a checksum served
+# from the same place. A copy of the good archive and its checksum at the spot
+# such a version would resolve to makes the difference visible.
+rm -f /usr/local/bin/hydranos
+for a in amd64 arm64; do
+    cp /tmp/good.tar.gz "$srv/evil-linux-$a.tar.gz"
+    (cd /tmp && sha256sum good.tar.gz) > "$srv/evil-linux-$a.tar.gz.sha256"
+done
+echo '9.9.9/../../evil' > /tmp/health_ver
+if enrol; then status=installed; else status=refused; fi
+check "path-like version" refused "$status"
+check "binary left in place" absent "$( [ -e /usr/local/bin/hydranos ] && echo present || echo absent)"
+check "reason given" yes "$(grep -q 'not a plain version number' /tmp/enrol.log && echo yes || echo no)"
+rm -f /tmp/health_ver
 
 exit $fail
