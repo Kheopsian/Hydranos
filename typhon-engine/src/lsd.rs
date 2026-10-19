@@ -495,6 +495,22 @@ mod tests {
         assert!(!v6.contains("cookie"), "no cookie header when there is none");
     }
 
+    /// 40 bytes of header value, but not 40 hex digits: a datagram from the
+    /// LAN is refused, it does not stop the receive loop.
+    #[test]
+    fn an_infohash_with_a_multibyte_character_is_refused() {
+        let bad = format!("a{}{}", "\u{e9}", "a".repeat(37));
+        assert_eq!(bad.len(), 40);
+        let msg = format!("BT-SEARCH * HTTP/1.1\r\nPort: 6881\r\nInfohash: {bad}\r\n\r\n\r\n");
+        assert!(parse(msg.as_bytes()).is_none());
+        // a good hash next to it still counts
+        let msg = format!(
+            "BT-SEARCH * HTTP/1.1\r\nPort: 6881\r\nInfohash: {bad}\r\nInfohash: {}\r\n\r\n\r\n",
+            "ab".repeat(20)
+        );
+        assert_eq!(parse(msg.as_bytes()).unwrap().info_hashes, vec![[0xab; 20]]);
+    }
+
     #[test]
     fn a_message_parses_back_to_what_was_built() {
         let msg = build(v4_group(), 51413, &[ih(7), ih(9)], "abc");
