@@ -23,6 +23,14 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 
 ## Unreleased -- an encrypted connection is not mistaken for a plaintext one
 
+### Added
+
+- `[daemon] memory_alert_mb` turns the memory alert on: past that resident
+  size the daemon logs one error (visible in the Logs tab), and one line when
+  it is back under, instead of the OOM killer ending it unannounced. The
+  alert had been written but nothing started it. 0 (the default) leaves it
+  off; a negative value is refused at startup. The startup log says which.
+
 ### Fixed
 
 - An incoming connection was taken for a plaintext handshake when its first
