@@ -1202,6 +1202,10 @@ fn engine_config(
     if session.socks5_outbound_port != 0 {
         v["socks5_outbound_port"] = serde_json::json!(session.socks5_outbound_port);
     }
+    // Absent keeps the engine's own default, not a second copy of it here.
+    if let Some(secs) = session.resume_fast_secs {
+        v["resume_fast_secs"] = serde_json::json!(secs);
+    }
     serde_json::from_value(v).ok()
 }
 
@@ -1234,6 +1238,14 @@ mod network_wiring_tests {
     fn dht_follow_seeds_reaches_the_engine() {
         assert!(cfg_of(&session("")).dht_follow_seeds);
         assert!(!cfg_of(&session("dht_follow_seeds = false\n")).dht_follow_seeds);
+    }
+
+    /// `resume_fast_secs` reaches the engine; absent keeps the engine's 60 s.
+    #[test]
+    fn resume_fast_secs_reaches_the_engine() {
+        assert_eq!(cfg_of(&session("")).resume_fast_secs, 60, "absent = the engine's default");
+        assert_eq!(cfg_of(&session("resume_fast_secs = 0\n")).resume_fast_secs, 0, "0 = the quick pass is off");
+        assert_eq!(cfg_of(&session("resume_fast_secs = 120\n")).resume_fast_secs, 120);
     }
 
     /// `lsd_announce_seeds` reaches the engine; absent keeps the old behaviour.

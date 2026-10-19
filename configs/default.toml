@@ -187,6 +187,9 @@ peer_encryption = "allow"
 # Inbound handshakes naming an info_hash we do not have, per source IP per
 # minute; past it the source is ignored for ten minutes. 0 = no limit.
 max_unknown_infohash_per_ip = 0
+# Seconds between the quick saves of the downloads that moved (a crash loses
+# at most this much progress). 0 = only the full save, every 300 s.
+resume_fast_secs = 60
 inactivity_timeout = 20
 
 # The queue, qBittorrent's. active_downloads (0 or -1 = unlimited) always
