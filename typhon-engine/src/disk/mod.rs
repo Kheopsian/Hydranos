@@ -328,7 +328,19 @@ impl DiskManager {
         let block_piece = (block_start / piece_size) as u32;
         let block_offset_in_piece = (block_start % piece_size) as u32;
 
-        let block_bytes = read_block_direct(torrent, block_piece, block_offset_in_piece, block_len).await?;
+        let block_bytes = match read_range(torrent, block_piece, block_offset_in_piece, block_len).await {
+            Ok(b) => b,
+            // The 128 KB window around the request may reach into sectors the
+            // request does not need: ask for the request alone before blaming
+            // anything, and blame only what it spans.
+            Err(first) if first.unreadable => {
+                return match read_range(torrent, piece, offset, length).await {
+                    Ok(b) => Ok(b),
+                    Err(e) => Err(give_up_on(torrent, piece, offset, length, e)),
+                };
+            }
+            Err(e) => return Err(give_up_on(torrent, piece, offset, length, e)),
+        };
 
         let end = offset_in_block + length as usize;
         if end > block_bytes.len() {
@@ -604,6 +616,54 @@ async fn read_block_direct(
     offset: u32,
     length: u32,
 ) -> Result<Bytes, String> {
+    read_range(torrent, piece, offset, length)
+        .await
+        .map_err(|e| give_up_on(torrent, piece, offset, length, e))
+}
+
+/// Why a read for a peer failed.
+struct ReadFailure {
+    /// A backing file is gone (ENOENT): the data is gone for good.
+    missing: bool,
+    /// The file is there and the read itself failed (EIO, a short file): what
+    /// it holds there cannot be trusted or served.
+    unreadable: bool,
+    msg: String,
+}
+
+/// What a failed read does to the torrent. ENOENT parks it once (the serve
+/// path then rejects upstream and stops getting here at all). An unreadable
+/// range takes the pieces it spans out of what we hold -- they are not offered
+/// or served again, and a recheck brings them back -- and the torrent's error
+/// says so. EMFILE and the like are transient and must NOT drag a healthy
+/// torrent down with them.
+fn give_up_on(torrent: &TorrentState, piece: u32, offset: u32, length: u32, e: ReadFailure) -> String {
+    if e.missing {
+        torrent.mark_error(&e.msg);
+    } else if e.unreadable {
+        let plen = torrent.meta.piece_length as u64;
+        let start = piece as u64 * plen + offset as u64;
+        let last = (start + (length as u64).max(1) - 1) / plen;
+        let pieces: Vec<u32> = (start / plen..=last).map(|p| p as u32).collect();
+        torrent.retract_pieces(
+            &pieces,
+            &format!(
+                "unreadable on disk, piece {} no longer counted as held: {}. Check the disk, \
+                 then recheck this torrent",
+                pieces.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", "),
+                e.msg
+            ),
+        );
+    }
+    e.msg
+}
+
+async fn read_range(
+    torrent: &TorrentState,
+    piece: u32,
+    offset: u32,
+    length: u32,
+) -> Result<Bytes, ReadFailure> {
     let ops = torrent.meta.map_block(piece, offset, length);
     let save_path = torrent.save_path.read().clone();
     let name = torrent.meta.name.clone();
@@ -614,7 +674,7 @@ async fn read_block_direct(
     // would silently read from save_path/<file-path>, which doesn't exist.
     let multi_file = torrent.meta.multi_file;
 
-    let outcome = tokio::task::spawn_blocking(move || {
+    tokio::task::spawn_blocking(move || {
         let mut result = Vec::with_capacity(length as usize);
 
         for op in ops {
@@ -631,37 +691,34 @@ async fn read_block_direct(
             // Keep the ErrorKind. ENOENT means the data is gone for good and
             // the torrent has to be parked; EMFILE or EIO are transient and
             // must NOT drag a healthy torrent down with them.
-            let file = get_or_open(&full_path).map_err(|e| {
-                (
-                    e.kind() == std::io::ErrorKind::NotFound,
-                    format!("open {:?}: {}", full_path, e),
-                )
+            let file = get_or_open(&full_path).map_err(|e| ReadFailure {
+                missing: e.kind() == std::io::ErrorKind::NotFound,
+                unreadable: false,
+                msg: format!("open {:?}: {}", full_path, e),
             })?;
 
             let mut buf = vec![0u8; op.length as usize];
 
-            serve_read(&file, &full_path, &mut buf, op.file_offset)
-                .map_err(|e| (false, format!("pread {:?}: {}", full_path, e)))?;
+            serve_read(&file, &full_path, &mut buf, op.file_offset).map_err(|e| ReadFailure {
+                missing: false,
+                unreadable: true,
+                msg: match classify_io(e) {
+                    PieceRead::Unreadable(why) => format!("pread {:?}: {}", full_path, why),
+                    _ => format!("pread {:?}: the file ends early", full_path),
+                },
+            })?;
 
             result.extend_from_slice(&buf);
         }
 
-        Ok::<Bytes, (bool, String)>(Bytes::from(result))
+        Ok::<Bytes, ReadFailure>(Bytes::from(result))
     })
     .await
-    .map_err(|e| format!("spawn_blocking: {}", e))?;
-
-    match outcome {
-        Ok(b) => Ok(b),
-        Err((missing, msg)) => {
-            // Park it once. serving_suspended then rejects further requests
-            // upstream, so this path stops being hit at all.
-            if missing {
-                torrent.mark_error(&msg);
-            }
-            Err(msg)
-        }
-    }
+    .map_err(|e| ReadFailure {
+        missing: false,
+        unreadable: false,
+        msg: format!("spawn_blocking: {}", e),
+    })?
 }
 
 
@@ -745,6 +802,15 @@ pub enum PieceRead {
     Unreadable(String),
 }
 
+/// A file that is not there, or ends early, is a piece not had; any other
+/// failure is the disk's. One rule for the recheck and for the serve path.
+fn classify_io(e: std::io::Error) -> PieceRead {
+    match e.kind() {
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::UnexpectedEof => PieceRead::Absent,
+        _ => PieceRead::Unreadable(e.to_string()),
+    }
+}
+
 /// Read a full piece from disk and check it against its hash, both on the
 /// blocking pool: hashing a piece of several MiB on an async worker held that
 /// worker for the whole digest. Bypasses the read cache: a one-shot cold
@@ -763,12 +829,7 @@ pub async fn read_piece_on_disk(torrent: &TorrentState, piece: u32) -> PieceRead
     let multi_file = torrent.meta.multi_file;
 
     let out = tokio::task::spawn_blocking(move || {
-        // A file that is not there, or ends early, is a piece not had; any
-        // other failure is the disk's.
-        let classify = |e: std::io::Error| match e.kind() {
-            std::io::ErrorKind::NotFound | std::io::ErrorKind::UnexpectedEof => PieceRead::Absent,
-            _ => PieceRead::Unreadable(e.to_string()),
-        };
+        let classify = classify_io;
         // Read straight into the piece: one buffer, no copy per file.
         let mut data = vec![0u8; plen as usize];
         let mut at = 0usize;
@@ -1236,6 +1297,39 @@ mod disk_tests {
             crate::torrent::meta::TorrentStatus::Seeding as u8,
             "no longer announced as a seed"
         );
+    }
+
+    /// ⭐ A read that fails on the disk for a peer takes the piece it was for
+    /// out of what we hold -- it is not served again, nor offered -- and the
+    /// torrent says why. The other pieces of the file stay.
+    #[tokio::test]
+    async fn a_piece_that_cannot_be_read_is_no_longer_held() {
+        let (f, chunks) = four_piece_fixture("readfail");
+        for (i, c) in chunks.iter().enumerate() {
+            download(&f, i as u32, c).await;
+        }
+        f.torrent
+            .status
+            .store(crate::torrent::meta::TorrentStatus::Seeding as u8, Ordering::Relaxed);
+        f._mgr.save_all_resume();
+        fail_read_of(f.root.join("data").join("payload.bin"));
+
+        let r = f.disk.read_block(&f.torrent, 1, 0, 16).await;
+        assert!(r.is_err(), "the read fails");
+
+        assert_eq!(held(&f), vec![0, 2, 3], "only the unreadable piece is given up");
+        let msg = f.torrent.error_msg.lock().unwrap().clone();
+        assert!(msg.contains("piece 1"), "the torrent says which: {msg:?}");
+        assert_ne!(
+            f.torrent.status.load(Ordering::Relaxed),
+            crate::torrent::meta::TorrentStatus::Seeding as u8,
+            "and is no longer presented as whole"
+        );
+        let advertised = f.torrent.have_bitfield();
+        assert_eq!(advertised[0], 0b1011_0000, "nor is it offered to peers");
+
+        f._mgr.save_all_resume();
+        assert_eq!(saved_bitfield(&f), "b0", "nor saved as held");
     }
 
     #[tokio::test]

@@ -521,6 +521,9 @@ pub struct TorrentState {
 
     // Download mode
     pub picker: OnceLock<Arc<Mutex<PiecePicker>>>,
+    /// The engine's download-memory budget, for a picker built after the
+    /// fact (`retract_pieces`). Set when the engine adopts the torrent.
+    pub piece_mem: OnceLock<Arc<super::piece_picker::PieceMem>>,
     /// Broadcast of freshly completed pieces, so connected peers can be sent
     /// a Have. Created on first use and dropped again the moment the torrent
     /// starts seeding: a complete torrent never announces a new piece, and
@@ -1110,6 +1113,7 @@ impl TorrentState {
             last_announce_at: AtomicI64::new(0),
             next_announce_at: AtomicI64::new(0),
             error_msg: Mutex::new(String::new()),
+            piece_mem: OnceLock::new(),
             peer_stats: DashMap::with_shard_amount(PER_TORRENT_SHARDS),
             connected_addrs: DashMap::with_shard_amount(PER_TORRENT_SHARDS),
         }
@@ -1147,6 +1151,44 @@ impl TorrentState {
         }
         self.status.store(TorrentStatus::Error as u8, Ordering::Relaxed);
         tracing::error!(torrent = %self.meta.name, "stopped fetching: {}", msg);
+    }
+
+    /// Stop counting `pieces` as held, and say why in the torrent's error.
+    /// Returns how many were held. Nothing held: nothing changes and nothing
+    /// is said, so a failure that repeats does not repeat its report.
+    ///
+    /// A torrent with no picker (loaded complete, or trusted by
+    /// skip_checking) gets one holding everything else: the bitfield is where
+    /// the loss is recorded, saved and offered to peers.
+    pub fn retract_pieces(&self, pieces: &[u32], msg: &str) -> usize {
+        let mut created = false;
+        let picker = self.picker.get_or_init(|| {
+            created = true;
+            let n = self.meta.num_pieces();
+            let mut p = PiecePicker::new(n);
+            p.import_bitfield(&super::full_bitfield(n));
+            Arc::new(Mutex::new(p))
+        });
+        if created {
+            if let Some(mem) = self.piece_mem.get() {
+                picker.lock().unwrap().attach_mem(mem.clone());
+            }
+            self.apply_download_order();
+        }
+        let mut cleared = 0;
+        {
+            let mut p = picker.lock().unwrap();
+            for piece in pieces {
+                if p.has_piece(*piece) {
+                    p.clear_have(*piece);
+                    cleared += 1;
+                }
+            }
+        }
+        if cleared > 0 {
+            self.mark_data_lost(msg);
+        }
+        cleared
     }
 
     /// Pieces we counted as held are not on the disk any more, or never
