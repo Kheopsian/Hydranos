@@ -77,7 +77,8 @@ CREATE TABLE IF NOT EXISTS torrent_state (
     seed_secs        INTEGER NOT NULL DEFAULT 0,
     up_limit         INTEGER NOT NULL DEFAULT 0,
     down_limit       INTEGER NOT NULL DEFAULT 0,
-    download_order   TEXT NOT NULL DEFAULT ''
+    download_order   TEXT NOT NULL DEFAULT '',
+    bitfield_sum     TEXT NOT NULL DEFAULT ''
 );
 ";
 
@@ -116,6 +117,21 @@ impl StateDb {
         // Download order (file priorities, sequential, first/last piece) as
         // JSON, '' for the default. Same migration, same rollback story.
         let _ = conn.execute("ALTER TABLE torrent_state ADD COLUMN download_order TEXT NOT NULL DEFAULT ''", []);
+        // A checksum of the bitfield, written with it. '' = none (a row from
+        // before the column, or written by an older build): such a row is
+        // read as it always was. The trigger is what keeps an older build
+        // that rolls back onto this file from poisoning it: it rewrites a
+        // bitfield without a sum, and the sum it leaves behind would no
+        // longer match.
+        let _ = conn.execute("ALTER TABLE torrent_state ADD COLUMN bitfield_sum TEXT NOT NULL DEFAULT ''", []);
+        let _ = conn.execute_batch(
+            "CREATE TRIGGER IF NOT EXISTS bitfield_sum_reset
+             AFTER UPDATE OF bitfield ON torrent_state
+             WHEN NEW.bitfield_sum = OLD.bitfield_sum AND NEW.bitfield <> OLD.bitfield
+             BEGIN
+                 UPDATE torrent_state SET bitfield_sum = '' WHERE info_hash = NEW.info_hash;
+             END;",
+        );
         Ok(Self { conn: Mutex::new(conn) })
     }
 
@@ -212,7 +228,8 @@ impl StateDb {
         let mut stmt = match conn.prepare(
             "SELECT info_hash, save_path, seed_mode, paused,
                     total_uploaded, total_downloaded, added_time, completed_time,
-                    bitfield, trackers, seed_secs, up_limit, down_limit, download_order
+                    bitfield, trackers, seed_secs, up_limit, down_limit, download_order,
+                    bitfield_sum
              FROM torrent_state",
         ) {
             Ok(s) => s,
@@ -227,6 +244,16 @@ impl StateDb {
         });
         fn read_row(row: &rusqlite::Row) -> Result<ResumeData, rusqlite::Error> {
             let trackers_json: String = row.get(9)?;
+            // A bitfield that does not match the sum written with it was
+            // altered after the fact. The torrent still loads -- a torrent
+            // that vanishes is worse -- but without the claim: the marker
+            // reads as no bitfield, and the loader asks the disk instead.
+            let mut bitfield: String = row.get(8)?;
+            let sum: String = row.get(14).unwrap_or_default();
+            if !sum.is_empty() && sum != bitfield_sum(&bitfield) {
+                warn!("[statedb] the bitfield of {} does not match its checksum", row.get::<_, String>(0).unwrap_or_default());
+                bitfield = super::fastresume::BITFIELD_DISCARDED.to_string();
+            }
             Ok(ResumeData {
                 info_hash: row.get(0)?,
                 save_path: row.get(1)?,
@@ -236,7 +263,7 @@ impl StateDb {
                 total_downloaded: row.get::<_, i64>(5)? as u64,
                 added_time: row.get(6)?,
                 completed_time: row.get(7)?,
-                bitfield: row.get(8)?,
+                bitfield,
                 trackers: decode_trackers(&trackers_json),
                 seed_secs: row.get(10).unwrap_or(0),
                 up_limit: row.get::<_, i64>(11).unwrap_or(0).max(0) as u64,
@@ -290,6 +317,21 @@ impl StateDb {
     }
 }
 
+/// Checksum of a bitfield's text (FNV-1a, 64 bits): it catches a digit that
+/// rotted or was edited, it is not meant to stop anyone who can rewrite the
+/// row. '' for no bitfield.
+fn bitfield_sum(bitfield: &str) -> String {
+    if bitfield.is_empty() {
+        return String::new();
+    }
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in bitfield.bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    format!("{h:016x}")
+}
+
 fn put_in(conn: &Connection, rd: &ResumeData) -> Result<(), rusqlite::Error> {
     conn.execute(
         // torrent_path is NOT written any more. The column survives in the
@@ -299,8 +341,9 @@ fn put_in(conn: &Connection, rd: &ResumeData) -> Result<(), rusqlite::Error> {
         "INSERT INTO torrent_state
             (info_hash, save_path, seed_mode, paused,
              total_uploaded, total_downloaded, added_time, completed_time,
-             bitfield, trackers, seed_secs, up_limit, down_limit, download_order)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+             bitfield, trackers, seed_secs, up_limit, down_limit, download_order,
+             bitfield_sum)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
          ON CONFLICT(info_hash) DO UPDATE SET
             save_path=excluded.save_path,
             seed_mode=excluded.seed_mode,
@@ -314,7 +357,8 @@ fn put_in(conn: &Connection, rd: &ResumeData) -> Result<(), rusqlite::Error> {
             seed_secs=excluded.seed_secs,
             up_limit=excluded.up_limit,
             down_limit=excluded.down_limit,
-            download_order=excluded.download_order",
+            download_order=excluded.download_order,
+            bitfield_sum=excluded.bitfield_sum",
         params![
             rd.info_hash,
             rd.save_path,
@@ -330,6 +374,7 @@ fn put_in(conn: &Connection, rd: &ResumeData) -> Result<(), rusqlite::Error> {
             rd.up_limit.min(i64::MAX as u64) as i64,
             rd.down_limit.min(i64::MAX as u64) as i64,
             encode_order(&rd.download_order),
+            bitfield_sum(&rd.bitfield),
         ],
     )?;
     Ok(())
@@ -485,6 +530,98 @@ mod tests {
         let back = db.load_all();
         assert!(back[0].trackers.is_empty());
         assert!(back[0].bitfield.is_empty());
+        std::fs::remove_file(&path).ok();
+    }
+
+    fn raw(path: &std::path::Path, sql: &str) {
+        Connection::open(path).unwrap().execute_batch(sql).unwrap();
+    }
+
+    fn column(path: &std::path::Path, hash: &str, col: &str) -> String {
+        Connection::open(path)
+            .unwrap()
+            .query_row(
+                &format!("SELECT {col} FROM torrent_state WHERE info_hash='{hash}'"),
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .unwrap_or_default()
+    }
+
+    /// ⭐ A bitfield that changed under the database (a digit rotted, a hand
+    /// edit) is not believed: the row still loads -- the torrent is not made
+    /// to disappear -- but without the claim, so the disk gets to say what is
+    /// there.
+    #[test]
+    fn a_bitfield_that_does_not_match_its_sum_is_not_trusted() {
+        let path = tmpdb("sum-untrusted");
+        let db = StateDb::open(&path).unwrap();
+        db.put(&rec("aa", 1)).unwrap();
+        // A write that bypasses the engine and any trigger it has installed.
+        raw(&path, "DROP TRIGGER IF EXISTS bitfield_sum_reset;
+                    UPDATE torrent_state SET bitfield='ffff' WHERE info_hash='aa'");
+        let (records, unreadable) = db.load_all_reporting();
+        assert!(unreadable.is_empty(), "the row is readable");
+        assert_eq!(records.len(), 1, "and the torrent is still loaded");
+        assert_ne!(records[0].bitfield, "ffff", "but not on the strength of a bitfield nobody vouches for");
+        assert_eq!(db.count(), 1);
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// The triggers that protect a row from an older build must not fire on
+    /// this build's own writes: written twice, the sum is still there, still
+    /// right, and still catches a change.
+    #[test]
+    fn the_sum_survives_this_builds_own_rewrites() {
+        let path = tmpdb("sum-twice");
+        let db = StateDb::open(&path).unwrap();
+        db.put(&rec("aa", 1)).unwrap();
+        let mut r = rec("aa", 2);
+        r.bitfield = "f0f0".into();
+        db.put(&r).unwrap();
+        db.put(&r).unwrap();
+        let sum = column(&path, "aa", "bitfield_sum");
+        assert!(!sum.is_empty(), "the sum is kept across writes");
+        assert_eq!(db.load_all()[0].bitfield, "f0f0", "and agrees with the bitfield");
+        raw(&path, "DROP TRIGGER IF EXISTS bitfield_sum_reset;
+                    UPDATE torrent_state SET bitfield='ffff' WHERE info_hash='aa'");
+        assert_ne!(db.load_all()[0].bitfield, "ffff", "so it still catches a change");
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// A record written before the sum existed has none, and is read as
+    /// before; the next write gives it one.
+    #[test]
+    fn a_database_from_before_the_sum_is_read_without_error() {
+        let path = tmpdb("sum-old");
+        raw(&path, "CREATE TABLE torrent_state (
+                info_hash TEXT PRIMARY KEY, torrent_path TEXT NOT NULL DEFAULT '',
+                save_path TEXT NOT NULL DEFAULT '', seed_mode INTEGER NOT NULL DEFAULT 0,
+                paused INTEGER NOT NULL DEFAULT 0, total_uploaded INTEGER NOT NULL DEFAULT 0,
+                total_downloaded INTEGER NOT NULL DEFAULT 0, added_time INTEGER NOT NULL DEFAULT 0,
+                completed_time INTEGER NOT NULL DEFAULT 0, bitfield TEXT NOT NULL DEFAULT '',
+                trackers TEXT NOT NULL DEFAULT '');
+             INSERT INTO torrent_state (info_hash, bitfield) VALUES ('old', 'f0');");
+        let db = StateDb::open(&path).unwrap();
+        let (records, unreadable) = db.load_all_reporting();
+        assert!(unreadable.is_empty());
+        assert_eq!(records[0].bitfield, "f0");
+        db.put(&rec("old", 2)).unwrap();
+        assert_eq!(db.load_all()[0].bitfield, "ff00");
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// An older binary that rolls back onto this file writes bitfields without
+    /// sums; the file must stay readable once the new binary is back.
+    #[test]
+    fn a_bitfield_rewritten_by_an_older_build_is_still_read() {
+        let path = tmpdb("sum-rollback");
+        let db = StateDb::open(&path).unwrap();
+        db.put(&rec("aa", 1)).unwrap();
+        raw(&path, "UPDATE torrent_state SET bitfield='f0f0' WHERE info_hash='aa'");
+        let (records, unreadable) = db.load_all_reporting();
+        assert!(unreadable.is_empty());
+        assert_eq!(records[0].bitfield, "f0f0");
         std::fs::remove_file(&path).ok();
     }
 }
