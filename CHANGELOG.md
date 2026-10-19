@@ -44,6 +44,11 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 - ut_metadata replies use the id the peer announced, as libtorrent does: they
   are sent under that id, and not at all to a peer that announced none.
 
+- A tracker URL or a magnet link with a non-ASCII character at the 6th, 7th or
+  8th byte is now judged as the text it is, instead of being cut through the
+  middle of that character (`udp://` detection, the add form, the RSS link
+  masking and magnet check).
+
 ## v4.5.2 -- a resumed move does not finish without a file it had
 
 ### Fixed

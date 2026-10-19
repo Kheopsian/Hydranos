@@ -12395,7 +12395,7 @@ async fn qbit_torrent_add(
     let mut failed = 0;
     let mut url_failed = 0;
     for u in &urls {
-        let outcome = if u.len() > 8 && u[..8].eq_ignore_ascii_case("magnet:?") {
+        let outcome = if crate::rss::is_magnet(u) {
             let (st, u2) = (state.clone(), u.clone());
             let (c, sp, tg) = (category.clone(), save_path.clone(), tags.clone());
             let shared = share_at_add.clone();
