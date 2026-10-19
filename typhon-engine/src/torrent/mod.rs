@@ -1407,7 +1407,7 @@ impl TorrentManager {
         self.refused_records.lock().map(|r| r.clone()).unwrap_or_default()
     }
 
-    pub fn load_resume_data(&self) -> usize {
+    pub fn load_resume_data(self: &Arc<Self>) -> usize {
         // Timed in two parts on purpose. Reading the resume records is a few
         // dozen MB of small JSON; re-parsing every .torrent that each record
         // points at is orders of magnitude more bytes, because that is where
@@ -1420,6 +1420,8 @@ impl TorrentManager {
         self.restore_done.store(0, Ordering::Relaxed);
         let t_records = t_start.elapsed();
         let mut loaded = 0;
+        // Torrents whose saved bitfield could not be used: the disk is asked.
+        let mut to_recheck: Vec<InfoHash> = Vec::new();
         let mut mismatched = 0usize;
         let mut parse_time = std::time::Duration::ZERO;
         let mut parse_bytes: u64 = 0;
@@ -1511,6 +1513,22 @@ impl TorrentManager {
             // one, importing into it, being promoted to Seeding, and carrying it
             // for the life of the process.
             let resume_bits = hex_decode_bytes(&rd.bitfield);
+            // A bitfield that is there and cannot be used -- not hex, or set
+            // aside by the store because its checksum no longer matched --
+            // is not "nothing downloaded". The torrent loads, and the disk
+            // says what it holds (queued below). A seed_mode record never had
+            // a bitfield to rely on.
+            let bitfield_unusable = !rd.bitfield.is_empty() && resume_bits.is_empty() && !rd.seed_mode;
+            if bitfield_unusable {
+                self.note_startup_issue(
+                    &rd.info_hash,
+                    "bitfield_discarded",
+                    "the saved bitfield could not be used (not valid, or it no longer matched its \
+                     checksum); the torrent is loaded and rechecked against the disk"
+                        .into(),
+                );
+                to_recheck.push(ih);
+            }
             let already_complete = bitfield_is_complete(&resume_bits, meta.num_pieces());
             let state = TorrentState::new_with_times(
                 meta,
@@ -1603,6 +1621,20 @@ impl TorrentManager {
                  their entries need repairing from the store",
                 mismatched,
             );
+        }
+        // The disk is the authority for these. Only where a runtime is there
+        // to run the check; the recheck itself is paced by its own semaphore.
+        if !to_recheck.is_empty() {
+            if tokio::runtime::Handle::try_current().is_ok() {
+                for ih in &to_recheck {
+                    if let Err(e) = self.recheck(ih) {
+                        warn!("[resume] recheck of {} not started: {}", &hex_encode(ih)[..8], e);
+                    }
+                }
+                info!("[resume] {} torrents with an unusable bitfield are being rechecked", to_recheck.len());
+            } else {
+                warn!("[resume] {} torrents have an unusable bitfield and no runtime to recheck them", to_recheck.len());
+            }
         }
         loaded
     }
@@ -2207,7 +2239,9 @@ fn bitfield_is_complete(bytes: &[u8], num_pieces: u32) -> bool {
 }
 
 /// Read byte pairs, not `&str` slices: a slice that ends inside a multibyte
-/// character panics. Anything that is not hex reads as no bitfield.
+/// character panics. Anything that is not hex reads as no bitfield; the
+/// loader sees a non-empty record that decodes to nothing and rechecks the
+/// torrent against the disk.
 fn hex_decode_bytes(hex: &str) -> Vec<u8> {
     let raw = hex.as_bytes();
     if raw.len() % 2 != 0 { return Vec::new(); }
@@ -3943,11 +3977,11 @@ mod unreadable_state_tests {
             .unwrap();
         }
 
-        let mgr = TorrentManager::new(
+        let mgr = Arc::new(TorrentManager::new(
             data.to_string_lossy().into_owned(),
             resume.to_string_lossy().into_owned(),
             Arc::new(crate::disk::DiskManager::new(16)),
-        );
+        ));
         mgr.load_resume_data();
         assert!(mgr.refused_records().contains(&hash), "its row must be kept");
         let _ = std::fs::remove_dir_all(&root);
