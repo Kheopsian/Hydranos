@@ -127,6 +127,34 @@ pub fn evict_fds_timed(paths: &[PathBuf]) -> (std::time::Duration, std::time::Du
     (got - asked, got.elapsed())
 }
 
+/// `File::sync_data`, with a seam for tests: a disk that refuses to flush
+/// cannot be had from a unit test, so a path can be told to fail here.
+#[cfg(not(test))]
+fn sync_data(file: &File, _path: &std::path::Path) -> std::io::Result<()> {
+    file.sync_data()
+}
+
+#[cfg(test)]
+fn sync_data(file: &File, path: &std::path::Path) -> std::io::Result<()> {
+    if sync_failures().lock().contains(path) {
+        return Err(std::io::Error::from_raw_os_error(5));
+    }
+    file.sync_data()
+}
+
+#[cfg(test)]
+fn sync_failures() -> &'static Mutex<std::collections::HashSet<PathBuf>> {
+    static F: OnceLock<Mutex<std::collections::HashSet<PathBuf>>> = OnceLock::new();
+    F.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+}
+
+/// Make every later sync of `path` fail with EIO.
+#[cfg(test)]
+#[allow(dead_code)]
+pub(crate) fn fail_sync_of(path: PathBuf) {
+    sync_failures().lock().insert(path);
+}
+
 pub struct DiskManager {
     read_cache: Mutex<LruCache<CacheKey, CacheEntry>>,
     /// Files written and not yet synced, per torrent.
@@ -195,7 +223,7 @@ impl DiskManager {
                     Err(_) => continue,
                 },
             };
-            match file.sync_data() {
+            match sync_data(&file, &path) {
                 Ok(()) => synced += 1,
                 Err(e) => {
                     tracing::warn!("[disk] sync {:?}: {}", path, e);
@@ -569,7 +597,7 @@ async fn read_block_direct(
 
             let mut buf = vec![0u8; op.length as usize];
 
-            pread_exact(&file, &mut buf, op.file_offset)
+            serve_read(&file, &full_path, &mut buf, op.file_offset)
                 .map_err(|e| (false, format!("pread {:?}: {}", full_path, e)))?;
 
             result.extend_from_slice(&buf);
@@ -593,6 +621,34 @@ async fn read_block_direct(
     }
 }
 
+
+/// `pread_exact` for the serve path, with a seam for tests: unreadable sectors
+/// cannot be had from a unit test, so a path can be told to fail here.
+#[cfg(not(test))]
+fn serve_read(file: &File, _path: &std::path::Path, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
+    pread_exact(file, buf, offset)
+}
+
+#[cfg(test)]
+fn serve_read(file: &File, path: &std::path::Path, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
+    if read_failures().lock().contains(path) {
+        return Err(std::io::Error::from_raw_os_error(5));
+    }
+    pread_exact(file, buf, offset)
+}
+
+#[cfg(test)]
+fn read_failures() -> &'static Mutex<std::collections::HashSet<PathBuf>> {
+    static F: OnceLock<Mutex<std::collections::HashSet<PathBuf>>> = OnceLock::new();
+    F.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+}
+
+/// Make every later served read of `path` fail with EIO.
+#[cfg(test)]
+#[allow(dead_code)]
+pub(crate) fn fail_read_of(path: PathBuf) {
+    read_failures().lock().insert(path);
+}
 
 // Cross-platform positional file I/O. Unix uses pread/pwrite (FileExt);
 // Windows uses seek_read/seek_write (looped to match all/exact semantics).
