@@ -326,17 +326,20 @@ fn csv_line(row: &ExportRow) -> String {
         }
         None => (String::new(), String::new(), String::new()),
     };
+    // The two numeric columns go through `csv_quote` as they are: a negative
+    // number starts with `-` and must stay a number. Every text column is
+    // neutralised first.
     let fields = [
-        row.info_hash.clone(),
-        name,
-        size,
-        row.category.clone(),
-        row.tags.join(","),
-        hosts,
-        (row.added_time as i64).to_string(),
-        row.save_path.clone(),
+        csv_field(&row.info_hash),
+        csv_field(&name),
+        csv_quote(&size),
+        csv_field(&row.category),
+        csv_field(&row.tags.join(",")),
+        csv_field(&hosts),
+        csv_quote(&(row.added_time as i64).to_string()),
+        csv_field(&row.save_path),
     ];
-    let mut line = fields.iter().map(|f| csv_field(f)).collect::<Vec<_>>().join(",");
+    let mut line = fields.join(",");
     line.push('\n');
     line
 }
@@ -353,7 +356,19 @@ fn tracker_host(url: &str) -> String {
     host.split(':').next().unwrap_or("").to_ascii_lowercase()
 }
 
+/// A text cell: a spreadsheet reads one that starts with `=`, `+`, `-`, `@`,
+/// a tab or a carriage return as a formula, so such a cell gets a leading
+/// apostrophe (which the spreadsheet shows as nothing) before the quoting.
 fn csv_field(s: &str) -> String {
+    if s.starts_with(['=', '+', '-', '@', '\t', '\r']) {
+        csv_quote(&format!("'{s}"))
+    } else {
+        csv_quote(s)
+    }
+}
+
+/// RFC 4180 quoting alone.
+fn csv_quote(s: &str) -> String {
     if s.contains([',', '"', '\n', '\r']) {
         format!("\"{}\"", s.replace('"', "\"\""))
     } else {
@@ -810,6 +825,28 @@ mod tests {
         );
         assert_eq!(lines[2], format!("{absent},,,,,,,"));
         assert!(!text.contains("PASSKEY"));
+    }
+
+    /// A spreadsheet reads a cell that starts with one of these as a formula,
+    /// whatever the quoting around it: text columns get a leading apostrophe,
+    /// numeric columns stay numbers (a negative one starts with `-`).
+    #[test]
+    fn a_csv_text_cell_never_opens_as_a_formula() {
+        let row = ExportRow {
+            info_hash: "a".repeat(40),
+            torrent: torrent("=SUM(1+1)", "https://=host.example/announce"),
+            category: "+cat".into(),
+            tags: vec!["@t".into(), "ok".into()],
+            save_path: "-1+1".into(),
+            added_time: -5.0,
+        };
+        assert_eq!(
+            csv_line(&row),
+            format!("{},'=SUM(1+1),5,'+cat,\"'@t,ok\",'=host.example,-5,'-1+1\n", "a".repeat(40))
+        );
+        assert_eq!(csv_field("\tx"), "'\tx");
+        assert_eq!(csv_field("\rx"), "\"'\rx\"");
+        assert_eq!(csv_field("plain-text=ok"), "plain-text=ok");
     }
 
     #[test]
