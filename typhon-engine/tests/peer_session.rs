@@ -402,6 +402,77 @@ fn a_metadata_reply_goes_out_under_the_id_the_peer_announced() {
     });
 }
 
+/// A public torrent of one metadata block, whose metainfo the store can hand
+/// out, in the seeding state.
+fn seeding_with_info_dict() -> Arc<TorrentState> {
+    let name = "metadata-under-test";
+    let mut bytes = b"d4:infod".to_vec();
+    bytes.extend_from_slice(format!("6:lengthi16384e4:name{}:{name}12:piece lengthi16384e6:pieces20:", name.len()).as_bytes());
+    bytes.extend_from_slice(&[7u8; 20]);
+    bytes.extend_from_slice(b"ee");
+    let parsed = typhon_engine::torrent::metainfo::parse_torrent_bytes(&bytes).expect("a valid torrent");
+    let t = Arc::new(TorrentState::new(parsed, PathBuf::from("/tmp"), true));
+    t.status.store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+    let _ = t.blob_source.set(Arc::new(move |_: &str| Some(bytes.clone())));
+    t
+}
+
+/// A peer that fetches the dict is served. One that asks for the same block
+/// without end is not answered with data without end: past a bound the answer
+/// is a reject.
+#[test]
+fn a_peer_asking_for_metadata_without_end_is_not_served_without_end() {
+    use std::collections::BTreeMap;
+    use typhon_engine::peer::bencode::Bencode;
+    use typhon_engine::peer::extension::{
+        build_metadata_request, parse_metadata_message, METADATA_DATA, METADATA_REJECT, OUR_UT_METADATA_ID,
+    };
+    const ASKED: usize = 300;
+    rt().block_on(async {
+        let (ours, theirs) = pair().await;
+        let mut peer = start_extended(seeding_with_info_dict(), ours, theirs);
+        wait_for(&mut peer, "unchoke", |m| matches!(m, Message::Unchoke)).await;
+        let mut m = BTreeMap::new();
+        m.insert(b"ut_metadata".to_vec(), Bencode::Int(3));
+        let mut root = BTreeMap::new();
+        root.insert(b"m".to_vec(), Bencode::Dict(m));
+        peer.send(Message::Extended { ext_id: 0, payload: bytes::Bytes::from(Bencode::Dict(root).to_vec()) })
+            .await
+            .expect("sent");
+        for _ in 0..ASKED {
+            peer.send(Message::Extended {
+                ext_id: OUR_UT_METADATA_ID,
+                payload: bytes::Bytes::from(build_metadata_request(0)),
+            })
+            .await
+            .expect("sent");
+        }
+        let (mut data, mut reject) = (0usize, 0usize);
+        let mut first = None;
+        while data + reject < ASKED {
+            let left = Duration::from_secs(5);
+            let Ok(Some(Ok(msg))) = tokio::time::timeout(left, peer.next()).await else { break };
+            if let Message::Extended { ext_id: 3, payload } = msg {
+                match parse_metadata_message(&payload).map(|p| p.msg_type) {
+                    Some(METADATA_DATA) => {
+                        first.get_or_insert(METADATA_DATA);
+                        data += 1;
+                    }
+                    Some(METADATA_REJECT) => {
+                        first.get_or_insert(METADATA_REJECT);
+                        reject += 1;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        assert_eq!(first, Some(METADATA_DATA), "the first request is served");
+        assert_eq!(data + reject, ASKED, "every request is answered, by data or by reject");
+        assert!(data >= 3, "a few retries are served: {data} data");
+        assert!(data < 50, "{data} blocks of data to one peer for {ASKED} requests of one block");
+    });
+}
+
 // ---------------------------------------------------------------------------
 // Upload rate cap
 // ---------------------------------------------------------------------------
