@@ -2023,10 +2023,12 @@ pub fn hex_decode(hex: &str) -> Result<InfoHash, String> {
     if hex.len() != 40 {
         return Err("info_hash must be 40 hex chars".into());
     }
+    // Byte pairs, not `&str` slices: a slice that ends inside a multibyte
+    // character panics, and 40 bytes can hold one.
+    let digit = |c: u8| (c as char).to_digit(16).map(|d| d as u8);
     let mut hash = [0u8; 20];
-    for i in 0..20 {
-        hash[i] = u8::from_str_radix(&hex[i*2..i*2+2], 16)
-            .map_err(|_| "invalid hex")?;
+    for (slot, p) in hash.iter_mut().zip(hex.as_bytes().chunks_exact(2)) {
+        *slot = digit(p[0]).zip(digit(p[1])).map(|(h, l)| h << 4 | l).ok_or("invalid hex")?;
     }
     Ok(hash)
 }
@@ -2485,6 +2487,36 @@ mod full_bitfield_tests {
         assert_eq!(full_bitfield(10), vec![0xFF, 0b1100_0000]);
         assert_eq!(full_bitfield(8), vec![0xFF]);
         assert!(full_bitfield(0).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod hex_decode_tests {
+    use super::hex_decode;
+
+    #[test]
+    fn a_hex_hash_decodes() {
+        assert_eq!(hex_decode(&"ab".repeat(20)).unwrap(), [0xab; 20]);
+        assert_eq!(hex_decode(&"0F".repeat(20)).unwrap(), [0x0f; 20]);
+    }
+
+    #[test]
+    fn a_hash_that_is_not_hex_is_refused() {
+        assert!(hex_decode("abc").is_err());
+        assert!(hex_decode(&"zz".repeat(20)).is_err());
+        assert!(hex_decode(&"+f".repeat(20)).is_err());
+    }
+
+    /// 40 bytes, but not 40 characters: a multibyte character straddles an
+    /// even boundary. Refused, not a panic.
+    #[test]
+    fn a_hash_with_a_multibyte_character_is_refused() {
+        let s = format!("a{}{}", "\u{e9}", "a".repeat(37));
+        assert_eq!(s.len(), 40);
+        assert!(hex_decode(&s).is_err());
+        let s = "\u{20ac}".repeat(13) + "a";
+        assert_eq!(s.len(), 40);
+        assert!(hex_decode(&s).is_err());
     }
 }
 
