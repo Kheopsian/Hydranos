@@ -122,6 +122,19 @@ fn serve_metadata_block(torrent: &Arc<TorrentState>, piece: u32) -> Vec<u8> {
     extension::build_metadata_data(piece, total, &dict[offset..end])
 }
 
+/// Whether a session that has sent `served` metadata blocks may be sent one more.
+///
+/// A peer resolving a magnet asks for each block once; a few retries are
+/// normal. Every answer is a 16 KiB message that no upload cap or choke ever
+/// saw, so a peer asking for the same block without end would be an upload
+/// channel outside the budget. Past this the request is rejected, which is
+/// the valid answer and costs a few bytes.
+fn metadata_requests_allowed(served: u32, total: usize) -> bool {
+    let blocks = total.div_ceil(extension::METADATA_BLOCK) as u32;
+    // The whole dict three times over, and a few more.
+    served < blocks.saturating_mul(3).saturating_add(8)
+}
+
 /// Bytes of info dict kept for the torrents most recently served by BEP 9.
 /// A peer fetching a dict asks for every block of it, often more than once:
 /// without this, each request read the whole metainfo from the store and
@@ -401,6 +414,8 @@ pub async fn run(
     // block, never in a retry loop. Nothing here is allocated or armed for an
     // uncapped session: the queue stays empty and the timer stays `None`.
     let mut ul_gate = Gate::default();
+    // BEP 9 blocks sent to this peer (see `metadata_requests_allowed`).
+    let mut metadata_answers: u32 = 0;
     let mut ul_queue: std::collections::VecDeque<(u32, u32, u32)> = std::collections::VecDeque::new();
     let mut ul_wait: Option<tokio::time::Instant> = None;
     // The download side gates the REQUESTS we send: a block is booked when it
@@ -797,7 +812,15 @@ pub async fn run(
                                     // peer move on to someone else.
                                     if let Some(m) = extension::parse_metadata_message(&payload) {
                                         if m.msg_type == extension::METADATA_REQUEST {
-                                            let reply = serve_metadata_block(&torrent, m.piece);
+                                            let reply = if metadata_requests_allowed(
+                                                metadata_answers,
+                                                torrent.meta.info_dict_len as usize,
+                                            ) {
+                                                metadata_answers = metadata_answers.saturating_add(1);
+                                                serve_metadata_block(&torrent, m.piece)
+                                            } else {
+                                                extension::build_metadata_reject(m.piece)
+                                            };
                                             // Their id, not ours: an extended
                                             // message is addressed with the
                                             // number the RECEIVER advertised,
