@@ -1829,6 +1829,92 @@ impl TorrentManager {
         }
     }
 
+    /// The quick resume pass: the downloads that wrote pieces since their
+    /// last sync AND whose piece count moved since their last save, nothing
+    /// else. It starts from the disk's set of torrents written to, so a pass
+    /// costs the torrents that moved: not the catalogue, not even the
+    /// downloading ones. Same order as the full sweep: the files of these
+    /// torrents reach the disk, those that would not sync give their pieces
+    /// back, and only then are the records written, in one transaction.
+    /// Returns the rows written. Seeding torrents, and downloads that did not
+    /// move, are left to the full sweep (a torrent written to but not yet
+    /// counted stays in the set and is picked up by the next pass).
+    pub fn save_downloading_resume(&self) -> usize {
+        let Some(db) = self.state_db.clone() else { return 0 };
+        let started = std::time::Instant::now();
+        let moved: Vec<InfoHash> = self
+            .disk
+            .written_torrents()
+            .into_iter()
+            .filter(|ih| {
+                let Some(t) = self.torrents.get(ih) else { return false };
+                let Some(p) = t.picker.get() else { return false };
+                if t.seed_mode {
+                    return false;
+                }
+                let p = p.lock().unwrap();
+                !p.is_complete()
+                    && self.last_saved.get(ih).map_or(true, |s| s.value().num_have != p.num_have())
+            })
+            .collect();
+        if moved.is_empty() {
+            return 0;
+        }
+        let mut report = crate::disk::SyncReport::default();
+        for ih in &moved {
+            let one = self.disk.sync_torrent(ih);
+            report.synced += one.synced;
+            report.failed.extend(one.failed);
+        }
+        let synced = report.synced;
+        self.retract_unsynced(report);
+
+        let now = crate::torrent::meta::now_secs();
+        let mut dirty: Vec<fastresume::ResumeData> = Vec::new();
+        let mut hashes: Vec<InfoHash> = Vec::new();
+        let mut fps: Vec<statedb::Fingerprint> = Vec::new();
+        for ih in &moved {
+            let Some(t) = self.get(ih) else { continue };
+            t.fold_seed_time(now);
+            let fp = fingerprint_of(&t);
+            if self.last_saved.get(ih).map(|p| *p.value() == fp).unwrap_or(false) {
+                continue;
+            }
+            dirty.push(Self::build_resume_data(&t));
+            hashes.push(*ih);
+            fps.push(fp);
+        }
+        if dirty.is_empty() {
+            return 0;
+        }
+        match db.put_batch(&dirty) {
+            Ok(n) => {
+                for (ih, fp) in hashes.iter().zip(fps.iter()) {
+                    self.last_saved.insert(*ih, *fp);
+                }
+                if self.mirror_json {
+                    for (rd, ih) in dirty.iter().zip(hashes.iter()) {
+                        fastresume::save(&self.resume_dir, ih, rd);
+                    }
+                }
+                tracing::debug!(
+                    "[statedb] quick pass: {} downloads moved, {} files synced, committed in {:.3}s",
+                    n,
+                    synced,
+                    started.elapsed().as_secs_f64()
+                );
+                n
+            }
+            Err(e) => {
+                warn!("[statedb] quick pass commit failed: {} -- writing {} JSON records instead", e, dirty.len());
+                for (rd, ih) in dirty.iter().zip(hashes.iter()) {
+                    fastresume::save(&self.resume_dir, ih, rd);
+                }
+                0
+            }
+        }
+    }
+
     /// Build a fastresume snapshot from the live TorrentState. Shared
     /// between save_all_resume (periodic) and set_save_path (immediate
     /// flush after a category move).
