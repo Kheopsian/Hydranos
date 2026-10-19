@@ -36,6 +36,10 @@ pub const GHOST: &str = "ghost";
 /// recheck guards met it (`pathclaim.rs`): isolated, refused, held, or let
 /// through by `legacy` mode.
 pub const PATH_COLLISION: &str = crate::pathclaim::PATH_COLLISION;
+/// A stored record the engine did not bring back at startup, or a state
+/// database it could not open: torrents that are simply not in the list.
+/// `detail` says which, and why.
+pub const STARTUP_SKIPPED: &str = "startup_skipped";
 /// A whole tracker host erroring. External, not an integrity bug, and kept out
 /// of the alert path so a maintenance window does not wake anyone.
 pub const TRACKER_OUTAGE: &str = "tracker_outage";
@@ -184,8 +188,16 @@ pub fn scan_engine(
 
         // files_missing: the serve path sets Error on ENOENT and never clears
         // it, precisely so this can be seen.
+        // The engine's own words when it has some (lost pieces, a failed
+        // sync, files cut short); the ENOENT park carries its own message.
         if status == TorrentStatus::Error as u8 {
-            report.add(anomaly(FILES_MISSING, "a read hit ENOENT: this torrent can serve nothing".into(), 0));
+            let said = t.error_msg.lock().map(|g| g.clone()).unwrap_or_default();
+            let detail = if said.is_empty() {
+                "a read hit ENOENT: this torrent can serve nothing".to_string()
+            } else {
+                said
+            };
+            report.add(anomaly(FILES_MISSING, detail, 0));
         }
 
         // fake_seed: announced complete, while the piece map says otherwise.
@@ -251,6 +263,30 @@ pub fn scan_engine(
                 }
             }
         }
+    }
+}
+
+/// What an engine could not restore at startup, as anomalies: nothing else
+/// shows a torrent that never came back.
+pub fn scan_startup_issues(
+    engine: &str,
+    issues: &[typhon_engine::torrent::StartupIssue],
+    total: usize,
+    report: &mut Report,
+) {
+    for i in issues {
+        report.add(Anomaly {
+            kind: STARTUP_SKIPPED.to_string(),
+            engine: engine.to_string(),
+            info_hash: i.info_hash.clone(),
+            name: String::new(),
+            detail: format!("{}: {}", i.kind, i.detail),
+            wasted_bytes: 0,
+        });
+    }
+    // Past the manager's list cap: counted, not listed, like the report's own.
+    if total > issues.len() {
+        *report.counts.entry(STARTUP_SKIPPED.to_string()).or_insert(0) += (total - issues.len()) as i64;
     }
 }
 
@@ -707,5 +743,19 @@ mod scan_tests {
         scan_dual_seed(&[], &mut r);
         assert!(r.anomalies.is_empty());
         assert_eq!(r.wasted_bytes, 0);
+    }
+
+    /// A torrent in error says why, in the engine's own words, not as the
+    /// ENOENT it used to be assumed to be.
+    #[test]
+    fn a_torrent_in_error_reports_its_own_reason() {
+        let (mgr, root) = manager("reason");
+        let t = torrent(&mgr, "lost", 16384);
+        t.mark_data_lost("disk sync failed: 3 piece(s) no longer counted as held");
+        let mut r = Report::default();
+        scan_engine("race", &[t], no_seeds, no_outage, &mut r);
+        assert_eq!(r.anomalies[0].kind, FILES_MISSING);
+        assert!(r.anomalies[0].detail.contains("disk sync failed"), "{}", r.anomalies[0].detail);
+        let _ = std::fs::remove_dir_all(root);
     }
 }
