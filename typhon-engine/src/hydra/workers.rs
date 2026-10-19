@@ -828,6 +828,8 @@ pub fn health_pass(engines: &crate::engines::EngineHost) {
             |_host| false,
             &mut report,
         );
+        let (n_issues, issues) = engine.manager.startup_issues();
+        crate::health::scan_startup_issues(&engine.id, &issues, n_issues, &mut report);
         per_engine.push((engine.id.clone(), torrents, engine.manager.clone()));
     }
     crate::health::scan_dual_seed_live(&per_engine, &mut report);
