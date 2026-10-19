@@ -231,6 +231,12 @@ impl DiskManager {
         report
     }
 
+    /// The torrents that wrote a piece since their last sync: the quick resume
+    /// pass reads this instead of walking the catalogue. Takes nothing out.
+    pub fn written_torrents(&self) -> Vec<[u8; 20]> {
+        self.written.lock().keys().copied().collect()
+    }
+
     /// `sync_written` for one torrent: what its completion record needs.
     pub fn sync_torrent(&self, info_hash: &[u8; 20]) -> SyncReport {
         let files = self.written.lock().remove(info_hash);
@@ -1330,6 +1336,114 @@ mod disk_tests {
 
         f._mgr.save_all_resume();
         assert_eq!(saved_bitfield(&f), "b0", "nor saved as held");
+    }
+
+    /// The saved bitfield, if a record has been written at all.
+    fn saved_bitfield_opt(f: &Fixture) -> Option<String> {
+        let db = crate::torrent::statedb::StateDb::open(&f.root.join("state.db")).unwrap();
+        db.load_all().into_iter().next().map(|r| r.bitfield)
+    }
+
+    /// The real session start, as the engine binary and Hydra call it: it is
+    /// what spawns the resume sweeps. Nothing is reached on the network
+    /// (DHT, LSD and webseed off, a free local port).
+    async fn start_session(f: &Fixture, extra: &str) {
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let cfg: crate::config::EngineConfig = serde_json::from_str(&format!(
+            r#"{{"listen_port":{port},"dht_enabled":false,"lsd_enabled":false,"enable_webseed":false{extra}}}"#
+        ))
+        .unwrap();
+        crate::session::start(
+            f._mgr.clone(),
+            f.disk.clone(),
+            &cfg,
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        )
+        .await;
+    }
+
+    /// Let `secs` of (paused) time go by, then give the blocking pool the real
+    /// time to finish a pass that was started.
+    async fn let_pass(secs: u64) {
+        tokio::time::sleep(Duration::from_secs(secs)).await;
+        for _ in 0..20 {
+            std::thread::sleep(Duration::from_millis(10));
+            tokio::task::yield_now().await;
+        }
+    }
+
+    /// ⭐ A download that moves is in the state database within a minute, not
+    /// five: a kill -9 costs at most the last minute of pieces.
+    #[tokio::test(start_paused = true)]
+    async fn a_download_that_moved_is_saved_within_a_minute() {
+        let (f, chunks) = four_piece_fixture("fastsave");
+        start_session(&f, "").await;
+        download(&f, 0, &chunks[0]).await;
+        download(&f, 1, &chunks[1]).await;
+
+        let_pass(61).await;
+
+        assert_eq!(saved_bitfield_opt(&f).as_deref(), Some("c0"), "two pieces held, saved after 61 s");
+    }
+
+    /// The quick pass writes a torrent only when its progress moved, and never
+    /// a finished one: those wait for the full sweep.
+    #[tokio::test(start_paused = true)]
+    async fn the_quick_pass_skips_what_did_not_move_and_what_is_finished() {
+        let (f, chunks) = four_piece_fixture("fastskip");
+        start_session(&f, "").await;
+        download(&f, 0, &chunks[0]).await;
+        let_pass(61).await;
+        assert_eq!(saved_bitfield_opt(&f).as_deref(), Some("80"));
+
+        // Marked in the record: a rewrite would put the real value back.
+        rusqlite::Connection::open(f.root.join("state.db"))
+            .unwrap()
+            .execute_batch("UPDATE torrent_state SET bitfield='zz'")
+            .unwrap();
+        let_pass(60).await;
+        assert_eq!(saved_bitfield_opt(&f).as_deref(), Some("zz"), "no progress: not rewritten");
+
+        download(&f, 1, &chunks[1]).await;
+        let_pass(60).await;
+        assert_eq!(saved_bitfield_opt(&f).as_deref(), Some("c0"), "progress: rewritten");
+
+        // Whole now: the quick pass leaves it to the full sweep.
+        rusqlite::Connection::open(f.root.join("state.db"))
+            .unwrap()
+            .execute_batch("UPDATE torrent_state SET bitfield='zz'")
+            .unwrap();
+        download(&f, 2, &chunks[2]).await;
+        download(&f, 3, &chunks[3]).await;
+        let_pass(60).await;
+        assert_eq!(saved_bitfield_opt(&f).as_deref(), Some("zz"), "finished: left to the full sweep");
+    }
+
+    /// A seeding torrent is never in the quick pass.
+    #[tokio::test(start_paused = true)]
+    async fn the_quick_pass_never_writes_a_seeding_torrent() {
+        let (f, chunks) = four_piece_fixture("fastseed");
+        for (i, c) in chunks.iter().enumerate() {
+            download(&f, i as u32, c).await;
+        }
+        f.torrent
+            .status
+            .store(crate::torrent::meta::TorrentStatus::Seeding as u8, Ordering::Relaxed);
+        start_session(&f, "").await;
+        let_pass(120).await;
+        assert_eq!(saved_bitfield_opt(&f).as_deref(), Some(""), "only the record made at add, before the full sweep");
+    }
+
+    /// 0 turns the quick pass off: back to one sweep every five minutes.
+    #[tokio::test(start_paused = true)]
+    async fn a_quick_pass_of_zero_seconds_is_off() {
+        let (f, chunks) = four_piece_fixture("fastoff");
+        start_session(&f, r#","resume_fast_secs":0"#).await;
+        download(&f, 0, &chunks[0]).await;
+        let_pass(250).await;
+        assert_eq!(saved_bitfield_opt(&f).as_deref(), Some(""), "only the record made at add, before the five minutes");
+        let_pass(60).await;
+        assert_eq!(saved_bitfield_opt(&f).as_deref(), Some("80"), "the full sweep still runs");
     }
 
     /// A second engine over the first one's state, as after a restart, once

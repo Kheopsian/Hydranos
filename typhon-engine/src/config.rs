@@ -178,6 +178,12 @@ pub struct EngineConfig {
     /// `private` torrents (BEP 27) are skipped either way.
     #[serde(default = "default_true")]
     pub dht_enabled: bool,
+    /// Seconds between the quick resume passes that save the downloads whose
+    /// progress moved (`session::spawn_resume_sweeps`). 0 = off: only the
+    /// full sweep every five minutes. A kill -9 costs at most this much
+    /// progress.
+    #[serde(default = "default_resume_fast_secs")]
+    pub resume_fast_secs: u64,
     /// Keep a `get_peers` stream running for torrents that have finished
     /// downloading. On by default, as it has always been. Off, a finished
     /// torrent is not tracked, and one already tracked stops when its lookup
@@ -249,6 +255,7 @@ pub struct EngineConfig {
 
 fn default_true() -> bool { true }
 fn default_webseed_concurrency() -> usize { 48 }
+fn default_resume_fast_secs() -> u64 { crate::session::RESUME_FAST_SECS }
 fn default_data_dir() -> String { "/configs".into() }
 fn default_listen_port() -> u16 { 16172 }
 fn default_max_connections() -> usize { 12000 }
