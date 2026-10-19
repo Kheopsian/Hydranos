@@ -742,10 +742,24 @@ async fn post_node_register(
     // enrol with that token, and the operator had to issue a new one to try
     // `--name`. The token still enrols one node at most -- spending it is
     // atomic -- and the name is checked again after, against a race.
-    let taken_before = {
+    //
+    // The name is only discussed with the holder of a live token: without one,
+    // the answer is the same whatever the name, so the route does not list
+    // which nodes exist.
+    let (live, taken_before) = {
         let store = state.store.lock().unwrap();
-        store.node(&name).ok().flatten().is_some()
+        (
+            store.enrol_token_is_live(&token).unwrap_or(false),
+            store.node(&name).ok().flatten().is_some(),
+        )
     };
+    if !live {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "enrolment token unknown, already used, or expired"})),
+        )
+            .into_response();
+    }
     if taken_before {
         return (
             StatusCode::CONFLICT,
@@ -20365,6 +20379,49 @@ mod node_route_tests {
         )
         .await;
         assert!(!resp.status().is_success(), "got {:?}", resp.status());
+    }
+
+    async fn register_status(s: &super::AppState, token: &str, name: &str) -> StatusCode {
+        super::post_node_register(
+            State(s.clone()),
+            keyed(KEY),
+            serde_json::json!({"token": token, "name": name, "url": "http://10.0.0.9:8199"}).to_string(),
+        )
+        .await
+        .status()
+    }
+
+    fn put_test_node(s: &super::AppState, name: &str) {
+        let node = crate::store::Node {
+            name: name.into(),
+            url: "http://10.0.0.5:8199".into(),
+            api_key: String::new(),
+            enabled: true,
+            added_at: 0,
+        };
+        s.store.lock().unwrap().put_node(&node).unwrap();
+    }
+
+    /// Whether a name is taken is told to the holder of a live token only:
+    /// without one the answer is the same whatever the name.
+    #[tokio::test]
+    async fn a_bad_token_learns_nothing_about_node_names() {
+        let s = st("node-register-names");
+        put_test_node(&s.state, "taken");
+        assert_eq!(register_status(&s.state, "never-minted", "taken").await, StatusCode::UNAUTHORIZED);
+        assert_eq!(register_status(&s.state, "never-minted", "free").await, StatusCode::UNAUTHORIZED);
+    }
+
+    /// A live token with a name already taken is refused without being spent:
+    /// the operator does not have to mint another to try `--name`.
+    #[tokio::test]
+    async fn a_taken_name_does_not_spend_a_live_token() {
+        let s = st("node-register-keep");
+        put_test_node(&s.state, "taken");
+        let (token, _) = s.state.store.lock().unwrap().create_enrol_token(600).unwrap();
+        assert_eq!(register_status(&s.state, &token, "taken").await, StatusCode::CONFLICT);
+        assert_eq!(register_status(&s.state, &token, "fresh").await, StatusCode::OK);
+        assert_eq!(register_status(&s.state, &token, "other").await, StatusCode::UNAUTHORIZED, "spent by the one that worked");
     }
 
     /// ⭐ A node may not register itself at a loopback address either -- the
