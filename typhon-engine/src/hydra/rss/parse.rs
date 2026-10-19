@@ -242,6 +242,10 @@ fn first_non_empty(v: &[&str]) -> String {
 // The XML reader
 // ---------------------------------------------------------------------------
 
+/// Open elements allowed at once. The tree is walked and dropped recursively,
+/// and no feed goes anywhere near this deep.
+const MAX_DEPTH: usize = 100;
+
 /// The document as a tree under an unnamed root. Unclosed elements are closed
 /// at the end and a stray end tag closes up to its match, if any: a broken
 /// feed gives what it has.
@@ -302,6 +306,9 @@ fn tree(src: &str) -> Result<Node, String> {
             if self_closing {
                 stack.last_mut().unwrap().children.push(node);
             } else {
+                if stack.len() > MAX_DEPTH {
+                    return Err("the feed is nested too deep".into());
+                }
                 stack.push(node);
             }
         }
@@ -655,6 +662,19 @@ mod tests {
         assert!(parse(b"").is_err());
         // An empty channel is a feed with nothing in it.
         assert_eq!(parse(b"<rss><channel><title>t</title></channel></rss>").unwrap().articles.len(), 0);
+    }
+
+    /// Dropping the tree recurses once per level, so a feed nested a million
+    /// deep must be an error, not a stack to run out of.
+    #[test]
+    fn a_feed_nested_absurdly_deep_is_refused() {
+        let deep = "<a>".repeat(1_000_000);
+        assert!(parse(deep.as_bytes()).is_err());
+        let deep_then_closed = format!("{}{}", "<a>".repeat(1_000_000), "</a>".repeat(1_000_000));
+        assert!(parse(deep_then_closed.as_bytes()).is_err());
+        // Real feeds are a handful of levels deep; a generous nesting still reads.
+        let ok = format!("<rss><channel>{}{}</channel></rss>", "<x>".repeat(50), "</x>".repeat(50));
+        assert!(parse(ok.as_bytes()).is_ok());
     }
 
     #[test]
