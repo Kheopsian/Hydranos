@@ -78,15 +78,22 @@ pub fn plan(cfg: &crate::config::Config) -> Result<Plan, String> {
 static RUNNING: AtomicBool = AtomicBool::new(false);
 
 /// Frees the slot however the run ends, a dropped request included.
-struct Slot;
-impl Drop for Slot {
+struct Slot<'a>(&'a AtomicBool);
+impl Drop for Slot<'_> {
     fn drop(&mut self) {
-        RUNNING.store(false, Ordering::Release);
+        self.0.store(false, Ordering::Release);
     }
 }
 
-fn take_slot() -> Option<Slot> {
-    RUNNING.compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed).ok().map(|_| Slot)
+fn take_slot() -> Option<Slot<'static>> {
+    take_slot_of(&RUNNING)
+}
+
+/// `take_slot` on a given flag, so a test can exercise the exclusion on its own
+/// flag instead of the process-wide one that the tests running a speedtest
+/// hold for a moment.
+fn take_slot_of(flag: &AtomicBool) -> Option<Slot<'_>> {
+    flag.compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed).ok().map(|_| Slot(flag))
 }
 
 /// Run one test now, record it, return it.
@@ -233,10 +240,14 @@ mod tests {
 
     #[test]
     fn two_runs_cannot_overlap() {
-        let a = take_slot().expect("free");
-        assert!(take_slot().is_none(), "two iperf3 runs at once measure each other, not the link");
+        // Its own flag: the process-wide one is held for a moment by every test
+        // that runs a speedtest, and this test failed whenever it ran at the
+        // same time as one of them.
+        let flag = AtomicBool::new(false);
+        let a = take_slot_of(&flag).expect("free");
+        assert!(take_slot_of(&flag).is_none(), "two iperf3 runs at once measure each other, not the link");
         drop(a);
-        assert!(take_slot().is_some(), "the slot is freed however the run ends");
+        assert!(take_slot_of(&flag).is_some(), "the slot is freed however the run ends");
     }
 
     fn cfg(src: &str) -> crate::config::Config {
