@@ -197,7 +197,12 @@ pub fn is_punchable(addr: &SocketAddr) -> bool {
     if addr.port() == 0 {
         return false;
     }
-    match addr.ip() {
+    // `::ffff:a.b.c.d` is the IPv4 machine a.b.c.d: judged by the IPv4 rules.
+    let ip = match addr.ip() {
+        IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(IpAddr::V6(v6), IpAddr::V4),
+        v4 => v4,
+    };
+    match ip {
         IpAddr::V4(v4) => {
             !v4.is_loopback()
                 && !v4.is_private()
@@ -249,6 +254,21 @@ mod tests {
 
     fn v4(s: &str) -> SocketAddr {
         s.parse().unwrap()
+    }
+
+    /// An IPv4 address written in its IPv6-mapped form is the same machine:
+    /// it is judged by the IPv4 rules.
+    #[test]
+    fn a_mapped_address_is_judged_as_its_ipv4_form() {
+        for private in ["192.168.0.1", "10.1.2.3", "172.16.0.9", "127.0.0.1", "169.254.1.1", "0.0.0.0", "224.0.0.1"] {
+            let plain = v4(&format!("{private}:6881"));
+            let mapped = v4(&format!("[::ffff:{private}]:6881"));
+            assert!(!is_punchable(&plain), "{plain}");
+            assert!(!is_punchable(&mapped), "{mapped}");
+        }
+        assert!(is_punchable(&v4("93.184.216.34:6881")));
+        assert!(is_punchable(&v4("[::ffff:93.184.216.34]:6881")));
+        assert!(!is_punchable(&v4("[::ffff:93.184.216.34]:0")));
     }
 
     /// BEP 55: type, address type, address, port. An IPv4 message is eight
