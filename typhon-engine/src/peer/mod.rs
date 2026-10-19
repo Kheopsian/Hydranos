@@ -10,6 +10,8 @@ pub mod peerclient;
 pub mod session;
 pub mod transport;
 pub mod proxy_protocol;
+#[cfg(test)]
+mod rebind_tests;
 
 use std::collections::HashSet;
 use std::net::SocketAddr;
