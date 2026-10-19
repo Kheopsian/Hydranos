@@ -145,7 +145,31 @@ pub async fn handshake_outgoing_with(
     let (xa, ya_bytes) = tokio::task::spawn_blocking(gen_keypair)
         .await
         .map_err(|e| format!("spawn_blocking(gen_keypair): {}", e))?;
+    handshake_outgoing_keyed(stream, info_hash, peer_id, rc4_only, xa, ya_bytes).await
+}
 
+/// A fresh key pair whose public half starts with `first`: what one dial in
+/// 256 sends, made on demand so a test can aim at it.
+#[cfg(test)]
+pub(crate) fn gen_keypair_starting_with(first: u8) -> (BigUint, Vec<u8>) {
+    loop {
+        let (x, y) = gen_keypair();
+        if y[0] == first {
+            return (x, y);
+        }
+    }
+}
+
+/// The initiator side of `handshake_outgoing_with`, from a key pair already
+/// made.
+pub(crate) async fn handshake_outgoing_keyed(
+    stream: &mut PeerTransport,
+    info_hash: &[u8; 20],
+    peer_id: &[u8; 20],
+    rc4_only: bool,
+    xa: BigUint,
+    ya_bytes: Vec<u8>,
+) -> Result<(Rc4, Rc4, MseHandshakeResult), String> {
     // Step 1: Send Ya + PadA (0-512 random bytes), in one write.
     let mut first = ya_bytes.clone();
     first.extend_from_slice(&random_pad());
