@@ -1514,6 +1514,21 @@ impl Store {
         Ok((token, expires))
     }
 
+    /// Could this token be spent right now? Reads only; spending is
+    /// `consume_enrol_token`, which stays the one that decides.
+    pub fn enrol_token_is_live(&self, token: &str) -> anyhow::Result<bool> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM enrol_tokens WHERE token = ?1 AND used_at = 0 AND expires_at > ?2",
+            rusqlite::params![token, now],
+            |r| r.get(0),
+        )?;
+        Ok(n > 0)
+    }
+
     /// Spend a token, or say why it cannot be spent.
     ///
     /// The UPDATE carries the conditions rather than a read-then-write: two
