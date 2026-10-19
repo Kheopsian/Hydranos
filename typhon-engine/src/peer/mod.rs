@@ -950,6 +950,9 @@ impl Drop for HandshakeSlot {
     }
 }
 
+/// How a plaintext BitTorrent handshake opens: the length byte, then the protocol string.
+const PLAIN_HANDSHAKE_HEAD: [u8; 20] = *b"\x13BitTorrent protocol";
+
 async fn handle_incoming(
     mut stream: PeerTransport,
     addr: SocketAddr,
@@ -994,9 +997,12 @@ async fn handle_incoming(
     // Every read and write of the handshake is bounded from here on.
     const HS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
-    // Read first byte to detect MSE vs plaintext
-    let mut first = [0u8; 1];
-    match tokio::time::timeout(HS_TIMEOUT, stream.read_exact(&mut first)).await {
+    // Tell MSE from plaintext on the 20 bytes a plaintext handshake opens with
+    // (length byte and protocol string), not on the first byte alone: the first
+    // byte of an MSE public key is 19 one time in 256. An MSE initiator sends at
+    // least 96 bytes, so reading 20 never waits for more than it will get.
+    let mut head = [0u8; 20];
+    match tokio::time::timeout(HS_TIMEOUT, stream.read_exact(&mut head)).await {
         Ok(Ok(_)) => {}
         Ok(Err(_)) => return,
         Err(_) => {
@@ -1006,15 +1012,16 @@ async fn handle_incoming(
         }
     }
 
-    let (crypto_stream, torrent, fast_ext, lt_ext, remote_peer_id, is_encrypted) = if first[0] == 19 {
-        // Plaintext BT handshake — read remaining 67 bytes
+    let (crypto_stream, torrent, fast_ext, lt_ext, remote_peer_id, is_encrypted) = if head == PLAIN_HANDSHAKE_HEAD {
+        // Plaintext BT handshake — 20 bytes read, 48 to go. `rest` is what
+        // follows the length byte, as before.
         let mut rest = [0u8; 67];
-        match tokio::time::timeout(HS_TIMEOUT, stream.read_exact(&mut rest)).await {
+        rest[..19].copy_from_slice(&head[1..]);
+        match tokio::time::timeout(HS_TIMEOUT, stream.read_exact(&mut rest[19..])).await {
             Ok(Ok(_)) => {}
             Ok(Err(_)) => return,
             Err(_) => { HS_TIMED_OUT.fetch_add(1, std::sync::atomic::Ordering::Relaxed); return; }
         }
-        if &rest[0..19] != b"BitTorrent protocol" { return; }
         // `peer_encryption = require`: a plaintext handshake is closed before
         // the torrent is even looked up, so it learns nothing.
         if torrent_mgr.policy().encryption() == crate::peer::extension::Encryption::Require {
@@ -1064,13 +1071,15 @@ async fn handle_incoming(
 
         (CryptoStream::plain(stream), torrent, fast_ext, ext_proto, remote_pid, false)
     } else {
-        // MSE handshake — first byte is part of DH public key
+        // MSE handshake — the 20 bytes already read are the start of the DH
+        // public key, handed on intact.
         if torrent_mgr.policy().block_mse() {
             crate::tracker::MSE_INBOUND_REFUSED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             return;
         }
         let mut ya_rest = [0u8; 95];
-        match tokio::time::timeout(HS_TIMEOUT, stream.read_exact(&mut ya_rest)).await {
+        ya_rest[..19].copy_from_slice(&head[1..]);
+        match tokio::time::timeout(HS_TIMEOUT, stream.read_exact(&mut ya_rest[19..])).await {
             Ok(Ok(_)) => {}
             Ok(Err(_)) => {
                 warn!("[peer] {} MSE: failed to read Ya", addr);
@@ -1085,7 +1094,7 @@ async fn handle_incoming(
             HS_TIMEOUT,
             crate::crypto::mse::handshake_incoming_with(
                 &mut stream,
-                first[0],
+                head[0],
                 &ya_rest,
                 &peer_id,
                 // resolved per torrent below, same rule as the plaintext path
@@ -1470,6 +1479,68 @@ mod paused_inbound_tests {
         mgr.policy().set_encryption("require");
         let refused = knock(mgr.clone(), disk.clone(), ih).await;
         assert!(refused.is_empty(), "require: plaintext closed unanswered, got {} bytes", refused.len());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// ⭐ An MSE initiator whose public key happens to start with byte 19 --
+    /// the length byte of a plaintext handshake, one dial in 256 -- is still an
+    /// MSE initiator. Taken for plaintext, its connection is closed (the
+    /// protocol string does not follow). Here the key is forced to start with
+    /// 19 and the dial goes through the real acceptance path: both ends must
+    /// derive the same keys, which the initiator proves by being heard, over the
+    /// encrypted stream, by the session on the other side.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_mse_dial_whose_public_key_starts_with_19_is_accepted() {
+        use futures::{SinkExt, StreamExt};
+        use std::sync::atomic::Ordering;
+        use tokio_util::codec::Framed;
+
+        let (mgr, disk, root) = manager("mse-19");
+        let (ih, _) = mgr
+            .add_torrent_bytes(&torrent_bytes(), root.join("data").to_str().unwrap(), false, false)
+            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let at = listener.local_addr().unwrap();
+        let server = tokio::spawn({
+            let mgr = mgr.clone();
+            async move {
+                let (s, addr) = listener.accept().await.unwrap();
+                handle_incoming(super::PeerTransport::Tcp(s), addr, mgr, disk, [7u8; 20], None, at.port()).await;
+            }
+        });
+
+        let (xa, ya) = crate::crypto::mse::gen_keypair_starting_with(19);
+        assert_eq!(ya[0], 19, "the fixture: a public key that begins with the plaintext length byte");
+        let mut t = super::PeerTransport::Tcp(tokio::net::TcpStream::connect(at).await.unwrap());
+        let done = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            crate::crypto::mse::handshake_outgoing_keyed(&mut t, &ih, b"-TY0001-initiator000", false, xa, ya),
+        )
+        .await
+        .expect("the handshake finished in time");
+        let (enc, dec, hs) = done.expect(
+            "an MSE initiator whose public key starts with byte 19 was taken for a plaintext handshake and dropped",
+        );
+        assert_eq!(hs.peer_id, [7u8; 20], "the reply is ours: the handshake went through the MSE path");
+
+        // Same keys on both sides: the session's first message decrypts into
+        // something the codec reads, and what we send is understood.
+        let mut peer = Framed::new(
+            crate::crypto::stream::CryptoStream::new(t, Some(enc), Some(dec)),
+            crate::wire::codec::BtCodec::new(),
+        );
+        match tokio::time::timeout(std::time::Duration::from_secs(5), peer.next()).await {
+            Ok(Some(Ok(_))) => {}
+            other => panic!("the session's first message did not decrypt into a message: {other:?}"),
+        }
+        peer.send(crate::peer::message::Message::Interested).await.unwrap();
+        let torrent = mgr.get(&ih).unwrap();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !torrent.peer_stats.iter().any(|e| e.value().interested.load(Ordering::Relaxed)) {
+            assert!(tokio::time::Instant::now() < deadline, "what we encrypted was not decrypted by the session");
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        server.abort();
         let _ = std::fs::remove_dir_all(root);
     }
 
