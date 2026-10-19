@@ -205,6 +205,13 @@ pub fn health(state: &AppState) -> (bool, serde_json::Value) {
             "detail": "no engine is listening for peers",
         }));
     }
+    // A whole volume in fault is the one disk condition that is fatal.
+    for (volume, detail) in volume_faults(state) {
+        fatal = true;
+        problems.push(serde_json::json!({
+            "check": "volume", "severity": "fail", "volume": volume, "detail": detail,
+        }))
+    }
     let status = if fatal {
         "unhealthy"
     } else if problems.is_empty() {
@@ -222,6 +229,65 @@ pub fn health(state: &AppState) -> (bool, serde_json::Value) {
             "problems": problems,
         }),
     )
+}
+
+/// A single torrent is an accident, not a volume.
+const VOLUME_FAULT_MIN_TORRENTS: usize = 2;
+
+/// Volumes (as `volumes` names them: device of the save path, shown by mount
+/// point) whose every active torrent -- at least two, across all engines -- is
+/// in error. Returns `(mount point, reason)`.
+///
+/// `TorrentStatus::Error` is only ever set by `mark_error`, `mark_write_error`
+/// and `mark_data_lost`, which are all disk causes (data missing, save path
+/// gone, unreadable, write refused, sync failed): trackers and metadata never
+/// set it. No age limit: a volume that stays unmounted keeps its torrents in
+/// error, and it stays in fault until a recheck or a write clears them.
+///
+/// Conservative on purpose: `/health` is what an orchestrator restarts a
+/// container on. One torrent erroring, or a volume with a torrent still
+/// checking, seeding or downloading, never counts. No file is touched; the
+/// common case (no torrent in error) costs one atomic load per torrent.
+pub fn volume_faults(state: &AppState) -> Vec<(String, String)> {
+    use typhon_engine::torrent::meta::TorrentStatus;
+    let engines = state.engines.engines();
+    let errored = |t: &typhon_engine::torrent::meta::TorrentState| {
+        t.status.load(Relaxed) == TorrentStatus::Error as u8
+    };
+    if !engines.iter().any(|e| e.manager.all().iter().any(|t| errored(t))) {
+        return Vec::new();
+    }
+    // dev -> (sample path, active, in error)
+    let mut by_dev: std::collections::HashMap<u64, (std::path::PathBuf, usize, usize)> = Default::default();
+    let mut dev_of: std::collections::HashMap<std::path::PathBuf, Option<u64>> = Default::default();
+    for e in engines {
+        for t in e.manager.all() {
+            let status = t.status.load(Relaxed);
+            if status == TorrentStatus::Stopped as u8 || t.is_paused.load(Relaxed) {
+                continue;
+            }
+            let path = t.save_path.read().clone();
+            let Some(dev) = *dev_of.entry(path.clone()).or_insert_with(|| crate::volumes::device_of_nearest(&path)) else {
+                continue;
+            };
+            let entry = by_dev.entry(dev).or_insert((path, 0, 0));
+            entry.1 += 1;
+            entry.2 += errored(&t) as usize;
+        }
+    }
+    let mut out: Vec<(String, String)> = by_dev
+        .into_values()
+        .filter(|(_, active, errored)| *active >= VOLUME_FAULT_MIN_TORRENTS && errored == active)
+        .map(|(path, active, errored)| {
+            let mount = crate::volumes::mount_point_of(&path).display().to_string();
+            let detail = format!(
+                "volume {mount} is failing: {errored} of {active} active torrents on it are in disk error"
+            );
+            (mount, detail)
+        })
+        .collect();
+    out.sort();
+    out
 }
 
 /// Free space below this on a volume holding torrent data is reported.
@@ -822,6 +888,76 @@ mod tests {
         assert_eq!(v["checks"]["store"], "ok");
         assert_eq!(v["checks"]["engines"].as_array().unwrap().len(), 3);
         assert!(v["version"].is_string(), "the page reads its version labels here");
+    }
+
+    /// `/health` goes unhealthy for a whole volume in fault, never for one
+    /// torrent: an orchestrator may restart the container on a 503, and a
+    /// single bad torrent must not cost the others their swarms.
+    fn fail_writes(s: &TestState, hashes: &[String]) {
+        for (h, e) in hashes.iter().zip(["race", "hoard", "vpn7"]) {
+            let ih = typhon_engine::torrent::hex_decode(h).unwrap();
+            let t = s.state.engines.get(e).unwrap().manager.get(&ih).unwrap();
+            t.mark_write_error("cannot write to disk: No space left on device");
+        }
+    }
+
+    #[tokio::test]
+    async fn one_torrent_in_disk_error_leaves_health_healthy() {
+        let (s, hashes) = three_engines("obs-health-one");
+        fail_writes(&s, &hashes[..1]);
+        let (st, body) = get(&s, "/health").await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["status"], "healthy", "{v:#}");
+    }
+
+    #[tokio::test]
+    async fn every_torrent_of_a_volume_in_disk_error_makes_health_unhealthy_and_it_recovers() {
+        let (s, hashes) = three_engines("obs-health-volume");
+        fail_writes(&s, &hashes);
+        let (st, body) = get(&s, "/health").await;
+        assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["status"], "unhealthy", "{v:#}");
+        let p = v["problems"].as_array().unwrap().iter().find(|p| p["check"] == "volume").expect("a volume problem");
+        assert_eq!(p["severity"], "fail");
+        assert!(p["volume"].as_str().unwrap().starts_with('/'), "{v:#}");
+        assert!(p["detail"].as_str().unwrap().contains("3 of 3"), "{v:#}");
+        // The disk is dealt with: errors cleared, torrents seeding again.
+        for (h, e) in hashes.iter().zip(["race", "hoard", "vpn7"]) {
+            let ih = typhon_engine::torrent::hex_decode(h).unwrap();
+            let t = s.state.engines.get(e).unwrap().manager.get(&ih).unwrap();
+            t.clear_error();
+            t.status.store(typhon_engine::torrent::meta::TorrentStatus::Seeding as u8, Relaxed);
+        }
+        let (st, body) = get(&s, "/health").await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["status"], "healthy", "{v:#}");
+    }
+
+    /// A volume that stays unmounted keeps its torrents in error for good:
+    /// nothing but a recovery may turn it healthy again, not the passing of
+    /// time. Asked twice, with time between, it says the same.
+    #[tokio::test]
+    async fn a_volume_whose_torrents_stay_in_error_stays_unhealthy() {
+        let (s, hashes) = three_engines("obs-health-old");
+        fail_writes(&s, &hashes);
+        for _ in 0..2 {
+            let (st, body) = get(&s, "/health").await;
+            assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+            tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn some_torrents_of_a_volume_in_disk_error_leave_health_healthy() {
+        let (s, hashes) = three_engines("obs-health-some");
+        fail_writes(&s, &hashes[..2]);
+        let (st, body) = get(&s, "/health").await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["status"], "healthy", "{v:#}");
     }
 
     /// An engine the kill switch keeps off the network is `degraded`, still
