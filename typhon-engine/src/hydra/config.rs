@@ -294,6 +294,12 @@ pub struct Session {
     /// `PeerPolicy::set_idle_timeout_secs`). Applied live.
     #[serde(default)]
     pub peer_timeout: u64,
+    /// Seconds between the quick resume passes, which save the progress of
+    /// the downloads that wrote pieces since their last save. Absent = the
+    /// engine's default (60); 0 = off, only the full sweep (300 s) saves.
+    /// Read at start.
+    #[serde(default)]
+    pub resume_fast_secs: Option<u64>,
     /// Peer-wire encryption (MSE/PE): `allow` (default, also when absent:
     /// plaintext first, MSE as the fallback, both accepted), `prefer` (MSE
     /// first, plaintext fallback) or `require` (never plaintext, in either
