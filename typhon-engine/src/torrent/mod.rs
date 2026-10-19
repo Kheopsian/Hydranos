@@ -2078,16 +2078,16 @@ fn bitfield_is_complete(bytes: &[u8], num_pieces: u32) -> bool {
     true
 }
 
+/// Read byte pairs, not `&str` slices: a slice that ends inside a multibyte
+/// character panics. Anything that is not hex reads as no bitfield.
 fn hex_decode_bytes(hex: &str) -> Vec<u8> {
-    if hex.len() % 2 != 0 { return Vec::new(); }
-    let mut out = Vec::with_capacity(hex.len() / 2);
-    for i in (0..hex.len()).step_by(2) {
-        match u8::from_str_radix(&hex[i..i+2], 16) {
-            Ok(b) => out.push(b),
-            Err(_) => return Vec::new(),
-        }
-    }
-    out
+    let raw = hex.as_bytes();
+    if raw.len() % 2 != 0 { return Vec::new(); }
+    let digit = |c: u8| (c as char).to_digit(16).map(|d| d as u8);
+    raw.chunks_exact(2)
+        .map(|p| Some(digit(p[0])? << 4 | digit(p[1])?))
+        .collect::<Option<Vec<u8>>>()
+        .unwrap_or_default()
 }
 
 /// Where a torrent's files are on disk, at its current save path.
@@ -2458,6 +2458,33 @@ mod full_bitfield_tests {
         assert_eq!(full_bitfield(10), vec![0xFF, 0b1100_0000]);
         assert_eq!(full_bitfield(8), vec![0xFF]);
         assert!(full_bitfield(0).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod hex_decode_bytes_tests {
+    use super::hex_decode_bytes;
+
+    #[test]
+    fn a_hex_bitfield_decodes() {
+        assert_eq!(hex_decode_bytes("ff0aC0"), vec![0xFF, 0x0A, 0xC0]);
+        assert!(hex_decode_bytes("").is_empty());
+    }
+
+    /// A resume record is a file anyone can edit: what is not hex reads as
+    /// no bitfield (the torrent is rechecked), it does not stop the engine.
+    #[test]
+    fn a_bitfield_that_is_not_hex_reads_as_empty() {
+        for bad in ["f", "zz", "+f"] {
+            assert!(hex_decode_bytes(bad).is_empty(), "{:?}", bad);
+        }
+    }
+
+    #[test]
+    fn a_bitfield_with_a_multibyte_character_reads_as_empty() {
+        for bad in ["aé0", "éé", "ff€0"] {
+            assert!(hex_decode_bytes(bad).is_empty(), "{:?}", bad);
+        }
     }
 }
 
