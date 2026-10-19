@@ -114,6 +114,22 @@ impl RemoveTimings {
 pub const STATUS_SLOTS: usize = 6;
 pub const STATUS_PAUSED: usize = 5;
 
+/// A stored record the engine could not bring back at startup, or a store it
+/// could not open: what would otherwise only be a WARN line in a log nobody
+/// reads, while the torrent is simply absent from every list.
+#[derive(Debug, Clone)]
+pub struct StartupIssue {
+    /// The torrent's info hash; empty when the issue is the store itself.
+    pub info_hash: String,
+    /// `resume_skipped`, `resume_refused`, `state_row_unreadable` or
+    /// `state_db_unavailable`.
+    pub kind: &'static str,
+    pub detail: String,
+}
+
+/// The issues are listed up to this many; the count is not capped.
+pub const MAX_STARTUP_ISSUES: usize = 500;
+
 pub struct TorrentManager {
     torrents: DashMap<InfoHash, Arc<TorrentState>>,
     data_dir: String,
@@ -273,6 +289,9 @@ pub struct TorrentManager {
     /// reading "not loaded" as "delete it" turns a torrent that could still be
     /// repaired into one that cannot.
     refused_records: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// What startup could not restore (see `StartupIssue`): (how many, the
+    /// first few). Read by the anomaly route.
+    startup_issues: std::sync::Mutex<(usize, Vec<StartupIssue>)>,
     /// Last state written per torrent, so a sweep can skip the rows that did
     /// not move. Without this the periodic save rewrites every torrent every
     /// five minutes regardless of activity, which is what made the old scheme
@@ -527,6 +546,7 @@ impl TorrentManager {
         // One policy per engine, shared by its torrents and its magnet jobs.
         let policy: Arc<crate::peer::extension::PeerPolicy> = Default::default();
         let mirror_json = std::env::var("TYPHON_RESUME_JSON").map(|v| v == "1").unwrap_or(false);
+        let mut db_issue: Option<StartupIssue> = None;
         let state_db = if std::env::var("TYPHON_STATE_DB").map(|v| v == "0").unwrap_or(false) {
             info!("[statedb] disabled by TYPHON_STATE_DB=0, using legacy resume JSON only");
             None
@@ -545,6 +565,16 @@ impl TorrentManager {
                 }
                 Err(e) => {
                     warn!("[statedb] could not open {}: {} -- falling back to resume JSON", path.display(), e);
+                    db_issue = Some(StartupIssue {
+                        info_hash: String::new(),
+                        kind: "state_db_unavailable",
+                        detail: format!(
+                            "could not open {}: {}; running on the resume JSON files, which may be \
+                             stale or empty",
+                            path.display(),
+                            e
+                        ),
+                    });
                     None
                 }
             }
@@ -556,6 +586,10 @@ impl TorrentManager {
             disk,
             blob_source: std::sync::RwLock::new(None),
             refused_records: std::sync::Mutex::new(std::collections::HashSet::new()),
+            startup_issues: std::sync::Mutex::new(match db_issue {
+                Some(i) => (1, vec![i]),
+                None => (0, Vec::new()),
+            }),
             upload_rate: rate::RateTracker::new(),
             download_rate: rate::RateTracker::new(),
             cached_unseeded_peers: std::sync::atomic::AtomicUsize::new(0),
@@ -1222,6 +1256,15 @@ impl TorrentManager {
             if let Ok(mut refused) = self.refused_records.lock() {
                 refused.extend(unreadable.iter().map(|h| h.to_lowercase()));
             }
+            for h in &unreadable {
+                self.note_startup_issue(
+                    h,
+                    "state_row_unreadable",
+                    "the stored row could not be read (damaged, or its bitfield no longer matches \
+                     its checksum); it is kept in the store and the torrent is not loaded"
+                        .into(),
+                );
+            }
         }
         records
     }
@@ -1344,6 +1387,21 @@ impl TorrentManager {
         (imported, lost)
     }
 
+    fn note_startup_issue(&self, info_hash: &str, kind: &'static str, detail: String) {
+        if let Ok(mut g) = self.startup_issues.lock() {
+            g.0 += 1;
+            if g.1.len() < MAX_STARTUP_ISSUES {
+                g.1.push(StartupIssue { info_hash: info_hash.to_string(), kind, detail });
+            }
+        }
+    }
+
+    /// What startup could not restore: (how many, the first
+    /// `MAX_STARTUP_ISSUES`). Empty on a healthy library.
+    pub fn startup_issues(&self) -> (usize, Vec<StartupIssue>) {
+        self.startup_issues.lock().map(|g| g.clone()).unwrap_or_default()
+    }
+
     /// The records this engine refused at startup. Empty on a healthy library.
     pub fn refused_records(&self) -> std::collections::HashSet<String> {
         self.refused_records.lock().map(|r| r.clone()).unwrap_or_default()
@@ -1384,6 +1442,11 @@ impl TorrentManager {
                 Ok(m) => m,
                 Err(e) => {
                     warn!("[resume] skip {}: {}", &rd.info_hash[..8.min(rd.info_hash.len())], e);
+                    self.note_startup_issue(
+                        &rd.info_hash,
+                        "resume_skipped",
+                        format!("not loaded: {e}"),
+                    );
                     continue;
                 }
             };
@@ -1422,6 +1485,14 @@ impl TorrentManager {
                     &hex_encode(&ih)[..8],
                 );
                 mismatched += 1;
+                self.note_startup_issue(
+                    &rd.info_hash,
+                    "resume_refused",
+                    format!(
+                        "not loaded: the stored metainfo is {} instead -- the store key and the blob disagree",
+                        hex_encode(&ih)
+                    ),
+                );
                 if let Ok(mut refused) = self.refused_records.lock() {
                     refused.insert(rd.info_hash.to_lowercase());
                 }

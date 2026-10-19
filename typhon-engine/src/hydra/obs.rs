@@ -250,6 +250,7 @@ pub fn anomalies(state: &AppState) -> serde_json::Value {
         crate::health::REDL,
         crate::health::DUAL_SEED,
         crate::health::PATH_COLLISION,
+        crate::health::STARTUP_SKIPPED,
     ];
     let mut counts = serde_json::Map::new();
     for k in kinds {
@@ -845,8 +846,13 @@ mod tests {
 
     /// #89: a torrent whose data is gone is counted and listed, from the
     /// background pass; nothing is a constant 0 any more.
+    /// The pass publishes to one process-wide report: tests that run it and
+    /// read it back take turns.
+    static HEALTH_PASS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     #[tokio::test]
     async fn anomalies_count_what_the_pass_found() {
+        let _turn = HEALTH_PASS.lock().await;
         let (s, hashes) = three_engines("obs-anomalies");
         let vpn = s.state.engines.get("vpn7").unwrap();
         let ih = typhon_engine::torrent::hex_decode(&hashes[2]).unwrap();
@@ -868,6 +874,28 @@ mod tests {
         }
         assert!(v["engines"]["vpn7"]["states"].is_object(), "every engine, the extra one included");
         assert!(v["disks"].as_array().is_some_and(|d| !d.is_empty()), "data_dir's filesystem at least");
+    }
+
+    /// ⭐ A torrent whose record the engine could not bring back at startup
+    /// is in the anomaly report with its hash and why, instead of being a
+    /// torrent that is simply not in any list.
+    #[tokio::test]
+    async fn a_record_the_engine_did_not_restore_is_in_the_anomalies() {
+        let _turn = HEALTH_PASS.lock().await;
+        let (s, hashes) = three_engines("obs-skipped");
+        let vpn = s.state.engines.get("vpn7").unwrap();
+        // The store has lost the metainfo the record points at.
+        vpn.manager.set_blob_source(std::sync::Arc::new(|_: &str| None));
+        vpn.manager.load_resume_data();
+        crate::workers::health_pass(&s.state.engines);
+
+        let (st, body) = get(&s, "/api/health/anomalies").await;
+        assert_eq!(st, StatusCode::OK);
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let found = v["anomalies"].as_array().unwrap().iter().find(|a| a["info_hash"] == hashes[2]);
+        let found = found.unwrap_or_else(|| panic!("the skipped record is not reported: {v}"));
+        assert!(found["detail"].as_str().unwrap().contains("no metainfo"), "{found}");
+        assert!(v["counts"]["startup_skipped"].as_i64().unwrap() >= 1, "{v}");
     }
 
     /// #92: tracker health covers every engine, and a tracker failing on two
