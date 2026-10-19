@@ -98,6 +98,12 @@ pub struct Daemon {
     /// host (a backup job, a reader of the config) keeps reading them. Unix only.
     #[serde(default)]
     pub private_files: bool,
+    /// Resident-memory ceiling for the whole daemon, in MiB. Past it the daemon
+    /// logs one error (and one line when it is back under), so the Logs tab
+    /// shows it before the kernel's OOM killer does. 0 = off, the default.
+    /// A negative value is refused when the file is read.
+    #[serde(default)]
+    pub memory_alert_mb: i64,
 }
 
 /// The echo service asked when `[daemon] exit_probe_url` is empty.
@@ -106,6 +112,11 @@ pub const DEFAULT_EXIT_PROBE_URL: &str = "https://api.ipify.org/";
 impl Daemon {
     pub fn exit_probe_enabled(&self) -> bool {
         self.exit_probe.unwrap_or(true)
+    }
+
+    /// The memory ceiling in bytes, 0 = off.
+    pub fn memory_alert_bytes(&self) -> u64 {
+        u64::try_from(self.memory_alert_mb).unwrap_or(0).saturating_mul(1 << 20)
     }
 
     pub fn exit_probe_url(&self) -> String {
@@ -670,6 +681,13 @@ impl Config {
             .map_err(|e| anyhow::anyhow!("reading {}: {}", path.display(), e))?;
         let cfg: Config = toml::from_str(&text)
             .map_err(|e| anyhow::anyhow!("parsing {}: {}", path.display(), e))?;
+        if cfg.daemon.memory_alert_mb < 0 {
+            anyhow::bail!(
+                "{}: [daemon] memory_alert_mb = {} is negative; use 0 to turn the memory alert off, or a ceiling in MiB",
+                path.display(),
+                cfg.daemon.memory_alert_mb
+            );
+        }
         Ok(cfg)
     }
 }
@@ -805,6 +823,23 @@ mod tests {
         let cfg: Config = toml::from_str("").unwrap();
         assert_eq!(cfg.race.max_dials_per_sec, 50.0, "absent [race] must bound to 50");
         assert_eq!(cfg.hoard.max_dials_per_sec, 50.0, "absent [hoard] must bound to 50");
+    }
+
+    /// `memory_alert_mb`: absent and 0 are both "off", a positive value is the
+    /// ceiling, and a negative one is a mistake the load says so about -- a
+    /// silent "off" would leave the operator believing they are watched.
+    #[test]
+    fn the_memory_alert_is_off_by_default_and_a_negative_value_is_refused() {
+        let absent = Config::load(&write_tmp("mem-absent", "[daemon]\n")).unwrap();
+        assert_eq!(absent.daemon.memory_alert_bytes(), 0);
+        let zero = Config::load(&write_tmp("mem-zero", "[daemon]\nmemory_alert_mb = 0\n")).unwrap();
+        assert_eq!(zero.daemon.memory_alert_bytes(), 0);
+        let set = Config::load(&write_tmp("mem-set", "[daemon]\nmemory_alert_mb = 2048\n")).unwrap();
+        assert_eq!(set.daemon.memory_alert_bytes(), 2048 << 20);
+        let err = Config::load(&write_tmp("mem-neg", "[daemon]\nmemory_alert_mb = -1\n"))
+            .expect_err("a negative ceiling must be refused")
+            .to_string();
+        assert!(err.contains("memory_alert_mb") && err.contains("-1"), "{err}");
     }
 
     /// The placeholder is published in this repository, so it is not a secret.

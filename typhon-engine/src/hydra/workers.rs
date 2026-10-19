@@ -1396,6 +1396,18 @@ pub fn spawn_memory_watch(limit_bytes: u64) {
     watch_memory(limit_bytes, resident_bytes)
 }
 
+/// Start-up wrapper for `[daemon] memory_alert_mb`: says in the log whether the
+/// memory watch is on, then starts it. Returns whether a watch was started.
+pub fn start_memory_watch(limit_bytes: u64) -> bool {
+    if limit_bytes == 0 {
+        tracing::info!("memory alert: off ([daemon] memory_alert_mb = 0)");
+        return false;
+    }
+    tracing::info!("memory alert: on, ceiling {} MiB", limit_bytes >> 20);
+    spawn_memory_watch(limit_bytes);
+    true
+}
+
 /// `spawn_memory_watch` with the resident-size reader given, so a test can
 /// set the reading instead of growing the whole test process to cross it.
 fn watch_memory(limit_bytes: u64, mut read: impl FnMut() -> Option<u64> + Send + 'static) {
@@ -2719,6 +2731,27 @@ mod decision_tests {
         spawn_memory_watch(1 << 30);
         tokio::task::yield_now().await;
         assert_eq!(alive_tasks(), base + 1);
+    }
+
+    /// The start-up line says whether the memory watch is on, and a ceiling
+    /// starts it; no ceiling starts nothing.
+    #[tokio::test]
+    async fn the_memory_watch_says_at_startup_whether_it_is_on() {
+        let log = capture();
+        let base = alive_tasks();
+        assert!(!start_memory_watch(0));
+        tokio::task::yield_now().await;
+        assert_eq!(alive_tasks(), base, "no ceiling, no watcher");
+        let off = lines(&log, "memory alert");
+        assert_eq!(off.len(), 1, "{off:?}");
+        assert!(off[0].starts_with("INFO") && off[0].contains("off"), "{off:?}");
+
+        assert!(start_memory_watch(1536 << 20));
+        tokio::task::yield_now().await;
+        assert_eq!(alive_tasks(), base + 1, "a ceiling starts the watcher");
+        let on = lines(&log, "memory alert");
+        assert_eq!(on.len(), 2, "{on:?}");
+        assert!(on[1].starts_with("INFO") && on[1].contains("1536 MiB"), "{on:?}");
     }
 
     /// ⭐ The daily sync copies the engine's seeding time into the store's
