@@ -161,6 +161,19 @@ API_KEY=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')
 # operator's back. HYDRANOS_VERSION_PIN overrides it.
 CTRL_VER=$(curl -fsS -m 10 "$REGISTER_TO/health" 2>/dev/null | sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' | head -1)
 VER="${HYDRANOS_VERSION_PIN:-${CTRL_VER:+v$CTRL_VER}}"
+# The version is spliced into download URLs and an image tag, and /health is
+# plain HTTP: only a dotted number (optionally prefixed with v) is accepted, so
+# a value can never carry a path segment, a query or a second URL.
+if [ -n "$VER" ]; then
+    case "$VER" in
+        *[!v0-9.]*) ver_ok=no ;;
+        *) printf '%s\n' "$VER" | grep -Eq '^v?[0-9]+(\.[0-9]+)*$' && ver_ok=yes || ver_ok=no ;;
+    esac
+    if [ "$ver_ok" != yes ]; then
+        echo "the version \"$VER\" is not a plain version number (expected e.g. v4.5.3) -- refusing to build a download URL from it" >&2
+        exit 1
+    fi
+fi
 
 echo "==> node   : $NAME"
 echo "==> address: $SELF_URL_HOST:$PORT"
