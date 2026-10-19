@@ -1332,6 +1332,84 @@ mod disk_tests {
         assert_eq!(saved_bitfield(&f), "b0", "nor saved as held");
     }
 
+    /// A second engine over the first one's state, as after a restart, once
+    /// `sql` has been run on the state database behind its back.
+    fn restart_after(f: &Fixture, sql: &str) -> (Arc<crate::torrent::TorrentManager>, Arc<crate::torrent::meta::TorrentState>) {
+        f._mgr.save_all_resume();
+        rusqlite::Connection::open(f.root.join("state.db")).unwrap().execute_batch(sql).unwrap();
+        let mgr = Arc::new(crate::torrent::TorrentManager::new(
+            f.root.join("data").to_string_lossy().into_owned(),
+            f.root.join("resume").to_string_lossy().into_owned(),
+            Arc::new(DiskManager::new(16)),
+        ));
+        let blob = f.torrent.metainfo_bytes().expect("the fixture's blob");
+        mgr.set_blob_source(Arc::new(move |_: &str| Some(blob.clone())));
+        assert_eq!(mgr.load_resume_data(), 1);
+        let t = mgr.get(&f.torrent.info_hash).expect("restored");
+        (mgr, t)
+    }
+
+    fn held_of(t: &crate::torrent::meta::TorrentState) -> Vec<u32> {
+        match t.picker.get() {
+            Some(p) => {
+                let p = p.lock().unwrap();
+                (0..4).filter(|i| p.has_piece(*i)).collect()
+            }
+            None => vec![0, 1, 2, 3],
+        }
+    }
+
+    /// The torrent, once it holds exactly `want` or a second and a half have
+    /// gone by (a recheck runs in the background).
+    async fn held_after_settling(t: &crate::torrent::meta::TorrentState, want: &[u32]) -> Vec<u32> {
+        for _ in 0..75 {
+            if held_of(t) == want {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        held_of(t)
+    }
+
+    /// ⭐ A bitfield that cannot be read as hex is not a torrent at 0% that
+    /// downloads again what is already on disk: the disk is asked, and the
+    /// pieces it holds are recognised.
+    #[tokio::test]
+    async fn a_bitfield_that_is_not_hex_is_rechecked_against_the_disk() {
+        let (f, chunks) = four_piece_fixture("nothex");
+        download(&f, 0, &chunks[0]).await;
+        download(&f, 1, &chunks[1]).await;
+        let (mgr, t) = restart_after(&f, "UPDATE torrent_state SET bitfield='zz'");
+
+        assert_eq!(held_after_settling(&t, &[0, 1]).await, vec![0, 1], "what is on disk is recognised");
+        let (_, issues) = mgr.startup_issues();
+        assert!(
+            issues.iter().any(|i| i.info_hash == hex_of(&f) && i.kind == "bitfield_discarded"),
+            "and the anomaly is listed: {issues:?}"
+        );
+    }
+
+    /// The same for a bitfield that no longer matches the sum stored with it:
+    /// the torrent is loaded, the claim set aside, the disk asked.
+    #[tokio::test]
+    async fn a_bitfield_that_fails_its_checksum_is_rechecked_against_the_disk() {
+        let (f, chunks) = four_piece_fixture("badsum");
+        download(&f, 0, &chunks[0]).await;
+        download(&f, 1, &chunks[1]).await;
+        let (mgr, t) = restart_after(
+            &f,
+            "DROP TRIGGER IF EXISTS bitfield_sum_reset; UPDATE torrent_state SET bitfield='f0'",
+        );
+
+        assert_eq!(held_after_settling(&t, &[0, 1]).await, vec![0, 1], "only what the disk holds");
+        let (_, issues) = mgr.startup_issues();
+        assert!(issues.iter().any(|i| i.kind == "bitfield_discarded"), "{issues:?}");
+    }
+
+    fn hex_of(f: &Fixture) -> String {
+        crate::torrent::hex_encode(&f.torrent.info_hash)
+    }
+
     #[tokio::test]
     async fn the_zero_copy_path_declines_a_request_it_cannot_satisfy_whole() {
         let content = vec![2u8; 1024];

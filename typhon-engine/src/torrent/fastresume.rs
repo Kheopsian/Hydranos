@@ -4,6 +4,11 @@ use tracing::{info, warn};
 
 use super::meta::InfoHash;
 
+/// What the state store puts in a record's `bitfield` when the one it holds
+/// no longer matches its checksum. Not hex, so it reads as "no usable
+/// bitfield"; the loader then asks the disk rather than the record.
+pub const BITFIELD_DISCARDED: &str = "!discarded";
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ResumeData {
     pub info_hash: String,
