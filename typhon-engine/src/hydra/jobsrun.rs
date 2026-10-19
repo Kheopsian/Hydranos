@@ -214,6 +214,17 @@ fn graduate(state: &AppState, job: &crate::store::Job) -> Result<(), String> {
                 .ok_or("the source engine no longer holds it")?;
             let old_root = t.save_path.read().clone();
             let files = graduation_files(&t.meta, &old_root, &dest_root);
+            // The room for the WHOLE torrent, asked before it leaves its
+            // engine: file by file, a disk that holds the first files and not
+            // the last fails halfway, with half the torrent already moved.
+            let needed = crate::jobs::bytes_to_copy(&files);
+            if let Some(free) = crate::jobs::free_space_near(std::path::Path::new(&dest_root)) {
+                if free < needed {
+                    return Err(format!(
+                        "{needed} bytes to copy, {free} free at {dest_root}; nothing was moved"
+                    ));
+                }
+            }
             let mut carrying = p.clone();
             carrying["record"] = serde_json::to_value(&original).map_err(|e| e.to_string())?;
             {
@@ -1673,6 +1684,72 @@ mod graduate_tests {
         assert!(!dst.join("grad").exists());
         let back = s.state.engines.get("race").unwrap().manager.get(&ih).expect("back in race");
         assert_eq!(*back.save_path.read(), src);
+    }
+
+    /// Puts the thread back to the one filesystem tests run on.
+    struct FullDisk;
+    impl FullDisk {
+        fn copying() -> Self {
+            crate::jobs::FORCE_COPY.with(|c| c.set(true));
+            FullDisk
+        }
+    }
+    impl Drop for FullDisk {
+        fn drop(&mut self) {
+            crate::jobs::FORCE_COPY.with(|c| c.set(false));
+            crate::jobs::COPY_FULL_AFTER.with(|c| c.set(None));
+            crate::jobs::FREE_SPACE.with(|c| c.set(None));
+        }
+    }
+
+    /// ⭐ A copy that runs out of space leaves no partial file on the
+    /// destination, and the graduation can be asked again. The partial file
+    /// used to stay: the next try met "a file is already there" and was
+    /// refused, every time, until someone deleted it by hand.
+    #[test]
+    fn a_graduation_that_fills_the_disk_leaves_no_partial_file_and_can_be_retried() {
+        let (s, hash, src, dst) = setup("grad-disk-full");
+        let ih = typhon_engine::torrent::hex_decode(&hash).unwrap();
+        let _full = FullDisk::copying();
+        crate::jobs::COPY_FULL_AFTER.with(|c| c.set(Some(4096)));
+
+        let err = graduate(&s.state, &job(&hash, &dst)).expect_err("the disk is full");
+        assert!(err.contains("no space"), "{err}");
+        assert!(!dst.join("grad").exists(), "a partial file was left on the destination");
+        assert_eq!(std::fs::read(src.join("grad")).unwrap(), vec![7u8; 16384], "the source is intact");
+        assert!(s.state.engines.get("race").unwrap().manager.get(&ih).is_some(), "back in race");
+
+        // Space came back: the same graduation goes through.
+        crate::jobs::COPY_FULL_AFTER.with(|c| c.set(None));
+        graduate(&s.state, &job(&hash, &dst)).expect("the retry is not blocked");
+        assert_eq!(std::fs::read(dst.join("grad")).unwrap(), vec![7u8; 16384]);
+        assert!(s.state.engines.get("hoard").unwrap().manager.get(&ih).is_some());
+    }
+
+    /// ⭐ The room for the whole torrent is asked before anything is copied:
+    /// each of its two files fits, both together do not.
+    #[test]
+    fn a_graduation_checks_the_room_for_the_whole_torrent_first() {
+        let s = state_from("grad-room", "");
+        let src = s.dir.join("race-data");
+        let dst = s.dir.join("hoard-data");
+        std::fs::create_dir_all(src.join("pair")).unwrap();
+        std::fs::write(src.join("pair").join("a"), vec![1u8; 16384]).unwrap();
+        std::fs::write(src.join("pair").join("b"), vec![2u8; 16384]).unwrap();
+        let (hash, _) = crate::api::add_torrent_bytes(
+            &s.state, &files_torrent_bytes(&[("a", 16384), ("b", 16384)]), "",
+            &src.display().to_string(), "", true, true, "race",
+        )
+        .expect("added");
+        let ih = typhon_engine::torrent::hex_decode(&hash).unwrap();
+        let _full = FullDisk::copying();
+        crate::jobs::FREE_SPACE.with(|c| c.set(Some(20000)));
+
+        let err = graduate(&s.state, &job(&hash, &dst)).expect_err("32768 bytes do not fit in 20000");
+        assert!(err.contains("nothing was moved"), "{err}");
+        assert!(src.join("pair").join("a").exists() && src.join("pair").join("b").exists());
+        assert!(!dst.join("pair").exists(), "nothing was copied before the refusal");
+        assert!(s.state.engines.get("race").unwrap().manager.get(&ih).is_some(), "still in race");
     }
 
     /// A move interrupted after its torrent left the engine, with the job's
