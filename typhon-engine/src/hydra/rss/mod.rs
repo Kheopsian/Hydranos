@@ -126,7 +126,7 @@ fn failed(e: impl std::fmt::Display) -> Refusal {
 /// A magnet keeps its info hash only: its `tr=` can carry a passkey too.
 pub fn mask_url(url: &str) -> String {
     let u = url.trim();
-    if u.len() >= 7 && u[..7].eq_ignore_ascii_case("magnet:") {
+    if u.get(..7).is_some_and(|p| p.eq_ignore_ascii_case("magnet:")) {
         let xt = u.split(['?', '&']).find(|p| p.starts_with("xt="));
         return match xt {
             Some(xt) => format!("magnet:?{xt}&***"),
@@ -154,8 +154,8 @@ pub fn mask_url(url: &str) -> String {
     format!("{scheme}://{host}{}{}", path.join("/"), if had_query { "?***" } else { "" })
 }
 
-fn is_magnet(u: &str) -> bool {
-    u.len() > 8 && u[..8].eq_ignore_ascii_case("magnet:?")
+pub(crate) fn is_magnet(u: &str) -> bool {
+    u.len() > 8 && u.get(..8).is_some_and(|p| p.eq_ignore_ascii_case("magnet:?"))
 }
 
 fn is_http(u: &str) -> bool {
