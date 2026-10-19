@@ -21,7 +21,7 @@ decided when the release is cut, by looking at what went in: whoever tags it
 renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 `HYDRANOS_VERSION` in the same commit.
 
-## Unreleased -- an encrypted connection is not mistaken for a plaintext one
+## v4.5.3 -- an encrypted connection is not mistaken for a plaintext one
 
 ### Added
 
