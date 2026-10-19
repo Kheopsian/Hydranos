@@ -798,13 +798,22 @@ pub async fn run(
                                     if let Some(m) = extension::parse_metadata_message(&payload) {
                                         if m.msg_type == extension::METADATA_REQUEST {
                                             let reply = serve_metadata_block(&torrent, m.piece);
-                                            framed
-                                                .send(Message::Extended {
-                                                    ext_id: extension::OUR_UT_METADATA_ID,
-                                                    payload: Bytes::from(reply),
-                                                })
-                                                .await
-                                                .ok();
+                                            // Their id, not ours: an extended
+                                            // message is addressed with the
+                                            // number the RECEIVER advertised,
+                                            // and a peer that advertised none
+                                            // (or 0) is sent nothing.
+                                            if let Some(id) =
+                                                peer_ext.as_ref().and_then(|e| e.ut_metadata_id)
+                                            {
+                                                framed
+                                                    .send(Message::Extended {
+                                                        ext_id: id,
+                                                        payload: Bytes::from(reply),
+                                                    })
+                                                    .await
+                                                    .ok();
+                                            }
                                         }
                                     }
                                 } else if ext_id == crate::peer::holepunch::OUR_UT_HOLEPUNCH_ID
