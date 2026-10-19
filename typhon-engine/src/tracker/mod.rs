@@ -1372,3 +1372,6 @@ mod socks_dial_tests {
         assert_eq!(*seen.lock().unwrap(), vec![true, false]);
     }
 }
+
+#[cfg(test)]
+mod unit_tests;
