@@ -524,6 +524,9 @@ pub struct TorrentState {
     /// The engine's download-memory budget, for a picker built after the
     /// fact (`retract_pieces`). Set when the engine adopts the torrent.
     pub piece_mem: OnceLock<Arc<super::piece_picker::PieceMem>>,
+    /// 0 = the files have not been checked against the saved state yet,
+    /// 1 = a session is checking them, 2 = done. See `verify_files_once`.
+    pub files_checked: std::sync::atomic::AtomicU8,
     /// Broadcast of freshly completed pieces, so connected peers can be sent
     /// a Have. Created on first use and dropped again the moment the torrent
     /// starts seeding: a complete torrent never announces a new piece, and
@@ -1114,6 +1117,7 @@ impl TorrentState {
             next_announce_at: AtomicI64::new(0),
             error_msg: Mutex::new(String::new()),
             piece_mem: OnceLock::new(),
+            files_checked: std::sync::atomic::AtomicU8::new(0),
             peer_stats: DashMap::with_shard_amount(PER_TORRENT_SHARDS),
             connected_addrs: DashMap::with_shard_amount(PER_TORRENT_SHARDS),
         }
@@ -1151,6 +1155,104 @@ impl TorrentState {
         }
         self.status.store(TorrentStatus::Error as u8, Ordering::Relaxed);
         tracing::error!(torrent = %self.meta.name, "stopped fetching: {}", msg);
+    }
+
+    /// Before the first peer is told what we hold: check that the files on
+    /// disk can back it. Once per torrent per run, lazily -- a library of a
+    /// million torrents pays one `stat` per file only for the torrents that
+    /// are actually used, never at startup.
+    ///
+    /// A saved bitfield is believed without reading a byte, so one that was
+    /// damaged (a digit flipped in the database) or outlived its data (a file
+    /// cut short, deleted, replaced) would offer and serve pieces that were
+    /// never there. This does not hash anything: it only refuses the claim
+    /// of bytes past the end of a file, or in a file that is gone. A hole
+    /// inside a file is for a recheck.
+    pub async fn verify_files_once(self: &Arc<Self>) {
+        // A download that holds nothing has nothing to doubt: no thread hop
+        // for it, a session of a fresh download starts as fast as ever.
+        if self.files_checked.load(Ordering::SeqCst) == 0 {
+            let nothing_held = self
+                .picker
+                .get()
+                .is_some_and(|p| p.lock().unwrap().num_have() == 0);
+            if nothing_held {
+                let _ = self.files_checked.compare_exchange(0, 2, Ordering::SeqCst, Ordering::SeqCst);
+                return;
+            }
+        }
+        match self.files_checked.compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(_) => {
+                let t = self.clone();
+                let _ = tokio::task::spawn_blocking(move || t.check_files_back_the_state()).await;
+                self.files_checked.store(2, Ordering::SeqCst);
+            }
+            Err(2) => {}
+            // Another session is at it: do not tell our peer anything first.
+            Err(_) => {
+                for _ in 0..100 {
+                    if self.files_checked.load(Ordering::SeqCst) == 2 {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+            }
+        }
+    }
+
+    fn check_files_back_the_state(&self) {
+        // A recheck reads the disk and is the authority.
+        if self.status.load(Ordering::Relaxed) == TorrentStatus::Checking as u8 {
+            return;
+        }
+        // Nothing held: nothing to doubt.
+        if let Some(p) = self.picker.get() {
+            if p.lock().unwrap().num_have() == 0 {
+                return;
+            }
+        }
+        let save = self.save_path.read().clone();
+        // No folder at all is a volume that is not mounted, not a loss of
+        // pieces: park it, as a read of it would, and keep what it holds
+        // recorded for when the volume is back.
+        if !save.exists() {
+            self.mark_error(&format!("save path {} is not there", save.display()));
+            return;
+        }
+        let plen = self.meta.piece_length as u64;
+        let mut lost: Vec<u32> = Vec::new();
+        let mut short: Vec<String> = Vec::new();
+        for f in &self.meta.files {
+            if f.length == 0 {
+                continue;
+            }
+            let path = if self.meta.multi_file {
+                save.join(&self.meta.name).join(&f.path)
+            } else {
+                save.join(&f.path)
+            };
+            let actual = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            if actual >= f.length {
+                continue;
+            }
+            // The bytes this file lacks, and every piece that touches them.
+            let (from, to) = (f.offset + actual, f.offset + f.length);
+            lost.extend((from / plen..=(to - 1) / plen).map(|p| p as u32));
+            short.push(format!("{} ({} of {} bytes)", path.display(), actual, f.length));
+        }
+        if lost.is_empty() {
+            return;
+        }
+        let n = self.retract_pieces(
+            &lost,
+            &format!(
+                "files on disk are shorter than the saved state claims: {}. The pieces they \
+                 cannot hold are no longer counted as held; recheck this torrent once the data \
+                 is back",
+                short.iter().take(3).cloned().collect::<Vec<_>>().join(", ")
+            ),
+        );
+        tracing::warn!(torrent = %self.meta.name, "{} piece(s) claimed by the saved state are not on disk", n);
     }
 
     /// Stop counting `pieces` as held, and say why in the torrent's error.

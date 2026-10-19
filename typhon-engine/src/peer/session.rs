@@ -323,6 +323,9 @@ pub async fn run(
     // removes + decrements on drop (panic-safe).
     let guard = PeerGuard::new(torrent.clone(), stats.clone());
 
+    // What we are about to say we hold must be backed by the files.
+    torrent.verify_files_once().await;
+
     let is_seeding = torrent.status.load(Ordering::Relaxed) == TorrentStatus::Seeding as u8;
     let num_pieces = torrent.meta.num_pieces();
 

@@ -591,3 +591,76 @@ fn a_capped_session_still_hears_the_peer() {
         let _ = std::fs::remove_dir_all(dir);
     });
 }
+
+/// The bitfield a session sends first.
+async fn opening_bitfield(t: Arc<TorrentState>) -> Vec<u8> {
+    let (ours, theirs) = pair().await;
+    let mut peer = start(t, false, ours, theirs);
+    match wait_for(&mut peer, "bitfield", |m| matches!(m, Message::Bitfield { .. })).await {
+        Message::Bitfield { data } => data.to_vec(),
+        _ => unreachable!(),
+    }
+}
+
+fn cut_to_pieces(dir: &std::path::Path, pieces: u64) {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(dir.join("payload.bin"))
+        .unwrap()
+        .set_len(pieces * 16384)
+        .unwrap();
+}
+
+/// ⭐ What the saved state says we hold is checked against the files before a
+/// peer is told: a record claiming all four pieces of a file that holds two
+/// offers two, not four.
+#[test]
+fn a_seed_whose_file_is_cut_short_does_not_claim_the_missing_pieces() {
+    rt().block_on(async {
+        let (t, dir) = seeding_with_payload("cutshort", 4);
+        cut_to_pieces(&dir, 2);
+        let bits = opening_bitfield(t).await;
+        assert_eq!(bits[0], 0b1100_0000, "only the two pieces the file holds");
+        let _ = std::fs::remove_dir_all(dir);
+    });
+}
+
+/// A file that is gone: nothing is offered.
+#[test]
+fn a_seed_whose_file_is_gone_claims_nothing() {
+    rt().block_on(async {
+        let (t, dir) = seeding_with_payload("filegone", 4);
+        std::fs::remove_file(dir.join("payload.bin")).unwrap();
+        let bits = opening_bitfield(t).await;
+        assert_eq!(bits[0], 0, "no piece of a file that is not there");
+        let _ = std::fs::remove_dir_all(dir);
+    });
+}
+
+/// A download whose picker was restored claiming everything, over a file
+/// that holds half of it.
+#[test]
+fn a_restored_picker_claiming_more_than_the_file_holds_is_cut_down() {
+    rt().block_on(async {
+        let (seed, dir) = seeding_with_payload("pickerclaim", 4);
+        let t = Arc::new(TorrentState::new(seed.meta.clone(), dir.clone(), false));
+        t.status.store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+        t.picker.get().expect("a download has a picker").lock().unwrap().import_bitfield(&[0xF0]);
+        cut_to_pieces(&dir, 2);
+        let bits = opening_bitfield(t).await;
+        assert_eq!(bits[0], 0b1100_0000);
+        let _ = std::fs::remove_dir_all(dir);
+    });
+}
+
+/// A file that is whole changes nothing.
+#[test]
+fn a_seed_whose_file_is_whole_still_says_it_has_everything() {
+    rt().block_on(async {
+        let (t, dir) = seeding_with_payload("filewhole", 4);
+        let (ours, theirs) = pair().await;
+        let mut peer = start(t, true, ours, theirs);
+        wait_for(&mut peer, "have all", |m| matches!(m, Message::HaveAll)).await;
+        let _ = std::fs::remove_dir_all(dir);
+    });
+}
