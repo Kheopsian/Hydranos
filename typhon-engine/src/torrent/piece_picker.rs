@@ -196,6 +196,21 @@ impl PieceMem {
         budget == 0 || committed == 0 || committed + size <= budget
     }
 
+    /// `admits` and the reservation in ONE step. Torrents each hold their own
+    /// picker lock, so a check followed by a reservation let several of them
+    /// pass the check on the same remainder and overshoot the budget by as many
+    /// pieces as there were starts in that window.
+    fn try_reserve(&self, size: u64) -> bool {
+        let budget = self.budget();
+        let writing = self.writing();
+        self.reserved
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |reserved| {
+                let committed = reserved + writing;
+                (budget == 0 || committed == 0 || committed + size <= budget).then_some(reserved + size)
+            })
+            .is_ok()
+    }
+
     /// Count `len` bytes as being written until the hold is dropped.
     pub fn hold_write(self: &Arc<Self>, len: u64) -> WriteHold {
         self.writing.fetch_add(len, Ordering::Relaxed);
@@ -690,14 +705,34 @@ impl PiecePicker {
     /// used to overwrite the first, throwing away every block received for it.
     /// The joiner is asked only for the blocks still missing.
     pub fn start_piece(&mut self, piece: u32, piece_size: u32, block_size: u32, owner: Owner) -> Vec<(u32, u32, u32)> {
+        self.start_piece_impl(piece, piece_size, block_size, owner, false).unwrap_or_default()
+    }
+
+    /// `start_piece`, but a NEW piece is started only if the engine's budget
+    /// admits it, the check and the reservation made together. `None`: no room.
+    /// Joining a piece already in flight always succeeds.
+    pub fn start_piece_within_budget(&mut self, piece: u32, piece_size: u32, block_size: u32, owner: Owner) -> Option<Vec<(u32, u32, u32)>> {
+        self.start_piece_impl(piece, piece_size, block_size, owner, true)
+    }
+
+    fn start_piece_impl(&mut self, piece: u32, piece_size: u32, block_size: u32, owner: Owner, gated: bool) -> Option<Vec<(u32, u32, u32)>> {
         if let Some(p) = self.pending.get_mut(&piece) {
             if !p.owners.contains(&owner) {
                 p.owners.push(owner);
             }
-            return p.missing(piece);
+            return Some(p.missing(piece));
         }
         if block_size == 0 {
-            return Vec::new();
+            return Some(Vec::new());
+        }
+        let mut reserved = false;
+        if gated {
+            if let Some(m) = &self.mem {
+                if !m.try_reserve(piece_size as u64) {
+                    return None;
+                }
+                reserved = true;
+            }
         }
         let num_blocks = piece_size.div_ceil(block_size) as usize;
         let p = PendingPiece {
@@ -713,10 +748,10 @@ impl PiecePicker {
         self.pending.insert(piece, p);
         self.account(1, 0);
         self.reserved_bytes += piece_size as u64;
-        if let Some(m) = &self.mem {
+        if let Some(m) = self.mem.as_ref().filter(|_| !reserved) {
             m.reserve(piece_size as i64);
         }
-        requests
+        Some(requests)
     }
 
     /// Store a block a peer sent, at its exact size.
