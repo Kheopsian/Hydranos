@@ -21,6 +21,18 @@ decided when the release is cut, by looking at what went in: whoever tags it
 renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 `HYDRANOS_VERSION` in the same commit.
 
+## Unreleased -- an encrypted connection is not mistaken for a plaintext one
+
+### Fixed
+
+- An incoming connection was taken for a plaintext handshake when its first
+  byte was 19, and closed when the protocol string did not follow. An
+  encrypted (MSE) peer's public key starts with that byte one time in 256, so
+  about one encrypted dial in 256 was refused for no reason. A connection is
+  now plaintext only when it opens with the 20 bytes of a BitTorrent handshake
+  (length byte and protocol string); anything else is handed to the encrypted
+  handshake with those bytes intact.
+
 ## v4.5.2 -- a resumed move does not finish without a file it had
 
 ### Fixed
