@@ -3084,7 +3084,8 @@ mod decision_tests {
         let seeds: Vec<_> = ["ql", "qm", "qn"]
             .iter()
             .map(|n| {
-                let (ih, _) = mgr.add_torrent_bytes(&torrent_bytes(n), "/tmp", false, true).unwrap();
+                // In the test's own directory: the removal below deletes files.
+                let (ih, _) = mgr.add_torrent_bytes(&torrent_bytes(n), s.dir.to_str().unwrap(), false, true).unwrap();
                 let t = mgr.get(&ih).unwrap();
                 t.status.store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
                 t.is_paused.store(false, Ordering::Relaxed);
