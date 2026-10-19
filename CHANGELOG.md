@@ -21,6 +21,18 @@ decided when the release is cut, by looking at what went in: whoever tags it
 renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 `HYDRANOS_VERSION` in the same commit.
 
+## Unreleased -- a graduation that runs out of disk cleans up after itself
+
+### Fixed
+
+- A file copy that failed (a full disk above all) left its partial file on the
+  destination. The next try met a file already there and was refused, every
+  time. A failed copy now removes what it wrote.
+- A graduation checked the room file by file, as each was copied, so a disk
+  that held the first files and not the last failed halfway. It now asks for
+  the room for the whole torrent before the torrent leaves its engine, and
+  refuses with nothing moved.
+
 ## v4.5.3 -- an encrypted connection is not mistaken for a plaintext one
 
 ### Added

@@ -10,6 +10,17 @@
 
 use std::path::{Path, PathBuf};
 
+#[cfg(test)]
+thread_local! {
+    /// Tests run on one filesystem: this makes every move a copy.
+    pub(crate) static FORCE_COPY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// A copy on this thread fails with "no space left" once it has written
+    /// this many bytes, leaving what it wrote: a full disk.
+    pub(crate) static COPY_FULL_AFTER: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+    /// The free space `free_space_near` reports on this thread.
+    pub(crate) static FREE_SPACE: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+}
+
 /// A move, planned before anything is touched.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Plan {
@@ -30,6 +41,10 @@ pub fn plan(source: &Path, target: &Path) -> std::io::Result<Plan> {
         return Ok(Plan::AlreadyThere);
     }
     let meta = std::fs::metadata(source)?;
+    #[cfg(test)]
+    if FORCE_COPY.with(|c| c.get()) {
+        return Ok(Plan::CopyThenDelete { bytes: meta.len() });
+    }
     if same_filesystem(source, target) {
         return Ok(Plan::Rename);
     }
@@ -85,20 +100,46 @@ pub fn free_space(path: &Path) -> Option<u64> {
 ///
 /// The copy is flushed before this returns: a caller that deletes the source
 /// next must not be deleting the only complete copy.
+///
+/// ⭐ A copy that fails (a full disk above all) does not leave its partial
+/// file: it would sit on the destination, fill the disk a little more, and
+/// make every retry meet "a file is already there".
 pub fn copy_only(source: &Path, target: &Path) -> std::io::Result<u64> {
-    use std::io::{Read, Write};
-
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let mut src = std::fs::File::open(source)?;
     let mut dst = std::fs::File::create(target)?;
+    match copy_loop(&mut src, &mut dst) {
+        Ok(copied) => Ok(copied),
+        Err(e) => {
+            drop(dst);
+            let _ = std::fs::remove_file(target);
+            Err(e)
+        }
+    }
+}
+
+fn copy_loop(src: &mut std::fs::File, dst: &mut std::fs::File) -> std::io::Result<u64> {
+    use std::io::{Read, Write};
+
     let mut buf = vec![0u8; 4 << 20];
     let mut copied = 0u64;
     loop {
         let n = src.read(&mut buf)?;
         if n == 0 {
             break;
+        }
+        #[cfg(test)]
+        if let Some(limit) = COPY_FULL_AFTER.with(|c| c.get()) {
+            let room = limit.saturating_sub(copied) as usize;
+            if room < n {
+                dst.write_all(&buf[..room])?;
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::StorageFull,
+                    "no space left on device",
+                ));
+            }
         }
         dst.write_all(&buf[..n])?;
         copied += n as u64;
@@ -165,6 +206,10 @@ pub fn run_move_allowing(
 /// Free bytes where `path` would land. The target usually does not exist yet,
 /// so its nearest existing ancestor is what gets asked.
 pub fn free_space_near(path: &Path) -> Option<u64> {
+    #[cfg(test)]
+    if let Some(free) = FREE_SPACE.with(|c| c.get()) {
+        return Some(free);
+    }
     let mut cur = path;
     loop {
         if cur.exists() {
@@ -172,6 +217,22 @@ pub fn free_space_near(path: &Path) -> Option<u64> {
         }
         cur = cur.parent()?;
     }
+}
+
+/// Bytes that moving these (from, to) pairs would copy: what a move across
+/// filesystems writes, a rename writing nothing. A file already at its
+/// destination is overwritten, so its size is not counted twice.
+pub fn bytes_to_copy(files: &[(PathBuf, PathBuf)]) -> u64 {
+    files
+        .iter()
+        .filter_map(|(from, to)| match plan(from, to) {
+            Ok(Plan::CopyThenDelete { bytes }) => {
+                let there = std::fs::metadata(to).map(|m| m.len()).unwrap_or(0);
+                Some(bytes.saturating_sub(there))
+            }
+            _ => None,
+        })
+        .sum()
 }
 
 #[cfg(test)]
