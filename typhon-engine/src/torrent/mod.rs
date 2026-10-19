@@ -2271,9 +2271,11 @@ impl TorrentManager {
             .and_then(|v| v.parse::<usize>().ok())
             .filter(|v| *v > 0)
             .unwrap_or(16);
+        let unreadable: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
         let mut verified: Vec<u32> = futures::stream::iter(0..num_pieces)
             .map(|piece| {
                 let t = t.clone();
+                let unreadable = unreadable.clone();
                 async move {
                     if t.is_removed.load(Ordering::Relaxed) {
                         return None;
@@ -2282,7 +2284,14 @@ impl TorrentManager {
                     // the have bit clear; the recheck reports the torrent
                     // incomplete rather than blessing unverified data.
                     // SHA-1 for v1 and hybrids, the merkle root for v2.
-                    if crate::disk::check_piece_on_disk(&t, piece).await? { Some(piece) } else { None }
+                    match crate::disk::read_piece_on_disk(&t, piece).await {
+                        crate::disk::PieceRead::Checked(true) => Some(piece),
+                        crate::disk::PieceRead::Unreadable(why) => {
+                            unreadable.lock().unwrap().get_or_insert(why);
+                            None
+                        }
+                        _ => None,
+                    }
                 }
             })
             .buffer_unordered(width)
@@ -2291,6 +2300,24 @@ impl TorrentManager {
             .await;
         if t.is_removed.load(Ordering::Relaxed) {
             return; // torrent removed mid-check -> do not publish a verdict
+        }
+        // The disk refused a read: that is no verdict on the pieces. Clearing
+        // them and writing the result down would turn a fault of the volume
+        // into a torrent at 0%, and lose the record of what had been
+        // downloaded. Keep what was known, say what happened, and leave the
+        // way back to a recheck once the volume reads again.
+        let unreadable = unreadable.lock().unwrap().take();
+        if let Some(why) = unreadable {
+            if t.is_paused.load(Ordering::Relaxed) {
+                t.status.store(TorrentStatus::Stopped as u8, Ordering::Relaxed);
+            } else {
+                t.status.store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+                t.mark_error(&format!(
+                    "cannot read the data: {why}. Check the volume is mounted and readable, then recheck this torrent"
+                ));
+            }
+            warn!("[recheck] {} not verified: the disk could not be read: {why}", &hex_encode(&ih)[..8]);
+            return;
         }
         verified.sort_unstable();
         let have = verified.len() as u32;
@@ -2788,6 +2815,55 @@ mod lifecycle_tests {
         mgr.on_completed(&ih);
         assert_eq!(*heard.lock().unwrap(), vec![ih]);
         assert_eq!(asked.load(Ordering::Relaxed), 1, "the tracker is still told");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A recheck that cannot READ the data says so, and keeps what it knew. An
+    /// unreadable file was taken for a missing one: every piece cleared, the
+    /// torrent shown at 0% with no error, and the empty verdict written over the
+    /// record of what had been downloaded.
+    #[tokio::test]
+    async fn a_recheck_that_cannot_read_the_data_keeps_the_progress_and_reports_it() {
+        let (mgr, root) = manager("recheckunreadable");
+        let data: Vec<u8> = (0..32768u32).map(|i| (i % 241) as u8).collect();
+        let mut info = Vec::new();
+        info.extend_from_slice(b"d6:lengthi32768e4:name3:bad12:piece lengthi16384e6:pieces40:");
+        for chunk in data.chunks(16384) {
+            let mut hasher = Sha1::new();
+            hasher.update(chunk);
+            info.extend_from_slice(&hasher.finalize());
+        }
+        info.push(b'e');
+        let mut bytes = b"d4:info".to_vec();
+        bytes.extend_from_slice(&info);
+        bytes.push(b'e');
+        let blob = bytes.clone();
+        mgr.set_blob_source(Arc::new(move |_: &str| Some(blob.clone())));
+        // A directory where the file should be: opening it fails, and the
+        // failure is not "no such file".
+        std::fs::create_dir(root.join("data").join("bad")).unwrap();
+        let save = root.join("data").to_string_lossy().into_owned();
+        let ih = mgr.add_torrent_bytes(&bytes, &save, false, false).expect("added").0;
+        let t = mgr.get(&ih).unwrap();
+        {
+            let mut p = t.picker.get().expect("a download has a picker").lock().unwrap();
+            p.set_have(0);
+        }
+
+        mgr.recheck(&ih).expect("recheck starts");
+        for _ in 0..200 {
+            if t.status.load(Ordering::Relaxed) != TorrentStatus::Checking as u8 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert_eq!(t.status.load(Ordering::Relaxed), TorrentStatus::Error as u8, "the fault is shown");
+        assert!(t.error_msg.lock().unwrap().contains("cannot read"), "and named: {}", t.error_msg.lock().unwrap());
+        assert!(
+            t.picker.get().unwrap().lock().unwrap().has_piece(0),
+            "what was known is kept: an unreadable disk says nothing about the pieces"
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 
