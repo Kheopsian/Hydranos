@@ -103,6 +103,7 @@ pub async fn measure(
     for engine in engines.engines() {
         let iface = engine.bind_interface.clone();
         let bound = if iface.is_empty() { None } else { Some(iface.as_str()) };
+        let proxy = crate::engines::session_http_proxy(&engine.session);
         // An unbound engine leaves through the default route. When the daemon
         // does too, the process probe already measured it; when the daemon
         // goes another way, the engine is measured on its own -- unless the
@@ -113,12 +114,14 @@ pub async fn measure(
             // Kept off the network by the kill switch: nothing to measure,
             // and no probe sent on its behalf.
             _ if engine.blocked.get().is_some() => (None, None),
-            None if daemon_route.is_direct() => (proc_v4.clone(), proc_v6.clone()),
-            None if daemon_route.kill_switch => (None, None),
+            // An engine with a proxy of its own does not leave where the
+            // daemon does: it is measured through that proxy, below.
+            None if proxy.is_empty() && daemon_route.is_direct() => (proc_v4.clone(), proc_v6.clone()),
+            None if proxy.is_empty() && daemon_route.kill_switch => (None, None),
             // The probe is off: nothing is asked for this engine either.
             _ if !probe.enabled => (None, None),
-            None => (echo(None, &probe.v4).await, echo_v6(None, probe).await),
-            Some(_) => (echo(bound, &probe.v4).await, echo_v6(bound, probe).await),
+            None => (echo(None, &proxy, &probe.v4).await, echo_v6(None, &proxy, probe).await),
+            Some(_) => (echo(bound, &proxy, &probe.v4).await, echo_v6(bound, &proxy, probe).await),
         };
 
         let mut r = row(&engine, bound.is_some(), v4, v6);
@@ -144,9 +147,9 @@ fn mark_unknown(row: &mut serde_json::Value) {
     row["detail"] = "exit address unknown: [daemon] exit_probe = false".into();
 }
 
-async fn echo_v6(device: Option<&str>, probe: &Probe) -> Option<String> {
+async fn echo_v6(device: Option<&str>, proxy: &str, probe: &Probe) -> Option<String> {
     match &probe.v6 {
-        Some(u) => echo(device, u).await,
+        Some(u) => echo(device, proxy, u).await,
         None => None,
     }
 }
@@ -209,17 +212,26 @@ pub(crate) async fn echo_daemon(url: &str) -> Option<String> {
 }
 
 /// Ask one echo service what address it saw, optionally out through `device`.
-async fn echo(device: Option<&str>, url: &str) -> Option<String> {
-    echo_via(device, url, device.map(typhon_engine::tunneldns::Resolver::new)).await
+async fn echo(device: Option<&str>, proxy: &str, url: &str) -> Option<String> {
+    echo_via(device, proxy, url, device.map(typhon_engine::tunneldns::Resolver::new)).await
 }
 
 /// `echo`, with the resolver of the bound request given.
 async fn echo_via(
     device: Option<&str>,
+    proxy: &str,
     url: &str,
     #[allow(unused_variables)] resolver: Option<std::sync::Arc<typhon_engine::tunneldns::Resolver>>,
 ) -> Option<String> {
     let mut builder = reqwest::Client::builder().timeout(ATTEMPT);
+    // The engine's own proxy, as its announces use it (`egress::apply_route!`):
+    // the probe must report the address the engine leaves with, and the
+    // echo service's name is the proxy's to resolve.
+    let proxied = !proxy.trim().is_empty();
+    if proxied {
+        // `no_proxy` first: an HTTP_PROXY in the environment is a second way out.
+        builder = builder.no_proxy().proxy(reqwest::Proxy::all(proxy.trim()).ok()?);
+    }
     // ⚠ Binding a request to a named interface is SO_BINDTODEVICE, which only
     // exists on Linux -- reqwest does not expose `interface()` anywhere else.
     // Windows has no equivalent by device NAME (it binds by source ADDRESS),
@@ -232,7 +244,7 @@ async fn echo_via(
         // are: through the tunnel's DNS, or refused under
         // `dns_no_host_fallback`, never silently by the host.
         builder = builder.interface(dev);
-        if let Some(r) = resolver {
+        if let (Some(r), false) = (resolver, proxied) {
             builder = builder.dns_resolver(r);
         }
     }
@@ -292,9 +304,51 @@ mod tests {
         let url = format!("http://localhost:{port}/");
         // The refusal is given to the resolver, not set on the process-wide
         // switch other tests read.
-        let via = |refuse| super::echo_via(Some("lo"), &url, Some(typhon_engine::tunneldns::Resolver::with_host_refusal("lo", refuse)));
+        let via = |refuse| super::echo_via(Some("lo"), "", &url, Some(typhon_engine::tunneldns::Resolver::with_host_refusal("lo", refuse)));
         assert_eq!(via(false).await.as_deref(), Some("203.0.113.5"), "switch off: the host resolves");
         let refused = via(true).await;
         assert_eq!(refused, None, "switch on: the name is refused, not resolved by the host");
+    }
+
+    /// An engine that reaches the world through a proxy is measured through
+    /// it: the echo service's name is the proxy's to resolve (it is not even
+    /// resolvable here), and the address in its row is the proxy's exit.
+    #[tokio::test]
+    async fn an_engine_with_a_proxy_is_measured_through_that_proxy() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let asked = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let seen = asked.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut s, _)) = listener.accept().await else { return };
+                let seen = seen.clone();
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut buf = [0u8; 2048];
+                    let n = s.read(&mut buf).await.unwrap_or(0);
+                    *seen.lock().unwrap() = String::from_utf8_lossy(&buf[..n]).into_owned();
+                    let _ = s
+                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\nConnection: close\r\n\r\n203.0.113.9\n")
+                        .await;
+                });
+            }
+        });
+        let s = crate::api::testing::state_from(
+            "netprobe-proxy",
+            &format!("[race]\nlisten_port = 16172\nannounce_proxy = \"http://127.0.0.1:{port}\"\n"),
+        );
+        let probe = super::Probe { enabled: true, v4: "http://echo.proxy-only.invalid/".into(), v6: None };
+        let snapshot: super::Snapshot = Default::default();
+        let public_ip: crate::api::PublicIp = Default::default();
+        super::measure(&s.state.engines, &snapshot, &public_ip, &probe).await;
+        let rows = snapshot.lock().await.0.clone();
+        let race = rows.iter().find(|r| r["engine"] == "race").expect("race has a row");
+        assert_eq!(race["exit_ip"], "203.0.113.9", "the row holds the proxy's exit: {race}");
+        assert!(
+            asked.lock().unwrap().starts_with("GET http://echo.proxy-only.invalid/"),
+            "the proxy was asked for the echo: {:?}",
+            asked.lock().unwrap()
+        );
     }
 }
