@@ -810,6 +810,19 @@ pub fn spawn_health_scan(engines: Arc<crate::engines::EngineHost>) {
     });
 }
 
+/// Keep the volumes in fault current for `/health`: one blocking pass every
+/// 30 s, so the route itself walks nothing.
+pub fn spawn_volume_fault_scan(engines: Arc<crate::engines::EngineHost>) {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_secs(30));
+        loop {
+            tick.tick().await;
+            let engines = engines.clone();
+            let _ = tokio::task::spawn_blocking(move || crate::obs::refresh_volume_faults(&engines)).await;
+        }
+    });
+}
+
 /// One anomaly pass over every engine, published when done.
 pub fn health_pass(engines: &crate::engines::EngineHost) {
     let started = std::time::Instant::now();

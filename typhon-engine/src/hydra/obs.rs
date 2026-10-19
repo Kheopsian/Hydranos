@@ -205,12 +205,13 @@ pub fn health(state: &AppState) -> (bool, serde_json::Value) {
             "detail": "no engine is listening for peers",
         }));
     }
-    // A whole volume in fault is the one disk condition that is fatal.
-    for (volume, detail) in volume_faults(state) {
+    // A whole volume in fault is the one disk condition that is fatal. Read
+    // from the last 30 s pass: the route walks nothing.
+    for (volume, detail) in state.engines.volume_faults() {
         fatal = true;
         problems.push(serde_json::json!({
             "check": "volume", "severity": "fail", "volume": volume, "detail": detail,
-        }))
+        }));
     }
     let status = if fatal {
         "unhealthy"
@@ -246,34 +247,38 @@ const VOLUME_FAULT_MIN_TORRENTS: usize = 2;
 ///
 /// Conservative on purpose: `/health` is what an orchestrator restarts a
 /// container on. One torrent erroring, or a volume with a torrent still
-/// checking, seeding or downloading, never counts. No file is touched; the
-/// common case (no torrent in error) costs one atomic load per torrent.
-pub fn volume_faults(state: &AppState) -> Vec<(String, String)> {
+/// checking, seeding or downloading, never counts. Not called by the route
+/// (see `refresh_volume_faults`): it walks every torrent in place, comparing
+/// save paths under their read lock and cloning one only the first time it is
+/// seen; the disk is only touched afterwards, once per distinct path and
+/// outside every lock.
+pub fn volume_faults(engines: &EngineHost) -> Vec<(String, String)> {
     use typhon_engine::torrent::meta::TorrentStatus;
-    let engines = state.engines.engines();
-    let errored = |t: &typhon_engine::torrent::meta::TorrentState| {
-        t.status.load(Relaxed) == TorrentStatus::Error as u8
-    };
-    if !engines.iter().any(|e| e.manager.all().iter().any(|t| errored(t))) {
-        return Vec::new();
+    // save path -> (active, in error)
+    let mut by_path: std::collections::HashMap<std::path::PathBuf, (usize, usize)> = Default::default();
+    for e in engines.engines() {
+        e.manager.for_each(|t| {
+            let status = t.status.load(Relaxed);
+            if status == TorrentStatus::Stopped as u8 || t.is_paused.load(Relaxed) {
+                return;
+            }
+            let bad = (status == TorrentStatus::Error as u8) as usize;
+            let path = t.save_path.read();
+            if let Some(c) = by_path.get_mut(path.as_path()) {
+                c.0 += 1;
+                c.1 += bad;
+            } else {
+                by_path.insert(path.clone(), (1, bad));
+            }
+        });
     }
     // dev -> (sample path, active, in error)
     let mut by_dev: std::collections::HashMap<u64, (std::path::PathBuf, usize, usize)> = Default::default();
-    let mut dev_of: std::collections::HashMap<std::path::PathBuf, Option<u64>> = Default::default();
-    for e in engines {
-        for t in e.manager.all() {
-            let status = t.status.load(Relaxed);
-            if status == TorrentStatus::Stopped as u8 || t.is_paused.load(Relaxed) {
-                continue;
-            }
-            let path = t.save_path.read().clone();
-            let Some(dev) = *dev_of.entry(path.clone()).or_insert_with(|| crate::volumes::device_of_nearest(&path)) else {
-                continue;
-            };
-            let entry = by_dev.entry(dev).or_insert((path, 0, 0));
-            entry.1 += 1;
-            entry.2 += errored(&t) as usize;
-        }
+    for (path, (active, errored)) in by_path {
+        let Some(dev) = crate::volumes::device_of_nearest(&path) else { continue };
+        let entry = by_dev.entry(dev).or_insert((path, 0, 0));
+        entry.1 += active;
+        entry.2 += errored;
     }
     let mut out: Vec<(String, String)> = by_dev
         .into_values()
@@ -288,6 +293,15 @@ pub fn volume_faults(state: &AppState) -> Vec<(String, String)> {
         .collect();
     out.sort();
     out
+}
+
+/// Recompute the volumes in fault and publish them for `/health`, which reads
+/// the last result and never walks the catalogue (a million torrents is
+/// hundreds of ms and a Vec of Arcs per probe). Run every 30 s by
+/// `workers::spawn_volume_fault_scan`: a volume turns `/health` unhealthy at
+/// most that long after its last torrent fails.
+pub fn refresh_volume_faults(engines: &EngineHost) {
+    engines.publish_volume_faults(volume_faults(engines));
 }
 
 /// Free space below this on a volume holding torrent data is reported.
@@ -905,6 +919,7 @@ mod tests {
     async fn one_torrent_in_disk_error_leaves_health_healthy() {
         let (s, hashes) = three_engines("obs-health-one");
         fail_writes(&s, &hashes[..1]);
+        refresh_volume_faults(&s.state.engines);
         let (st, body) = get(&s, "/health").await;
         assert_eq!(st, StatusCode::OK, "{body}");
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -915,6 +930,7 @@ mod tests {
     async fn every_torrent_of_a_volume_in_disk_error_makes_health_unhealthy_and_it_recovers() {
         let (s, hashes) = three_engines("obs-health-volume");
         fail_writes(&s, &hashes);
+        refresh_volume_faults(&s.state.engines);
         let (st, body) = get(&s, "/health").await;
         assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{body}");
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -930,6 +946,7 @@ mod tests {
             t.clear_error();
             t.status.store(typhon_engine::torrent::meta::TorrentStatus::Seeding as u8, Relaxed);
         }
+        refresh_volume_faults(&s.state.engines);
         let (st, body) = get(&s, "/health").await;
         assert_eq!(st, StatusCode::OK, "{body}");
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -938,15 +955,16 @@ mod tests {
 
     /// A volume that stays unmounted keeps its torrents in error for good:
     /// nothing but a recovery may turn it healthy again, not the passing of
-    /// time. Asked twice, with time between, it says the same.
+    /// time. Asked again, it says the same.
     #[tokio::test]
     async fn a_volume_whose_torrents_stay_in_error_stays_unhealthy() {
         let (s, hashes) = three_engines("obs-health-old");
         fail_writes(&s, &hashes);
         for _ in 0..2 {
+            refresh_volume_faults(&s.state.engines);
             let (st, body) = get(&s, "/health").await;
             assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{body}");
-            tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+            refresh_volume_faults(&s.state.engines);
         }
     }
 
@@ -954,6 +972,7 @@ mod tests {
     async fn some_torrents_of_a_volume_in_disk_error_leave_health_healthy() {
         let (s, hashes) = three_engines("obs-health-some");
         fail_writes(&s, &hashes[..2]);
+        refresh_volume_faults(&s.state.engines);
         let (st, body) = get(&s, "/health").await;
         assert_eq!(st, StatusCode::OK, "{body}");
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
