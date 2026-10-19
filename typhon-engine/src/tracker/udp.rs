@@ -94,7 +94,8 @@ pub fn event_code(event: &str) -> u32 {
 }
 
 pub fn is_udp(url: &str) -> bool {
-    url.len() > 6 && url[..6].eq_ignore_ascii_case("udp://")
+    // `get`, not a slice: a non-ASCII character can straddle byte 6.
+    url.len() > 6 && url.get(..6).is_some_and(|p| p.eq_ignore_ascii_case("udp://"))
 }
 
 /// Host, port and BEP 41 URL data (path and query) of a `udp://` URL.

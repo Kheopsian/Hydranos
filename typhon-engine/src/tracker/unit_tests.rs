@@ -242,3 +242,18 @@ mod proxy_helpers {
         assert!(proxy_for("http://proxy.example:3128").unwrap().is_some());
     }
 }
+
+mod char_boundary {
+    use super::super::udp::is_udp;
+
+    /// A tracker URL is judged by its first six bytes without cutting a
+    /// character in two: a non-ASCII character can straddle the offset.
+    #[test]
+    fn a_non_ascii_url_is_not_udp_and_is_judged_whole() {
+        for u in ["abcde\u{e9}://x", "udp\u{e9}://x", "ud\u{e9}p://x", "\u{e9}\u{e9}\u{e9}\u{e9}"] {
+            assert!(!is_udp(u), "{u:?}");
+        }
+        assert!(is_udp("udp://t.example:80") && is_udp("UDP://t.example:80"), "the ascii cases are unchanged");
+        assert!(!is_udp("udp://"), "the bare scheme is no tracker");
+    }
+}

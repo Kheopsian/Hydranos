@@ -484,3 +484,19 @@ async fn a_rule_saved_without_tags_keeps_them() {
     put_rule(&s, "t", &json!({"affectedFeeds": [feed], "torrentParams": {"tags": []}})).unwrap();
     assert!(load_rules(&s).into_iter().find(|r| r.name == "t").unwrap().tags.is_empty(), "an explicit empty list clears them");
 }
+
+/// A link is judged by its first characters without cutting a character in two:
+/// "magnet:" is 7 bytes and "magnet:?" is 8, and a non-ASCII character can
+/// straddle either offset.
+#[test]
+fn a_non_ascii_link_is_judged_without_splitting_a_character() {
+    for u in ["magnet\u{e9}:?xt=1", "magnet:\u{e9}xt=1", "magn\u{e9}t:?x", "abcdef\u{e9}://x"] {
+        assert!(!is_magnet(u), "{u:?}");
+        if !u.starts_with("magnet:") {
+            assert!(!mask_url(u).starts_with("magnet:?"), "{u:?} was taken for a magnet");
+        }
+    }
+    assert_eq!(mask_url("magnet:\u{e9}xt=1"), "magnet:?***", "a real `magnet:` prefix is still one");
+    assert!(is_magnet("MAGNET:?xt=1") && !is_magnet("magnet:?"), "the ascii cases are unchanged");
+    assert!(mask_url("Magnet:?xt=urn:btih:ab&tr=http://t.example/k").ends_with("&***"));
+}
