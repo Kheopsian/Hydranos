@@ -509,8 +509,12 @@ impl StoreLock {
     /// Ask the store, without waiting for it: the read connection (the shared
     /// one when there is no other) must answer, and so must the writer when it
     /// is free. A connection somebody holds is `Busy`, never an error.
+    #[track_caller]
     pub fn probe(&self) -> Probe {
-        let ping = |m: &std::sync::Mutex<Store>, slot: &HoldSlot, can_block: bool| match m.try_lock() {
+        let at = std::panic::Location::caller();
+        // The probe's own ping is a hold like any request's: on a frozen mount
+        // it is the ping that hangs, and the next probe must see it.
+        let ping = |m: &std::sync::Mutex<Store>, slot: &HoldSlot, can_block: bool| match Self::try_take(m, slot, at) {
             Ok(s) => match s.ping() {
                 Ok(()) => Probe::Ok,
                 Err(e) => Probe::Error(e),
@@ -590,16 +594,20 @@ impl StoreLock {
     }
 
     /// `heal` without the pacing, for the watcher thread that sets its own.
+    #[track_caller]
     pub fn heal_now(&self) -> bool {
-        let mut ok = Self::heal_one(&self.inner, "writer");
+        let mut ok = Self::heal_one(&self.inner, &self.inner_hold, "writer");
         if let Some(r) = &self.reader {
-            ok &= Self::heal_one(r, "reader");
+            ok &= Self::heal_one(r, &self.reader_hold, "reader");
         }
         ok
     }
 
-    fn heal_one(m: &std::sync::Mutex<Store>, which: &str) -> bool {
-        let mut s = match m.try_lock() {
+    #[track_caller]
+    fn heal_one(m: &std::sync::Mutex<Store>, slot: &HoldSlot, which: &str) -> bool {
+        // Held through a guard, so a ping or a reopening stuck on a frozen
+        // mount shows in `/health` and in the watchdog like any request.
+        let mut s = match Self::try_take(m, slot, std::panic::Location::caller()) {
             Ok(s) => s,
             Err(std::sync::TryLockError::WouldBlock) => return true,
             Err(std::sync::TryLockError::Poisoned(_)) => return false,
@@ -665,6 +673,21 @@ impl StoreLock {
         *g.slot.lock().unwrap_or_else(|e| e.into_inner()) =
             Some(Hold { since: g.since, at: g.at, warned: false });
         g
+    }
+
+    /// `take` without waiting: the connection if it is free now, its holder
+    /// recorded like any other.
+    fn try_take<'a>(
+        m: &'a std::sync::Mutex<Store>,
+        slot: &'a HoldSlot,
+        at: &'static std::panic::Location<'static>,
+    ) -> Result<StoreGuard<'a>, std::sync::TryLockError<()>> {
+        let wrap = |guard| Self::held(StoreGuard { guard, at, waited: std::time::Duration::ZERO, since: std::time::Instant::now(), slot });
+        match m.try_lock() {
+            Ok(g) => Ok(wrap(g)),
+            Err(std::sync::TryLockError::WouldBlock) => Err(std::sync::TryLockError::WouldBlock),
+            Err(std::sync::TryLockError::Poisoned(_)) => Err(std::sync::TryLockError::Poisoned(std::sync::PoisonError::new(()))),
+        }
     }
 
     fn take<'a>(
@@ -735,20 +758,24 @@ pub fn log_store<T, E: std::fmt::Display>(what: &str, r: Result<T, E>) -> Option
 /// 10 s, ask whether the connections still answer and reopen the ones that do
 /// not (`StoreLock::heal`), so a store comes back after its mount did even
 /// when nothing is asking it anything.
+///
+/// Two threads: a reopening check stuck on a frozen mount must not stop the
+/// watchdog that reports it.
 pub fn spawn_watch(lock: std::sync::Arc<StoreLock>) {
-    let spawned = std::thread::Builder::new().name("store-watch".into()).spawn(move || {
-        let mut tick = 0u32;
-        loop {
-            std::thread::sleep(std::time::Duration::from_secs(2));
-            lock.watch_holds(LOCK_STUCK_WARN);
-            tick = tick.wrapping_add(1);
-            if tick % 5 == 0 {
-                lock.heal_now();
-            }
-        }
+    let watcher = lock.clone();
+    let spawned = std::thread::Builder::new().name("store-watch".into()).spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        watcher.watch_holds(LOCK_STUCK_WARN);
     });
     if let Err(e) = spawned {
         tracing::warn!("no store watcher: {e}");
+    }
+    let spawned = std::thread::Builder::new().name("store-heal".into()).spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_secs(10));
+        lock.heal_now();
+    });
+    if let Err(e) = spawned {
+        tracing::warn!("no store reopening check: {e}");
     }
 }
 
