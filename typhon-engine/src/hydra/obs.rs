@@ -1002,6 +1002,35 @@ mod tests {
         assert_eq!(st, StatusCode::OK, "released, healthy again: {body}");
     }
 
+    /// The store's own ping is what hangs on a frozen mount, not only a
+    /// request: the watcher's reopening check or `/health`'s probe holding the
+    /// only connection must show as a hold like any other, or `/health` says
+    /// "busy" for ever and the log says nothing.
+    #[tokio::test]
+    async fn a_ping_stuck_on_the_store_is_seen_as_a_hold() {
+        let s = state_from("obs-store-ping-stuck", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+        let store = s.state.store.clone();
+        let stuck = std::thread::spawn(move || {
+            crate::store::PING_STALL_MS.with(|c| c.set(8000));
+            store.heal_now();
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(6000)).await;
+        let t = std::time::Instant::now();
+        let (st, body) = get(&s, "/health").await;
+        assert!(t.elapsed() < std::time::Duration::from_secs(2), "/health waited for the store");
+        assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "a ping held for 6 s is the store held: {body}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["checks"]["store"], "unavailable", "{v:#}");
+        assert_eq!(
+            s.state.store.watch_holds(std::time::Duration::from_secs(5)),
+            1,
+            "the watchdog reports the ping that is stuck"
+        );
+        stuck.join().unwrap();
+        let (st, body) = get(&s, "/health").await;
+        assert_eq!(st, StatusCode::OK, "released, healthy again: {body}");
+    }
+
     /// A store that is still unreadable after the reopening stays an error in
     /// `/health`, and its file is never touched.
     #[tokio::test]
