@@ -439,7 +439,26 @@ pub struct StoreLock {
     /// When the connections were last reopened (or tried to be), so a store
     /// that cannot be reopened is retried at a bounded pace.
     last_heal: std::sync::Mutex<Option<std::time::Instant>>,
+    /// Who holds each connection, since when: what the watchdog and `/health`
+    /// read while the holder is still inside its query.
+    inner_hold: HoldSlot,
+    reader_hold: HoldSlot,
 }
+
+/// The current holder of one connection.
+struct Hold {
+    since: std::time::Instant,
+    at: &'static std::panic::Location<'static>,
+    warned: bool,
+}
+type HoldSlot = std::sync::Mutex<Option<Hold>>;
+
+/// A connection held this long is reported to the log while it is still held.
+pub const LOCK_STUCK_WARN: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// `/health` calls the store unavailable once its only connection has been
+/// held this long by one request.
+const UNAVAILABLE_AFTER: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// The least time between two attempts to reopen the store's connections
 /// when something asks for one (a failed write, a health probe).
@@ -451,6 +470,8 @@ pub enum Probe {
     Ok,
     /// Someone holds the connection the probe wanted; not a failure.
     Busy,
+    /// Held by one request for longer than any healthy statement takes.
+    Blocked(std::time::Duration),
     Error(String),
 }
 
@@ -460,11 +481,12 @@ pub struct StoreGuard<'a> {
     at: &'static std::panic::Location<'static>,
     waited: std::time::Duration,
     since: std::time::Instant,
+    slot: &'a HoldSlot,
 }
 
 impl StoreLock {
     pub fn new(store: Store) -> Self {
-        StoreLock { inner: std::sync::Mutex::new(store), reader: None, last_heal: Default::default() }
+        Self::with_reader(store, None)
     }
 
     pub fn with_reader(store: Store, reader: Option<Store>) -> Self {
@@ -472,6 +494,8 @@ impl StoreLock {
             inner: std::sync::Mutex::new(store),
             reader: reader.map(std::sync::Mutex::new),
             last_heal: Default::default(),
+            inner_hold: Default::default(),
+            reader_hold: Default::default(),
         }
     }
 
@@ -479,23 +503,63 @@ impl StoreLock {
     /// one when there is no other) must answer, and so must the writer when it
     /// is free. A connection somebody holds is `Busy`, never an error.
     pub fn probe(&self) -> Probe {
-        let ping = |m: &std::sync::Mutex<Store>| match m.try_lock() {
+        let ping = |m: &std::sync::Mutex<Store>, slot: &HoldSlot, can_block: bool| match m.try_lock() {
             Ok(s) => match s.ping() {
                 Ok(()) => Probe::Ok,
                 Err(e) => Probe::Error(e),
             },
-            Err(std::sync::TryLockError::WouldBlock) => Probe::Busy,
+            // With a read connection beside it (a local WAL store) a long
+            // read is ordinary and the writer is not what is probed; with the
+            // shared connection alone, one request holding it for seconds is
+            // everything waiting behind it.
+            Err(std::sync::TryLockError::WouldBlock) => match Self::held_for(slot) {
+                Some(d) if can_block && d >= UNAVAILABLE_AFTER => Probe::Blocked(d),
+                _ => Probe::Busy,
+            },
             Err(std::sync::TryLockError::Poisoned(_)) => {
                 Probe::Error("the store's lock is poisoned: a thread panicked holding it".into())
             }
         };
-        let main = ping(self.reader.as_ref().unwrap_or(&self.inner));
-        if self.reader.is_some() {
-            if let Probe::Error(e) = ping(&self.inner) {
+        let alone = self.reader.is_none();
+        let main = match &self.reader {
+            Some(r) => ping(r, &self.reader_hold, false),
+            None => ping(&self.inner, &self.inner_hold, alone),
+        };
+        if !alone {
+            if let Probe::Error(e) = ping(&self.inner, &self.inner_hold, false) {
                 return Probe::Error(e);
             }
         }
         main
+    }
+
+    fn held_for(slot: &HoldSlot) -> Option<std::time::Duration> {
+        slot.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map(|h| h.since.elapsed())
+    }
+
+    /// Log, once per hold, each connection that has been held for `after` and
+    /// is still held: the holder's line, while it is stuck and not after. A
+    /// query hung on a dead mount never gets to release the guard that would
+    /// have reported it. Returns how many holds were reported now.
+    pub fn watch_holds(&self, after: std::time::Duration) -> usize {
+        let mut n = 0;
+        for (which, slot) in [("writer", &self.inner_hold), ("reader", &self.reader_hold)] {
+            let mut g = slot.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(h) = g.as_mut() {
+                if !h.warned && h.since.elapsed() >= after {
+                    h.warned = true;
+                    n += 1;
+                    tracing::warn!(
+                        target: "hydranos::store_lock",
+                        connection = which,
+                        held_secs = h.since.elapsed().as_secs(),
+                        at = %h.at,
+                        "store held and still held: every request that needs it waits (a query stuck on a hung mount?)"
+                    );
+                }
+            }
+        }
+        n
     }
 
     /// Close and reopen the connections that no longer answer, then check
@@ -549,7 +613,7 @@ impl StoreLock {
 
     #[track_caller]
     pub fn lock(&self) -> std::sync::LockResult<StoreGuard<'_>> {
-        Self::take(&self.inner, std::panic::Location::caller())
+        Self::take(&self.inner, &self.inner_hold, std::panic::Location::caller())
     }
 
     /// The read-only connection when there is one, the shared one otherwise.
@@ -557,8 +621,8 @@ impl StoreLock {
     pub fn read(&self) -> std::sync::LockResult<StoreGuard<'_>> {
         let at = std::panic::Location::caller();
         match &self.reader {
-            Some(reader) => Self::take(reader, at),
-            None => Self::take(&self.inner, at),
+            Some(reader) => Self::take(reader, &self.reader_hold, at),
+            None => Self::take(&self.inner, &self.inner_hold, at),
         }
     }
 
@@ -580,7 +644,8 @@ impl StoreLock {
     pub fn try_read(&self) -> Option<Result<StoreGuard<'_>, ()>> {
         let m = self.reader.as_ref().unwrap_or(&self.inner);
         let at = std::panic::Location::caller();
-        let wrap = |guard| StoreGuard { guard, at, waited: std::time::Duration::ZERO, since: std::time::Instant::now() };
+        let slot = if self.reader.is_some() { &self.reader_hold } else { &self.inner_hold };
+        let wrap = |guard| Self::held(StoreGuard { guard, at, waited: std::time::Duration::ZERO, since: std::time::Instant::now(), slot });
         match m.try_lock() {
             Ok(g) => Some(Ok(wrap(g))),
             Err(std::sync::TryLockError::WouldBlock) => None,
@@ -588,12 +653,20 @@ impl StoreLock {
         }
     }
 
+    /// Record the holder of a connection that was just locked.
+    fn held(g: StoreGuard<'_>) -> StoreGuard<'_> {
+        *g.slot.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some(Hold { since: g.since, at: g.at, warned: false });
+        g
+    }
+
     fn take<'a>(
         m: &'a std::sync::Mutex<Store>,
+        slot: &'a HoldSlot,
         at: &'static std::panic::Location<'static>,
     ) -> std::sync::LockResult<StoreGuard<'a>> {
         let asked = std::time::Instant::now();
-        let wrap = |guard| StoreGuard { guard, at, waited: asked.elapsed(), since: std::time::Instant::now() };
+        let wrap = |guard| Self::held(StoreGuard { guard, at, waited: asked.elapsed(), since: std::time::Instant::now(), slot });
         match m.lock() {
             Ok(g) => Ok(wrap(g)),
             Err(p) => Err(std::sync::PoisonError::new(wrap(p.into_inner()))),
@@ -623,6 +696,7 @@ impl std::ops::DerefMut for StoreGuard<'_> {
 
 impl Drop for StoreGuard<'_> {
     fn drop(&mut self) {
+        *self.slot.lock().unwrap_or_else(|e| e.into_inner()) = None;
         let held = self.since.elapsed();
         if held >= LOCK_WARN {
             tracing::warn!(
@@ -636,14 +710,22 @@ impl Drop for StoreGuard<'_> {
     }
 }
 
-/// Look after the connections of the shared store: every few seconds, ask
-/// whether they still answer and reopen the ones that do not (cf
-/// `StoreLock::heal`), so a store comes back after its mount did even when
-/// nothing is asking it anything.
+/// Look after the shared store. Every 2 s, report a connection held for
+/// `LOCK_STUCK_WARN` while it is still held (`StoreLock::watch_holds`); every
+/// 10 s, ask whether the connections still answer and reopen the ones that do
+/// not (`StoreLock::heal`), so a store comes back after its mount did even
+/// when nothing is asking it anything.
 pub fn spawn_watch(lock: std::sync::Arc<StoreLock>) {
-    let spawned = std::thread::Builder::new().name("store-watch".into()).spawn(move || loop {
-        std::thread::sleep(std::time::Duration::from_secs(10));
-        lock.heal_now();
+    let spawned = std::thread::Builder::new().name("store-watch".into()).spawn(move || {
+        let mut tick = 0u32;
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            lock.watch_holds(LOCK_STUCK_WARN);
+            tick = tick.wrapping_add(1);
+            if tick % 5 == 0 {
+                lock.heal_now();
+            }
+        }
     });
     if let Err(e) = spawned {
         tracing::warn!("no store watcher: {e}");
@@ -5410,6 +5492,25 @@ mod wal_tests {
         assert!(lock.inner.try_lock().is_ok(), "a read must not take the writer's lock");
         drop(held);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// The watchdog reports a hold while it lasts, once, and not a short one.
+    #[test]
+    fn the_watchdog_reports_a_hold_while_it_lasts_once() {
+        let lock = StoreLock::new(Store::open_in_memory().unwrap());
+        let after = std::time::Duration::from_millis(300);
+        assert_eq!(lock.watch_holds(after), 0, "nothing held");
+        let held = lock.lock().unwrap();
+        assert_eq!(lock.watch_holds(after), 0, "held for an instant");
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        assert_eq!(lock.watch_holds(after), 1, "reported while still held");
+        assert_eq!(lock.watch_holds(after), 0, "once per hold");
+        drop(held);
+        assert_eq!(lock.watch_holds(after), 0, "released");
+        let held = lock.lock().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        assert_eq!(lock.watch_holds(after), 1, "the next hold is reported again");
+        drop(held);
     }
 
     /// Without a read connection, read() is the shared lock -- never a panic,
