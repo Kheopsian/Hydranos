@@ -443,6 +443,11 @@ pub struct StoreLock {
     /// read while the holder is still inside its query.
     inner_hold: HoldSlot,
     reader_hold: HoldSlot,
+    /// Shared with the connections' `ping`, which sleeps this long first.
+    /// Read without taking any connection, so a test can set it while a
+    /// ping is stuck. For tests; 0 = off.
+    #[cfg(test)]
+    ping_stall_ms: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 #[cfg(test)]
@@ -497,7 +502,20 @@ impl StoreLock {
     }
 
     pub fn with_reader(store: Store, reader: Option<Store>) -> Self {
+        #[cfg(test)]
+        let (mut store, mut reader) = (store, reader);
+        #[cfg(test)]
+        let ping_stall_ms = {
+            let shared = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+            store.ping_stall_ms = shared.clone();
+            if let Some(r) = reader.as_mut() {
+                r.ping_stall_ms = shared.clone();
+            }
+            shared
+        };
         StoreLock {
+            #[cfg(test)]
+            ping_stall_ms,
             inner: std::sync::Mutex::new(store),
             reader: reader.map(std::sync::Mutex::new),
             last_heal: Default::default(),
@@ -649,6 +667,14 @@ impl StoreLock {
         if let Some(r) = &self.reader {
             r.lock().unwrap().break_connection_for_tests();
         }
+    }
+
+    /// Make the `ping` of this store's connections sleep `ms` first, whichever
+    /// thread pings (`PING_STALL_MS` is the pinging thread's own, and a
+    /// request's thread is not known beforehand). For tests; 0 = off.
+    #[cfg(test)]
+    pub fn stall_pings_for_tests(&self, ms: u64) {
+        self.ping_stall_ms.store(ms, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// The read connection if it is free right now, `None` if someone holds
@@ -846,6 +872,10 @@ pub struct Store {
     slim: std::collections::HashMap<String, std::sync::Arc<SlimFacts>>,
     slim_version: i64,
     tracks_changes: bool,
+    /// Make this store's `ping` sleep this many ms first, from whichever
+    /// thread pings it. For tests; 0 = off.
+    #[cfg(test)]
+    ping_stall_ms: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// Copies (`info_hash/session`) this process wrote a row for, and when.
     /// The add path writes the row BEFORE the engine holds the torrent, so for
     /// a moment a new row looks exactly like an orphan; the reconcile asks here
@@ -945,6 +975,10 @@ impl Store {
             if ms > 0 {
                 std::thread::sleep(std::time::Duration::from_millis(ms));
             }
+            let ms = self.ping_stall_ms.load(std::sync::atomic::Ordering::Relaxed);
+            if ms > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(ms));
+            }
         }
         self.conn
             .query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get::<_, i64>(0))
@@ -1004,7 +1038,10 @@ impl Store {
     }
 
     fn bare(conn: Connection) -> Self {
-        Store { conn, path: None, read_only: false, slim: Default::default(), slim_version: -1, tracks_changes: false, fresh: Default::default() }
+        Store { conn, path: None, read_only: false, slim: Default::default(), slim_version: -1, tracks_changes: false,
+            #[cfg(test)]
+            ping_stall_ms: Default::default(),
+            fresh: Default::default() }
     }
 
     /// Create anything missing. Every statement is IF NOT EXISTS, so this is a
