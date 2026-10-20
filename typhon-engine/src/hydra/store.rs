@@ -470,6 +470,16 @@ impl StoreLock {
         }
     }
 
+    /// Break the writer's connection and the reader's (see
+    /// `Store::break_connection_for_tests`). For tests; no effect otherwise.
+    #[cfg(test)]
+    pub fn break_connections_for_tests(&self) {
+        self.inner.lock().unwrap().break_connection_for_tests();
+        if let Some(r) = &self.reader {
+            r.lock().unwrap().break_connection_for_tests();
+        }
+    }
+
     /// The read connection if it is free right now, `None` if someone holds
     /// it. For a health probe: a probe that queued behind a long read would
     /// report the store as broken when it is only busy, and pile up blocked
@@ -1461,6 +1471,22 @@ impl Store {
             }
         }
         Ok(changed)
+    }
+
+    /// Swap the connection for one that fails every query, the way a
+    /// connection whose descriptors belong to a vanished network session does
+    /// ("file is not a database" / "database disk image is malformed"), while
+    /// the database file itself stays intact. For tests; no effect otherwise.
+    #[cfg(test)]
+    pub fn break_connection_for_tests(&mut self) {
+        static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let junk = std::env::temp_dir().join(format!(
+            "store-junk-{}-{}.db",
+            std::process::id(),
+            N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::write(&junk, vec![0x5Au8; 8192]).expect("junk file");
+        self.conn = Connection::open(&junk).expect("open junk");
     }
 
     /// Rows waiting in the list's re-read queue, for tests.
