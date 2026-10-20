@@ -1020,6 +1020,35 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), junk, "the file is never repaired or rewritten");
     }
 
+    /// A mount that drops can leave an empty folder where the database was.
+    /// Reopening must not create a fresh, empty store there and call it
+    /// healthy: the daemon would run on it and every write would go to a
+    /// file the real one hides once the mount is back. The store stays an
+    /// error, and nothing is created.
+    #[tokio::test]
+    async fn a_store_whose_file_is_gone_is_not_recreated_by_the_reopening() {
+        let mut s = state_from("obs-store-gone", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+        let path = file_store(&mut s, "gone");
+        s.state.store.lock().unwrap().put_meta("k", "before").unwrap();
+        s.state.store.break_connections_for_tests();
+        for ext in ["", "-wal", "-shm", "-journal"] {
+            let _ = std::fs::remove_file(format!("{}{ext}", path.display()));
+        }
+        for _ in 0..3 {
+            let (st, body) = get(&s, "/health").await;
+            assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "an empty folder is not a healthy store: {body}");
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+        assert!(s.state.store.heal_now() == false, "a reopening with no file to open has failed");
+        assert!(!path.exists(), "no database is created where the old one was");
+
+        // An empty SQLite file left there is not the store either.
+        rusqlite::Connection::open(&path).unwrap().execute_batch("CREATE TABLE other(x)").unwrap();
+        assert!(!s.state.store.heal_now(), "a database without the store's tables is not reopened as the store");
+        let (st, body) = get(&s, "/health").await;
+        assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    }
+
     /// `/health` goes unhealthy for a whole volume in fault, never for one
     /// torrent: an orchestrator may restart the container on a 503, and a
     /// single bad torrent must not cost the others their swarms.
