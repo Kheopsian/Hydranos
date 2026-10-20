@@ -124,14 +124,20 @@ pub enum StoreState {
 }
 
 pub fn store_state(state: &AppState) -> StoreState {
-    match state.store.try_read() {
-        None => StoreState::Busy,
-        Some(Err(())) => StoreState::Error("the store's lock is poisoned: a thread panicked holding it".into()),
-        Some(Ok(s)) => match s.ping() {
-            Ok(()) => StoreState::Ok,
-            Err(e) => StoreState::Error(e),
-        },
+    use crate::store::Probe;
+    let probe = || match state.store.probe() {
+        Probe::Ok => StoreState::Ok,
+        Probe::Busy => StoreState::Busy,
+        Probe::Error(e) => StoreState::Error(e),
+    };
+    let first = probe();
+    // A store that stopped answering gets its connections reopened (at most
+    // every few seconds) and is asked again: the probe is what notices a
+    // mount that reconnected, so it is also what brings the store back.
+    if matches!(first, StoreState::Error(_)) && state.store.heal() {
+        return probe();
     }
+    first
 }
 
 /// `/health` once the router is served: 200 `healthy` or `degraded`, 503
@@ -902,6 +908,65 @@ mod tests {
         assert_eq!(v["checks"]["store"], "ok");
         assert_eq!(v["checks"]["engines"].as_array().unwrap().len(), 3);
         assert!(v["version"].is_string(), "the page reads its version labels here");
+    }
+
+    /// A file-backed store, writer and reader, in place of the in-memory one.
+    fn file_store(s: &mut TestState, tag: &str) -> std::path::PathBuf {
+        let dir = s.dir.join(tag);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("hydra.db");
+        let writer = crate::store::Store::open(&path, false).unwrap();
+        let reader = crate::store::Store::open(&path, true).unwrap();
+        s.state.store = std::sync::Arc::new(crate::store::StoreLock::with_reader(writer, Some(reader)));
+        path
+    }
+
+    /// After a network mount reconnects, the connections opened before it
+    /// answer every query with an error although the file is fine. The store
+    /// closes and reopens them by itself, and `/health` says so.
+    #[tokio::test]
+    async fn the_store_reopens_its_connections_when_they_break() {
+        let mut s = state_from("obs-store-heal", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+        file_store(&mut s, "heal");
+        s.state.store.lock().unwrap().put_meta("k", "before").unwrap();
+        let (st, body) = get(&s, "/health").await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+
+        s.state.store.break_connections_for_tests();
+
+        let mut last = (StatusCode::OK, String::new());
+        for _ in 0..40 {
+            last = get(&s, "/health").await;
+            if last.0 == StatusCode::OK {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+        assert_eq!(last.0, StatusCode::OK, "the store stayed broken: {}", last.1);
+        let v: serde_json::Value = serde_json::from_str(&last.1).unwrap();
+        assert_eq!(v["checks"]["store"], "ok", "{v:#}");
+        let doc = s.state.store.lock().unwrap().meta_doc("k");
+        assert_eq!(doc.as_deref(), Some("before"), "the writer reads again");
+        s.state.store.lock().unwrap().put_meta("k", "after").unwrap();
+        assert_eq!(s.state.store.read().unwrap().meta_doc("k").as_deref(), Some("after"), "the reader sees it");
+    }
+
+    /// A store that is still unreadable after the reopening stays an error in
+    /// `/health`, and its file is never touched.
+    #[tokio::test]
+    async fn a_store_that_stays_unreadable_stays_an_error_and_its_file_is_left_alone() {
+        let mut s = state_from("obs-store-stays", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+        let path = file_store(&mut s, "stays");
+        s.state.store.break_connections_for_tests();
+        let junk = vec![0x5Au8; 8192];
+        std::fs::write(&path, &junk).unwrap();
+        for _ in 0..3 {
+            let (st, body) = get(&s, "/health").await;
+            assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+            let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(v["checks"]["store"], "error", "{v:#}");
+        }
+        assert_eq!(std::fs::read(&path).unwrap(), junk, "the file is never repaired or rewritten");
     }
 
     /// `/health` goes unhealthy for a whole volume in fault, never for one
