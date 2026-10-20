@@ -903,7 +903,36 @@ impl Store {
         let Some(path) = self.path.clone() else {
             anyhow::bail!("an in-memory store has nothing to reopen");
         };
-        let new = Store::open(&path, self.read_only)?;
+        // Never `open`: it creates the file and its tables. A mount that
+        // dropped can leave an empty folder where the database was, and a
+        // fresh store there would answer every ping while the real one is
+        // hidden under the mount once it is back.
+        if !path.is_file() {
+            anyhow::bail!("{} is not there: not creating a new store in its place", path.display());
+        }
+        let flags = if self.read_only {
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI
+        } else {
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_URI
+        };
+        let mut new = Self::bare(Connection::open_with_flags(&path, flags)?);
+        new.path = Some(path.clone());
+        new.read_only = self.read_only;
+        let tables: i64 = new.conn.query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name IN ('torrents', 'meta')",
+            [],
+            |r| r.get(0),
+        )?;
+        if tables < 2 {
+            anyhow::bail!("{} holds no store (its tables are missing): not reopened", path.display());
+        }
+        if !self.read_only {
+            new.track_changes();
+            new.prefer_wal(&path);
+            if let Err(e) = new.conn.execute_batch("PRAGMA cache_size=-65536;") {
+                tracing::warn!("store page cache left at the default: {e}");
+            }
+        }
         self.conn = new.conn;
         self.tracks_changes = new.tracks_changes;
         self.slim.clear();
