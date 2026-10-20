@@ -8144,8 +8144,7 @@ async function loadDedup() {
     if (!box) return;
     try {
         const d = await api("/api/dedup/stats");
-        const on = document.getElementById("dedup-enabled");
-        if (on) on.checked = !!d.enabled;
+        pickDedupMethod(d.enabled ? (d.method || "hardlink") : "off");
 
         if (!d.groups) {
             box.innerHTML = '<span class="sr-desc">' + t("No duplicated payload found.") + "</span>";
@@ -8165,9 +8164,23 @@ async function loadDedup() {
 }
 
 
+// Off, hardlink or reflink: one choice of three, so one row of three buttons
+// rather than a checkbox and a select that can disagree.
+function pickDedupMethod(m) {
+    document.querySelectorAll("#dedup-method button").forEach((b) => {
+        const on = b.dataset.m === m;
+        b.classList.toggle("on", on);
+        b.setAttribute("aria-checked", on ? "true" : "false");
+    });
+}
+
 async function saveDedupMode() {
     const banner = document.getElementById("dedup-result");
-    const enabled = document.getElementById("dedup-enabled").checked;
+    const picked = document.querySelector("#dedup-method button.on");
+    const m = picked ? picked.dataset.m : "hardlink";
+    const enabled = m !== "off";
+    // Off keeps the saved method, so turning it back on returns to the same one.
+    const body = enabled ? { enabled: true, method: m } : { enabled: false };
     banner.style.display = "block";
     banner.className = "result-msg info";
     banner.textContent = t("Saving…");
@@ -8178,7 +8191,7 @@ async function saveDedupMode() {
         await api("/api/dedup/config", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ enabled: enabled }),
+            body: JSON.stringify(body),
         });
         // [dedup] is read when a torrent is added, so it needs the daemon back.
         // Offering a Save that leaves the setting inert would be half an action.

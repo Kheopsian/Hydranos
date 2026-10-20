@@ -3529,9 +3529,34 @@ th.col-drop { box-shadow: inset 3px 0 0 var(--accent, #4a9eff); }
 .dd-n { font-size: 18px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .dd-l { font-size: 11px; opacity: 0.75; }
 
-/* The one control this card has: checkbox and its label on one line, so the
-   words are part of the hit area rather than sitting next to it. */
+/* The one control this card has. Kept on one line with its button: the
+   labels are single words, so nothing wraps at any width the row allows. */
 .sr-check { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+.dd-field { align-items: center; gap: 10px; flex-wrap: nowrap; }
+.dd-seg {
+    display: inline-flex;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    flex-shrink: 0;
+}
+.dd-seg button {
+    background: var(--bg-tertiary);
+    color: var(--text-secondary);
+    border: none;
+    border-right: 1px solid var(--border);
+    padding: 6px 14px;
+    font-size: 12.5px;
+    font-weight: 600;
+    white-space: nowrap;
+    cursor: pointer;
+    transition: background 0.12s, color 0.12s;
+}
+.dd-seg button:last-child { border-right: none; }
+.dd-seg button:hover:not(.on) { color: var(--text-primary); }
+.dd-seg button.on { background: rgba(88, 166, 255, 0.16); color: var(--accent-blue, #58a6ff); }
+.dd-seg button[data-m="off"].on { background: var(--bg-subtle, rgba(127, 127, 127, 0.12)); color: var(--text-primary); }
+.dd-seg button:focus-visible { outline: 2px solid var(--accent-blue, #58a6ff); outline-offset: -2px; }
 
 /* The announced-identity line under the trackers table.
  *

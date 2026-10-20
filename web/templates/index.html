@@ -1194,8 +1194,8 @@
             <!-- Duplicate data. The content index recognises payload we
                  already hold when a torrent is added under a name we have not
                  seen, because a torrent's piece hashes cover the bytes and not
-                 the names. The action this card comments on is the mode
-                 select, so the result line sits directly under it. -->
+                 the names. The action this card comments on is the method
+                 picker, so the result line sits directly under it. -->
             <div class="card">
                 <div class="card-header-row">
                     <h3>Duplicate data</h3>
@@ -1204,15 +1204,19 @@
                     <div class="settings-row">
                         <div class="sr-label">
                             <span class="sr-key">On adding a torrent we already hold</span>
-                            <span class="sr-desc">Sets [dedup] enabled. Hardlinks the files we already hold under the new torrent's names, so it seeds at once without downloading them again. On by default: a link costs a directory entry, downloading the same data again costs the bandwidth and the disk.</span>
+                            <span class="sr-desc">Sets [dedup] enabled and method. The files we already hold appear under the new torrent's names, so it seeds at once without downloading them again. Hardlink (the default): one file, two names, on any local filesystem. Reflink: a separate file sharing the blocks until one side writes, only where the filesystem can clone (btrfs, XFS, ZFS with block cloning); where it cannot, the torrent downloads. Off: always download.</span>
                         </div>
-                        <div class="sr-field">
-                            <label class="sr-check"><input type="checkbox" id="dedup-enabled"> <span>Link it instead of downloading</span></label>
-                            <button class="btn-small btn-accent" onclick="saveDedupMode()" style="margin-left:6px">Save and restart</button>
+                        <div class="sr-field dd-field">
+                            <div class="dd-seg" id="dedup-method" role="radiogroup" aria-label="Duplicate data">
+                                <button type="button" role="radio" data-m="off" onclick="pickDedupMethod('off')">Off</button>
+                                <button type="button" role="radio" data-m="hardlink" onclick="pickDedupMethod('hardlink')">Hardlink</button>
+                                <button type="button" role="radio" data-m="reflink" onclick="pickDedupMethod('reflink')">Reflink</button>
+                            </div>
+                            <button class="btn-small btn-accent" onclick="saveDedupMode()">Save and restart</button>
                         </div>
                     </div>
                     <div id="dedup-result" class="result-msg" style="display:none;margin-top:8px"></div>
-                    <div id="dedup-stats" class="dedup-stats"></div>                    <div id="dedup-stats" class="dedup-stats"></div>
+                    <div id="dedup-stats" class="dedup-stats"></div>
                 </div>
             </div>
             <div class="card">
