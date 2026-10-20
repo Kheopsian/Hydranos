@@ -21,7 +21,7 @@ decided when the release is cut, by looking at what went in: whoever tags it
 renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 `HYDRANOS_VERSION` in the same commit.
 
-## Unreleased -- a graduation that runs out of disk cleans up after itself
+## v4.5.4 -- a write the store did not keep is never acknowledged
 
 ### Added
 
@@ -33,9 +33,67 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   in its place. `hardlink` stays the default. The Config tab
   offers Off, Hardlink and Reflink as one three-way choice in place of the
   checkbox.
+- `resume_fast_secs` (engine sections, default 60): the progress of the
+  downloads that wrote pieces since their last save is saved every minute, so
+  a crash loses at most a minute of it instead of five. 0 keeps only the full
+  save every 300 s.
+
+### Changed
+
+- `/health` answers 503 when every active torrent of a volume (two or more)
+  is in disk error, and names the volume; one torrent in error still leaves
+  it healthy. It also answers 503 `store: unavailable` once the store has
+  been held by one request for 5 s, and never touches the database file
+  itself: on a frozen network mount it answers instead of hanging. Known
+  limit: when the connection to a network share is cut cleanly (closed rather
+  than silent), `/health` can still answer 200 for a while although writes do
+  not get through; a refused write answers 503 and is never acknowledged.
 
 ### Fixed
 
+- A write the store refused (a database on a network share that lost its
+  connection) was acknowledged: the API answered 2xx and the change was gone.
+  Every write route now answers 503 when the store refuses, a move or a copy
+  between engines is undone on the engine side, and background writes say so
+  in the log at ERROR.
+- A store whose connections broke when its network mount reconnected stayed
+  broken until a restart. It reopens them by itself, never creating a
+  database where the file is missing.
+- Requests waiting for a store held by a query stuck on a frozen mount took
+  every API worker with them; the requests that do not need the store keep
+  being served.
+- A move whose store write was refused after the torrent was back in its
+  engine undid itself into an empty folder. It now finishes on disk and
+  records the new place when the job runs again.
+- A file whose sync to disk failed kept its pieces counted as held, and they
+  were served. They are now given up and the torrent shows the error; a piece
+  that cannot be read for a peer is given up the same way.
+- A saved bitfield was believed as stored. Pieces past the end of a file, or
+  in a file that is gone, are no longer offered; a bitfield that does not
+  match its checksum, or cannot be read, makes the torrent a recheck instead
+  of a torrent at 0 %.
+- Records the engine could not restore at startup disappeared without a
+  trace; they are listed in the anomaly report.
+- A recheck on a disk that cannot be read kept nothing and showed 0 %. It
+  now keeps the progress and reports the error.
+- A recheck that brings a torrent out of an error announces it at once,
+  instead of after the half hour an error waits.
+- Torrents starting pieces together could overshoot the download memory
+  budget; the check and the reservation are one step.
+- The installer accepts only a plain version number from the controller
+  before it builds a download URL.
+- CSV export: a text cell that a spreadsheet would read as a formula gets a
+  leading apostrophe.
+- An RSS feed nested more than 100 elements deep is refused with an error.
+- An RSS article title links out only to an absolute http or https address
+  (hardened without a reproduction: there is no browser test harness).
+- Info hashes and resume bitfields that are not plain hex are refused
+  instead of stopping the task that read them.
+- Hole punching judges an IPv4-mapped address by the IPv4 rules.
+- Node registration refuses a bad token before it looks at the name.
+- A peer is answered a bounded number of metadata requests.
+- A tunnel that did not come up resolves no name through the host.
+- An engine's exit-address probe goes through the engine's own proxy.
 - A file copy that failed (a full disk above all) left its partial file on the
   destination. The next try met a file already there and was refused, every
   time. A failed copy now removes what it wrote.
