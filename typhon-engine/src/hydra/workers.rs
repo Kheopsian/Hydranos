@@ -1202,6 +1202,10 @@ pub fn drain_once(
     // anyway would fail the same way every tick.
     let mut stuck_dest_taken: std::collections::BTreeMap<String, usize> =
         std::collections::BTreeMap::new();
+    // Torrents the target engine already holds, by category: counted, not
+    // logged one by one, for the same reason.
+    let mut stuck_held_by_target: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
     for torrent in torrents {
         if to_free <= 0.0 {
             break;
@@ -1258,6 +1262,17 @@ pub fn drain_once(
             // property of the disk, and it would come back every tick.
             if crate::jobsrun::plan_move(&torrent, std::path::Path::new(&save_path)).refusal().is_some() {
                 *stuck_dest_taken
+                    .entry(crate::api::category_of_hash(state, &hash, engine_id))
+                    .or_insert(0usize) += 1;
+                stuck += 1;
+                continue;
+            }
+            // The target engine already has this torrent: the job refuses it
+            // before moving a file, so queueing it only fails every tick.
+            // Counted as stuck so "cannot free" is said; nothing is removed
+            // from either engine here.
+            if state.engines.get(&to_engine).is_some_and(|d| d.manager.get(&torrent.info_hash).is_some()) {
+                *stuck_held_by_target
                     .entry(crate::api::category_of_hash(state, &hash, engine_id))
                     .or_insert(0usize) += 1;
                 stuck += 1;
@@ -1322,6 +1337,18 @@ pub fn drain_once(
             volume = %volume.id,
             categories = %detail,
             "graduate_to points back at this engine, so these torrents can never leave the volume:              set graduate_to to a category that files under a DIFFERENT engine"
+        );
+    }
+    if !stuck_held_by_target.is_empty() {
+        let detail = stuck_held_by_target
+            .iter()
+            .map(|(cat, n)| format!("{cat} x{n}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        tracing::warn!(
+            volume = %volume.id,
+            categories = %detail,
+            "not graduated: the target engine already holds these torrents; remove the copy on one side"
         );
     }
     if !stuck_dest_taken.is_empty() {
@@ -2544,6 +2571,33 @@ mod decision_tests {
         assert!(!s.store.read().unwrap().job_pending_for("graduate", &hash));
         assert!(file.exists());
         assert_eq!(std::fs::read(s.dir.join("pool").join("ja")).unwrap(), b"someone else's bytes");
+    }
+
+    /// The target engine already holds the very torrent (it sits in both): the
+    /// job would refuse it, so it is not queued -- it used to be copied over
+    /// and back every tick -- and it is counted as stuck, so "cannot free"
+    /// is said.
+    #[test]
+    fn a_graduation_the_target_engine_already_holds_is_stuck_not_queued() {
+        let s = graduation_state("dec-drain-held", "72", "hoard");
+        let mgr = engine_manager(&s, "race");
+        let (hash, _, file) = put(&s, "race", "la", "ssd", TRACKER, 3600);
+        let elsewhere = s.dir.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let hoard = engine_manager(&s, "hoard");
+        hoard.add_torrent_bytes(&torrent_bytes("la"), elsewhere.to_str().unwrap(), true, true).unwrap();
+        let ih = typhon_engine::torrent::hex_decode(&hash).unwrap();
+        assert!(hoard.get(&ih).is_some(), "the target holds it");
+
+        let v = volume_on(&s, NO_SUCH_MOUNT, 100_000, 99_000, 80);
+        for _ in 0..2 {
+            let out = drain_once(&s.state, &mgr, &v, &s.cfg(), "race");
+            assert_eq!((out.graduated, out.stuck, out.deleted), (0, 1, 0));
+            assert!(!s.store.read().unwrap().job_pending_for("graduate", &hash));
+        }
+        assert!(file.exists() && in_store(&s, &hash));
+        assert!(mgr.get(&ih).is_some(), "still in race");
+        assert!(hoard.get(&ih).is_some(), "and untouched in hoard");
     }
 
     /// Mixed fates in one pass: the one that has paid is deleted, the one that
