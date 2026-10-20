@@ -120,6 +120,8 @@ pub enum StoreState {
     Ok,
     /// Someone holds the read connection; not a failure, and not waited for.
     Busy,
+    /// Held by one request for this many seconds: everything behind it waits.
+    Unavailable(u64),
     Error(String),
 }
 
@@ -128,6 +130,7 @@ pub fn store_state(state: &AppState) -> StoreState {
     let probe = || match state.store.probe() {
         Probe::Ok => StoreState::Ok,
         Probe::Busy => StoreState::Busy,
+        Probe::Blocked(d) => StoreState::Unavailable(d.as_secs()),
         Probe::Error(e) => StoreState::Error(e),
     };
     let first = probe();
@@ -151,9 +154,19 @@ pub fn health(state: &AppState) -> (bool, serde_json::Value) {
     let mut problems: Vec<serde_json::Value> = Vec::new();
     let mut fatal = false;
     let store = store_state(state);
+    let mut blocked_secs = None;
     let store_word = match &store {
         StoreState::Ok => "ok".to_string(),
         StoreState::Busy => "busy".to_string(),
+        StoreState::Unavailable(secs) => {
+            fatal = true;
+            blocked_secs = Some(*secs);
+            problems.push(serde_json::json!({
+                "check": "store", "severity": "fail",
+                "detail": format!("the store has been held by one request for {secs} s: everything that needs it waits"),
+            }));
+            "unavailable".to_string()
+        }
         StoreState::Error(e) => {
             fatal = true;
             problems.push(serde_json::json!({"check": "store", "severity": "fail", "detail": e}));
@@ -226,13 +239,17 @@ pub fn health(state: &AppState) -> (bool, serde_json::Value) {
     } else {
         "degraded"
     };
+    let mut checks = serde_json::json!({"store": store_word, "engines": engines});
+    if let Some(secs) = blocked_secs {
+        checks["store_blocked_secs"] = secs.into();
+    }
     (
         !fatal,
         serde_json::json!({
             "status": status,
             "version": crate::api::HYDRANOS_VERSION,
             "uptime": crate::startup::uptime_secs() as f64,
-            "checks": {"store": store_word, "engines": engines},
+            "checks": checks,
             "problems": problems,
         }),
     )
@@ -949,6 +966,40 @@ mod tests {
         assert_eq!(doc.as_deref(), Some("before"), "the writer reads again");
         s.state.store.lock().unwrap().put_meta("k", "after").unwrap();
         assert_eq!(s.state.store.read().unwrap().meta_doc("k").as_deref(), Some("after"), "the reader sees it");
+    }
+
+    /// A request that holds the store for seconds (a query stuck on a hung
+    /// network mount) must not take `/health` with it: it answers at once,
+    /// first "busy" and, once the hold has lasted too long, 503 with
+    /// `store: unavailable` and how long the store has been held.
+    #[tokio::test]
+    async fn health_does_not_wait_for_a_store_held_for_seconds() {
+        let s = state_from("obs-store-held", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+        let store = s.state.store.clone();
+        let holder = std::thread::spawn(move || {
+            let guard = store.lock().unwrap();
+            std::thread::sleep(std::time::Duration::from_secs(8));
+            drop(guard);
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let t = std::time::Instant::now();
+        let (st, body) = get(&s, "/health").await;
+        assert!(t.elapsed() < std::time::Duration::from_secs(2), "/health waited for the store");
+        assert_eq!(st, StatusCode::OK, "held for half a second is busy, not broken: {body}");
+
+        tokio::time::sleep(std::time::Duration::from_millis(5500)).await;
+        let t = std::time::Instant::now();
+        let (st, body) = get(&s, "/health").await;
+        assert!(t.elapsed() < std::time::Duration::from_secs(2), "/health waited for the store");
+        assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["checks"]["store"], "unavailable", "{v:#}");
+        assert!(v["checks"]["store_blocked_secs"].as_u64().unwrap_or(0) >= 5, "{v:#}");
+        assert!(v["problems"][0]["detail"].as_str().unwrap_or("").contains("held"), "{v:#}");
+
+        holder.join().unwrap();
+        let (st, body) = get(&s, "/health").await;
+        assert_eq!(st, StatusCode::OK, "released, healthy again: {body}");
     }
 
     /// A store that is still unreadable after the reopening stays an error in
