@@ -728,7 +728,7 @@ impl Job {
         if self.resume {
             {
                 let store = self.state.store.lock().unwrap_or_else(|e| e.into_inner());
-                let _ = store.set_paused(&self.hash, &self.engine_id, false);
+                crate::store::log_store("set_paused", store.set_paused(&self.hash, &self.engine_id, false));
             }
             let _ = manager.start_torrent(ih);
         }
@@ -798,7 +798,7 @@ pub fn guarded_recheck(state: &AppState, engine_id: &str, t: &Arc<TorrentState>)
     if was_running {
         {
             let store = state.store.lock().unwrap_or_else(|e| e.into_inner());
-            let _ = store.set_paused(&hash, engine_id, true);
+            crate::store::log_store("set_paused", store.set_paused(&hash, engine_id, true));
         }
         let _ = engine.manager.stop_torrent(&t.info_hash);
     }
@@ -852,7 +852,7 @@ pub fn guarded_start(state: &AppState, engine_id: &str, t: &Arc<TorrentState>) -
     // Paused until proven, in the store as in the engine: the job releases it.
     {
         let store = state.store.lock().unwrap_or_else(|e| e.into_inner());
-        let _ = store.set_paused(&hash, engine_id, true);
+        crate::store::log_store("set_paused", store.set_paused(&hash, engine_id, true));
     }
     let _ = engine.manager.stop_torrent(&t.info_hash);
     let metainfo = {
