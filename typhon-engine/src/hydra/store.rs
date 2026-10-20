@@ -445,6 +445,13 @@ pub struct StoreLock {
     reader_hold: HoldSlot,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Make `Store::ping` on this thread sleep this long first, the way a
+    /// query on a hung mount does. For tests; 0 = off.
+    pub static PING_STALL_MS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 /// The current holder of one connection.
 struct Hold {
     since: std::time::Instant,
@@ -890,6 +897,13 @@ impl Store {
     /// The journal mode SQLite reports for this file.
     /// Whether the database answers a query at all.
     pub fn ping(&self) -> Result<(), String> {
+        #[cfg(test)]
+        {
+            let ms = PING_STALL_MS.with(|c| c.get());
+            if ms > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(ms));
+            }
+        }
         self.conn
             .query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get::<_, i64>(0))
             .map(|_| ())
