@@ -551,7 +551,7 @@ pub fn share_limits_pass(
         match engine.action {
             Action::Stop => {
                 if let Ok(store) = state.store.lock() {
-                    let _ = store.set_paused(&hash, engine_id, true);
+                    crate::store::log_store("set_paused", store.set_paused(&hash, engine_id, true));
                 }
                 crate::api::apply_pause_to_engine(state, engine_id, &hash, true);
                 out.stopped += 1;

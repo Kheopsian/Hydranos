@@ -710,6 +710,19 @@ impl Drop for StoreGuard<'_> {
     }
 }
 
+/// A background write the store refused: said at ERROR, never swallowed.
+/// For the places that have nobody to answer (a job, a worker); a route
+/// answers 5xx instead.
+pub fn log_store<T, E: std::fmt::Display>(what: &str, r: Result<T, E>) -> Option<T> {
+    match r {
+        Ok(v) => Some(v),
+        Err(e) => {
+            tracing::error!(what, error = %e, "the store refused a write: the change is not saved");
+            None
+        }
+    }
+}
+
 /// Look after the shared store. Every 2 s, report a connection held for
 /// `LOCK_STUCK_WARN` while it is still held (`StoreLock::watch_holds`); every
 /// 10 s, ask whether the connections still answer and reopen the ones that do

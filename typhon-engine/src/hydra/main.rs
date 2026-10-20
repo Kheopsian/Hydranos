@@ -862,7 +862,7 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
                     paused_total += 1;
                     let hex = typhon_engine::torrent::hex_encode(&torrent.info_hash);
                     if let Ok(store) = shared_store.lock() {
-                        let _ = store.set_paused(&hex, &engine.id, true);
+                        store::log_store("set_paused", store.set_paused(&hex, &engine.id, true));
                     }
                 }
             }
