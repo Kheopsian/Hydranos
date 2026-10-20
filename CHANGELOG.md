@@ -21,6 +21,20 @@ decided when the release is cut, by looking at what went in: whoever tags it
 renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 `HYDRANOS_VERSION` in the same commit.
 
+## Unreleased -- a graduated torrent's history is not throughput
+
+### Fixed
+
+- An engine's upload and download rates count the bytes it moved, not the sum
+  of its torrents' lifetime counters. A torrent graduating from race to hoard
+  carries its lifetime in, and the next tick read all of it as throughput:
+  the Benchmark charts and records showed peaks of hundreds of Gbps that no
+  line carried.
+- A graduation whose target engine already holds the torrent is refused before
+  any file moves. It used to copy every file over, be refused at the end, copy
+  them all back, and be queued again on the next drain; the drain now counts
+  it as stuck and logs which categories hold a copy on both sides.
+
 ## v4.5.4 -- a write the store did not keep is never acknowledged
 
 ### Added
