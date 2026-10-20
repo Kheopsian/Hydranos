@@ -947,7 +947,9 @@ fn move_data(state: &AppState, job: &crate::store::Job) -> Result<(), String> {
         Ok(())
     };
     if plan.is_noop() {
-        set_labels(None)?;
+        // Already where it was asked to go: a move whose store write was
+        // refused is finished here, so the store learns the place too.
+        set_labels(Some(&plan.new_root.to_string_lossy()))?;
         return Ok(());
     }
     // Checked again here, not only when the request came in: a file can gain
@@ -1058,12 +1060,12 @@ fn move_data(state: &AppState, job: &crate::store::Job) -> Result<(), String> {
         let undo = roll_back(engine, &metainfo, &original, &renamed, &copied);
         return Err(format!("the engine refused it at {new_root}: {e}; {undo}"));
     }
-    if let Err(why) = set_labels(Some(&new_root)) {
-        // The store still says the old place: put the engine back there too,
-        // while the originals are still in it.
-        let undo = roll_back(engine, &metainfo, &original, &renamed, &copied);
-        return Err(format!("{why}; {undo}"));
-    }
+    // The engine serves the new place from here on. A store that refuses to
+    // record it is not undone by moving the data back -- `roll_back` is for a
+    // torrent the engine does not hold, and here it does: the move is
+    // finished on the disk and the job fails with only the store left, which
+    // running it again records (the move is then a no-op).
+    let labels = set_labels(Some(&new_root));
 
     // 3. The originals of what was copied. The torrent reads the new ones now.
     for f in plan.files.iter().filter(|f| f.present && !f.rename) {
@@ -1073,6 +1075,9 @@ fn move_data(state: &AppState, job: &crate::store::Job) -> Result<(), String> {
     }
     prune_empty_dirs(&plan);
     let _ = set_carried_record(state, job, &p, None);
+    if let Err(why) = labels {
+        return Err(format!("{why}; the torrent is at {new_root} in the engine, run the job again to record it"));
+    }
     tracing::info!(hash = %hash, engine = %engine_id, from = %plan.old_root.display(),
                    to = %new_root, copied_bytes = need, "moved");
     Ok(())
@@ -1489,6 +1494,59 @@ mod graduate_tests {
         let t = race.manager.get(&ih).expect("back in race");
         assert_eq!(*t.save_path.read(), dst);
         assert_eq!(t.total_uploaded.load(std::sync::atomic::Ordering::Relaxed), 5_000);
+        assert!(dst.join("grad").exists() && !src.join("grad").exists());
+    }
+
+    /// ⭐ The store refuses the new place AFTER the engine took the torrent
+    /// back there. Undoing then emptied the place the engine serves and could
+    /// not put the torrent back where it was ("already present"). The move is
+    /// finished on the disk instead, the job fails saying only the store is
+    /// left, and running it again records the new place.
+    #[test]
+    fn a_move_whose_store_refuses_the_new_place_keeps_serving_it_and_records_it_when_run_again() {
+        let s = state_from("move-store-refuses", "");
+        let src = s.dir.join("race-data");
+        let dst = s.dir.join("elsewhere");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("grad"), vec![7u8; 16384]).unwrap();
+        let blob = torrent_bytes("grad");
+        let root = src.display().to_string();
+        let race = s.state.engines.get("race").unwrap();
+        let (ih, _) = race.manager.add_torrent_bytes(&blob, &root, true, false).expect("added");
+        let hash = typhon_engine::torrent::hex_encode(&ih);
+        let params = serde_json::json!({
+            "engine": "race", "category": "", "save_path": dst.display().to_string(),
+        })
+        .to_string();
+        let running = {
+            let store = s.state.store.lock().unwrap();
+            store.insert_torrent(&hash, "race", &blob, &root, "", 0.0, true, "").unwrap();
+            store.create_job("move_data", &hash, &params, 16384).unwrap();
+            store.claim_next_job().expect("claimed")
+        };
+        s.state.store.lock().unwrap().execute_batch_for_tests(
+            "CREATE TRIGGER refuse_move BEFORE UPDATE OF save_path ON torrents \
+             BEGIN SELECT RAISE(ABORT, 'database disk image is malformed'); END;",
+        );
+
+        let err = move_data(&s.state, &running).expect_err("the store refused the new place");
+        let t = race.manager.get(&ih).expect("the engine still holds it");
+        assert_eq!(*t.save_path.read(), dst, "{err}");
+        assert!(dst.join("grad").exists(), "the place the engine serves keeps its data: {err}");
+        assert!(err.contains("store"), "{err}");
+
+        s.state.store.lock().unwrap().execute_batch_for_tests("DROP TRIGGER refuse_move;");
+        let again = {
+            let store = s.state.store.lock().unwrap();
+            store.requeue_running_jobs();
+            store.claim_next_job().expect("claimed again")
+        };
+        move_data(&s.state, &again).expect("only the store was left");
+        assert_eq!(
+            s.state.store.lock().unwrap().save_path_of(&hash).as_deref(),
+            Some(dst.display().to_string().as_str()),
+            "the store records the place the engine serves"
+        );
         assert!(dst.join("grad").exists() && !src.join("grad").exists());
     }
 
