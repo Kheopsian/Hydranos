@@ -1696,9 +1696,13 @@ impl TorrentManager {
             t.upload_rate.update(ul);
             t.download_rate.update(dl);
         }
-        self.upload_rate.update(total_ul);
-        self.download_rate.update(total_dl);
         self.credit_moved(moved);
+        // Fed from what this engine moved, not the lifetime sum: a torrent
+        // adopted with 4 GB of history would otherwise read as 4 GB of
+        // throughput in the next tick. The lifetime totals stay cached below.
+        let (moved_ul, moved_dl) = self.moved();
+        self.upload_rate.update(moved_ul);
+        self.download_rate.update(moved_dl);
         self.cached_total_uploaded.store(total_ul, Ordering::Relaxed);
         self.cached_total_downloaded.store(total_dl, Ordering::Relaxed);
         self.totals_ready.store(true, Ordering::Release);
@@ -4137,6 +4141,44 @@ mod manager_tests {
         dst.get(&ih).unwrap().total_uploaded.fetch_add(25, Ordering::Relaxed);
         dst.update_rates();
         assert_eq!(dst.moved(), (25, 0), "and counts what it moves from there");
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(root2);
+    }
+
+    /// ⭐ An adopted torrent's lifetime is history, not throughput. The engine
+    /// rate used to be fed the sum of every torrent's lifetime counter, so a
+    /// graduation that carried 4 GB in showed up as 4 GB in one tick -- the
+    /// 100+ Gbps peaks in the bench db. It follows what the engine moved.
+    #[test]
+    fn an_adopted_torrent_s_lifetime_is_not_throughput() {
+        let (src, root) = manager("rate-src");
+        let (dst, root2) = manager("rate-dst");
+        let blob = torrent_bytes("alpha", &["https://tracker.example/announce"]);
+        dst.set_blob_source(Arc::new(move |_hash: &str| Some(blob.clone())));
+        let ih = add(&src, "alpha");
+        src.get(&ih).unwrap().restore_lifetime(4_000_000_000, 8_000_000_000);
+        let rd = src.export_state(&ih).expect("exported");
+
+        // Seed the engine trackers while it holds nothing, then adopt.
+        dst.update_rates();
+        dst.import_state(&rd).expect("imported");
+        std::thread::sleep(std::time::Duration::from_millis(650));
+        dst.update_rates();
+        assert_eq!(dst.moved(), (0, 0));
+        assert_eq!(dst.upload_rate.get(), 0, "adopting 4 GB of history is not upload");
+        assert_eq!(dst.download_rate.get(), 0, "adopting 8 GB of history is not download");
+
+        // Real traffic after the adoption still shows.
+        let t = dst.get(&ih).unwrap();
+        t.total_uploaded.fetch_add(6_000_000, Ordering::Relaxed);
+        t.total_downloaded.fetch_add(3_000_000, Ordering::Relaxed);
+        std::thread::sleep(std::time::Duration::from_millis(650));
+        dst.update_rates();
+        assert_eq!(dst.moved(), (6_000_000, 3_000_000));
+        assert!(dst.upload_rate.get() > 0, "real upload still registers");
+        assert!(dst.upload_rate.get() < 100_000_000, "and is the traffic, not the history");
+        assert!(dst.download_rate.get() > 0, "real download still registers");
+        assert!(dst.download_rate.get() < 100_000_000);
         let _ = std::fs::remove_dir_all(root);
         let _ = std::fs::remove_dir_all(root2);
     }
