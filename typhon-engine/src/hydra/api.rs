@@ -6981,8 +6981,9 @@ fn store_refused(state: &AppState, what: &str, e: impl std::fmt::Display) -> Res
         Json(serde_json::json!({"error": format!("{what}: the store refused the write: {e}")})),
     )
         .into_response();
-    // The next request finds the connections reopened, if they were the
-    // problem; this one is already answered.
+    // Asked for in the background, without waiting: the next request finds
+    // the connections reopened, if they were the problem; this one is already
+    // answered, and a ping on a frozen mount is not made on its path.
     state.store.heal();
     response
 }
@@ -16055,6 +16056,7 @@ pub fn rescue_router(state: RescueState) -> Router {
 /// makes it `degraded` (still 200). See `obs::health`. While the catalogue
 /// loads, the startup gate answers 200 `starting` instead.
 async fn get_health(State(state): State<AppState>) -> Response {
+    crate::obs::refresh_store(&state).await;
     let (ok, body) = crate::obs::health(&state);
     let code = if ok { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE };
     (code, Json(body)).into_response()
@@ -16071,6 +16073,7 @@ async fn get_health_gated(
 ) -> Response {
     let query = query.unwrap_or_default();
     if state.cfg().daemon.health_detail_requires_key && !authorised(&state, &headers, &query) {
+        crate::obs::refresh_store(&state).await;
         let (ok, body) = crate::obs::health(&state);
         let code = if ok { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE };
         return (code, Json(serde_json::json!({"status": body["status"], "version": body["version"]})))
