@@ -528,6 +528,12 @@ pub struct Dedup {
     /// of offers nobody reads is dead weight that still has to be maintained.
     #[serde(default = "dedup_default_enabled")]
     pub enabled: bool,
+    /// `hardlink` (the default) or `reflink`: how the held files are made to
+    /// appear under the new torrent's names. Reflink gives each torrent its
+    /// own file sharing the blocks; where the filesystem cannot clone, the
+    /// torrent downloads instead. See `dedup::Method`.
+    #[serde(default)]
+    pub method: crate::dedup::Method,
     /// An incoming torrent naming files another torrent holds with other
     /// bytes: `isolate` (a folder of its own, identical files hardlinked in),
     /// `refuse`, or `legacy` (share the path and let the recheck overwrite,
@@ -542,7 +548,11 @@ fn dedup_default_enabled() -> bool {
 
 impl Default for Dedup {
     fn default() -> Self {
-        Self { enabled: dedup_default_enabled(), path_collision: Default::default() }
+        Self {
+            enabled: dedup_default_enabled(),
+            method: Default::default(),
+            path_collision: Default::default(),
+        }
     }
 }
 

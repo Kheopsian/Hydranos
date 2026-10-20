@@ -18,7 +18,8 @@
 //!    two of 50) -- so the size list is compared before trusting the pairing.
 //!
 //! 2. A hardlink points at the same inode, so the bytes ARE the source's
-//!    bytes. If the source is complete and verified, the copy is complete by
+//!    bytes (a reflink shares the blocks, which is the same thing until one
+//!    side writes). If the source is complete and verified, the copy is complete by
 //!    construction and rechecking it reads gigabytes to confirm a tautology.
 //!
 //! What this module deliberately does NOT do is partial matching. Measured on
@@ -312,6 +313,22 @@ fn device_of(p: &Path) -> Option<u64> {
     crate::platform::volume_id_nearest(p)
 }
 
+/// How a planned file is made to exist under its new name (`[dedup] method`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Method {
+    /// A second directory entry for the same inode. Works on every local
+    /// filesystem; the two names share one file, link count and all.
+    #[default]
+    Hardlink,
+    /// A copy-on-write clone (`FICLONE`): a new inode sharing the source's
+    /// blocks until either side writes. Only where the filesystem can clone
+    /// (btrfs, XFS with reflink, ZFS with block cloning). A refused clone is
+    /// NOT retried as a hardlink: whoever picked this asked for separate
+    /// files, and a hardlink would quietly give them one.
+    Reflink,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Applied {
     pub created: usize,
@@ -324,7 +341,7 @@ pub struct Applied {
 /// by the kernel, so a renamed folder means a new folder holding links to the
 /// same file inodes. On failure everything created here is removed again --
 /// a half-linked torrent seeds corrupt data to the swarm.
-pub fn apply(p: &Plan) -> std::io::Result<Applied> {
+pub fn apply(p: &Plan, method: Method) -> std::io::Result<Applied> {
     let mut done: Vec<PathBuf> = Vec::with_capacity(p.links.len());
     let mut out = Applied::default();
 
@@ -335,7 +352,11 @@ pub fn apply(p: &Plan) -> std::io::Result<Applied> {
                 return Err(e);
             }
         }
-        if let Err(e) = std::fs::hard_link(&link.from, &link.to) {
+        let made = match method {
+            Method::Hardlink => std::fs::hard_link(&link.from, &link.to),
+            Method::Reflink => reflink(&link.from, &link.to),
+        };
+        if let Err(e) = made {
             unwind(&done);
             return Err(e);
         }
@@ -344,6 +365,40 @@ pub fn apply(p: &Plan) -> std::io::Result<Applied> {
         out.bytes += link.len;
     }
     Ok(out)
+}
+
+/// Clone `from` into a new file `to`, or fail without leaving `to` behind.
+///
+/// `FICLONE` and not `copy_file_range`: the latter falls back to copying the
+/// bytes when it cannot share them, which would turn a dedup into a second
+/// copy of the payload without a word.
+#[cfg(target_os = "linux")]
+fn reflink(from: &Path, to: &Path) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    // _IOW(0x94, 9, int), the same on every Linux architecture.
+    const FICLONE: libc::c_ulong = 0x4004_9409;
+
+    let src = std::fs::File::open(from)?;
+    // create_new: never clone over a file someone else just put there.
+    let dst = std::fs::OpenOptions::new().write(true).create_new(true).open(to)?;
+    // SAFETY: both descriptors are open for the duration of the call, and
+    // FICLONE reads no memory from us beyond the integer argument.
+    let rc = unsafe { libc::ioctl(dst.as_raw_fd(), FICLONE as _, src.as_raw_fd()) };
+    if rc != 0 {
+        let e = std::io::Error::last_os_error();
+        drop(dst);
+        let _ = std::fs::remove_file(to);
+        return Err(e);
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn reflink(_from: &Path, _to: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "reflink is only implemented on Linux",
+    ))
 }
 
 fn unwind(created: &[PathBuf]) {
@@ -453,7 +508,7 @@ mod tests {
         assert_eq!(p.links.len(), 1);
         assert_eq!(p.bytes, 10);
 
-        let done = apply(&p).unwrap();
+        let done = apply(&p, Method::Hardlink).unwrap();
         assert_eq!(done.created, 1);
 
         // The link must BE the source inode, not a copy of it. Unix only:
@@ -522,10 +577,71 @@ mod tests {
             cross_device: false,
             bytes: 8,
         };
-        assert!(apply(&p).is_err());
+        assert!(apply(&p, Method::Hardlink).is_err());
         assert!(!dst.join("P").join("a").exists(), "first link was left behind");
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn reflink_gives_a_separate_file_or_nothing() {
+        // Reflink is only possible where the filesystem clones, and the test
+        // directory may sit on one that cannot (tmpfs). Either outcome is
+        // allowed; a hardlink in its place is not.
+        let dir = std::env::temp_dir().join(format!("dedup-reflink-{}", std::process::id()));
+        let src = dir.join("src");
+        let dst = dir.join("dst");
+        std::fs::create_dir_all(src.join("Old")).unwrap();
+        std::fs::write(src.join("Old").join("a.mkv"), b"0123456789").unwrap();
+
+        let have = layout(&multi("Old", &[("a.mkv", 10)])).unwrap();
+        let want = layout(&multi("New", &[("a.mkv", 10)])).unwrap();
+        let p = plan(&have, src.to_str().unwrap(), &want, dst.to_str().unwrap()).unwrap();
+
+        let made = dst.join("New").join("a.mkv");
+        match apply(&p, Method::Reflink) {
+            Ok(done) => {
+                assert_eq!(done.created, 1);
+                assert_eq!(std::fs::read(&made).unwrap(), b"0123456789");
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::MetadataExt;
+                    let a = std::fs::metadata(src.join("Old").join("a.mkv")).unwrap();
+                    let b = std::fs::metadata(&made).unwrap();
+                    assert_ne!(a.ino(), b.ino(), "reflink produced a hardlink");
+                    assert_eq!(a.nlink(), 1);
+                }
+            }
+            Err(e) => {
+                // Set where TMPDIR is known to clone, so a run there cannot
+                // pass on the refusal branch alone.
+                assert!(std::env::var_os("DEDUP_TEST_MUST_CLONE").is_none(), "clone refused: {e}");
+                assert!(!made.exists(), "a refused clone left a file behind");
+            }
+        }
+        // Whatever happened, the source still has exactly one name.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let a = std::fs::metadata(src.join("Old").join("a.mkv")).unwrap();
+            assert_eq!(a.nlink(), 1, "the source was hardlinked");
+        }
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn method_reads_from_the_config_words() {
+        #[derive(serde::Deserialize)]
+        struct T {
+            m: Method,
+        }
+        let r: T = toml::from_str("m = \"reflink\"").unwrap();
+        assert_eq!(r.m, Method::Reflink);
+        let h: T = toml::from_str("m = \"hardlink\"").unwrap();
+        assert_eq!(h.m, Method::Hardlink);
+        assert!(toml::from_str::<T>("m = \"copy\"").is_err());
+        assert_eq!(Method::default(), Method::Hardlink);
     }
 
     #[test]
