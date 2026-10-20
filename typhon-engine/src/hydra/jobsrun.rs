@@ -151,6 +151,9 @@ thread_local! {
     /// torrent left its engine, with nothing undone: what a kill or a power
     /// cut leaves behind.
     static STOP_AFTER_LEAVING_SOURCE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Makes the target refuse the next adoption on this thread, after the
+    /// files were copied: the rollback a refusal at that point has to do.
+    static REFUSE_ADOPTION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Move a torrent and its data to another engine's storage, keeping it seeding.
@@ -195,6 +198,12 @@ fn graduate(state: &AppState, job: &crate::store::Job) -> Result<(), String> {
         p.get("record").and_then(|v| serde_json::from_value(v.clone()).ok());
     let (original, old_root, files, resumed) = match src.manager.get(&ih) {
         Some(t) => {
+            // A target that already holds this torrent can only refuse it at
+            // the end, after every file was copied over and then copied back;
+            // the drain queued it again each tick. Asked before anything stops.
+            if state.engines.get(&to).is_some_and(|d| d.manager.get(&ih).is_some()) {
+                return Err(format!("{to} already holds it; nothing was moved"));
+            }
             // The same checks a move inside an engine makes, before anything
             // stops: 4.4 renamed each file onto its destination unseen, so the
             // drain could overwrite another torrent's file of the same name in
@@ -330,6 +339,10 @@ fn graduate(state: &AppState, job: &crate::store::Job) -> Result<(), String> {
     // Interrupted after the target adopted it: only the store is left to do.
     let adopted = resumed && dst.manager.get(&ih).is_some();
     if !adopted {
+        #[cfg(test)]
+        if REFUSE_ADOPTION.with(|c| c.replace(false)) {
+            return Err(put_back(&moved, "the target engine refused it: refused by the test".into()));
+        }
         if let Err(e) = dst.manager.import_state_bytes(&record, &metainfo) {
             return Err(put_back(&moved, format!("the target engine refused it: {e}")));
         }
@@ -1742,24 +1755,43 @@ mod graduate_tests {
         assert_eq!(std::fs::read(dst.join("grad")).unwrap(), vec![7u8; 16384]);
     }
 
-    /// ⭐ A target that refuses puts everything back: the files return and the
-    /// source engine holds the torrent again. 4.3 left it in no engine.
+    /// ⭐ A target that refuses after the copy puts everything back: the files
+    /// return and the source engine holds the torrent again. 4.3 left it in no
+    /// engine.
     #[test]
     fn a_refused_graduation_is_rolled_back() {
         let (s, hash, src, dst) = setup("grad-refused");
         let ih = typhon_engine::torrent::hex_decode(&hash).unwrap();
-        // The target already holds this torrent, so its adoption is refused.
-        let hoard = s.state.engines.get("hoard").unwrap();
-        let other = s.dir.join("elsewhere");
-        std::fs::create_dir_all(&other).unwrap();
-        hoard.manager.add_torrent_bytes(&torrent_bytes("grad"), &other.display().to_string(), true, true).unwrap();
-
+        REFUSE_ADOPTION.with(|c| c.set(true));
         let err = graduate(&s.state, &job(&hash, &dst)).expect_err("refused");
         assert!(err.contains("rolled back"), "{err}");
         assert!(src.join("grad").exists(), "the file came back");
         assert!(!dst.join("grad").exists());
         let back = s.state.engines.get("race").unwrap().manager.get(&ih).expect("back in race");
         assert_eq!(*back.save_path.read(), src);
+        assert!(s.state.engines.get("hoard").unwrap().manager.get(&ih).is_none());
+    }
+
+    /// ⭐ A target that already holds the very torrent (it sits in both
+    /// engines) is refused before anything moves. It used to copy every file,
+    /// be refused at the end, and copy them all back -- and the drain queued
+    /// it again on its next tick, forever.
+    #[test]
+    fn a_graduation_the_target_engine_already_holds_is_refused_before_any_file_moves() {
+        let (s, hash, src, dst) = setup("grad-held");
+        let ih = typhon_engine::torrent::hex_decode(&hash).unwrap();
+        let hoard = s.state.engines.get("hoard").unwrap();
+        let other = s.dir.join("elsewhere");
+        std::fs::create_dir_all(&other).unwrap();
+        hoard.manager.add_torrent_bytes(&torrent_bytes("grad"), &other.display().to_string(), true, true).unwrap();
+
+        let err = graduate(&s.state, &job(&hash, &dst)).expect_err("refused");
+        assert!(err.contains("already holds it") && err.contains("nothing was moved"), "{err}");
+        assert_eq!(std::fs::read(src.join("grad")).unwrap(), vec![7u8; 16384], "the source is untouched");
+        assert!(!dst.exists(), "nothing was created at the destination");
+        let kept = s.state.engines.get("race").unwrap().manager.get(&ih).expect("it never left race");
+        assert_eq!(*kept.save_path.read(), src);
+        assert!(hoard.manager.get(&ih).is_some(), "and hoard still holds its own");
     }
 
     /// Puts the thread back to the one filesystem tests run on.
