@@ -1749,6 +1749,18 @@ impl Store {
             .ok()
     }
 
+    /// `meta_doc`, but a store that cannot be read is an error and not an
+    /// absent row. A writer that edits the document must tell the two apart:
+    /// taking "unreadable" for "empty" and saving the edit would replace the
+    /// whole document with one entry.
+    pub fn meta_doc_checked(&self, key: &str) -> anyhow::Result<Option<String>> {
+        use rusqlite::OptionalExtension;
+        Ok(self
+            .conn
+            .query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| r.get(0))
+            .optional()?)
+    }
+
     /// One job by id.
     /// Queue a job. Returns its id.
     ///
