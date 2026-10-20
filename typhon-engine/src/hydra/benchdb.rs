@@ -1254,6 +1254,43 @@ mod tests {
         assert_eq!(peers, 6.0, "race_peers + hoard_peers + extra_peers");
     }
 
+    /// A rate no line carried is cleared to NULL in place. The minute it sat in
+    /// keeps its other samples, the records skip the cleared one, and nothing
+    /// that reads the samples back trips over the hole.
+    #[test]
+    fn a_rate_cleared_to_null_is_skipped_and_breaks_no_reader() {
+        let db = BenchDb::open_in_memory().unwrap();
+        const GBPS: f64 = 1.25e8;
+        for minute in [1_000.0, 2_000.0] {
+            for i in 0..12 {
+                let ts = minute + i as f64 * 5.0;
+                let up = if minute == 2_000.0 && i == 3 { 579.0 * GBPS } else { GBPS };
+                db.record_sample(&serde_json::json!({
+                    "ts": ts, "race_upload_rate": up, "hoard_upload_rate": 0.0, "extra_upload_rate": 0.0,
+                }))
+                .unwrap();
+            }
+        }
+        let cleared = db
+            .conn
+            .execute(
+                "UPDATE bench_samples SET \
+                   race_upload_rate = CASE WHEN race_upload_rate > 1.25e9 THEN NULL ELSE race_upload_rate END \
+                 WHERE race_upload_rate > 1.25e9",
+                [],
+            )
+            .unwrap();
+        assert_eq!(cleared, 1);
+
+        let rec = db.records_payload().expect("the records read a NULL rate");
+        let peak = rec["records"].as_array().unwrap().iter().find(|r| r["label"] == "Peak upload").unwrap()["value"]
+            .as_f64()
+            .unwrap();
+        assert!((peak - 1.0).abs() < 0.01, "the cleared sample is out of its minute's average: {peak}");
+        let back = db.samples_in_range(0.0, 3_000.0).expect("the samples read a NULL rate");
+        assert_eq!(back.len(), 24, "the cleared row is still a sample");
+    }
+
     /// A bench.db written by an older release lacks the announce-health
     /// columns. Opening it must add them, or the first insert fails and the
     /// sampler records nothing from then on.
