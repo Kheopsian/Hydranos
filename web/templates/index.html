@@ -1204,7 +1204,7 @@
                     <div class="settings-row">
                         <div class="sr-label">
                             <span class="sr-key">On adding a torrent we already hold</span>
-                            <span class="sr-desc">Sets [dedup] enabled and method. The files we already hold appear under the new torrent's names, so it seeds at once without downloading them again. Hardlink (the default): one file, two names, on any local filesystem. Reflink: a separate file sharing the blocks until one side writes, only where the filesystem can clone (btrfs, XFS, ZFS with block cloning); where it cannot, the torrent downloads. Off: always download.</span>
+                            <span class="sr-desc">Sets [dedup] enabled and method. The files we already hold appear under the new torrent's names, so it seeds at once without downloading them again. Hardlink (the default): one file, two names, on any local filesystem. Reflink: a separate file sharing the blocks until one side writes, only where the filesystem can clone (btrfs, XFS with reflink, ZFS 2.2 or later with block cloning); where it cannot, the torrent downloads. On ZFS a clone can wait for the pool's next sync before it returns. Off: always download.</span>
                         </div>
                         <div class="sr-field dd-field">
                             <div class="dd-seg" id="dedup-method" role="radiogroup" aria-label="Duplicate data">

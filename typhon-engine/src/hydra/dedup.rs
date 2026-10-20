@@ -323,7 +323,9 @@ pub enum Method {
     Hardlink,
     /// A copy-on-write clone (`FICLONE`): a new inode sharing the source's
     /// blocks until either side writes. Only where the filesystem can clone
-    /// (btrfs, XFS with reflink, ZFS with block cloning). A refused clone is
+    /// (btrfs, XFS with reflink, ZFS >= 2.2 with block cloning). On ZFS the
+    /// clone can wait for a txg sync, and that wait cannot be interrupted or
+    /// timed out from here. A refused clone is
     /// NOT retried as a hardlink: whoever picked this asked for separate
     /// files, and a hardlink would quietly give them one.
     Reflink,

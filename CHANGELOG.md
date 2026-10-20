@@ -27,9 +27,10 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 
 - `[dedup] method = "reflink"`: a torrent whose payload we already hold gets
   its own copy-on-write clone of the files instead of a hardlink, on a
-  filesystem that can clone (btrfs, XFS with reflink, ZFS with block
-  cloning). Where the clone is refused, the torrent downloads; it is never
-  hardlinked in its place. `hardlink` stays the default. The Config tab
+  filesystem that can clone (btrfs, XFS with reflink, ZFS 2.2 or later
+  with block cloning; there a clone can wait for the pool's next sync).
+  Where the clone is refused, the torrent downloads; it is never hardlinked
+  in its place. `hardlink` stays the default. The Config tab
   offers Off, Hardlink and Reflink as one three-way choice in place of the
   checkbox.
 
