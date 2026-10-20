@@ -436,6 +436,22 @@ const LOCK_WARN: std::time::Duration = std::time::Duration::from_millis(200);
 pub struct StoreLock {
     inner: std::sync::Mutex<Store>,
     reader: Option<std::sync::Mutex<Store>>,
+    /// When the connections were last reopened (or tried to be), so a store
+    /// that cannot be reopened is retried at a bounded pace.
+    last_heal: std::sync::Mutex<Option<std::time::Instant>>,
+}
+
+/// The least time between two attempts to reopen the store's connections
+/// when something asks for one (a failed write, a health probe).
+const HEAL_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How the store answers a probe that never waits for it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Probe {
+    Ok,
+    /// Someone holds the connection the probe wanted; not a failure.
+    Busy,
+    Error(String),
 }
 
 /// A held store. Derefs to `Store`; logs on release if it was held too long.
@@ -448,11 +464,87 @@ pub struct StoreGuard<'a> {
 
 impl StoreLock {
     pub fn new(store: Store) -> Self {
-        StoreLock { inner: std::sync::Mutex::new(store), reader: None }
+        StoreLock { inner: std::sync::Mutex::new(store), reader: None, last_heal: Default::default() }
     }
 
     pub fn with_reader(store: Store, reader: Option<Store>) -> Self {
-        StoreLock { inner: std::sync::Mutex::new(store), reader: reader.map(std::sync::Mutex::new) }
+        StoreLock {
+            inner: std::sync::Mutex::new(store),
+            reader: reader.map(std::sync::Mutex::new),
+            last_heal: Default::default(),
+        }
+    }
+
+    /// Ask the store, without waiting for it: the read connection (the shared
+    /// one when there is no other) must answer, and so must the writer when it
+    /// is free. A connection somebody holds is `Busy`, never an error.
+    pub fn probe(&self) -> Probe {
+        let ping = |m: &std::sync::Mutex<Store>| match m.try_lock() {
+            Ok(s) => match s.ping() {
+                Ok(()) => Probe::Ok,
+                Err(e) => Probe::Error(e),
+            },
+            Err(std::sync::TryLockError::WouldBlock) => Probe::Busy,
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                Probe::Error("the store's lock is poisoned: a thread panicked holding it".into())
+            }
+        };
+        let main = ping(self.reader.as_ref().unwrap_or(&self.inner));
+        if self.reader.is_some() {
+            if let Probe::Error(e) = ping(&self.inner) {
+                return Probe::Error(e);
+            }
+        }
+        main
+    }
+
+    /// Close and reopen the connections that no longer answer, then check
+    /// that they do. Returns whether every connection answers afterwards.
+    ///
+    /// For the day a network mount reconnects: the connections opened before
+    /// keep descriptors on the old session and fail every query with
+    /// "malformed" or "not a database" while the file is intact. A fresh
+    /// connection to the same path works. The file is only ever opened, never
+    /// repaired. At most one attempt every `HEAL_EVERY`; a connection someone
+    /// holds is left to them.
+    pub fn heal(&self) -> bool {
+        {
+            let mut last = self.last_heal.lock().unwrap_or_else(|e| e.into_inner());
+            if last.is_some_and(|t| t.elapsed() < HEAL_EVERY) {
+                return false;
+            }
+            *last = Some(std::time::Instant::now());
+        }
+        self.heal_now()
+    }
+
+    /// `heal` without the pacing, for the watcher thread that sets its own.
+    pub fn heal_now(&self) -> bool {
+        let mut ok = Self::heal_one(&self.inner, "writer");
+        if let Some(r) = &self.reader {
+            ok &= Self::heal_one(r, "reader");
+        }
+        ok
+    }
+
+    fn heal_one(m: &std::sync::Mutex<Store>, which: &str) -> bool {
+        let mut s = match m.try_lock() {
+            Ok(s) => s,
+            Err(std::sync::TryLockError::WouldBlock) => return true,
+            Err(std::sync::TryLockError::Poisoned(_)) => return false,
+        };
+        let Err(why) = s.ping() else { return true };
+        tracing::warn!(connection = which, error = %why, "store connection broken, reopening it");
+        match s.reopen().and_then(|()| s.ping().map_err(anyhow::Error::msg)) {
+            Ok(()) => {
+                tracing::info!(connection = which, "store connection reopened");
+                true
+            }
+            Err(e) => {
+                tracing::warn!(connection = which, error = %e, "store connection still broken after reopening");
+                false
+            }
+        }
     }
 
     #[track_caller]
@@ -544,6 +636,20 @@ impl Drop for StoreGuard<'_> {
     }
 }
 
+/// Look after the connections of the shared store: every few seconds, ask
+/// whether they still answer and reopen the ones that do not (cf
+/// `StoreLock::heal`), so a store comes back after its mount did even when
+/// nothing is asking it anything.
+pub fn spawn_watch(lock: std::sync::Arc<StoreLock>) {
+    let spawned = std::thread::Builder::new().name("store-watch".into()).spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_secs(10));
+        lock.heal_now();
+    });
+    if let Err(e) = spawned {
+        tracing::warn!("no store watcher: {e}");
+    }
+}
+
 /// Copy the WAL back into the database once a second, on a connection of its
 /// own, so no write ever pays for it.
 ///
@@ -589,6 +695,9 @@ const SLIM_REREAD_MAX: usize = 100_000;
 
 pub struct Store {
     conn: Connection,
+    /// Where this connection was opened, to open it again. `None` in memory.
+    path: Option<std::path::PathBuf>,
+    read_only: bool,
     /// `slim_facts` per session, kept current by `slim_facts_current`.
     slim: std::collections::HashMap<String, std::sync::Arc<SlimFacts>>,
     slim_version: i64,
@@ -618,6 +727,8 @@ impl Store {
         }
         let conn = Connection::open_with_flags(path, flags)?;
         let mut store = Self::bare(conn);
+        store.path = Some(path.to_path_buf());
+        store.read_only = read_only;
         // 3.x applies its CREATE TABLE IF NOT EXISTS on every open, so a fresh
         // install comes up with an empty but complete database rather than
         // refusing to start. Reproduced here; read-only opens skip it, since a
@@ -690,6 +801,21 @@ impl Store {
             .map_err(|e| e.to_string())
     }
 
+    /// Close this connection and open a new one on the same file, the way
+    /// `open` did. What the store holds in memory about rows is dropped (it is
+    /// read again on the next list). The file is never repaired.
+    pub fn reopen(&mut self) -> anyhow::Result<()> {
+        let Some(path) = self.path.clone() else {
+            anyhow::bail!("an in-memory store has nothing to reopen");
+        };
+        let new = Store::open(&path, self.read_only)?;
+        self.conn = new.conn;
+        self.tracks_changes = new.tracks_changes;
+        self.slim.clear();
+        self.slim_version = -1;
+        Ok(())
+    }
+
     pub fn journal_mode(&self) -> String {
         self.conn
             .query_row("PRAGMA journal_mode", [], |r| r.get::<_, String>(0))
@@ -698,7 +824,7 @@ impl Store {
     }
 
     fn bare(conn: Connection) -> Self {
-        Store { conn, slim: Default::default(), slim_version: -1, tracks_changes: false, fresh: Default::default() }
+        Store { conn, path: None, read_only: false, slim: Default::default(), slim_version: -1, tracks_changes: false, fresh: Default::default() }
     }
 
     /// Create anything missing. Every statement is IF NOT EXISTS, so this is a

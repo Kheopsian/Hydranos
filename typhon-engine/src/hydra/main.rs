@@ -764,6 +764,7 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
     }
     tracing::info!(wal, read_connection = reader.is_some(), "store open");
     let shared_store = Arc::new(store::StoreLock::with_reader(store, reader));
+    store::spawn_watch(shared_store.clone());
     workers::spawn_store_reconcile(engine_host.clone(), shared_store.clone());
 
     // Index anything added by a build that did not know about the content

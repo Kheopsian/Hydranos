@@ -6972,13 +6972,16 @@ fn split_list(raw: &str) -> Vec<String> {
 /// to drop the store's error (`let _ =`) and answer 2xx, so a client was told
 /// "created" for a category that never reached the disk.
 fn store_refused(state: &AppState, what: &str, e: impl std::fmt::Display) -> Response {
-    let _ = state;
     tracing::warn!(error = %e, "{what}: the store refused the write");
-    (
+    let response = (
         StatusCode::SERVICE_UNAVAILABLE,
         Json(serde_json::json!({"error": format!("{what}: the store refused the write: {e}")})),
     )
-        .into_response()
+        .into_response();
+    // The next request finds the connections reopened, if they were the
+    // problem; this one is already answered.
+    state.store.heal();
+    response
 }
 
 /// qBittorrent answers its mutations with an empty 200.
