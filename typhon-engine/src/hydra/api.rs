@@ -6966,6 +6966,21 @@ fn split_list(raw: &str) -> Vec<String> {
         .collect()
 }
 
+/// The answer to a write the store refused: 503, with what the store said.
+///
+/// A change that was not written must not be acknowledged. These routes used
+/// to drop the store's error (`let _ =`) and answer 2xx, so a client was told
+/// "created" for a category that never reached the disk.
+fn store_refused(state: &AppState, what: &str, e: impl std::fmt::Display) -> Response {
+    let _ = state;
+    tracing::warn!(error = %e, "{what}: the store refused the write");
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(serde_json::json!({"error": format!("{what}: the store refused the write: {e}")})),
+    )
+        .into_response()
+}
+
 /// qBittorrent answers its mutations with an empty 200.
 fn qbit_ok() -> Response {
     (StatusCode::OK, "").into_response()
@@ -6983,7 +6998,7 @@ where
     let cfg = state.cfg();
     let store = state.store.lock().unwrap();
     let raw = store
-        .meta_doc("categories")
+        .meta_doc_checked("categories")?
         .filter(|d| !d.is_empty())
         .or_else(|| {
             let path = std::path::Path::new(&cfg.daemon.data_dir)
@@ -7073,9 +7088,11 @@ async fn qbit_create_category(
         return (StatusCode::CONFLICT, "Category already exists").into_response();
     }
     let save_path = form.get("savePath").cloned().unwrap_or_default();
-    let _ = edit_categories(&state, |doc| {
+    if let Err(e) = edit_categories(&state, |doc| {
         doc.insert(name, serde_json::json!({"save_path": save_path, "mode": "hoard"}));
-    });
+    }) {
+        return store_refused(&state, "createCategory", e);
+    }
     qbit_ok()
 }
 
@@ -7091,7 +7108,7 @@ async fn qbit_edit_category(
 
     let name = form.get("category").cloned().unwrap_or_default();
     let save_path = form.get("savePath").cloned().unwrap_or_default();
-    let _ = edit_categories(&state, |doc| {
+    if let Err(e) = edit_categories(&state, |doc| {
         // Edit in place so anything the category carries beyond save_path
         // survives; only a category that does not exist is created whole.
         match doc.get_mut(&name) {
@@ -7102,7 +7119,9 @@ async fn qbit_edit_category(
                 doc.insert(name, serde_json::json!({"save_path": save_path, "mode": "hoard"}));
             }
         }
-    });
+    }) {
+        return store_refused(&state, "editCategory", e);
+    }
     qbit_ok()
 }
 
@@ -7127,16 +7146,21 @@ async fn qbit_remove_categories(
                 .collect()
         })
         .unwrap_or_default();
-    let _ = edit_categories(&state, |doc| {
+    if let Err(e) = edit_categories(&state, |doc| {
         for name in &names {
             doc.remove(name);
         }
-    });
+    }) {
+        return store_refused(&state, "removeCategories", e);
+    }
     // qBittorrent clears the label from the torrents too.
     {
         let store = state.store.lock().unwrap();
         for name in &names {
-            let _ = store.relabel_category(name, "");
+            if let Err(e) = store.relabel_category(name, "") {
+                drop(store);
+                return store_refused(&state, "removeCategories", e);
+            }
         }
     }
     qbit_ok()
@@ -7152,8 +7176,10 @@ async fn qbit_create_tags(
     guard!(state, headers, query);
     let cfg = state.cfg();
     let tags = split_list(form.get("tags").map(String::as_str).unwrap_or(""));
-    let store = state.store.lock().unwrap();
-    let _ = store.register_tags(&tags);
+    let written = state.store.lock().unwrap().register_tags(&tags);
+    if let Err(e) = written {
+        return store_refused(&state, "createTags", e);
+    }
     qbit_ok()
 }
 
@@ -7169,20 +7195,24 @@ async fn qbit_delete_tags(
     // As qBittorrent does: the tag goes from the list and from every torrent.
     // 4.x reproduced a 3.x bug and deleted nothing, so a tag a client deleted
     // came back in the next listing.
-    let store = state.store.lock().unwrap();
-    let _ = store.unregister_tags(&tags);
-    let _ = store.strip_tags(&tags);
+    let written = {
+        let store = state.store.lock().unwrap();
+        store.unregister_tags(&tags).and_then(|_| store.strip_tags(&tags).map(|_| ()))
+    };
+    if let Err(e) = written {
+        return store_refused(&state, "deleteTags", e);
+    }
     qbit_ok()
 }
 
 /// Apply a tag change to every torrent named in `hashes`.
-fn retag(state: &AppState, form: &Fields, add: bool) {
+fn retag(state: &AppState, form: &Fields, add: bool) -> anyhow::Result<()> {
     let tags = split_list(form.get("tags").map(String::as_str).unwrap_or(""));
     let hashes = qbit_hashes(state, form);
     let store = state.store.lock().unwrap();
 
     if add {
-        let _ = store.register_tags(&tags);
+        store.register_tags(&tags)?;
     }
     for prefix in hashes {
         let Some(hash) = store.resolve_hash(&prefix) else {
@@ -7197,8 +7227,9 @@ fn retag(state: &AppState, form: &Fields, add: bool) {
         }
         current.sort();
         current.dedup();
-        let _ = store.set_tags(&hash, &current);
+        store.set_tags(&hash, &current)?;
     }
+    Ok(())
 }
 
 async fn qbit_add_tags(
@@ -7210,7 +7241,9 @@ async fn qbit_add_tags(
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
     let cfg = state.cfg();
-    retag(&state, &form, true);
+    if let Err(e) = retag(&state, &form, true) {
+        return store_refused(&state, "addTags", e);
+    }
     qbit_ok()
 }
 
@@ -7223,7 +7256,9 @@ async fn qbit_remove_tags(
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
     let cfg = state.cfg();
-    retag(&state, &form, false);
+    if let Err(e) = retag(&state, &form, false) {
+        return store_refused(&state, "removeTags", e);
+    }
     qbit_ok()
 }
 
@@ -7276,17 +7311,18 @@ fn apply_pause_everywhere(state: &AppState, hash: &str, paused: bool) {
     }
 }
 
-fn set_paused(state: &AppState, form: &Fields, paused: bool) {
+fn set_paused(state: &AppState, form: &Fields, paused: bool) -> anyhow::Result<()> {
     let hashes = qbit_hashes(state, form);
     let resolved: Vec<String> = {
         let store = state.store.lock().unwrap();
-        hashes
-            .into_iter()
-            .filter_map(|prefix| store.resolve_hash(&prefix))
-            .inspect(|hash| {
-                let _ = store.set_paused_everywhere(hash, paused);
-            })
-            .collect()
+        let mut resolved = Vec::new();
+        for prefix in hashes {
+            if let Some(hash) = store.resolve_hash(&prefix) {
+                store.set_paused_everywhere(&hash, paused)?;
+                resolved.push(hash);
+            }
+        }
+        resolved
     };
     // Outside the store lock: stopping a torrent touches the engine and the
     // DHT, and holding the database while doing it would serialise every other
@@ -7294,6 +7330,7 @@ fn set_paused(state: &AppState, form: &Fields, paused: bool) {
     for hash in resolved {
         apply_pause_everywhere(state, &hash, paused);
     }
+    Ok(())
 }
 
 async fn qbit_pause(
@@ -7305,7 +7342,9 @@ async fn qbit_pause(
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
     let cfg = state.cfg();
-    set_paused(&state, &form, true);
+    if let Err(e) = set_paused(&state, &form, true) {
+        return store_refused(&state, "pause", e);
+    }
     qbit_ok()
 }
 
@@ -7318,7 +7357,9 @@ async fn qbit_resume(
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
     let cfg = state.cfg();
-    set_paused(&state, &form, false);
+    if let Err(e) = set_paused(&state, &form, false) {
+        return store_refused(&state, "resume", e);
+    }
     qbit_ok()
 }
 
@@ -7374,8 +7415,10 @@ macro_rules! torrent_write {
                 Ok(h) => h,
                 Err(response) => return response,
             };
-            let apply: fn(&AppState, &str, &str, &str) = $body;
-            apply(&state, &hash, &body, &engine);
+            let apply: fn(&AppState, &str, &str, &str) -> anyhow::Result<()> = $body;
+            if let Err(e) = apply(&state, &hash, &body, &engine) {
+                return store_refused(&state, stringify!($name), e);
+            }
             let ok: fn(&str) -> serde_json::Value = $ok;
             Json(ok(&info_hash)).into_response()
         }
@@ -7383,19 +7426,15 @@ macro_rules! torrent_write {
 }
 
 torrent_write!(hoard_pause_one, "hoard", "torrent not found", |_ih: &str| serde_json::json!({"status": "ok"}), |state: &AppState, hash: &str, _body: &str, engine: &str| {
-    {
-        let store = state.store.lock().unwrap();
-        let _ = store.set_paused(hash, engine, true);
-    }
+    state.store.lock().unwrap().set_paused(hash, engine, true)?;
     apply_pause_to_engine(state, engine, hash, true);
+    Ok(())
 });
 
 torrent_write!(hoard_resume_one, "hoard", "torrent not found", |_ih: &str| serde_json::json!({"status": "ok"}), |state: &AppState, hash: &str, _body: &str, engine: &str| {
-    {
-        let store = state.store.lock().unwrap();
-        let _ = store.set_paused(hash, engine, false);
-    }
+    state.store.lock().unwrap().set_paused(hash, engine, false)?;
     apply_pause_to_engine(state, engine, hash, false);
+    Ok(())
 });
 
 // Force download starts the torrent too, through the path claim, as
@@ -7403,10 +7442,11 @@ torrent_write!(hoard_resume_one, "hoard", "torrent not found", |_ih: &str| serde
 torrent_write!(hoard_pin_one, "hoard", "torrent not in hoard: {}", |ih: &str| serde_json::json!({"info_hash": ih, "pinned": true, "status": "ok"}), |state: &AppState, hash: &str, _body: &str, engine: &str| {
     {
         let store = state.store.lock().unwrap();
-        let _ = store.set_pinned(hash, engine, true);
-        let _ = store.set_paused(hash, engine, false);
+        store.set_pinned(hash, engine, true)?;
+        store.set_paused(hash, engine, false)?;
     }
     apply_pause_to_engine(state, engine, hash, false);
+    Ok(())
 });
 
 /// Unpin, which unlike pin accepts a torrent from ANY session.
@@ -7425,9 +7465,15 @@ async fn hoard_unpin_one(
     guard!(state, headers, query);
     let cfg = state.cfg();
 
-    let store = state.store.lock().unwrap();
-    if let Some(hash) = store.resolve_hash(&info_hash) {
-        let _ = store.set_pinned_everywhere(&hash, false);
+    let written = {
+        let store = state.store.lock().unwrap();
+        match store.resolve_hash(&info_hash) {
+            Some(hash) => store.set_pinned_everywhere(&hash, false),
+            None => Ok(()),
+        }
+    };
+    if let Err(e) = written {
+        return store_refused(&state, "unpin", e);
     }
     Json(serde_json::json!({
         "info_hash": info_hash, "pinned": false, "status": "ok",
@@ -7523,10 +7569,12 @@ async fn post_category(state: &AppState, info_hash: &str, query: &str, body: &st
     let allow = v.get("allow_breaking_hardlinks").and_then(|b| b.as_bool()).unwrap_or(false);
 
     let relabel = |moved: bool| {
-        let store = state.store.lock().unwrap();
+        let written = state.store.lock().unwrap().set_category_in(&hash, &engine, &category);
         // The engine was already a parameter here, ignored as `_engine`, so the
         // native API relabelled every copy of a torrent it was given one of.
-        let _ = store.set_category_in(&hash, &engine, &category);
+        if let Err(e) = written {
+            return store_refused(state, "category", e);
+        }
         Json(serde_json::json!({"status": "ok", "moved": moved})).into_response()
     };
     if !move_files {
@@ -7753,8 +7801,8 @@ torrent_write!(set_torrent_tags, "hoard", "torrent not found", |_ih: &str| serde
         .and_then(|v| serde_json::from_value(v).ok())
         .unwrap_or_default();
     let store = state.store.lock().unwrap();
-    let _ = store.register_tags(&tags);
-    let _ = store.set_tags(hash, &tags);
+    store.register_tags(&tags)?;
+    store.set_tags(hash, &tags)
 });
 
 // The race-side twins of the two label writers. Identical bodies; what
@@ -7769,8 +7817,8 @@ torrent_write!(set_race_torrent_tags, "race", "torrent not found", |_ih: &str| s
         .and_then(|v| serde_json::from_value(v).ok())
         .unwrap_or_default();
     let store = state.store.lock().unwrap();
-    let _ = store.register_tags(&tags);
-    let _ = store.set_tags(hash, &tags);
+    store.register_tags(&tags)?;
+    store.set_tags(hash, &tags)
 });
 
 /// Create a category from the native API.
@@ -7809,9 +7857,11 @@ async fn category_create(
         )
             .into_response();
     }
-    let _ = edit_categories(&state, |doc| {
+    if let Err(e) = edit_categories(&state, |doc| {
         doc.insert(name, incoming.clone());
-    });
+    }) {
+        return store_refused(&state, "create category", e);
+    }
     // 201 with the category echoed back, not a bare status: the UI uses the
     // echo to add the row without refetching the list. Echoed through the
     // ordered struct, because a serde_json::Value would come back alphabetical.
@@ -7861,7 +7911,7 @@ async fn category_update(
             .into_response();
     }
     let (old, new) = (name.clone(), new_name.clone());
-    let _ = edit_categories(&state, |doc| {
+    if let Err(e) = edit_categories(&state, |doc| {
         if old != new {
             doc.remove(&old);
             // Another category graduating INTO this one follows it.
@@ -7872,11 +7922,16 @@ async fn category_update(
             }
         }
         doc.insert(new, incoming.clone());
-    });
+    }) {
+        return store_refused(&state, "update category", e);
+    }
     if new_name == name {
         return Json(serde_json::json!({"status": "ok", "name": new_name, "relabelled": 0})).into_response();
     }
-    let relabelled = state.store.lock().unwrap().relabel_category(&name, &new_name).unwrap_or(0);
+    let relabelled = match state.store.lock().unwrap().relabel_category(&name, &new_name) {
+        Ok(n) => n,
+        Err(e) => return store_refused(&state, "update category", e),
+    };
     let followed = rename_category_references(&state, &name, &new_name);
     Json(serde_json::json!({"status": "ok", "name": new_name, "relabelled": relabelled, "followed": followed}))
         .into_response()
@@ -7991,12 +8046,17 @@ async fn category_delete(
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
     let was_orphan = !categories_map(&state).contains_key(&name);
-    let _ = edit_categories(&state, |doc| {
+    if let Err(e) = edit_categories(&state, |doc| {
         doc.remove(&name);
-    });
+    }) {
+        return store_refused(&state, "delete category", e);
+    }
     // The label goes with the category: 4.3 kept it on every torrent and
     // answered "cleared": 0, leaving labels no category matched.
-    let cleared = state.store.lock().unwrap().relabel_category(&name, "").unwrap_or(0);
+    let cleared = match state.store.lock().unwrap().relabel_category(&name, "") {
+        Ok(n) => n,
+        Err(e) => return store_refused(&state, "delete category", e),
+    };
     Json(serde_json::json!({
         "cleared": cleared, "cleared_stored": cleared, "status": "ok", "was_orphan": was_orphan,
     }))
@@ -8711,7 +8771,10 @@ async fn qbit_set_category(
         if let Some(hash) = store.resolve_hash(&prefix) {
             // The shim has no engine to name: qBit clients send a hash and a
             // category and nothing else. Every copy it is, deliberately.
-            let _ = store.set_category_everywhere(&hash, &category);
+            if let Err(e) = store.set_category_everywhere(&hash, &category) {
+                drop(store);
+                return store_refused(&state, "setCategory", e);
+            }
         }
     }
     qbit_ok()
@@ -8729,7 +8792,9 @@ async fn qbit_start(
     guard!(state, headers, query);
     let cfg = state.cfg();
     let _ = cfg;
-    set_paused(&state, &form, false);
+    if let Err(e) = set_paused(&state, &form, false) {
+        return store_refused(&state, "resume", e);
+    }
     qbit_ok()
 }
 
@@ -8743,7 +8808,9 @@ async fn qbit_stop(
     guard!(state, headers, query);
     let cfg = state.cfg();
     let _ = cfg;
-    set_paused(&state, &form, true);
+    if let Err(e) = set_paused(&state, &form, true) {
+        return store_refused(&state, "pause", e);
+    }
     qbit_ok()
 }
 
@@ -15021,7 +15088,10 @@ async fn qbit_set_force_start(State(state): State<AppState>, RawQuery(query): Ra
     {
         let store = state.store.lock().unwrap();
         for hash in &hashes {
-            let _ = store.set_pinned_everywhere(hash, on);
+            if let Err(e) = store.set_pinned_everywhere(hash, on) {
+                drop(store);
+                return store_refused(&state, "setForceStart", e);
+            }
         }
     }
     if !on {
@@ -15030,7 +15100,9 @@ async fn qbit_set_force_start(State(state): State<AppState>, RawQuery(query): Ra
     let joined = hashes.join("|");
     let mut f = Fields::new();
     f.insert("hashes".into(), joined);
-    set_paused(&state, &f, false);
+    if let Err(e) = set_paused(&state, &f, false) {
+        return store_refused(&state, "setForceStart", e);
+    }
     qbit_ok()
 }
 
@@ -19643,6 +19715,78 @@ mod category_lifecycle_tests {
         assert_eq!(v[0]["torrents"], 1);
         assert_eq!(v[0]["mode"], "hoard");
         assert_eq!(v[0]["save_path"], "/data");
+    }
+
+    /// A write the store refused is never acknowledged. Every statement that
+    /// changes a category, a tag, a pause or a pin fails here with the error a
+    /// dead network mount gives ("database disk image is malformed"); the route
+    /// must say so, not answer 2xx for a change that was never written.
+    #[tokio::test]
+    async fn a_write_the_store_refused_is_not_acknowledged() {
+        let s = state_from("cat-refused", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+        let h = "c".repeat(40);
+        labelled(&s, &h, "films");
+        let r = category_create(State(s.state.clone()), RawQuery(None), keyed(KEY),
+            r#"{"name":"films","save_path":"/data/films","mode":"hoard"}"#.into()).await;
+        assert_eq!(r.status(), StatusCode::CREATED);
+
+        let broken = "RAISE(ABORT, 'database disk image is malformed')";
+        // A tag that exists, so that deleting it has a row to delete.
+        let mut sql = String::from("INSERT INTO tag_registry (name) VALUES ('x');");
+        for (table, events) in [("meta", ["INSERT", "UPDATE", "DELETE"]), ("tag_registry", ["INSERT", "UPDATE", "DELETE"]), ("torrents", ["INSERT", "UPDATE", "DELETE"])] {
+            for ev in events {
+                sql += &format!("CREATE TRIGGER broken_{table}_{ev} BEFORE {ev} ON {table} BEGIN SELECT {broken}; END;");
+            }
+        }
+        s.state.store.lock().unwrap().execute_batch_for_tests(&sql);
+
+        fn form(pairs: &[(&str, &str)]) -> Form<Fields> {
+            Form(pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect())
+        }
+        let st = s.state.clone();
+        let p = |n: &str| Path(n.to_string());
+        let hp = || Path(h.clone());
+        let mut seen: Vec<(&str, StatusCode)> = Vec::new();
+        macro_rules! call {
+            ($name:expr, $fut:expr) => {
+                seen.push(($name, $fut.await.status()))
+            };
+        }
+        call!("POST /api/categories", category_create(State(st.clone()), RawQuery(None), keyed(KEY),
+            r#"{"name":"series","save_path":"/data/series","mode":"hoard"}"#.into()));
+        call!("PUT /api/categories/:name", category_update(State(st.clone()), p("films"), RawQuery(None), keyed(KEY),
+            r#"{"save_path":"/data/other"}"#.into()));
+        call!("DELETE /api/categories/:name", category_delete(State(st.clone()), p("films"), RawQuery(None), keyed(KEY)));
+        call!("qbit createCategory", qbit_create_category(State(st.clone()), RawQuery(None), keyed(KEY),
+            form(&[("category", "anime"), ("savePath", "/data/anime")])));
+        call!("qbit editCategory", qbit_edit_category(State(st.clone()), RawQuery(None), keyed(KEY),
+            form(&[("category", "films"), ("savePath", "/data/other")])));
+        call!("qbit removeCategories", qbit_remove_categories(State(st.clone()), RawQuery(None), keyed(KEY),
+            form(&[("categories", "films")])));
+        call!("qbit createTags", qbit_create_tags(State(st.clone()), RawQuery(None), keyed(KEY), form(&[("tags", "x")])));
+        call!("qbit deleteTags", qbit_delete_tags(State(st.clone()), RawQuery(None), keyed(KEY), form(&[("tags", "x")])));
+        call!("qbit addTags", qbit_add_tags(State(st.clone()), RawQuery(None), keyed(KEY),
+            form(&[("hashes", h.as_str()), ("tags", "x")])));
+        call!("qbit removeTags", qbit_remove_tags(State(st.clone()), RawQuery(None), keyed(KEY),
+            form(&[("hashes", h.as_str()), ("tags", "x")])));
+        call!("qbit setCategory", qbit_set_category(State(st.clone()), RawQuery(None), keyed(KEY),
+            form(&[("hashes", h.as_str()), ("category", "films")])));
+        call!("qbit pause", qbit_pause(State(st.clone()), RawQuery(None), keyed(KEY), form(&[("hashes", h.as_str())])));
+        call!("qbit resume", qbit_resume(State(st.clone()), RawQuery(None), keyed(KEY), form(&[("hashes", h.as_str())])));
+        call!("POST torrent tags", set_torrent_tags(State(st.clone()), hp(), RawQuery(None), keyed(KEY),
+            r#"{"tags":["x"]}"#.into()));
+        call!("POST torrent category", set_torrent_category(State(st.clone()), hp(), RawQuery(None), keyed(KEY),
+            r#"{"category":"films"}"#.into()));
+        call!("POST torrent pause", hoard_pause_one(State(st.clone()), hp(), RawQuery(None), keyed(KEY), String::new()));
+        call!("POST torrent resume", hoard_resume_one(State(st.clone()), hp(), RawQuery(None), keyed(KEY), String::new()));
+        call!("POST torrent pin", hoard_pin_one(State(st.clone()), hp(), RawQuery(None), keyed(KEY), String::new()));
+        call!("DELETE torrent pin", hoard_unpin_one(State(st.clone()), hp(), RawQuery(None), keyed(KEY)));
+
+        let acked: Vec<String> = seen.iter().filter(|(_, c)| c.is_success()).map(|(n, c)| format!("{n} -> {c}")).collect();
+        assert!(acked.is_empty(), "acknowledged although the store refused the write: {acked:?}");
+        for (n, c) in &seen {
+            assert!(c.is_server_error(), "{n}: {c}");
+        }
     }
 
     /// ⭐ A rename follows every reference: another category's graduate_to,
