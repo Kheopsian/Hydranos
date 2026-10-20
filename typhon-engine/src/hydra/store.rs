@@ -439,6 +439,15 @@ pub struct StoreLock {
     /// When the connections were last reopened (or tried to be), so a store
     /// that cannot be reopened is retried at a bounded pace.
     last_heal: std::sync::Mutex<Option<std::time::Instant>>,
+    /// What the last ping of the connections found, and when. Pinged apart
+    /// from any request (the `store-heal` thread, or `refreshed` when nothing
+    /// ran it recently): `probe`, which `/health` reads, only looks here and
+    /// at the holders, so it never touches the file.
+    last_ping: std::sync::Mutex<Option<(std::time::Instant, Result<(), String>)>>,
+    /// A refresh is running (the one at a time that may be stuck on the mount).
+    refreshing: std::sync::atomic::AtomicBool,
+    /// Counts the refreshes that ended, for the requests waiting for one.
+    refreshed: tokio::sync::watch::Sender<u64>,
     /// Who holds each connection, since when: what the watchdog and `/health`
     /// read while the holder is still inside its query.
     inner_hold: HoldSlot,
@@ -472,8 +481,15 @@ pub const LOCK_STUCK_WARN: std::time::Duration = std::time::Duration::from_secs(
 /// held this long by one request.
 const UNAVAILABLE_AFTER: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// A ping result older than this is asked again before `/health` reads it.
+const PING_FRESH: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// How long a request waits for the refresh it started: the store answers or
+/// the holder shows, and past this the request answers with what it knows.
+const REFRESH_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// The least time between two attempts to reopen the store's connections
-/// when something asks for one (a failed write, a health probe).
+/// when a ping fails.
 const HEAL_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// How the store answers a probe that never waits for it.
@@ -485,6 +501,14 @@ pub enum Probe {
     /// Held by one request for longer than any healthy statement takes.
     Blocked(std::time::Duration),
     Error(String),
+}
+
+/// What pinging one connection found.
+enum Beat {
+    Alive,
+    /// Somebody holds it: not pinged.
+    Held,
+    Broken(String),
 }
 
 /// A held store. Derefs to `Store`; logs on release if it was held too long.
@@ -519,47 +543,64 @@ impl StoreLock {
             inner: std::sync::Mutex::new(store),
             reader: reader.map(std::sync::Mutex::new),
             last_heal: Default::default(),
+            last_ping: Default::default(),
+            refreshing: Default::default(),
+            refreshed: tokio::sync::watch::channel(0).0,
             inner_hold: Default::default(),
             reader_hold: Default::default(),
         }
     }
 
-    /// Ask the store, without waiting for it: the read connection (the shared
-    /// one when there is no other) must answer, and so must the writer when it
-    /// is free. A connection somebody holds is `Busy`, never an error.
-    #[track_caller]
+    /// What the store is known to do, without touching it: who holds the
+    /// connection and since when, and what the last ping (made elsewhere,
+    /// see `heal`) found. A connection somebody holds is `Busy`, never an
+    /// error, until one request has held the only connection for
+    /// `UNAVAILABLE_AFTER`.
+    ///
+    /// Never pings and never takes a connection: on a frozen mount the ping is
+    /// what hangs, and a probe that made it hung with it.
     pub fn probe(&self) -> Probe {
-        let at = std::panic::Location::caller();
-        // The probe's own ping is a hold like any request's: on a frozen mount
-        // it is the ping that hangs, and the next probe must see it.
-        let ping = |m: &std::sync::Mutex<Store>, slot: &HoldSlot, can_block: bool| match Self::try_take(m, slot, at) {
-            Ok(s) => match s.ping() {
-                Ok(()) => Probe::Ok,
-                Err(e) => Probe::Error(e),
-            },
-            // With a read connection beside it (a local WAL store) a long
-            // read is ordinary and the writer is not what is probed; with the
-            // shared connection alone, one request holding it for seconds is
-            // everything waiting behind it.
-            Err(std::sync::TryLockError::WouldBlock) => match Self::held_for(slot) {
-                Some(d) if can_block && d >= UNAVAILABLE_AFTER => Probe::Blocked(d),
-                _ => Probe::Busy,
-            },
-            Err(std::sync::TryLockError::Poisoned(_)) => {
-                Probe::Error("the store's lock is poisoned: a thread panicked holding it".into())
-            }
-        };
+        if self.inner.is_poisoned() || self.reader.as_ref().is_some_and(|r| r.is_poisoned()) {
+            return Probe::Error("the store's lock is poisoned: a thread panicked holding it".into());
+        }
+        // With a read connection beside it (a local WAL store) a long read is
+        // ordinary and the writer is not what is probed; with the shared
+        // connection alone, one request holding it for seconds is everything
+        // waiting behind it.
         let alone = self.reader.is_none();
-        let main = match &self.reader {
-            Some(r) => ping(r, &self.reader_hold, false),
-            None => ping(&self.inner, &self.inner_hold, alone),
-        };
-        if !alone {
-            if let Probe::Error(e) = ping(&self.inner, &self.inner_hold, false) {
-                return Probe::Error(e);
+        let held = Self::held_for(if alone { &self.inner_hold } else { &self.reader_hold });
+        if alone {
+            if let Some(d) = held {
+                return if d >= UNAVAILABLE_AFTER { Probe::Blocked(d) } else { Probe::Busy };
             }
         }
-        main
+        let last = self.last_ping.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        match last {
+            Some((_, Err(e))) => Probe::Error(e),
+            Some((_, Ok(()))) if held.is_none() => Probe::Ok,
+            // Held, or not pinged yet: nothing is known to be wrong.
+            _ => Probe::Busy,
+        }
+    }
+
+    /// Make sure the last ping is recent before `/health` reads it, without
+    /// ever pinging on the caller's own path: a stale result starts a refresh
+    /// on a thread of its own (one at a time) and this waits for it, in the
+    /// async sense, for `REFRESH_WAIT` at most. A ping stuck on a frozen mount
+    /// outlasts that, and the holder it leaves is what `probe` then reports.
+    pub async fn refreshed(self: &std::sync::Arc<Self>) {
+        let recent = self
+            .last_ping
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .is_some_and(|(at, _)| at.elapsed() < PING_FRESH);
+        if recent {
+            return;
+        }
+        let mut ended = self.refreshed.subscribe();
+        self.heal();
+        let _ = tokio::time::timeout(REFRESH_WAIT, ended.changed()).await;
     }
 
     fn held_for(slot: &HoldSlot) -> Option<std::time::Duration> {
@@ -591,6 +632,41 @@ impl StoreLock {
         n
     }
 
+    /// Ask for the connections to be pinged, and reopened if they no longer
+    /// answer, on a thread of its own, and return at once. For a request that
+    /// met a store error: the ping and the reopening are what hang on a frozen
+    /// mount, and they are not made on the request's path. One at a time.
+    pub fn heal(self: &std::sync::Arc<Self>) {
+        if !self.claim_refresh() {
+            return;
+        }
+        let me = self.clone();
+        let spawned = std::thread::Builder::new().name("store-refresh".into()).spawn(move || me.run_claimed(true));
+        if let Err(e) = spawned {
+            tracing::warn!("no store refresh: {e}");
+            self.refreshing.store(false, std::sync::atomic::Ordering::Release);
+        }
+    }
+
+    fn claim_refresh(&self) -> bool {
+        self.refreshing
+            .compare_exchange(false, true, std::sync::atomic::Ordering::AcqRel, std::sync::atomic::Ordering::Acquire)
+            .is_ok()
+    }
+
+    /// Run the refresh `claim_refresh` granted, and say it ended.
+    fn run_claimed(&self, paced: bool) {
+        struct Ends<'a>(&'a StoreLock);
+        impl Drop for Ends<'_> {
+            fn drop(&mut self) {
+                self.0.refreshing.store(false, std::sync::atomic::Ordering::Release);
+                self.0.refreshed.send_modify(|n| *n += 1);
+            }
+        }
+        let _ends = Ends(self);
+        self.refresh(paced);
+    }
+
     /// Close and reopen the connections that no longer answer, then check
     /// that they do. Returns whether every connection answers afterwards.
     ///
@@ -598,48 +674,70 @@ impl StoreLock {
     /// keep descriptors on the old session and fail every query with
     /// "malformed" or "not a database" while the file is intact. A fresh
     /// connection to the same path works. The file is only ever opened, never
-    /// repaired. At most one attempt every `HEAL_EVERY`; a connection someone
-    /// holds is left to them.
-    pub fn heal(&self) -> bool {
-        {
+    /// repaired. A connection someone holds is left to them. The result is
+    /// what `probe` reports. Without pacing, for tests.
+    #[track_caller]
+    pub fn heal_now(&self) -> bool {
+        self.refresh(false)
+    }
+
+    /// Ping each connection, reopen the ones that fail (paced: at most once
+    /// every `HEAL_EVERY`), and keep what was found.
+    #[track_caller]
+    fn refresh(&self, paced: bool) -> bool {
+        let may_reopen = || {
+            if !paced {
+                return true;
+            }
             let mut last = self.last_heal.lock().unwrap_or_else(|e| e.into_inner());
             if last.is_some_and(|t| t.elapsed() < HEAL_EVERY) {
                 return false;
             }
             *last = Some(std::time::Instant::now());
-        }
-        self.heal_now()
-    }
-
-    /// `heal` without the pacing, for the watcher thread that sets its own.
-    #[track_caller]
-    pub fn heal_now(&self) -> bool {
-        let mut ok = Self::heal_one(&self.inner, &self.inner_hold, "writer");
+            true
+        };
+        let mut beats = vec![Self::heal_one(&self.inner, &self.inner_hold, "writer", &may_reopen)];
         if let Some(r) = &self.reader {
-            ok &= Self::heal_one(r, &self.reader_hold, "reader");
+            beats.push(Self::heal_one(r, &self.reader_hold, "reader", &may_reopen));
         }
-        ok
+        let broken = beats.iter().find_map(|b| match b {
+            Beat::Broken(e) => Some(e.clone()),
+            _ => None,
+        });
+        let held = beats.iter().any(|b| matches!(b, Beat::Held));
+        // A connection somebody holds was not pinged: its holder is what
+        // `probe` says about it, and nothing new is known.
+        if broken.is_some() || !held {
+            let found = broken.clone().map_or(Ok(()), Err);
+            *self.last_ping.lock().unwrap_or_else(|e| e.into_inner()) = Some((std::time::Instant::now(), found));
+        }
+        broken.is_none()
     }
 
     #[track_caller]
-    fn heal_one(m: &std::sync::Mutex<Store>, slot: &HoldSlot, which: &str) -> bool {
+    fn heal_one(m: &std::sync::Mutex<Store>, slot: &HoldSlot, which: &str, may_reopen: &dyn Fn() -> bool) -> Beat {
         // Held through a guard, so a ping or a reopening stuck on a frozen
         // mount shows in `/health` and in the watchdog like any request.
         let mut s = match Self::try_take(m, slot, std::panic::Location::caller()) {
             Ok(s) => s,
-            Err(std::sync::TryLockError::WouldBlock) => return true,
-            Err(std::sync::TryLockError::Poisoned(_)) => return false,
+            Err(std::sync::TryLockError::WouldBlock) => return Beat::Held,
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                return Beat::Broken("the store's lock is poisoned: a thread panicked holding it".into())
+            }
         };
-        let Err(why) = s.ping() else { return true };
+        let Err(why) = s.ping() else { return Beat::Alive };
+        if !may_reopen() {
+            return Beat::Broken(why);
+        }
         tracing::warn!(connection = which, error = %why, "store connection broken, reopening it");
         match s.reopen().and_then(|()| s.ping().map_err(anyhow::Error::msg)) {
             Ok(()) => {
                 tracing::info!(connection = which, "store connection reopened");
-                true
+                Beat::Alive
             }
             Err(e) => {
                 tracing::warn!(connection = which, error = %e, "store connection still broken after reopening");
-                false
+                Beat::Broken(e.to_string())
             }
         }
     }
@@ -796,9 +894,10 @@ pub fn log_store<T, E: std::fmt::Display>(what: &str, r: Result<T, E>) -> Option
 
 /// Look after the shared store. Every 2 s, report a connection held for
 /// `LOCK_STUCK_WARN` while it is still held (`StoreLock::watch_holds`); every
-/// 10 s, ask whether the connections still answer and reopen the ones that do
-/// not (`StoreLock::heal`), so a store comes back after its mount did even
-/// when nothing is asking it anything.
+/// 2 s, ping the connections and reopen the ones that do not answer (at the
+/// `HEAL_EVERY` pace; `StoreLock::probe` reads what that found), so a store
+/// comes back after its mount did even when nothing is asking it anything,
+/// and `/health` never pings it itself.
 ///
 /// Two threads: a reopening check stuck on a frozen mount must not stop the
 /// watchdog that reports it.
@@ -812,8 +911,10 @@ pub fn spawn_watch(lock: std::sync::Arc<StoreLock>) {
         tracing::warn!("no store watcher: {e}");
     }
     let spawned = std::thread::Builder::new().name("store-heal".into()).spawn(move || loop {
-        std::thread::sleep(std::time::Duration::from_secs(10));
-        lock.heal_now();
+        std::thread::sleep(PING_FRESH);
+        if lock.claim_refresh() {
+            lock.run_claimed(true);
+        }
     });
     if let Err(e) = spawned {
         tracing::warn!("no store reopening check: {e}");
