@@ -107,7 +107,7 @@ pub fn spawn(state: AppState) {
                     Ok(s) => s,
                     Err(e) => e.into_inner(),
                 };
-                let _ = store.job_finish(&id, &err);
+                crate::store::log_store("job_finish", store.job_finish(&id, &err));
             }
             if err.is_empty() {
                 tracing::info!(job = %id, "job done");
@@ -322,7 +322,7 @@ fn graduate(state: &AppState, job: &crate::store::Job) -> Result<(), String> {
             Ok(s) => s,
             Err(e) => e.into_inner(),
         };
-        let _ = store.job_progress(&job.id, done);
+        crate::store::log_store("job_progress", store.job_progress(&job.id, done));
     }
 
     let mut record = original.clone();
@@ -342,14 +342,22 @@ fn graduate(state: &AppState, job: &crate::store::Job) -> Result<(), String> {
             Ok(s) => s,
             Err(e) => e.into_inner(),
         };
-        let _ = store.set_session(&hash, &from, &to);
+        // A refusal fails the job, which can be resumed: "only the store is
+        // left to do" is exactly what a resumed job starts from.
+        store
+            .set_session(&hash, &from, &to)
+            .map_err(|e| format!("the store refused the new engine: {e}"))?;
         // The payload MOVED. Forgetting this leaves the row pointing at the
         // directory the bytes left.
-        let _ = store.set_save_path(&hash, &dest_root);
+        store
+            .set_save_path(&hash, &dest_root)
+            .map_err(|e| format!("the store refused the new save path: {e}"))?;
         if !category.is_empty() {
             // The row moved to `to` a few lines up; the category belongs to that
             // copy and to no other.
-            let _ = store.set_category_in(&hash, &to, &category);
+            store
+                .set_category_in(&hash, &to, &category)
+                .map_err(|e| format!("the store refused the category: {e}"))?;
         }
     }
     {
@@ -362,7 +370,7 @@ fn graduate(state: &AppState, job: &crate::store::Job) -> Result<(), String> {
             Ok(s) => s,
             Err(e) => e.into_inner(),
         };
-        let _ = store.set_job_params(&job.id, &finished.to_string());
+        crate::store::log_store("set_job_params", store.set_job_params(&job.id, &finished.to_string()));
     }
     tracing::info!(hash = %hash, from = %from, to = %to, moved_bytes = done, seed_secs = seeded,
                    "graduated");
@@ -923,20 +931,23 @@ fn move_data(state: &AppState, job: &crate::store::Job) -> Result<(), String> {
         return Err(format!("{why}; nothing was moved"));
     }
 
-    let set_labels = |root: Option<&str>| {
+    let set_labels = |root: Option<&str>| -> Result<(), String> {
         let store = match state.store.lock() {
             Ok(s) => s,
             Err(e) => e.into_inner(),
         };
         if let Some(r) = root {
-            let _ = store.set_save_path(&hash, r);
+            store.set_save_path(&hash, r).map_err(|e| format!("the store refused the new save path: {e}"))?;
         }
         if !category.is_empty() {
-            let _ = store.set_category_in(&hash, &engine_id, &category);
+            store
+                .set_category_in(&hash, &engine_id, &category)
+                .map_err(|e| format!("the store refused the category: {e}"))?;
         }
+        Ok(())
     };
     if plan.is_noop() {
-        set_labels(None);
+        set_labels(None)?;
         return Ok(());
     }
     // Checked again here, not only when the request came in: a file can gain
@@ -970,7 +981,7 @@ fn move_data(state: &AppState, job: &crate::store::Job) -> Result<(), String> {
             Ok(s) => s,
             Err(e) => e.into_inner(),
         };
-        let _ = store.job_progress(&job.id, done);
+        crate::store::log_store("job_progress", store.job_progress(&job.id, done));
     };
 
     // 1. Copies, while it seeds.
@@ -1047,7 +1058,12 @@ fn move_data(state: &AppState, job: &crate::store::Job) -> Result<(), String> {
         let undo = roll_back(engine, &metainfo, &original, &renamed, &copied);
         return Err(format!("the engine refused it at {new_root}: {e}; {undo}"));
     }
-    set_labels(Some(&new_root));
+    if let Err(why) = set_labels(Some(&new_root)) {
+        // The store still says the old place: put the engine back there too,
+        // while the originals are still in it.
+        let undo = roll_back(engine, &metainfo, &original, &renamed, &copied);
+        return Err(format!("{why}; {undo}"));
+    }
 
     // 3. The originals of what was copied. The torrent reads the new ones now.
     for f in plan.files.iter().filter(|f| f.present && !f.rename) {
@@ -1173,9 +1189,11 @@ fn finish_interrupted_move(
             Ok(s) => s,
             Err(e) => e.into_inner(),
         };
-        let _ = store.set_save_path(&hash, save_path);
+        store.set_save_path(&hash, save_path).map_err(|e| format!("the store refused the new save path: {e}"))?;
         if !category.is_empty() {
-            let _ = store.set_category_in(&hash, &engine.id, category);
+            store
+                .set_category_in(&hash, &engine.id, category)
+                .map_err(|e| format!("the store refused the category: {e}"))?;
         }
     }
     let _ = set_carried_record(state, job, p, None);

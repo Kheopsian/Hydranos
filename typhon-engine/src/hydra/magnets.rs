@@ -456,7 +456,7 @@ pub(crate) fn complete(state: &AppState, row: &mut crate::store::MagnetRow, dict
 
 fn save(state: &AppState, row: &crate::store::MagnetRow) {
     if let Ok(s) = state.store.lock() {
-        let _ = s.put_magnet(row);
+        crate::store::log_store("put_magnet", s.put_magnet(row));
     }
 }
 

@@ -1041,9 +1041,12 @@ pub(crate) async fn handoff_watch_once(state: &AppState) -> usize {
                 let settled = state.store.lock().unwrap().settle_waiting_job(&job.id, "done", "");
                 if settled {
                     tracing::info!(hash = %job.info_hash, node = %node_name, "handoff complete, dropping the local copy");
-                    remove_torrent_everywhere(state, &job.info_hash, true);
+                    crate::store::log_store(
+                        "handoff: drop the local copy",
+                        remove_torrent_everywhere(state, &job.info_hash, true),
+                    );
                     let store = state.store.lock().unwrap();
-                    let _ = store.job_progress(&job.id, job.total_bytes);
+                    crate::store::log_store("job_progress", store.job_progress(&job.id, job.total_bytes));
                     dropped += 1;
                 }
                 continue;
@@ -2505,7 +2508,7 @@ pub(crate) fn add_torrent_bytes_as(
             // reason one notch down: a torrent seeded from two engines has two
             // rows, and only ours is ours to drop.
             if row_is_ours {
-                let _ = state.store.lock().unwrap().delete_copy(&hash, &engine_id);
+                crate::store::log_store("undo the row of a refused add", state.store.lock().unwrap().delete_copy(&hash, &engine_id));
             }
             e
         })?;
@@ -7935,7 +7938,10 @@ async fn category_update(
         Ok(n) => n,
         Err(e) => return store_refused(&state, "update category", e),
     };
-    let followed = rename_category_references(&state, &name, &new_name);
+    let followed = match rename_category_references(&state, &name, &new_name) {
+        Ok(v) => v,
+        Err(e) => return store_refused(&state, "update category: renamed, but not everything that names it was followed", e),
+    };
     Json(serde_json::json!({"status": "ok", "name": new_name, "relabelled": relabelled, "followed": followed}))
         .into_response()
 }
@@ -7948,17 +7954,28 @@ async fn category_update(
 /// longer existed -- race by default, which the drain purges. A workflow
 /// condition is renamed only where it compares for equality: a `contains` or
 /// a regex is the operator's text, not a reference.
-fn rename_category_references(state: &AppState, old: &str, new: &str) -> serde_json::Value {
+fn rename_category_references(state: &AppState, old: &str, new: &str) -> Result<serde_json::Value, String> {
     let store = state.store.lock().unwrap_or_else(|e| e.into_inner());
+    // Every reference is tried; what the store refused is reported at the end.
+    let mut refused: Vec<String> = Vec::new();
+    let mut note = |what: &str, e: anyhow::Error| {
+        tracing::error!(what, error = %e, "category rename: the store refused a reference");
+        refused.push(format!("{what}: {e}"));
+    };
     let (mut rss, mut watch, mut workflows, mut magnets, mut jobs) = (0usize, 0usize, 0usize, 0usize, 0usize);
 
-    for (rule_name, doc) in store.rss_rules().unwrap_or_default() {
+    let rules = store.rss_rules().unwrap_or_else(|e| {
+        note("rss rules", e);
+        Vec::new()
+    });
+    for (rule_name, doc) in rules {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(&doc) else { continue };
         let Ok(mut r) = crate::rss::matcher::Rule::from_json(&rule_name, &v) else { continue };
         if r.category == old {
             r.category = new.to_string();
-            if store.rss_rule_put(&rule_name, &r.to_json().to_string()).is_ok() {
-                rss += 1;
+            match store.rss_rule_put(&rule_name, &r.to_json().to_string()) {
+                Ok(()) => rss += 1,
+                Err(e) => note("rss rule", e),
             }
         }
     }
@@ -7966,10 +7983,11 @@ fn rename_category_references(state: &AppState, old: &str, new: &str) -> serde_j
         crate::rss::rules_changed();
     }
 
-    if let Some(mut list) = store
-        .setting("watch_folders")
-        .ok()
-        .flatten()
+    let watched = store.setting("watch_folders").unwrap_or_else(|e| {
+        note("watch folders", e);
+        None
+    });
+    if let Some(mut list) = watched
         .and_then(|d| serde_json::from_str::<Vec<crate::watch::Folder>>(&d).ok())
     {
         for f in list.iter_mut().filter(|f| f.category == old) {
@@ -7977,7 +7995,9 @@ fn rename_category_references(state: &AppState, old: &str, new: &str) -> serde_j
             watch += 1;
         }
         if watch > 0 {
-            let _ = store.put_setting("watch_folders", &serde_json::to_string(&list).unwrap_or_default());
+            if let Err(e) = store.put_setting("watch_folders", &serde_json::to_string(&list).unwrap_or_default()) {
+                note("watch folders", e);
+            }
         }
     }
 
@@ -7993,7 +8013,11 @@ fn rename_category_references(state: &AppState, old: &str, new: &str) -> serde_j
             Node::Cond(_) => 0,
         }
     }
-    for mut stored in store.workflows().unwrap_or_default() {
+    let stored_workflows = store.workflows().unwrap_or_else(|e| {
+        note("workflows", e);
+        Vec::new()
+    });
+    for mut stored in stored_workflows {
         let Ok(mut w) = serde_json::from_str::<crate::rules::Workflow>(&stored.body) else { continue };
         let mut n = walk(&mut w.when, old, new);
         for a in w.then.iter_mut() {
@@ -8006,22 +8030,32 @@ fn rename_category_references(state: &AppState, old: &str, new: &str) -> serde_j
         }
         if n > 0 {
             stored.body = serde_json::to_string(&w).unwrap_or(stored.body);
-            if store.put_workflow(&stored).is_ok() {
-                workflows += 1;
+            match store.put_workflow(&stored) {
+                Ok(()) => workflows += 1,
+                Err(e) => note("workflow", e),
             }
         }
     }
 
-    for mut m in store.magnets().unwrap_or_default() {
+    let waiting = store.magnets().unwrap_or_else(|e| {
+        note("magnets", e);
+        Vec::new()
+    });
+    for mut m in waiting {
         if m.category == old {
             m.category = new.to_string();
-            if store.put_magnet(&m).is_ok() {
-                magnets += 1;
+            match store.put_magnet(&m) {
+                Ok(()) => magnets += 1,
+                Err(e) => note("magnet", e),
             }
         }
     }
 
-    for j in store.list_jobs(10_000).unwrap_or_default() {
+    let queued = store.list_jobs(10_000).unwrap_or_else(|e| {
+        note("jobs", e);
+        Vec::new()
+    });
+    for j in queued {
         if !matches!(j.state.as_str(), "queued" | "waiting") {
             continue;
         }
@@ -8033,11 +8067,17 @@ fn rename_category_references(state: &AppState, old: &str, new: &str) -> serde_j
                 hit = true;
             }
         }
-        if hit && store.set_job_params(&j.id, &p.to_string()).is_ok() {
-            jobs += 1;
+        if hit {
+            match store.set_job_params(&j.id, &p.to_string()) {
+                Ok(()) => jobs += 1,
+                Err(e) => note("job", e),
+            }
         }
     }
-    serde_json::json!({"rss_rules": rss, "watch_folders": watch, "workflows": workflows, "magnets": magnets, "jobs": jobs})
+    if !refused.is_empty() {
+        return Err(refused.join("; "));
+    }
+    Ok(serde_json::json!({"rss_rules": rss, "watch_folders": watch, "workflows": workflows, "magnets": magnets, "jobs": jobs}))
 }
 
 async fn category_delete(
@@ -10009,7 +10049,10 @@ fn set_one_paused(state: &AppState, engine: &str, prefix: &str, paused: bool) ->
         let store = state.store.lock().unwrap();
         match store.resolve_hash_in(engine, prefix) {
             Some(hash) => {
-                let _ = store.set_paused_everywhere(&hash, paused);
+                if let Err(e) = store.set_paused_everywhere(&hash, paused) {
+                    drop(store);
+                    return store_refused(state, "pause", e);
+                }
                 Some(hash)
             }
             None => None,
@@ -10536,9 +10579,9 @@ async fn post_baseline(
         return (StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({"error": "invalid body"}))).into_response();
     };
-    {
-        let store = state.store.lock().unwrap();
-        let _ = store.set_counter("global", req.total_uploaded, req.total_downloaded);
+    let written = state.store.lock().unwrap().set_counter("global", req.total_uploaded, req.total_downloaded);
+    if let Err(e) = written {
+        return store_refused(&state, "baseline", e);
     }
     Json(serde_json::json!({
         "status": "ok",
@@ -10844,12 +10887,17 @@ fn edit_download_order(
     state: &AppState,
     copies: &[(String, std::sync::Arc<typhon_engine::torrent::meta::TorrentState>)],
     edit: impl Fn(&mut typhon_engine::torrent::piece_picker::DownloadOrder),
-) {
+) -> Result<(), String> {
+    let mut failed = Vec::new();
     for (engine, t) in copies {
         if let Some(e) = state.engines.get(engine) {
-            let _ = e.manager.update_download_order(&t.info_hash, |o| edit(o));
+            if let Err(msg) = e.manager.update_download_order(&t.info_hash, |o| edit(o)) {
+                tracing::error!(engine = %engine, "download order not applied: {msg}");
+                failed.push(format!("{engine}: {msg}"));
+            }
         }
     }
+    if failed.is_empty() { Ok(()) } else { Err(failed.join("; ")) }
 }
 
 fn download_order_json(engine: &str, t: &typhon_engine::torrent::meta::TorrentState) -> serde_json::Value {
@@ -11181,7 +11229,7 @@ pub(crate) fn apply_add_options(state: &AppState, hash: &str, up: Option<u64>, d
         shim_cap_torrents(state, &[hash.to_string()], up, down);
     }
     if sequential || first_last {
-        edit_download_order(state, &torrent_copies(state, hash, ""), |o| {
+        let _ = edit_download_order(state, &torrent_copies(state, hash, ""), |o| {
             o.sequential |= sequential;
             o.first_last |= first_last;
         });
@@ -12759,6 +12807,18 @@ pub(crate) fn absorb_on_remove(
     hash: &str,
     session: Option<&str>,
 ) -> (std::time::Duration, std::time::Duration) {
+    let (wait, hold, _) = absorb_checked(state, engine_id, torrent, hash, session);
+    (wait, hold)
+}
+
+/// `absorb_on_remove`, saying whether the store took it.
+fn absorb_checked(
+    state: &AppState,
+    engine_id: &str,
+    torrent: &std::sync::Arc<typhon_engine::torrent::meta::TorrentState>,
+    hash: &str,
+    session: Option<&str>,
+) -> (std::time::Duration, std::time::Duration, Result<(), String>) {
     use std::sync::atomic::Ordering;
     let ul = torrent.total_uploaded.load(Ordering::Relaxed) as i64;
     let dl = torrent.total_downloaded.load(Ordering::Relaxed) as i64;
@@ -12789,6 +12849,7 @@ pub(crate) fn absorb_on_remove(
     let r = timed_store(state, &mut wait, &mut hold, |store| {
         store.delete_absorb(hash, session, &keys, ul, dl)
     });
+    let mut outcome = Ok(());
     if let Err(e) = r {
         // Loud on purpose: lifetime upload is the one figure here that
         // cannot be recomputed from anything else, so a fold that did not
@@ -12797,8 +12858,9 @@ pub(crate) fn absorb_on_remove(
             hash = %hash, engine = %engine_id, ul, dl,
             "absorb-on-remove failed, lifetime bytes not carried over: {e}"
         );
+        outcome = Err(format!("{e}"));
     }
-    (wait, hold)
+    (wait, hold, outcome)
 }
 
 /// Run `f` under the store lock, adding the time spent waiting for the lock
@@ -12931,6 +12993,9 @@ fn remove_one_inner(
     // still seeds, still announces, and comes back at the next restart from the
     // engine's own state -- present to the network, invisible to the interface.
     let mut dropped = 0usize;
+    // The first thing the store refused: the engines have let go by then, so
+    // the rest of the copies still go, and the answer says what did not.
+    let mut refused: Option<String> = None;
     for session in sessions {
         let Some(engine) = state.engines.get(session) else { continue };
         let stage = Instant::now();
@@ -12969,20 +13034,30 @@ fn remove_one_inner(
         // then refuses to drop counts its bytes twice, once in the carry-over
         // and once in the live sum. This also drops the row for this copy.
         let stage = Instant::now();
-        let (w, h) = absorb_on_remove(state, session, &torrent, hash, Some(session));
+        let (w, h, absorbed) = absorb_checked(state, session, &torrent, hash, Some(session));
+        if let Err(e) = absorbed {
+            refused.get_or_insert(e);
+        }
         tm.absorb_total += stage.elapsed();
         tm.absorb_wait += w;
         tm.absorb_hold += h;
         dropped += 1;
     }
 
-    timed_store(state, &mut tm.final_wait, &mut tm.final_hold, |store| {
+    let deleted = timed_store(state, &mut tm.final_wait, &mut tm.final_hold, |store| {
         if want.is_empty() {
-            let _ = store.delete_torrent(hash);
+            store.delete_torrent(hash).map(|_| ())
         } else {
-            let _ = store.delete_copy(hash, want);
+            store.delete_copy(hash, want).map(|_| ())
         }
     });
+    if let Err(e) = deleted {
+        refused.get_or_insert(format!("{e}"));
+    }
+    if let Some(e) = refused {
+        tracing::error!(hash = %hash, "removed from the engines, the store refused to drop it: {e}");
+        return Err(format!("removed from the engine, but the store refused: {e}"));
+    }
     Ok(dropped)
 }
 
@@ -13062,16 +13137,25 @@ async fn post_torrent_copy(
         )
             .into_response();
     }
-    if let Err(e) = dst.manager.add_torrent_bytes(&blob, &save_path, false, true) {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("the engine refused it: {e}")})),
-        )
-            .into_response();
-    }
-    {
-        let store = state.store.lock().unwrap();
-        let _ = store.insert_torrent(&hash, &target, &blob, &save_path, &category, added, false, "");
+    let (ih, _) = match dst.manager.add_torrent_bytes(&blob, &save_path, false, true) {
+        Ok(added) => added,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": format!("the engine refused it: {e}")})),
+            )
+                .into_response();
+        }
+    };
+    let stored = state.store.lock().unwrap().insert_torrent(&hash, &target, &blob, &save_path, &category, added, false, "");
+    if let Err(e) = stored {
+        // A copy the store does not know would be gone at the next restart,
+        // seeding in the meantime: take it back out of the engine (the files
+        // are the source's too, and stay).
+        if let Err(u) = dst.manager.remove_torrent(&ih, true) {
+            tracing::error!(hash = %hash, engine = %target, "could not take the copy back out of the engine: {u}");
+        }
+        return store_refused(&state, "copy to engine", e);
     }
     tracing::info!(hash = %hash, from = %existing, to = %target, "torrent now seeded from a second engine");
     Json(serde_json::json!({"status": "ok", "engine": target, "save_path": save_path}))
@@ -13369,7 +13453,8 @@ async fn post_torrent_engine(
     let ih = torrent.info_hash;
     let Some(src) = state.engines.get(&current) else { return not_found() };
     let Some(dst) = state.engines.get(&target) else { return not_found() };
-    let Some(mut record) = src.manager.export_state(&ih) else { return not_found() };
+    let Some(original) = src.manager.export_state(&ih) else { return not_found() };
+    let mut record = original.clone();
     if !save_path.is_empty() {
         record.save_path = save_path.clone();
     }
@@ -13394,9 +13479,16 @@ async fn post_torrent_engine(
             .into_response();
     }
     src.announce_cache.forget(&hash);
-    {
-        let store = state.store.lock().unwrap();
-        let _ = store.set_session(&hash, &current, &target);
+    let stored = state.store.lock().unwrap().set_session(&hash, &current, &target);
+    if let Err(e) = stored {
+        // The store still says `current`: put the torrent back there, so the
+        // engines and the store agree again.
+        let back = src.manager.import_state_bytes(&original, &blob).map_err(|u| u.to_string());
+        let back = back.and_then(|_| dst.manager.remove_torrent(&ih, true).map_err(|u| u.to_string()));
+        if let Err(u) = back {
+            tracing::error!(hash = %hash, from = %current, to = %target, "could not undo the engine move after the store refused it: {u}");
+        }
+        return store_refused(&state, "move to engine", e);
     }
     tracing::info!(hash = %hash, from = %current, to = %target, "torrent moved between engines");
     Json(serde_json::json!({"status": "ok", "from": current, "to": target})).into_response()
@@ -13408,9 +13500,10 @@ async fn post_torrent_engine(
 /// row alone leaves a torrent that still seeds, still announces, and comes back
 /// at the next restart from the engine's own state -- present to the network,
 /// invisible to the interface.
-fn remove_torrent_everywhere(state: &AppState, info_hash: &str, delete_files: bool) {
+fn remove_torrent_everywhere(state: &AppState, info_hash: &str, delete_files: bool) -> Result<(), String> {
     let hash = info_hash.to_lowercase();
     let keep_data = !delete_files;
+    let mut refused: Option<String> = None;
     if let Some((_, torrent)) = find_torrent(state, &hash) {
         let ih = torrent.info_hash;
         for engine in state.engines.engines() {
@@ -13426,18 +13519,28 @@ fn remove_torrent_everywhere(state: &AppState, info_hash: &str, delete_files: bo
                 state.engines.spawn_departure(&engine.id, copy.clone());
                 if let Err(e) = engine.manager.remove_torrent_sparing(&ih, keep_data, &spare).0 {
                     tracing::warn!(hash = %hash, "engine refused removal: {e}");
-                    return;
+                    return Err(e.to_string());
                 }
                 engine.announce_cache.forget(&hash);
-                let _ = absorb_on_remove(state, &engine.id, &copy, &hash, Some(&engine.id));
+                if let Err(e) = absorb_checked(state, &engine.id, &copy, &hash, Some(&engine.id)).2 {
+                    refused = Some(e);
+                }
             }
         }
     }
-    {
-        let store = state.store.lock().unwrap();
-        let _ = store.delete_torrent(&hash);
+    let deleted = state.store.lock().unwrap().delete_torrent(&hash);
+    if let Err(e) = deleted {
+        refused = Some(format!("{e}"));
+    }
+    if let Some(e) = refused {
+        // The engines let go and the store still lists it: the torrent comes
+        // back from the store at the next restart, which is the state the
+        // store knows. Said, not acknowledged.
+        tracing::error!(hash = %hash, "removed from the engines, the store refused to drop it: {e}");
+        return Err(format!("the store refused: {e}"));
     }
     tracing::info!(hash = %hash, delete_files, "torrent removed");
+    Ok(())
 }
 
 /// Purge a race torrent: remove it and free its slot.
@@ -13503,6 +13606,7 @@ async fn qbit_delete(
         .unwrap_or(false);
 
     let hashes = qbit_hashes(&state, &form);
+    let mut failed: Vec<String> = Vec::new();
     for prefix in hashes {
         let resolved = {
             let store = state.store.lock().unwrap();
@@ -13519,8 +13623,19 @@ async fn qbit_delete(
                 tracing::info!(hash = %hash, delete_files = wants_files, copies = dropped,
                     "torrent removed (qbit shim)");
             }
-            Err(e) => tracing::warn!(hash = %hash, "shim removal failed: {e}"),
+            Err(e) => {
+                tracing::warn!(hash = %hash, "shim removal failed: {e}");
+                failed.push(format!("{hash}: {e}"));
+            }
         }
+    }
+    if !failed.is_empty() {
+        // A client that is told "Ok." believes the torrents are gone.
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": "some torrents were not removed", "failed": failed})),
+        )
+            .into_response();
     }
     qbit_ok()
 }
@@ -13800,7 +13915,7 @@ fn import_engine(state: &AppState) -> String {
 fn import_categories(state: &AppState) -> crate::importer::CategoryFn {
     let state = state.clone();
     Arc::new(move |cats| {
-        let _ = edit_categories(&state, |doc| {
+        crate::store::log_store("import: create categories", edit_categories(&state, |doc| {
             for (name, path) in cats {
                 if !doc.contains_key(name) {
                     doc.insert(
@@ -13809,7 +13924,7 @@ fn import_categories(state: &AppState) -> crate::importer::CategoryFn {
                     );
                 }
             }
-        });
+        }));
     })
 }
 
@@ -15140,11 +15255,15 @@ async fn qbit_file_prio(State(state): State<AppState>, RawQuery(query): RawQuery
     }
     let ids: Vec<usize> = ids.split('|').filter_map(|i| i.trim().parse().ok()).collect();
     let copies = torrent_copies(&state, &typhon_engine::torrent::hex_encode(&torrent.info_hash), "");
-    edit_download_order(&state, &copies, |o| {
+    let applied = edit_download_order(&state, &copies, |o| {
         for &id in &ids {
             o.set_file_priority(id, n, prio as u8);
         }
     });
+    if let Err(e) = applied {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": format!("not applied: {e}")})))
+            .into_response();
+    }
     qbit_ok()
 }
 
@@ -15161,13 +15280,16 @@ async fn qbit_toggle_order_flag(state: &AppState, query: &str, headers: &HeaderM
         let Some((_, first)) = copies.first() else { continue };
         let (seq, fl) = first.download_order_flags();
         let on = !if sequential { seq } else { fl };
-        edit_download_order(state, &copies, |o| {
+        if let Err(e) = edit_download_order(state, &copies, |o| {
             if sequential {
                 o.sequential = on;
             } else {
                 o.first_last = on;
             }
-        });
+        }) {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": format!("not applied: {e}")})))
+                .into_response();
+        }
     }
     qbit_ok()
 }
@@ -21419,6 +21541,97 @@ mod write_path_tests {
             add_torrent_bytes(&s.state, &torrent_bytes("alpha"), "", "/tmp", "", true, true, "race")
                 .expect("added");
         (s, hash)
+    }
+
+    /// Make every write to these tables fail the way a dead mount does.
+    fn refuse_writes(s: &TestState, tables: &[&str]) {
+        let mut sql = String::new();
+        for table in tables {
+            for ev in ["INSERT", "UPDATE", "DELETE"] {
+                sql += &format!(
+                    "CREATE TRIGGER refuse_{table}_{ev} BEFORE {ev} ON {table} \
+                     BEGIN SELECT RAISE(ABORT, 'database disk image is malformed'); END;"
+                );
+            }
+        }
+        s.state.store.lock().unwrap().execute_batch_for_tests(&sql);
+    }
+
+    /// The writes that come AFTER the engine has acted -- a copy, a move, a
+    /// removal -- and the ones on the side (counters, a pause, the references
+    /// a rename follows): when the store refuses them the answer is not 2xx,
+    /// and the engine is not left holding what the store does not know.
+    #[tokio::test]
+    async fn a_store_that_refuses_after_the_engine_acted_is_not_acknowledged() {
+        let mut seen: Vec<(&str, StatusCode)> = Vec::new();
+        let mut left_behind: Vec<&str> = Vec::new();
+
+        // Copy to a second engine: the engine adds it, the store insert fails.
+        let (s, hash) = with_torrent("refuse-copy");
+        let ih = typhon_engine::torrent::hex_decode(&hash).unwrap();
+        refuse_writes(&s, &["torrents"]);
+        let r = super::post_torrent_copy(State(s.state.clone()), axum::extract::Path(hash.clone()),
+            RawQuery(None), keyed(KEY), r#"{"engine":"hoard"}"#.to_string()).await;
+        seen.push(("POST /api/torrents/:hash/copy", r.status()));
+        let hoard = s.state.engines.get("hoard").unwrap();
+        if hoard.manager.get(&ih).is_some() {
+            left_behind.push("copy: the engine kept a copy the store does not know");
+        }
+
+        // Move to another engine: both engines moved, the store update fails.
+        let (s, hash) = with_torrent("refuse-move");
+        let ih = typhon_engine::torrent::hex_decode(&hash).unwrap();
+        refuse_writes(&s, &["torrents"]);
+        let r = super::post_torrent_engine(State(s.state.clone()), axum::extract::Path(hash.clone()),
+            RawQuery(None), keyed(KEY), r#"{"engine":"hoard"}"#.to_string()).await;
+        seen.push(("POST /api/torrents/:hash/engine", r.status()));
+        if s.state.engines.get("race").unwrap().manager.get(&ih).is_none()
+            || s.state.engines.get("hoard").unwrap().manager.get(&ih).is_some()
+        {
+            left_behind.push("move: the engines moved, the store did not");
+        }
+
+        // Removal: the engine let go, the store delete fails.
+        let (s, hash) = with_torrent("refuse-delete");
+        refuse_writes(&s, &["torrents"]);
+        let r = super::delete_torrent(State(s.state.clone()), axum::extract::Path(hash.clone()),
+            RawQuery(None), keyed(KEY)).await;
+        seen.push(("DELETE /api/torrents/:hash", r.status()));
+        let (s, hash) = with_torrent("refuse-qbit-delete");
+        refuse_writes(&s, &["torrents"]);
+        let mut form = super::Fields::new();
+        form.insert("hashes".into(), hash.clone());
+        let r = super::qbit_delete(State(s.state.clone()), RawQuery(None), keyed(KEY), axum::extract::Form(form)).await;
+        seen.push(("qbit delete", r.status()));
+
+        // Pause of one race torrent.
+        let (s, hash) = with_torrent("refuse-pause");
+        refuse_writes(&s, &["torrents"]);
+        let r = super::race_pause_one(State(s.state.clone()), axum::extract::Path(hash.clone()),
+            RawQuery(None), keyed(KEY)).await;
+        seen.push(("POST /api/race/torrents/:hash/pause", r.status()));
+
+        // The baseline counters.
+        let (s, _) = with_torrent("refuse-baseline");
+        refuse_writes(&s, &["counters"]);
+        let r = super::post_baseline(State(s.state.clone()), RawQuery(None), keyed(KEY),
+            r#"{"total_uploaded":5,"total_downloaded":6}"#.to_string()).await;
+        seen.push(("POST /api/stats/baseline", r.status()));
+
+        // A rename that cannot follow a watched folder.
+        let s = state_from("refuse-rename", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+        super::category_create(State(s.state.clone()), RawQuery(None), keyed(KEY),
+            r#"{"name":"films","save_path":"/data/films","mode":"hoard"}"#.to_string()).await;
+        s.state.store.lock().unwrap()
+            .put_setting("watch_folders", r#"[{"path":"/watch","category":"films"}]"#).unwrap();
+        refuse_writes(&s, &["app_settings"]);
+        let r = super::category_update(State(s.state.clone()), axum::extract::Path("films".to_string()),
+            RawQuery(None), keyed(KEY), r#"{"name":"movies","save_path":"/data/films","mode":"hoard"}"#.to_string()).await;
+        seen.push(("PUT /api/categories/:name (rename)", r.status()));
+
+        let acked: Vec<String> = seen.iter().filter(|(_, c)| !c.is_server_error()).map(|(n, c)| format!("{n} -> {c}")).collect();
+        assert!(acked.is_empty(), "not refused although the store refused the write: {acked:?}");
+        assert!(left_behind.is_empty(), "engines and store disagree: {left_behind:?}");
     }
 
     /// ⭐⭐ The settings screen edits keys this binary does not model, so the
