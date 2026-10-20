@@ -1002,6 +1002,45 @@ mod tests {
         assert_eq!(st, StatusCode::OK, "released, healthy again: {body}");
     }
 
+    /// Requests that wait for a store held by a query stuck on a frozen mount
+    /// must not take every runtime worker with them: they did, and nothing
+    /// else ran -- not `/health`, not a request that never touches the store.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn requests_waiting_for_a_held_store_leave_the_runtime_free() {
+        let s = state_from("obs-store-runtime", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+        let store = s.state.store.clone();
+        let holder = std::thread::spawn(move || {
+            let guard = store.lock().unwrap();
+            std::thread::sleep(std::time::Duration::from_secs(6));
+            drop(guard);
+        });
+        // std sleeps: a tokio one would itself wait for a free worker.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let waiters: Vec<_> = (0..4)
+            .map(|_| {
+                let st = s.state.store.clone();
+                tokio::spawn(async move {
+                    let _g = st.lock().unwrap();
+                })
+            })
+            .collect();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        // Wall clock, not `tokio::time::timeout`: the runtime's timer is
+        // driven by the very workers that are stuck.
+        let t = std::time::Instant::now();
+        let other = tokio::spawn(async { 42 }).await;
+        assert_eq!(other.unwrap(), 42);
+        assert!(
+            t.elapsed() < std::time::Duration::from_secs(2),
+            "a task that never touches the store waited {:?} behind the ones that do",
+            t.elapsed()
+        );
+        holder.join().unwrap();
+        for w in waiters {
+            w.await.unwrap();
+        }
+    }
+
     /// The store's own ping is what hangs on a frozen mount, not only a
     /// request: the watcher's reopening check or `/health`'s probe holding the
     /// only connection must show as a hold like any other, or `/health` says

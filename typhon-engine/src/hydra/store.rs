@@ -697,7 +697,22 @@ impl StoreLock {
     ) -> std::sync::LockResult<StoreGuard<'a>> {
         let asked = std::time::Instant::now();
         let wrap = |guard| Self::held(StoreGuard { guard, at, waited: asked.elapsed(), since: std::time::Instant::now(), slot });
-        match m.lock() {
+        let got = match m.try_lock() {
+            Ok(g) => Ok(g),
+            Err(std::sync::TryLockError::Poisoned(p)) => Err(p),
+            // Held: the wait may last as long as a query stuck on a frozen
+            // mount. On a runtime worker it hands the worker's other tasks
+            // to a new thread first, or every request that needs the store
+            // takes a worker down with it and nothing else runs -- /health
+            // included. Free, the lock costs what it always did.
+            Err(std::sync::TryLockError::WouldBlock) => match tokio::runtime::Handle::try_current() {
+                Ok(h) if h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+                    tokio::task::block_in_place(|| m.lock())
+                }
+                _ => m.lock(),
+            },
+        };
+        match got {
             Ok(g) => Ok(wrap(g)),
             Err(p) => Err(std::sync::PoisonError::new(wrap(p.into_inner()))),
         }
