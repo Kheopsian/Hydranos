@@ -8177,7 +8177,15 @@ function pickDedupMethod(m) {
 async function saveDedupMode() {
     const banner = document.getElementById("dedup-result");
     const picked = document.querySelector("#dedup-method button.on");
-    const m = picked ? picked.dataset.m : "hardlink";
+    // Nothing picked means the saved setting could not be read: saving a guess
+    // would switch dedup on (or change its method) behind the operator's back.
+    if (!picked) {
+        banner.style.display = "block";
+        banner.className = "result-msg err";
+        banner.textContent = t("Pick Off, Hardlink or Reflink first.");
+        return;
+    }
+    const m = picked.dataset.m;
     const enabled = m !== "off";
     // Off keeps the saved method, so turning it back on returns to the same one.
     const body = enabled ? { enabled: true, method: m } : { enabled: false };
