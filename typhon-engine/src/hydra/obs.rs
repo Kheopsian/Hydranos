@@ -127,20 +127,21 @@ pub enum StoreState {
 
 pub fn store_state(state: &AppState) -> StoreState {
     use crate::store::Probe;
-    let probe = || match state.store.probe() {
+    // Reads what is known, never the file: the holders of the connections and
+    // the last ping, made apart from this request (`refresh_store`, and the
+    // `store-heal` thread that also reopens what stopped answering).
+    match state.store.probe() {
         Probe::Ok => StoreState::Ok,
         Probe::Busy => StoreState::Busy,
         Probe::Blocked(d) => StoreState::Unavailable(d.as_secs()),
         Probe::Error(e) => StoreState::Error(e),
-    };
-    let first = probe();
-    // A store that stopped answering gets its connections reopened (at most
-    // every few seconds) and is asked again: the probe is what notices a
-    // mount that reconnected, so it is also what brings the store back.
-    if matches!(first, StoreState::Error(_)) && state.store.heal() {
-        return probe();
     }
-    first
+}
+
+/// Bring the store's last ping up to date before `/health` reads it: a stale
+/// one is asked again on a thread of its own, and waited for a second at most.
+pub async fn refresh_store(state: &AppState) {
+    state.store.refreshed().await;
 }
 
 /// `/health` once the router is served: 200 `healthy` or `degraded`, 503
@@ -951,6 +952,10 @@ mod tests {
 
         s.state.store.break_connections_for_tests();
 
+        // `/health` no longer pings: it reads the last ping, up to 2 s old,
+        // and the break is only found by the next one. Let the one just made
+        // go stale, so the loop below reads a ping made after the break.
+        tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
         let mut last = (StatusCode::OK, String::new());
         for _ in 0..40 {
             last = get(&s, "/health").await;
@@ -1068,6 +1073,89 @@ mod tests {
         stuck.join().unwrap();
         let (st, body) = get(&s, "/health").await;
         assert_eq!(st, StatusCode::OK, "released, healthy again: {body}");
+    }
+
+    async fn get_owned(state: AppState, path: &str) -> (StatusCode, String) {
+        let resp = crate::api::router(state)
+            .oneshot(Request::builder().uri(path).header("X-Api-Key", KEY).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        (status, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    /// On a frozen mount nobody holds the connection when `/health` comes: it
+    /// is `/health`'s own ping that would hang, on the request's thread. It
+    /// must never touch the file: it answers at once from what it knows, and
+    /// the ping that hangs elsewhere shows as a hold, so 503 `unavailable`
+    /// once it has lasted 5 s.
+    #[tokio::test]
+    async fn health_does_not_ping_the_store_on_its_own_path() {
+        let s = state_from("obs-store-health-ping", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+        s.state.store.stall_pings_for_tests(8000);
+        let frozen = std::time::Instant::now();
+        loop {
+            let t = std::time::Instant::now();
+            let (st, body) = get(&s, "/health").await;
+            // Wall clock: the runtime's timer can itself be held up.
+            assert!(
+                t.elapsed() < std::time::Duration::from_secs(2),
+                "/health took {:?} with the store's ping frozen {:?} ago",
+                t.elapsed(),
+                frozen.elapsed()
+            );
+            if frozen.elapsed() < std::time::Duration::from_secs(4) {
+                assert_eq!(st, StatusCode::OK, "frozen for under 4 s is busy, not broken: {body}");
+            }
+            if frozen.elapsed() >= std::time::Duration::from_millis(5600) {
+                assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+                let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+                assert_eq!(v["checks"]["store"], "unavailable", "{v:#}");
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+        // The ping ends, nothing stalls it any more: the store is healthy again.
+        s.state.store.stall_pings_for_tests(0);
+        let mut last = (StatusCode::SERVICE_UNAVAILABLE, String::new());
+        for _ in 0..40 {
+            last = get(&s, "/health").await;
+            if last.0 == StatusCode::OK {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+        assert_eq!(last.0, StatusCode::OK, "released, healthy again: {}", last.1);
+    }
+
+    /// Several `/health` at once while the ping is frozen, on a runtime with
+    /// two workers: none of them takes a worker down with the ping.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn parallel_health_requests_all_answer_while_the_store_ping_is_frozen() {
+        let s = state_from("obs-store-health-par", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+        s.state.store.stall_pings_for_tests(8000);
+        for round in 0..3 {
+            let asked: Vec<_> = (0..6)
+                .map(|_| {
+                    let state = s.state.clone();
+                    tokio::spawn(async move {
+                        let t = std::time::Instant::now();
+                        let r = get_owned(state, "/health").await;
+                        (t.elapsed(), r)
+                    })
+                })
+                .collect();
+            for a in asked {
+                let (took, (st, body)) = a.await.unwrap();
+                assert!(
+                    took < std::time::Duration::from_secs(2),
+                    "round {round}: a /health took {took:?} while the ping is frozen ({st}): {body}"
+                );
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+        s.state.store.stall_pings_for_tests(0);
     }
 
     /// A store that is still unreadable after the reopening stays an error in
