@@ -1291,6 +1291,48 @@ mod tests {
         assert_eq!(back.len(), 24, "the cleared row is still a sample");
     }
 
+    /// A whole minute cleared to NULL is no minute at all: it cannot hold the
+    /// record over a sound one, and a window that is nothing but cleared
+    /// minutes has no peak rather than a peak of zero or an error.
+    #[test]
+    fn a_minute_cleared_to_null_holds_no_record() {
+        const GBPS: f64 = 1.25e8;
+        let fill = |db: &BenchDb, minute: f64, up: f64| {
+            for i in 0..12 {
+                db.record_sample(&serde_json::json!({
+                    "ts": minute + i as f64 * 5.0, "race_upload_rate": up, "hoard_upload_rate": 0.0, "extra_upload_rate": 0.0,
+                }))
+                .unwrap();
+            }
+        };
+        let clear = |db: &BenchDb| {
+            db.conn
+                .execute("UPDATE bench_samples SET race_upload_rate = NULL WHERE race_upload_rate > 1.25e9", [])
+                .unwrap()
+        };
+        let peak_upload = |db: &BenchDb| -> Option<f64> {
+            let rec = db.records_payload().expect("the records read a cleared window");
+            rec["records"].as_array().unwrap().iter().find(|r| r["label"] == "Peak upload").map(|r| r["value"].as_f64().unwrap())
+        };
+
+        // A sound minute next to one cleared from end to end.
+        let mixed = BenchDb::open_in_memory().unwrap();
+        fill(&mixed, 1_000.0, GBPS);
+        fill(&mixed, 2_000.0, 500.0 * GBPS);
+        assert_eq!(clear(&mixed), 12);
+        let peak = peak_upload(&mixed).expect("the sound minute still holds a record");
+        assert!((peak - 1.0).abs() < 0.01, "{peak}");
+        assert_eq!(mixed.samples_in_range(0.0, 3_000.0).unwrap().len(), 24);
+
+        // Nothing but cleared minutes.
+        let cleared = BenchDb::open_in_memory().unwrap();
+        fill(&cleared, 1_000.0, 500.0 * GBPS);
+        fill(&cleared, 2_000.0, 300.0 * GBPS);
+        assert_eq!(clear(&cleared), 24);
+        assert_eq!(peak_upload(&cleared), None, "no sound minute, no upload record");
+        assert_eq!(cleared.samples_in_range(0.0, 3_000.0).unwrap().len(), 24);
+    }
+
     /// A bench.db written by an older release lacks the announce-health
     /// columns. Opening it must add them, or the first insert fails and the
     /// sampler records nothing from then on.
