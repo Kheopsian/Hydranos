@@ -1261,10 +1261,10 @@ mod tests {
     fn a_rate_cleared_to_null_is_skipped_and_breaks_no_reader() {
         let db = BenchDb::open_in_memory().unwrap();
         const GBPS: f64 = 1.25e8;
-        for minute in [1_000.0, 2_000.0] {
+        for minute in [960.0, 1_980.0] {
             for i in 0..12 {
                 let ts = minute + i as f64 * 5.0;
-                let up = if minute == 2_000.0 && i == 3 { 579.0 * GBPS } else { GBPS };
+                let up = if minute == 1_980.0 && i == 3 { 579.0 * GBPS } else { GBPS };
                 db.record_sample(&serde_json::json!({
                     "ts": ts, "race_upload_rate": up, "hoard_upload_rate": 0.0, "extra_upload_rate": 0.0,
                 }))
@@ -1317,8 +1317,8 @@ mod tests {
 
         // A sound minute next to one cleared from end to end.
         let mixed = BenchDb::open_in_memory().unwrap();
-        fill(&mixed, 1_000.0, GBPS);
-        fill(&mixed, 2_000.0, 500.0 * GBPS);
+        fill(&mixed, 960.0, GBPS);
+        fill(&mixed, 1_980.0, 500.0 * GBPS);
         assert_eq!(clear(&mixed), 12);
         let peak = peak_upload(&mixed).expect("the sound minute still holds a record");
         assert!((peak - 1.0).abs() < 0.01, "{peak}");
@@ -1326,11 +1326,43 @@ mod tests {
 
         // Nothing but cleared minutes.
         let cleared = BenchDb::open_in_memory().unwrap();
-        fill(&cleared, 1_000.0, 500.0 * GBPS);
-        fill(&cleared, 2_000.0, 300.0 * GBPS);
+        fill(&cleared, 960.0, 500.0 * GBPS);
+        fill(&cleared, 1_980.0, 300.0 * GBPS);
         assert_eq!(clear(&cleared), 24);
         assert_eq!(peak_upload(&cleared), None, "no sound minute, no upload record");
         assert_eq!(cleared.samples_in_range(0.0, 3_000.0).unwrap().len(), 24);
+    }
+
+    /// The case the clean-up mostly left: ONE column of a sample cleared, the
+    /// others sound. The sample's total is unknown, so it leaves its minute's
+    /// average instead of counting as its sound half; the minute stands on its
+    /// other samples. The graph route still serves the sample, the cleared
+    /// column as 0 and the sound ones as they were.
+    #[test]
+    fn a_sample_with_one_column_cleared_leaves_its_minute_s_average() {
+        const GBPS: f64 = 1.25e8;
+        let db = BenchDb::open_in_memory().unwrap();
+        for i in 0..12 {
+            let race = if i == 3 { 579.0 * GBPS } else { GBPS };
+            db.record_sample(&serde_json::json!({
+                "ts": 1_020.0 + i as f64 * 5.0, "race_upload_rate": race, "hoard_upload_rate": GBPS, "extra_upload_rate": 0.0,
+            }))
+            .unwrap();
+        }
+        db.conn
+            .execute("UPDATE bench_samples SET race_upload_rate = NULL WHERE race_upload_rate > 1.25e9", [])
+            .unwrap();
+        let rec = db.records_payload().unwrap();
+        let peak = rec["records"].as_array().unwrap().iter().find(|r| r["label"] == "Peak upload").unwrap()["value"]
+            .as_f64()
+            .expect("a number, not null");
+        // 2 Gbps over the 11 whole samples; counting the cleared one as its
+        // hoard half alone would give 1.92.
+        assert!((peak - 2.0).abs() < 0.01, "{peak}");
+        let back = db.samples_in_range(1_034.0, 1_036.0).unwrap();
+        assert_eq!(back.len(), 1);
+        assert_eq!(back[0]["race_upload_rate"].as_f64(), Some(0.0));
+        assert_eq!(back[0]["hoard_upload_rate"].as_f64(), Some(GBPS));
     }
 
     /// A bench.db written by an older release lacks the announce-health
