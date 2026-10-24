@@ -44,6 +44,7 @@ fn meta(num_pieces: u32) -> TorrentMeta {
         multi_file: false,
         info_dict_len: 0,
         v2: false,
+        renames: Default::default(),
     }
 }
 

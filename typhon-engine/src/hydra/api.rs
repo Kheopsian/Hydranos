@@ -9617,9 +9617,14 @@ async fn get_torrent_files(
     let Some((_, torrent)) = find_torrent(&state, &info_hash) else {
         return not_found();
     };
+    Json(torrent_files_json(&torrent)).into_response()
+}
+
+/// The native file list of one torrent: what `GET .../files` answers.
+fn torrent_files_json(torrent: &std::sync::Arc<typhon_engine::torrent::meta::TorrentState>) -> serde_json::Value {
     // What each file already has on disk, so the Content tab shows what was
     // downloaded and what is still missing. It listed paths and sizes only.
-    let done = file_done_bytes(&torrent);
+    let done = file_done_bytes(torrent);
     let order = torrent.download_order();
     let files: Vec<serde_json::Value> = torrent
         .meta
@@ -9632,7 +9637,12 @@ async fn get_torrent_files(
                 // The id `download-order` and `filePrio` take: the list is
                 // shown sorted, so its position is not it.
                 "index": i,
-                "path": f.path.to_string_lossy(),
+                // Where the file is now: renamed, or the .torrent's own.
+                // Below the folder (multi-file), as the .torrent gives it
+                // until the file is renamed. `folder`: the folder it is in
+                // now, null for a single-file torrent.
+                "path": file_folder_and_path(&torrent.meta, i).1,
+                "folder": file_folder_and_path(&torrent.meta, i).0,
                 "size": f.length,
                 // null: no piece map to tell (a stopped, never-checked torrent).
                 "done": d,
@@ -9641,13 +9651,167 @@ async fn get_torrent_files(
             })
         })
         .collect();
-    Json(serde_json::json!({
+    serde_json::json!({
         "files": files,
         "sequential": order.sequential,
         "first_last_piece": order.first_last,
         "complete": torrent.bytes_left() == 0,
-    }))
-    .into_response()
+    })
+}
+
+/// Rename a file on the copies of a torrent that `engine` names (every copy
+/// when `all`, else exactly one: an unnamed engine is refused when several
+/// hold it). `paths` turns the request into the `(from, to)` below the save
+/// path that one copy is asked (`Err` is a 400).
+///
+/// The 409s are the engine's (`RenameError::Conflict`); `Err` carries the
+/// status and the sentence.
+fn rename_file_on_copies(
+    state: &AppState,
+    hash: &str,
+    engine: &str,
+    all: bool,
+    paths: &dyn Fn(&typhon_engine::torrent::meta::TorrentMeta) -> Result<(String, String), String>,
+) -> Result<std::sync::Arc<typhon_engine::torrent::meta::TorrentState>, (StatusCode, String)> {
+    use typhon_engine::torrent::RenameError;
+    let copies = torrent_copies(state, hash, engine);
+    if copies.is_empty() {
+        return Err((StatusCode::NOT_FOUND, "torrent not found".into()));
+    }
+    if copies.len() > 1 && !all {
+        let held: Vec<&str> = copies.iter().map(|(id, _)| id.as_str()).collect();
+        return Err((
+            StatusCode::CONFLICT,
+            format!("the torrent is held by several engines ({}): name one with ?engine=", held.join(", ")),
+        ));
+    }
+    let refused = |e: RenameError| match e {
+        RenameError::NotFound => (StatusCode::NOT_FOUND, e.to_string()),
+        RenameError::Invalid(m) => (StatusCode::BAD_REQUEST, m),
+        RenameError::Conflict(m) => (StatusCode::CONFLICT, m),
+    };
+    // Every copy is checked before one is renamed: if any would refuse, none
+    // changes.
+    let mut todo = Vec::new();
+    for (id, copy) in &copies {
+        let Some(engine) = state.engines.get(id) else { continue };
+        let (from, to) = paths(&copy.meta).map_err(|m| (StatusCode::BAD_REQUEST, m))?;
+        engine.manager.can_rename_file(&copy.info_hash, &from, &to).map_err(refused)?;
+        todo.push((engine, copy.info_hash, from, to));
+    }
+    for (engine, ih, from, to) in todo {
+        engine.manager.rename_file(&ih, &from, &to).map_err(refused)?;
+    }
+    Ok(copies[0].1.clone())
+}
+
+/// File `i` as the native list shows it: (folder, path below it). A
+/// multi-file torrent's folder is the first component of where the file is
+/// (the .torrent's name until the file is renamed into another folder); a
+/// single-file torrent has none.
+fn file_folder_and_path(meta: &typhon_engine::torrent::meta::TorrentMeta, i: usize) -> (Option<String>, String) {
+    // Joined with `/` whatever the platform's separator is.
+    let join = |p: &std::path::Path| p.components().map(|c| c.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/");
+    let (folder, rest) = meta.folder_split(i);
+    (folder.map(|f| join(&f)), join(&rest))
+}
+
+#[derive(serde::Deserialize)]
+struct FileRenameBody {
+    from: String,
+    to: String,
+    /// The folder the new path is in; the file's current one when absent.
+    #[serde(default)]
+    folder: Option<String>,
+    /// Which file `from` means when two files, in different folders, share it.
+    #[serde(default)]
+    from_folder: Option<String>,
+}
+
+/// The save-path-relative `(from, to)` a native request means.
+///
+/// `from` is a file's `path` in `GET .../files` (with `from_folder` if two
+/// share it); `to` is its new path below `folder`, which is the file's own
+/// folder unless the request names another, so a file goes to another folder
+/// only by naming it. A single-file torrent has no folder: `to` is the new
+/// path itself.
+fn native_rename_paths(
+    meta: &typhon_engine::torrent::meta::TorrentMeta,
+    req: &FileRenameBody,
+) -> Result<(String, String), String> {
+    let n = meta.files.len();
+    if !meta.multi_file {
+        if req.folder.is_some() || req.from_folder.is_some() {
+            return Err("a single-file torrent has no folder".into());
+        }
+        let from = file_folder_and_path(meta, 0).1;
+        if n != 1 || from != req.from {
+            return Err(format!("{:?} is not a file of this torrent", req.from));
+        }
+        return Ok((from, req.to.clone()));
+    }
+    let hits: Vec<usize> = (0..n)
+        .filter(|&i| {
+            let (folder, path) = file_folder_and_path(meta, i);
+            path == req.from && req.from_folder.as_deref().is_none_or(|f| folder.as_deref() == Some(f))
+        })
+        .collect();
+    let i = match hits.as_slice() {
+        [i] => *i,
+        [] => return Err(format!("{:?} is not a file of this torrent", req.from)),
+        _ => return Err(format!("{:?} is in several folders: name one with \"from_folder\"", req.from)),
+    };
+    let (folder, _) = file_folder_and_path(meta, i);
+    let folder = req.folder.clone().or(folder).unwrap_or_default();
+    let (cur_folder, cur_path) = file_folder_and_path(meta, i);
+    let from_full = format!("{}/{cur_path}", cur_folder.unwrap_or_default());
+    Ok((from_full, format!("{folder}/{}", req.to)))
+}
+
+/// `POST /api/torrents/:info_hash/files/rename`
+/// `{"from","to","folder"?,"from_folder"?}`: point a file of a stopped torrent
+/// at another path, in the same folder or in the one `folder` names. Nothing
+/// is moved on disk; see `TorrentManager::rename_file` for what is refused.
+async fn post_torrent_file_rename(
+    State(state): State<AppState>,
+    Path(info_hash): Path<String>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+    let refuse = |code: StatusCode, msg: &str| (code, Json(serde_json::json!({"error": msg}))).into_response();
+    let Ok(req) = serde_json::from_str::<FileRenameBody>(&body) else {
+        return refuse(StatusCode::BAD_REQUEST, r#"the body is {"from": "<path>", "to": "<new path>"}"#);
+    };
+    let engine = engine_param(&query, "");
+    match rename_file_on_copies(&state, &info_hash, &engine, false, &|meta| native_rename_paths(meta, &req)) {
+        Ok(torrent) => {
+            let mut v = torrent_files_json(&torrent);
+            v["ok"] = true.into();
+            Json(v).into_response()
+        }
+        Err((code, msg)) => refuse(code, &msg),
+    }
+}
+
+/// `POST /api/v2/torrents/renameFile` (`hash`, `oldPath`, `newPath`): the same
+/// rename, with paths as `torrents/files` names them, folder included, and the
+/// folder may change (a file by file move of a torrent to another folder).
+async fn qbit_rename_file(State(state): State<AppState>, RawQuery(query): RawQuery, headers: HeaderMap, body: String) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+    let form = shim_form(&query, &body);
+    let (Some(hash), Some(old), Some(new)) = (form.get("hash"), form.get("oldPath"), form.get("newPath")) else {
+        return qbit_refuse(StatusCode::BAD_REQUEST, "hash, oldPath and newPath are required");
+    };
+    // The paths are the engine's own: below the save path, folder included
+    // (which may change: a file can go to another folder).
+    match rename_file_on_copies(&state, hash, "", true, &|_| Ok((old.clone(), new.clone()))) {
+        Ok(_) => qbit_ok(),
+        Err((code, msg)) => qbit_refuse(code, &msg),
+    }
 }
 
 /// Bytes of each file already held, in `meta.files` order.
@@ -9806,7 +9970,7 @@ async fn qbit_torrent_files(
                 "availability": 1,
                 "index": index,
                 "is_seed": complete,
-                "name": qbit_file_name(&torrent.meta, &f.path),
+                "name": qbit_file_name(&torrent.meta, index),
                 "piece_range": [first, last],
                 // 1, 6 or 7: never 0, every file is downloaded.
                 "priority": order.file_priority(index),
@@ -9835,12 +9999,10 @@ fn file_piece_range(offset: u64, len: u64, piece_len: u64) -> (u64, u64) {
 /// cross-seed matches these names against the files of the torrent it wants
 /// to inject; without the folder every multi-file candidate looked like a
 /// different layout.
-fn qbit_file_name(meta: &typhon_engine::torrent::meta::TorrentMeta, path: &std::path::Path) -> String {
-    let rel = if meta.multi_file {
-        std::path::Path::new(&meta.name).join(path)
-    } else {
-        path.to_path_buf()
-    };
+fn qbit_file_name(meta: &typhon_engine::torrent::meta::TorrentMeta, index: usize) -> String {
+    // Below the save path already: the folder is in the path, and is not the
+    // .torrent's once the file was renamed into another.
+    let rel = meta.disk_rel(index);
     // qBit answers with forward slashes on every platform. Joined component by
     // component rather than by replacing '\\': on Linux a backslash is a legal
     // character inside a file name.
@@ -13221,6 +13383,9 @@ async fn post_torrent_copy(
     let Some(dst) = state.engines.get(&target) else { return not_found() };
     // Seed mode is a promise that every byte is on disk; only a whole source
     // copy can make it.
+    // The source's renamed files: the copy reads the same bytes at the same
+    // paths, not the .torrent's.
+    let renames = find_copy(&state, &existing, &hash).map(|t| t.meta.renamed_files()).unwrap_or_default();
     let whole = find_copy(&state, &existing, &hash).is_some_and(|t| {
         t.status.load(std::sync::atomic::Ordering::Relaxed)
             != typhon_engine::torrent::meta::TorrentStatus::Checking as u8
@@ -13235,7 +13400,7 @@ async fn post_torrent_copy(
         )
             .into_response();
     }
-    let (ih, _) = match dst.manager.add_torrent_bytes(&blob, &save_path, false, true) {
+    let (ih, _) = match dst.manager.add_torrent_bytes_renamed(&blob, &save_path, false, true, &renames) {
         Ok(added) => added,
         Err(e) => {
             return (
@@ -16690,6 +16855,8 @@ fn router_with(state: AppState, extra: Router<AppState>) -> Router {
         .route("/api/torrents/:info_hash/share-limits", get(get_torrent_share_limits).post(post_torrent_share_limits))
         .route("/api/engines/:id/share-limits", get(get_engine_share_limits).post(post_engine_share_limits))
         .route("/api/torrents/:info_hash/files", get(get_torrent_files))
+        .route("/api/torrents/:info_hash/files/rename", axum::routing::post(post_torrent_file_rename))
+        .route("/api/v2/torrents/renameFile", axum::routing::post(qbit_rename_file))
         .route("/api/torrents/:info_hash/torrent", get(get_torrent_file))
         .route("/api/torrents/:info_hash/peers", axum::routing::post(post_torrent_peers))
         .route("/api/torrents/:info_hash/engine", axum::routing::post(post_torrent_engine))
@@ -17878,6 +18045,10 @@ mod api_shim_tests;
 #[cfg(test)]
 #[path = "api_access_tests.rs"]
 mod api_access_tests;
+
+#[cfg(test)]
+#[path = "api_rename_tests.rs"]
+mod api_rename_tests;
 
 #[cfg(test)]
 mod event_stream_tests {

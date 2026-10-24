@@ -388,8 +388,6 @@ impl DiskManager {
 
         let ops = torrent.meta.map_block(piece, 0, data.len() as u32);
         let save_path = torrent.save_path.read().clone();
-        let name = torrent.meta.name.clone();
-        let multi_file = torrent.meta.multi_file;
         let written = self.written.clone();
         let info_hash = torrent.info_hash;
 
@@ -413,11 +411,8 @@ impl DiskManager {
                     data_offset += op.length as usize;
                     continue;
                 }
-                let full_path = if multi_file {
-                    save_path.join(&name).join(&op.path)
-                } else {
-                    save_path.join(&op.path)
-                };
+                // `op.path` is below the save path, wherever the file was put.
+                let full_path = save_path.join(&op.path);
 
                 // Said as what it is: swallowed, a folder that could not be
                 // made (permissions, quota, a file in the way) came back as
@@ -486,12 +481,7 @@ impl DiskManager {
             return None;
         }
         let save_path = torrent.save_path.read().clone();
-        let name = torrent.meta.name.clone();
-        let full_path = if torrent.meta.multi_file {
-            save_path.join(&name).join(&op.path)
-        } else {
-            save_path.join(&op.path)
-        };
+        let full_path = save_path.join(&op.path);
         get_or_open(&full_path).ok().map(|f| (f, op.file_offset))
     }
 }
@@ -672,14 +662,9 @@ async fn read_range(
 ) -> Result<Bytes, ReadFailure> {
     let ops = torrent.meta.map_block(piece, offset, length);
     let save_path = torrent.save_path.read().clone();
-    let name = torrent.meta.name.clone();
-    // Multi-file torrents have the `files` key in their info dict: on-disk
-    // layout is save_path/<name>/<file-path>. Single-file (no `files` key)
-    // has just save_path/<name>. Using `files.len() == 1` as the discriminator
-    // was wrong — multi-file torrents commonly contain a single entry and
-    // would silently read from save_path/<file-path>, which doesn't exist.
-    let multi_file = torrent.meta.multi_file;
-
+    // `op.path` is below the save path: save_path/<name>/<file-path> for a
+    // multi-file torrent (`files` key, even with one entry), save_path/<name>
+    // for a single-file one, or wherever the file was renamed to.
     tokio::task::spawn_blocking(move || {
         let mut result = Vec::with_capacity(length as usize);
 
@@ -688,11 +673,7 @@ async fn read_range(
                 result.resize(result.len() + op.length as usize, 0);
                 continue;
             }
-            let full_path = if multi_file {
-                save_path.join(&name).join(&op.path)
-            } else {
-                save_path.join(&op.path)
-            };
+            let full_path = save_path.join(&op.path);
 
             // Keep the ErrorKind. ENOENT means the data is gone for good and
             // the torrent has to be parked; EMFILE or EIO are transient and
@@ -831,8 +812,6 @@ pub async fn read_piece_on_disk(torrent: &TorrentState, piece: u32) -> PieceRead
     };
     let ops = torrent.meta.map_block(piece, 0, plen);
     let save_path = torrent.save_path.read().clone();
-    let name = torrent.meta.name.clone();
-    let multi_file = torrent.meta.multi_file;
 
     let out = tokio::task::spawn_blocking(move || {
         let classify = classify_io;
@@ -842,11 +821,7 @@ pub async fn read_piece_on_disk(torrent: &TorrentState, piece: u32) -> PieceRead
         for op in ops {
             let len = op.length as usize;
             if !op.pad {
-                let full_path = if multi_file {
-                    save_path.join(&name).join(&op.path)
-                } else {
-                    save_path.join(&op.path)
-                };
+                let full_path = save_path.join(&op.path);
                 let file = match get_or_open(&full_path) {
                     Ok(f) => f,
                     Err(e) => return classify(e),

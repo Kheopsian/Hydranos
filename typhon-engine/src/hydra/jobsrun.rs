@@ -141,16 +141,10 @@ fn graduation_files(
     old_root: &std::path::Path,
     dest_root: &str,
 ) -> Vec<(std::path::PathBuf, std::path::PathBuf)> {
-    meta.files
-        .iter()
-        .map(|f| {
-            let rel: std::path::PathBuf = if meta.multi_file {
-                std::path::Path::new(&meta.name).join(&f.path)
-            } else {
-                std::path::PathBuf::from(&f.path)
-            };
-            (old_root.join(&rel), std::path::Path::new(dest_root).join(&rel))
-        })
+    // Below the save path, wherever each file was put.
+    meta.disk_rels()
+        .into_iter()
+        .map(|rel| (old_root.join(&rel), std::path::Path::new(dest_root).join(&rel)))
         .collect()
 }
 
@@ -261,6 +255,8 @@ fn graduate(state: &AppState, job: &crate::store::Job) -> Result<(), String> {
                 return Err("the source engine no longer holds it".into());
             };
             let meta = typhon_engine::torrent::metainfo::parse_torrent_bytes(&metainfo)?;
+            // The data sits under the renamed paths, not the .torrent's.
+            meta.restore_renamed_files(&original.file_renames);
             let old_root = std::path::PathBuf::from(&original.save_path);
             let files = graduation_files(&meta, &old_root, &dest_root);
             tracing::warn!(hash = %hash, from = %from, to = %to,
@@ -496,20 +492,9 @@ impl MovePlan {
     }
 }
 
-/// The paths of `t`'s files relative to its root, as the engine builds them.
+/// The paths of `t`'s files below its save path, as the engine reads them.
 fn rel_paths(t: &typhon_engine::torrent::meta::TorrentState) -> Vec<std::path::PathBuf> {
-    let multi = t.meta.multi_file;
-    t.meta
-        .files
-        .iter()
-        .map(|f| {
-            if multi {
-                std::path::Path::new(&t.meta.name).join(&f.path)
-            } else {
-                f.path.clone()
-            }
-        })
-        .collect()
+    t.meta.disk_rels()
 }
 
 /// Above this many torrents the shared-file scan is split across threads.
@@ -520,18 +505,11 @@ const SHARED_SCAN_PARALLEL_FROM: usize = 20_000;
 const SHARED_SCAN_PARALLEL_FROM: usize = 0;
 
 /// The first component every one of `t`'s paths starts with, relative to its
-/// save path: its name for a multi-file torrent, its file for a single one.
-/// None when that is not one thing (a multi-file torrent with no name).
-fn top_entry(t: &typhon_engine::torrent::meta::TorrentState) -> Option<&std::ffi::OsStr> {
-    if t.meta.multi_file {
-        if t.meta.name.is_empty() {
-            None
-        } else {
-            std::path::Path::new(&t.meta.name).components().next().map(|c| c.as_os_str())
-        }
-    } else {
-        t.meta.files.first().and_then(|f| f.path.components().next()).map(|c| c.as_os_str())
-    }
+/// save path: its folder for a multi-file torrent, its file for a single one.
+/// None when that is not one thing (a torrent whose files were renamed into
+/// different folders): no scan is then narrowed by it.
+fn top_entry(t: &typhon_engine::torrent::meta::TorrentState) -> Option<std::ffi::OsString> {
+    t.meta.common_root()
 }
 
 /// Only plain names: no `..`, no root, no prefix, no `.`.
@@ -619,7 +597,8 @@ fn scan_shared(
     let keys: std::collections::HashSet<std::path::PathBuf> = by_key.keys().cloned().collect();
     let mut hashes: Vec<String> = Vec::new();
     let mut files: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
-    for (other, hit) in scan_claims(state, root, top_entry(t), &keys, &skip) {
+    let top = top_entry(t);
+    for (other, hit) in scan_claims(state, root, top.as_deref(), &keys, &skip) {
         let h = typhon_engine::torrent::hex_encode(&other.meta.info_hash);
         if !hashes.contains(&h) {
             hashes.push(h);
@@ -719,7 +698,7 @@ fn claim_of(
         // every path of each starts with its own entry.
         if *r == *root {
             if let (Some(a), Some(b)) = (my_top, top_entry(other)) {
-                if a != b {
+                if a != b.as_os_str() {
                     return None;
                 }
             }
@@ -799,18 +778,13 @@ pub fn plan_move(
         .into_iter()
         .find(|p| !is_plain_relative(p))
         .map(|p| p.display().to_string());
-    let multi = t.meta.multi_file;
-    let name = t.meta.name.clone();
     let files: Vec<MoveFile> = t
         .meta
         .files
         .iter()
-        .map(|f| {
-            let rel: std::path::PathBuf = if multi {
-                std::path::Path::new(&name).join(&f.path)
-            } else {
-                f.path.clone()
-            };
+        .enumerate()
+        .map(|(i, f)| {
+            let rel = t.meta.disk_rel(i);
             let from = old_root.join(&rel);
             let to = new_root.join(&rel);
             let meta = std::fs::metadata(&from).ok();
@@ -1158,6 +1132,7 @@ fn finish_interrupted_move(
     }
     .ok_or("the engine no longer holds it, and there is no metainfo to re-add it with")?;
     let meta = typhon_engine::torrent::metainfo::parse_torrent_bytes(&metainfo)?;
+    meta.restore_renamed_files(&original.file_renames);
     let old_root = std::path::PathBuf::from(&original.save_path);
     let files = graduation_files(&meta, &old_root, save_path);
     tracing::warn!(hash = %hash, engine = %engine.id, "move interrupted after leaving its engine; finishing it");
@@ -1738,6 +1713,36 @@ mod graduate_tests {
         let store = s.state.store.lock().unwrap();
         assert_eq!(store.sessions_of(hash), vec!["hoard".to_string()]);
         assert!(store.torrent_blob(hash).unwrap().is_some(), "with its metainfo");
+    }
+
+    /// The data of a renamed file sits under its new name: a graduation
+    /// resumed after the torrent left its engine moves THAT, not the names the
+    /// .torrent gives (which would leave the data behind and call it done).
+    #[test]
+    fn a_resumed_graduation_moves_the_renamed_files() {
+        let (s, hash, src, dst) = setup("grad-renamed");
+        let ih = typhon_engine::torrent::hex_decode(&hash).unwrap();
+        let race = s.state.engines.get("race").unwrap();
+        std::fs::rename(src.join("grad"), src.join("renamed")).unwrap();
+        race.manager.rename_file(&ih, "grad", "renamed").expect("renamed");
+        let params = job(&hash, &dst).params;
+        let running = {
+            let store = s.state.store.lock().unwrap();
+            store.create_job("graduate", &hash, &params, 16384).unwrap();
+            store.claim_next_job().expect("claimed")
+        };
+        STOP_AFTER_LEAVING_SOURCE.with(|c| c.set(true));
+        graduate(&s.state, &running).expect_err("stopped where a crash would");
+        let again = {
+            let store = s.state.store.lock().unwrap();
+            store.requeue_running_jobs();
+            store.claim_next_job().expect("claimed again")
+        };
+        graduate(&s.state, &again).expect("finished");
+        assert!(dst.join("renamed").exists(), "the renamed file went with the torrent");
+        assert!(!src.join("renamed").exists());
+        let t = s.state.engines.get("hoard").unwrap().manager.get(&ih).expect("in hoard");
+        assert_eq!(t.meta.disk_rel(0), std::path::PathBuf::from("renamed"), "and the torrent still reads it by that name");
     }
 
     /// ⭐ Stopped between leaving its engine and reaching the other -- a kill,

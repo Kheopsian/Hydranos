@@ -26,6 +26,16 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 ### Added
 
 - `GET /api/fs/list?path=` and the shim's `app/getDirectoryContent` list a folder for a tool that cannot see this host's disk, limited to the download folders Hydranos knows (default save path, categories, torrents' folders), never the data folder; anything outside them, by `..` or a symbolic link too, is a 403.
+- A stopped torrent's files can be renamed: `POST /api/torrents/:info_hash/files/rename`
+  (`{"from","to"}`) and the qBittorrent `torrents/renameFile` point a file at
+  another path, in the torrent's folder or in one of another name (so a copy
+  held under a different folder name is matched file by file). Nothing moves on disk: it is for
+  data already sitting under the new name, which a recheck then finds. The
+  file lists and `content_path` show the new paths, the new names are saved
+  with the torrent (restart, engine move), and the exported `.torrent` and
+  its info-hash do not change. Refused while the torrent runs or is being
+  checked, when a file is on disk at the old path, and when the new path is
+  another file's.
 
 ### Fixed
 
