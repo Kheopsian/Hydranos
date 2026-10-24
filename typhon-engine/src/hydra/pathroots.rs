@@ -49,9 +49,6 @@ pub(crate) fn within_known_dirs(state: &crate::api::AppState, path: &str) -> Res
 /// shows. The data folder holds the config (API key, password hash) and the
 /// database, so a path inside it is refused outright, even where a category or
 /// a torrent's save path would cover it, and it is not a root.
-// Called by the folder listing route; until that route is in this branch only the
-// tests call it.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn within_download_dirs(state: &crate::api::AppState, path: &str) -> Result<PathBuf, String> {
     check(state, path, false)
 }

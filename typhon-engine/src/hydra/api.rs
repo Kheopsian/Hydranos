@@ -356,7 +356,7 @@ pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 }
 
 /// Pull one parameter out of a raw query string.
-fn query_param(query: &str, name: &str) -> Option<String> {
+pub(crate) fn query_param(query: &str, name: &str) -> Option<String> {
     for pair in query.split('&') {
         if let Some((key, value)) = pair.split_once('=') {
             if key == name {
@@ -374,7 +374,7 @@ fn query_param(query: &str, name: &str) -> Option<String> {
 /// empty `hash` from it, answered 404, and cross-seed saw a client with no
 /// torrents at all. An empty value counts as absent, so `?hash=` on the URL
 /// does not shadow the real one in the body.
-fn shim_param(query: &str, body: &str, name: &str) -> Option<String> {
+pub(crate) fn shim_param(query: &str, body: &str, name: &str) -> Option<String> {
     query_param(query, name)
         .filter(|v| !v.is_empty())
         .or_else(|| query_param(body, name).filter(|v| !v.is_empty()))
@@ -410,7 +410,7 @@ pub(crate) fn percent_decode(input: &str) -> String {
 }
 
 /// The refusal body is copied verbatim from the Go handler: clients match on it.
-fn unauthorised() -> Response {
+pub(crate) fn unauthorised() -> Response {
     (
         StatusCode::UNAUTHORIZED,
         Json(serde_json::json!({"error": "Invalid or missing API key"})),
@@ -425,6 +425,7 @@ macro_rules! guard {
         }
     };
 }
+pub(crate) use guard;
 
 // ---------------------------------------------------------------------------
 // The fleet
@@ -16698,6 +16699,8 @@ fn router_with(state: AppState, extra: Router<AppState>) -> Router {
         .route("/api/torrents/:info_hash/add-tracker", axum::routing::post(post_add_tracker))
         .route("/api/trackers", get(get_trackers))
         .route("/api/fs/browse", get(get_fs_browse))
+        .route("/api/fs/list", get(crate::fslist::get_fs_list))
+        .route("/api/v2/app/getDirectoryContent", axum::routing::any(crate::fslist::qbit_directory_content))
         .route("/api/benchmark/records", get(get_bench_records))
         .route("/api/benchmark/range", get(get_bench_range))
         .route("/api/benchmark/engines", get(get_bench_engines_range))
