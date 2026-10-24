@@ -193,7 +193,10 @@ async fn a_leecher_downloads_a_whole_torrent_from_a_seeder_over_a_real_socket() 
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    assert!(listening.load(Ordering::Relaxed), "the seeder never started listening");
+    assert!(
+        listening.load(Ordering::Relaxed),
+        "the seeder never started listening"
+    );
 
     // --- the leecher: same torrent, nothing on disk ---
     let leecher = engine("leech", torrent.clone());
@@ -255,7 +258,10 @@ async fn a_leecher_downloads_a_whole_torrent_from_a_seeder_over_a_real_socket() 
         "the leecher never wrote a complete file (downloaded {} bytes)",
         t.total_downloaded.load(Ordering::Relaxed)
     );
-    assert_eq!(got, data, "the bytes that arrived are not the bytes that were served");
+    assert_eq!(
+        got, data,
+        "the bytes that arrived are not the bytes that were served"
+    );
 
     // And the counters tell the same story as the disk.
     assert!(
@@ -281,7 +287,12 @@ async fn a_piece_that_fails_its_hash_is_not_kept() {
     }
     std::fs::write(liar.root.join("data").join("payload.bin"), &wrong).unwrap();
     liar.mgr
-        .add_torrent_bytes(&torrent, &liar.root.join("data").to_string_lossy(), false, true)
+        .add_torrent_bytes(
+            &torrent,
+            &liar.root.join("data").to_string_lossy(),
+            false,
+            true,
+        )
         .expect("added in seed mode");
 
     let port = free_port();
@@ -312,7 +323,12 @@ async fn a_piece_that_fails_its_hash_is_not_kept() {
     let victim = engine("victim", torrent.clone());
     let (ih, _) = victim
         .mgr
-        .add_torrent_bytes(&torrent, &victim.root.join("data").to_string_lossy(), false, false)
+        .add_torrent_bytes(
+            &torrent,
+            &victim.root.join("data").to_string_lossy(),
+            false,
+            false,
+        )
         .expect("added");
     let t = victim.mgr.get(&ih).expect("the torrent");
 
@@ -428,10 +444,18 @@ async fn a_torrent_completes_from_a_webseed_with_no_peer_at_all() {
     let e = engine("webseed", torrent.clone());
     let (ih, _) = e
         .mgr
-        .add_torrent_bytes(&torrent, &e.root.join("data").to_string_lossy(), false, false)
+        .add_torrent_bytes(
+            &torrent,
+            &e.root.join("data").to_string_lossy(),
+            false,
+            false,
+        )
         .expect("added");
     let t = e.mgr.get(&ih).expect("the torrent");
-    assert!(!t.meta.url_list.is_empty(), "the url-list survived the parse");
+    assert!(
+        !t.meta.url_list.is_empty(),
+        "the url-list survived the parse"
+    );
 
     // `enable_webseed` is off by default: a mirror fetch leaves by a socket the
     // engine did not open, so it is opt-in.
@@ -452,8 +476,15 @@ async fn a_torrent_completes_from_a_webseed_with_no_peer_at_all() {
     }
     let _ = tx.send(());
 
-    assert_eq!(got.len(), data.len(), "the webseed never produced a complete file");
-    assert_eq!(got, data, "the bytes fetched over HTTP are not the bytes served");
+    assert_eq!(
+        got.len(),
+        data.len(),
+        "the webseed never produced a complete file"
+    );
+    assert_eq!(
+        got, data,
+        "the bytes fetched over HTTP are not the bytes served"
+    );
 }
 
 /// ⭐ A mirror that serves the WRONG bytes must not have them kept: the piece
@@ -504,7 +535,12 @@ async fn a_webseed_serving_wrong_bytes_has_them_rejected() {
     let e = engine("webseed-liar", torrent.clone());
     let (ih, _) = e
         .mgr
-        .add_torrent_bytes(&torrent, &e.root.join("data").to_string_lossy(), false, false)
+        .add_torrent_bytes(
+            &torrent,
+            &e.root.join("data").to_string_lossy(),
+            false,
+            false,
+        )
         .expect("added");
     let t = e.mgr.get(&ih).expect("the torrent");
 
@@ -516,7 +552,10 @@ async fn a_webseed_serving_wrong_bytes_has_them_rejected() {
     let _ = tx.send(());
 
     let progress = typhon_engine::rpc::dispatch::torrent_core(&t).progress;
-    assert!(progress < 1.0, "a mirror serving wrong bytes completed the torrent ({progress})");
+    assert!(
+        progress < 1.0,
+        "a mirror serving wrong bytes completed the torrent ({progress})"
+    );
     if let Ok(on_disk) = std::fs::read(e.root.join("data").join("payload.bin")) {
         assert_ne!(on_disk, wrong, "the mirror's wrong content was written");
     }
@@ -532,7 +571,12 @@ async fn a_dead_webseed_url_leaves_the_torrent_alone() {
     let e = engine("webseed-dead", torrent.clone());
     let (ih, _) = e
         .mgr
-        .add_torrent_bytes(&torrent, &e.root.join("data").to_string_lossy(), false, false)
+        .add_torrent_bytes(
+            &torrent,
+            &e.root.join("data").to_string_lossy(),
+            false,
+            false,
+        )
         .expect("added");
     let t = e.mgr.get(&ih).expect("the torrent");
 
@@ -542,7 +586,10 @@ async fn a_dead_webseed_url_leaves_the_torrent_alone() {
 
     tokio::time::sleep(Duration::from_secs(2)).await;
     let progress = typhon_engine::rpc::dispatch::torrent_core(&t).progress;
-    assert_eq!(progress, 0.0, "nothing was fetched from a mirror that does not exist");
+    assert_eq!(
+        progress, 0.0,
+        "nothing was fetched from a mirror that does not exist"
+    );
 }
 
 /// ⭐⭐ Webseed is ON by default, and that IS the safe default rather than the
@@ -564,7 +611,12 @@ async fn webseed_is_on_by_default_because_some_torrents_have_no_other_source() {
     let torrent = build_torrent_with_urllist("payload.bin", &data, "http://127.0.0.1:1/x");
     let e = engine("webseed-off", torrent.clone());
     e.mgr
-        .add_torrent_bytes(&torrent, &e.root.join("data").to_string_lossy(), false, false)
+        .add_torrent_bytes(
+            &torrent,
+            &e.root.join("data").to_string_lossy(),
+            false,
+            false,
+        )
         .expect("added");
     // Starts and returns without fetching anything.
     typhon_engine::webseed::start(e.mgr.clone(), &cfg);
@@ -580,7 +632,12 @@ async fn a_device_pinned_engine_refuses_to_webseed_without_a_proxy() {
     let torrent = build_torrent_with_urllist("payload.bin", &data, "http://127.0.0.1:1/x");
     let e = engine("webseed-pinned", torrent.clone());
     e.mgr
-        .add_torrent_bytes(&torrent, &e.root.join("data").to_string_lossy(), false, false)
+        .add_torrent_bytes(
+            &torrent,
+            &e.root.join("data").to_string_lossy(),
+            false,
+            false,
+        )
         .expect("added");
 
     let mut cfg: typhon_engine::config::EngineConfig = toml::from_str("").unwrap();
@@ -601,7 +658,12 @@ async fn spawn_seeder(tag: &str, torrent: &[u8], data: &[u8], peer_id: [u8; 20])
     let e = engine(tag, torrent.to_vec());
     std::fs::write(e.root.join("data").join("payload.bin"), data).unwrap();
     e.mgr
-        .add_torrent_bytes(&torrent.to_vec(), &e.root.join("data").to_string_lossy(), false, true)
+        .add_torrent_bytes(
+            &torrent.to_vec(),
+            &e.root.join("data").to_string_lossy(),
+            false,
+            true,
+        )
         .expect("the seeder accepts the torrent");
 
     let port = free_port();
@@ -628,11 +690,19 @@ async fn spawn_seeder(tag: &str, torrent: &[u8], data: &[u8], peer_id: [u8; 20])
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    assert!(listening.load(Ordering::Relaxed), "{tag} never started listening");
+    assert!(
+        listening.load(Ordering::Relaxed),
+        "{tag} never started listening"
+    );
     (e, port)
 }
 
-fn dial(port: u16, t: Arc<typhon_engine::torrent::meta::TorrentState>, disk: Arc<DiskManager>, id: [u8; 20]) {
+fn dial(
+    port: u16,
+    t: Arc<typhon_engine::torrent::meta::TorrentState>,
+    disk: Arc<DiskManager>,
+    id: [u8; 20],
+) {
     let lport = free_port();
     tokio::spawn(async move {
         typhon_engine::tracker::dial_peer(
@@ -662,7 +732,12 @@ async fn a_leecher_completes_correctly_while_two_seeders_answer_at_once() {
     let leecher = engine("multi-leech", torrent.clone());
     let (ih, _) = leecher
         .mgr
-        .add_torrent_bytes(&torrent, &leecher.root.join("data").to_string_lossy(), false, false)
+        .add_torrent_bytes(
+            &torrent,
+            &leecher.root.join("data").to_string_lossy(),
+            false,
+            false,
+        )
         .expect("added");
     let t = leecher.mgr.get(&ih).expect("the torrent");
 
@@ -714,18 +789,19 @@ async fn one_seeder_feeds_three_leechers_without_starving_any_of_them() {
     let (_seeder, port) = spawn_seeder("choke-seed", &torrent, &data, pid("seeder")).await;
 
     let mut leechers = Vec::new();
-    for (i, id) in [
-        pid("leech1"),
-        pid("leech2"),
-        pid("leech3"),
-    ]
-    .into_iter()
-    .enumerate()
+    for (i, id) in [pid("leech1"), pid("leech2"), pid("leech3")]
+        .into_iter()
+        .enumerate()
     {
         let e = engine(&format!("choke-l{i}"), torrent.clone());
         let (ih, _) = e
             .mgr
-            .add_torrent_bytes(&torrent, &e.root.join("data").to_string_lossy(), false, false)
+            .add_torrent_bytes(
+                &torrent,
+                &e.root.join("data").to_string_lossy(),
+                false,
+                false,
+            )
             .expect("added");
         let t = e.mgr.get(&ih).expect("the torrent");
         dial(port, t.clone(), e.disk.clone(), id);
@@ -787,7 +863,12 @@ async fn two_complete_peers_exchange_nothing() {
     std::fs::write(other.root.join("data").join("payload.bin"), &data).unwrap();
     let (ih, _) = other
         .mgr
-        .add_torrent_bytes(&torrent, &other.root.join("data").to_string_lossy(), false, true)
+        .add_torrent_bytes(
+            &torrent,
+            &other.root.join("data").to_string_lossy(),
+            false,
+            true,
+        )
         .expect("added in seed mode");
     let t = other.mgr.get(&ih).expect("the torrent");
 
@@ -816,7 +897,12 @@ async fn a_torrent_survives_a_peer_that_goes_away_and_finishes_from_another() {
     let leecher = engine("gone-leech", torrent.clone());
     let (ih, _) = leecher
         .mgr
-        .add_torrent_bytes(&torrent, &leecher.root.join("data").to_string_lossy(), false, false)
+        .add_torrent_bytes(
+            &torrent,
+            &leecher.root.join("data").to_string_lossy(),
+            false,
+            false,
+        )
         .expect("added");
     let t = leecher.mgr.get(&ih).expect("the torrent");
 
@@ -838,7 +924,10 @@ async fn a_torrent_survives_a_peer_that_goes_away_and_finishes_from_another() {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    assert_eq!(got, data, "the torrent must finish from the peer that stayed");
+    assert_eq!(
+        got, data,
+        "the torrent must finish from the peer that stayed"
+    );
 }
 
 /// ⭐⭐ A real transfer of multi-block pieces through a peer that chokes us in
@@ -874,7 +963,12 @@ async fn a_download_survives_a_choke_in_the_middle_of_multi_block_pieces() {
     let leecher = engine("choke-mid", torrent.clone());
     let (ih, _) = leecher
         .mgr
-        .add_torrent_bytes(&torrent, &leecher.root.join("data").to_string_lossy(), false, false)
+        .add_torrent_bytes(
+            &torrent,
+            &leecher.root.join("data").to_string_lossy(),
+            false,
+            false,
+        )
         .expect("added");
     let t = leecher.mgr.get(&ih).expect("the torrent");
 
@@ -899,7 +993,11 @@ async fn a_download_survives_a_choke_in_the_middle_of_multi_block_pieces() {
     ));
 
     let mut peer = framed(theirs);
-    peer.send(Message::Bitfield { data: bytes::Bytes::from(vec![0xFF, 0xFF]) }).await.unwrap();
+    peer.send(Message::Bitfield {
+        data: bytes::Bytes::from(vec![0xFF, 0xFF]),
+    })
+    .await
+    .unwrap();
     peer.send(Message::Unchoke).await.unwrap();
 
     let target = leecher.root.join("data").join("payload.bin");
@@ -915,8 +1013,18 @@ async fn a_download_survives_a_choke_in_the_middle_of_multi_block_pieces() {
     let mut done = false;
     while tokio::time::Instant::now() < deadline {
         match tokio::time::timeout(Duration::from_millis(200), peer.next()).await {
-            Ok(Some(Ok(Message::Request { index, begin, length }))) => {
-                peer.send(Message::Piece { index, begin, data: block(index, begin, length) }).await.unwrap();
+            Ok(Some(Ok(Message::Request {
+                index,
+                begin,
+                length,
+            }))) => {
+                peer.send(Message::Piece {
+                    index,
+                    begin,
+                    data: block(index, begin, length),
+                })
+                .await
+                .unwrap();
                 served += 1;
                 if served == 6 {
                     peer.send(Message::Choke).await.unwrap();
@@ -950,8 +1058,16 @@ async fn a_download_survives_a_choke_in_the_middle_of_multi_block_pieces() {
         "the download never completed after a choke (served {served} blocks, {voided} voided, downloaded {})",
         t.total_downloaded.load(Ordering::Relaxed)
     );
-    assert_eq!(std::fs::read(&target).unwrap(), data, "the bytes that arrived are the bytes served");
-    assert_eq!(t.picker.get().unwrap().lock().unwrap().in_flight(), (0, 0), "nothing left in flight");
+    assert_eq!(
+        std::fs::read(&target).unwrap(),
+        data,
+        "the bytes that arrived are the bytes served"
+    );
+    assert_eq!(
+        t.picker.get().unwrap().lock().unwrap().in_flight(),
+        (0, 0),
+        "nothing left in flight"
+    );
     assert_eq!(leecher.mgr.piece_mem().pieces(), 0);
     assert_eq!(leecher.mgr.piece_mem().bytes(), 0);
 }

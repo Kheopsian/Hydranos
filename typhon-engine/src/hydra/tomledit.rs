@@ -103,7 +103,10 @@ pub fn set_toml_value(doc: &str, section: &str, key: &str, value: &str) -> Resul
             continue;
         }
 
-        let indent: String = line.chars().take_while(|c| *c == ' ' || *c == '\t').collect();
+        let indent: String = line
+            .chars()
+            .take_while(|c| *c == ' ' || *c == '\t')
+            .collect();
         let after = &line[eq + 1..];
         let comment = match find_inline_comment(after) {
             Some(ci) => format!("  {}", after[ci..].trim()),
@@ -112,7 +115,9 @@ pub fn set_toml_value(doc: &str, section: &str, key: &str, value: &str) -> Resul
         lines[i] = format!("{indent}{lhs} = {value}{comment}");
         return Ok(lines.join("\n"));
     }
-    Err(format!("toml: key {key:?} not found in section {section:?}"))
+    Err(format!(
+        "toml: key {key:?} not found in section {section:?}"
+    ))
 }
 
 /// Set several keys in `[section]`, creating the keys and the section if needed.
@@ -310,7 +315,11 @@ pub fn delete_agent_block(doc: &str, id: &str) -> Option<String> {
                 }
             }
         }
-        let declared = if engine_id.is_empty() { name.as_str() } else { engine_id.as_str() };
+        let declared = if engine_id.is_empty() {
+            name.as_str()
+        } else {
+            engine_id.as_str()
+        };
         if declared == id {
             let mut kept: Vec<&str> = lines[..s].to_vec();
             kept.extend_from_slice(&lines[e..]);
@@ -367,7 +376,11 @@ pub fn set_agent_session_key(doc: &str, id: &str, key: &str, value: &str) -> Opt
                 }
             }
         }
-        let this = if declared.is_empty() { fallback.as_str() } else { declared.as_str() };
+        let this = if declared.is_empty() {
+            fallback.as_str()
+        } else {
+            declared.as_str()
+        };
         if this != id {
             continue;
         }
@@ -390,7 +403,11 @@ pub fn set_agent_session_key(doc: &str, id: &str, key: &str, value: &str) -> Opt
                     if t.starts_with(key)
                         && t[key.len()..].trim_start().starts_with('=')
                         && !replaced
-                        && lines[s..e].iter().position(|l| std::ptr::eq(*l, *line)).map(|p| s + p > h).unwrap_or(false)
+                        && lines[s..e]
+                            .iter()
+                            .position(|l| std::ptr::eq(*l, *line))
+                            .map(|p| s + p > h)
+                            .unwrap_or(false)
                     {
                         out.push(format!("  {key} = {value}"));
                         replaced = true;
@@ -454,7 +471,9 @@ pub fn delete_agent_session_key(doc: &str, id: &str, key: &str) -> Option<String
                 (t[..eq].trim() == k).then(|| t[eq + 1..].trim().trim_matches('"').to_string())
             })
         };
-        let declared = field("engine_id").filter(|v| !v.is_empty()).or_else(|| field("name"));
+        let declared = field("engine_id")
+            .filter(|v| !v.is_empty())
+            .or_else(|| field("name"));
         if declared.as_deref() != Some(id) {
             continue;
         }
@@ -467,7 +486,8 @@ pub fn delete_agent_session_key(doc: &str, id: &str, key: &str) -> Option<String
             .enumerate()
             .filter(|(i, l)| {
                 let in_session = *i > h && *i < e && !l.trim().starts_with('#');
-                !(in_session && key_end(l).is_some_and(|eq| unquote_key(&l[..eq]) == unquote_key(key)))
+                !(in_session
+                    && key_end(l).is_some_and(|eq| unquote_key(&l[..eq]) == unquote_key(key)))
             })
             .map(|(_, l)| *l)
             .collect();
@@ -503,7 +523,9 @@ pub fn toml_scalar(value: &serde_json::Value) -> Result<String, String> {
         // the settings screen shows the string verbatim. It reads oddly from a
         // Rust binary; changing it would be a visible difference for no gain.
         Value::Null => Err("unsupported value type <nil> (scalars only)".into()),
-        Value::Object(_) => Err("unsupported value type map[string]interface {} (scalars only)".into()),
+        Value::Object(_) => {
+            Err("unsupported value type map[string]interface {} (scalars only)".into())
+        }
     }
 }
 
@@ -532,7 +554,10 @@ listen_port = 16171
     fn editing_a_value_keeps_every_other_byte() {
         let out = set_toml_value(DOC, "race", "listen_port", "16999").unwrap();
         assert!(out.contains("listen_port = 16999"));
-        assert!(out.contains("# ─── SESSION RACE ───"), "banner lost:\n{out}");
+        assert!(
+            out.contains("# ─── SESSION RACE ───"),
+            "banner lost:\n{out}"
+        );
         assert!(out.contains("# Hydra Torrent Daemon - Configuration"));
         assert!(out.contains("create_torrent_folder = true  # keep the folder"));
         assert_eq!(out.lines().count(), DOC.lines().count());
@@ -568,18 +593,27 @@ listen_port = 16171
         let pairs = vec![("\"t.example\"".to_string(), "\"v6\"".to_string())];
         let out = set_toml_table(DOC, "announce_ip_modes", &pairs).unwrap();
         assert!(out.contains("\"t.example\" = \"v6\""));
-        assert!(out.contains("\"gemini-tracker.org\" = \"v4\""), "existing key lost");
+        assert!(
+            out.contains("\"gemini-tracker.org\" = \"v4\""),
+            "existing key lost"
+        );
 
         let out = set_toml_table(DOC, "announce_passkeys", &pairs).unwrap();
-        assert!(out.trim_end().ends_with("[announce_passkeys]\n\"t.example\" = \"v6\""),
-                "a new table belongs at the end:\n{out}");
+        assert!(
+            out.trim_end()
+                .ends_with("[announce_passkeys]\n\"t.example\" = \"v6\""),
+            "a new table belongs at the end:\n{out}"
+        );
     }
 
     #[test]
     fn deleting_is_idempotent_and_scoped_to_its_section() {
         let out = delete_toml_key(DOC, "race", "listen_port");
         assert!(!out.contains("listen_port"));
-        assert!(out.contains("api_port = 8199"), "another section was touched");
+        assert!(
+            out.contains("api_port = 8199"),
+            "another section was touched"
+        );
         // deleting again changes nothing
         assert_eq!(delete_toml_key(&out, "race", "listen_port"), out);
     }
@@ -588,7 +622,10 @@ listen_port = 16171
     fn an_emptied_table_is_pruned_but_one_holding_a_comment_is_kept() {
         let emptied = delete_toml_key(DOC, "announce_ip_modes", "\"gemini-tracker.org\"");
         let pruned = prune_empty_table(&emptied, "announce_ip_modes");
-        assert!(!pruned.contains("[announce_ip_modes]"), "header should be gone:\n{pruned}");
+        assert!(
+            !pruned.contains("[announce_ip_modes]"),
+            "header should be gone:\n{pruned}"
+        );
 
         let with_comment = "[a]\n# the operator's note\n";
         assert_eq!(prune_empty_table(with_comment, "a"), with_comment);
@@ -599,8 +636,14 @@ listen_port = 16171
         let out = delete_toml_table(DOC, "race");
         assert!(!out.contains("[race]"));
         assert!(!out.contains("listen_port = 16171"));
-        assert!(out.contains("[announce_ip_modes]"), "the next table was eaten:\n{out}");
-        assert!(out.contains("api_port = 8199"), "an earlier table was eaten");
+        assert!(
+            out.contains("[announce_ip_modes]"),
+            "the next table was eaten:\n{out}"
+        );
+        assert!(
+            out.contains("api_port = 8199"),
+            "an earlier table was eaten"
+        );
         assert_eq!(delete_toml_table(&out, "race"), out, "must be idempotent");
     }
 
@@ -643,11 +686,17 @@ mod agent_block_tests {
             &[("listen_port".into(), "16473".into())],
         );
         let v: toml::Value = toml::from_str(&out).expect("still valid TOML");
-        let agents = v.get("engine").and_then(|a| a.as_array()).expect("one engine");
+        let agents = v
+            .get("engine")
+            .and_then(|a| a.as_array())
+            .expect("one engine");
         assert_eq!(agents.len(), 1);
         assert_eq!(agents[0]["engine_id"].as_str(), Some("vpn1"));
         assert_eq!(agents[0]["role"].as_str(), Some("hoard"));
-        assert_eq!(agents[0]["session"]["listen_port"].as_integer(), Some(16473));
+        assert_eq!(
+            agents[0]["session"]["listen_port"].as_integer(),
+            Some(16473)
+        );
         // The rest of the file is untouched.
         assert_eq!(v["race"]["listen_port"].as_integer(), Some(16371));
     }
@@ -656,11 +705,24 @@ mod agent_block_tests {
     /// must not swallow the section that follows.
     #[test]
     fn only_the_named_block_goes() {
-        let doc = append_agent_block(DOC, "vpn1", "hoard", &[("listen_port".into(), "16473".into())]);
-        let doc = append_agent_block(&doc, "vpn2", "race", &[("listen_port".into(), "16474".into())]);
+        let doc = append_agent_block(
+            DOC,
+            "vpn1",
+            "hoard",
+            &[("listen_port".into(), "16473".into())],
+        );
+        let doc = append_agent_block(
+            &doc,
+            "vpn2",
+            "race",
+            &[("listen_port".into(), "16474".into())],
+        );
         let out = delete_agent_block(&doc, "vpn1").expect("vpn1 was there");
         let v: toml::Value = toml::from_str(&out).expect("still valid TOML");
-        let agents = v.get("engine").and_then(|a| a.as_array()).expect("one left");
+        let agents = v
+            .get("engine")
+            .and_then(|a| a.as_array())
+            .expect("one left");
         assert_eq!(agents.len(), 1);
         assert_eq!(agents[0]["engine_id"].as_str(), Some("vpn2"));
         assert_eq!(v["race"]["listen_port"].as_integer(), Some(16371));
@@ -673,14 +735,22 @@ mod agent_block_tests {
         let doc = format!(
             "{DOC}\n[[agent]]\nname = \"old\"\nrole = \"race\"\nengine_id = \"old\"\n  [agent.session]\n  listen_port = 1111\n"
         );
-        let doc = append_agent_block(&doc, "new", "hoard", &[("listen_port".into(), "2222".into())]);
+        let doc = append_agent_block(
+            &doc,
+            "new",
+            "hoard",
+            &[("listen_port".into(), "2222".into())],
+        );
         let v: toml::Value = toml::from_str(&doc).expect("both spellings parse");
         assert_eq!(v["agent"].as_array().unwrap().len(), 1);
         assert_eq!(v["engine"].as_array().unwrap().len(), 1);
 
         let out = delete_agent_block(&doc, "old").expect("the old one was there");
         let v: toml::Value = toml::from_str(&out).expect("still valid after removal");
-        assert!(v.get("agent").is_none(), "its sub-table must have gone with it");
+        assert!(
+            v.get("agent").is_none(),
+            "its sub-table must have gone with it"
+        );
         assert_eq!(v["engine"].as_array().unwrap().len(), 1);
         assert_eq!(v["race"]["listen_port"].as_integer(), Some(16371));
     }
@@ -709,21 +779,29 @@ mod session_key_tests {
         assert_eq!(e["session"]["listen_port"].as_integer(), Some(16999));
         // Everything else in the block is left alone.
         assert_eq!(e["session"]["enable_dht"].as_bool(), Some(false));
-        assert!(out.contains("# the tunnel this one leaves by"), "a comment was eaten");
+        assert!(
+            out.contains("# the tunnel this one leaves by"),
+            "a comment was eaten"
+        );
         assert_eq!(v["race"]["listen_port"].as_integer(), Some(16371));
     }
 
     #[test]
     fn a_missing_sub_table_is_created() {
-        let doc = format!("{DOC}\n[[engine]]\nname = \"vpn1\"\nrole = \"hoard\"\nengine_id = \"vpn1\"\n");
+        let doc =
+            format!("{DOC}\n[[engine]]\nname = \"vpn1\"\nrole = \"hoard\"\nengine_id = \"vpn1\"\n");
         let out = set_agent_session_key(&doc, "vpn1", "bind_interface", "\"wg1\"").unwrap();
         let v: toml::Value = toml::from_str(&out).unwrap();
-        assert_eq!(v["engine"].as_array().unwrap()[0]["session"]["bind_interface"].as_str(), Some("wg1"));
+        assert_eq!(
+            v["engine"].as_array().unwrap()[0]["session"]["bind_interface"].as_str(),
+            Some("wg1")
+        );
     }
 
     #[test]
     fn an_unknown_engine_changes_nothing() {
-        let doc = format!("{DOC}\n[[engine]]\nname = \"vpn1\"\nengine_id = \"vpn1\"\nrole = \"hoard\"\n");
+        let doc =
+            format!("{DOC}\n[[engine]]\nname = \"vpn1\"\nengine_id = \"vpn1\"\nrole = \"hoard\"\n");
         assert!(set_agent_session_key(&doc, "absent", "listen_port", "1").is_none());
     }
 }
@@ -745,7 +823,9 @@ fn key_end(line: &str) -> Option<usize> {
 /// A key as a name: surrounding quotes removed.
 fn unquote_key(k: &str) -> String {
     let k = k.trim();
-    if k.len() >= 2 && ((k.starts_with('"') && k.ends_with('"')) || (k.starts_with('\'') && k.ends_with('\''))) {
+    if k.len() >= 2
+        && ((k.starts_with('"') && k.ends_with('"')) || (k.starts_with('\'') && k.ends_with('\'')))
+    {
         k[1..k.len() - 1].to_string()
     } else {
         k.to_string()
@@ -763,7 +843,8 @@ mod quoted_key_tests {
         let doc = "[announce_passkeys]\n\"tracker.example\" = \"OLD\"\n";
         let out = set_toml_value(doc, "announce_passkeys", "tracker.example", "\"NEW\"").unwrap();
         assert!(out.contains("\"tracker.example\" = \"NEW\""), "{out}");
-        let out = set_toml_value(doc, "announce_passkeys", "\"tracker.example\"", "\"NEW\"").unwrap();
+        let out =
+            set_toml_value(doc, "announce_passkeys", "\"tracker.example\"", "\"NEW\"").unwrap();
         assert!(out.contains("\"NEW\""));
     }
 }

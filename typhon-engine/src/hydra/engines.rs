@@ -55,9 +55,7 @@ pub struct Engine {
     /// sent to the wrong scheduler announces the wrong catalogue. Empty until
     /// `connect` puts the engine on the network -- an offline engine has no
     /// announce loop to jump.
-    pub bump: std::sync::OnceLock<
-        tokio::sync::mpsc::Sender<crate::announce::scheduler::BumpReq>,
-    >,
+    pub bump: std::sync::OnceLock<tokio::sync::mpsc::Sender<crate::announce::scheduler::BumpReq>>,
     /// This engine's live announce policy, swappable while it runs.
     ///
     /// Empty until `connect` starts the announcer, like `bump`: an engine that
@@ -136,9 +134,13 @@ pub fn apply_live_settings(manager: &TorrentManager, session: &crate::config::Se
     manager.rates().engine.down.set_rate(down);
     manager.policy().set_idle_timeout_secs(session.peer_timeout);
     manager.policy().set_encryption(&session.peer_encryption);
-    manager.policy().set_unknown_hash_limit(session.max_unknown_infohash_per_ip);
+    manager
+        .policy()
+        .set_unknown_hash_limit(session.max_unknown_infohash_per_ip);
     manager.policy().set_choking(session.choking);
-    manager.policy().set_unchoke_slots(session.max_uploads_per_torrent);
+    manager
+        .policy()
+        .set_unchoke_slots(session.max_uploads_per_torrent);
 }
 
 impl EngineHost {
@@ -239,7 +241,9 @@ impl EngineHost {
                 let (imported, lost) = manager.import_missing_blobs(&uploads, &sink);
                 if imported > 0 || lost > 0 {
                     tracing::warn!(
-                        engine = id, imported, unrecoverable = lost,
+                        engine = id,
+                        imported,
+                        unrecoverable = lost,
                         "metainfo migrated out of uploads/ and into the store"
                     );
                 }
@@ -255,7 +259,8 @@ impl EngineHost {
             let loaded = manager.load_resume_data();
             tracing::info!(engine = id, torrents = loaded, "engine state loaded");
             {
-                let tx: tokio::sync::mpsc::UnboundedSender<(String, [u8; 20])> = completed_tx.clone();
+                let tx: tokio::sync::mpsc::UnboundedSender<(String, [u8; 20])> =
+                    completed_tx.clone();
                 let engine_id = id.to_string();
                 manager.set_completion_hook(Arc::new(move |ih| {
                     let _ = tx.send((engine_id.clone(), ih));
@@ -338,7 +343,10 @@ impl EngineHost {
     /// The last published hardlink summary. Empty until the first one: every
     /// torrent then reads as never measured, which is the truth.
     pub fn link_summary(&self) -> Arc<crate::linkindex::Summary> {
-        self.link_summary.read().map(|g| g.clone()).unwrap_or_default()
+        self.link_summary
+            .read()
+            .map(|g| g.clone())
+            .unwrap_or_default()
     }
 
     /// Replace the summary. Whole, never patched: it is one computation over
@@ -352,7 +360,10 @@ impl EngineHost {
     /// The last counted space on disk with its unix time, `None` before the
     /// link scanner's first count.
     pub fn volume_faults(&self) -> Vec<(String, String)> {
-        self.volume_faults.read().map(|g| g.clone()).unwrap_or_default()
+        self.volume_faults
+            .read()
+            .map(|g| g.clone())
+            .unwrap_or_default()
     }
 
     pub fn publish_volume_faults(&self, faults: Vec<(String, String)>) {
@@ -372,7 +383,9 @@ impl EngineHost {
     }
 
     /// The finished-download stream, for the one listener that acts on it.
-    pub fn take_completions(&self) -> Option<tokio::sync::mpsc::UnboundedReceiver<(String, [u8; 20])>> {
+    pub fn take_completions(
+        &self,
+    ) -> Option<tokio::sync::mpsc::UnboundedReceiver<(String, [u8; 20])>> {
         self.completions.lock().ok()?.take()
     }
 
@@ -393,9 +406,14 @@ impl EngineHost {
     async fn connect(&self, config: &Config, config_dir: &std::path::Path) {
         // The tunnels first: an engine pinned to a device that is not there
         // yet would fail its listener and its uTP socket for good.
-        let wants = crate::wgtunnel::wanted(crate::netmode::current(config), &config.local_engines());
+        let wants =
+            crate::wgtunnel::wanted(crate::netmode::current(config), &config.local_engines());
         if networking_enabled() {
-            let (reg, dir, w) = (self.wireguard.clone(), self.wireguard_dir.clone(), wants.clone());
+            let (reg, dir, w) = (
+                self.wireguard.clone(),
+                self.wireguard_dir.clone(),
+                wants.clone(),
+            );
             let _ = tokio::task::spawn_blocking(move || {
                 crate::wgtunnel::reconcile(&mut crate::wgtunnel::System, &dir, &w, &reg)
             })
@@ -406,7 +424,11 @@ impl EngineHost {
         let plan = crate::killswitch::plan(config);
         // `[daemon] gluetun_verify = "block"`: decided once for the node, like
         // the rest of the kill switch.
-        let verify_block = if networking_enabled() { crate::gluetun::gate(config).await } else { None };
+        let verify_block = if networking_enabled() {
+            crate::gluetun::gate(config).await
+        } else {
+            None
+        };
         for engine in &self.engines {
             // The engine's own merged session. NOT config.race / config.hoard:
             // an engine that is neither is a legitimate configuration.
@@ -443,7 +465,12 @@ impl EngineHost {
             // the gateway translates public `external_port` to that internal
             // port (measured on Proton), so the listener belongs there and only
             // the announced port is the external one (`set_external_port`).
-            let follow = self.natpmp_follow(wants.iter().find(|w| w.engine == engine.id), session.listen_port).await;
+            let follow = self
+                .natpmp_follow(
+                    wants.iter().find(|w| w.engine == engine.id),
+                    session.listen_port,
+                )
+                .await;
             let mut born = session.clone();
             // LSD's default depends on the role, which the session alone
             // does not carry: resolved here, written out for the engine.
@@ -491,7 +518,10 @@ impl EngineHost {
                             session.bind_interface.clone(),
                             session.listen_port,
                             initial,
-                            Arc::new(TunnelPort { registry: self.wireguard.clone(), engine: engine.id.clone() }),
+                            Arc::new(TunnelPort {
+                                registry: self.wireguard.clone(),
+                                engine: engine.id.clone(),
+                            }),
                         );
                     }
                     let bump = crate::announce::runner::start(
@@ -570,7 +600,10 @@ impl EngineHost {
         }
         let conf = crate::wgtunnel::load_conf(&self.wireguard_dir, &w.config_file).ok()?;
         let Some(gateway) = crate::wgtunnel::natpmp_gateway(&w.provider, &conf) else {
-            let e = format!("{}: no NAT-PMP gateway known (no IPv4 DNS in the file); no port is asked for", w.config_file);
+            let e = format!(
+                "{}: no NAT-PMP gateway known (no IPv4 DNS in the file); no port is asked for",
+                w.config_file
+            );
             tracing::warn!(engine = %w.engine, "wireguard: {e}");
             self.wireguard.update(&w.engine, |t| t.last_error = e);
             return None;
@@ -580,13 +613,22 @@ impl EngineHost {
         // configured port as both internal and suggested: internal 0 is
         // reserved by RFC 6886, and a gateway that honours the suggestion
         // then maps the port straight through.
-        let initial = match crate::portfwd::map_both(gateway, &w.device, listen_port, listen_port, 2).await {
+        let initial = match crate::portfwd::map_both(
+            gateway,
+            &w.device,
+            listen_port,
+            listen_port,
+            2,
+        )
+        .await
+        {
             Ok((m, udp)) => {
                 if let Some(e) = udp {
                     tracing::warn!(engine = %w.engine, "wireguard port forward: {e}");
                 }
                 tracing::info!(engine = %w.engine, port = m.external_port, "wireguard: port forwarded before the engine starts");
-                self.wireguard.update(&w.engine, |t| t.forwarded_port = m.external_port);
+                self.wireguard
+                    .update(&w.engine, |t| t.forwarded_port = m.external_port);
                 Some(m)
             }
             Err(e) => {
@@ -603,16 +645,31 @@ impl EngineHost {
     /// not sent in time is left to the trackers' own timeouts, which is what
     /// libtorrent does with its 5-second `stop_tracker_timeout`.
     pub async fn depart_all(&self, budget: std::time::Duration) -> usize {
-        let mut work: Vec<(std::sync::Arc<typhon_engine::torrent::meta::TorrentState>, std::sync::Arc<crate::announce::policy::Policy>, u16)> = Vec::new();
+        let mut work: Vec<(
+            std::sync::Arc<typhon_engine::torrent::meta::TorrentState>,
+            std::sync::Arc<crate::announce::policy::Policy>,
+            u16,
+        )> = Vec::new();
         let mut engines: Vec<&Engine> = self.engines().iter().collect();
         engines.sort_by_key(|e| e.role != "race");
         for engine in engines {
-            let Some(handle) = engine.announce_policy.get() else { continue };
+            let Some(handle) = engine.announce_policy.get() else {
+                continue;
+            };
             let policy = handle.read().unwrap_or_else(|p| p.into_inner()).clone();
             for t in engine.manager.all() {
-                let started = t.announce_book.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|s| s.started);
+                let started = t
+                    .announce_book
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .iter()
+                    .any(|s| s.started);
                 if started {
-                    work.push((t, policy.clone(), engine.manager.announced_port(engine.session.listen_port)));
+                    work.push((
+                        t,
+                        policy.clone(),
+                        engine.manager.announced_port(engine.session.listen_port),
+                    ));
                 }
             }
         }
@@ -637,7 +694,8 @@ impl EngineHost {
                 }
             });
         }
-        let _ = tokio::time::timeout(budget, async { while set.join_next().await.is_some() {} }).await;
+        let _ =
+            tokio::time::timeout(budget, async { while set.join_next().await.is_some() {} }).await;
         set.abort_all();
         let done = done.load(std::sync::atomic::Ordering::Relaxed);
         tracing::info!(departed = done, of = total, "stopped sent to the trackers");
@@ -645,9 +703,17 @@ impl EngineHost {
     }
 
     /// Send `stopped` for one torrent leaving this engine, in the background.
-    pub fn spawn_departure(&self, engine_id: &str, t: std::sync::Arc<typhon_engine::torrent::meta::TorrentState>) {
-        let Some(engine) = self.engines().iter().find(|e| e.id == engine_id) else { return };
-        let Some(handle) = engine.announce_policy.get() else { return };
+    pub fn spawn_departure(
+        &self,
+        engine_id: &str,
+        t: std::sync::Arc<typhon_engine::torrent::meta::TorrentState>,
+    ) {
+        let Some(engine) = self.engines().iter().find(|e| e.id == engine_id) else {
+            return;
+        };
+        let Some(handle) = engine.announce_policy.get() else {
+            return;
+        };
         let policy = handle.read().unwrap_or_else(|p| p.into_inner()).clone();
         let port = engine.manager.announced_port(engine.session.listen_port);
         if let Ok(rt) = tokio::runtime::Handle::try_current() {
@@ -739,7 +805,11 @@ impl EngineHost {
     /// DHT nodes known to every engine that runs a DHT, summed: what
     /// qBittorrent's `dht_nodes` reports. 0 when no engine runs one.
     pub fn dht_nodes(&self) -> u64 {
-        self.engines.iter().filter_map(|e| e.manager.dht()).map(|d| d.node_count() as u64).sum()
+        self.engines
+            .iter()
+            .filter_map(|e| e.manager.dht())
+            .map(|d| d.node_count() as u64)
+            .sum()
     }
 
     /// The same for ONE engine; (0, 0) for an engine this node does not host.
@@ -777,7 +847,9 @@ mod tests {
         let base = 20000 + (std::process::id() % 6000) as u16;
         loop {
             let port = base + NEXT.fetch_add(1, Ordering::Relaxed) % 6000;
-            if std::net::TcpListener::bind(("0.0.0.0", port)).is_ok() && std::net::UdpSocket::bind(("0.0.0.0", port)).is_ok() {
+            if std::net::TcpListener::bind(("0.0.0.0", port)).is_ok()
+                && std::net::UdpSocket::bind(("0.0.0.0", port)).is_ok()
+            {
                 return port;
             }
         }
@@ -841,8 +913,14 @@ mod tests {
             .find(|e| e.id == "vpn1")
             .expect("the extra engine must exist");
 
-        assert_eq!(vpn1.session.listen_port, 16999, "took another engine's port");
-        assert_eq!(vpn1.session.bind_interface, "wg1", "took another engine's interface");
+        assert_eq!(
+            vpn1.session.listen_port, 16999,
+            "took another engine's port"
+        );
+        assert_eq!(
+            vpn1.session.bind_interface, "wg1",
+            "took another engine's interface"
+        );
         // What netprobe shows and what connect binds must be the same thing.
         assert_eq!(vpn1.listen_port, vpn1.session.listen_port);
         assert_eq!(vpn1.bind_interface, vpn1.session.bind_interface);
@@ -867,10 +945,17 @@ mod tests {
         config.hoard.listen_port = 16172;
 
         let host = EngineHost::offline(&config, &dir);
-        assert!(dir.join("hydra.db").exists(), "the store is created on the first start");
+        assert!(
+            dir.join("hydra.db").exists(),
+            "the store is created on the first start"
+        );
         assert!(!host.engines().is_empty());
         for e in host.engines() {
-            assert!(e.manager.has_blob_source(), "engine {} started without its piece hashes", e.id);
+            assert!(
+                e.manager.has_blob_source(),
+                "engine {} started without its piece hashes",
+                e.id
+            );
         }
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -882,7 +967,8 @@ mod tests {
     /// port, and each says why.
     #[tokio::test]
     async fn an_unassigned_engine_is_blocked_and_opens_no_socket() {
-        let dir = std::env::temp_dir().join(format!("hydra-engtest-blocked-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("hydra-engtest-blocked-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         // Free ports, so "nobody bound it" is checked on ports nobody else holds.
         let free = free_port;
@@ -899,15 +985,32 @@ mod tests {
         crate::startup::set_phase(phase);
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         for e in host.engines() {
-            let why = e.blocked.get().unwrap_or_else(|| panic!("{} was not blocked", e.id));
+            let why = e
+                .blocked
+                .get()
+                .unwrap_or_else(|| panic!("{} was not blocked", e.id));
             assert!(why.contains("not assigned"), "{why}");
-            assert!(e.engine_config.get().is_none(), "{}: no network config, so no dial and no magnet", e.id);
-            assert!(e.bump.get().is_none() && e.announce_policy.get().is_none(), "{}: no announce loop", e.id);
-            assert!(!e.listening.load(std::sync::atomic::Ordering::Relaxed), "{}: no listener", e.id);
+            assert!(
+                e.engine_config.get().is_none(),
+                "{}: no network config, so no dial and no magnet",
+                e.id
+            );
+            assert!(
+                e.bump.get().is_none() && e.announce_policy.get().is_none(),
+                "{}: no announce loop",
+                e.id
+            );
+            assert!(
+                !e.listening.load(std::sync::atomic::Ordering::Relaxed),
+                "{}: no listener",
+                e.id
+            );
             assert!(e.manager.dht().is_none(), "{}: no DHT", e.id);
             // Its port is free: nothing bound it, on any address.
-            std::net::TcpListener::bind(("0.0.0.0", e.listen_port)).unwrap_or_else(|err| panic!("{}: port {} taken: {err}", e.id, e.listen_port));
-            std::net::UdpSocket::bind(("0.0.0.0", e.listen_port)).unwrap_or_else(|err| panic!("{}: UDP {} taken: {err}", e.id, e.listen_port));
+            std::net::TcpListener::bind(("0.0.0.0", e.listen_port))
+                .unwrap_or_else(|err| panic!("{}: port {} taken: {err}", e.id, e.listen_port));
+            std::net::UdpSocket::bind(("0.0.0.0", e.listen_port))
+                .unwrap_or_else(|err| panic!("{}: UDP {} taken: {err}", e.id, e.listen_port));
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -921,16 +1024,26 @@ mod tests {
             tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
             format!("http://{addr}")
         }
-        let echo = serve(axum::Router::new().route("/", axum::routing::get(move || async move { echo_ip }))).await;
+        let echo = serve(
+            axum::Router::new().route("/", axum::routing::get(move || async move { echo_ip })),
+        )
+        .await;
         let control = serve(axum::Router::new().route(
             "/v1/publicip/ip",
-            axum::routing::get(move || async move { format!("{{\"public_ip\":\"{control_ip}\"}}") }),
+            axum::routing::get(
+                move || async move { format!("{{\"public_ip\":\"{control_ip}\"}}") },
+            ),
         ))
         .await;
         (echo, control)
     }
 
-    async fn gluetun_engines(tag: &str, daemon_extra: &str, echo: &str, control: &str) -> (EngineHost, std::path::PathBuf) {
+    async fn gluetun_engines(
+        tag: &str,
+        daemon_extra: &str,
+        echo: &str,
+        control: &str,
+    ) -> (EngineHost, std::path::PathBuf) {
         let dir = std::env::temp_dir().join(format!("hydra-engtest-{tag}-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let free = free_port;
@@ -955,11 +1068,30 @@ mod tests {
     #[tokio::test]
     async fn gluetun_verify_block_keeps_engines_off_when_the_exit_is_not_the_tunnel() {
         let (echo, control) = echo_and_control("203.0.113.5", "198.51.100.9").await;
-        let (host, dir) = gluetun_engines("gluetun-block", "gluetun_verify = \"block\"", &echo, &control).await;
+        let (host, dir) = gluetun_engines(
+            "gluetun-block",
+            "gluetun_verify = \"block\"",
+            &echo,
+            &control,
+        )
+        .await;
         for e in host.engines() {
-            let why = e.blocked.get().unwrap_or_else(|| panic!("{} was not blocked", e.id));
-            assert!(why.contains("gluetun_verify") && why.contains("203.0.113.5") && why.contains("198.51.100.9"), "{why}");
-            assert!(e.engine_config.get().is_none() && !e.listening.load(std::sync::atomic::Ordering::Relaxed), "{}: on the network", e.id);
+            let why = e
+                .blocked
+                .get()
+                .unwrap_or_else(|| panic!("{} was not blocked", e.id));
+            assert!(
+                why.contains("gluetun_verify")
+                    && why.contains("203.0.113.5")
+                    && why.contains("198.51.100.9"),
+                "{why}"
+            );
+            assert!(
+                e.engine_config.get().is_none()
+                    && !e.listening.load(std::sync::atomic::Ordering::Relaxed),
+                "{}: on the network",
+                e.id
+            );
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -970,11 +1102,22 @@ mod tests {
     #[tokio::test]
     async fn gluetun_verify_block_without_an_exit_probe_says_so() {
         let (echo, control) = echo_and_control("203.0.113.5", "203.0.113.5").await;
-        let (host, dir) =
-            gluetun_engines("gluetun-block-noprobe", "gluetun_verify = \"block\"\nexit_probe = false", &echo, &control).await;
+        let (host, dir) = gluetun_engines(
+            "gluetun-block-noprobe",
+            "gluetun_verify = \"block\"\nexit_probe = false",
+            &echo,
+            &control,
+        )
+        .await;
         for e in host.engines() {
-            let why = e.blocked.get().unwrap_or_else(|| panic!("{} was not blocked", e.id));
-            assert!(why.contains("gluetun_verify") && why.contains("exit_probe = false"), "{why}");
+            let why = e
+                .blocked
+                .get()
+                .unwrap_or_else(|| panic!("{} was not blocked", e.id));
+            assert!(
+                why.contains("gluetun_verify") && why.contains("exit_probe = false"),
+                "{why}"
+            );
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1002,13 +1145,24 @@ mod tests {
     /// no listening port, TCP or UDP.
     #[tokio::test]
     async fn listen_when_proxied_false_binds_no_port_behind_socks5() {
-        let (host, dir, port) = proxied_engine("noproxylisten", "listen_when_proxied = false").await;
+        let (host, dir, port) =
+            proxied_engine("noproxylisten", "listen_when_proxied = false").await;
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         for e in host.engines() {
-            assert!(e.engine_config.get().is_some(), "{} is on the network, proxied", e.id);
-            assert!(!e.listening.load(std::sync::atomic::Ordering::Relaxed), "{}: listening", e.id);
-            std::net::TcpListener::bind(("0.0.0.0", e.listen_port)).unwrap_or_else(|err| panic!("{}: TCP {} is bound: {err}", e.id, e.listen_port));
-            std::net::UdpSocket::bind(("0.0.0.0", e.listen_port)).unwrap_or_else(|err| panic!("{}: UDP {} is bound: {err}", e.id, e.listen_port));
+            assert!(
+                e.engine_config.get().is_some(),
+                "{} is on the network, proxied",
+                e.id
+            );
+            assert!(
+                !e.listening.load(std::sync::atomic::Ordering::Relaxed),
+                "{}: listening",
+                e.id
+            );
+            std::net::TcpListener::bind(("0.0.0.0", e.listen_port))
+                .unwrap_or_else(|err| panic!("{}: TCP {} is bound: {err}", e.id, e.listen_port));
+            std::net::UdpSocket::bind(("0.0.0.0", e.listen_port))
+                .unwrap_or_else(|err| panic!("{}: UDP {} is bound: {err}", e.id, e.listen_port));
         }
         let _ = port;
         let _ = std::fs::remove_dir_all(&dir);
@@ -1018,15 +1172,26 @@ mod tests {
     #[tokio::test]
     async fn a_proxied_engine_listens_by_default() {
         let (host, dir, _) = proxied_engine("proxylisten", "").await;
-        let race = host.engines().iter().find(|e| e.id == "race").unwrap().clone();
+        let race = host
+            .engines()
+            .iter()
+            .find(|e| e.id == "race")
+            .unwrap()
+            .clone();
         for _ in 0..100 {
             if race.listening.load(std::sync::atomic::Ordering::Relaxed) {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
-        assert!(race.listening.load(std::sync::atomic::Ordering::Relaxed), "the listener is up");
-        assert!(std::net::TcpListener::bind(("0.0.0.0", race.listen_port)).is_err(), "its port is held");
+        assert!(
+            race.listening.load(std::sync::atomic::Ordering::Relaxed),
+            "the listener is up"
+        );
+        assert!(
+            std::net::TcpListener::bind(("0.0.0.0", race.listen_port)).is_err(),
+            "its port is held"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1040,10 +1205,16 @@ mod tests {
     #[test]
     fn only_an_explicit_off_holds_the_engines_back() {
         for off in ["0", "false", "off"] {
-            assert!(!super::networking_enabled_by(Some(off)), "{off} should hold the engines off");
+            assert!(
+                !super::networking_enabled_by(Some(off)),
+                "{off} should hold the engines off"
+            );
         }
         for on in ["1", "true", "", "no", "yes"] {
-            assert!(super::networking_enabled_by(Some(on)), "{on:?} must not be read as off");
+            assert!(
+                super::networking_enabled_by(Some(on)),
+                "{on:?} must not be read as off"
+            );
         }
         assert!(super::networking_enabled_by(None), "unset means on");
     }
@@ -1114,7 +1285,8 @@ fn announce_policy(
     first.skip_udp = !session.udp_trackers();
     first.device = session.bind_interface.trim().to_string();
     first.no_ipv6 = !session.enable_ipv6;
-    first.registration_window = std::time::Duration::from_secs(session.registration_retry_minutes() * 60);
+    first.registration_window =
+        std::time::Duration::from_secs(session.registration_retry_minutes() * 60);
     first
 }
 
@@ -1124,20 +1296,26 @@ fn announce_policy(
 /// configured (the transport may still apply `TYPHON_ANNOUNCE_PROXY`).
 pub(crate) fn session_http_proxy(session: &crate::config::Session) -> String {
     let dir = std::path::Path::new("");
-    engine_config(session, dir, dir).map(|c| c.http_proxy()).unwrap_or_default()
+    engine_config(session, dir, dir)
+        .map(|c| c.http_proxy())
+        .unwrap_or_default()
 }
 
 /// The same session's peer SOCKS5 proxy as a URL. Empty = peers dialled
 /// directly.
 pub(crate) fn session_socks5_url(session: &crate::config::Session) -> String {
     let dir = std::path::Path::new("");
-    engine_config(session, dir, dir).map(|c| c.socks5_url()).unwrap_or_default()
+    engine_config(session, dir, dir)
+        .map(|c| c.socks5_url())
+        .unwrap_or_default()
 }
 
 /// What an engine would start with from this session, for tests outside
 /// this module.
 #[cfg(test)]
-pub(crate) fn engine_config_for_test(session: &crate::config::Session) -> typhon_engine::config::EngineConfig {
+pub(crate) fn engine_config_for_test(
+    session: &crate::config::Session,
+) -> typhon_engine::config::EngineConfig {
     let dir = std::path::Path::new("/tmp");
     engine_config(session, dir, dir).expect("engine config builds")
 }
@@ -1210,7 +1388,6 @@ fn engine_config(
     serde_json::from_value(v).ok()
 }
 
-
 #[cfg(test)]
 mod network_wiring_tests {
     use super::*;
@@ -1229,9 +1406,17 @@ mod network_wiring_tests {
     /// `webseed_private` reaches the engine, and absent keeps the old behaviour.
     #[test]
     fn webseed_private_reaches_the_engine() {
-        assert!(cfg_of(&session("")).webseed_private, "absent = private torrents may use webseeds");
-        assert!(!cfg_of(&session("webseed_private = false
-")).webseed_private);
+        assert!(
+            cfg_of(&session("")).webseed_private,
+            "absent = private torrents may use webseeds"
+        );
+        assert!(
+            !cfg_of(&session(
+                "webseed_private = false
+"
+            ))
+            .webseed_private
+        );
     }
 
     /// `dht_follow_seeds` reaches the engine; absent keeps the old behaviour.
@@ -1244,9 +1429,20 @@ mod network_wiring_tests {
     /// `resume_fast_secs` reaches the engine; absent keeps the engine's 60 s.
     #[test]
     fn resume_fast_secs_reaches_the_engine() {
-        assert_eq!(cfg_of(&session("")).resume_fast_secs, 60, "absent = the engine's default");
-        assert_eq!(cfg_of(&session("resume_fast_secs = 0\n")).resume_fast_secs, 0, "0 = the quick pass is off");
-        assert_eq!(cfg_of(&session("resume_fast_secs = 120\n")).resume_fast_secs, 120);
+        assert_eq!(
+            cfg_of(&session("")).resume_fast_secs,
+            60,
+            "absent = the engine's default"
+        );
+        assert_eq!(
+            cfg_of(&session("resume_fast_secs = 0\n")).resume_fast_secs,
+            0,
+            "0 = the quick pass is off"
+        );
+        assert_eq!(
+            cfg_of(&session("resume_fast_secs = 120\n")).resume_fast_secs,
+            120
+        );
     }
 
     /// `lsd_announce_seeds` reaches the engine; absent keeps the old behaviour.
@@ -1280,18 +1476,31 @@ mod network_wiring_tests {
              proxy_v2_trusted_sources = [\"203.0.113.20\"]\nannounce_proxy = \"socks5h://10.9.9.9:9050\"\n",
         ));
         assert_eq!(c.socks5_outbound_host, "10.0.0.1");
-        assert_eq!(c.socks5_outbound_port, 1080, "an unwritten port is the SOCKS default, not 0");
-        assert!(c.resolved_bindings().iter().all(|b| b.egress.socks5.is_some()), "every dial is proxied");
+        assert_eq!(
+            c.socks5_outbound_port, 1080,
+            "an unwritten port is the SOCKS default, not 0"
+        );
+        assert!(
+            c.resolved_bindings()
+                .iter()
+                .all(|b| b.egress.socks5.is_some()),
+            "every dial is proxied"
+        );
         assert_eq!(c.listen_port_proxy_v2, Some(16271));
         assert_eq!(c.listen_addr_proxy_v2.as_deref(), Some("[2001:db8::2]"));
         assert_eq!(c.proxy_v2_trusted_sources, vec!["203.0.113.20".to_string()]);
         assert_eq!(c.http_proxy(), "socks5h://10.9.9.9:9050");
 
         // 0 and "" mean "none", not "port 0" and "address \"\"".
-        let off = cfg_of(&session("listen_port_proxy_v2 = 0\nlisten_addr_proxy_v2 = \"\"\n"));
+        let off = cfg_of(&session(
+            "listen_port_proxy_v2 = 0\nlisten_addr_proxy_v2 = \"\"\n",
+        ));
         assert_eq!(off.listen_port_proxy_v2, None);
         assert_eq!(off.listen_addr_proxy_v2, None);
-        assert!(off.resolved_bindings().iter().all(|b| b.egress.socks5.is_none()));
+        assert!(off
+            .resolved_bindings()
+            .iter()
+            .all(|b| b.egress.socks5.is_none()));
     }
 
     /// A SOCKS5 server that is also the tracker: it records the CONNECT
@@ -1321,24 +1530,43 @@ mod network_wiring_tests {
                             s.read_exact(&mut name).await.ok()?;
                             format!("name:{}", String::from_utf8_lossy(&name))
                         }
-                        1 => { let mut a = [0u8; 4]; s.read_exact(&mut a).await.ok()?; format!("ip:{:?}", a) }
-                        _ => { let mut a = [0u8; 16]; s.read_exact(&mut a).await.ok()?; format!("ip:{:?}", a) }
+                        1 => {
+                            let mut a = [0u8; 4];
+                            s.read_exact(&mut a).await.ok()?;
+                            format!("ip:{:?}", a)
+                        }
+                        _ => {
+                            let mut a = [0u8; 16];
+                            s.read_exact(&mut a).await.ok()?;
+                            format!("ip:{:?}", a)
+                        }
                     };
                     let mut p = [0u8; 2];
                     s.read_exact(&mut p).await.ok()?;
-                    log.lock().unwrap().push(format!("{target}:{}", u16::from_be_bytes(p)));
+                    log.lock()
+                        .unwrap()
+                        .push(format!("{target}:{}", u16::from_be_bytes(p)));
                     s.write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0]).await.ok()?;
                     let mut http = Vec::new();
                     let mut buf = [0u8; 1024];
                     while !http.windows(4).any(|w| w == b"\r\n\r\n") {
                         let n = s.read(&mut buf).await.ok()?;
-                        if n == 0 { return None; }
+                        if n == 0 {
+                            return None;
+                        }
                         http.extend_from_slice(&buf[..n]);
                     }
-                    let line = String::from_utf8_lossy(&http).lines().next().unwrap_or_default().to_string();
+                    let line = String::from_utf8_lossy(&http)
+                        .lines()
+                        .next()
+                        .unwrap_or_default()
+                        .to_string();
                     log.lock().unwrap().push(line);
                     let body: &[u8] = b"d8:completei1e10:incompletei0e8:intervali1800e5:peers0:e";
-                    let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
                     s.write_all(head.as_bytes()).await.ok()?;
                     s.write_all(body).await.ok()?;
                     Some(())
@@ -1361,14 +1589,46 @@ mod network_wiring_tests {
             "socks5_outbound_host = \"127.0.0.1\"\nsocks5_outbound_port = {port}\nannounce_ip = \"198.51.100.7\"\n"
         ));
         let policy = announce_policy(&Config::default(), &s, &cfg_of(&s));
-        assert_eq!(policy.proxy, format!("socks5h://127.0.0.1:{port}"), "announces default to the peer proxy");
-        let req = crate::announce::policy::prepare(&policy, "http://tracker.invalid/announce", IH, 16171, 0, 0, 5, "started", None, None)
-            .expect("request");
-        let out = typhon_engine::tracker::http::send_announce_on(&req.url, &req.user_agent, req.ip_mode, &req.device, &req.proxy).await;
-        assert!(out.is_ok(), "the tracker behind the proxy answered: {out:?}");
+        assert_eq!(
+            policy.proxy,
+            format!("socks5h://127.0.0.1:{port}"),
+            "announces default to the peer proxy"
+        );
+        let req = crate::announce::policy::prepare(
+            &policy,
+            "http://tracker.invalid/announce",
+            IH,
+            16171,
+            0,
+            0,
+            5,
+            "started",
+            None,
+            None,
+        )
+        .expect("request");
+        let out = typhon_engine::tracker::http::send_announce_on(
+            &req.url,
+            &req.user_agent,
+            req.ip_mode,
+            &req.device,
+            &req.proxy,
+        )
+        .await;
+        assert!(
+            out.is_ok(),
+            "the tracker behind the proxy answered: {out:?}"
+        );
         let seen = seen.lock().unwrap().clone();
-        assert!(seen.iter().any(|l| l == "name:tracker.invalid:80"), "the proxy got the NAME: {seen:?}");
-        assert!(seen.iter().any(|l| l.starts_with("GET /announce?") && l.contains("&ip=198.51.100.7")), "ip= sent: {seen:?}");
+        assert!(
+            seen.iter().any(|l| l == "name:tracker.invalid:80"),
+            "the proxy got the NAME: {seen:?}"
+        );
+        assert!(
+            seen.iter()
+                .any(|l| l.starts_with("GET /announce?") && l.contains("&ip=198.51.100.7")),
+            "ip= sent: {seen:?}"
+        );
     }
 
     /// Unwritten, `announce_ip` sends no `ip=` at all: the tracker keeps the
@@ -1377,15 +1637,55 @@ mod network_wiring_tests {
     fn an_unwritten_announce_ip_sends_nothing() {
         let s = session("");
         let policy = announce_policy(&Config::default(), &s, &cfg_of(&s));
-        let http = crate::announce::policy::prepare(&policy, "http://t.example/announce", IH, 1, 0, 0, 0, "", None, None).unwrap();
+        let http = crate::announce::policy::prepare(
+            &policy,
+            "http://t.example/announce",
+            IH,
+            1,
+            0,
+            0,
+            0,
+            "",
+            None,
+            None,
+        )
+        .unwrap();
         assert!(!http.url.contains("&ip="), "{}", http.url);
-        let udp = crate::announce::policy::prepare(&policy, "udp://t.example:6969/announce", IH, 1, 0, 0, 0, "", None, None).unwrap();
+        let udp = crate::announce::policy::prepare(
+            &policy,
+            "udp://t.example:6969/announce",
+            IH,
+            1,
+            0,
+            0,
+            0,
+            "",
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(udp.udp.unwrap().ip, 0);
 
         let s = session("announce_ip = \"198.51.100.7\"\n");
         let policy = announce_policy(&Config::default(), &s, &cfg_of(&s));
-        let udp = crate::announce::policy::prepare(&policy, "udp://t.example:6969/announce", IH, 1, 0, 0, 0, "", None, None).unwrap();
-        assert_eq!(udp.udp.unwrap().ip, u32::from(std::net::Ipv4Addr::new(198, 51, 100, 7)), "BEP 15 `ip` field");
+        let udp = crate::announce::policy::prepare(
+            &policy,
+            "udp://t.example:6969/announce",
+            IH,
+            1,
+            0,
+            0,
+            0,
+            "",
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            udp.udp.unwrap().ip,
+            u32::from(std::net::Ipv4Addr::new(198, 51, 100, 7)),
+            "BEP 15 `ip` field"
+        );
     }
 
     /// ⭐ A UDP tracker behind a proxy is refused with the reason, the same
@@ -1394,8 +1694,26 @@ mod network_wiring_tests {
     async fn a_udp_tracker_behind_the_proxy_is_refused_with_the_reason() {
         let s = session("socks5_outbound_host = \"127.0.0.1\"\nsocks5_outbound_port = 9\n");
         let policy = announce_policy(&Config::default(), &s, &cfg_of(&s));
-        let req = crate::announce::policy::prepare(&policy, "udp://127.0.0.1:9/announce", IH, 1, 0, 0, 0, "", None, None).unwrap();
-        let out = typhon_engine::tracker::udp::send_announce_on(req.udp.as_ref().unwrap(), req.ip_mode, &req.device, &req.proxy).await;
+        let req = crate::announce::policy::prepare(
+            &policy,
+            "udp://127.0.0.1:9/announce",
+            IH,
+            1,
+            0,
+            0,
+            0,
+            "",
+            None,
+            None,
+        )
+        .unwrap();
+        let out = typhon_engine::tracker::udp::send_announce_on(
+            req.udp.as_ref().unwrap(),
+            req.ip_mode,
+            &req.device,
+            &req.proxy,
+        )
+        .await;
         assert_eq!(out.unwrap_err(), crate::netmode::UDP_BEHIND_PROXY);
     }
 
@@ -1415,14 +1733,31 @@ mod network_wiring_tests {
         let _ = std::fs::create_dir_all(&dir);
         let c = engine_config(&s, &dir, &dir.join("resume")).unwrap();
         let disk = Arc::new(DiskManager::new(16));
-        let mgr = Arc::new(TorrentManager::new(dir.to_string_lossy().into_owned(), dir.join("resume").to_string_lossy().into_owned(), disk.clone()));
-        typhon_engine::session::start(mgr.clone(), disk, &c, Arc::new(std::sync::atomic::AtomicBool::new(false))).await;
+        let mgr = Arc::new(TorrentManager::new(
+            dir.to_string_lossy().into_owned(),
+            dir.join("resume").to_string_lossy().into_owned(),
+            disk.clone(),
+        ));
+        typhon_engine::session::start(
+            mgr.clone(),
+            disk,
+            &c,
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        )
+        .await;
 
         let want: std::net::IpAddr = "203.0.113.20".parse().unwrap();
-        assert_eq!(mgr.trusted_proxy_sources(), &[want], "the allowlist reached the engine");
+        assert_eq!(
+            mgr.trusted_proxy_sources(),
+            &[want],
+            "the allowlist reached the engine"
+        );
         let mut up = false;
         for _ in 0..50 {
-            if tokio::net::TcpStream::connect(("127.0.0.1", pv2)).await.is_ok() {
+            if tokio::net::TcpStream::connect(("127.0.0.1", pv2))
+                .await
+                .is_ok()
+            {
                 up = true;
                 break;
             }
@@ -1435,13 +1770,26 @@ mod network_wiring_tests {
     /// Bring one engine up from a session, the way `connect` does.
     async fn started(tag: &str, toml_text: &str) -> Arc<TorrentManager> {
         let free = super::tests::free_port;
-        let s = session(&format!("listen_port = {}\nenable_webseed = false\n{toml_text}", free()));
+        let s = session(&format!(
+            "listen_port = {}\nenable_webseed = false\n{toml_text}",
+            free()
+        ));
         let dir = std::env::temp_dir().join(format!("hydra-dht-{tag}-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let c = engine_config(&s, &dir, &dir.join("resume")).unwrap();
         let disk = Arc::new(DiskManager::new(16));
-        let mgr = Arc::new(TorrentManager::new(dir.to_string_lossy().into_owned(), dir.join("resume").to_string_lossy().into_owned(), disk.clone()));
-        typhon_engine::session::start(mgr.clone(), disk, &c, Arc::new(std::sync::atomic::AtomicBool::new(false))).await;
+        let mgr = Arc::new(TorrentManager::new(
+            dir.to_string_lossy().into_owned(),
+            dir.join("resume").to_string_lossy().into_owned(),
+            disk.clone(),
+        ));
+        typhon_engine::session::start(
+            mgr.clone(),
+            disk,
+            &c,
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        )
+        .await;
         let _ = std::fs::remove_dir_all(&dir);
         mgr
     }
@@ -1455,9 +1803,19 @@ mod network_wiring_tests {
     async fn a_proxied_engine_starts_no_dht() {
         let pinned = "bind_interface = \"lo\"\nenable_dht = true\n";
         let control = started("direct", pinned).await;
-        assert!(control.dht().is_some(), "the control engine must run a DHT, or the next assert proves nothing");
-        let proxied = started("socks", &format!("{pinned}socks5_outbound_host = \"127.0.0.1\"\nsocks5_outbound_port = 9\n")).await;
-        assert!(proxied.dht().is_none(), "a DHT node started behind the SOCKS5 proxy");
+        assert!(
+            control.dht().is_some(),
+            "the control engine must run a DHT, or the next assert proves nothing"
+        );
+        let proxied = started(
+            "socks",
+            &format!("{pinned}socks5_outbound_host = \"127.0.0.1\"\nsocks5_outbound_port = 9\n"),
+        )
+        .await;
+        assert!(
+            proxied.dht().is_none(),
+            "a DHT node started behind the SOCKS5 proxy"
+        );
     }
 
     /// ⭐⭐ Fail closed. A tunnel that did not come up leaves its engine
@@ -1476,38 +1834,79 @@ mod network_wiring_tests {
         let _ = std::fs::create_dir_all(&dir);
         let c = engine_config(&s, &dir, &dir.join("resume")).unwrap();
         let disk = Arc::new(DiskManager::new(16));
-        let mgr = Arc::new(TorrentManager::new(dir.to_string_lossy().into_owned(), dir.join("resume").to_string_lossy().into_owned(), disk.clone()));
+        let mgr = Arc::new(TorrentManager::new(
+            dir.to_string_lossy().into_owned(),
+            dir.join("resume").to_string_lossy().into_owned(),
+            disk.clone(),
+        ));
         typhon_engine::session::start(mgr.clone(), disk, &c, listening.clone()).await;
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        assert!(!listening.load(std::sync::atomic::Ordering::Relaxed), "a listener came up on a missing device");
-        assert!(mgr.dht().is_none(), "a DHT node started on a missing device");
+        assert!(
+            !listening.load(std::sync::atomic::Ordering::Relaxed),
+            "a listener came up on a missing device"
+        );
+        assert!(
+            mgr.dht().is_none(),
+            "a DHT node started on a missing device"
+        );
 
         // The tracker is on loopback and answers: only the pin can stop it.
         let tracker = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://127.0.0.1:{}/announce", tracker.local_addr().unwrap().port());
+        let url = format!(
+            "http://127.0.0.1:{}/announce",
+            tracker.local_addr().unwrap().port()
+        );
         tokio::spawn(async move {
             while let Ok((mut sock, _)) = tracker.accept().await {
                 let mut buf = [0u8; 2048];
                 let _ = sock.read(&mut buf).await;
                 let body: &[u8] = b"d8:intervali1800e5:peers0:e";
-                let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
                 let _ = sock.write_all(head.as_bytes()).await;
                 let _ = sock.write_all(body).await;
             }
         });
         let policy = announce_policy(&Config::default(), &s, &c);
         assert_eq!(policy.device, GONE);
-        let req = crate::announce::policy::prepare(&policy, &url, IH, 1, 0, 0, 0, "started", None, None).unwrap();
-        let pinned = typhon_engine::tracker::http::send_announce_on(&req.url, &req.user_agent, req.ip_mode, &req.device, &req.proxy).await;
-        assert!(pinned.is_err(), "an announce left without its tunnel: {pinned:?}");
-        let open = typhon_engine::tracker::http::send_announce_on(&req.url, &req.user_agent, req.ip_mode, "", &req.proxy).await;
+        let req =
+            crate::announce::policy::prepare(&policy, &url, IH, 1, 0, 0, 0, "started", None, None)
+                .unwrap();
+        let pinned = typhon_engine::tracker::http::send_announce_on(
+            &req.url,
+            &req.user_agent,
+            req.ip_mode,
+            &req.device,
+            &req.proxy,
+        )
+        .await;
+        assert!(
+            pinned.is_err(),
+            "an announce left without its tunnel: {pinned:?}"
+        );
+        let open = typhon_engine::tracker::http::send_announce_on(
+            &req.url,
+            &req.user_agent,
+            req.ip_mode,
+            "",
+            &req.proxy,
+        )
+        .await;
         assert!(open.is_ok(), "the control announce must reach the tracker, or the assert above proves nothing: {open:?}");
 
         // A peer dial goes through the same pin, and fails the same way.
-        let egress = typhon_engine::netpin::Egress { device: GONE.into(), ..Default::default() };
+        let egress = typhon_engine::netpin::Egress {
+            device: GONE.into(),
+            ..Default::default()
+        };
         let sock = tokio::net::TcpSocket::new_v4().unwrap();
         use std::os::fd::AsRawFd;
-        assert!(typhon_engine::netpin::pin_fd(sock.as_raw_fd(), &egress).is_err(), "a dial socket pinned to nothing");
+        assert!(
+            typhon_engine::netpin::pin_fd(sock.as_raw_fd(), &egress).is_err(),
+            "a dial socket pinned to nothing"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

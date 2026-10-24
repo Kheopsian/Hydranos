@@ -63,7 +63,9 @@ pub fn parse_reply(buf: &[u8]) -> Result<Mapping, String> {
     Ok(Mapping {
         internal_port: u16::from_be_bytes([buf[8], buf[9]]),
         external_port: u16::from_be_bytes([buf[10], buf[11]]),
-        lifetime: Duration::from_secs(u32::from_be_bytes([buf[12], buf[13], buf[14], buf[15]]) as u64),
+        lifetime: Duration::from_secs(
+            u32::from_be_bytes([buf[12], buf[13], buf[14], buf[15]]) as u64
+        ),
     })
 }
 
@@ -109,7 +111,9 @@ pub async fn map_to(
             .bind_device(Some(dev.as_bytes()))
             .map_err(|e| format!("cannot pin the request to {dev}: {e}"))?;
         #[cfg(not(any(target_os = "linux", target_os = "android")))]
-        return Err(format!("cannot pin the request to {dev}: not supported on this platform"));
+        return Err(format!(
+            "cannot pin the request to {dev}: not supported on this platform"
+        ));
     }
     let req = request(tcp, internal, suggested, lifetime);
 
@@ -150,11 +154,28 @@ pub async fn map_both(
     attempts: usize,
 ) -> Result<(Mapping, Option<String>), String> {
     let target = SocketAddr::new(gateway, NATPMP_PORT);
-    let tcp = map_to(target, true, internal, suggested, VPN_LEASE, attempts, Some(device)).await?;
-    let udp = map_to(target, false, internal, tcp.external_port, VPN_LEASE, attempts, Some(device))
-        .await
-        .err()
-        .map(|e| format!("UDP not forwarded, uTP peers cannot reach this engine: {e}"));
+    let tcp = map_to(
+        target,
+        true,
+        internal,
+        suggested,
+        VPN_LEASE,
+        attempts,
+        Some(device),
+    )
+    .await?;
+    let udp = map_to(
+        target,
+        false,
+        internal,
+        tcp.external_port,
+        VPN_LEASE,
+        attempts,
+        Some(device),
+    )
+    .await
+    .err()
+    .map(|e| format!("UDP not forwarded, uTP peers cannot reach this engine: {e}"));
     Ok((tcp, udp))
 }
 
@@ -292,8 +313,14 @@ mod tests {
     /// gone and we do not know it.
     #[test]
     fn renewal_happens_halfway_through() {
-        assert_eq!(renew_interval(Duration::from_secs(3600)), Duration::from_secs(1800));
-        assert_eq!(renew_interval(Duration::from_secs(4)), Duration::from_secs(5));
+        assert_eq!(
+            renew_interval(Duration::from_secs(3600)),
+            Duration::from_secs(1800)
+        );
+        assert_eq!(
+            renew_interval(Duration::from_secs(4)),
+            Duration::from_secs(5)
+        );
         assert_eq!(renew_interval(Duration::ZERO), Duration::from_secs(5));
     }
 }
@@ -335,12 +362,22 @@ mod io_tests {
         let (addr, rx) = gateway(reply.to_vec());
 
         let m = rt()
-            .block_on(map_to(addr, true, 16171, 16171, Duration::from_secs(7200), 1, None))
+            .block_on(map_to(
+                addr,
+                true,
+                16171,
+                16171,
+                Duration::from_secs(7200),
+                1,
+                None,
+            ))
             .expect("the gateway granted it");
         assert_eq!(m.external_port, 50000);
         assert_eq!(m.lifetime, Duration::from_secs(7200));
 
-        let sent = rx.recv_timeout(std::time::Duration::from_secs(5)).expect("a request arrived");
+        let sent = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("a request arrived");
         assert_eq!(sent.len(), 12, "NAT-PMP asks in twelve bytes");
         assert_eq!(sent[1], OP_MAP_TCP);
         assert_eq!(u16::from_be_bytes([sent[4], sent[5]]), 16171);
@@ -355,7 +392,15 @@ mod io_tests {
         let (addr, _rx) = gateway(reply.to_vec());
 
         let err = rt()
-            .block_on(map_to(addr, true, 16171, 16171, Duration::from_secs(3600), 1, None))
+            .block_on(map_to(
+                addr,
+                true,
+                16171,
+                16171,
+                Duration::from_secs(3600),
+                1,
+                None,
+            ))
             .expect_err("code 2 is a refusal");
         assert!(err.contains("refuses to map"), "{err}");
     }
@@ -369,7 +414,15 @@ mod io_tests {
         drop(sock);
 
         let err = rt()
-            .block_on(map_to(addr, true, 16171, 16171, Duration::from_secs(3600), 1, None))
+            .block_on(map_to(
+                addr,
+                true,
+                16171,
+                16171,
+                Duration::from_secs(3600),
+                1,
+                None,
+            ))
             .expect_err("nobody answered");
         assert!(!err.is_empty(), "the error says something");
     }
@@ -415,19 +468,35 @@ mod follower_tests {
     #[test]
     fn a_renewal_keeps_the_mapping_key_and_suggests_the_granted_port() {
         assert_eq!(renewal_ports(16171, 0), (16171, 16171), "first request");
-        assert_eq!(renewal_ports(16171, 45133), (16171, 45133), "after the listener moved to 45133");
-        assert_ne!(renewal_ports(16171, 45133).0, 45133, "the external port must not become the key");
+        assert_eq!(
+            renewal_ports(16171, 45133),
+            (16171, 45133),
+            "after the listener moved to 45133"
+        );
+        assert_ne!(
+            renewal_ports(16171, 45133).0,
+            45133,
+            "the external port must not become the key"
+        );
     }
 
     /// ⭐ TCP and UDP are both asked for, the same port, and the grant is read.
     #[tokio::test]
     async fn both_protocols_are_mapped_to_one_port() {
         let (addr, ops) = gateway(vec![45243]).await;
-        let tcp = map_to(addr, true, 16171, 16171, VPN_LEASE, 1, None).await.unwrap();
-        let udp = map_to(addr, false, 16171, tcp.external_port, VPN_LEASE, 1, None).await.unwrap();
+        let tcp = map_to(addr, true, 16171, 16171, VPN_LEASE, 1, None)
+            .await
+            .unwrap();
+        let udp = map_to(addr, false, 16171, tcp.external_port, VPN_LEASE, 1, None)
+            .await
+            .unwrap();
         assert_eq!((tcp.external_port, udp.external_port), (45243, 45243));
         assert_eq!(*ops.lock().unwrap(), vec![OP_MAP_TCP, OP_MAP_UDP]);
-        assert_eq!(renew_interval(tcp.lifetime), Duration::from_secs(30), "renewed at half the lease");
+        assert_eq!(
+            renew_interval(tcp.lifetime),
+            Duration::from_secs(30),
+            "renewed at half the lease"
+        );
     }
 
     /// A pin to a device that is not there fails the request: it is never
@@ -436,7 +505,9 @@ mod follower_tests {
     #[tokio::test]
     async fn a_request_pinned_to_a_missing_tunnel_is_not_sent() {
         let (addr, ops) = gateway(vec![1]).await;
-        let err = map_to(addr, true, 1, 1, VPN_LEASE, 1, Some("hy-nodev0")).await.unwrap_err();
+        let err = map_to(addr, true, 1, 1, VPN_LEASE, 1, Some("hy-nodev0"))
+            .await
+            .unwrap_err();
         assert!(err.contains("hy-nodev0"), "{err}");
         assert!(ops.lock().unwrap().is_empty());
     }

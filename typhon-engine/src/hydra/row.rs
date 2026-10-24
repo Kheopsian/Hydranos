@@ -74,7 +74,11 @@ fn num(value: f64) -> Value {
 pub fn derive_state_static(raw: &'static str, user_stopped: bool) -> &'static str {
     match raw {
         "paused" | STATE_STOPPED | STATE_QUEUED | "" => {
-            if user_stopped { STATE_STOPPED } else { STATE_QUEUED }
+            if user_stopped {
+                STATE_STOPPED
+            } else {
+                STATE_QUEUED
+            }
         }
         "error" if user_stopped => STATE_STOPPED,
         other => other,
@@ -83,9 +87,12 @@ pub fn derive_state_static(raw: &'static str, user_stopped: bool) -> &'static st
 
 pub fn derive_state(raw: &str, user_stopped: bool) -> String {
     match raw {
-        "paused" | STATE_STOPPED | STATE_QUEUED | "" => {
-            if user_stopped { STATE_STOPPED } else { STATE_QUEUED }.to_string()
+        "paused" | STATE_STOPPED | STATE_QUEUED | "" => if user_stopped {
+            STATE_STOPPED
+        } else {
+            STATE_QUEUED
         }
+        .to_string(),
         "error" if user_stopped => STATE_STOPPED.to_string(),
         other => other.to_string(),
     }
@@ -154,7 +161,11 @@ pub fn torrent_ratio(t: &std::sync::Arc<typhon_engine::torrent::meta::TorrentSta
     if (down as f64) >= t.meta.total_size as f64 * 0.01 {
         return share_ratio(up, down, 0);
     }
-    share_ratio(up, down, typhon_engine::rpc::dispatch::torrent_core(t).total_done)
+    share_ratio(
+        up,
+        down,
+        typhon_engine::rpc::dispatch::torrent_core(t).total_done,
+    )
 }
 
 /// Project one engine torrent, plus what the store knows, into an API row.
@@ -175,7 +186,11 @@ pub fn build(engine: &Value, facts: &StoreFacts, agent: &str) -> Value {
 
     // A seeding torrent is complete by definition; the engine's own progress
     // can sit a hair under 1.0 and the UI would render 99% forever.
-    let progress = if raw_state == "seeding" { 1.0 } else { f(engine, "progress") };
+    let progress = if raw_state == "seeding" {
+        1.0
+    } else {
+        f(engine, "progress")
+    };
 
     let total_download = i(engine, "total_download");
     let total_upload = i(engine, "total_upload");
@@ -195,7 +210,11 @@ pub fn build(engine: &Value, facts: &StoreFacts, agent: &str) -> Value {
         facts.save_path.clone()
     };
 
-    let added_time = if facts.added_time > 0 { facts.added_time } else { i(engine, "added_time") };
+    let added_time = if facts.added_time > 0 {
+        facts.added_time
+    } else {
+        i(engine, "added_time")
+    };
     let completed_time = if facts.completed_time > 0 {
         facts.completed_time
     } else {
@@ -237,7 +256,11 @@ pub fn build(engine: &Value, facts: &StoreFacts, agent: &str) -> Value {
     let live_seed = i(engine, "seeding_time");
     row.insert(
         "seeding_time".into(),
-        if live_seed > 0 { live_seed.into() } else { facts.seeding_time.into() },
+        if live_seed > 0 {
+            live_seed.into()
+        } else {
+            facts.seeding_time.into()
+        },
     );
     row.insert("state".into(), state.into());
     row.insert("swarm_leechers".into(), i(engine, "list_peers").into());
@@ -247,7 +270,13 @@ pub fn build(engine: &Value, facts: &StoreFacts, agent: &str) -> Value {
         if facts.tags.is_empty() {
             Value::Null
         } else {
-            Value::Array(facts.tags.iter().map(|t| Value::String(t.clone())).collect())
+            Value::Array(
+                facts
+                    .tags
+                    .iter()
+                    .map(|t| Value::String(t.clone()))
+                    .collect(),
+            )
         },
     );
     row.insert("torrent_error".into(), (raw_state == "error").into());
@@ -256,7 +285,10 @@ pub fn build(engine: &Value, facts: &StoreFacts, agent: &str) -> Value {
     row.insert("total_size".into(), i(engine, "total_size").into());
     row.insert("total_upload".into(), total_upload.into());
     row.insert("tracker_error".into(), b(engine, "tracker_error").into());
-    row.insert("tracker_error_msg".into(), s(engine, "tracker_error_msg").into());
+    row.insert(
+        "tracker_error_msg".into(),
+        s(engine, "tracker_error_msg").into(),
+    );
     row.insert("tracker_host".into(), s(engine, "tracker_host").into());
     row.insert("upload_rate".into(), i(engine, "upload_rate").into());
     row.insert("uploader".into(), "".into());
@@ -287,7 +319,11 @@ mod tests {
 
     #[test]
     fn seeding_is_reported_complete() {
-        let row = build(&json!({"state": "seeding", "progress": 0.9997}), &StoreFacts::default(), "");
+        let row = build(
+            &json!({"state": "seeding", "progress": 0.9997}),
+            &StoreFacts::default(),
+            "",
+        );
         assert_eq!(row["progress"], json!(1));
     }
 
@@ -300,14 +336,19 @@ mod tests {
             "added_time": 111, "completed_time": 222, "save_path": "/engine",
         });
         let facts = StoreFacts {
-            added_time: 999, completed_time: 888, save_path: "/store".into(),
+            added_time: 999,
+            completed_time: 888,
+            save_path: "/store".into(),
             ..Default::default()
         };
         let row = build(&engine, &facts, "");
         assert_eq!(row["added_time"], 999);
         assert_eq!(row["completed_time"], 888);
         assert_eq!(row["save_path"], "/store");
-        assert_eq!(row["engine_save_path"], "/engine", "the engine path is still published");
+        assert_eq!(
+            row["engine_save_path"], "/engine",
+            "the engine path is still published"
+        );
 
         // and the engine is the fallback when the store says nothing
         let row = build(&engine, &StoreFacts::default(), "");
@@ -318,9 +359,17 @@ mod tests {
 
     #[test]
     fn ratio_is_zero_rather_than_infinite_without_downloads() {
-        let row = build(&json!({"total_upload": 500, "total_download": 0}), &StoreFacts::default(), "");
+        let row = build(
+            &json!({"total_upload": 500, "total_download": 0}),
+            &StoreFacts::default(),
+            "",
+        );
         assert_eq!(row["ratio"], json!(0));
-        let row = build(&json!({"total_upload": 500, "total_download": 250}), &StoreFacts::default(), "");
+        let row = build(
+            &json!({"total_upload": 500, "total_download": 250}),
+            &StoreFacts::default(),
+            "",
+        );
         assert_eq!(row["ratio"], json!(2));
     }
 
@@ -351,7 +400,11 @@ mod tests {
     #[test]
     fn nothing_held_and_nothing_downloaded_is_zero() {
         assert_eq!(share_ratio(0, 0, 0), 0.0);
-        assert_eq!(share_ratio(999, 0, 0), 0.0, "qBittorrent says 9999 here; we say 0");
+        assert_eq!(
+            share_ratio(999, 0, 0),
+            0.0,
+            "qBittorrent says 9999 here; we say 0"
+        );
     }
 
     // The 1% line, compared as qBittorrent compares it: in floats. 1 byte of
@@ -360,7 +413,11 @@ mod tests {
     #[test]
     fn the_one_percent_line_is_not_rounded_down() {
         assert_eq!(share_ratio(300, 1, 150), 2.0);
-        assert_eq!(share_ratio(300, 2, 150), 150.0, "2 is past 1.5: downloaded wins");
+        assert_eq!(
+            share_ratio(300, 2, 150),
+            150.0,
+            "2 is past 1.5: downloaded wins"
+        );
     }
 
     // The exact key set of a 3.x row, read off a live answer. Both halves
@@ -368,18 +425,55 @@ mod tests {
     // publishes several the front hides) leaks internals the UI never showed.
     #[test]
     fn the_key_set_matches_a_live_3x_row() {
-        let row = build(&json!({"info_hash": "abc", "name": "x"}), &StoreFacts::default(), "local-race");
-        let keys: Vec<&str> = row.as_object().unwrap().keys().map(String::as_str).collect();
-        assert_eq!(keys, vec![
-            "added_time", "agent", "category", "completed_time", "content_folder",
-            "download_rate", "engine_save_path", "info_hash", "injected_peers",
-            "injection_hit", "multi_file", "name", "num_peers", "num_seeds",
-            "progress", "ratio", "save_path", "seeding_time", "state",
-            "swarm_leechers", "swarm_seeds", "tags", "torrent_error",
-            "torrent_error_msg", "total_download", "total_size", "total_upload",
-            "tracker_error", "tracker_error_msg", "tracker_host", "upload_rate",
-            "uploader", "user_paused",
-        ]);
+        let row = build(
+            &json!({"info_hash": "abc", "name": "x"}),
+            &StoreFacts::default(),
+            "local-race",
+        );
+        let keys: Vec<&str> = row
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            vec![
+                "added_time",
+                "agent",
+                "category",
+                "completed_time",
+                "content_folder",
+                "download_rate",
+                "engine_save_path",
+                "info_hash",
+                "injected_peers",
+                "injection_hit",
+                "multi_file",
+                "name",
+                "num_peers",
+                "num_seeds",
+                "progress",
+                "ratio",
+                "save_path",
+                "seeding_time",
+                "state",
+                "swarm_leechers",
+                "swarm_seeds",
+                "tags",
+                "torrent_error",
+                "torrent_error_msg",
+                "total_download",
+                "total_size",
+                "total_upload",
+                "tracker_error",
+                "tracker_error_msg",
+                "tracker_host",
+                "upload_rate",
+                "uploader",
+                "user_paused",
+            ]
+        );
     }
 
     // Absent values are null, not omitted: a 3.x row always carries the key.

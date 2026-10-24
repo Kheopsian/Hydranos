@@ -14,14 +14,14 @@
 //! Rarity-first biases toward peers who actually need our bytes; speed
 //! provides a tie-break that rewards useful connections.
 
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::time;
 use tracing::{debug, info};
 
-use crate::torrent::TorrentManager;
 use crate::torrent::meta::{TorrentState, TorrentStatus};
+use crate::torrent::TorrentManager;
 
 /// How often the choker re-ranks. Ten seconds is BEP 3's suggestion and what
 /// the loop always used.
@@ -64,11 +64,18 @@ fn choke_pass(
     torrents: impl FnOnce() -> Vec<Arc<TorrentState>>,
     was_active: bool,
 ) -> bool {
-    let slots = if policy.choking() { policy.unchoke_slots() } else { None };
+    let slots = if policy.choking() {
+        policy.unchoke_slots()
+    } else {
+        None
+    };
     match slots {
         Some(max_unchoked) => {
             if !was_active {
-                info!("[choking] on: {} unchoke slots per seeding torrent", max_unchoked);
+                info!(
+                    "[choking] on: {} unchoke slots per seeding torrent",
+                    max_unchoked
+                );
             }
             let all = torrents();
             let mut total_unchoked = 0usize;
@@ -84,7 +91,10 @@ fn choke_pass(
             }
             debug!(
                 "[choking] tick: +{} unchoke -{} choke across {} torrents (interested on {})",
-                total_unchoked, total_choked, all.len(), torrents_with_interested
+                total_unchoked,
+                total_choked,
+                all.len(),
+                torrents_with_interested
             );
             true
         }
@@ -137,7 +147,11 @@ fn tick_torrent(t: &TorrentState, max_unchoked: usize) -> (usize, usize, bool) {
                 return None;
             }
             let bytes = s.uploaded_last_tick.load(Ordering::Relaxed);
-            Some(Cand { stats: s, score: 0.0, bytes_last_tick: bytes })
+            Some(Cand {
+                stats: s,
+                score: 0.0,
+                bytes_last_tick: bytes,
+            })
         })
         .collect();
 
@@ -160,7 +174,11 @@ fn tick_torrent(t: &TorrentState, max_unchoked: usize) -> (usize, usize, bool) {
         };
         c.score = 0.7 * rarity + 0.3 * speed;
     }
-    cands.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    cands.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     let mut newly_unchoked = 0usize;
     let mut newly_choked = 0usize;
@@ -276,7 +294,11 @@ mod tests {
     fn no_interested_peer_is_nothing_to_decide() {
         let t = seeding(100);
         peer(&t, 1, 50, false, 0);
-        assert_eq!(tick_torrent(&t, 4), (0, 0, false), "nobody asked for anything");
+        assert_eq!(
+            tick_torrent(&t, 4),
+            (0, 0, false),
+            "nobody asked for anything"
+        );
     }
 
     /// The point of the ranking: bytes go to whoever needs them most. A peer
@@ -290,8 +312,15 @@ mod tests {
 
         let (unchoked, choked, had) = tick_torrent(&t, 1);
         assert!(had);
-        assert_eq!((unchoked, choked), (1, 0), "one let through, one already choked");
-        assert!(!empty.choked.load(Ordering::Relaxed), "the one with nothing");
+        assert_eq!(
+            (unchoked, choked),
+            (1, 0),
+            "one let through, one already choked"
+        );
+        assert!(
+            !empty.choked.load(Ordering::Relaxed),
+            "the one with nothing"
+        );
         assert!(
             nearly_done.choked.load(Ordering::Relaxed),
             "a peer that is almost a seed does not outrank one that has nothing, \
@@ -308,7 +337,10 @@ mod tests {
         let busy = peer(&t, 2, 50, true, 999_999);
 
         tick_torrent(&t, 1);
-        assert!(!busy.choked.load(Ordering::Relaxed), "the one using the connection");
+        assert!(
+            !busy.choked.load(Ordering::Relaxed),
+            "the one using the connection"
+        );
         assert!(idle.choked.load(Ordering::Relaxed));
     }
 
@@ -317,11 +349,16 @@ mod tests {
     #[test]
     fn only_the_top_slots_are_let_through() {
         let t = seeding(100);
-        let peers: Vec<_> = (1..=5).map(|i| peer(&t, i, i as u32 * 10, true, 0)).collect();
+        let peers: Vec<_> = (1..=5)
+            .map(|i| peer(&t, i, i as u32 * 10, true, 0))
+            .collect();
 
         let (unchoked, _, _) = tick_torrent(&t, 2);
         assert_eq!(unchoked, 2);
-        let open = peers.iter().filter(|p| !p.choked.load(Ordering::Relaxed)).count();
+        let open = peers
+            .iter()
+            .filter(|p| !p.choked.load(Ordering::Relaxed))
+            .count();
         assert_eq!(open, 2, "two slots, two peers");
     }
 
@@ -374,9 +411,12 @@ mod tests {
         let p = peer(&t, 1, 0, true, 0);
         p.choked.store(true, Ordering::Relaxed);
         tick_torrent(&t, 4);
-        tokio::time::timeout(std::time::Duration::from_millis(100), p.punch_wake.notified())
-            .await
-            .expect("the unchoke must wake the session");
+        tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            p.punch_wake.notified(),
+        )
+        .await
+        .expect("the unchoke must wake the session");
     }
 
     /// ⭐ Turning the choker off releases every peer it had choked. Left as
@@ -384,9 +424,17 @@ mod tests {
     #[test]
     fn switching_the_choker_off_unchokes_everyone() {
         let t = seeding(100);
-        let peers: Vec<_> = (1..=5).map(|i| peer(&t, i, i as u32 * 10, true, 0)).collect();
+        let peers: Vec<_> = (1..=5)
+            .map(|i| peer(&t, i, i as u32 * 10, true, 0))
+            .collect();
         tick_torrent(&t, 1);
-        assert_eq!(peers.iter().filter(|p| p.choked.load(Ordering::Relaxed)).count(), 4);
+        assert_eq!(
+            peers
+                .iter()
+                .filter(|p| p.choked.load(Ordering::Relaxed))
+                .count(),
+            4
+        );
         assert_eq!(release_torrent(&t), 4);
         assert!(peers.iter().all(|p| !p.choked.load(Ordering::Relaxed)));
         assert_eq!(release_torrent(&t), 0, "a second release changes nothing");
@@ -414,17 +462,37 @@ mod tests {
     #[test]
     fn the_choker_switch_off_on_off() {
         let t = Arc::new(seeding(100));
-        let peers: Vec<_> = (1..=5).map(|i| peer(&t, i, i as u32 * 10, true, 0)).collect();
+        let peers: Vec<_> = (1..=5)
+            .map(|i| peer(&t, i, i as u32 * 10, true, 0))
+            .collect();
         // What a session does with the choker off: it unchokes whoever is
         // interested, itself.
-        peers.iter().for_each(|p| p.choked.store(false, Ordering::Relaxed));
-        let choked = || peers.iter().filter(|p| p.choked.load(Ordering::Relaxed)).count();
+        peers
+            .iter()
+            .for_each(|p| p.choked.store(false, Ordering::Relaxed));
+        let choked = || {
+            peers
+                .iter()
+                .filter(|p| p.choked.load(Ordering::Relaxed))
+                .count()
+        };
         let policy = crate::peer::extension::PeerPolicy::default();
         let mut listed = 0;
 
-        let active = choke_pass(&policy, || { listed += 1; vec![t.clone()] }, false);
+        let active = choke_pass(
+            &policy,
+            || {
+                listed += 1;
+                vec![t.clone()]
+            },
+            false,
+        );
         assert!(!active);
-        assert_eq!((choked(), listed), (0, 0), "off: no choke, no walk of the library");
+        assert_eq!(
+            (choked(), listed),
+            (0, 0),
+            "off: no choke, no walk of the library"
+        );
 
         policy.set_choking(true);
         policy.set_unchoke_slots(2);
@@ -469,6 +537,10 @@ mod tests {
     #[test]
     fn an_empty_or_short_bitfield_counts_what_is_there() {
         assert_eq!(count_bitfield_pieces(&[], 100), 0);
-        assert_eq!(count_bitfield_pieces(&[0xFF], 100), 8, "one byte, eight pieces");
+        assert_eq!(
+            count_bitfield_pieces(&[0xFF], 100),
+            8,
+            "one byte, eight pieces"
+        );
     }
 }

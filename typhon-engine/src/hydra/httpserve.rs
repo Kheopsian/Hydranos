@@ -14,7 +14,10 @@ pub struct Limits {
 
 impl Default for Limits {
     fn default() -> Self {
-        Limits { header_timeout: Duration::from_secs(30), max_connections: 1024 }
+        Limits {
+            header_timeout: Duration::from_secs(30),
+            max_connections: 1024,
+        }
     }
 }
 
@@ -41,7 +44,9 @@ pub async fn serve(
     let slots = Arc::new(tokio::sync::Semaphore::new(limits.max_connections.max(1)));
     let graceful = hyper_util::server::graceful::GracefulShutdown::new();
     let mut builder = hyper::server::conn::http1::Builder::new();
-    builder.timer(TokioTimer::new()).header_read_timeout(limits.header_timeout);
+    builder
+        .timer(TokioTimer::new())
+        .header_read_timeout(limits.header_timeout);
     tokio::pin!(shutdown);
 
     loop {
@@ -69,7 +74,9 @@ pub async fn serve(
             },
             _ = &mut shutdown => break,
         };
-        let svc = app.clone().layer(axum::Extension(axum::extract::ConnectInfo(peer)));
+        let svc = app
+            .clone()
+            .layer(axum::Extension(axum::extract::ConnectInfo(peer)));
         let svc = hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
             svc.clone().oneshot(req.map(axum::body::Body::new))
         });
@@ -106,7 +113,10 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
-        let limits = Limits { header_timeout: Duration::from_secs(1), max_connections: max };
+        let limits = Limits {
+            header_timeout: Duration::from_secs(1),
+            max_connections: max,
+        };
         tokio::spawn(serve(listener, app, limits, async move {
             let _ = rx.await;
         }));
@@ -130,9 +140,14 @@ mod tests {
 
     async fn get(addr: SocketAddr) -> String {
         let mut s = TcpStream::connect(addr).await.unwrap();
-        s.write_all(b"GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").await.unwrap();
+        s.write_all(b"GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
         let mut out = String::new();
-        tokio::time::timeout(Duration::from_secs(5), s.read_to_string(&mut out)).await.unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(5), s.read_to_string(&mut out))
+            .await
+            .unwrap()
+            .unwrap();
         out
     }
 
@@ -156,19 +171,30 @@ mod tests {
                         return None;
                     }
                     tokio::time::sleep(Duration::from_millis(500)).await;
-                    Some((Ok::<_, std::convert::Infallible>(format!("chunk{n};")), n + 1))
+                    Some((
+                        Ok::<_, std::convert::Infallible>(format!("chunk{n};")),
+                        n + 1,
+                    ))
                 });
                 axum::body::Body::from_stream(chunks)
             }),
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let limits = Limits { header_timeout: Duration::from_secs(1), max_connections: 4 };
+        let limits = Limits {
+            header_timeout: Duration::from_secs(1),
+            max_connections: 4,
+        };
         tokio::spawn(serve(listener, app, limits, std::future::pending()));
         let mut s = TcpStream::connect(addr).await.unwrap();
-        s.write_all(b"GET /slow HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").await.unwrap();
+        s.write_all(b"GET /slow HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
         let mut out = Vec::new();
-        tokio::time::timeout(Duration::from_secs(6), s.read_to_end(&mut out)).await.unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(6), s.read_to_end(&mut out))
+            .await
+            .unwrap()
+            .unwrap();
         let out = String::from_utf8_lossy(&out);
         assert!(out.contains("chunk4;"), "the 2.5 s response was cut: {out}");
     }
@@ -177,7 +203,10 @@ mod tests {
     async fn a_connection_that_sends_nothing_is_closed() {
         let (addr, _stop) = server(4).await;
         let mut s = TcpStream::connect(addr).await.unwrap();
-        assert!(closed_within(&mut s, Duration::from_secs(4)).await, "an idle connection stayed open");
+        assert!(
+            closed_within(&mut s, Duration::from_secs(4)).await,
+            "an idle connection stayed open"
+        );
     }
 
     #[tokio::test]
@@ -189,7 +218,10 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(300)).await;
             let _ = s.write_all(b"X-Slow: 1\r\n").await;
         }
-        assert!(closed_within(&mut s, Duration::from_secs(4)).await, "a request that never finished its headers stayed open");
+        assert!(
+            closed_within(&mut s, Duration::from_secs(4)).await,
+            "a request that never finished its headers stayed open"
+        );
     }
 
     #[tokio::test]
@@ -205,13 +237,22 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
         // A third is accepted by the kernel but not served while both are held.
         let mut third = TcpStream::connect(addr).await.unwrap();
-        third.write_all(b"GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").await.unwrap();
+        third
+            .write_all(b"GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
         let mut buf = [0u8; 64];
         let early = tokio::time::timeout(Duration::from_millis(300), third.read(&mut buf)).await;
-        assert!(early.is_err(), "the third connection was served while the limit was reached");
+        assert!(
+            early.is_err(),
+            "the third connection was served while the limit was reached"
+        );
         // The held ones time out (1 s), which frees the slots.
         let mut out = Vec::new();
-        tokio::time::timeout(Duration::from_secs(5), third.read_to_end(&mut out)).await.unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(5), third.read_to_end(&mut out))
+            .await
+            .unwrap()
+            .unwrap();
         assert!(String::from_utf8_lossy(&out).starts_with("HTTP/1.1 200"));
     }
 }

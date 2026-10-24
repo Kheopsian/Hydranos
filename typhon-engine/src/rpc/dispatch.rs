@@ -5,9 +5,9 @@
 //! served by a standalone engine binary; that binary and its socket are gone,
 //! and what the daemon still calls stayed here.
 
-use std::sync::Arc;
-use std::sync::atomic::Ordering;
 use serde_json::{json, Value};
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use crate::torrent::hex_encode;
 use crate::torrent::meta::TorrentStatus;
@@ -73,7 +73,11 @@ pub fn torrent_core(t: &Arc<crate::torrent::meta::TorrentState>) -> TorrentCore 
     } else if let Some(picker) = t.picker.get() {
         let n = picker.lock().unwrap().num_have();
         let total = t.meta.num_pieces();
-        let p = if total > 0 { n as f64 / total as f64 } else { 0.0 };
+        let p = if total > 0 {
+            n as f64 / total as f64
+        } else {
+            0.0
+        };
         (n, p)
     } else {
         // No picker = added in seed_mode = its data is trusted whole (that is
@@ -90,7 +94,13 @@ pub fn torrent_core(t: &Arc<crate::torrent::meta::TorrentState>) -> TorrentCore 
     } else {
         (num_have as u64 * t.meta.piece_length as u64).min(t.meta.total_size)
     };
-    TorrentCore { state, progress, total_done, is_paused, status_u8 }
+    TorrentCore {
+        state,
+        progress,
+        total_done,
+        is_paused,
+        status_u8,
+    }
 }
 
 /// The live peer table for one torrent: one row per connected peer, carrying
@@ -107,47 +117,66 @@ pub fn peers_json(t: &Arc<crate::torrent::meta::TorrentState>) -> Value {
     let now = std::time::SystemTime::now();
     let total_pieces = t.meta.num_pieces();
     // Iterate DashMap snapshot — called on-demand when user opens peer panel
-    let peers: Vec<Value> = t.peer_stats.iter().map(|entry| {
-        let p = entry.value();
-        let dur = now.duration_since(p.connected_at).unwrap_or_default().as_secs();
-        let interested = p.interested.load(Ordering::Relaxed);
-        let choked = p.choked.load(Ordering::Relaxed);
-        let is_seed = p.is_seed.load(Ordering::Relaxed);
-        let num_pieces = p.num_pieces_have.load(Ordering::Relaxed);
-        let mut flags = String::new();
-        if interested { flags.push('i'); }
-        if !choked { flags.push('U'); }
-        if p.is_encrypted { flags.push('E'); }
-        if p.fast_ext { flags.push('F'); }
-        if is_seed { flags.push('S'); }
-        let progress = if total_pieces > 0 {
-            num_pieces as f64 / total_pieces as f64
-        } else { 0.0 };
-        // Sample the rates here rather than from a background tick: this call
-        // only happens while someone is looking at the peer panel, so the delta
-        // lands over the caller's own polling interval and costs nothing the
-        // rest of the time. The first sample for a freshly connected peer
-        // reports 0 by design — RateTracker seeds its reference point before it
-        // will emit anything, which is what stops a peer that arrives with a
-        // resumed byte count from reporting an absurd one-off spike.
-        let dl_total = p.total_downloaded.load(Ordering::Relaxed);
-        let ul_total = p.total_uploaded.load(Ordering::Relaxed);
-        p.dl_rate.update(dl_total);
-        p.ul_rate.update(ul_total);
-        json!({
-            "ip": p.addr.ip().to_string(),
-            "port": p.addr.port(),
-            "client": p.client,
-            "dl_rate": p.dl_rate.get(),
-            "ul_rate": p.ul_rate.get(),
-            "total_download": dl_total,
-            "total_upload": ul_total,
-            "progress": progress,
-            "flags": flags,
-            "num_pieces": num_pieces,
-            "connection_duration": dur,
+    let peers: Vec<Value> = t
+        .peer_stats
+        .iter()
+        .map(|entry| {
+            let p = entry.value();
+            let dur = now
+                .duration_since(p.connected_at)
+                .unwrap_or_default()
+                .as_secs();
+            let interested = p.interested.load(Ordering::Relaxed);
+            let choked = p.choked.load(Ordering::Relaxed);
+            let is_seed = p.is_seed.load(Ordering::Relaxed);
+            let num_pieces = p.num_pieces_have.load(Ordering::Relaxed);
+            let mut flags = String::new();
+            if interested {
+                flags.push('i');
+            }
+            if !choked {
+                flags.push('U');
+            }
+            if p.is_encrypted {
+                flags.push('E');
+            }
+            if p.fast_ext {
+                flags.push('F');
+            }
+            if is_seed {
+                flags.push('S');
+            }
+            let progress = if total_pieces > 0 {
+                num_pieces as f64 / total_pieces as f64
+            } else {
+                0.0
+            };
+            // Sample the rates here rather than from a background tick: this call
+            // only happens while someone is looking at the peer panel, so the delta
+            // lands over the caller's own polling interval and costs nothing the
+            // rest of the time. The first sample for a freshly connected peer
+            // reports 0 by design — RateTracker seeds its reference point before it
+            // will emit anything, which is what stops a peer that arrives with a
+            // resumed byte count from reporting an absurd one-off spike.
+            let dl_total = p.total_downloaded.load(Ordering::Relaxed);
+            let ul_total = p.total_uploaded.load(Ordering::Relaxed);
+            p.dl_rate.update(dl_total);
+            p.ul_rate.update(ul_total);
+            json!({
+                "ip": p.addr.ip().to_string(),
+                "port": p.addr.port(),
+                "client": p.client,
+                "dl_rate": p.dl_rate.get(),
+                "ul_rate": p.ul_rate.get(),
+                "total_download": dl_total,
+                "total_upload": ul_total,
+                "progress": progress,
+                "flags": flags,
+                "num_pieces": num_pieces,
+                "connection_duration": dur,
+            })
         })
-    }).collect();
+        .collect();
     Value::Array(peers)
 }
 
@@ -187,16 +216,25 @@ pub fn torrent_to_json(t: &Arc<crate::torrent::meta::TorrentState>) -> Value {
     // seed obligation measured against that is satisfied early, and early is
     // the direction that costs a hit-and-run.
     let seeding_time = t.seed_time_now(now);
-    let current_tracker = t.current_tracker.lock()
+    let current_tracker = t
+        .current_tracker
+        .lock()
         .map(|s| s.clone())
         .unwrap_or_default();
     let scrape_seeders = t.scrape_seeders.load(Ordering::Relaxed);
     let scrape_leechers = t.scrape_leechers.load(Ordering::Relaxed);
     let announce_ok = t.last_announce_ok.load(Ordering::Relaxed);
-    let tracker_error = t.last_announce_error.lock()
+    let tracker_error = t
+        .last_announce_error
+        .lock()
         .map(|s| s.clone())
         .unwrap_or_default();
-    let tracker_host = t.live_trackers.read().iter().flatten().next()
+    let tracker_host = t
+        .live_trackers
+        .read()
+        .iter()
+        .flatten()
+        .next()
         .map(|u| tracker_host_of(u))
         .unwrap_or_default();
     let error_msg = t.error_msg.lock().map(|g| g.clone()).unwrap_or_default();
@@ -244,10 +282,22 @@ mod tests {
     /// breaker; getting it wrong splits one tracker into several.
     #[test]
     fn the_tracker_host_is_the_host_and_nothing_else() {
-        assert_eq!(tracker_host_of("https://tracker.example/announce"), "tracker.example");
-        assert_eq!(tracker_host_of("http://tracker.example:8080/x"), "tracker.example");
-        assert_eq!(tracker_host_of("udp://tracker.example:1337"), "tracker.example");
-        assert_eq!(tracker_host_of("tracker.example/announce"), "tracker.example");
+        assert_eq!(
+            tracker_host_of("https://tracker.example/announce"),
+            "tracker.example"
+        );
+        assert_eq!(
+            tracker_host_of("http://tracker.example:8080/x"),
+            "tracker.example"
+        );
+        assert_eq!(
+            tracker_host_of("udp://tracker.example:1337"),
+            "tracker.example"
+        );
+        assert_eq!(
+            tracker_host_of("tracker.example/announce"),
+            "tracker.example"
+        );
         assert_eq!(tracker_host_of(""), "");
     }
 }

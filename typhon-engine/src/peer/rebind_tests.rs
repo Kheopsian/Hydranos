@@ -21,7 +21,11 @@ fn engine(tag: &str) -> (Arc<TorrentManager>, Arc<DiskManager>) {
 
 /// A TCP port nobody holds right now.
 fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
 }
 
 fn binding(id: u32, ip: &str, port: u16) -> ResolvedBinding {
@@ -57,11 +61,27 @@ impl Listening {
         let first = bind_round(&cur).expect("first round binds");
         let handles = spawn_tcp(first, &mgr, &disk, &utp);
         let utp_task = spawn_utp(&utp, &cur, cur[0].addr.port(), &mgr, &disk);
-        Listening { cur, handles, utp_task, utp, mgr, disk }
+        Listening {
+            cur,
+            handles,
+            utp_task,
+            utp,
+            mgr,
+            disk,
+        }
     }
 
     async fn rebind(&mut self, port: u16) -> Result<u16, String> {
-        rebind(port, &mut self.cur, &mut self.handles, &mut self.utp_task, &self.utp, &self.mgr, &self.disk).await
+        rebind(
+            port,
+            &mut self.cur,
+            &mut self.handles,
+            &mut self.utp_task,
+            &self.utp,
+            &self.mgr,
+            &self.disk,
+        )
+        .await
     }
 }
 
@@ -74,7 +94,10 @@ async fn a_rebind_to_port_zero_is_refused_and_to_the_current_port_is_a_no_op() {
     assert_eq!(l.rebind(0).await, Err("port 0 is not a port".to_string()));
     assert_eq!(l.rebind(was).await, Ok(was));
     assert!(!l.handles[0].is_finished(), "the accept loop was disturbed");
-    assert!(accepts("127.0.0.1", was).await, "nothing listens on {was} any more");
+    assert!(
+        accepts("127.0.0.1", was).await,
+        "nothing listens on {was} any more"
+    );
 }
 
 /// ⭐ The new sockets are bound BEFORE the old ones go. A port already in use
@@ -87,14 +110,23 @@ async fn a_rebind_onto_a_busy_port_keeps_the_old_listener() {
     let squatter = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let busy = squatter.local_addr().unwrap().port();
 
-    let err = l.rebind(busy).await.expect_err("the port is held by someone else");
+    let err = l
+        .rebind(busy)
+        .await
+        .expect_err("the port is held by someone else");
     assert!(err.contains(&format!("still listening on {was}")), "{err}");
     // An accept loop that was aborted stops at its next poll: give it one.
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(l.cur[0].addr.port(), was, "the live binding moved anyway");
     assert_eq!(l.cur[0].advertised_port, was);
-    assert!(!l.handles[0].is_finished(), "the old accept loop was stopped");
-    assert!(accepts("127.0.0.1", was).await, "the old port stopped accepting");
+    assert!(
+        !l.handles[0].is_finished(),
+        "the old accept loop was stopped"
+    );
+    assert!(
+        accepts("127.0.0.1", was).await,
+        "the old port stopped accepting"
+    );
 }
 
 /// A successful rebind moves EVERY binding -- port and advertised port both --
@@ -110,12 +142,26 @@ async fn a_rebind_moves_every_binding_and_frees_the_old_port() {
     let now = free_port();
     assert_eq!(l.rebind(now).await, Ok(now));
     for b in &l.cur {
-        assert_eq!((b.addr.port(), b.advertised_port), (now, now), "binding {} did not move", b.id);
+        assert_eq!(
+            (b.addr.port(), b.advertised_port),
+            (now, now),
+            "binding {} did not move",
+            b.id
+        );
     }
     assert_eq!(l.handles.len(), 2, "one accept loop per binding");
-    assert!(accepts("127.0.0.1", now).await && accepts("127.0.0.2", now).await, "the new port does not accept");
-    assert!(!accepts("127.0.0.1", was).await, "the old port still accepts");
-    assert!(!accepts("127.0.0.2", was).await, "the second binding's old port still accepts");
+    assert!(
+        accepts("127.0.0.1", now).await && accepts("127.0.0.2", now).await,
+        "the new port does not accept"
+    );
+    assert!(
+        !accepts("127.0.0.1", was).await,
+        "the old port still accepts"
+    );
+    assert!(
+        !accepts("127.0.0.2", was).await,
+        "the second binding's old port still accepts"
+    );
 }
 
 /// A round is all or nothing: when the second binding cannot be bound, the
@@ -128,8 +174,12 @@ async fn a_round_that_cannot_bind_one_binding_holds_none() {
     let err = bind_round(&[binding(1, "127.0.0.1", free), binding(2, "127.0.0.1", busy)])
         .err()
         .expect("the second binding is busy");
-    assert!(err.contains(&format!("cannot bind 127.0.0.1:{busy}")), "{err}");
-    std::net::TcpListener::bind(("127.0.0.1", free)).expect("the first binding's socket was kept after the failure");
+    assert!(
+        err.contains(&format!("cannot bind 127.0.0.1:{busy}")),
+        "{err}"
+    );
+    std::net::TcpListener::bind(("127.0.0.1", free))
+        .expect("the first binding's socket was kept after the failure");
 }
 
 /// An `enable_ipv6` listener sits BESIDE the v4 one, so it must not also take
@@ -145,8 +195,14 @@ async fn an_only_v6_listener_does_not_take_v4() {
     b.only_v6 = true;
     let round = bind_round(&[b]).expect("a v6 wildcard binds");
     let port = round[0].0.local_addr().unwrap().port();
-    assert!(accepts("::1", port).await, "the v6 listener does not accept v6");
-    assert!(!accepts("127.0.0.1", port).await, "the v6-only listener took a v4 connection");
+    assert!(
+        accepts("::1", port).await,
+        "the v6 listener does not accept v6"
+    );
+    assert!(
+        !accepts("127.0.0.1", port).await,
+        "the v6-only listener took a v4 connection"
+    );
 }
 
 /// uTP follows the TCP port: the socket is replaced by one on the new port,
@@ -159,8 +215,15 @@ async fn a_rebind_moves_the_utp_socket_with_the_tcp_listeners() {
     let mut l = Listening::start("utp-move", vec![binding(1, "127.0.0.1", was)], utp);
     let now = free_port();
     assert_eq!(l.rebind(now).await, Ok(now));
-    assert_eq!(l.utp.get().unwrap().bind_addr().port(), now, "dials after the rebind leave from the old uTP port");
-    assert!(l.utp_task.as_ref().is_some_and(|t| !t.is_finished()), "no uTP accept loop on the new socket");
+    assert_eq!(
+        l.utp.get().unwrap().bind_addr().port(),
+        now,
+        "dials after the rebind leave from the old uTP port"
+    );
+    assert!(
+        l.utp_task.as_ref().is_some_and(|t| !t.is_finished()),
+        "no uTP accept loop on the new socket"
+    );
     // The old socket is cancelled, not just dropped: its port frees up.
     let mut freed = false;
     for _ in 0..40 {
@@ -186,22 +249,42 @@ async fn a_rebind_whose_utp_port_is_busy_changes_nothing() {
     let _udp_squatter = std::net::UdpSocket::bind(("0.0.0.0", target)).expect("hold the UDP port");
 
     let err = l.rebind(target).await.expect_err("the uTP port is held");
-    assert!(err.contains("uTP socket") && err.contains(&format!("still listening on {was}")), "{err}");
+    assert!(
+        err.contains("uTP socket") && err.contains(&format!("still listening on {was}")),
+        "{err}"
+    );
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(l.cur[0].addr.port(), was);
-    assert!(accepts("127.0.0.1", was).await, "the old TCP listener is gone");
-    assert!(!accepts("127.0.0.1", target).await, "the new TCP socket was left bound after the failure");
-    assert_eq!(l.utp.get().unwrap().bind_addr().port(), udp_before, "the uTP socket moved");
+    assert!(
+        accepts("127.0.0.1", was).await,
+        "the old TCP listener is gone"
+    );
+    assert!(
+        !accepts("127.0.0.1", target).await,
+        "the new TCP socket was left bound after the failure"
+    );
+    assert_eq!(
+        l.utp.get().unwrap().bind_addr().port(),
+        udp_before,
+        "the uTP socket moved"
+    );
 }
 
 /// An engine without uTP moves TCP only, and stays without it.
 #[tokio::test]
 async fn an_engine_without_utp_rebinds_tcp_only() {
     let was = free_port();
-    let mut l = Listening::start("no-utp", vec![binding(1, "127.0.0.1", was)], UtpHandle::off());
+    let mut l = Listening::start(
+        "no-utp",
+        vec![binding(1, "127.0.0.1", was)],
+        UtpHandle::off(),
+    );
     let now = free_port();
     assert_eq!(l.rebind(now).await, Ok(now));
-    assert!(l.utp.get().is_none() && l.utp_task.is_none(), "a uTP socket appeared");
+    assert!(
+        l.utp.get().is_none() && l.utp_task.is_none(),
+        "a uTP socket appeared"
+    );
     assert!(accepts("127.0.0.1", now).await);
 }
 
@@ -238,7 +321,16 @@ async fn the_listeners_close_when_the_stop_begins() {
     let stop = crate::stop::Stop::new();
     let (f, st) = (flag.clone(), stop.clone());
     let task = tokio::spawn(async move {
-        let _ = listen_until(vec![binding(1, "127.0.0.1", port)], port, mgr, disk, utp, f, st).await;
+        let _ = listen_until(
+            vec![binding(1, "127.0.0.1", port)],
+            port,
+            mgr,
+            disk,
+            utp,
+            f,
+            st,
+        )
+        .await;
     });
     for _ in 0..100 {
         if flag.load(std::sync::atomic::Ordering::Relaxed) {
@@ -246,8 +338,14 @@ async fn the_listeners_close_when_the_stop_begins() {
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    assert!(accepts("127.0.0.1", port).await, "the listener never came up");
-    assert!(std::net::UdpSocket::bind(("0.0.0.0", port)).is_err(), "the uTP socket is not held");
+    assert!(
+        accepts("127.0.0.1", port).await,
+        "the listener never came up"
+    );
+    assert!(
+        std::net::UdpSocket::bind(("0.0.0.0", port)).is_err(),
+        "the uTP socket is not held"
+    );
 
     stop.begin();
 
@@ -259,8 +357,14 @@ async fn the_listeners_close_when_the_stop_begins() {
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    assert!(closed, "the TCP listener still accepts after the stop began");
-    assert!(!flag.load(std::sync::atomic::Ordering::Relaxed), "the engine still says it listens");
+    assert!(
+        closed,
+        "the TCP listener still accepts after the stop began"
+    );
+    assert!(
+        !flag.load(std::sync::atomic::Ordering::Relaxed),
+        "the engine still says it listens"
+    );
     let mut udp_free = false;
     for _ in 0..100 {
         if std::net::UdpSocket::bind(("0.0.0.0", port)).is_ok() {
@@ -269,6 +373,9 @@ async fn the_listeners_close_when_the_stop_begins() {
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    assert!(udp_free, "the uTP socket is still held after the stop began");
+    assert!(
+        udp_free,
+        "the uTP socket is still held after the stop began"
+    );
     let _ = tokio::time::timeout(Duration::from_secs(2), task).await;
 }

@@ -31,8 +31,7 @@ fn bad(msg: impl std::fmt::Display) -> Response {
 
 /// Serialise a stored workflow back out, body included.
 fn to_json(s: &crate::store::StoredWorkflow) -> serde_json::Value {
-    let body: serde_json::Value =
-        serde_json::from_str(&s.body).unwrap_or(serde_json::Value::Null);
+    let body: serde_json::Value = serde_json::from_str(&s.body).unwrap_or(serde_json::Value::Null);
     serde_json::json!({
         "id": s.id,
         "name": s.name,
@@ -357,7 +356,13 @@ pub async fn preview(
     }
 
     let decided = tokio::task::spawn_blocking(move || decide(&state, &w)).await;
-    let Decision { matches, report, rechecked, no_longer, .. } = match decided {
+    let Decision {
+        matches,
+        report,
+        rechecked,
+        no_longer,
+        ..
+    } = match decided {
         Ok(Ok(d)) => d,
         Ok(Err(e)) => return bad(e),
         Err(e) => return bad(e),
@@ -397,7 +402,10 @@ pub async fn preview(
 fn preview_completion(state: &AppState, w: &Workflow) -> Result<serde_json::Value, String> {
     let mut facts = gather_all(state, rulesrun::Want::of(w));
     facts.retain(|f| f.progress < 100.0);
-    let unbounded = Workflow { cap: usize::MAX, ..w.clone() };
+    let unbounded = Workflow {
+        cap: usize::MAX,
+        ..w.clone()
+    };
     let (matches, report) = rulesrun::evaluate(&unbounded, &facts)?;
     let sample: Vec<serde_json::Value> = matches
         .iter()
@@ -426,7 +434,10 @@ fn preview_completion(state: &AppState, w: &Workflow) -> Result<serde_json::Valu
 fn preview_added(state: &AppState, w: &Workflow) -> Result<serde_json::Value, String> {
     let mut facts = gather_all(state, rulesrun::Want::of(w));
     facts.retain(|f| f.added_age < RECENT_ADD_SECS);
-    let unbounded = Workflow { cap: usize::MAX, ..w.clone() };
+    let unbounded = Workflow {
+        cap: usize::MAX,
+        ..w.clone()
+    };
     let (matches, report) = rulesrun::evaluate(&unbounded, &facts)?;
     let sample: Vec<serde_json::Value> = matches
         .iter()
@@ -506,8 +517,12 @@ fn decide(state: &AppState, w: &Workflow) -> Result<Decision, String> {
     };
     // The same computation the list's "Hardlinks" column is built from, cf
     // `rulesrun::links_from_measured`.
-    let rulesrun::StoredLinks { mut entries, origin, mut measured_at, links } =
-        rulesrun::links_from_measured(&cat, measured);
+    let rulesrun::StoredLinks {
+        mut entries,
+        origin,
+        mut measured_at,
+        links,
+    } = rulesrun::links_from_measured(&cat, measured);
     let mut facts = gather_all_with(state, &links, rulesrun::Want::of(w));
     let (first, _) = rulesrun::evaluate(w, &facts)?;
 
@@ -543,7 +558,10 @@ fn decide(state: &AppState, w: &Workflow) -> Result<Decision, String> {
         .publish_link_summary(rulesrun::link_summary(&cat, &origin, &measured_at, &links));
     rulesrun::patch_link_facts(&mut facts, &links, &want);
     let (second, report) = rulesrun::evaluate(w, &facts)?;
-    let matches: Vec<_> = second.into_iter().filter(|m| want.contains(&m.info_hash)).collect();
+    let matches: Vec<_> = second
+        .into_iter()
+        .filter(|m| want.contains(&m.info_hash))
+        .collect();
     Ok(Decision {
         no_longer: first.len().saturating_sub(matches.len()),
         rechecked: picked.len(),
@@ -621,7 +639,13 @@ pub async fn run_now(
 
 /// One pass of one workflow. The single path both the timer and the button use.
 pub fn run_one(state: &AppState, w: &Workflow, dry: bool) -> serde_json::Value {
-    let Decision { matches, mut report, links, rechecked, no_longer } = match decide(state, w) {
+    let Decision {
+        matches,
+        mut report,
+        links,
+        rechecked,
+        no_longer,
+    } = match decide(state, w) {
         Ok(d) => d,
         Err(e) => {
             return serde_json::json!({"error": e});
@@ -695,7 +719,8 @@ fn apply_matches(
     let move_hook = |engine: &str, hash: &str, to: &str, allow: bool| {
         crate::api::queue_location_move(state, engine, hash, to, allow)
     };
-    let trackers_hook = |_engine: &str, hash: &str, urls: &[String]| crate::api::add_trackers_to(state, hash, urls);
+    let trackers_hook =
+        |_engine: &str, hash: &str, urls: &[String]| crate::api::add_trackers_to(state, hash, urls);
 
     for m in matches {
         let action_name = m
@@ -942,10 +967,13 @@ static EVENT_WAKE: tokio::sync::Notify = tokio::sync::Notify::const_new();
 /// Written to the store first, like a completion, and for the same reason: a
 /// restart between the add and the run loses nothing.
 pub fn record_added(state: &AppState, session: &str, info_hash: &str) {
-    let Ok(store) = state.store.lock() else { return };
+    let Ok(store) = state.store.lock() else {
+        return;
+    };
     let listening = store.workflows().unwrap_or_default().iter().any(|s| {
         s.enabled
-            && serde_json::from_str::<Workflow>(&s.body).is_ok_and(|w| w.trigger == rules::Trigger::Added)
+            && serde_json::from_str::<Workflow>(&s.body)
+                .is_ok_and(|w| w.trigger == rules::Trigger::Added)
     });
     if !listening {
         return;
@@ -961,7 +989,9 @@ pub fn record_added(state: &AppState, session: &str, info_hash: &str) {
 /// Write finished downloads down, then run the event workflows on them.
 pub fn record_completions(state: &AppState, batch: &[(String, [u8; 20])]) {
     {
-        let Ok(store) = state.store.lock() else { return };
+        let Ok(store) = state.store.lock() else {
+            return;
+        };
         for (session, ih) in batch {
             let hash: String = ih.iter().map(|b| format!("{b:02x}")).collect();
             if let Err(e) = store.push_workflow_event("completed", session, &hash) {
@@ -982,7 +1012,9 @@ pub fn run_events(state: &AppState) -> usize {
 fn run_events_at(state: &AppState, now: i64) -> usize {
     let _one = EVENT_DRAIN.lock().unwrap_or_else(|p| p.into_inner());
     let (events, workflows) = {
-        let Ok(store) = state.store.lock() else { return 0 };
+        let Ok(store) = state.store.lock() else {
+            return 0;
+        };
         let events = store.workflow_events(1000).unwrap_or_default();
         if events.is_empty() {
             return 0;
@@ -1001,8 +1033,10 @@ fn run_events_at(state: &AppState, now: i64) -> usize {
     for ev in events {
         // No workflow to hand it to, or an event nothing here handles: the
         // row is cleared all the same, or it would wait forever.
-        let listening: Vec<&Workflow> =
-            workflows.iter().filter(|w| w.trigger.event_name() == ev.event).collect();
+        let listening: Vec<&Workflow> = workflows
+            .iter()
+            .filter(|w| w.trigger.event_name() == ev.event)
+            .collect();
         let facts = if !listening.is_empty() {
             let Ok(store) = state.store.read() else { break };
             let f = rulesrun::gather_one(&state.engines, &store, &ev.session, &ev.info_hash);
@@ -1019,7 +1053,9 @@ fn run_events_at(state: &AppState, now: i64) -> usize {
                     Ok((matches, mut report)) => {
                         apply_matches(state, w, &matches, &Default::default(), &mut report)
                     }
-                    Err(e) => tracing::warn!(workflow = %w.name, error = %e, "event workflow will not compile, skipped"),
+                    Err(e) => {
+                        tracing::warn!(workflow = %w.name, error = %e, "event workflow will not compile, skipped")
+                    }
                 }
             }
         }
@@ -1106,20 +1142,33 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_json(resp).await;
         let offered = body["fields"].as_array().expect("a fields array");
-        assert_eq!(offered.len(), rules::FIELDS.len(), "the catalogue is served whole");
+        assert_eq!(
+            offered.len(),
+            rules::FIELDS.len(),
+            "the catalogue is served whole"
+        );
 
         let known: Vec<&str> = rules::FIELDS.iter().map(|(n, _)| *n).collect();
         for f in offered {
             let name = f["name"].as_str().expect("a field has a name");
-            assert!(known.contains(&name), "{name} is offered but unknown to the engine");
-            assert!(!f["label"].as_str().unwrap_or_default().is_empty(), "{name} has a label");
+            assert!(
+                known.contains(&name),
+                "{name} is offered but unknown to the engine"
+            );
+            assert!(
+                !f["label"].as_str().unwrap_or_default().is_empty(),
+                "{name} has a label"
+            );
             assert!(
                 !f["operators"].as_array().expect("operators").is_empty(),
                 "{name} offers at least one operator"
             );
             assert_eq!(
                 f["operators"].as_array().unwrap().len(),
-                f["operators_labelled"].as_array().expect("labelled operators").len(),
+                f["operators_labelled"]
+                    .as_array()
+                    .expect("labelled operators")
+                    .len(),
                 "{name}: every operator has a label"
             );
         }
@@ -1208,13 +1257,19 @@ mod tests {
         v["when"] = serde_json::json!({"kind": "all", "of": [
             {"kind": "cond", "field": "no_such_field", "op": "eq", "value": "x"}
         ]});
-        assert!(parse(&v.to_string()).is_err(), "an unknown field is refused");
+        assert!(
+            parse(&v.to_string()).is_err(),
+            "an unknown field is refused"
+        );
 
         let mut v2: serde_json::Value = serde_json::from_str(&wf_json("bad regex")).unwrap();
         v2["when"] = serde_json::json!({"kind": "all", "of": [
             {"kind": "cond", "field": "name", "op": "matches", "value": "([unclosed"}
         ]});
-        assert!(parse(&v2.to_string()).is_err(), "an uncompilable regex is refused");
+        assert!(
+            parse(&v2.to_string()).is_err(),
+            "an uncompilable regex is refused"
+        );
     }
 
     #[test]
@@ -1238,19 +1293,32 @@ mod tests {
         .await;
         assert_eq!(resp.status(), StatusCode::OK, "the save was accepted");
 
-        let listed = body_json(list(State(s.state.clone()), RawQuery(None), keyed(KEY)).await).await;
+        let listed =
+            body_json(list(State(s.state.clone()), RawQuery(None), keyed(KEY)).await).await;
         let rows = listed.as_array().expect("an array");
         assert_eq!(rows.len(), 1, "exactly the workflow that was saved");
         assert_eq!(rows[0]["name"], serde_json::json!("ratio reached"));
-        assert!(!rows[0]["when"].is_null(), "the when clause survived the round trip");
-        assert!(!rows[0]["then"].is_null(), "the then clause survived the round trip");
+        assert!(
+            !rows[0]["when"].is_null(),
+            "the when clause survived the round trip"
+        );
+        assert!(
+            !rows[0]["then"].is_null(),
+            "the then clause survived the round trip"
+        );
         assert_eq!(rows[0]["enabled"], serde_json::json!(true));
     }
 
     #[tokio::test]
     async fn saving_an_invalid_workflow_is_a_bad_request_not_a_panic() {
         let s = st("rules-badsave");
-        let resp = save(State(s.state.clone()), RawQuery(None), keyed(KEY), "{".into()).await;
+        let resp = save(
+            State(s.state.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            "{".into(),
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 }
@@ -1284,23 +1352,42 @@ mod handler_tests {
         let s = st("rules2-auth");
         let no_key = HeaderMap::new();
         assert_eq!(
-            remove(State(s.state.clone()), Path("wf1".into()), RawQuery(None), no_key.clone())
+            remove(
+                State(s.state.clone()),
+                Path("wf1".into()),
+                RawQuery(None),
+                no_key.clone()
+            )
+            .await
+            .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            run_now(
+                State(s.state.clone()),
+                Path("wf1".into()),
+                RawQuery(None),
+                no_key.clone()
+            )
+            .await
+            .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            preview(
+                State(s.state.clone()),
+                RawQuery(None),
+                no_key.clone(),
+                wf("x")
+            )
+            .await
+            .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            activity(State(s.state.clone()), RawQuery(None), no_key)
                 .await
                 .status(),
-            StatusCode::UNAUTHORIZED
-        );
-        assert_eq!(
-            run_now(State(s.state.clone()), Path("wf1".into()), RawQuery(None), no_key.clone())
-                .await
-                .status(),
-            StatusCode::UNAUTHORIZED
-        );
-        assert_eq!(
-            preview(State(s.state.clone()), RawQuery(None), no_key.clone(), wf("x")).await.status(),
-            StatusCode::UNAUTHORIZED
-        );
-        assert_eq!(
-            activity(State(s.state.clone()), RawQuery(None), no_key).await.status(),
             StatusCode::UNAUTHORIZED
         );
     }
@@ -1311,11 +1398,18 @@ mod handler_tests {
     #[tokio::test]
     async fn a_preview_reports_without_storing_the_workflow() {
         let s = st("rules2-preview");
-        let resp = preview(State(s.state.clone()), RawQuery(None), keyed(KEY), wf("dry run")).await;
+        let resp = preview(
+            State(s.state.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            wf("dry run"),
+        )
+        .await;
         assert!(resp.status().is_success(), "got {:?}", resp.status());
         let _ = body_json(resp).await;
 
-        let listed = body_json(list(State(s.state.clone()), RawQuery(None), keyed(KEY)).await).await;
+        let listed =
+            body_json(list(State(s.state.clone()), RawQuery(None), keyed(KEY)).await).await;
         assert_eq!(
             listed.as_array().map(|a| a.len()),
             Some(0),
@@ -1332,8 +1426,13 @@ mod handler_tests {
         v["when"] = serde_json::json!({"kind": "all", "of": [
             {"kind": "cond", "field": "no_such_field", "op": "eq", "value": "x"}
         ]});
-        let resp =
-            preview(State(s.state.clone()), RawQuery(None), keyed(KEY), v.to_string()).await;
+        let resp = preview(
+            State(s.state.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            v.to_string(),
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
@@ -1375,10 +1474,19 @@ mod handler_tests {
     #[tokio::test]
     async fn a_workflow_can_be_saved_run_and_removed() {
         let s = st("rules2-life");
-        let saved = save(State(s.state.clone()), RawQuery(None), keyed(KEY), wf("ratio")).await;
+        let saved = save(
+            State(s.state.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            wf("ratio"),
+        )
+        .await;
         assert!(saved.status().is_success());
         let body = body_json(saved).await;
-        let id = body["id"].as_str().expect("the saved workflow has an id").to_string();
+        let id = body["id"]
+            .as_str()
+            .expect("the saved workflow has an id")
+            .to_string();
 
         let ran = run_now(
             State(s.state.clone()),
@@ -1387,12 +1495,17 @@ mod handler_tests {
             keyed(KEY),
         )
         .await;
-        assert!(ran.status().is_success(), "a pass on an empty library still runs: {:?}", ran.status());
+        assert!(
+            ran.status().is_success(),
+            "a pass on an empty library still runs: {:?}",
+            ran.status()
+        );
 
         let gone = remove(State(s.state.clone()), Path(id), RawQuery(None), keyed(KEY)).await;
         assert!(gone.status().is_success());
 
-        let listed = body_json(list(State(s.state.clone()), RawQuery(None), keyed(KEY)).await).await;
+        let listed =
+            body_json(list(State(s.state.clone()), RawQuery(None), keyed(KEY)).await).await;
         assert_eq!(listed.as_array().map(|a| a.len()), Some(0));
     }
 
@@ -1403,7 +1516,11 @@ mod handler_tests {
         let body =
             body_json(activity(State(s.state.clone()), RawQuery(None), keyed(KEY)).await).await;
         let empty = body.as_array().map(|a| a.is_empty()).unwrap_or(false)
-            || body.get("activity").and_then(|a| a.as_array()).map(|a| a.is_empty()).unwrap_or(false);
+            || body
+                .get("activity")
+                .and_then(|a| a.as_array())
+                .map(|a| a.is_empty())
+                .unwrap_or(false);
         assert!(empty, "got {body}");
     }
 
@@ -1435,7 +1552,10 @@ mod handler_tests {
         })
         .to_string();
         let err = parse(&body).expect_err("an unconditioned workflow is refused");
-        assert!(err.contains("condition"), "the reason names the problem: {err}");
+        assert!(
+            err.contains("condition"),
+            "the reason names the problem: {err}"
+        );
     }
 
     /// ⭐ A workflow with no action at all is refused rather than stored: it
@@ -1450,7 +1570,10 @@ mod handler_tests {
         })
         .to_string();
         let err = parse(&body).expect_err("an actionless workflow is refused");
-        assert!(err.contains("action"), "the reason names the problem: {err}");
+        assert!(
+            err.contains("action"),
+            "the reason names the problem: {err}"
+        );
     }
 }
 
@@ -1483,9 +1606,18 @@ mod event_tests {
 
     /// A download under way: added, not seeded, nothing on disk.
     fn add(s: &TestState, name: &str) -> String {
-        crate::api::add_torrent_bytes(&s.state, &torrent_bytes(name), "", "/tmp", "", true, false, "hoard")
-            .unwrap_or_else(|e| panic!("add {name}: {e}"))
-            .0
+        crate::api::add_torrent_bytes(
+            &s.state,
+            &torrent_bytes(name),
+            "",
+            "/tmp",
+            "",
+            true,
+            false,
+            "hoard",
+        )
+        .unwrap_or_else(|e| panic!("add {name}: {e}"))
+        .0
     }
 
     async fn save_wf(s: &TestState, trigger: &str, tag: &str) -> String {
@@ -1501,7 +1633,13 @@ mod event_tests {
             "when": when,
             "then": [{"type": "add_tags", "tags": [tag]}],
         });
-        let r = save(State(s.state.clone()), RawQuery(None), keyed(KEY), body.to_string()).await;
+        let r = save(
+            State(s.state.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            body.to_string(),
+        )
+        .await;
         let status = r.status();
         let v = body_json(r).await;
         assert!(status.is_success(), "saved: {v}");
@@ -1513,7 +1651,13 @@ mod event_tests {
     }
 
     fn waiting(s: &TestState) -> usize {
-        s.state.store.lock().unwrap().workflow_events(100).unwrap().len()
+        s.state
+            .store
+            .lock()
+            .unwrap()
+            .workflow_events(100)
+            .unwrap()
+            .len()
     }
 
     /// ⭐ "On add": the add itself queues the event, the drain runs the add
@@ -1530,8 +1674,15 @@ mod event_tests {
         let hash = add(&s, "arrival");
         assert_eq!(waiting(&s), 1, "the add is queued before anything runs");
         assert_eq!(run_events(&s.state), 1);
-        assert_eq!(tags(&s, &hash), vec!["new".to_string()], "only the add workflow ran");
-        assert!(tags(&s, &before).is_empty(), "added before: not an event, untouched");
+        assert_eq!(
+            tags(&s, &hash),
+            vec!["new".to_string()],
+            "only the add workflow ran"
+        );
+        assert!(
+            tags(&s, &before).is_empty(),
+            "added before: not an event, untouched"
+        );
         assert_eq!(waiting(&s), 0);
         assert_eq!(run_events(&s.state), 0, "nothing to replay");
     }
@@ -1542,8 +1693,17 @@ mod event_tests {
     async fn an_imported_torrent_fires_no_add_workflow() {
         let s = st("wf-ev-import");
         save_wf(&s, "added", "new").await;
-        crate::api::add_torrent_bytes_as(&s.state, &torrent_bytes("imported"), "", "/tmp", "", true, false, "hoard")
-            .expect("added");
+        crate::api::add_torrent_bytes_as(
+            &s.state,
+            &torrent_bytes("imported"),
+            "",
+            "/tmp",
+            "",
+            true,
+            false,
+            "hoard",
+        )
+        .expect("added");
         assert_eq!(waiting(&s), 0);
     }
 
@@ -1558,14 +1718,30 @@ mod event_tests {
             "when": {"kind": "all", "of": []},
             "then": [{"type": "add_tags", "tags": ["x"]}],
         });
-        let v = body_json(preview(State(s.state.clone()), RawQuery(None), keyed(KEY), body.to_string()).await).await;
+        let v = body_json(
+            preview(
+                State(s.state.clone()),
+                RawQuery(None),
+                keyed(KEY),
+                body.to_string(),
+            )
+            .await,
+        )
+        .await;
         assert_eq!(v["trigger"], "added", "got {v}");
-        assert_eq!((v["recent"].as_u64(), v["would_apply"].as_u64()), (Some(1), Some(1)), "got {v}");
+        assert_eq!(
+            (v["recent"].as_u64(), v["would_apply"].as_u64()),
+            (Some(1), Some(1)),
+            "got {v}"
+        );
 
         let id = save_wf(&s, "added", "x").await;
         let r = run_now(State(s.state.clone()), Path(id), RawQuery(None), keyed(KEY)).await;
         assert_eq!(r.status(), StatusCode::BAD_REQUEST);
-        assert!(body_json(r).await["error"].as_str().unwrap().contains("torrent is added"));
+        assert!(body_json(r).await["error"]
+            .as_str()
+            .unwrap()
+            .contains("torrent is added"));
     }
 
     fn torrent_bytes_private(name: &str) -> Vec<u8> {
@@ -1581,7 +1757,13 @@ mod event_tests {
             "id": "", "name": "wf", "enabled": true, "trigger": trigger,
             "when": {"kind": "all", "of": []}, "then": then,
         });
-        let r = save(State(s.state.clone()), RawQuery(None), keyed(KEY), body.to_string()).await;
+        let r = save(
+            State(s.state.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            body.to_string(),
+        )
+        .await;
         let status = r.status();
         let v = body_json(r).await;
         assert!(status.is_success(), "saved: {v}");
@@ -1590,8 +1772,22 @@ mod event_tests {
 
     fn trackers_of(s: &TestState, hash: &str) -> Vec<String> {
         let ih = crate::store::hex20(hash).unwrap();
-        let e = s.state.engines.engines().iter().find(|e| e.id == "hoard").unwrap();
-        e.manager.get(&ih).unwrap().live_trackers.read().iter().flatten().cloned().collect()
+        let e = s
+            .state
+            .engines
+            .engines()
+            .iter()
+            .find(|e| e.id == "hoard")
+            .unwrap();
+        e.manager
+            .get(&ih)
+            .unwrap()
+            .live_trackers
+            .read()
+            .iter()
+            .flatten()
+            .cloned()
+            .collect()
     }
 
     /// "Add trackers" on arrival adds to a public torrent, and NEVER to a
@@ -1599,15 +1795,33 @@ mod event_tests {
     #[tokio::test]
     async fn trackers_are_added_on_arrival_but_never_to_a_private_torrent() {
         let s = st("wf-addtrk");
-        save_wf_then(&s, "added", serde_json::json!([
-            {"type": "add_trackers", "urls": ["udp://open.example:1337/announce"]}
-        ])).await;
+        save_wf_then(
+            &s,
+            "added",
+            serde_json::json!([
+                {"type": "add_trackers", "urls": ["udp://open.example:1337/announce"]}
+            ]),
+        )
+        .await;
         let public = add(&s, "public");
-        let private = crate::api::add_torrent_bytes(&s.state, &torrent_bytes_private("private"), "", "/tmp", "", true, false, "hoard")
-            .expect("added").0;
+        let private = crate::api::add_torrent_bytes(
+            &s.state,
+            &torrent_bytes_private("private"),
+            "",
+            "/tmp",
+            "",
+            true,
+            false,
+            "hoard",
+        )
+        .expect("added")
+        .0;
         run_events(&s.state);
         assert!(trackers_of(&s, &public).contains(&"udp://open.example:1337/announce".to_string()));
-        assert!(trackers_of(&s, &private).is_empty(), "a private torrent keeps its own trackers only");
+        assert!(
+            trackers_of(&s, &private).is_empty(),
+            "a private torrent keeps its own trackers only"
+        );
     }
 
     /// A refused URL never reaches a torrent: the workflow does not save.
@@ -1622,7 +1836,13 @@ mod event_tests {
         ] {
             let body = serde_json::json!({"id": "", "name": "x", "enabled": true, "trigger": "added",
                 "when": {"kind": "all", "of": []}, "then": then});
-            let r = save(State(s.state.clone()), RawQuery(None), keyed(KEY), body.to_string()).await;
+            let r = save(
+                State(s.state.clone()),
+                RawQuery(None),
+                keyed(KEY),
+                body.to_string(),
+            )
+            .await;
             assert_eq!(r.status(), StatusCode::BAD_REQUEST, "accepted {body}");
         }
     }
@@ -1639,19 +1859,47 @@ mod event_tests {
         std::fs::create_dir_all(&src).unwrap();
         std::fs::create_dir_all(&dst).unwrap();
         std::fs::write(src.join("moved"), vec![0u8; 16384]).unwrap();
-        let hash = crate::api::add_torrent_bytes(&s.state, &torrent_bytes("moved"), "", src.to_str().unwrap(), "", true, true, "hoard")
-            .expect("added").0;
-        save_wf_then(&s, "completed", serde_json::json!([
-            {"type": "set_location", "to": dst.to_str().unwrap()}
-        ])).await;
-        s.state.store.lock().unwrap().push_workflow_event("completed", "hoard", &hash).unwrap();
+        let hash = crate::api::add_torrent_bytes(
+            &s.state,
+            &torrent_bytes("moved"),
+            "",
+            src.to_str().unwrap(),
+            "",
+            true,
+            true,
+            "hoard",
+        )
+        .expect("added")
+        .0;
+        save_wf_then(
+            &s,
+            "completed",
+            serde_json::json!([
+                {"type": "set_location", "to": dst.to_str().unwrap()}
+            ]),
+        )
+        .await;
+        s.state
+            .store
+            .lock()
+            .unwrap()
+            .push_workflow_event("completed", "hoard", &hash)
+            .unwrap();
         run_events(&s.state);
         let jobs = s.state.store.lock().unwrap().list_jobs(10).unwrap();
         let moves: Vec<_> = jobs.iter().filter(|j| j.info_hash == hash).collect();
         assert_eq!(moves.len(), 1, "one move queued: {jobs:?}");
-        assert!(moves[0].params.contains("final"), "towards the folder asked: {:?}", moves[0].params);
+        assert!(
+            moves[0].params.contains("final"),
+            "towards the folder asked: {:?}",
+            moves[0].params
+        );
         let act = s.state.store.lock().unwrap().workflow_activity(10).unwrap();
-        assert_eq!((act[0].action.as_str(), act[0].outcome.as_str()), ("set_location", "applied"), "{act:?}");
+        assert_eq!(
+            (act[0].action.as_str(), act[0].outcome.as_str()),
+            ("set_location", "applied"),
+            "{act:?}"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1666,25 +1914,54 @@ mod event_tests {
         save_wf(&s, "completed", "done").await;
         save_wf(&s, "schedule", "timer").await;
 
-        let mut rx = s.state.engines.take_completions().expect("the stream is there to take");
+        let mut rx = s
+            .state
+            .engines
+            .take_completions()
+            .expect("the stream is there to take");
         let ih = crate::store::hex20(&hash).unwrap();
-        let engine = s.state.engines.engines().iter().find(|e| e.id == "hoard").unwrap();
+        let engine = s
+            .state
+            .engines
+            .engines()
+            .iter()
+            .find(|e| e.id == "hoard")
+            .unwrap();
         engine.manager.on_completed(&ih);
         let got = rx.try_recv().expect("the hook reported the completion");
         assert_eq!(got, ("hoard".to_string(), ih));
 
         record_completions(&s.state, &[got]);
-        assert_eq!(tags(&s, &hash), vec!["done".to_string()], "only the completion workflow ran");
-        assert!(tags(&s, &other).is_empty(), "a torrent that did not finish is untouched");
+        assert_eq!(
+            tags(&s, &hash),
+            vec!["done".to_string()],
+            "only the completion workflow ran"
+        );
+        assert!(
+            tags(&s, &other).is_empty(),
+            "a torrent that did not finish is untouched"
+        );
         assert_eq!(waiting(&s), 0, "the event is dealt with and removed");
 
         let act = s.state.store.lock().unwrap().workflow_activity(10).unwrap();
         assert_eq!(act.len(), 1);
-        assert_eq!((act[0].action.as_str(), act[0].outcome.as_str()), ("add_tags", "applied"));
+        assert_eq!(
+            (act[0].action.as_str(), act[0].outcome.as_str()),
+            ("add_tags", "applied")
+        );
 
         // Nothing is left to replay: another drain does nothing.
         assert_eq!(run_events(&s.state), 0);
-        assert_eq!(s.state.store.lock().unwrap().workflow_activity(10).unwrap().len(), 1);
+        assert_eq!(
+            s.state
+                .store
+                .lock()
+                .unwrap()
+                .workflow_activity(10)
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     /// With no completion workflow the queue must not grow: every event is
@@ -1694,7 +1971,10 @@ mod event_tests {
         let s = st("wf-ev-none");
         let hash = add(&s, "lonely");
         save_wf(&s, "schedule", "timer").await;
-        record_completions(&s.state, &[("hoard".into(), crate::store::hex20(&hash).unwrap())]);
+        record_completions(
+            &s.state,
+            &[("hoard".into(), crate::store::hex20(&hash).unwrap())],
+        );
         assert_eq!(waiting(&s), 0);
         assert!(tags(&s, &hash).is_empty());
     }
@@ -1717,12 +1997,26 @@ mod event_tests {
         save_wf(&s, "completed", "done").await;
         record_completions(&s.state, &[("hoard".into(), [0x42; 20])]);
         let now = crate::store::now_secs();
-        assert_eq!(run_events_at(&s.state, now + EVENT_PATIENCE_SECS - 60), 0, "still inside the hour");
+        assert_eq!(
+            run_events_at(&s.state, now + EVENT_PATIENCE_SECS - 60),
+            0,
+            "still inside the hour"
+        );
         assert_eq!(waiting(&s), 1);
-        assert_eq!(run_events_at(&s.state, now + EVENT_PATIENCE_SECS + 1), 1, "past it: dealt with");
+        assert_eq!(
+            run_events_at(&s.state, now + EVENT_PATIENCE_SECS + 1),
+            1,
+            "past it: dealt with"
+        );
         assert_eq!(waiting(&s), 0);
         assert!(
-            s.state.store.lock().unwrap().workflow_activity(10).unwrap().is_empty(),
+            s.state
+                .store
+                .lock()
+                .unwrap()
+                .workflow_activity(10)
+                .unwrap()
+                .is_empty(),
             "and nothing was done in its name"
         );
     }
@@ -1736,14 +2030,24 @@ mod event_tests {
         let hash = add(&s, "restarted");
         save_wf(&s, "completed", "done").await;
         // Written by the previous process, which stopped before acting on it.
-        s.state.store.lock().unwrap().push_workflow_event("completed", "hoard", &hash).unwrap();
+        s.state
+            .store
+            .lock()
+            .unwrap()
+            .push_workflow_event("completed", "hoard", &hash)
+            .unwrap();
         tick(&s.state, crate::store::now_secs()).await;
         assert_eq!(tags(&s, &hash), vec!["done".to_string()]);
         assert_eq!(waiting(&s), 0);
     }
 
     /// A receiver in a test: records each POST body and answers `status`.
-    async fn hook_receiver(status: u16) -> (String, std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>) {
+    async fn hook_receiver(
+        status: u16,
+    ) -> (
+        String,
+        std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+    ) {
         let got = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let log = got.clone();
         let app = axum::Router::new().route(
@@ -1751,7 +2055,9 @@ mod event_tests {
             axum::routing::post(move |body: String| {
                 let log = log.clone();
                 async move {
-                    log.lock().unwrap().push(serde_json::from_str(&body).unwrap_or(serde_json::Value::Null));
+                    log.lock()
+                        .unwrap()
+                        .push(serde_json::from_str(&body).unwrap_or(serde_json::Value::Null));
                     axum::http::StatusCode::from_u16(status).unwrap()
                 }
             }),
@@ -1770,7 +2076,13 @@ mod event_tests {
             "when": {"kind": "all", "of": []},
             "then": [{"type": "add_tags", "tags": ["done"]}, {"type": "webhook", "url": url}],
         });
-        let r = save(State(s.state.clone()), RawQuery(None), keyed(KEY), body.to_string()).await;
+        let r = save(
+            State(s.state.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            body.to_string(),
+        )
+        .await;
         assert!(r.status().is_success());
     }
 
@@ -1784,16 +2096,25 @@ mod event_tests {
         save_hook_wf(&s, &url).await;
         let st2 = s.state.clone();
         let ih = crate::store::hex20(&hash).unwrap();
-        tokio::task::spawn_blocking(move || record_completions(&st2, &[("hoard".into(), ih)])).await.unwrap();
+        tokio::task::spawn_blocking(move || record_completions(&st2, &[("hoard".into(), ih)]))
+            .await
+            .unwrap();
 
         let posts = got.lock().unwrap().clone();
         assert_eq!(posts.len(), 1, "one call");
         assert_eq!(posts[0]["event"], "completed");
         assert_eq!(posts[0]["torrent"]["info_hash"], hash);
-        assert_eq!(posts[0]["torrent"]["tags"], serde_json::json!([]), "the facts the rule matched on, before its own tag");
+        assert_eq!(
+            posts[0]["torrent"]["tags"],
+            serde_json::json!([]),
+            "the facts the rule matched on, before its own tag"
+        );
         assert!(posts[0]["content"].as_str().unwrap().contains("hooked"));
         let act = s.state.store.lock().unwrap().workflow_activity(10).unwrap();
-        assert_eq!((act[0].action.as_str(), act[0].outcome.as_str()), ("add_tags+webhook", "applied"));
+        assert_eq!(
+            (act[0].action.as_str(), act[0].outcome.as_str()),
+            ("add_tags+webhook", "applied")
+        );
     }
 
     /// A receiver that refuses is a failed action, said in the activity log
@@ -1806,13 +2127,19 @@ mod event_tests {
         save_hook_wf(&s, &url).await;
         let st2 = s.state.clone();
         let ih = crate::store::hex20(&hash).unwrap();
-        tokio::task::spawn_blocking(move || record_completions(&st2, &[("hoard".into(), ih)])).await.unwrap();
+        tokio::task::spawn_blocking(move || record_completions(&st2, &[("hoard".into(), ih)]))
+            .await
+            .unwrap();
 
         assert_eq!(got.lock().unwrap().len(), 1, "a 4xx is not retried");
         let act = s.state.store.lock().unwrap().workflow_activity(10).unwrap();
         assert_eq!(act[0].outcome, "failed");
         assert!(act[0].detail.contains("404"), "{}", act[0].detail);
-        assert!(!act[0].detail.contains("SECRET"), "the URL stays out of the log: {}", act[0].detail);
+        assert!(
+            !act[0].detail.contains("SECRET"),
+            "the URL stays out of the log: {}",
+            act[0].detail
+        );
     }
 
     /// A disabled completion workflow is the same as none.
@@ -1827,7 +2154,10 @@ mod event_tests {
             w.enabled = false;
             store.put_workflow(&w).unwrap();
         }
-        record_completions(&s.state, &[("hoard".into(), crate::store::hex20(&hash).unwrap())]);
+        record_completions(
+            &s.state,
+            &[("hoard".into(), crate::store::hex20(&hash).unwrap())],
+        );
         assert!(tags(&s, &hash).is_empty());
         assert_eq!(waiting(&s), 0);
     }
@@ -1854,7 +2184,13 @@ mod event_tests {
             "when": {"kind": "all", "of": []},
             "then": [{"type": "add_tags", "tags": ["done"]}],
         });
-        let r = preview(State(s.state.clone()), RawQuery(None), keyed(KEY), body.to_string()).await;
+        let r = preview(
+            State(s.state.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            body.to_string(),
+        )
+        .await;
         let v = body_json(r).await;
         assert_eq!(v["trigger"], "completed");
         assert_eq!(v["downloading"], 2);
@@ -1881,7 +2217,12 @@ mod event_tests {
         };
         s.state.store.lock().unwrap().put_workflow(&old).unwrap();
         let rows = body_json(list(State(s.state.clone()), RawQuery(None), keyed(KEY)).await).await;
-        let old = rows.as_array().unwrap().iter().find(|r| r["id"] == "old").unwrap();
+        let old = rows
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["id"] == "old")
+            .unwrap();
         assert_eq!(old["trigger"], "schedule");
     }
 }
@@ -1919,20 +2260,39 @@ mod one_number_tests {
     /// Seeded (the data is trusted whole, as for a cross-seed) and stopped:
     /// no network, and `total_done` is the full size.
     fn add(s: &TestState, name: &str, save_path: &str) -> String {
-        crate::api::add_torrent_bytes(&s.state, &torrent_bytes(name), "", save_path, "", true, true, "hoard")
-            .unwrap_or_else(|e| panic!("add {name}: {e}"))
-            .0
+        crate::api::add_torrent_bytes(
+            &s.state,
+            &torrent_bytes(name),
+            "",
+            save_path,
+            "",
+            true,
+            true,
+            "hoard",
+        )
+        .unwrap_or_else(|e| panic!("add {name}: {e}"))
+        .0
     }
 
     fn set_transfer(s: &TestState, hash: &str, up: u64, down: u64) {
-        let t = s.state.engines.get("hoard").unwrap().manager
+        let t = s
+            .state
+            .engines
+            .get("hoard")
+            .unwrap()
+            .manager
             .get(&crate::store::hex20(hash).unwrap())
             .expect("the engine holds it");
-        t.total_uploaded.store(up, std::sync::atomic::Ordering::Relaxed);
-        t.total_downloaded.store(down, std::sync::atomic::Ordering::Relaxed);
+        t.total_uploaded
+            .store(up, std::sync::atomic::Ordering::Relaxed);
+        t.total_downloaded
+            .store(down, std::sync::atomic::Ordering::Relaxed);
     }
 
-    fn by_hash(rows: &serde_json::Value, key: &str) -> std::collections::HashMap<String, serde_json::Value> {
+    fn by_hash(
+        rows: &serde_json::Value,
+        key: &str,
+    ) -> std::collections::HashMap<String, serde_json::Value> {
         rows.as_array()
             .expect("rows")
             .iter()
@@ -1958,17 +2318,31 @@ mod one_number_tests {
         let page = crate::api::engine_page_value(&s.state, "hoard", "sort=ratio&order=desc").await;
         let rows = by_hash(&page["rows"], "info_hash");
         assert_eq!(rows[&xseed]["ratio"], serde_json::json!(3));
-        assert_eq!(rows[&two]["ratio"], serde_json::json!(2), "a normal download is unchanged");
+        assert_eq!(
+            rows[&two]["ratio"],
+            serde_json::json!(2),
+            "a normal download is unchanged"
+        );
         assert_eq!(rows[&one]["ratio"], serde_json::json!(1));
 
         // The sort key: 3 puts it first. Under the old key it was 0, last.
-        let order: Vec<&str> = page["rows"].as_array().unwrap().iter()
-            .map(|r| r["info_hash"].as_str().unwrap()).collect();
+        let order: Vec<&str> = page["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["info_hash"].as_str().unwrap())
+            .collect();
         assert_eq!(order, vec![xseed.as_str(), two.as_str(), one.as_str()]);
 
         // The workflow facts.
         let facts = gather_all(&s.state, Default::default());
-        let ratio_of = |h: &str| facts.iter().find(|f| f.info_hash == h).expect("facts").ratio;
+        let ratio_of = |h: &str| {
+            facts
+                .iter()
+                .find(|f| f.info_hash == h)
+                .expect("facts")
+                .ratio
+        };
         assert_eq!(ratio_of(&xseed), 3.0);
         assert_eq!(ratio_of(&two), 2.0);
         assert_eq!(ratio_of(&one), 1.0);
@@ -1976,7 +2350,9 @@ mod one_number_tests {
         // And the qBittorrent API, since 4.4: it answered 0 for every torrent
         // until then (the 3.x key spelling it reproduced, see qbitrow.rs).
         // *arr acts on this number, so it is the same one as everywhere else.
-        let qbit = serde_json::Value::Array(crate::api::engine_qbit_rows(&s.state, "hoard", 0, None, None));
+        let qbit = serde_json::Value::Array(crate::api::engine_qbit_rows(
+            &s.state, "hoard", 0, None, None,
+        ));
         let qbit = by_hash(&qbit, "hash");
         assert_eq!(qbit[&xseed]["ratio"], serde_json::json!(3));
         assert_eq!(qbit[&two]["ratio"], serde_json::json!(2));
@@ -2013,9 +2389,14 @@ mod one_number_tests {
             };
             let cat = rulesrun::catalogue_from(&s.state.engines, &stored);
             assert_eq!(cat.len(), 3);
-            let plan = cat.iter().map(|c| (c.info_hash.clone(), c.paths().unwrap())).collect();
+            let plan = cat
+                .iter()
+                .map(|c| (c.info_hash.clone(), c.paths().unwrap()))
+                .collect();
             let measured = rulesrun::stat_plan_with(plan, 2);
-            let rows: Vec<_> = cat.iter().zip(&measured)
+            let rows: Vec<_> = cat
+                .iter()
+                .zip(&measured)
                 .map(|(c, (_, fs))| {
                     let stats: Vec<_> = fs.iter().map(|(_, st)| *st).collect();
                     rulesrun::link_row(c, &stats, measured_at)
@@ -2026,46 +2407,102 @@ mod one_number_tests {
         // Added after the sweep: no measurement at all.
         let never = add(&s, "never.bin", root_s);
 
-        assert_eq!(crate::linkscan::refresh_summary(&s.state.engines, &s.state.store), Some(3));
+        assert_eq!(
+            crate::linkscan::refresh_summary(&s.state.engines, &s.state.store),
+            Some(3)
+        );
 
-        let page = crate::api::engine_page_value(&s.state, "hoard", "sort=external_links&order=asc").await;
-        let order: Vec<&str> = page["rows"].as_array().unwrap().iter()
-            .map(|r| r["info_hash"].as_str().unwrap()).collect();
-        assert_eq!(order.last(), Some(&never.as_str()), "unmeasured sorts last ascending");
+        let page =
+            crate::api::engine_page_value(&s.state, "hoard", "sort=external_links&order=asc").await;
+        let order: Vec<&str> = page["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["info_hash"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            order.last(),
+            Some(&never.as_str()),
+            "unmeasured sorts last ascending"
+        );
         assert_eq!(order[2], lib.as_str());
-        let desc = crate::api::engine_page_value(&s.state, "hoard", "sort=external_links&order=desc").await;
-        let order_desc: Vec<&str> = desc["rows"].as_array().unwrap().iter()
-            .map(|r| r["info_hash"].as_str().unwrap()).collect();
+        let desc =
+            crate::api::engine_page_value(&s.state, "hoard", "sort=external_links&order=desc")
+                .await;
+        let order_desc: Vec<&str> = desc["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["info_hash"].as_str().unwrap())
+            .collect();
         assert_eq!(order_desc[0], lib.as_str());
-        assert_eq!(order_desc.last(), Some(&never.as_str()), "and last descending too");
+        assert_eq!(
+            order_desc.last(),
+            Some(&never.as_str()),
+            "and last descending too"
+        );
 
         let col = by_hash(&page["rows"], "info_hash");
-        assert_eq!(col[&ours]["external_links"], serde_json::json!(0), "a cross-seed of ours is not an outsider");
+        assert_eq!(
+            col[&ours]["external_links"],
+            serde_json::json!(0),
+            "a cross-seed of ours is not an outsider"
+        );
         assert_eq!(col[&cross]["external_links"], serde_json::json!(0));
-        assert_eq!(col[&lib]["external_links"], serde_json::json!(1), "the library holds a name");
-        assert_eq!(col[&never]["external_links"], serde_json::Value::Null, "never measured is not 0");
-        assert_eq!(col[&ours]["links_checked_at"], serde_json::json!(measured_at));
+        assert_eq!(
+            col[&lib]["external_links"],
+            serde_json::json!(1),
+            "the library holds a name"
+        );
+        assert_eq!(
+            col[&never]["external_links"],
+            serde_json::Value::Null,
+            "never measured is not 0"
+        );
+        assert_eq!(
+            col[&ours]["links_checked_at"],
+            serde_json::json!(measured_at)
+        );
         assert_eq!(col[&never]["links_checked_at"], serde_json::Value::Null);
         // The "Hardlinks" column counts every name, ours included: the very
         // case where the two columns part -- a cross-seed is shared, not kept.
-        assert_eq!(col[&ours]["link_count"], serde_json::json!(2), "our cross-seed is a second name");
+        assert_eq!(
+            col[&ours]["link_count"],
+            serde_json::json!(2),
+            "our cross-seed is a second name"
+        );
         assert_eq!(col[&cross]["link_count"], serde_json::json!(2));
         assert_eq!(col[&lib]["link_count"], serde_json::json!(2));
-        assert_eq!(col[&never]["link_count"], serde_json::Value::Null, "never measured is not 1");
-        let by_links = crate::api::engine_page_value(&s.state, "hoard", "sort=link_count&order=asc").await;
-        let last = by_links["rows"].as_array().unwrap().last().unwrap()["info_hash"].as_str().unwrap().to_string();
+        assert_eq!(
+            col[&never]["link_count"],
+            serde_json::Value::Null,
+            "never measured is not 1"
+        );
+        let by_links =
+            crate::api::engine_page_value(&s.state, "hoard", "sort=link_count&order=asc").await;
+        let last = by_links["rows"].as_array().unwrap().last().unwrap()["info_hash"]
+            .as_str()
+            .unwrap()
+            .to_string();
         assert_eq!(last, never, "unmeasured sorts last on this column too");
 
-        let w = parse(&serde_json::json!({
-            "id": "", "name": "noHL", "enabled": true, "interval_secs": 3600, "cap": 10,
-            "when": {"kind": "cond", "field": "external_links", "op": "eq", "value": "0"},
-            "then": [{"type": "add_tags", "tags": ["noHL"]}],
-        }).to_string()).expect("a valid workflow");
+        let w = parse(
+            &serde_json::json!({
+                "id": "", "name": "noHL", "enabled": true, "interval_secs": 3600, "cap": 10,
+                "when": {"kind": "cond", "field": "external_links", "op": "eq", "value": "0"},
+                "then": [{"type": "add_tags", "tags": ["noHL"]}],
+            })
+            .to_string(),
+        )
+        .expect("a valid workflow");
         let d = decide(&s.state, &w).expect("decided");
 
         // Torrent by torrent: the column's value is the workflow's value.
         for (hash, row) in &col {
-            let wf = d.links.get(hash).map(|f| serde_json::json!(f.external_links));
+            let wf = d
+                .links
+                .get(hash)
+                .map(|f| serde_json::json!(f.external_links));
             assert_eq!(
                 row["external_links"],
                 wf.unwrap_or(serde_json::Value::Null),
@@ -2074,9 +2511,11 @@ mod one_number_tests {
         }
         // And the condition matches exactly the rows the column shows at 0.
         let mut matched: Vec<&str> = d.matches.iter().map(|m| m.info_hash.as_str()).collect();
-        let mut zero: Vec<&str> = col.iter()
+        let mut zero: Vec<&str> = col
+            .iter()
             .filter(|(_, r)| r["external_links"] == serde_json::json!(0))
-            .map(|(h, _)| h.as_str()).collect();
+            .map(|(h, _)| h.as_str())
+            .collect();
         matched.sort();
         zero.sort();
         assert_eq!(matched, zero);
@@ -2086,10 +2525,21 @@ mod one_number_tests {
         let after = crate::api::engine_page_value(&s.state, "hoard", "").await;
         let after = by_hash(&after["rows"], "info_hash");
         for (hash, row) in &after {
-            let wf = d.links.get(hash).map(|f| serde_json::json!(f.external_links));
-            assert_eq!(row["external_links"], wf.unwrap_or(serde_json::Value::Null), "{hash} after the pass");
+            let wf = d
+                .links
+                .get(hash)
+                .map(|f| serde_json::json!(f.external_links));
+            assert_eq!(
+                row["external_links"],
+                wf.unwrap_or(serde_json::Value::Null),
+                "{hash} after the pass"
+            );
         }
         assert!(after[&ours]["links_checked_at"].as_i64().unwrap() > measured_at);
-        assert_eq!(after[&lib]["links_checked_at"], serde_json::json!(measured_at), "not a candidate, not re-measured");
+        assert_eq!(
+            after[&lib]["links_checked_at"],
+            serde_json::json!(measured_at),
+            "not a candidate, not re-measured"
+        );
     }
 }

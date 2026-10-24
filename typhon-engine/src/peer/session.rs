@@ -80,8 +80,8 @@ const CHOKE_TICK: Duration = Duration::from_secs(10);
 const MAX_DEFERRED_REQUESTS: usize = 512;
 
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -150,7 +150,10 @@ struct ServedDicts {
 fn served_dicts() -> &'static parking_lot::Mutex<ServedDicts> {
     static DICTS: std::sync::OnceLock<parking_lot::Mutex<ServedDicts>> = std::sync::OnceLock::new();
     DICTS.get_or_init(|| {
-        parking_lot::Mutex::new(ServedDicts { lru: lru::LruCache::unbounded(), bytes: 0 })
+        parking_lot::Mutex::new(ServedDicts {
+            lru: lru::LruCache::unbounded(),
+            bytes: 0,
+        })
     })
 }
 
@@ -187,7 +190,13 @@ fn served_info_dict(torrent: &TorrentState, total: usize) -> Option<Arc<Vec<u8>>
 /// Checked when the request arrives AND again when a deferred one finally goes
 /// out: a torrent paused, or a peer choked, while a request waited behind the
 /// upload cap must not be served it afterwards.
-fn may_serve(torrent: &TorrentState, stats: &PeerStats, index: u32, begin: u32, length: u32) -> bool {
+fn may_serve(
+    torrent: &TorrentState,
+    stats: &PeerStats,
+    index: u32,
+    begin: u32,
+    length: u32,
+) -> bool {
     // A peer must not name a piece past the end, nor a block past the end of its
     // piece: a seeding torrent "has" every index, so without this an out-of-range
     // Request reaches the disk layer, where begin/length drive the read size and
@@ -247,9 +256,17 @@ async fn serve_block(
                     return false;
                 }
                 let served = match framed.get_ref().plain_tcp() {
-                    Some(sock) => crate::disk::serve_block_sendfile(
-                        sock, &file, foff, index, begin, length as usize,
-                    ).await,
+                    Some(sock) => {
+                        crate::disk::serve_block_sendfile(
+                            sock,
+                            &file,
+                            foff,
+                            index,
+                            begin,
+                            length as usize,
+                        )
+                        .await
+                    }
                     None => Ok(false),
                 };
                 match served {
@@ -277,19 +294,27 @@ async fn serve_block(
                 .await
                 .is_err()
             {
-                tracing::debug!("[peer-debug] {} BREAK send-piece failed (idx={}, begin={}, len={})", addr, index, begin, len);
+                tracing::debug!(
+                    "[peer-debug] {} BREAK send-piece failed (idx={}, begin={}, len={})",
+                    addr,
+                    index,
+                    begin,
+                    len
+                );
                 return false;
             }
             torrent.total_uploaded.fetch_add(len, Ordering::Relaxed);
             stats.total_uploaded.fetch_add(len, Ordering::Relaxed);
-            stats
-                .uploaded_last_tick
-                .fetch_add(len, Ordering::Relaxed);
+            stats.uploaded_last_tick.fetch_add(len, Ordering::Relaxed);
         }
         Err(_) => {
             if fast_ext {
                 framed
-                    .send(Message::Reject { index, begin, length })
+                    .send(Message::Reject {
+                        index,
+                        begin,
+                        length,
+                    })
                     .await
                     .ok();
             }
@@ -314,11 +339,21 @@ pub async fn run(
     let client = choking::client_from_peer_id(&remote_peer_id);
     tracing::debug!("[peer-debug] {} SESSION-START remote_peer_id={:02x?} client={:?} encrypted={} fast_ext={} lt_ext={}", addr, remote_peer_id, client, is_encrypted, fast_ext, lt_ext);
     // Cut off on this torrent for sending pieces that failed their hash.
-    if torrent.picker.get().is_some_and(|p| p.lock().unwrap().is_banned(addr.ip())) {
+    if torrent
+        .picker
+        .get()
+        .is_some_and(|p| p.lock().unwrap().is_banned(addr.ip()))
+    {
         tracing::debug!("[peer-debug] {} EARLY-RETURN banned on this torrent", addr);
         return;
     }
-    let stats = Arc::new(PeerStats::new(addr, remote_peer_id, client, is_encrypted, fast_ext));
+    let stats = Arc::new(PeerStats::new(
+        addr,
+        remote_peer_id,
+        client,
+        is_encrypted,
+        fast_ext,
+    ));
     // RAII: inserts into torrent.peer_stats and bumps peers_connected;
     // removes + decrements on drop (panic-safe).
     let guard = PeerGuard::new(torrent.clone(), stats.clone());
@@ -358,8 +393,15 @@ pub async fn run(
         } else {
             None
         };
-        let payload = Bytes::from(extension::build_extension_handshake(listen_port, meta_size, torrent.policy()));
-        framed.send(Message::Extended { ext_id: 0, payload }).await.ok();
+        let payload = Bytes::from(extension::build_extension_handshake(
+            listen_port,
+            meta_size,
+            torrent.policy(),
+        ));
+        framed
+            .send(Message::Extended { ext_id: 0, payload })
+            .await
+            .ok();
         Some(PeerExt::new())
     } else {
         None
@@ -380,7 +422,8 @@ pub async fn run(
     // (hoard), sendfile bypasses the ARC on ZoL -> the served hot-set would fill
     // dumb page-cache LRU and starve the ARC; the buffered read()+cache path
     // keeps blocks in the ARC (compressed, scan-resistant, prefetch).
-    let serve_zerocopy = !is_encrypted && !crate::disk::path_is_zfs(torrent.save_path.read().as_path());
+    let serve_zerocopy =
+        !is_encrypted && !crate::disk::path_is_zfs(torrent.save_path.read().as_path());
     let mut local_choking_gen: u32 = stats.choking_gen.load(Ordering::Relaxed);
 
     // Both timers are built once and reset in place. Building them inside the
@@ -419,7 +462,8 @@ pub async fn run(
     let mut ul_gate = Gate::default();
     // BEP 9 blocks sent to this peer (see `metadata_requests_allowed`).
     let mut metadata_answers: u32 = 0;
-    let mut ul_queue: std::collections::VecDeque<(u32, u32, u32)> = std::collections::VecDeque::new();
+    let mut ul_queue: std::collections::VecDeque<(u32, u32, u32)> =
+        std::collections::VecDeque::new();
     let mut ul_wait: Option<tokio::time::Instant> = None;
     // The download side gates the REQUESTS we send: a block is booked when it
     // is asked for, which is when its bytes are decided, and the pipeline is
@@ -468,7 +512,11 @@ pub async fn run(
         if cur_gen != local_choking_gen {
             local_choking_gen = cur_gen;
             let we_choke = stats.choked.load(Ordering::Relaxed);
-            let msg = if we_choke { Message::Choke } else { Message::Unchoke };
+            let msg = if we_choke {
+                Message::Choke
+            } else {
+                Message::Unchoke
+            };
             if framed.send(msg).await.is_err() {
                 tracing::debug!("[peer-debug] {} BREAK send-choke-msg failed", addr);
                 break;
@@ -482,7 +530,16 @@ pub async fn run(
             while let Some(&(index, begin, length)) = ul_queue.front() {
                 if !may_serve(&torrent, &stats, index, begin, length) {
                     ul_queue.pop_front();
-                    if fast_ext && framed.send(Message::Reject { index, begin, length }).await.is_err() {
+                    if fast_ext
+                        && framed
+                            .send(Message::Reject {
+                                index,
+                                begin,
+                                length,
+                            })
+                            .await
+                            .is_err()
+                    {
                         broken = true;
                         break;
                     }
@@ -491,7 +548,20 @@ pub async fn run(
                 match ul_gate.admit(length as u64, &torrent.rate_chain(Dir::Up)) {
                     Admit::Now => {
                         ul_queue.pop_front();
-                        if !serve_block(&mut framed, &torrent, &disk, &stats, addr, serve_zerocopy, fast_ext, index, begin, length).await {
+                        if !serve_block(
+                            &mut framed,
+                            &torrent,
+                            &disk,
+                            &stats,
+                            addr,
+                            serve_zerocopy,
+                            fast_ext,
+                            index,
+                            begin,
+                            length,
+                        )
+                        .await
+                        {
                             broken = true;
                             break;
                         }
@@ -514,7 +584,14 @@ pub async fn run(
             let cancels = dl.release_stalled(std::time::Instant::now());
             if !cancels.is_empty() {
                 for (index, begin, length) in cancels {
-                    framed.feed(Message::Cancel { index, begin, length }).await.ok();
+                    framed
+                        .feed(Message::Cancel {
+                            index,
+                            begin,
+                            length,
+                        })
+                        .await
+                        .ok();
                 }
                 if framed.flush().await.is_err() {
                     tracing::debug!("[peer-debug] {} BREAK flush-cancels failed", addr);
@@ -545,7 +622,11 @@ pub async fn run(
             let mut queued = false;
             for (idx, off, len) in requests {
                 if framed
-                    .feed(Message::Request { index: idx, begin: off, length: len })
+                    .feed(Message::Request {
+                        index: idx,
+                        begin: off,
+                        length: len,
+                    })
                     .await
                     .is_err()
                 {
@@ -985,7 +1066,12 @@ pub async fn run(
 
     let dl_total = stats.total_downloaded.load(Ordering::Relaxed);
     let ul_total = stats.total_uploaded.load(Ordering::Relaxed);
-    tracing::debug!("[peer-debug] {} SESSION-END dl={} ul={}", addr, dl_total, ul_total);
+    tracing::debug!(
+        "[peer-debug] {} SESSION-END dl={} ul={}",
+        addr,
+        dl_total,
+        ul_total
+    );
     dl.on_disconnect();
     // guard drops here -> peer_stats.remove + peers_connected/interested decrement
     drop(guard);
@@ -1021,8 +1107,14 @@ mod idle_deadline_tests {
             Message::Bitfield { data: Bytes::new() },
             Message::HaveAll,
             Message::HaveNone,
-            Message::Extended { ext_id: 0, payload: Bytes::new() },
-            Message::Unknown { id: 99, payload: Bytes::new() },
+            Message::Extended {
+                ext_id: 0,
+                payload: Bytes::new(),
+            },
+            Message::Unknown {
+                id: 99,
+                payload: Bytes::new(),
+            },
         ] {
             assert!(pushes_idle_deadline(&m), "{m:?} should push the deadline");
         }
@@ -1050,7 +1142,11 @@ mod metadata_serve_tests {
         bytes.extend_from_slice(&info);
         bytes.extend_from_slice(b"ee");
         let meta = crate::torrent::metainfo::parse_torrent_bytes(&bytes).unwrap();
-        let t = Arc::new(TorrentState::new(meta, std::path::PathBuf::from("/tmp"), true));
+        let t = Arc::new(TorrentState::new(
+            meta,
+            std::path::PathBuf::from("/tmp"),
+            true,
+        ));
         let reads = Arc::new(AtomicUsize::new(0));
         let counted = reads.clone();
         let _ = t.blob_source.set(Arc::new(move |_: &str| {
@@ -1075,14 +1171,20 @@ mod metadata_serve_tests {
     #[test]
     fn a_private_torrent_does_not_hand_out_its_info_dict() {
         let (t, reads) = served("private.bin", true);
-        assert_eq!(kind(&serve_metadata_block(&t, 0)), extension::METADATA_REJECT);
+        assert_eq!(
+            kind(&serve_metadata_block(&t, 0)),
+            extension::METADATA_REJECT
+        );
         assert_eq!(reads.load(Ordering::SeqCst), 0, "nothing was read for it");
     }
 
     #[test]
     fn a_block_past_the_end_is_refused_without_reading_the_store() {
         let (t, reads) = served("past-end.bin", false);
-        assert_eq!(kind(&serve_metadata_block(&t, 999)), extension::METADATA_REJECT);
+        assert_eq!(
+            kind(&serve_metadata_block(&t, 999)),
+            extension::METADATA_REJECT
+        );
         assert_eq!(reads.load(Ordering::SeqCst), 0);
     }
 
@@ -1091,7 +1193,10 @@ mod metadata_serve_tests {
     fn a_peer_asking_again_and_again_costs_one_store_read() {
         let (t, reads) = served("again.bin", false);
         for round in 0..50u32 {
-            assert_eq!(kind(&serve_metadata_block(&t, round % 4)), extension::METADATA_DATA);
+            assert_eq!(
+                kind(&serve_metadata_block(&t, round % 4)),
+                extension::METADATA_DATA
+            );
         }
         assert_eq!(reads.load(Ordering::SeqCst), 1);
     }
@@ -1107,7 +1212,9 @@ mod request_bounds_tests {
 
     /// A seeding torrent that has every piece, with an unchoked peer.
     fn seeding() -> (Arc<TorrentState>, PeerStats) {
-        let mut info = format!("d6:lengthi{TOTAL}e4:name9:bound.bin12:piece lengthi{PIECE}e6:pieces60:").into_bytes();
+        let mut info =
+            format!("d6:lengthi{TOTAL}e4:name9:bound.bin12:piece lengthi{PIECE}e6:pieces60:")
+                .into_bytes();
         info.extend([3u8; 60]);
         info.push(b'e');
         let mut bytes = b"d4:info".to_vec();
@@ -1115,9 +1222,20 @@ mod request_bounds_tests {
         bytes.push(b'e');
         let meta = crate::torrent::metainfo::parse_torrent_bytes(&bytes).unwrap();
         assert_eq!(meta.num_pieces(), 3);
-        let t = Arc::new(TorrentState::new(meta, std::path::PathBuf::from("/tmp"), true));
-        t.status.store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
-        let stats = PeerStats::new("192.168.99.7:6881".parse().unwrap(), [1u8; 20], "test".into(), false, false);
+        let t = Arc::new(TorrentState::new(
+            meta,
+            std::path::PathBuf::from("/tmp"),
+            true,
+        ));
+        t.status
+            .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+        let stats = PeerStats::new(
+            "192.168.99.7:6881".parse().unwrap(),
+            [1u8; 20],
+            "test".into(),
+            false,
+            false,
+        );
         stats.choked.store(false, Ordering::Relaxed);
         (t, stats)
     }
@@ -1142,25 +1260,43 @@ mod request_bounds_tests {
         let (t, s) = seeding();
         assert!(!ask(&t, &s, 3, 0, 1), "the first index past the end");
         assert!(!ask(&t, &s, 3, 0, PIECE), "a whole block of it");
-        assert!(!ask(&t, &s, u32::MAX, 0, 1), "an index at the top of the range");
+        assert!(
+            !ask(&t, &s, u32::MAX, 0, 1),
+            "an index at the top of the range"
+        );
     }
 
     #[test]
     fn a_block_past_the_end_of_its_piece_is_refused() {
         let (t, s) = seeding();
         assert!(!ask(&t, &s, 0, PIECE, 1), "a block starting past its piece");
-        assert!(!ask(&t, &s, 0, PIECE - 1, 2), "a block running one byte past its piece");
-        assert!(!ask(&t, &s, 2, 0, 101), "past the end of the short last piece");
-        assert!(!ask(&t, &s, 2, 100, 1), "starting at the end of the last piece");
+        assert!(
+            !ask(&t, &s, 0, PIECE - 1, 2),
+            "a block running one byte past its piece"
+        );
+        assert!(
+            !ask(&t, &s, 2, 0, 101),
+            "past the end of the short last piece"
+        );
+        assert!(
+            !ask(&t, &s, 2, 100, 1),
+            "starting at the end of the last piece"
+        );
     }
 
     /// `begin + length` must be added wide: as a u32 it wraps back into range.
     #[test]
     fn a_begin_and_length_that_wrap_are_refused() {
         let (t, s) = seeding();
-        assert!(!ask(&t, &s, 0, u32::MAX, PIECE), "begin + length wrapping a u32");
+        assert!(
+            !ask(&t, &s, 0, u32::MAX, PIECE),
+            "begin + length wrapping a u32"
+        );
         assert!(!ask(&t, &s, 0, u32::MAX - 100, 200), "a smaller wrap");
-        assert!(!ask(&t, &s, 0, u32::MAX, 1), "a begin at the top of the range");
+        assert!(
+            !ask(&t, &s, 0, u32::MAX, 1),
+            "a begin at the top of the range"
+        );
     }
 
     #[test]

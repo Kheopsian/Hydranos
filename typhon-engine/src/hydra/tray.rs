@@ -137,7 +137,13 @@ mod win {
             }
             tracing::info!("tray icon added; right-click it to quit cleanly");
 
-            STATE.with(|s| *s.borrow_mut() = Some(State { port, tooltip, data }));
+            STATE.with(|s| {
+                *s.borrow_mut() = Some(State {
+                    port,
+                    tooltip,
+                    data,
+                })
+            });
             // Rates move; the tooltip follows them.
             SetTimer(hwnd, TIMER_ID, 2000, None);
 
@@ -183,14 +189,20 @@ mod win {
     /// In its own console: it asks before replacing anything, and a
     /// confirmation prompt with nowhere to be typed would hang forever.
     unsafe fn run_updater() {
-        let Ok(exe) = std::env::current_exe() else { return };
+        let Ok(exe) = std::env::current_exe() else {
+            return;
+        };
         let Some(dir) = exe.parent() else { return };
         let updater = dir.join("hydranos-update.exe");
         if !updater.exists() {
             tracing::warn!("no hydranos-update.exe beside {}", exe.display());
             return;
         }
-        let args = format!("/K \"\"{}\" --dir \"{}\"\"", updater.display(), dir.display());
+        let args = format!(
+            "/K \"\"{}\" --dir \"{}\"\"",
+            updater.display(),
+            dir.display()
+        );
         ShellExecuteW(
             std::ptr::null_mut(),
             wide("open").as_ptr(),
@@ -207,7 +219,12 @@ mod win {
             return;
         }
         AppendMenuW(menu, MF_STRING, ID_OPEN, wide("Open Hydranos").as_ptr());
-        AppendMenuW(menu, MF_STRING, ID_UPDATE, wide("Check for updates").as_ptr());
+        AppendMenuW(
+            menu,
+            MF_STRING,
+            ID_UPDATE,
+            wide("Check for updates").as_ptr(),
+        );
         AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
         AppendMenuW(menu, MF_STRING, ID_QUIT, wide("Quit Hydranos").as_ptr());
 

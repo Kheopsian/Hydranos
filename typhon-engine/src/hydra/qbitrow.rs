@@ -48,23 +48,43 @@ pub fn state_to_qbit(
     }
     match state {
         "downloading" => {
-            if download_rate > 0 { "downloading" } else { "stalledDL" }
+            if download_rate > 0 {
+                "downloading"
+            } else {
+                "stalledDL"
+            }
         }
         "seeding" => {
-            if upload_rate > 0 { "uploading" } else { "stalledUP" }
+            if upload_rate > 0 {
+                "uploading"
+            } else {
+                "stalledUP"
+            }
         }
         "checking" | "checking_files" => "checkingDL",
         "stopped" => {
-            if complete { "stoppedUP" } else { "stoppedDL" }
+            if complete {
+                "stoppedUP"
+            } else {
+                "stoppedDL"
+            }
         }
         "queued" | "paused" => {
-            if complete { "queuedUP" } else { "queuedDL" }
+            if complete {
+                "queuedUP"
+            } else {
+                "queuedDL"
+            }
         }
         "error" => "error",
         "moving" => "moving",
         "allocating" => "allocating",
         _ => {
-            if complete { "stalledUP" } else { "stalledDL" }
+            if complete {
+                "stalledUP"
+            } else {
+                "stalledDL"
+            }
         }
     }
 }
@@ -117,7 +137,11 @@ pub fn build(native: &Value, engine_name: &str, now: i64) -> Value {
     };
 
     let eta = if download_rate > 0 && total_size > 0 {
-        if amount_left > 0 { amount_left / download_rate } else { 0 }
+        if amount_left > 0 {
+            amount_left / download_rate
+        } else {
+            0
+        }
     } else {
         ETA_INFINITE
     };
@@ -228,7 +252,10 @@ pub fn metainfo_extras(blob: &[u8]) -> (Option<i64>, String, String) {
             })
             .unwrap_or_default()
     };
-    let created = d.get("creation date").and_then(|x| x.as_int()).filter(|t| *t > 0);
+    let created = d
+        .get("creation date")
+        .and_then(|x| x.as_int())
+        .filter(|t| *t > 0);
     (created, text("created by"), text("comment"))
 }
 
@@ -240,10 +267,19 @@ mod tests {
     #[test]
     fn the_metainfo_extras_come_from_the_file_and_absent_ones_stay_absent() {
         let with = b"d7:comment5:hello10:created by9:mktorrent13:creation datei1700000000e4:infod4:name1:xee";
-        assert_eq!(metainfo_extras(with), (Some(1_700_000_000), "mktorrent".into(), "hello".into()));
+        assert_eq!(
+            metainfo_extras(with),
+            (Some(1_700_000_000), "mktorrent".into(), "hello".into())
+        );
         let without = b"d4:infod4:name1:xee";
-        assert_eq!(metainfo_extras(without), (None, String::new(), String::new()));
-        assert_eq!(metainfo_extras(b"not bencode"), (None, String::new(), String::new()));
+        assert_eq!(
+            metainfo_extras(without),
+            (None, String::new(), String::new())
+        );
+        assert_eq!(
+            metainfo_extras(b"not bencode"),
+            (None, String::new(), String::new())
+        );
     }
 
     // The pair a client acts on: stopped means a human decided, queued means a
@@ -262,7 +298,10 @@ mod tests {
         assert_eq!(state_to_qbit("seeding", 1.0, 0, 0, false), "stalledUP");
         assert_eq!(state_to_qbit("seeding", 1.0, 5000, 0, false), "uploading");
         assert_eq!(state_to_qbit("downloading", 0.5, 0, 0, false), "stalledDL");
-        assert_eq!(state_to_qbit("downloading", 0.5, 0, 5000, false), "downloading");
+        assert_eq!(
+            state_to_qbit("downloading", 0.5, 0, 5000, false),
+            "downloading"
+        );
     }
 
     // Without this fixup a finished torrent claims it downloaded nothing, and
@@ -271,7 +310,8 @@ mod tests {
     fn a_finished_torrent_reports_its_full_size_as_downloaded() {
         let row = build(
             &json!({"progress": 1.0, "total_size": 1000, "total_download": 0, "state": "seeding"}),
-            "race", 0,
+            "race",
+            0,
         );
         assert_eq!(row["downloaded"], 1000);
         assert_eq!(row["completed"], 1000);
@@ -280,12 +320,17 @@ mod tests {
 
     #[test]
     fn eta_is_infinite_when_nothing_is_moving() {
-        let row = build(&json!({"total_size": 1000, "total_download": 10}), "race", 0);
+        let row = build(
+            &json!({"total_size": 1000, "total_download": 10}),
+            "race",
+            0,
+        );
         assert_eq!(row["eta"], ETA_INFINITE);
 
         let row = build(
             &json!({"total_size": 1000, "total_download": 100, "download_rate": 90}),
-            "race", 0,
+            "race",
+            0,
         );
         assert_eq!(row["eta"], 10, "900 bytes left at 90 per second");
     }
@@ -296,7 +341,8 @@ mod tests {
         let row = build(
             &json!({"name": "Release.2160p", "engine_save_path": "/race/torrents",
                     "save_path": "/ignored"}),
-            "race", 0,
+            "race",
+            0,
         );
         assert_eq!(row["content_path"], "/race/torrents/Release.2160p");
         assert_eq!(row["save_path"], "/race/torrents");
@@ -312,14 +358,28 @@ mod tests {
 
     #[test]
     fn the_swarm_totals_are_the_trackers_not_the_connections() {
-        let row = build(&json!({"num_seeds": 42, "swarm_leechers": 7, "num_peers": 0}), "hoard", 0);
-        assert_eq!((row["num_complete"].clone(), row["num_incomplete"].clone()), (json!(42), json!(7)));
-        assert_eq!(row["num_leechs"], 0, "connected leechers stay the connections");
+        let row = build(
+            &json!({"num_seeds": 42, "swarm_leechers": 7, "num_peers": 0}),
+            "hoard",
+            0,
+        );
+        assert_eq!(
+            (row["num_complete"].clone(), row["num_incomplete"].clone()),
+            (json!(42), json!(7))
+        );
+        assert_eq!(
+            row["num_leechs"], 0,
+            "connected leechers stay the connections"
+        );
     }
 
     #[test]
-        fn ratio_is_rounded_to_two_decimals() {
-        let row = build(&json!({"total_upload": 1000, "total_download": 300}), "race", 0);
+    fn ratio_is_rounded_to_two_decimals() {
+        let row = build(
+            &json!({"total_upload": 1000, "total_download": 300}),
+            "race",
+            0,
+        );
         assert_eq!(row["ratio"], json!(3.33));
     }
 
@@ -331,7 +391,8 @@ mod tests {
         let row = build(
             &json!({"total_upload": 1500, "total_download": 500, "total_size": 500,
                     "progress": 1.0, "seeding_time": 7200}),
-            "race", 0,
+            "race",
+            0,
         );
         assert_eq!(row["uploaded"], 1500);
         assert_eq!(row["downloaded"], 500);
@@ -341,7 +402,8 @@ mod tests {
         // size, as qBittorrent computes it, not a division by zero.
         let row = build(
             &json!({"total_upload": 2000, "total_download": 0, "total_size": 1000, "progress": 1.0}),
-            "race", 0,
+            "race",
+            0,
         );
         assert_eq!(row["ratio"], json!(2));
     }

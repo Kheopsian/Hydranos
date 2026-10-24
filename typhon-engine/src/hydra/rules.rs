@@ -141,9 +141,15 @@ pub enum Action {
     /// Changing a category MOVES DATA in Hydra. Carried out as a job, never
     /// inline in a pass: a rule matching a thousand torrents would otherwise
     /// hold the pass open for terabytes of copying.
-    SetCategory { to: String },
-    AddTags { tags: Vec<String> },
-    RemoveTags { tags: Vec<String> },
+    SetCategory {
+        to: String,
+    },
+    AddTags {
+        tags: Vec<String>,
+    },
+    RemoveTags {
+        tags: Vec<String>,
+    },
     /// The one that cannot be undone. Kept apart everywhere: it may not share a
     /// workflow with another action, and it ends processing for that torrent.
     Delete {
@@ -153,7 +159,9 @@ pub enum Action {
     /// POST what happened to a URL: a Discord or Slack webhook, ntfy, n8n, a
     /// script behind a small HTTP server. Never a command run here -- an API
     /// key that leaks must not become a shell on this machine.
-    Webhook { url: String },
+    Webhook {
+        url: String,
+    },
     /// Move the torrent's data to a folder, category unchanged: the job
     /// "Set location..." submits. Queued, never inline. A file hardlinked
     /// elsewhere is not copied across filesystems (that would double the
@@ -283,7 +291,10 @@ pub type Matcher = Box<dyn Fn(&Facts) -> bool + Send + Sync>;
 #[derive(Debug, PartialEq)]
 pub enum CompileError {
     UnknownField(String),
-    BadValue { field: String, value: String },
+    BadValue {
+        field: String,
+        value: String,
+    },
     BadRegex(String),
     Empty,
     /// Delete refuses company. Combining it with a tag action would raise the
@@ -422,7 +433,12 @@ pub fn uses_field(n: &Node, field: &str) -> bool {
 }
 
 /// The fields read from the hardlink index rather than from the torrent.
-pub const LINK_FIELDS: &[&str] = &["link_count", "external_links", "freeable_bytes", "data_missing"];
+pub const LINK_FIELDS: &[&str] = &[
+    "link_count",
+    "external_links",
+    "freeable_bytes",
+    "data_missing",
+];
 
 /// Does this condition tree ask anything that needs the link scan?
 ///
@@ -576,10 +592,11 @@ fn compile_cond(c: &Cond) -> Result<Matcher, CompileError> {
 
     match kind {
         Kind::Number | Kind::Duration | Kind::Size | Kind::Percent => {
-            let want = number_for(&field, kind, &c.value).ok_or_else(|| CompileError::BadValue {
-                field: field.clone(),
-                value: c.value.clone(),
-            })?;
+            let want =
+                number_for(&field, kind, &c.value).ok_or_else(|| CompileError::BadValue {
+                    field: field.clone(),
+                    value: c.value.clone(),
+                })?;
             Ok(Box::new(move |f: &Facts| {
                 number_of(f, &field).is_some_and(|got| cmp_num(op, got, want))
             }))
@@ -671,7 +688,10 @@ pub fn compile_workflow(w: &Workflow) -> Result<Matcher, CompileError> {
     }
     let http_url = |url: &str| {
         let u = url.trim().to_ascii_lowercase();
-        let host = u.strip_prefix("https://").or_else(|| u.strip_prefix("http://")).unwrap_or("");
+        let host = u
+            .strip_prefix("https://")
+            .or_else(|| u.strip_prefix("http://"))
+            .unwrap_or("");
         !host.is_empty() && !host.starts_with('/')
     };
     for a in &w.then {
@@ -686,7 +706,9 @@ pub fn compile_workflow(w: &Workflow) -> Result<Matcher, CompileError> {
                 let plain = p.components().all(|c| {
                     matches!(
                         c,
-                        std::path::Component::Prefix(_) | std::path::Component::RootDir | std::path::Component::Normal(_)
+                        std::path::Component::Prefix(_)
+                            | std::path::Component::RootDir
+                            | std::path::Component::Normal(_)
                     )
                 });
                 if !p.is_absolute() || !plain {
@@ -694,7 +716,10 @@ pub fn compile_workflow(w: &Workflow) -> Result<Matcher, CompileError> {
                 }
             }
             Action::AddTrackers { urls, list_url } => {
-                if let Some(bad) = urls.iter().find(|u| !crate::trackerlists::is_announce_url(u)) {
+                if let Some(bad) = urls
+                    .iter()
+                    .find(|u| !crate::trackerlists::is_announce_url(u))
+                {
                     return Err(CompileError::BadTracker(bad.clone()));
                 }
                 if !list_url.trim().is_empty() && !http_url(list_url) {
@@ -763,7 +788,10 @@ pub fn already_satisfied(action: &Action, f: &Facts) -> bool {
             };
             match listed {
                 None => false,
-                Some(l) => urls.iter().chain(l.iter()).all(|u| f.trackers.iter().any(|t| t == u)),
+                Some(l) => urls
+                    .iter()
+                    .chain(l.iter())
+                    .all(|u| f.trackers.iter().any(|t| t == u)),
             }
         }
     }
@@ -777,47 +805,101 @@ mod tests {
     /// answered None for it, so it never matched and its NOT matched all.
     #[test]
     fn data_missing_matches_a_torrent_whose_files_are_gone() {
-        let cond = |v: &str| Node::Cond(Cond { field: "data_missing".into(), op: Op::Eq, value: v.into() });
+        let cond = |v: &str| {
+            Node::Cond(Cond {
+                field: "data_missing".into(),
+                op: Op::Eq,
+                value: v.into(),
+            })
+        };
         let m = compile(&cond("true")).unwrap();
-        let gone = Facts { data_missing: true, ..Default::default() };
+        let gone = Facts {
+            data_missing: true,
+            ..Default::default()
+        };
         assert!(m(&gone));
         assert!(!m(&Facts::default()));
-        let not = compile(&Node::Not { of: Box::new(cond("true")) }).unwrap();
+        let not = compile(&Node::Not {
+            of: Box::new(cond("true")),
+        })
+        .unwrap();
         assert!(not(&Facts::default()) && !not(&gone));
     }
 
     #[test]
     fn a_move_is_done_once_the_torrent_is_in_the_folder() {
-        let f = Facts { save_path: "/data/final".into(), ..Default::default() };
-        let mv = |to: &str| Action::SetLocation { to: to.into(), allow_breaking_hardlinks: false };
-        assert!(already_satisfied(&mv("/data/final/"), &f), "a trailing slash is the same folder");
+        let f = Facts {
+            save_path: "/data/final".into(),
+            ..Default::default()
+        };
+        let mv = |to: &str| Action::SetLocation {
+            to: to.into(),
+            allow_breaking_hardlinks: false,
+        };
+        assert!(
+            already_satisfied(&mv("/data/final/"), &f),
+            "a trailing slash is the same folder"
+        );
         assert!(!already_satisfied(&mv("/data/temp"), &f));
     }
 
     #[test]
     fn trackers_are_done_when_present_and_always_on_a_private_torrent() {
-        let add = Action::AddTrackers { urls: vec!["udp://a.example:1/announce".into()], list_url: String::new() };
-        let mut f = Facts { trackers: vec!["udp://a.example:1/announce".into()], ..Default::default() };
+        let add = Action::AddTrackers {
+            urls: vec!["udp://a.example:1/announce".into()],
+            list_url: String::new(),
+        };
+        let mut f = Facts {
+            trackers: vec!["udp://a.example:1/announce".into()],
+            ..Default::default()
+        };
         assert!(already_satisfied(&add, &f));
         f.trackers.clear();
         assert!(!already_satisfied(&add, &f));
         f.private = true;
         assert!(already_satisfied(&add, &f), "never touched, so never due");
-        let listed = Action::AddTrackers { urls: vec![], list_url: "https://lists.example/never-fetched.txt".into() };
-        assert!(!already_satisfied(&listed, &Facts::default()), "a list not fetched yet is not done");
+        let listed = Action::AddTrackers {
+            urls: vec![],
+            list_url: "https://lists.example/never-fetched.txt".into(),
+        };
+        assert!(
+            !already_satisfied(&listed, &Facts::default()),
+            "a list not fetched yet is not done"
+        );
     }
 
     /// A pass pays for `free_space` -- a `statvfs` per save path -- only when
     /// a condition reads it, however deep in the tree.
     #[test]
     fn a_field_is_found_wherever_the_tree_puts_it() {
-        let c = |f: &str| Node::Cond(Cond { field: f.into(), op: Op::Eq, value: "0".into() });
+        let c = |f: &str| {
+            Node::Cond(Cond {
+                field: f.into(),
+                op: Op::Eq,
+                value: "0".into(),
+            })
+        };
         let tree = Node::All {
-            of: vec![c("external_links"), Node::Any { of: vec![c("category"), Node::Not { of: Box::new(c("free_space")) }] }],
+            of: vec![
+                c("external_links"),
+                Node::Any {
+                    of: vec![
+                        c("category"),
+                        Node::Not {
+                            of: Box::new(c("free_space")),
+                        },
+                    ],
+                },
+            ],
         };
         assert!(uses_field(&tree, "free_space"));
         assert!(uses_field(&tree, "external_links"));
-        assert!(!uses_field(&Node::All { of: vec![c("external_links"), c("category")] }, "free_space"));
+        assert!(!uses_field(
+            &Node::All {
+                of: vec![c("external_links"), c("category")]
+            },
+            "free_space"
+        ));
     }
 
     fn facts() -> Facts {
@@ -1009,7 +1091,9 @@ mod tests {
             trigger: Trigger::Completed,
             interval_secs: DEFAULT_INTERVAL_SECS,
             when,
-            then: vec![Action::AddTags { tags: vec!["done".into()] }],
+            then: vec![Action::AddTags {
+                tags: vec!["done".into()],
+            }],
             cap: DEFAULT_CAP,
         }
     }
@@ -1022,21 +1106,35 @@ mod tests {
         let matcher = compile_workflow(&every).expect("an event needs no condition");
         assert!(matcher(&facts()));
 
-        let scheduled = Workflow { trigger: Trigger::Schedule, ..every };
-        assert_eq!(compile_workflow(&scheduled).err(), Some(CompileError::Empty));
+        let scheduled = Workflow {
+            trigger: Trigger::Schedule,
+            ..every
+        };
+        assert_eq!(
+            compile_workflow(&scheduled).err(),
+            Some(CompileError::Empty)
+        );
     }
 
     /// A hardlink condition on a torrent that finished a second ago reads
     /// NEVER and never matches: refused when saved, not discovered later.
     #[test]
     fn a_hardlink_condition_is_refused_on_a_completion() {
-        let w = on_completion(Node::All { of: vec![cond("external_links", Op::Eq, "0")] });
+        let w = on_completion(Node::All {
+            of: vec![cond("external_links", Op::Eq, "0")],
+        });
         assert_eq!(
             compile_workflow(&w).err(),
             Some(CompileError::LinkFieldOnEvent("external_links".into()))
         );
-        let scheduled = Workflow { trigger: Trigger::Schedule, ..w };
-        assert!(compile_workflow(&scheduled).is_ok(), "a timer reads the index, which is fine");
+        let scheduled = Workflow {
+            trigger: Trigger::Schedule,
+            ..w
+        };
+        assert!(
+            compile_workflow(&scheduled).is_ok(),
+            "a timer reads the index, which is fine"
+        );
     }
 
     /// A webhook needs a real URL; on a timer it needs company that
@@ -1047,19 +1145,49 @@ mod tests {
         let hook = |u: &str| Action::Webhook { url: u.into() };
         let mut w = on_completion(Node::All { of: vec![] });
         w.then = vec![hook("https://hooks.example/x")];
-        assert!(compile_workflow(&w).is_ok(), "alone on a completion is fine");
+        assert!(
+            compile_workflow(&w).is_ok(),
+            "alone on a completion is fine"
+        );
         w.then = vec![hook("ftp://hooks.example/x")];
-        assert_eq!(compile_workflow(&w).err(), Some(CompileError::BadWebhookUrl("ftp://hooks.example/x".into())));
+        assert_eq!(
+            compile_workflow(&w).err(),
+            Some(CompileError::BadWebhookUrl("ftp://hooks.example/x".into()))
+        );
         w.then = vec![hook("https://")];
-        assert!(matches!(compile_workflow(&w).err(), Some(CompileError::BadWebhookUrl(_))));
+        assert!(matches!(
+            compile_workflow(&w).err(),
+            Some(CompileError::BadWebhookUrl(_))
+        ));
 
-        let mut timer = Workflow { trigger: Trigger::Schedule, when: cond("ratio", Op::Ge, "2"), ..w.clone() };
+        let mut timer = Workflow {
+            trigger: Trigger::Schedule,
+            when: cond("ratio", Op::Ge, "2"),
+            ..w.clone()
+        };
         timer.then = vec![hook("https://hooks.example/x")];
-        assert_eq!(compile_workflow(&timer).err(), Some(CompileError::WebhookAlone));
-        timer.then = vec![Action::AddTags { tags: vec!["told".into()] }, hook("https://hooks.example/x")];
-        assert!(compile_workflow(&timer).is_ok(), "with a tag that converges");
-        timer.then = vec![Action::Delete { with_files: false }, hook("https://hooks.example/x")];
-        assert_eq!(compile_workflow(&timer).err(), Some(CompileError::DeleteNotAlone));
+        assert_eq!(
+            compile_workflow(&timer).err(),
+            Some(CompileError::WebhookAlone)
+        );
+        timer.then = vec![
+            Action::AddTags {
+                tags: vec!["told".into()],
+            },
+            hook("https://hooks.example/x"),
+        ];
+        assert!(
+            compile_workflow(&timer).is_ok(),
+            "with a tag that converges"
+        );
+        timer.then = vec![
+            Action::Delete { with_files: false },
+            hook("https://hooks.example/x"),
+        ];
+        assert_eq!(
+            compile_workflow(&timer).err(),
+            Some(CompileError::DeleteNotAlone)
+        );
     }
 
     /// Every workflow saved before triggers existed ran on a timer, and has to
@@ -1082,7 +1210,10 @@ mod tests {
         .unwrap();
         assert_eq!(added.trigger, Trigger::Added);
         assert!(added.trigger.is_event() && !Trigger::Schedule.is_event());
-        assert!(compile_workflow(&added).is_ok(), "no condition: every torrent added");
+        assert!(
+            compile_workflow(&added).is_ok(),
+            "no condition: every torrent added"
+        );
     }
 
     /// Without this a workflow rewrites the same tag every fifteen minutes and
@@ -1090,14 +1221,35 @@ mod tests {
     #[test]
     fn convergence_stops_a_workflow_reapplying_itself() {
         let f = facts();
-        assert!(already_satisfied(&Action::SetCategory { to: "animes".into() }, &f));
-        assert!(!already_satisfied(&Action::SetCategory { to: "done".into() }, &f));
-        assert!(already_satisfied(&Action::AddTags { tags: vec!["keep".into()] }, &f));
-        assert!(!already_satisfied(&Action::AddTags { tags: vec!["new".into()] }, &f));
+        assert!(already_satisfied(
+            &Action::SetCategory {
+                to: "animes".into()
+            },
+            &f
+        ));
+        assert!(!already_satisfied(
+            &Action::SetCategory { to: "done".into() },
+            &f
+        ));
+        assert!(already_satisfied(
+            &Action::AddTags {
+                tags: vec!["keep".into()]
+            },
+            &f
+        ));
+        assert!(!already_satisfied(
+            &Action::AddTags {
+                tags: vec!["new".into()]
+            },
+            &f
+        ));
         assert!(!already_satisfied(&Action::Pause, &f));
         assert!(already_satisfied(&Action::Resume, &f));
         // A delete is never "already done".
-        assert!(!already_satisfied(&Action::Delete { with_files: false }, &f));
+        assert!(!already_satisfied(
+            &Action::Delete { with_files: false },
+            &f
+        ));
     }
 
     #[test]

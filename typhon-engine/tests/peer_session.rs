@@ -51,7 +51,11 @@ fn meta(num_pieces: u32) -> TorrentMeta {
 /// A torrent we hold in full: `seed_mode` skips the picker, which is what a
 /// seeding torrent looks like in production.
 fn seeding(num_pieces: u32) -> Arc<TorrentState> {
-    let t = Arc::new(TorrentState::new(meta(num_pieces), PathBuf::from("/tmp"), true));
+    let t = Arc::new(TorrentState::new(
+        meta(num_pieces),
+        PathBuf::from("/tmp"),
+        true,
+    ));
     t.status
         .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
     t
@@ -59,7 +63,9 @@ fn seeding(num_pieces: u32) -> Arc<TorrentState> {
 
 /// A connected pair: the session's end, and ours.
 async fn pair() -> (TcpStream, TcpStream) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind loopback");
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback");
     let addr = listener.local_addr().unwrap();
     let dial = tokio::spawn(async move { TcpStream::connect(addr).await.expect("connect") });
     let (server, _) = listener.accept().await.expect("accept");
@@ -71,9 +77,12 @@ fn framed(s: TcpStream) -> Framed<CryptoStream, BtCodec> {
 }
 
 /// Start a session on one end and hand back the other, as a peer would hold it.
-fn start(torrent: Arc<TorrentState>, fast_ext: bool, ours: TcpStream, theirs: TcpStream)
-    -> Framed<CryptoStream, BtCodec>
-{
+fn start(
+    torrent: Arc<TorrentState>,
+    fast_ext: bool,
+    ours: TcpStream,
+    theirs: TcpStream,
+) -> Framed<CryptoStream, BtCodec> {
     let addr: SocketAddr = "127.0.0.1:6881".parse().unwrap();
     tokio::spawn(session::run(
         framed(ours),
@@ -147,7 +156,10 @@ fn the_same_seed_opens_with_a_bitfield_when_fast_is_off() {
     rt().block_on(async {
         let (ours, theirs) = pair().await;
         let mut peer = start(seeding(64), false, ours, theirs);
-        let m = wait_for(&mut peer, "bitfield", |m| matches!(m, Message::Bitfield { .. })).await;
+        let m = wait_for(&mut peer, "bitfield", |m| {
+            matches!(m, Message::Bitfield { .. })
+        })
+        .await;
         match m {
             Message::Bitfield { data } => {
                 assert_eq!(data.len(), 8, "sixty-four pieces fit in eight bytes");
@@ -214,7 +226,10 @@ fn a_peer_that_hangs_up_is_released() {
             );
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        assert!(torrent.peer_stats.is_empty(), "and the table is empty again");
+        assert!(
+            torrent.peer_stats.is_empty(),
+            "and the table is empty again"
+        );
     });
 }
 
@@ -249,9 +264,11 @@ fn an_interested_peer_is_recorded_as_interested() {
 }
 
 /// A session with the extension protocol on, as production runs it.
-fn start_extended(torrent: Arc<TorrentState>, ours: TcpStream, theirs: TcpStream)
-    -> Framed<CryptoStream, BtCodec>
-{
+fn start_extended(
+    torrent: Arc<TorrentState>,
+    ours: TcpStream,
+    theirs: TcpStream,
+) -> Framed<CryptoStream, BtCodec> {
     let addr: SocketAddr = "127.0.0.1:6881".parse().unwrap();
     tokio::spawn(session::run(
         framed(ours),
@@ -262,7 +279,7 @@ fn start_extended(torrent: Arc<TorrentState>, ours: TcpStream, theirs: TcpStream
         THEIR_ID,
         false,
         true,
-        true,  // BEP 10 negotiated
+        true, // BEP 10 negotiated
         None,
         16171, // a listen port: the extension handshake is on
     ));
@@ -273,7 +290,8 @@ fn private_seed(num_pieces: u32) -> Arc<TorrentState> {
     let mut m = meta(num_pieces);
     m.private = true;
     let t = Arc::new(TorrentState::new(m, PathBuf::from("/tmp"), true));
-    t.status.store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+    t.status
+        .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
     t
 }
 
@@ -304,8 +322,15 @@ async fn pex_learned(torrent: Arc<TorrentState>) -> u64 {
 #[test]
 fn bep27_a_private_torrent_learns_no_peer_from_pex_even_unasked() {
     rt().block_on(async {
-        assert!(pex_learned(seeding(8)).await > 0, "control: a public torrent does learn from PEX");
-        assert_eq!(pex_learned(private_seed(8)).await, 0, "a private torrent takes peers from its tracker only");
+        assert!(
+            pex_learned(seeding(8)).await > 0,
+            "control: a public torrent does learn from PEX"
+        );
+        assert_eq!(
+            pex_learned(private_seed(8)).await,
+            0,
+            "a private torrent takes peers from its tracker only"
+        );
     });
 }
 
@@ -336,8 +361,15 @@ fn bep27_a_private_torrent_dials_no_peer_a_hole_punch_names() {
         dials() - before
     }
     rt().block_on(async {
-        assert!(punched(seeding(8)).await > 0, "control: a public torrent acts on the connect");
-        assert_eq!(punched(private_seed(8)).await, 0, "a private torrent dials nobody a peer names");
+        assert!(
+            punched(seeding(8)).await > 0,
+            "control: a public torrent acts on the connect"
+        );
+        assert_eq!(
+            punched(private_seed(8)).await,
+            0,
+            "a private torrent dials nobody a peer names"
+        );
     });
 }
 
@@ -374,7 +406,9 @@ async fn metadata_reply_id(announce: Option<i64>) -> Option<u8> {
     let deadline = tokio::time::Instant::now() + Duration::from_millis(800);
     while let Ok(Some(Ok(msg))) = tokio::time::timeout_at(deadline, peer.next()).await {
         if let Message::Extended { ext_id, payload } = msg {
-            if ext_id != 0 && typhon_engine::peer::extension::parse_metadata_message(&payload).is_some() {
+            if ext_id != 0
+                && typhon_engine::peer::extension::parse_metadata_message(&payload).is_some()
+            {
                 return Some(ext_id);
             }
         }
@@ -408,13 +442,23 @@ fn a_metadata_reply_goes_out_under_the_id_the_peer_announced() {
 fn seeding_with_info_dict() -> Arc<TorrentState> {
     let name = "metadata-under-test";
     let mut bytes = b"d4:infod".to_vec();
-    bytes.extend_from_slice(format!("6:lengthi16384e4:name{}:{name}12:piece lengthi16384e6:pieces20:", name.len()).as_bytes());
+    bytes.extend_from_slice(
+        format!(
+            "6:lengthi16384e4:name{}:{name}12:piece lengthi16384e6:pieces20:",
+            name.len()
+        )
+        .as_bytes(),
+    );
     bytes.extend_from_slice(&[7u8; 20]);
     bytes.extend_from_slice(b"ee");
-    let parsed = typhon_engine::torrent::metainfo::parse_torrent_bytes(&bytes).expect("a valid torrent");
+    let parsed =
+        typhon_engine::torrent::metainfo::parse_torrent_bytes(&bytes).expect("a valid torrent");
     let t = Arc::new(TorrentState::new(parsed, PathBuf::from("/tmp"), true));
-    t.status.store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
-    let _ = t.blob_source.set(Arc::new(move |_: &str| Some(bytes.clone())));
+    t.status
+        .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+    let _ = t
+        .blob_source
+        .set(Arc::new(move |_: &str| Some(bytes.clone())));
     t
 }
 
@@ -426,7 +470,8 @@ fn a_peer_asking_for_metadata_without_end_is_not_served_without_end() {
     use std::collections::BTreeMap;
     use typhon_engine::peer::bencode::Bencode;
     use typhon_engine::peer::extension::{
-        build_metadata_request, parse_metadata_message, METADATA_DATA, METADATA_REJECT, OUR_UT_METADATA_ID,
+        build_metadata_request, parse_metadata_message, METADATA_DATA, METADATA_REJECT,
+        OUR_UT_METADATA_ID,
     };
     const ASKED: usize = 300;
     rt().block_on(async {
@@ -437,9 +482,12 @@ fn a_peer_asking_for_metadata_without_end_is_not_served_without_end() {
         m.insert(b"ut_metadata".to_vec(), Bencode::Int(3));
         let mut root = BTreeMap::new();
         root.insert(b"m".to_vec(), Bencode::Dict(m));
-        peer.send(Message::Extended { ext_id: 0, payload: bytes::Bytes::from(Bencode::Dict(root).to_vec()) })
-            .await
-            .expect("sent");
+        peer.send(Message::Extended {
+            ext_id: 0,
+            payload: bytes::Bytes::from(Bencode::Dict(root).to_vec()),
+        })
+        .await
+        .expect("sent");
         for _ in 0..ASKED {
             peer.send(Message::Extended {
                 ext_id: OUR_UT_METADATA_ID,
@@ -452,7 +500,9 @@ fn a_peer_asking_for_metadata_without_end_is_not_served_without_end() {
         let mut first = None;
         while data + reject < ASKED {
             let left = Duration::from_secs(5);
-            let Ok(Some(Ok(msg))) = tokio::time::timeout(left, peer.next()).await else { break };
+            let Ok(Some(Ok(msg))) = tokio::time::timeout(left, peer.next()).await else {
+                break;
+            };
             if let Message::Extended { ext_id: 3, payload } = msg {
                 match parse_metadata_message(&payload).map(|p| p.msg_type) {
                     Some(METADATA_DATA) => {
@@ -468,9 +518,16 @@ fn a_peer_asking_for_metadata_without_end_is_not_served_without_end() {
             }
         }
         assert_eq!(first, Some(METADATA_DATA), "the first request is served");
-        assert_eq!(data + reject, ASKED, "every request is answered, by data or by reject");
+        assert_eq!(
+            data + reject,
+            ASKED,
+            "every request is answered, by data or by reject"
+        );
         assert!(data >= 3, "a few retries are served: {data} data");
-        assert!(data < 50, "{data} blocks of data to one peer for {ASKED} requests of one block");
+        assert!(
+            data < 50,
+            "{data} blocks of data to one peer for {ASKED} requests of one block"
+        );
     });
 }
 
@@ -494,17 +551,28 @@ fn seeding_with_payload(tag: &str, pieces: u32) -> (Arc<TorrentState>, PathBuf) 
         length: len,
     }];
     let t = Arc::new(TorrentState::new(m, dir.clone(), true));
-    t.status.store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+    t.status
+        .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
     (t, dir)
 }
 
 /// Ask for every block, then count the payload bytes that arrive within
 /// `window`, and the Rejects.
-async fn pull(peer: &mut Framed<CryptoStream, BtCodec>, pieces: u32, window: Duration) -> (u64, u32) {
+async fn pull(
+    peer: &mut Framed<CryptoStream, BtCodec>,
+    pieces: u32,
+    window: Duration,
+) -> (u64, u32) {
     wait_for(peer, "unchoke", |m| matches!(m, Message::Unchoke)).await;
     peer.send(Message::Interested).await.expect("sent");
     for i in 0..pieces {
-        peer.feed(Message::Request { index: i, begin: 0, length: 16384 }).await.expect("fed");
+        peer.feed(Message::Request {
+            index: i,
+            begin: 0,
+            length: 16384,
+        })
+        .await
+        .expect("fed");
     }
     peer.flush().await.expect("flushed");
     let deadline = tokio::time::Instant::now() + window;
@@ -539,12 +607,16 @@ async fn pull(peer: &mut Framed<CryptoStream, BtCodec>, pieces: u32, window: Dur
 fn an_upload_cap_holds_on_the_wire() {
     rt().block_on(async {
         const PIECES: u32 = 128; // 2 MiB
-        // Control: uncapped, everything arrives at once.
+                                 // Control: uncapped, everything arrives at once.
         let (t, dir) = seeding_with_payload("uncapped", PIECES);
         let (ours, theirs) = pair().await;
         let mut peer = start(t, true, ours, theirs);
         let (bytes, _) = pull(&mut peer, PIECES, Duration::from_secs(3)).await;
-        assert_eq!(bytes, PIECES as u64 * 16384, "control: uncapped, the whole 2 MiB arrives");
+        assert_eq!(
+            bytes,
+            PIECES as u64 * 16384,
+            "control: uncapped, the whole 2 MiB arrives"
+        );
         let _ = std::fs::remove_dir_all(dir);
 
         // Capped at 256 KiB/s.
@@ -556,7 +628,10 @@ fn an_upload_cap_holds_on_the_wire() {
         let kib = bytes / 1024;
         // 3 s x 256 KiB/s = 768 KiB, plus the 64 KiB burst and the block in
         // hand. -15% / +15% around that.
-        assert!((650..=900).contains(&kib), "256 KiB/s over 3 s sent {kib} KiB");
+        assert!(
+            (650..=900).contains(&kib),
+            "256 KiB/s over 3 s sent {kib} KiB"
+        );
         assert_eq!(rejects, 0, "a capped request is deferred, not refused");
         let _ = std::fs::remove_dir_all(dir);
     });
@@ -576,19 +651,37 @@ fn a_capped_session_still_hears_the_peer() {
         wait_for(&mut peer, "unchoke", |m| matches!(m, Message::Unchoke)).await;
         peer.send(Message::Interested).await.expect("sent");
         for i in 0..PIECES {
-            peer.feed(Message::Request { index: i, begin: 0, length: 16384 }).await.expect("fed");
+            peer.feed(Message::Request {
+                index: i,
+                begin: 0,
+                length: 16384,
+            })
+            .await
+            .expect("fed");
         }
         peer.flush().await.expect("flushed");
         let last = PIECES - 1;
-        peer.send(Message::Cancel { index: last, begin: 0, length: 16384 }).await.expect("sent");
+        peer.send(Message::Cancel {
+            index: last,
+            begin: 0,
+            length: 16384,
+        })
+        .await
+        .expect("sent");
         // At 16 KiB/s the last block is ~30 s away; its Reject must come now.
         let started = tokio::time::Instant::now();
-        let m = wait_for(&mut peer, "reject of the cancelled block", |m| {
-            matches!(m, Message::Reject { index, .. } if *index == last)
-        })
+        let m = wait_for(
+            &mut peer,
+            "reject of the cancelled block",
+            |m| matches!(m, Message::Reject { index, .. } if *index == last),
+        )
         .await;
         assert!(matches!(m, Message::Reject { .. }));
-        assert!(started.elapsed() < Duration::from_secs(2), "took {:?}", started.elapsed());
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "took {:?}",
+            started.elapsed()
+        );
         let _ = std::fs::remove_dir_all(dir);
     });
 }
@@ -597,7 +690,11 @@ fn a_capped_session_still_hears_the_peer() {
 async fn opening_bitfield(t: Arc<TorrentState>) -> Vec<u8> {
     let (ours, theirs) = pair().await;
     let mut peer = start(t, false, ours, theirs);
-    match wait_for(&mut peer, "bitfield", |m| matches!(m, Message::Bitfield { .. })).await {
+    match wait_for(&mut peer, "bitfield", |m| {
+        matches!(m, Message::Bitfield { .. })
+    })
+    .await
+    {
         Message::Bitfield { data } => data.to_vec(),
         _ => unreachable!(),
     }
@@ -645,8 +742,14 @@ fn a_restored_picker_claiming_more_than_the_file_holds_is_cut_down() {
     rt().block_on(async {
         let (seed, dir) = seeding_with_payload("pickerclaim", 4);
         let t = Arc::new(TorrentState::new(seed.meta.clone(), dir.clone(), false));
-        t.status.store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
-        t.picker.get().expect("a download has a picker").lock().unwrap().import_bitfield(&[0xF0]);
+        t.status
+            .store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+        t.picker
+            .get()
+            .expect("a download has a picker")
+            .lock()
+            .unwrap()
+            .import_bitfield(&[0xF0]);
         cut_to_pieces(&dir, 2);
         let bits = opening_bitfield(t).await;
         assert_eq!(bits[0], 0b1100_0000);

@@ -80,7 +80,9 @@ impl Filter {
                 continue;
             }
             match k {
-                "level" => f.level = Some(level_rank(v).ok_or_else(|| format!("unknown level {v:?}"))?),
+                "level" => {
+                    f.level = Some(level_rank(v).ok_or_else(|| format!("unknown level {v:?}"))?)
+                }
                 "module" | "source" => {
                     // The 3.x tab sent a "source" of go/gin/engine:*; there is
                     // one process now, and every line is "rust". A module is
@@ -91,8 +93,13 @@ impl Filter {
                     f.module = Some(v.to_lowercase())
                 }
                 "q" | "contains" => f.text = Some(v.to_lowercase()),
-                "since" => f.since = Some(parse_since(v, now).ok_or_else(|| format!("unreadable since {v:?}"))?),
-                "after" => f.after = Some(v.parse().map_err(|_| format!("unreadable after {v:?}"))?),
+                "since" => {
+                    f.since =
+                        Some(parse_since(v, now).ok_or_else(|| format!("unreadable since {v:?}"))?)
+                }
+                "after" => {
+                    f.after = Some(v.parse().map_err(|_| format!("unreadable after {v:?}"))?)
+                }
                 _ => {}
             }
         }
@@ -213,7 +220,8 @@ impl LogBuffer {
     /// The modules present in the ring, for the filter's list.
     pub fn modules(&self) -> Vec<String> {
         let ring = self.lock();
-        let set: std::collections::BTreeSet<&str> = ring.entries.iter().map(|e| e.module.as_str()).collect();
+        let set: std::collections::BTreeSet<&str> =
+            ring.entries.iter().map(|e| e.module.as_str()).collect();
         set.into_iter().map(str::to_string).collect()
     }
 }
@@ -232,7 +240,8 @@ impl Visit for MessageVisitor {
         if field.name() == "message" {
             self.message = value.to_string();
         } else {
-            self.fields.push_str(&format!(" {}={}", field.name(), value));
+            self.fields
+                .push_str(&format!(" {}={}", field.name(), value));
         }
     }
 
@@ -240,11 +249,15 @@ impl Visit for MessageVisitor {
         if field.name() == "message" {
             self.message = format!("{value:?}");
             // Debug formatting of a &str quotes it; the API publishes the text.
-            if self.message.starts_with('"') && self.message.ends_with('"') && self.message.len() >= 2 {
+            if self.message.starts_with('"')
+                && self.message.ends_with('"')
+                && self.message.len() >= 2
+            {
                 self.message = self.message[1..self.message.len() - 1].to_string();
             }
         } else {
-            self.fields.push_str(&format!(" {}={:?}", field.name(), value));
+            self.fields
+                .push_str(&format!(" {}={:?}", field.name(), value));
         }
     }
 }
@@ -358,7 +371,10 @@ mod tests {
         }
         let snap = buffer.snapshot();
         assert_eq!(snap.len(), CAPACITY, "the ring must stay bounded");
-        assert_eq!(snap[0].msg, "line 10", "the oldest lines are the ones dropped");
+        assert_eq!(
+            snap[0].msg, "line 10",
+            "the oldest lines are the ones dropped"
+        );
         assert_eq!(snap[CAPACITY - 1].msg, format!("line {}", CAPACITY + 9));
     }
 
@@ -372,7 +388,10 @@ mod tests {
         }
         let cursor = buffer.last_seq();
         buffer.push(line("WARN", "m", "new", 0));
-        let f = Filter { after: Some(cursor), ..Default::default() };
+        let f = Filter {
+            after: Some(cursor),
+            ..Default::default()
+        };
         let fresh = buffer.query(&f, 100);
         assert_eq!(fresh.len(), 1, "exactly the line logged after the cursor");
         assert_eq!(fresh[0].msg, "new");
@@ -383,8 +402,18 @@ mod tests {
     fn filters_apply_on_the_server() {
         let buffer = LogBuffer::new();
         buffer.push(line("DEBUG", "hydranos::store", "noise", 1_000));
-        buffer.push(line("INFO", "hydranos::announce::runner", "tracker warning tracker=t.example", 1_000));
-        buffer.push(line("WARN", "hydranos::announce::runner", "announce failed", 5_000));
+        buffer.push(line(
+            "INFO",
+            "hydranos::announce::runner",
+            "tracker warning tracker=t.example",
+            1_000,
+        ));
+        buffer.push(line(
+            "WARN",
+            "hydranos::announce::runner",
+            "announce failed",
+            5_000,
+        ));
         buffer.push(line("ERROR", "hydranos::store", "store held long", 5_000));
 
         let q = |s: &str| buffer.query(&Filter::from_query(s, 6_000).unwrap(), 100);
@@ -392,10 +421,26 @@ mod tests {
         assert_eq!(q("level=WARN").len(), 2, "minimum level");
         assert_eq!(q("level=error")[0].msg, "store held long");
         assert_eq!(q("module=announce").len(), 2);
-        assert_eq!(q("q=TRACKER%20WARNING").len(), 1, "case-insensitive, URL-decoded");
-        assert_eq!(q("q=t.example").len(), 1, "structured fields are searchable");
-        assert_eq!(q("since=1h").len(), 2, "only what was logged in the last hour");
-        assert_eq!(q("since=1h&level=ERROR&module=store").len(), 1, "filters combine");
+        assert_eq!(
+            q("q=TRACKER%20WARNING").len(),
+            1,
+            "case-insensitive, URL-decoded"
+        );
+        assert_eq!(
+            q("q=t.example").len(),
+            1,
+            "structured fields are searchable"
+        );
+        assert_eq!(
+            q("since=1h").len(),
+            2,
+            "only what was logged in the last hour"
+        );
+        assert_eq!(
+            q("since=1h&level=ERROR&module=store").len(),
+            1,
+            "filters combine"
+        );
         // The 3.x select sends source=rust for "everything".
         assert_eq!(q("source=rust").len(), 4);
     }
@@ -422,7 +467,11 @@ mod tests {
     #[test]
     fn timestamps_are_rfc3339_with_nanoseconds() {
         let (ts, unix) = now_rfc3339();
-        assert_eq!(ts.len(), 30, "expected 2026-09-05T12:34:56.123456789Z: {ts}");
+        assert_eq!(
+            ts.len(),
+            30,
+            "expected 2026-09-05T12:34:56.123456789Z: {ts}"
+        );
         assert!(ts.ends_with('Z') && ts.contains('T'), "{ts}");
         assert!(unix > 1_700_000_000);
     }

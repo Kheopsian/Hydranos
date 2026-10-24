@@ -97,7 +97,10 @@ pub fn pin_fd(_fd: i32, egress: &Egress) -> std::io::Result<()> {
     if egress.device().is_none() {
         return Ok(());
     }
-    Err(std::io::Error::new(std::io::ErrorKind::Unsupported, UNSUPPORTED))
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        UNSUPPORTED,
+    ))
 }
 
 /// Whether `bind_interface` can be honoured here. Linux only: a device pin is
@@ -122,7 +125,11 @@ mod tests {
         assert_eq!(e.device(), None);
         // Whitespace is not a device name; treating " " as one would hand
         // SO_BINDTODEVICE a name no interface has and fail every socket.
-        let blank = Egress { fwmark: 0, device: "  ".into(), ..Default::default() };
+        let blank = Egress {
+            fwmark: 0,
+            device: "  ".into(),
+            ..Default::default()
+        };
         assert_eq!(blank.device(), None);
         assert!(!blank.is_steered());
     }
@@ -135,9 +142,18 @@ mod tests {
     fn a_device_pin_that_cannot_be_applied_fails_closed() {
         use std::os::fd::AsRawFd;
         let sock = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-        assert!(pin_fd(sock.as_raw_fd(), &Egress::default()).is_ok(), "no device, nothing to refuse");
-        let wg = Egress { device: "hydranos-test-nodev".into(), ..Default::default() };
-        assert!(pin_fd(sock.as_raw_fd(), &wg).is_err(), "a missing (Linux) or unpinnable (elsewhere) device fails");
+        assert!(
+            pin_fd(sock.as_raw_fd(), &Egress::default()).is_ok(),
+            "no device, nothing to refuse"
+        );
+        let wg = Egress {
+            device: "hydranos-test-nodev".into(),
+            ..Default::default()
+        };
+        assert!(
+            pin_fd(sock.as_raw_fd(), &wg).is_err(),
+            "a missing (Linux) or unpinnable (elsewhere) device fails"
+        );
         assert_eq!(DEVICE_PIN_SUPPORTED, cfg!(target_os = "linux"));
         assert!(UNSUPPORTED.contains("Linux-only"));
     }
@@ -146,7 +162,11 @@ mod tests {
     fn a_fwmark_alone_still_counts_as_steered() {
         // The single-tunnel-with-mark setup has no device: skipping the
         // pre-connect socket setup for it would drop the mark.
-        let e = Egress { fwmark: 42, device: String::new(), ..Default::default() };
+        let e = Egress {
+            fwmark: 42,
+            device: String::new(),
+            ..Default::default()
+        };
         assert!(e.is_steered());
         assert_eq!(e.device(), None);
     }
@@ -159,8 +179,16 @@ mod tests {
     // express, so this test fails against the design it replaced.
     #[test]
     fn two_engines_in_one_process_keep_their_own_device() {
-        let race = Egress { fwmark: 0, device: "wg-race".into(), ..Default::default() };
-        let hoard = Egress { fwmark: 0, device: "wg-hoard".into(), ..Default::default() };
+        let race = Egress {
+            fwmark: 0,
+            device: "wg-race".into(),
+            ..Default::default()
+        };
+        let hoard = Egress {
+            fwmark: 0,
+            device: "wg-hoard".into(),
+            ..Default::default()
+        };
         assert_eq!(race.device(), Some("wg-race"));
         assert_eq!(hoard.device(), Some("wg-hoard"));
         assert_ne!(race, hoard);

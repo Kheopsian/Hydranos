@@ -7,7 +7,10 @@ use super::*;
 const KEY: &str = "0123456789abcdef0123456789abcdef";
 
 fn st(tag: &str) -> TestState {
-    state_from(tag, &format!("[daemon]\napi_key = \"{KEY}\"\napi_port = 8199\n"))
+    state_from(
+        tag,
+        &format!("[daemon]\napi_key = \"{KEY}\"\napi_port = 8199\n"),
+    )
 }
 
 fn add_table(doc: &str, name: &str) -> Result<String, String> {
@@ -21,10 +24,15 @@ async fn a_setting_of_the_wrong_type_is_refused_and_the_file_is_unchanged() {
     let s = st("cfgw-badtype");
     let before = std::fs::read_to_string(&s.config_path).unwrap();
     for value in [r#""abc""#, "70000"] {
-        let body = format!(r#"{{"changes":[{{"section":"daemon","key":"api_port","value":{value}}}]}}"#);
+        let body =
+            format!(r#"{{"changes":[{{"section":"daemon","key":"api_port","value":{value}}}]}}"#);
         let resp = post_settings(State(s.state.clone()), RawQuery(None), keyed(KEY), body).await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{value}");
-        assert_eq!(std::fs::read_to_string(&s.config_path).unwrap(), before, "{value}: nothing written");
+        assert_eq!(
+            std::fs::read_to_string(&s.config_path).unwrap(),
+            before,
+            "{value}: nothing written"
+        );
     }
     assert_eq!(s.cfg().daemon.api_port, 8199);
 }
@@ -38,8 +46,14 @@ fn an_edit_replaces_the_file_instead_of_truncating_it() {
     std::fs::hard_link(&s.config_path, &alias).unwrap();
     let old = std::fs::read_to_string(&alias).unwrap();
     assert!(edit_config(&s.state, |doc| add_table(doc, "alpha")));
-    assert!(std::fs::read_to_string(&s.config_path).unwrap().contains("[alpha]"));
-    assert_eq!(std::fs::read_to_string(&alias).unwrap(), old, "the old file was not rewritten in place");
+    assert!(std::fs::read_to_string(&s.config_path)
+        .unwrap()
+        .contains("[alpha]"));
+    assert_eq!(
+        std::fs::read_to_string(&alias).unwrap(),
+        old,
+        "the old file was not rewritten in place"
+    );
     let leftovers: Vec<_> = std::fs::read_dir(&s.dir)
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
@@ -55,7 +69,14 @@ fn an_edit_keeps_the_mode_of_the_file() {
     let s = st("cfgw-mode");
     std::fs::set_permissions(&s.config_path, std::fs::Permissions::from_mode(0o600)).unwrap();
     assert!(edit_config(&s.state, |doc| add_table(doc, "alpha")));
-    assert_eq!(std::fs::metadata(&s.config_path).unwrap().permissions().mode() & 0o777, 0o600);
+    assert_eq!(
+        std::fs::metadata(&s.config_path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
 }
 
 /// Two edits at once both land: the second reads what the first wrote.
@@ -79,7 +100,10 @@ fn two_edits_at_once_both_land() {
     assert!(slow.join().unwrap());
     assert!(fast.join().unwrap());
     let text = std::fs::read_to_string(&s.config_path).unwrap();
-    assert!(text.contains("[alpha]") && text.contains("[beta]"), "{text}");
+    assert!(
+        text.contains("[alpha]") && text.contains("[beta]"),
+        "{text}"
+    );
 }
 
 /// `[mcp] torrent_roots` is written in the file by hand: no route changes it,
@@ -92,9 +116,19 @@ async fn no_route_writes_the_torrent_roots() {
     );
     let before = std::fs::read_to_string(&s.config_path).unwrap();
     let body = r#"{"changes":[{"section":"mcp","key":"torrent_roots","value":["/etc","/root"]}]}"#;
-    let resp = post_settings(State(s.state.clone()), RawQuery(None), keyed(KEY), body.to_string()).await;
+    let resp = post_settings(
+        State(s.state.clone()),
+        RawQuery(None),
+        keyed(KEY),
+        body.to_string(),
+    )
+    .await;
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
-    assert_eq!(std::fs::read_to_string(&s.config_path).unwrap(), before, "nothing written");
+    assert_eq!(
+        std::fs::read_to_string(&s.config_path).unwrap(),
+        before,
+        "nothing written"
+    );
 
     // The shared editor every other route goes through refuses it too, and
     // still takes any other edit.
@@ -102,7 +136,13 @@ async fn no_route_writes_the_torrent_roots() {
         crate::tomledit::set_toml_value(doc, "mcp", "torrent_roots", "[\"/etc\"]")
     }));
     assert!(edit_config(&s.state, |doc| add_table(doc, "alpha")));
-    assert_eq!(std::fs::read_to_string(&s.config_path).unwrap().matches("torrent_roots = []").count(), 1);
+    assert_eq!(
+        std::fs::read_to_string(&s.config_path)
+            .unwrap()
+            .matches("torrent_roots = []")
+            .count(),
+        1
+    );
 }
 
 /// The settings reset rewrites the file from the defaults and carries the
@@ -118,6 +158,11 @@ async fn a_settings_reset_keeps_the_torrent_roots() {
     assert_eq!(resp.status(), StatusCode::OK);
     let text = std::fs::read_to_string(&s.config_path).unwrap();
     let doc: toml::Value = toml::from_str(&text).unwrap();
-    let roots: Vec<&str> = doc["mcp"]["torrent_roots"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
+    let roots: Vec<&str> = doc["mcp"]["torrent_roots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
     assert_eq!(roots, ["/srv/watch", "/mnt/user/drop"], "{text}");
 }

@@ -100,8 +100,15 @@ fn tracker_answering(body: &'static [u8]) -> Tracker {
         let mut lines = head.lines();
         let request_line = lines.next().unwrap_or_default().to_string();
         let target = request_line.split_whitespace().nth(1).unwrap_or_default();
-        let query = target.split_once('?').map(|(_, q)| q).unwrap_or("").to_string();
-        let headers: Vec<String> = lines.take_while(|l| !l.is_empty()).map(String::from).collect();
+        let query = target
+            .split_once('?')
+            .map(|(_, q)| q)
+            .unwrap_or("")
+            .to_string();
+        let headers: Vec<String> = lines
+            .take_while(|l| !l.is_empty())
+            .map(String::from)
+            .collect();
 
         let _ = qtx.send(query);
         let _ = htx.send(headers);
@@ -136,7 +143,8 @@ fn announce_to(url: &str) -> Result<AnnounceResponse, String> {
 }
 
 /// A well-formed answer: two counts, an interval, and one compact peer.
-const PEER_127_0_0_1_6881: &[u8] = b"d8:completei5e10:incompletei3e8:intervali1800e5:peers6:\x7f\x00\x00\x01\x1a\xe1e";
+const PEER_127_0_0_1_6881: &[u8] =
+    b"d8:completei5e10:incompletei3e8:intervali1800e5:peers6:\x7f\x00\x00\x01\x1a\xe1e";
 
 // ---------------------------------------------------------------------------
 // BEP 3 -- the announce request
@@ -157,7 +165,14 @@ fn bep3_the_mandatory_parameters_are_all_present() {
 
     let params = t.params();
     let names: Vec<&str> = params.iter().map(|(k, _)| k.as_str()).collect();
-    for required in ["info_hash", "peer_id", "port", "uploaded", "downloaded", "left"] {
+    for required in [
+        "info_hash",
+        "peer_id",
+        "port",
+        "uploaded",
+        "downloaded",
+        "left",
+    ] {
         assert!(
             names.contains(&required),
             "BEP 3 requires `{required}` on every announce; the tracker received {names:?}"
@@ -179,7 +194,11 @@ fn bep3_the_info_hash_decodes_to_exactly_twenty_bytes() {
     announce_to(&url).expect("the tracker answered");
 
     let params = t.params();
-    let raw = &params.iter().find(|(k, _)| k == "info_hash").expect("info_hash").1;
+    let raw = &params
+        .iter()
+        .find(|(k, _)| k == "info_hash")
+        .expect("info_hash")
+        .1;
     let decoded = percent_decode(raw);
     assert_eq!(
         decoded.len(),
@@ -203,7 +222,11 @@ fn bep3_the_peer_id_decodes_to_exactly_twenty_bytes() {
     announce_to(&url).expect("the tracker answered");
 
     let params = t.params();
-    let raw = &params.iter().find(|(k, _)| k == "peer_id").expect("peer_id").1;
+    let raw = &params
+        .iter()
+        .find(|(k, _)| k == "peer_id")
+        .expect("peer_id")
+        .1;
     let decoded = percent_decode(raw);
     assert_eq!(
         decoded.len(),
@@ -222,7 +245,9 @@ fn bep3_the_peer_id_decodes_to_exactly_twenty_bytes() {
 /// client keeps hammering a tracker that told it to stop.
 #[test]
 fn bep3_a_failure_reason_is_an_error_and_not_a_peer_list() {
-    let t = tracker_answering(b"d14:failure reason24:your account is disabled5:peers6:\x7f\x00\x00\x01\x1a\xe1e");
+    let t = tracker_answering(
+        b"d14:failure reason24:your account is disabled5:peers6:\x7f\x00\x00\x01\x1a\xe1e",
+    );
     let url = format!("{}?info_hash={}", t.url, "%AB".repeat(20));
 
     let err = announce_to(&url).expect_err("BEP 3: a failure reason is an error");
@@ -255,7 +280,11 @@ fn bep3_the_swarm_counts_survive_the_parse() {
     let url = format!("{}?info_hash={}", t.url, "%AB".repeat(20));
 
     let r = announce_to(&url).expect("the tracker answered");
-    assert_eq!((r.complete, r.incomplete), (5, 3), "complete/incomplete as sent");
+    assert_eq!(
+        (r.complete, r.incomplete),
+        (5, 3),
+        "complete/incomplete as sent"
+    );
 }
 
 /// BEP 3: `min interval`, when the tracker states one, is the floor below which
@@ -270,7 +299,10 @@ fn bep3_the_min_interval_floor_is_read() {
     let url = format!("{}?info_hash={}", t.url, "%AB".repeat(20));
 
     let r = announce_to(&url).expect("the tracker answered");
-    assert_eq!(r.min_interval, 900, "BEP 3: the tracker imposed a 900s floor");
+    assert_eq!(
+        r.min_interval, 900,
+        "BEP 3: the tracker imposed a 900s floor"
+    );
     assert_eq!(r.interval, 1800, "and still asked to be seen every 1800s");
 }
 
@@ -309,11 +341,17 @@ fn bep23_a_compact_peer_list_is_six_bytes_per_peer() {
 /// did arrive whole. Trackers behind a proxy do truncate.
 #[test]
 fn bep23_a_truncated_last_entry_does_not_lose_the_others() {
-    let t = tracker_answering(b"d8:completei1e10:incompletei0e8:intervali1800e5:peers8:\x7f\x00\x00\x01\x1a\xe1\x7f\x00e");
+    let t = tracker_answering(
+        b"d8:completei1e10:incompletei0e8:intervali1800e5:peers8:\x7f\x00\x00\x01\x1a\xe1\x7f\x00e",
+    );
     let url = format!("{}?info_hash={}", t.url, "%AB".repeat(20));
 
     let r = announce_to(&url).expect("a short tail is not a fatal answer");
-    assert_eq!(r.peers.len(), 1, "the whole entry is kept, the half one dropped");
+    assert_eq!(
+        r.peers.len(),
+        1,
+        "the whole entry is kept, the half one dropped"
+    );
 }
 
 /// BEP 3: the non-compact form is a list of dictionaries. A tracker may ignore
@@ -326,7 +364,11 @@ fn bep3_the_dictionary_peer_list_is_understood_too() {
     let url = format!("{}?info_hash={}", t.url, "%AB".repeat(20));
 
     let r = announce_to(&url).expect("the tracker answered");
-    assert_eq!(r.peers.len(), 1, "a dictionary peer list is still a peer list");
+    assert_eq!(
+        r.peers.len(),
+        1,
+        "a dictionary peer list is still a peer list"
+    );
     assert_eq!(r.peers[0].to_string(), "10.0.0.42:6881");
 }
 

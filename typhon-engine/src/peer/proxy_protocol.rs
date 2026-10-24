@@ -72,7 +72,10 @@ pub async fn parse_v2<R: AsyncRead + Unpin>(mut reader: R) -> io::Result<SocketA
         }
         _ => Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("PROXY v2: unsupported fam={} proto={} len={}", fam, proto, len),
+            format!(
+                "PROXY v2: unsupported fam={} proto={} len={}",
+                fam, proto, len
+            ),
         )),
     }
 }

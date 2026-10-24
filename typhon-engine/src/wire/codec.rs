@@ -1,6 +1,6 @@
 use bytes::{Buf, BufMut, BytesMut};
-use tokio_util::codec::{Decoder, Encoder};
 use std::io;
+use tokio_util::codec::{Decoder, Encoder};
 
 use crate::peer::message::Message;
 
@@ -13,7 +13,9 @@ pub struct BtCodec {
 impl BtCodec {
     pub fn new() -> Self {
         // Max piece = 16 KiB data + 13 bytes header, plus some margin
-        Self { max_frame_len: 1 << 18 } // 256 KiB
+        Self {
+            max_frame_len: 1 << 18,
+        } // 256 KiB
     }
 }
 
@@ -56,8 +58,10 @@ impl Decoder for BtCodec {
             return Ok(Some(Message::KeepAlive));
         }
         if len > self.max_frame_len {
-            return Err(io::Error::new(io::ErrorKind::InvalidData,
-                format!("frame too large: {}", len)));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("frame too large: {}", len),
+            ));
         }
         if src.len() < 4 + len {
             // Room for what has to arrive next, never more than a step at a
@@ -140,7 +144,11 @@ mod tests {
         let mut buf = BytesMut::with_capacity(8 * 1024);
         let before = buf.capacity();
         let _ = codec.decode(&mut buf).expect("decode must not error");
-        assert_eq!(buf.capacity(), before, "a small buffer was needlessly swapped");
+        assert_eq!(
+            buf.capacity(),
+            before,
+            "a small buffer was needlessly swapped"
+        );
     }
 
     /// The write half: a batched-up buffer that drained must not keep its peak.
@@ -150,7 +158,9 @@ mod tests {
         let mut codec = BtCodec::new();
         let mut buf = BytesMut::with_capacity(128 * 1024);
         assert!(buf.is_empty());
-        codec.encode(Message::KeepAlive, &mut buf).expect("encode must not error");
+        codec
+            .encode(Message::KeepAlive, &mut buf)
+            .expect("encode must not error");
         assert!(
             buf.capacity() <= WRITE_BUF_TARGET,
             "oversized empty write buffer kept {} bytes",
@@ -164,7 +174,9 @@ mod tests {
         let mut codec = BtCodec::new();
         let mut buf = BytesMut::with_capacity(128 * 1024);
         buf.extend_from_slice(&[1u8, 2, 3, 4]);
-        codec.encode(Message::KeepAlive, &mut buf).expect("encode must not error");
+        codec
+            .encode(Message::KeepAlive, &mut buf)
+            .expect("encode must not error");
         assert_eq!(&buf[..4], &[1u8, 2, 3, 4], "queued bytes were dropped");
         assert_eq!(buf.len(), 8, "keepalive should append 4 bytes");
     }
@@ -177,8 +189,15 @@ mod tests {
         let mut codec = BtCodec::new();
         let mut buf = BytesMut::with_capacity(8 * 1024);
         buf.extend_from_slice(&(1u32 << 18).to_be_bytes());
-        assert!(codec.decode(&mut buf).expect("a partial frame is not an error").is_none());
-        assert!(buf.capacity() <= 64 * 1024, "reserved {} bytes for a frame not yet sent", buf.capacity());
+        assert!(codec
+            .decode(&mut buf)
+            .expect("a partial frame is not an error")
+            .is_none());
+        assert!(
+            buf.capacity() <= 64 * 1024,
+            "reserved {} bytes for a frame not yet sent",
+            buf.capacity()
+        );
     }
 
     /// The frame still decodes when its bytes come in pieces.

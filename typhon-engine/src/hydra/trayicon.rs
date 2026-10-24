@@ -34,7 +34,11 @@ pub fn from_logo() -> Option<HANDLE> {
     let (pix, sw, sh) = decode(LOGO)?;
 
     let (w, h) = unsafe { (GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON)) };
-    let (w, h) = if w <= 0 || h <= 0 { (16i32, 16i32) } else { (w, h) };
+    let (w, h) = if w <= 0 || h <= 0 {
+        (16i32, 16i32)
+    } else {
+        (w, h)
+    };
     let (wu, hu) = (w as usize, h as usize);
 
     // Tightest rectangle holding the logo itself. Sampling the raw canvas
@@ -88,8 +92,7 @@ pub fn from_logo() -> Option<HANDLE> {
                 let x1 = bx0 as f64 + (x as f64 + 1.0 + off_x) / scale;
                 let y0 = by0 as f64 + (y as f64 + off_y) / scale;
                 let y1 = by0 as f64 + (y as f64 + 1.0 + off_y) / scale;
-                let (r, g, b, a) =
-                    average(&pix, sw, (bx0, by0, bx1, by1), x0, y0, x1, y1);
+                let (r, g, b, a) = average(&pix, sw, (bx0, by0, bx1, by1), x0, y0, x1, y1);
                 // Premultiplied, which is what a 32bpp DIB icon wants. Order
                 // in memory is BGRA.
                 let i = (y * wu + x) * 4;
@@ -212,5 +215,10 @@ fn average(
         }
     }
     let n = ((ix1 - ix0) * (iy1 - iy0)) as u64;
-    ((sr / n) as u8, (sg / n) as u8, (sb / n) as u8, (sa / n) as u8)
+    (
+        (sr / n) as u8,
+        (sg / n) as u8,
+        (sb / n) as u8,
+        (sa / n) as u8,
+    )
 }

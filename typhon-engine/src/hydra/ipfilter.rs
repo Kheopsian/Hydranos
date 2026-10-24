@@ -46,7 +46,11 @@ fn default_refresh() -> u64 {
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { enabled: false, sources: Vec::new(), refresh_hours: default_refresh() }
+        Settings {
+            enabled: false,
+            sources: Vec::new(),
+            refresh_hours: default_refresh(),
+        }
     }
 }
 
@@ -91,12 +95,16 @@ fn decompress(bytes: Vec<u8>) -> Result<String, String> {
             .map_err(|e| format!("gzip: {e}"))?;
         out
     } else if bytes.starts_with(b"PK\x03\x04") {
-        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).map_err(|e| format!("zip: {e}"))?;
+        let mut zip =
+            zip::ZipArchive::new(std::io::Cursor::new(bytes)).map_err(|e| format!("zip: {e}"))?;
         let mut out = Vec::new();
         for i in 0..zip.len() {
             let mut f = zip.by_index(i).map_err(|e| format!("zip: {e}"))?;
             if f.is_file() {
-                (&mut f).take(MAX_SOURCE_BYTES as u64 * 4).read_to_end(&mut out).map_err(|e| format!("zip: {e}"))?;
+                (&mut f)
+                    .take(MAX_SOURCE_BYTES as u64 * 4)
+                    .read_to_end(&mut out)
+                    .map_err(|e| format!("zip: {e}"))?;
                 out.push(b'\n');
             }
         }
@@ -176,11 +184,18 @@ pub async fn reload(state: &AppState) {
                 }
                 Err(e) => {
                     tracing::warn!(source = %src, error = %e, "ip filter source failed to load");
-                    let kept = previous.iter().find(|(p, _)| *p == src).map(|(_, f)| f.clone());
+                    let kept = previous
+                        .iter()
+                        .find(|(p, _)| *p == src)
+                        .map(|(_, f)| f.clone());
                     status.push(SourceStatus {
                         source: src.clone(),
                         ranges: kept.as_ref().map_or(0, |f| f.len()),
-                        error: if kept.is_some() { format!("{e} (kept the last copy)") } else { e },
+                        error: if kept.is_some() {
+                            format!("{e} (kept the last copy)")
+                        } else {
+                            e
+                        },
                         ..Default::default()
                     });
                     if let Some(f) = kept {
@@ -191,7 +206,12 @@ pub async fn reload(state: &AppState) {
         }
     }
     if let Ok(mut g) = LOADED.lock() {
-        *g = Some(Loaded { settings: Some(s), lists, status, loaded_at: crate::store::now_secs() });
+        *g = Some(Loaded {
+            settings: Some(s),
+            lists,
+            status,
+            loaded_at: crate::store::now_secs(),
+        });
     }
     rebuild(state);
 }
@@ -201,9 +221,17 @@ pub fn rebuild(state: &AppState) {
     let mut parts: Vec<IpFilter> = LOADED
         .lock()
         .ok()
-        .and_then(|g| g.as_ref().map(|l| l.lists.iter().map(|(_, f)| f.clone()).collect()))
+        .and_then(|g| {
+            g.as_ref()
+                .map(|l| l.lists.iter().map(|(_, f)| f.clone()).collect())
+        })
         .unwrap_or_default();
-    let bans = state.store.lock().ok().and_then(|s| s.bans().ok()).unwrap_or_default();
+    let bans = state
+        .store
+        .lock()
+        .ok()
+        .and_then(|s| s.bans().ok())
+        .unwrap_or_default();
     let text: String = bans.iter().map(|(ip, _, _)| format!("{ip}\n")).collect();
     parts.push(IpFilter::parse(&text).0);
     let all = IpFilter::union(&parts);
@@ -211,9 +239,17 @@ pub fn rebuild(state: &AppState) {
     typhon_engine::ipfilter::install(Some(all));
     // The peers already connected: each session re-checks on its next turn,
     // and these are woken so the next turn is now.
-    let woken: usize = state.engines.engines().iter().map(|e| e.manager.wake_filtered_peers()).sum();
+    let woken: usize = state
+        .engines
+        .engines()
+        .iter()
+        .map(|e| e.manager.wake_filtered_peers())
+        .sum();
     if woken > 0 {
-        tracing::info!(peers = woken, "ip filter: disconnecting peers it now blocks");
+        tracing::info!(
+            peers = woken,
+            "ip filter: disconnecting peers it now blocks"
+        );
     }
 }
 
@@ -237,7 +273,8 @@ pub fn spawn(state: AppState) {
                 .ok()
                 .map(|g| g.as_ref().and_then(|l| l.settings.clone()) != Some(s.clone()))
                 .unwrap_or(true);
-            let due = s.enabled && crate::store::now_secs() - last >= s.refresh_hours.max(1) as i64 * 3600;
+            let due = s.enabled
+                && crate::store::now_secs() - last >= s.refresh_hours.max(1) as i64 * 3600;
             if changed || due {
                 reload(&state).await;
                 last = crate::store::now_secs();
@@ -251,11 +288,19 @@ pub fn spawn(state: AppState) {
 // ---------------------------------------------------------------------------
 
 fn unauthorised() -> Response {
-    (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "Invalid or missing API key"}))).into_response()
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(serde_json::json!({"error": "Invalid or missing API key"})),
+    )
+        .into_response()
 }
 
 fn bad(msg: impl std::fmt::Display) -> Response {
-    (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": msg.to_string()}))).into_response()
+    (
+        StatusCode::BAD_REQUEST,
+        Json(serde_json::json!({"error": msg.to_string()})),
+    )
+        .into_response()
 }
 
 /// What the filter holds and has done.
@@ -287,14 +332,23 @@ pub fn status_json(state: &AppState) -> serde_json::Value {
     })
 }
 
-async fn status(State(state): State<AppState>, RawQuery(q): RawQuery, headers: HeaderMap) -> Response {
+async fn status(
+    State(state): State<AppState>,
+    RawQuery(q): RawQuery,
+    headers: HeaderMap,
+) -> Response {
     if !crate::api::authorised(&state, &headers, &q.unwrap_or_default()) {
         return unauthorised();
     }
     Json(status_json(&state)).into_response()
 }
 
-async fn put_settings(State(state): State<AppState>, RawQuery(q): RawQuery, headers: HeaderMap, body: String) -> Response {
+async fn put_settings(
+    State(state): State<AppState>,
+    RawQuery(q): RawQuery,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
     if !crate::api::authorised(&state, &headers, &q.unwrap_or_default()) {
         return unauthorised();
     }
@@ -305,11 +359,21 @@ async fn put_settings(State(state): State<AppState>, RawQuery(q): RawQuery, head
     for src in &s.sources {
         let src = src.trim();
         if !(src.starts_with("http://") || src.starts_with("https://") || src.starts_with('/')) {
-            return bad(format!("{src:?}: a source is an absolute path on this node or an http(s) URL"));
+            return bad(format!(
+                "{src:?}: a source is an absolute path on this node or an http(s) URL"
+            ));
         }
     }
     let json = serde_json::to_string(&s).unwrap_or_default();
-    if let Err(e) = state.store.lock().map_err(|_| "store lock".to_string()).and_then(|st| st.put_setting(SETTINGS_KEY, &json).map_err(|e| e.to_string())) {
+    if let Err(e) = state
+        .store
+        .lock()
+        .map_err(|_| "store lock".to_string())
+        .and_then(|st| {
+            st.put_setting(SETTINGS_KEY, &json)
+                .map_err(|e| e.to_string())
+        })
+    {
         return bad(e);
     }
     // Applied now rather than at the next minute: the operator is looking.
@@ -324,7 +388,12 @@ struct BanBody {
     reason: String,
 }
 
-async fn ban(State(state): State<AppState>, RawQuery(q): RawQuery, headers: HeaderMap, body: String) -> Response {
+async fn ban(
+    State(state): State<AppState>,
+    RawQuery(q): RawQuery,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
     if !crate::api::authorised(&state, &headers, &q.unwrap_or_default()) {
         return unauthorised();
     }
@@ -338,14 +407,24 @@ async fn ban(State(state): State<AppState>, RawQuery(q): RawQuery, headers: Head
     if st.ranges != 1 || st.unreadable != 0 {
         return bad(format!("{ip:?} is not an address, a CIDR or a range"));
     }
-    if let Err(e) = state.store.lock().map_err(|_| "store lock".to_string()).and_then(|s| s.put_ban(ip, &b.reason).map_err(|e| e.to_string())) {
+    if let Err(e) = state
+        .store
+        .lock()
+        .map_err(|_| "store lock".to_string())
+        .and_then(|s| s.put_ban(ip, &b.reason).map_err(|e| e.to_string()))
+    {
         return bad(e);
     }
     rebuild(&state);
     Json(serde_json::json!({"status": "ok", "ip": ip})).into_response()
 }
 
-async fn unban(State(state): State<AppState>, RawQuery(q): RawQuery, headers: HeaderMap, body: String) -> Response {
+async fn unban(
+    State(state): State<AppState>,
+    RawQuery(q): RawQuery,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
     let query = q.unwrap_or_default();
     if !crate::api::authorised(&state, &headers, &query) {
         return unauthorised();
@@ -354,20 +433,34 @@ async fn unban(State(state): State<AppState>, RawQuery(q): RawQuery, headers: He
         Ok(b) => b,
         Err(e) => return bad(e),
     };
-    let gone = state.store.lock().ok().map(|s| s.delete_ban(b.ip.trim()).unwrap_or(false)).unwrap_or(false);
+    let gone = state
+        .store
+        .lock()
+        .ok()
+        .map(|s| s.delete_ban(b.ip.trim()).unwrap_or(false))
+        .unwrap_or(false);
     if !gone {
-        return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "no such ban"}))).into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "no such ban"})),
+        )
+            .into_response();
     }
     rebuild(&state);
     Json(serde_json::json!({"status": "ok"})).into_response()
 }
 
-async fn reload_route(State(state): State<AppState>, RawQuery(q): RawQuery, headers: HeaderMap) -> Response {
+async fn reload_route(
+    State(state): State<AppState>,
+    RawQuery(q): RawQuery,
+    headers: HeaderMap,
+) -> Response {
     if !crate::api::authorised(&state, &headers, &q.unwrap_or_default()) {
         return unauthorised();
     }
     reload(&state).await;
-    Json(serde_json::json!({"status": "ok", "ranges": typhon_engine::ipfilter::installed_len()})).into_response()
+    Json(serde_json::json!({"status": "ok", "ranges": typhon_engine::ipfilter::installed_len()}))
+        .into_response()
 }
 
 pub fn routes() -> axum::Router<AppState> {
@@ -397,7 +490,13 @@ mod tests {
     }
 
     async fn put(s: &TestState, body: serde_json::Value) -> Response {
-        put_settings(State(s.state.clone()), RawQuery(None), keyed(KEY), body.to_string()).await
+        put_settings(
+            State(s.state.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            body.to_string(),
+        )
+        .await
     }
 
     /// ⭐ A list from a file, a gzip one beside it, both applied; a ban on
@@ -415,7 +514,11 @@ mod tests {
             e.write_all(b"198.51.100.200/30\n").unwrap();
             std::fs::write(&gz, e.finish().unwrap()).unwrap();
         }
-        let r = put(&s, serde_json::json!({"enabled": true, "sources": [plain, gz]})).await;
+        let r = put(
+            &s,
+            serde_json::json!({"enabled": true, "sources": [plain, gz]}),
+        )
+        .await;
         assert!(r.status().is_success());
         let v = body_json(r).await;
         assert_eq!(v["sources"][0]["ranges"], 1);
@@ -424,17 +527,48 @@ mod tests {
         assert!(typhon_engine::ipfilter::blocked(ip("198.51.100.201")));
         assert!(!typhon_engine::ipfilter::blocked(ip("198.51.100.150")));
 
-        let b = ban(State(s.state.clone()), RawQuery(None), keyed(KEY), r#"{"ip":"198.51.100.150","reason":"leecher"}"#.into()).await;
+        let b = ban(
+            State(s.state.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            r#"{"ip":"198.51.100.150","reason":"leecher"}"#.into(),
+        )
+        .await;
         assert!(b.status().is_success());
-        assert!(typhon_engine::ipfilter::blocked(ip("198.51.100.150")), "a ban applies at once");
-        let bad_ban = ban(State(s.state.clone()), RawQuery(None), keyed(KEY), r#"{"ip":"not-an-ip"}"#.into()).await;
+        assert!(
+            typhon_engine::ipfilter::blocked(ip("198.51.100.150")),
+            "a ban applies at once"
+        );
+        let bad_ban = ban(
+            State(s.state.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            r#"{"ip":"not-an-ip"}"#.into(),
+        )
+        .await;
         assert_eq!(bad_ban.status(), StatusCode::BAD_REQUEST);
 
         // Off: the lists stop applying, the ban does not.
-        put(&s, serde_json::json!({"enabled": false, "sources": [plain]})).await;
-        assert!(!typhon_engine::ipfilter::blocked(ip("198.51.100.5")), "lists off");
-        assert!(typhon_engine::ipfilter::blocked(ip("198.51.100.150")), "a ban by hand is not a list");
-        let u = unban(State(s.state.clone()), RawQuery(None), keyed(KEY), r#"{"ip":"198.51.100.150"}"#.into()).await;
+        put(
+            &s,
+            serde_json::json!({"enabled": false, "sources": [plain]}),
+        )
+        .await;
+        assert!(
+            !typhon_engine::ipfilter::blocked(ip("198.51.100.5")),
+            "lists off"
+        );
+        assert!(
+            typhon_engine::ipfilter::blocked(ip("198.51.100.150")),
+            "a ban by hand is not a list"
+        );
+        let u = unban(
+            State(s.state.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            r#"{"ip":"198.51.100.150"}"#.into(),
+        )
+        .await;
         assert!(u.status().is_success());
         assert!(!typhon_engine::ipfilter::blocked(ip("198.51.100.150")));
     }
@@ -451,9 +585,18 @@ mod tests {
         assert!(typhon_engine::ipfilter::blocked(ip("198.51.100.77")));
         std::fs::remove_file(&f).unwrap();
         reload(&s.state).await;
-        assert!(typhon_engine::ipfilter::blocked(ip("198.51.100.77")), "still filtered");
+        assert!(
+            typhon_engine::ipfilter::blocked(ip("198.51.100.77")),
+            "still filtered"
+        );
         let v = status_json(&s.state);
-        assert!(v["sources"][0]["error"].as_str().unwrap().contains("kept the last copy"), "{v}");
+        assert!(
+            v["sources"][0]["error"]
+                .as_str()
+                .unwrap()
+                .contains("kept the last copy"),
+            "{v}"
+        );
         put(&s, serde_json::json!({"enabled": false, "sources": []})).await;
     }
 
@@ -461,7 +604,11 @@ mod tests {
     async fn a_source_must_be_a_path_or_a_url_and_the_routes_need_the_key() {
         let _one = SERIAL.lock().await;
         let s = st("ipf-refuse");
-        let r = put(&s, serde_json::json!({"enabled": true, "sources": ["relative/list.txt"]})).await;
+        let r = put(
+            &s,
+            serde_json::json!({"enabled": true, "sources": ["relative/list.txt"]}),
+        )
+        .await;
         assert_eq!(r.status(), StatusCode::BAD_REQUEST);
         let r = status(State(s.state.clone()), RawQuery(None), HeaderMap::new()).await;
         assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
@@ -473,7 +620,8 @@ mod tests {
         let mut buf = std::io::Cursor::new(Vec::new());
         {
             let mut z = zip::ZipWriter::new(&mut buf);
-            z.start_file("level1.p2p", zip::write::SimpleFileOptions::default()).unwrap();
+            z.start_file("level1.p2p", zip::write::SimpleFileOptions::default())
+                .unwrap();
             z.write_all(b"x:10.1.0.0-10.1.0.9\n").unwrap();
             z.finish().unwrap();
         }

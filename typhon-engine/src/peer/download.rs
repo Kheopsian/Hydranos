@@ -2,8 +2,8 @@
 //! Manages piece requesting, block assembly, and completion.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::info;
 
@@ -121,8 +121,8 @@ impl DownloadState {
     }
 
     pub fn is_downloading(&self) -> bool {
-        self.torrent.picker.get().is_some() &&
-        self.torrent.status.load(Ordering::Relaxed) == TorrentStatus::Downloading as u8
+        self.torrent.picker.get().is_some()
+            && self.torrent.status.load(Ordering::Relaxed) == TorrentStatus::Downloading as u8
     }
 
     /// Process incoming Bitfield from peer.
@@ -214,7 +214,11 @@ impl DownloadState {
     /// A Reject for a request no longer on the wire (the ones a choke already
     /// voided) changes nothing.
     pub fn on_reject(&mut self, index: u32, begin: u32, length: u32) {
-        let Some(i) = self.inflight.iter().position(|r| *r == (index, begin, length)) else {
+        let Some(i) = self
+            .inflight
+            .iter()
+            .position(|r| *r == (index, begin, length))
+        else {
             return;
         };
         self.inflight.remove(i);
@@ -275,7 +279,9 @@ impl DownloadState {
 
     /// Check if we should send Interested to this peer.
     pub fn should_be_interested(&self) -> bool {
-        if !self.is_downloading() { return false; }
+        if !self.is_downloading() {
+            return false;
+        }
         if let Some(picker) = self.torrent.picker.get() {
             let p = picker.lock().unwrap();
             p.pick_piece(&self.peer_bitfield).is_some()
@@ -307,7 +313,10 @@ impl DownloadState {
     /// piece must still be finished before another is started -- and the batch
     /// stops there. The pipeline is then refilled when the cap allows, instead
     /// of being sized by a number the cap knows nothing about.
-    pub fn get_requests_gated(&mut self, mut admit: impl FnMut(u32) -> bool) -> Vec<(u32, u32, u32)> {
+    pub fn get_requests_gated(
+        &mut self,
+        mut admit: impl FnMut(u32) -> bool,
+    ) -> Vec<(u32, u32, u32)> {
         self.held_back = false;
         // A paused torrent asks for nothing. This is the single choke point
         // for the download side: `stop_torrent` sets the flag and untracks the
@@ -385,7 +394,9 @@ impl DownloadState {
             // already in flight (endgame) costs nothing more.
             // The check and the reservation are one step: other torrents start
             // pieces on the same budget under their own locks.
-            let Some(piece_requests) = picker.start_piece_within_budget(piece, piece_size, BLOCK_SIZE, self.owner) else {
+            let Some(piece_requests) =
+                picker.start_piece_within_budget(piece, piece_size, BLOCK_SIZE, self.owner)
+            else {
                 self.held_back = true;
                 break;
             };
@@ -401,7 +412,11 @@ impl DownloadState {
         if self.cut_off {
             return None;
         }
-        if let Some(i) = self.inflight.iter().position(|r| r.0 == index && r.1 == begin) {
+        if let Some(i) = self
+            .inflight
+            .iter()
+            .position(|r| r.0 == index && r.1 == begin)
+        {
             self.inflight.remove(i);
         }
 
@@ -421,7 +436,11 @@ impl DownloadState {
         let (outcome, piece_data) = {
             let mut p = picker.lock().unwrap();
             let outcome = p.receive_block_from(index, begin, data, self.owner);
-            let piece_data = if outcome == Block::Complete { p.take_piece(index) } else { None };
+            let piece_data = if outcome == Block::Complete {
+                p.take_piece(index)
+            } else {
+                None
+            };
             (outcome, piece_data)
         };
         if matches!(outcome, Block::Stored | Block::Complete | Block::Duplicate) {
@@ -707,7 +726,10 @@ mod tests {
     fn a_repeated_have_is_not_counted_twice() {
         let mut dl = state(downloading(16, 16384));
         assert!(dl.on_have(3), "the first time");
-        assert!(!dl.on_have(3), "the second time tells the caller not to count it");
+        assert!(
+            !dl.on_have(3),
+            "the second time tells the caller not to count it"
+        );
     }
 
     /// A peer may send a piece index this torrent does not have. Believing it
@@ -729,7 +751,10 @@ mod tests {
         dl.on_have_all();
         assert_eq!(dl.peer_bitfield.len(), 2, "ten pieces need two bytes");
         assert_eq!(dl.peer_bitfield[0], 0xFF);
-        assert_eq!(dl.peer_bitfield[1], 0b1100_0000, "two real pieces, six of padding");
+        assert_eq!(
+            dl.peer_bitfield[1], 0b1100_0000,
+            "two real pieces, six of padding"
+        );
     }
 
     #[test]
@@ -740,7 +765,14 @@ mod tests {
     }
 
     fn copies_seen(dl: &DownloadState) -> u64 {
-        dl.torrent.picker.get().unwrap().lock().unwrap().availability_stats().2
+        dl.torrent
+            .picker
+            .get()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .availability_stats()
+            .2
     }
 
     /// ⭐ One peer is one copy of what it holds, however many times it says
@@ -753,9 +785,17 @@ mod tests {
         dl.on_bitfield(&[0b1010_1010, 0x00]);
         dl.on_have_all();
         dl.on_have_all();
-        assert_eq!(copies_seen(&dl), 16, "one copy of each of the sixteen pieces");
+        assert_eq!(
+            copies_seen(&dl),
+            16,
+            "one copy of each of the sixteen pieces"
+        );
         dl.on_disconnect();
-        assert_eq!(copies_seen(&dl), 0, "gone with the peer, nothing left behind");
+        assert_eq!(
+            copies_seen(&dl),
+            0,
+            "gone with the peer, nothing left behind"
+        );
     }
 
     /// A Bitfield that drops a piece the peer announced by Have takes that copy
@@ -835,7 +875,8 @@ mod tests {
     #[test]
     fn a_torrent_that_is_not_downloading_asks_for_nothing() {
         let t = downloading(64, 2 * 1024 * 1024);
-        t.status.store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+        t.status
+            .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
         let mut dl = state(t);
         ready(&mut dl);
         assert!(dl.get_requests().is_empty());
@@ -852,7 +893,11 @@ mod tests {
         ready(&mut dl);
 
         let reqs = dl.get_requests();
-        assert_eq!(reqs.len(), MAX_PIPELINE, "the pipeline is filled, not the piece");
+        assert_eq!(
+            reqs.len(),
+            MAX_PIPELINE,
+            "the pipeline is filled, not the piece"
+        );
 
         // All of one piece before any of the next: a piece half-requested from
         // two peers completes twice as slowly and pins twice the memory.
@@ -863,7 +908,11 @@ mod tests {
         );
         // Blocks are contiguous and of the block size.
         for (i, (_, begin, len)) in reqs.iter().enumerate() {
-            assert_eq!(*begin, i as u32 * BLOCK_SIZE, "block {i} starts where the last ended");
+            assert_eq!(
+                *begin,
+                i as u32 * BLOCK_SIZE,
+                "block {i} starts where the last ended"
+            );
             assert_eq!(*len, BLOCK_SIZE);
         }
     }
@@ -875,11 +924,15 @@ mod tests {
     fn the_last_short_piece_is_asked_for_at_its_real_size() {
         // One piece of 1000 bytes.
         let t = Arc::new(TorrentState::new(
-            TorrentMeta { total_size: 1000, ..meta(1, 16384) },
+            TorrentMeta {
+                total_size: 1000,
+                ..meta(1, 16384)
+            },
             PathBuf::from("/tmp"),
             false,
         ));
-        t.status.store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+        t.status
+            .store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
         let mut dl = state(t);
         ready(&mut dl);
 
@@ -924,14 +977,23 @@ mod endgame_tests {
             PathBuf::from("/tmp"),
             false,
         ));
-        t.status.store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+        t.status
+            .store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
         let mut dl = DownloadState::new(t, Arc::new(DiskManager::new(100)));
         dl.on_have_all();
         dl.on_unchoke();
 
         let reqs = dl.get_requests();
-        assert_eq!(reqs.len(), 1, "one piece of one short block, asked for once: {reqs:?}");
-        assert_eq!(reqs[0], (0, 0, 1000), "and at its real length, not a full block");
+        assert_eq!(
+            reqs.len(),
+            1,
+            "one piece of one short block, asked for once: {reqs:?}"
+        );
+        assert_eq!(
+            reqs[0],
+            (0, 0, 1000),
+            "and at its real length, not a full block"
+        );
     }
 
     /// The same, with room in the pipeline and several pieces: what goes out
@@ -957,7 +1019,8 @@ mod endgame_tests {
             PathBuf::from("/tmp"),
             false,
         ));
-        t.status.store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+        t.status
+            .store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
         let mut dl = DownloadState::new(t, Arc::new(DiskManager::new(100)));
         dl.on_have_all();
         dl.on_unchoke();
@@ -967,7 +1030,11 @@ mod endgame_tests {
         for r in &reqs {
             assert!(seen.insert(*r), "block {r:?} asked for twice in {reqs:?}");
         }
-        assert!(reqs.len() <= 8, "four pieces of two blocks is eight, got {}", reqs.len());
+        assert!(
+            reqs.len() <= 8,
+            "four pieces of two blocks is eight, got {}",
+            reqs.len()
+        );
     }
 }
 
@@ -1000,7 +1067,8 @@ mod disk_failure_tests {
             PathBuf::from("/tmp"),
             false,
         ));
-        t.status.store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+        t.status
+            .store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
         t
     }
 
@@ -1058,7 +1126,10 @@ mod disk_failure_tests {
         let mut dl = DownloadState::new(t.clone(), disk.clone());
         dl.on_have_all();
         dl.on_unchoke();
-        assert!(!dl.get_requests().is_empty(), "asking, before the disk gives up");
+        assert!(
+            !dl.get_requests().is_empty(),
+            "asking, before the disk gives up"
+        );
 
         for _ in 0..DISK_FAILURES_BEFORE_ERROR {
             rt.block_on(commit_piece(&t, &disk, 0, vec![0u8; 16384]));
@@ -1084,7 +1155,10 @@ mod disk_failure_tests {
             1,
             "counting starts again from the last success"
         );
-        assert_eq!(t.status.load(Ordering::Relaxed), TorrentStatus::Downloading as u8);
+        assert_eq!(
+            t.status.load(Ordering::Relaxed),
+            TorrentStatus::Downloading as u8
+        );
     }
 }
 
@@ -1117,7 +1191,8 @@ mod release_tests {
             PathBuf::from("/tmp"),
             false,
         ));
-        t.status.store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+        t.status
+            .store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
         t
     }
 
@@ -1133,11 +1208,19 @@ mod release_tests {
     }
 
     fn holds(t: &TorrentState, piece: u32, dl: &DownloadState) -> bool {
-        t.picker.get().unwrap().lock().unwrap().holds(piece, dl.owner)
+        t.picker
+            .get()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .holds(piece, dl.owner)
     }
 
     fn rt() -> tokio::runtime::Runtime {
-        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap()
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
     }
 
     fn block() -> Vec<u8> {
@@ -1165,7 +1248,11 @@ mod release_tests {
         assert_eq!(in_flight(&t), (16, BLOCK_SIZE as u64), "one block held");
 
         a.on_choke();
-        assert_eq!(in_flight(&t), (9, BLOCK_SIZE as u64), "A's seven untouched pieces went back");
+        assert_eq!(
+            in_flight(&t),
+            (9, BLOCK_SIZE as u64),
+            "A's seven untouched pieces went back"
+        );
         assert!(holds(&t, first, &a), "the piece A was delivering stays A's");
         for p in &b_pieces {
             assert!(holds(&t, *p, &b), "B's piece {p} is B's business");
@@ -1177,7 +1264,11 @@ mod release_tests {
         let again = a.get_requests();
         assert_eq!(
             &again[..3],
-            &[(first, BLOCK_SIZE, BLOCK_SIZE), (first, 2 * BLOCK_SIZE, BLOCK_SIZE), (first, 3 * BLOCK_SIZE, BLOCK_SIZE)],
+            &[
+                (first, BLOCK_SIZE, BLOCK_SIZE),
+                (first, 2 * BLOCK_SIZE, BLOCK_SIZE),
+                (first, 3 * BLOCK_SIZE, BLOCK_SIZE)
+            ],
             "the rest of the piece, first: {again:?}"
         );
         assert!(!again.contains(&(first, 0, BLOCK_SIZE)));
@@ -1195,12 +1286,23 @@ mod release_tests {
         let p = reqs[0].0;
         rt().block_on(a.on_piece(p, 0, &block()));
         let now = Instant::now();
-        assert!(a.release_stalled(now + PIECE_STALL_TIMEOUT / 2).is_empty(), "not yet");
+        assert!(
+            a.release_stalled(now + PIECE_STALL_TIMEOUT / 2).is_empty(),
+            "not yet"
+        );
         assert_eq!(in_flight(&t).0, 8);
 
         let cancels = a.release_stalled(now + PIECE_STALL_TIMEOUT + Duration::from_secs(1));
-        assert_eq!(cancels.len(), MAX_PIPELINE - 1, "every request still on the wire is withdrawn");
-        assert_eq!(in_flight(&t), (0, 0), "the partial piece went too, blocks and all");
+        assert_eq!(
+            cancels.len(),
+            MAX_PIPELINE - 1,
+            "every request still on the wire is withdrawn"
+        );
+        assert_eq!(
+            in_flight(&t),
+            (0, 0),
+            "the partial piece went too, blocks and all"
+        );
         assert!(!a.has_started());
 
         // The late block: no panic, no piece, no byte held.
@@ -1259,10 +1361,18 @@ mod release_tests {
         let rt = rt();
         rt.block_on(a.on_piece(0, 0, &block()));
         rt.block_on(b.on_piece(0, 0, &block())); // duplicate
-        assert_eq!(in_flight(&t), (1, BLOCK_SIZE as u64), "a duplicate is not stored twice");
+        assert_eq!(
+            in_flight(&t),
+            (1, BLOCK_SIZE as u64),
+            "a duplicate is not stored twice"
+        );
         rt.block_on(b.on_piece(0, BLOCK_SIZE, &block()));
         rt.block_on(a.on_piece(0, BLOCK_SIZE, &block()));
-        assert_eq!(t.disk_write_failures.load(Ordering::Relaxed), 1, "one write, not two");
+        assert_eq!(
+            t.disk_write_failures.load(Ordering::Relaxed),
+            1,
+            "one write, not two"
+        );
         assert_eq!(in_flight(&t), (0, 0));
         drop(a);
         drop(b);
@@ -1291,7 +1401,12 @@ mod release_tests {
     fn the_engine_counters_follow_the_blocks() {
         let t = torrent(64, PIECE);
         let mem = Arc::new(crate::torrent::piece_picker::PieceMem::default());
-        t.picker.get().unwrap().lock().unwrap().attach_mem(mem.clone());
+        t.picker
+            .get()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .attach_mem(mem.clone());
         let mut a = peer(&t);
         let reqs = a.get_requests();
         assert_eq!((mem.pieces(), mem.bytes()), (8, 0));
@@ -1323,7 +1438,12 @@ mod release_tests {
                     let (mem, ready, fired) = (mem.clone(), ready.clone(), fired.clone());
                     std::thread::spawn(move || {
                         let t = torrent(64, PIECE);
-                        t.picker.get().unwrap().lock().unwrap().attach_mem(mem.clone());
+                        t.picker
+                            .get()
+                            .unwrap()
+                            .lock()
+                            .unwrap()
+                            .attach_mem(mem.clone());
                         let mut dl = peer(&t);
                         ready.wait();
                         let _ = dl.get_requests();
@@ -1336,7 +1456,10 @@ mod release_tests {
                 worst = worst.max(h.join().unwrap());
             }
         }
-        assert!(worst <= budget, "the sessions committed {worst} bytes on a budget of {budget}");
+        assert!(
+            worst <= budget,
+            "the sessions committed {worst} bytes on a budget of {budget}"
+        );
     }
 }
 
@@ -1375,14 +1498,17 @@ mod poison_tests {
             PathBuf::from("/nonexistent"),
             false,
         ));
-        t.status.store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+        t.status
+            .store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
         let h = Sha1::digest(good());
         let mut blob = format!("d4:infod6:pieces{}:", num_pieces * 20).into_bytes();
         for _ in 0..num_pieces {
             blob.extend_from_slice(&h);
         }
         blob.extend_from_slice(b"ee");
-        t.blob_source.set(Arc::new(move |_: &str| Some(blob.clone()))).ok();
+        t.blob_source
+            .set(Arc::new(move |_: &str| Some(blob.clone())))
+            .ok();
         t
     }
 
@@ -1398,7 +1524,10 @@ mod poison_tests {
     }
 
     fn rt() -> tokio::runtime::Runtime {
-        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap()
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
     }
 
     /// ⭐ A peer cannot fill a piece it was never asked for: its blocks are
@@ -1426,14 +1555,25 @@ mod poison_tests {
         let mut a = peer(&t);
         let ra = a.get_requests();
         let rt = rt();
-        let bad: Vec<_> = ra.iter().filter(|r| r.0 == ra[0].0 || r.0 == ra[2].0).copied().collect();
+        let bad: Vec<_> = ra
+            .iter()
+            .filter(|r| r.0 == ra[0].0 || r.0 == ra[2].0)
+            .copied()
+            .collect();
         assert_eq!(bad.len(), 4, "two pieces of two blocks");
         for r in &bad {
             rt.block_on(a.on_piece(r.0, r.1, &vec![0u8; r.2 as usize]));
         }
         let again = a.get_requests();
-        assert!(again.is_empty(), "still asked for {again:?} after two bad pieces");
-        assert_eq!(in_flight(&t), (0, 0), "what it held went back for others to fetch");
+        assert!(
+            again.is_empty(),
+            "still asked for {again:?} after two bad pieces"
+        );
+        assert_eq!(
+            in_flight(&t),
+            (0, 0),
+            "what it held went back for others to fetch"
+        );
     }
 
     /// An endgame piece filled by two peers that fails proves nothing about

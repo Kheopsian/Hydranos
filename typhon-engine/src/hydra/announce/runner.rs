@@ -45,7 +45,10 @@ fn classify(err: &str) -> &'static str {
         "timeout"
     } else if e.contains("passkey") {
         "invalid_passkey"
-    } else if e.contains("unregistered") || e.contains("not registered") || e.contains("introuvable") {
+    } else if e.contains("unregistered")
+        || e.contains("not registered")
+        || e.contains("introuvable")
+    {
         "unknown_torrent"
     } else if e.contains("dns") {
         "dns"
@@ -116,7 +119,8 @@ impl Catalogue for EngineCatalogue {
             // out, because the runner clears the flag when it sends it.
             .filter(|t| {
                 !t.is_paused.load(std::sync::atomic::Ordering::Relaxed)
-                    || t.pending_announce_event.load(std::sync::atomic::Ordering::Relaxed)
+                    || t.pending_announce_event
+                        .load(std::sync::atomic::Ordering::Relaxed)
                         & typhon_engine::torrent::meta::ANNOUNCE_EVENT_STOPPED
                         != 0
             })
@@ -125,10 +129,19 @@ impl Catalogue for EngineCatalogue {
     }
 
     fn host_of(&self, info_hash: &str) -> String {
-        let Some(ih) = parse_hex(info_hash) else { return String::new() };
-        let Some(t) = self.manager.get(&ih) else { return String::new() };
+        let Some(ih) = parse_hex(info_hash) else {
+            return String::new();
+        };
+        let Some(t) = self.manager.get(&ih) else {
+            return String::new();
+        };
         let tiers = t.live_trackers.read();
-        tiers.iter().flatten().next().map(|u| super::cache::host_of(u)).unwrap_or_default()
+        tiers
+            .iter()
+            .flatten()
+            .next()
+            .map(|u| super::cache::host_of(u))
+            .unwrap_or_default()
     }
 }
 
@@ -141,13 +154,20 @@ impl Catalogue for EngineCatalogue {
 /// announce -- passkey, IP family, interface, tracker id -- with the session's
 /// counters, once per tracker, never retried (as every client does). Returns
 /// how many trackers acknowledged it.
-pub async fn depart(torrent: Arc<typhon_engine::torrent::meta::TorrentState>, policy: Arc<Policy>, port: u16) -> usize {
+pub async fn depart(
+    torrent: Arc<typhon_engine::torrent::meta::TorrentState>,
+    policy: Arc<Policy>,
+    port: u16,
+) -> usize {
     let ih = hex(&torrent.info_hash);
     let uploaded = torrent.session_uploaded() as i64;
     let downloaded = torrent.session_downloaded() as i64;
     let left = torrent.bytes_left() as i64;
     let owed: Vec<(String, Option<String>)> = {
-        let book = torrent.announce_book.lock().unwrap_or_else(|e| e.into_inner());
+        let book = torrent
+            .announce_book
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         torrent
             .live_trackers
             .read()
@@ -166,18 +186,49 @@ pub async fn depart(torrent: Arc<typhon_engine::torrent::meta::TorrentState>, po
         if policy.skip_udp && typhon_engine::tracker::udp::is_udp(&url) {
             continue;
         }
-        let Some(req) = policy::prepare(&policy, &url, &ih, port, uploaded, downloaded, left, "stopped", None, tracker_id.as_deref()) else {
+        let Some(req) = policy::prepare(
+            &policy,
+            &url,
+            &ih,
+            port,
+            uploaded,
+            downloaded,
+            left,
+            "stopped",
+            None,
+            tracker_id.as_deref(),
+        ) else {
             continue;
         };
         let result = match &req.udp {
-            Some(u) => typhon_engine::tracker::udp::send_announce_on(u, req.ip_mode, &req.device, &req.proxy).await,
-            None => typhon_engine::tracker::http::send_announce_on(&req.url, &req.user_agent, req.ip_mode, &req.device, &req.proxy).await,
+            Some(u) => {
+                typhon_engine::tracker::udp::send_announce_on(
+                    u,
+                    req.ip_mode,
+                    &req.device,
+                    &req.proxy,
+                )
+                .await
+            }
+            None => {
+                typhon_engine::tracker::http::send_announce_on(
+                    &req.url,
+                    &req.user_agent,
+                    req.ip_mode,
+                    &req.device,
+                    &req.proxy,
+                )
+                .await
+            }
         };
         if result.is_ok() {
             acknowledged += 1;
         }
     }
-    let mut book = torrent.announce_book.lock().unwrap_or_else(|e| e.into_inner());
+    let mut book = torrent
+        .announce_book
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     for slot in book.iter_mut() {
         slot.started = false;
         slot.stopped_owed = false;
@@ -205,14 +256,21 @@ pub fn start(
     cache: Arc<Cache>,
     admission: Arc<scheduler::Admission>,
 ) -> tokio::sync::mpsc::Sender<scheduler::BumpReq> {
-    let catalogue = Arc::new(EngineCatalogue { manager: manager.clone() });
+    let catalogue = Arc::new(EngineCatalogue {
+        manager: manager.clone(),
+    });
     let hook_manager = manager.clone();
     // One breaker for the engine, not one per torrent: an outage belongs to the
     // host, and every torrent listing it has to learn from the same evidence.
     let breaker = Arc::new(Breaker::default());
     // Swarm counts for what has not been announced yet: same policy, same
     // breaker, never the announce cache (`scrape`).
-    super::scrape::spawn(manager.clone(), policy.clone(), cache.clone(), breaker.clone());
+    super::scrape::spawn(
+        manager.clone(),
+        policy.clone(),
+        cache.clone(),
+        breaker.clone(),
+    );
 
     let announce = Arc::new(move |job: Job| {
         let manager = manager.clone();
@@ -238,7 +296,11 @@ pub fn start(
     {
         let tx = bump_tx.clone();
         hook_manager.set_announce_hook(Arc::new(move |ih: [u8; 20]| {
-            let _ = tx.try_send(scheduler::BumpReq { info_hash: hex(&ih), reply: None, forced: false });
+            let _ = tx.try_send(scheduler::BumpReq {
+                info_hash: hex(&ih),
+                reply: None,
+                forced: false,
+            });
         }));
     }
     tokio::spawn(async move {
@@ -325,7 +387,11 @@ pub(super) async fn announce_one(
     // until the check ends, and every client stays quiet until then. Back in a
     // minute; an event raised meanwhile is still owed and still waiting.
     if status == TorrentStatus::Checking as u8 {
-        return Outcome { next_in: CHECKING_RETRY, gone: false, ..gone };
+        return Outcome {
+            next_in: CHECKING_RETRY,
+            gone: false,
+            ..gone
+        };
     }
     // A torrent whose data is gone cannot serve a single piece. Announcing it
     // hands its address to leechers it will refuse; it leaves the swarm the
@@ -334,12 +400,20 @@ pub(super) async fn announce_one(
     // Held at startup (`start_paused`): not a word to any tracker until the
     // gate is released; come back shortly to check.
     if manager.limiter().dials_paused() {
-        return Outcome { next_in: Duration::from_secs(15), gone: false, ..gone };
+        return Outcome {
+            next_in: Duration::from_secs(15),
+            gone: false,
+            ..gone
+        };
     }
     // Same while the forwarded port is not known yet: an announce now would
     // hand the tracker a port nothing will listen on.
     if manager.port_pending() {
-        return Outcome { next_in: Duration::from_secs(15), gone: false, ..gone };
+        return Outcome {
+            next_in: Duration::from_secs(15),
+            gone: false,
+            ..gone
+        };
     }
     // Where the listener is NOW: a rebind (gluetun's rotation, the API) moves
     // it after this runner started with the configured port.
@@ -359,21 +433,31 @@ pub(super) async fn announce_one(
 
     // The engine's raised events, filed onto the trackers they are owed to.
     // Taken in the same breath: from here on the book is the only record.
-    let mut raised = torrent.pending_announce_event.swap(ANNOUNCE_EVENT_NONE, Ordering::Relaxed);
+    let mut raised = torrent
+        .pending_announce_event
+        .swap(ANNOUNCE_EVENT_NONE, Ordering::Relaxed);
     if status == TorrentStatus::Error as u8 {
         raised |= ANNOUNCE_EVENT_STOPPED;
     }
     let owes_something = {
-        let mut book = torrent.announce_book.lock().unwrap_or_else(|e| e.into_inner());
+        let mut book = torrent
+            .announce_book
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         book::file_owed(&mut book, raised, silent);
-        book.iter().any(|s| s.stopped_owed || (s.completed_owed && s.started))
+        book.iter()
+            .any(|s| s.stopped_owed || (s.completed_owed && s.started))
     };
     // A paused torrent announces to nobody -- including when a forced
     // re-announce targets it directly -- except to take back a `started` it
     // gave. Reported as `gone`: the catalogue refill puts it back on resume.
     if silent && !owes_something {
         return if status == TorrentStatus::Error as u8 {
-            Outcome { next_in: Duration::from_secs(30 * 60), gone: false, ..gone }
+            Outcome {
+                next_in: Duration::from_secs(30 * 60),
+                gone: false,
+                ..gone
+            }
         } else {
             gone
         };
@@ -381,8 +465,7 @@ pub(super) async fn announce_one(
 
     // Sampled self-check. Only on a torrent that is already seeding: a leecher
     // asks for peers anyway, so its answer says nothing about numwant.
-    let verify_this = left == 0
-        && VERIFY_TICK.fetch_add(1, Ordering::Relaxed) % VERIFY_EVERY == 0;
+    let verify_this = left == 0 && VERIFY_TICK.fetch_add(1, Ordering::Relaxed) % VERIFY_EVERY == 0;
 
     // The list actually announced to: the operator can edit it at runtime,
     // and `meta.trackers` is only what the .torrent said when it was added.
@@ -411,9 +494,18 @@ pub(super) async fn announce_one(
             for pass in 0..2 {
                 let now = typhon_engine::torrent::meta::now_secs();
                 let (step, tracker_id) = {
-                    let mut book = torrent.announce_book.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut book = torrent
+                        .announce_book
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
                     let slot = book::slot_mut(&mut book, tracker_url);
-                    let st = book::step(slot, now, tier_done && mode == Mode::Hoard, silent, job.forced);
+                    let st = book::step(
+                        slot,
+                        now,
+                        tier_done && mode == Mode::Hoard,
+                        silent,
+                        job.forced,
+                    );
                     if let book::Step::Skip(why) = st {
                         if mode == Mode::Hoard && book::holds_us(slot, why) {
                             tier_done = true;
@@ -449,12 +541,27 @@ pub(super) async fn announce_one(
                 ) else {
                     if policy::refused_for_cleartext(policy, tracker_url) {
                         let e = "refused: the announce URL carries a passkey over plain http:// (announce_cleartext_passkey = \"refuse\")".to_string();
-                        let result: Result<typhon_engine::tracker::http::AnnounceResponse, String> = Err(e.clone());
+                        let result: Result<typhon_engine::tracker::http::AnnounceResponse, String> =
+                            Err(e.clone());
                         {
-                            let mut book = torrent.announce_book.lock().unwrap_or_else(|e| e.into_inner());
-                            book::record(book::slot_mut(&mut book, tracker_url), event, &result, typhon_engine::torrent::meta::now_secs());
+                            let mut book = torrent
+                                .announce_book
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner());
+                            book::record(
+                                book::slot_mut(&mut book, tracker_url),
+                                event,
+                                &result,
+                                typhon_engine::torrent::meta::now_secs(),
+                            );
                         }
-                        cache.count_failed_message(&host, "refused", &e, &job.info_hash, &event.to_string());
+                        cache.count_failed_message(
+                            &host,
+                            "refused",
+                            &e,
+                            &job.info_hash,
+                            &event.to_string(),
+                        );
                         torrent.last_announce_ok.store(false, Ordering::Relaxed);
                         if let Ok(mut g) = torrent.last_announce_error.lock() {
                             *g = e;
@@ -463,12 +570,37 @@ pub(super) async fn announce_one(
                     break;
                 };
                 let result = match &req.udp {
-                    Some(u) => typhon_engine::tracker::udp::send_announce_on(u, req.ip_mode, &req.device, &req.proxy).await,
-                    None => typhon_engine::tracker::http::send_announce_on(&req.url, &req.user_agent, req.ip_mode, &req.device, &req.proxy).await,
+                    Some(u) => {
+                        typhon_engine::tracker::udp::send_announce_on(
+                            u,
+                            req.ip_mode,
+                            &req.device,
+                            &req.proxy,
+                        )
+                        .await
+                    }
+                    None => {
+                        typhon_engine::tracker::http::send_announce_on(
+                            &req.url,
+                            &req.user_agent,
+                            req.ip_mode,
+                            &req.device,
+                            &req.proxy,
+                        )
+                        .await
+                    }
                 };
                 {
-                    let mut book = torrent.announce_book.lock().unwrap_or_else(|e| e.into_inner());
-                    book::record(book::slot_mut(&mut book, tracker_url), event, &result, typhon_engine::torrent::meta::now_secs());
+                    let mut book = torrent
+                        .announce_book
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    book::record(
+                        book::slot_mut(&mut book, tracker_url),
+                        event,
+                        &result,
+                        typhon_engine::torrent::meta::now_secs(),
+                    );
                 }
                 match result {
                     Ok(resp) => {
@@ -521,8 +653,12 @@ pub(super) async fn announce_one(
                         // "never announced" for all 300k torrents while
                         // announcing normally, with no error anywhere.
                         {
-                            torrent.scrape_seeders.store(resp.complete, Ordering::Relaxed);
-                            torrent.scrape_leechers.store(resp.incomplete, Ordering::Relaxed);
+                            torrent
+                                .scrape_seeders
+                                .store(resp.complete, Ordering::Relaxed);
+                            torrent
+                                .scrape_leechers
+                                .store(resp.incomplete, Ordering::Relaxed);
                             let now_unix = typhon_engine::torrent::meta::now_secs();
                             torrent.last_announce_at.store(now_unix, Ordering::Relaxed);
                             torrent
@@ -655,9 +791,19 @@ pub(super) async fn announce_one(
         // The departures are out (or attempted, once). Nothing else to say
         // until the torrent runs again; the catalogue drops it on refill.
         return if status == TorrentStatus::Error as u8 {
-            Outcome { next_in: Duration::from_secs(30 * 60), gone: false, throttled, timed_out, ..gone }
+            Outcome {
+                next_in: Duration::from_secs(30 * 60),
+                gone: false,
+                throttled,
+                timed_out,
+                ..gone
+            }
         } else {
-            Outcome { throttled, timed_out, ..gone }
+            Outcome {
+                throttled,
+                timed_out,
+                ..gone
+            }
         };
     }
 
@@ -682,13 +828,12 @@ pub(super) async fn announce_one(
     // so it is traffic trackers already expect. No `min interval` is crossed:
     // a tracker that refuses a torrent has not set one for it. Not on a
     // 429 or a timeout -- those are a tracker asking for less, not more.
-    let registration_retry = mode == Mode::Race
-        && left > 0
-        && !announced_at_all
-        && !throttled
-        && !timed_out
-        && {
-            let book = torrent.announce_book.lock().unwrap_or_else(|e| e.into_inner());
+    let registration_retry =
+        mode == Mode::Race && left > 0 && !announced_at_all && !throttled && !timed_out && {
+            let book = torrent
+                .announce_book
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             let window = if policy.registration_window.is_zero() {
                 book::REGISTRATION_WINDOW
             } else {
@@ -701,14 +846,24 @@ pub(super) async fn announce_one(
     }
     // Coming back before any tracker will accept us is a wasted wake-up.
     {
-        let book = torrent.announce_book.lock().unwrap_or_else(|e| e.into_inner());
+        let book = torrent
+            .announce_book
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let open = book::earliest_open(&book, typhon_engine::torrent::meta::now_secs());
         if open > next_in {
             next_in = open;
         }
     }
 
-    Outcome { info_hash: job.info_hash, next_in, gone: false, throttled, timed_out, registration_retry }
+    Outcome {
+        info_hash: job.info_hash,
+        next_in,
+        gone: false,
+        throttled,
+        timed_out,
+        registration_retry,
+    }
 }
 
 /// An error message with any URL taken out of it.
@@ -724,7 +879,10 @@ fn redact(message: &str) -> String {
         let tail = &rest[start..];
         // The URL runs to the closing parenthesis reqwest wraps it in, or to
         // the first space when it is not wrapped.
-        let end = tail.find(')').or_else(|| tail.find(' ')).unwrap_or(tail.len());
+        let end = tail
+            .find(')')
+            .or_else(|| tail.find(' '))
+            .unwrap_or(tail.len());
         rest = &tail[end..];
     }
     out.push_str(rest);
@@ -742,9 +900,11 @@ fn scrub_url_secrets(message: &str, url: &str) -> String {
     let rest = url.split_once("://").map_or(url, |(_, r)| r);
     let (path, query) = rest.split_once('?').unwrap_or((rest, ""));
     let path = path.split_once('/').map_or("", |(_, p)| p);
-    let pieces = path
-        .split('/')
-        .chain(query.split('&').filter_map(|kv| kv.split_once('=').map(|(_, v)| v)));
+    let pieces = path.split('/').chain(
+        query
+            .split('&')
+            .filter_map(|kv| kv.split_once('=').map(|(_, v)| v)),
+    );
     let mut out = message.to_string();
     for piece in pieces {
         if piece.len() >= MIN && !piece.starts_with("announce") {
@@ -782,11 +942,21 @@ mod tests {
         for _ in 0..20 {
             b.record("t.example", proves_alive(classify(err)), now);
         }
-        assert!(b.allows("t.example", now), "twenty 429s are twenty answers, not an outage");
+        assert!(
+            b.allows("t.example", now),
+            "twenty 429s are twenty answers, not an outage"
+        );
         for _ in 0..20 {
-            b.record("dead.example", proves_alive(classify("v4: tcp connect error: Connection refused")), now);
+            b.record(
+                "dead.example",
+                proves_alive(classify("v4: tcp connect error: Connection refused")),
+                now,
+            );
         }
-        assert!(!b.allows("dead.example", now), "a tracker that does not answer is still spared");
+        assert!(
+            !b.allows("dead.example", now),
+            "a tracker that does not answer is still spared"
+        );
     }
 
     /// A race that the tracker accepted waits the tracker's interval, like
@@ -808,14 +978,23 @@ mod tests {
         let raw = "http request: error sending request for url \
                    (https://tk.tr4ker.net/announce/SECRETKEY?info_hash=%AB): timed out";
         let clean = redact(raw);
-        assert!(!clean.contains("SECRETKEY"), "the passkey survived: {clean}");
+        assert!(
+            !clean.contains("SECRETKEY"),
+            "the passkey survived: {clean}"
+        );
         assert!(!clean.contains("tk.tr4ker.net"));
-        assert!(clean.contains("timed out"), "the reason is what we keep: {clean}");
+        assert!(
+            clean.contains("timed out"),
+            "the reason is what we keep: {clean}"
+        );
     }
 
     #[test]
     fn a_message_without_a_url_is_left_alone() {
-        assert_eq!(redact("tracker: torrent introuvable"), "tracker: torrent introuvable");
+        assert_eq!(
+            redact("tracker: torrent introuvable"),
+            "tracker: torrent introuvable"
+        );
     }
 
     #[test]
@@ -856,7 +1035,10 @@ mod numwant_rules {
     #[test]
     fn an_invisible_seed_asks_for_peers_to_dial() {
         let v = verify(false, false, true);
-        assert_eq!(seed_numwant(Some(&v), false), Some(UNREACHABLE_SEED_NUMWANT));
+        assert_eq!(
+            seed_numwant(Some(&v), false),
+            Some(UNREACHABLE_SEED_NUMWANT)
+        );
     }
 
     /// And the converse, which is what keeps a reachable node cheap: it asks
@@ -874,7 +1056,10 @@ mod numwant_rules {
     /// large swarm start dialling for nothing.
     #[test]
     fn an_inconclusive_answer_is_not_a_verdict() {
-        assert_eq!(seed_numwant(Some(&verify(false, false, false)), false), None);
+        assert_eq!(
+            seed_numwant(Some(&verify(false, false, false)), false),
+            None
+        );
     }
 
     /// The ordinary self-check still fires on a tracker that sees us.
@@ -910,7 +1095,10 @@ mod classify_tests {
         assert_eq!(classify("HTTP 429"), "rate_limited");
         assert_eq!(classify("too many requests"), "rate_limited");
         // Our own refusal behind a proxy is named as such on the Trackers tab.
-        assert_eq!(classify(typhon_engine::tracker::udp::UDP_PROXIED_REFUSAL), "udp_proxied");
+        assert_eq!(
+            classify(typhon_engine::tracker::udp::UDP_PROXIED_REFUSAL),
+            "udp_proxied"
+        );
         assert_eq!(classify("operation timed out"), "timeout");
         assert_eq!(classify("connection timeout"), "timeout");
         assert_eq!(classify("invalid passkey"), "invalid_passkey");
@@ -950,7 +1138,10 @@ mod classify_tests {
         let msg = "error sending request for url (https://tracker.example/announce?passkey=SECRET)";
         let out = redact(msg);
         assert!(!out.contains("SECRET"), "the passkey is gone: {out}");
-        assert!(!out.contains("tracker.example"), "and so is the host: {out}");
+        assert!(
+            !out.contains("tracker.example"),
+            "and so is the host: {out}"
+        );
         assert!(out.contains("<url>"), "replaced by a marker: {out}");
     }
 
@@ -958,7 +1149,10 @@ mod classify_tests {
     fn redaction_handles_a_bare_url_and_several_of_them() {
         let one = redact("failed https://a.example/x?passkey=A after 3 tries");
         assert!(!one.contains("passkey=A"), "got {one}");
-        assert!(one.contains("after 3 tries"), "the rest of the message survives: {one}");
+        assert!(
+            one.contains("after 3 tries"),
+            "the rest of the message survives: {one}"
+        );
 
         let two = redact("https://a.example/x?k=1 and https://b.example/y?k=2");
         assert!(!two.contains("k=1") && !two.contains("k=2"), "got {two}");
@@ -970,12 +1164,24 @@ mod classify_tests {
     fn a_passkey_quoted_alone_is_scrubbed() {
         let url = "https://tracker.example/abcdef0123456789abcdef0123456789/announce?info_hash=%AB";
         let out = scrub_url_secrets("invalid passkey abcdef0123456789abcdef0123456789", url);
-        assert!(!out.contains("abcdef0123456789"), "the passkey survived: {out}");
+        assert!(
+            !out.contains("abcdef0123456789"),
+            "the passkey survived: {out}"
+        );
         let q = "https://tracker.example/announce.php?passkey=Q1w2E3r4T5y6U7i8";
         let out = scrub_url_secrets("GET /announce.php?passkey=Q1w2E3r4T5y6U7i8: 403", q);
-        assert!(!out.contains("Q1w2E3r4T5y6U7i8"), "a query passkey survived: {out}");
-        assert!(out.contains("announce.php") && out.contains("403"), "the rest is kept: {out}");
-        assert_eq!(scrub_url_secrets("unregistered torrent", url), "unregistered torrent");
+        assert!(
+            !out.contains("Q1w2E3r4T5y6U7i8"),
+            "a query passkey survived: {out}"
+        );
+        assert!(
+            out.contains("announce.php") && out.contains("403"),
+            "the rest is kept: {out}"
+        );
+        assert_eq!(
+            scrub_url_secrets("unregistered torrent", url),
+            "unregistered torrent"
+        );
     }
 
     #[test]
@@ -1034,7 +1240,10 @@ mod classify_tests {
             conclusive: true,
             swarm: 10,
         };
-        assert_eq!(seed_numwant(Some(&unreachable), false), Some(UNREACHABLE_SEED_NUMWANT));
+        assert_eq!(
+            seed_numwant(Some(&unreachable), false),
+            Some(UNREACHABLE_SEED_NUMWANT)
+        );
     }
 
     /// An INCONCLUSIVE check is not evidence of anything: the tracker
@@ -1131,7 +1340,10 @@ mod announce_one_tests {
         let app = axum::Router::new().route(
             "/announce",
             axum::routing::get(move || async move {
-                (axum::http::StatusCode::from_u16(status).unwrap(), body.to_vec())
+                (
+                    axum::http::StatusCode::from_u16(status).unwrap(),
+                    body.to_vec(),
+                )
             }),
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1144,7 +1356,10 @@ mod announce_one_tests {
                 })
                 .await;
         });
-        FakeTracker { url: format!("http://{addr}/announce"), _stop: tx }
+        FakeTracker {
+            url: format!("http://{addr}/announce"),
+            _stop: tx,
+        }
     }
 
     /// `d8:completei3e10:incompletei1e8:intervali1800e12:min intervali900e5:peers0:e`
@@ -1185,11 +1400,19 @@ mod announce_one_tests {
             &cache,
             16371,
             Mode::Hoard,
-            Job { info_hash: "a".repeat(40), first: true, forced: false },
+            Job {
+                info_hash: "a".repeat(40),
+                first: true,
+                forced: false,
+            },
         )
         .await;
         assert!(out.gone, "an unknown hash must be reported as gone");
-        assert_eq!(out.info_hash, "a".repeat(40), "the outcome names the job it answers");
+        assert_eq!(
+            out.info_hash,
+            "a".repeat(40),
+            "the outcome names the job it answers"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1209,7 +1432,11 @@ mod announce_one_tests {
             &cache,
             16371,
             Mode::Hoard,
-            Job { info_hash: hash.clone(), first: true, forced: false },
+            Job {
+                info_hash: hash.clone(),
+                first: true,
+                forced: false,
+            },
         )
         .await;
 
@@ -1239,11 +1466,18 @@ mod announce_one_tests {
             &cache,
             16371,
             Mode::Hoard,
-            Job { info_hash: hash.clone(), first: true, forced: false },
+            Job {
+                info_hash: hash.clone(),
+                first: true,
+                forced: false,
+            },
         )
         .await;
 
-        assert!(!out.gone, "a tracker being down does not make the torrent gone");
+        assert!(
+            !out.gone,
+            "a tracker being down does not make the torrent gone"
+        );
         assert!(out.next_in > Duration::from_secs(0), "a retry is scheduled");
         let _ = std::fs::remove_dir_all(root);
     }
@@ -1268,7 +1502,11 @@ mod announce_one_tests {
             &cache,
             16371,
             Mode::Hoard,
-            Job { info_hash: hash.clone(), first: true, forced: false },
+            Job {
+                info_hash: hash.clone(),
+                first: true,
+                forced: false,
+            },
         )
         .await;
         assert!(!out.gone);
@@ -1292,7 +1530,11 @@ mod announce_one_tests {
             &cache,
             16371,
             Mode::Hoard,
-            Job { info_hash: hash.clone(), first: true, forced: false },
+            Job {
+                info_hash: hash.clone(),
+                first: true,
+                forced: false,
+            },
         )
         .await;
         assert!(!out.gone);
@@ -1311,13 +1553,31 @@ mod announce_one_tests {
         let (policy, breaker, cache) = parts();
 
         let race = announce_one(
-            &mgr, &policy, &breaker, &cache, 16371, Mode::Race,
-            Job { info_hash: hash.clone(), first: true, forced: false },
+            &mgr,
+            &policy,
+            &breaker,
+            &cache,
+            16371,
+            Mode::Race,
+            Job {
+                info_hash: hash.clone(),
+                first: true,
+                forced: false,
+            },
         )
         .await;
         let hoard = announce_one(
-            &mgr, &policy, &breaker, &cache, 16371, Mode::Hoard,
-            Job { info_hash: hash.clone(), first: false, forced: false },
+            &mgr,
+            &policy,
+            &breaker,
+            &cache,
+            16371,
+            Mode::Hoard,
+            Job {
+                info_hash: hash.clone(),
+                first: false,
+                forced: false,
+            },
         )
         .await;
 
@@ -1351,8 +1611,17 @@ mod announce_one_tests {
         );
 
         let out = announce_one(
-            &mgr, &policy, &breaker, &cache, 16371, Mode::Hoard,
-            Job { info_hash: hash.clone(), first: true, forced: false },
+            &mgr,
+            &policy,
+            &breaker,
+            &cache,
+            16371,
+            Mode::Hoard,
+            Job {
+                info_hash: hash.clone(),
+                first: true,
+                forced: false,
+            },
         )
         .await;
         assert!(!out.gone, "a broken tracker does not make the torrent gone");
@@ -1373,17 +1642,32 @@ mod announce_one_tests {
         let (mgr, root) = manager("paused");
         let hash = add(&mgr, "theta", &t.url);
         {
-            let st = mgr.get(&typhon_engine::torrent::hex_decode(&hash).unwrap()).unwrap();
-            st.is_paused.store(true, std::sync::atomic::Ordering::Relaxed);
+            let st = mgr
+                .get(&typhon_engine::torrent::hex_decode(&hash).unwrap())
+                .unwrap();
+            st.is_paused
+                .store(true, std::sync::atomic::Ordering::Relaxed);
         }
         let (policy, breaker, cache) = parts();
 
         let out = announce_one(
-            &mgr, &policy, &breaker, &cache, 16371, Mode::Hoard,
-            Job { info_hash: hash.clone(), first: true, forced: false },
+            &mgr,
+            &policy,
+            &breaker,
+            &cache,
+            16371,
+            Mode::Hoard,
+            Job {
+                info_hash: hash.clone(),
+                first: true,
+                forced: false,
+            },
         )
         .await;
-        assert!(out.gone, "a paused torrent is dropped from the schedule, not announced");
+        assert!(
+            out.gone,
+            "a paused torrent is dropped from the schedule, not announced"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1397,9 +1681,13 @@ mod announce_one_tests {
         let (mgr, root) = manager("paused-stop");
         let hash = add(&mgr, "iota", &t.url);
         {
-            let st = mgr.get(&typhon_engine::torrent::hex_decode(&hash).unwrap()).unwrap();
-            st.is_paused.store(true, std::sync::atomic::Ordering::Relaxed);
-            st.pending_announce_event.store(ANNOUNCE_EVENT_STOPPED, std::sync::atomic::Ordering::Relaxed);
+            let st = mgr
+                .get(&typhon_engine::torrent::hex_decode(&hash).unwrap())
+                .unwrap();
+            st.is_paused
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            st.pending_announce_event
+                .store(ANNOUNCE_EVENT_STOPPED, std::sync::atomic::Ordering::Relaxed);
         }
         let (policy, breaker, cache) = parts();
         let out = run(&mgr, &policy, &breaker, &cache, Mode::Hoard, &hash).await;
@@ -1415,14 +1703,25 @@ mod announce_one_tests {
         let (mgr, root) = manager("notracker");
         let hash = add(&mgr, "eta", "http://127.0.0.1:1/announce");
         {
-            let t = mgr.get(&typhon_engine::torrent::hex_decode(&hash).unwrap()).unwrap();
+            let t = mgr
+                .get(&typhon_engine::torrent::hex_decode(&hash).unwrap())
+                .unwrap();
             t.live_trackers.write().clear();
         }
         let (policy, breaker, cache) = parts();
 
         let out = announce_one(
-            &mgr, &policy, &breaker, &cache, 16371, Mode::Hoard,
-            Job { info_hash: hash.clone(), first: true, forced: false },
+            &mgr,
+            &policy,
+            &breaker,
+            &cache,
+            16371,
+            Mode::Hoard,
+            Job {
+                info_hash: hash.clone(),
+                first: true,
+                forced: false,
+            },
         )
         .await;
         assert!(!out.gone);
@@ -1448,7 +1747,10 @@ mod announce_one_tests {
             self.seen.lock().unwrap().clone()
         }
         fn last(&self) -> String {
-            self.queries().last().cloned().expect("the tracker received an announce")
+            self.queries()
+                .last()
+                .cloned()
+                .expect("the tracker received an announce")
         }
     }
 
@@ -1478,7 +1780,11 @@ mod announce_one_tests {
                 })
                 .await;
         });
-        Recording { url: format!("http://{addr}/announce"), seen, _stop: tx }
+        Recording {
+            url: format!("http://{addr}/announce"),
+            seen,
+            _stop: tx,
+        }
     }
 
     fn param(q: &str, name: &str) -> Option<String> {
@@ -1488,8 +1794,12 @@ mod announce_one_tests {
         })
     }
 
-    fn state(mgr: &Arc<TorrentManager>, hash: &str) -> Arc<typhon_engine::torrent::meta::TorrentState> {
-        mgr.get(&typhon_engine::torrent::hex_decode(hash).unwrap()).unwrap()
+    fn state(
+        mgr: &Arc<TorrentManager>,
+        hash: &str,
+    ) -> Arc<typhon_engine::torrent::meta::TorrentState> {
+        mgr.get(&typhon_engine::torrent::hex_decode(hash).unwrap())
+            .unwrap()
     }
 
     async fn run(
@@ -1500,7 +1810,20 @@ mod announce_one_tests {
         mode: Mode,
         hash: &str,
     ) -> Outcome {
-        announce_one(mgr, policy, breaker, cache, 16371, mode, Job { info_hash: hash.to_string(), first: false, forced: false }).await
+        announce_one(
+            mgr,
+            policy,
+            breaker,
+            cache,
+            16371,
+            mode,
+            Job {
+                info_hash: hash.to_string(),
+                first: false,
+                forced: false,
+            },
+        )
+        .await
     }
 
     /// ⭐⭐⭐ The whole life of a torrent, as the tracker sees it:
@@ -1522,27 +1845,50 @@ mod announce_one_tests {
         assert_eq!(param(&q, "left").as_deref(), Some("0"));
         assert!(param(&q, "key").is_some());
 
-        state(&mgr, &hash).total_uploaded.fetch_add(5000, Ordering::Relaxed);
+        state(&mgr, &hash)
+            .total_uploaded
+            .fetch_add(5000, Ordering::Relaxed);
         run(&mgr, &policy, &breaker, &cache, Mode::Hoard, &hash).await;
         let q = t.last();
-        assert_eq!(param(&q, "event"), None, "a periodic announce has no event key: {q}");
+        assert_eq!(
+            param(&q, "event"),
+            None,
+            "a periodic announce has no event key: {q}"
+        );
         assert_eq!(param(&q, "uploaded").as_deref(), Some("5000"));
 
-        mgr.stop_torrent(&typhon_engine::torrent::hex_decode(&hash).unwrap()).unwrap();
+        mgr.stop_torrent(&typhon_engine::torrent::hex_decode(&hash).unwrap())
+            .unwrap();
         let out = run(&mgr, &policy, &breaker, &cache, Mode::Hoard, &hash).await;
         let q = t.last();
         assert_eq!(param(&q, "event").as_deref(), Some("stopped"), "{q}");
-        assert_eq!(param(&q, "uploaded").as_deref(), Some("5000"), "the departure carries the final count");
-        assert!(out.gone, "a stopped torrent leaves the schedule once it said so");
+        assert_eq!(
+            param(&q, "uploaded").as_deref(),
+            Some("5000"),
+            "the departure carries the final count"
+        );
+        assert!(
+            out.gone,
+            "a stopped torrent leaves the schedule once it said so"
+        );
 
         run(&mgr, &policy, &breaker, &cache, Mode::Hoard, &hash).await;
         assert_eq!(t.queries().len(), 3, "silence while paused");
 
-        mgr.start_torrent(&typhon_engine::torrent::hex_decode(&hash).unwrap()).unwrap();
+        mgr.start_torrent(&typhon_engine::torrent::hex_decode(&hash).unwrap())
+            .unwrap();
         run(&mgr, &policy, &breaker, &cache, Mode::Hoard, &hash).await;
         let q = t.last();
-        assert_eq!(param(&q, "event").as_deref(), Some("started"), "a resume is a new session: {q}");
-        assert_eq!(param(&q, "uploaded").as_deref(), Some("0"), "with counters from zero");
+        assert_eq!(
+            param(&q, "event").as_deref(),
+            Some("started"),
+            "a resume is a new session: {q}"
+        );
+        assert_eq!(
+            param(&q, "uploaded").as_deref(),
+            Some("0"),
+            "with counters from zero"
+        );
         assert_eq!(t.queries().len(), 4);
         let _ = std::fs::remove_dir_all(root);
     }
@@ -1584,9 +1930,21 @@ mod announce_one_tests {
         assert_eq!(t.queries().len(), 1);
         let hoard = run(&mgr, &policy, &breaker, &cache, Mode::Hoard, &hash).await;
         let race = run(&mgr, &policy, &breaker, &cache, Mode::Race, &hash).await;
-        assert_eq!(t.queries().len(), 1, "inside the floor nothing is sent, whoever asks");
-        assert!(race.next_in >= Duration::from_secs(890), "a race waits for the floor too: {:?}", race.next_in);
-        assert!(hoard.next_in >= Duration::from_secs(890), "{:?}", hoard.next_in);
+        assert_eq!(
+            t.queries().len(),
+            1,
+            "inside the floor nothing is sent, whoever asks"
+        );
+        assert!(
+            race.next_in >= Duration::from_secs(890),
+            "a race waits for the floor too: {:?}",
+            race.next_in
+        );
+        assert!(
+            hoard.next_in >= Duration::from_secs(890),
+            "{:?}",
+            hoard.next_in
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1603,8 +1961,17 @@ mod announce_one_tests {
         run(&mgr, &policy, &breaker, &cache, Mode::Race, &hash).await;
         assert_eq!(t.queries().len(), 1, "not forced: the floor holds");
         announce_one(
-            &mgr, &policy, &breaker, &cache, 16371, Mode::Race,
-            Job { info_hash: hash.clone(), first: false, forced: true },
+            &mgr,
+            &policy,
+            &breaker,
+            &cache,
+            16371,
+            Mode::Race,
+            Job {
+                info_hash: hash.clone(),
+                first: false,
+                forced: true,
+            },
         )
         .await;
         assert_eq!(t.queries().len(), 2, "forced: past min interval");
@@ -1628,7 +1995,8 @@ mod announce_one_tests {
         let hash = typhon_engine::torrent::hex_encode(&ih);
         let st = state(&mgr, &hash);
         *st.live_trackers.write() = vec![vec![t.url.clone()]];
-        st.status.store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+        st.status
+            .store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
         let (policy, breaker, cache) = parts();
 
         let race = run(&mgr, &policy, &breaker, &cache, Mode::Race, &hash).await;
@@ -1638,14 +2006,22 @@ mod announce_one_tests {
             let again = run(&mgr, &policy, &breaker, &cache, Mode::Race, &hash).await;
             assert!(again.registration_retry, "still refused, still retried");
         }
-        assert_eq!(t.queries().len(), 11, "a refusal is an answer: the breaker stays closed");
+        assert_eq!(
+            t.queries().len(),
+            11,
+            "a refusal is an answer: the breaker stays closed"
+        );
 
         let hoard = run(&mgr, &policy, &breaker, &cache, Mode::Hoard, &hash).await;
         assert!(!hoard.registration_retry, "a hoard is not racing");
 
-        st.status.store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+        st.status
+            .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
         let seed = run(&mgr, &policy, &breaker, &cache, Mode::Race, &hash).await;
-        assert!(!seed.registration_retry, "nothing left to download, nothing to hurry");
+        assert!(
+            !seed.registration_retry,
+            "nothing left to download, nothing to hurry"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1664,18 +2040,25 @@ mod announce_one_tests {
         let hash = typhon_engine::torrent::hex_encode(&ih);
         let st = state(&mgr, &hash);
         *st.live_trackers.write() = vec![vec![a.url.clone()], vec![b.url.clone()]];
-        st.status.store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+        st.status
+            .store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
         let (policy, breaker, cache) = parts();
 
         run(&mgr, &policy, &breaker, &cache, Mode::Race, &hash).await;
         for t in [&a, &b] {
             let q = t.last();
             assert_eq!(param(&q, "event").as_deref(), Some("started"));
-            assert_eq!(param(&q, "left").as_deref(), Some("16384"), "a leecher needs its bytes: {q}");
+            assert_eq!(
+                param(&q, "left").as_deref(),
+                Some("16384"),
+                "a leecher needs its bytes: {q}"
+            );
         }
 
-        st.status.store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
-        st.pending_announce_event.fetch_or(ANNOUNCE_EVENT_COMPLETED, Ordering::Relaxed);
+        st.status
+            .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+        st.pending_announce_event
+            .fetch_or(ANNOUNCE_EVENT_COMPLETED, Ordering::Relaxed);
         run(&mgr, &policy, &breaker, &cache, Mode::Race, &hash).await;
         for t in [&a, &b] {
             let q = t.last();
@@ -1704,7 +2087,10 @@ mod announce_one_tests {
         let acked = depart(st.clone(), Arc::new(policy), 6881).await;
         assert_eq!(acked, 1);
         assert_eq!(param(&a.last(), "event").as_deref(), Some("stopped"));
-        assert!(b.queries().is_empty(), "a tracker that never heard started is told nothing");
+        assert!(
+            b.queries().is_empty(),
+            "a tracker that never heard started is told nothing"
+        );
         assert!(!st.announce_book.lock().unwrap().iter().any(|s| s.started));
         let _ = std::fs::remove_dir_all(root);
     }
@@ -1722,7 +2108,10 @@ mod announce_one_tests {
         run(&mgr, &policy, &breaker, &cache, Mode::Hoard, &hash).await;
         run(&mgr, &policy, &breaker, &cache, Mode::Hoard, &hash).await;
         assert_eq!(a.queries().len(), 2);
-        assert!(b.queries().is_empty(), "the backup tier is for failure, not for every announce");
+        assert!(
+            b.queries().is_empty(),
+            "the backup tier is for failure, not for every announce"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1733,8 +2122,10 @@ mod announce_one_tests {
         let b = recording_tracker(OPEN_BODY).await;
         let (mgr, root) = manager("failover");
         let hash = add(&mgr, "fail", &b.url);
-        *state(&mgr, &hash).live_trackers.write() =
-            vec![vec!["http://127.0.0.1:1/announce".into()], vec![b.url.clone()]];
+        *state(&mgr, &hash).live_trackers.write() = vec![
+            vec!["http://127.0.0.1:1/announce".into()],
+            vec![b.url.clone()],
+        ];
         let (policy, breaker, cache) = parts();
         run(&mgr, &policy, &breaker, &cache, Mode::Hoard, &hash).await;
         assert_eq!(param(&b.last(), "event").as_deref(), Some("started"));
@@ -1752,7 +2143,11 @@ mod announce_one_tests {
         let hash = add(&mgr, "tid", &t.url);
         let (policy, breaker, cache) = parts();
         run(&mgr, &policy, &breaker, &cache, Mode::Hoard, &hash).await;
-        assert_eq!(param(&t.last(), "trackerid"), None, "nothing to echo on the first one");
+        assert_eq!(
+            param(&t.last(), "trackerid"),
+            None,
+            "nothing to echo on the first one"
+        );
         run(&mgr, &policy, &breaker, &cache, Mode::Hoard, &hash).await;
         assert_eq!(param(&t.last(), "trackerid").as_deref(), Some("T-123"));
         let _ = std::fs::remove_dir_all(root);
@@ -1769,7 +2164,11 @@ mod announce_one_tests {
         for _ in 0..3 {
             run(&mgr, &policy, &breaker, &cache, Mode::Race, &hash).await;
         }
-        assert_eq!(t.queries().len(), 1, "asked once, told never, never asked again");
+        assert_eq!(
+            t.queries().len(),
+            1,
+            "asked once, told never, never asked again"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1780,7 +2179,10 @@ mod announce_one_tests {
         let t = recording_tracker(OPEN_BODY).await;
         let (mgr, root) = manager("checking");
         let hash = add(&mgr, "chk", &t.url);
-        state(&mgr, &hash).status.store(TorrentStatus::Checking as u8, std::sync::atomic::Ordering::Relaxed);
+        state(&mgr, &hash).status.store(
+            TorrentStatus::Checking as u8,
+            std::sync::atomic::Ordering::Relaxed,
+        );
         let (policy, breaker, cache) = parts();
         let out = run(&mgr, &policy, &breaker, &cache, Mode::Hoard, &hash).await;
         assert!(t.queries().is_empty());
@@ -1812,7 +2214,12 @@ mod announce_one_tests {
         let t = recording_tracker(OPEN_BODY).await;
         let (mgr, root) = manager("edited");
         let (ih, _) = mgr
-            .add_torrent_bytes(&torrent_bytes("edit", "http://127.0.0.1:1/announce"), &seed_dir("edit"), false, true)
+            .add_torrent_bytes(
+                &torrent_bytes("edit", "http://127.0.0.1:1/announce"),
+                &seed_dir("edit"),
+                false,
+                true,
+            )
             .expect("parses");
         let hash = typhon_engine::torrent::hex_encode(&ih);
         *state(&mgr, &hash).live_trackers.write() = vec![vec![t.url.clone()]];
@@ -1824,7 +2231,9 @@ mod announce_one_tests {
 
     /// A UDP tracker in a test: answers `connect`, records every announce and
     /// answers it with the given interval.
-    async fn udp_tracker(interval: u32) -> (String, std::sync::Arc<std::sync::Mutex<Vec<Vec<u8>>>>) {
+    async fn udp_tracker(
+        interval: u32,
+    ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<Vec<u8>>>>) {
         let sock = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let port = sock.local_addr().unwrap().port();
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -1867,11 +2276,22 @@ mod announce_one_tests {
         let got = seen.lock().unwrap().clone();
         assert_eq!(got.len(), 1, "one announce");
         let p = &got[0];
-        assert_eq!(typhon_engine::torrent::hex_encode(&p[16..36].try_into().unwrap()), hash);
+        assert_eq!(
+            typhon_engine::torrent::hex_encode(&p[16..36].try_into().unwrap()),
+            hash
+        );
         assert_eq!(&p[80..84], &2u32.to_be_bytes(), "started");
         assert_eq!(&p[96..98], &16371u16.to_be_bytes(), "our listen port");
-        assert_eq!(&p[98..], &[&[0x2u8, 9][..], b"/announce"].concat()[..], "the path, as BEP 41 URL data");
-        assert_eq!(cache.get(&hash).map(|e| e.complete), Some(5), "the swarm count is recorded like an HTTP one");
+        assert_eq!(
+            &p[98..],
+            &[&[0x2u8, 9][..], b"/announce"].concat()[..],
+            "the path, as BEP 41 URL data"
+        );
+        assert_eq!(
+            cache.get(&hash).map(|e| e.complete),
+            Some(5),
+            "the swarm count is recorded like an HTTP one"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1889,7 +2309,11 @@ mod announce_one_tests {
         run(&mgr, &policy, &breaker, &cache, Mode::Hoard, &hash).await;
         let got = seen.lock().unwrap().clone();
         assert_eq!(got.len(), 1);
-        assert_eq!(&got[0][96..98], &40123u16.to_be_bytes(), "the port the listener moved to");
+        assert_eq!(
+            &got[0][96..98],
+            &40123u16.to_be_bytes(),
+            "the port the listener moved to"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1909,7 +2333,11 @@ mod announce_one_tests {
         run(&mgr, &policy, &breaker, &cache, Mode::Hoard, &hash).await;
         let got = seen.lock().unwrap().clone();
         assert_eq!(got.len(), 1);
-        assert_eq!(&got[0][96..98], &45133u16.to_be_bytes(), "the port the outside reaches us on");
+        assert_eq!(
+            &got[0][96..98],
+            &45133u16.to_be_bytes(),
+            "the port the outside reaches us on"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1923,7 +2351,10 @@ mod announce_one_tests {
         let (policy, breaker, cache) = parts();
         run(&mgr, &policy, &breaker, &cache, Mode::Hoard, &hash).await;
         tokio::time::sleep(Duration::from_millis(200)).await;
-        assert!(seen.lock().unwrap().is_empty(), "held until the port is known");
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "held until the port is known"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 

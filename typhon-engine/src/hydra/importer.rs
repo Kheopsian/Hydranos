@@ -16,8 +16,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::Arc;
 
 /// Where to reach the client we are taking over from.
 ///
@@ -213,7 +213,11 @@ impl Qbit {
             return Err("empty qBittorrent URL".into());
         }
         // A bare host:port is what most people paste; reqwest needs a scheme.
-        let base = if base.contains("://") { base } else { format!("http://{base}") };
+        let base = if base.contains("://") {
+            base
+        } else {
+            format!("http://{base}")
+        };
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()
@@ -241,7 +245,11 @@ impl Qbit {
     }
 
     /// POST the login form; the session cookie on success.
-    async fn authenticate(client: &reqwest::Client, base: &str, creds: &QbitCreds) -> Result<String, String> {
+    async fn authenticate(
+        client: &reqwest::Client,
+        base: &str,
+        creds: &QbitCreds,
+    ) -> Result<String, String> {
         let body = format!(
             "username={}&password={}",
             urlencoding(&creds.username),
@@ -271,25 +279,42 @@ impl Qbit {
             .join("; ");
         let text = resp.text().await.unwrap_or_default();
         if !login_accepted(status, &text) {
-            let why = if text.trim().is_empty() { format!("http {status}") } else { text.trim().to_string() };
+            let why = if text.trim().is_empty() {
+                format!("http {status}")
+            } else {
+                text.trim().to_string()
+            };
             return Err(format!("qBittorrent refused the login: {why}"));
         }
         Ok(cookie)
     }
 
     fn get(&self, path: &str) -> reqwest::RequestBuilder {
-        let req = self.client.get(format!("{}{path}", self.base)).header("Referer", &self.base);
+        let req = self
+            .client
+            .get(format!("{}{path}", self.base))
+            .header("Referer", &self.base);
         let cookie = self.cookie.read().unwrap().clone();
-        if cookie.is_empty() { req } else { req.header(reqwest::header::COOKIE, cookie) }
+        if cookie.is_empty() {
+            req
+        } else {
+            req.header(reqwest::header::COOKIE, cookie)
+        }
     }
 
     /// Every torrent it holds.
     pub async fn torrents(&self) -> Result<Vec<QbitTorrent>, String> {
-        let resp = self.get("/api/v2/torrents/info").send().await.map_err(|e| format!("torrents/info: {e}"))?;
+        let resp = self
+            .get("/api/v2/torrents/info")
+            .send()
+            .await
+            .map_err(|e| format!("torrents/info: {e}"))?;
         if !resp.status().is_success() {
             return Err(format!("torrents/info: http {}", resp.status()));
         }
-        resp.json().await.map_err(|e| format!("torrents/info body: {e}"))
+        resp.json()
+            .await
+            .map_err(|e| format!("torrents/info body: {e}"))
     }
 
     /// The .torrent file for one hash.
@@ -326,14 +351,24 @@ impl Qbit {
 
     async fn export_once(&self, hash: &str) -> Result<Vec<u8>, (String, Retry)> {
         let resp = self
-            .get(&format!("/api/v2/torrents/export?hash={}", urlencoding(hash)))
+            .get(&format!(
+                "/api/v2/torrents/export?hash={}",
+                urlencoding(hash)
+            ))
             .send()
             .await
             .map_err(|e| (format!("export {hash}: {e}"), Retry::Later))?;
         let status = resp.status().as_u16();
         if !(200..300).contains(&status) {
-            let why = if status == 409 { " (no metadata yet in qBittorrent)" } else { "" };
-            return Err((format!("export {hash}: http {status}{why}"), export_retry(status)));
+            let why = if status == 409 {
+                " (no metadata yet in qBittorrent)"
+            } else {
+                ""
+            };
+            return Err((
+                format!("export {hash}: http {status}{why}"),
+                export_retry(status),
+            ));
         }
         resp.bytes()
             .await
@@ -388,7 +423,13 @@ impl Candidate {
             stopped: t.state.starts_with("paused") || t.state.starts_with("stopped"),
             uploaded: t.uploaded,
             downloaded: t.downloaded,
-            tags: t.tags.split(',').map(str::trim).filter(|s| !s.is_empty()).map(String::from).collect(),
+            tags: t
+                .tags
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .collect(),
             source: Source::Qbit(t.hash.clone()),
         }
     }
@@ -419,7 +460,8 @@ pub fn categories_needed(cands: &[Candidate]) -> BTreeMap<String, String> {
         // First one wins: qBittorrent allows a per-torrent path override, and
         // taking the last would let one stray torrent redefine the category
         // for every other torrent in it.
-        out.entry(c.category.clone()).or_insert_with(|| c.save_path.clone());
+        out.entry(c.category.clone())
+            .or_insert_with(|| c.save_path.clone());
     }
     out
 }
@@ -431,8 +473,10 @@ const MAX_PREFIXES: usize = 40;
 /// The folders the wizard offers to remap: the distinct save paths, folded
 /// onto their parents until the list is short enough to read.
 pub fn path_prefixes<'a>(paths: impl Iterator<Item = &'a str>) -> Vec<String> {
-    let mut set: BTreeSet<String> =
-        paths.filter(|p| !p.is_empty()).map(|p| p.trim_end_matches('/').to_string()).collect();
+    let mut set: BTreeSet<String> = paths
+        .filter(|p| !p.is_empty())
+        .map(|p| p.trim_end_matches('/').to_string())
+        .collect();
     while set.len() > MAX_PREFIXES {
         let folded: BTreeSet<String> = set
             .iter()
@@ -501,7 +545,10 @@ pub struct Preview {
 }
 
 pub fn preview(cands: &[Candidate], exists: impl Fn(&Path) -> bool) -> Preview {
-    let mut p = Preview { total: cands.len(), ..Default::default() };
+    let mut p = Preview {
+        total: cands.len(),
+        ..Default::default()
+    };
     for c in cands {
         if c.complete {
             p.completed += 1;
@@ -543,7 +590,10 @@ fn yes() -> bool {
 
 impl Default for Choices {
     fn default() -> Self {
-        Self { path_map: BTreeMap::new(), start_stopped: true }
+        Self {
+            path_map: BTreeMap::new(),
+            start_stopped: true,
+        }
     }
 }
 
@@ -658,7 +708,9 @@ pub async fn run_job(
             }
         };
         if matches!(outcome, Ok(Added::Seeded) | Ok(Added::Resumed)) {
-            progress.carried_uploaded.fetch_add(retry_copy.uploaded, Ordering::Relaxed);
+            progress
+                .carried_uploaded
+                .fetch_add(retry_copy.uploaded, Ordering::Relaxed);
             if stays_stopped {
                 progress.stopped.fetch_add(1, Ordering::Relaxed);
             }
@@ -703,7 +755,13 @@ pub async fn run_job(
 /// counts and the carried bytes are summed, every client is named once, and
 /// the date stays the FIRST import's -- the counters have been carried since
 /// then. An import that added nothing changes nothing.
-pub fn provenance_doc(previous: Option<&str>, client: &str, added: usize, carried_uploaded: u64, now: i64) -> Option<String> {
+pub fn provenance_doc(
+    previous: Option<&str>,
+    client: &str,
+    added: usize,
+    carried_uploaded: u64,
+    now: i64,
+) -> Option<String> {
     let prev: serde_json::Value = previous
         .and_then(|d| serde_json::from_str(d).ok())
         .unwrap_or(serde_json::Value::Null);
@@ -713,14 +771,31 @@ pub fn provenance_doc(previous: Option<&str>, client: &str, added: usize, carrie
     let mut clients: Vec<String> = prev
         .get("source_client")
         .and_then(|c| c.as_str())
-        .map(|c| c.split(", ").filter(|s| !s.is_empty()).map(String::from).collect())
+        .map(|c| {
+            c.split(", ")
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .collect()
+        })
         .unwrap_or_default();
     if !clients.iter().any(|c| c == client) {
         clients.push(client.to_string());
     }
-    let date = prev.get("source_date").and_then(|d| d.as_i64()).filter(|d| *d > 0).unwrap_or(now);
-    let count = prev.get("imported_count").and_then(|n| n.as_u64()).unwrap_or(0) + added as u64;
-    let carried = prev.get("carried_uploaded_bytes").and_then(|n| n.as_u64()).unwrap_or(0) + carried_uploaded;
+    let date = prev
+        .get("source_date")
+        .and_then(|d| d.as_i64())
+        .filter(|d| *d > 0)
+        .unwrap_or(now);
+    let count = prev
+        .get("imported_count")
+        .and_then(|n| n.as_u64())
+        .unwrap_or(0)
+        + added as u64;
+    let carried = prev
+        .get("carried_uploaded_bytes")
+        .and_then(|n| n.as_u64())
+        .unwrap_or(0)
+        + carried_uploaded;
     Some(
         serde_json::json!({
             "source_client": clients.join(", "),
@@ -812,10 +887,17 @@ mod tests {
         let got = Candidate::from_qbit(&t);
         assert!(!got.complete);
         assert!(got.stopped);
-        assert_eq!(got.content, "/downloads/films/Film", "no content_path: save_path/name");
+        assert_eq!(
+            got.content, "/downloads/films/Film",
+            "no content_path: save_path/name"
+        );
         assert_eq!(got.tags, vec!["a", "b"]);
         assert_eq!(got.source, Source::Qbit("ab".into()));
-        let done = Candidate::from_qbit(&QbitTorrent { progress: 1.0, state: "uploading".into(), ..t });
+        let done = Candidate::from_qbit(&QbitTorrent {
+            progress: 1.0,
+            state: "uploading".into(),
+            ..t
+        });
         assert!(done.complete && !done.stopped);
     }
 
@@ -829,7 +911,11 @@ mod tests {
         assert_eq!(map_path("/downloads/films/A", &map), "/films/A");
         assert_eq!(map_path("/downloads/films", &map), "/films");
         assert_eq!(map_path("/downloads/series/B", &map), "/data/series/B");
-        assert_eq!(map_path("/downloads2/x", &map), "/downloads2/x", "not a component boundary");
+        assert_eq!(
+            map_path("/downloads2/x", &map),
+            "/downloads2/x",
+            "not a component boundary"
+        );
         assert_eq!(map_path("/elsewhere", &map), "/elsewhere");
     }
 
@@ -838,7 +924,10 @@ mod tests {
         let got = path_prefixes(["/d/films", "/d/films/hd", "/e/x"].into_iter());
         assert_eq!(got, vec!["/d/films", "/e/x"]);
         let many: Vec<String> = (0..100).map(|i| format!("/data/lib/{i}")).collect();
-        assert_eq!(path_prefixes(many.iter().map(String::as_str)), vec!["/data/lib"]);
+        assert_eq!(
+            path_prefixes(many.iter().map(String::as_str)),
+            vec!["/data/lib"]
+        );
     }
 
     #[test]
@@ -850,29 +939,52 @@ mod tests {
         };
         assert_eq!(
             plan(&x, &ch, true),
-            AddPlan { save_path: "/data/films".into(), paused: false, seed_mode: true }
+            AddPlan {
+                save_path: "/data/films".into(),
+                paused: false,
+                seed_mode: true
+            }
         );
-        assert!(!plan(&x, &ch, false).seed_mode, "complete but not found: check, never trust");
+        assert!(
+            !plan(&x, &ch, false).seed_mode,
+            "complete but not found: check, never trust"
+        );
         x.complete = false;
         assert!(!plan(&x, &ch, true).seed_mode, "partial: check and resume");
         x.stopped = true;
-        assert!(plan(&x, &ch, true).paused, "stopped in the source stays stopped");
+        assert!(
+            plan(&x, &ch, true).paused,
+            "stopped in the source stays stopped"
+        );
     }
 
     #[test]
     fn provenance_is_written_by_an_import_that_added_something_and_adds_up() {
-        assert_eq!(provenance_doc(None, "qBittorrent", 0, 0, 100), None, "nothing added, nothing claimed");
+        assert_eq!(
+            provenance_doc(None, "qBittorrent", 0, 0, 100),
+            None,
+            "nothing added, nothing claimed"
+        );
         let first = provenance_doc(None, "qBittorrent", 3, 500, 100).unwrap();
         let v: serde_json::Value = serde_json::from_str(&first).unwrap();
         assert_eq!(v["source_client"], "qBittorrent");
-        assert_eq!((v["source_date"].as_i64(), v["imported_count"].as_u64()), (Some(100), Some(3)));
+        assert_eq!(
+            (v["source_date"].as_i64(), v["imported_count"].as_u64()),
+            (Some(100), Some(3))
+        );
         assert_eq!(v["carried_uploaded_bytes"], 500);
 
         let again = provenance_doc(Some(&first), "qBittorrent", 2, 50, 200).unwrap();
         let v: serde_json::Value = serde_json::from_str(&again).unwrap();
         assert_eq!(v["source_client"], "qBittorrent", "named once");
         assert_eq!(v["source_date"], 100, "the first import's date");
-        assert_eq!((v["imported_count"].as_u64(), v["carried_uploaded_bytes"].as_u64()), (Some(5), Some(550)));
+        assert_eq!(
+            (
+                v["imported_count"].as_u64(),
+                v["carried_uploaded_bytes"].as_u64()
+            ),
+            (Some(5), Some(550))
+        );
 
         let both = provenance_doc(Some(&again), "Transmission", 1, 0, 300).unwrap();
         let v: serde_json::Value = serde_json::from_str(&both).unwrap();
@@ -892,9 +1004,18 @@ mod tests {
         rows[1].stopped = true;
         rows[2].uploaded = 100;
         let p = preview(&rows, |path| path.starts_with("/d/1"));
-        assert_eq!((p.total, p.completed, p.incomplete, p.stopped), (10, 9, 1, 1));
+        assert_eq!(
+            (p.total, p.completed, p.incomplete, p.stopped),
+            (10, 9, 1, 1)
+        );
         assert_eq!(p.carried_uploaded_bytes, 100);
-        assert_eq!(p.categories, vec![CategoryPlan { name: "Films".into(), save_path: "/d/0".into() }]);
+        assert_eq!(
+            p.categories,
+            vec![CategoryPlan {
+                name: "Films".into(),
+                save_path: "/d/0".into()
+            }]
+        );
         assert_eq!((p.data_checked, p.data_found), (10, 1));
     }
 }
@@ -936,7 +1057,12 @@ pub fn resume_facts(data: &[u8], num_pieces: u32) -> Option<ResumeFacts> {
         labels: dict
             .get("labels")
             .and_then(|v| v.as_list())
-            .map(|l| l.iter().filter_map(|x| x.as_string()).map(String::from).collect())
+            .map(|l| {
+                l.iter()
+                    .filter_map(|x| x.as_string())
+                    .map(String::from)
+                    .collect()
+            })
             .unwrap_or_default(),
         complete: false,
     };
@@ -948,7 +1074,12 @@ pub fn resume_facts(data: &[u8], num_pieces: u32) -> Option<ResumeFacts> {
             .get("pieces")
             .and_then(|v| v.as_bytes())
             .filter(|b| b != b"all" && num_pieces > 0)
-            .map(|b| (0..num_pieces as usize).all(|i| b.get(i / 8).is_some_and(|byte| byte & (0x80 >> (i % 8)) != 0)))
+            .map(|b| {
+                (0..num_pieces as usize).all(|i| {
+                    b.get(i / 8)
+                        .is_some_and(|byte| byte & (0x80 >> (i % 8)) != 0)
+                })
+            })
             .unwrap_or(false);
         out.complete = says_all || bits_all;
     }
@@ -957,7 +1088,9 @@ pub fn resume_facts(data: &[u8], num_pieces: u32) -> Option<ResumeFacts> {
 
 /// Read the destination out of a Transmission `.resume` file.
 pub fn destination_from_resume(data: &[u8]) -> Option<String> {
-    resume_facts(data, 0).map(|f| f.destination).filter(|d| !d.is_empty())
+    resume_facts(data, 0)
+        .map(|f| f.destination)
+        .filter(|d| !d.is_empty())
 }
 
 /// A Transmission config folder, read.
@@ -975,7 +1108,11 @@ pub struct TransmissionScan {
 /// resume file is missing, or names no destination, is counted and skipped,
 /// not guessed at: the resume file is the only thing that says where the data
 /// lives, and a default path would re-download a library already on disk.
-pub fn scan_transmission(dir: &Path, categories_from_dirs: bool, import_labels: bool) -> Result<TransmissionScan, String> {
+pub fn scan_transmission(
+    dir: &Path,
+    categories_from_dirs: bool,
+    import_labels: bool,
+) -> Result<TransmissionScan, String> {
     let tdir = dir.join("torrents");
     let entries = std::fs::read_dir(&tdir)
         .map_err(|e| format!("no torrents folder at {}: {e}", tdir.display()))?;
@@ -987,7 +1124,10 @@ pub fn scan_transmission(dir: &Path, categories_from_dirs: bool, import_labels: 
 
     let mut out = TransmissionScan::default();
     for path in files {
-        let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        let stem = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
         let meta = match std::fs::read(&path)
             .map_err(|e| e.to_string())
             .and_then(|b| typhon_engine::torrent::metainfo::parse_torrent_bytes(&b))
@@ -1022,7 +1162,11 @@ pub fn scan_transmission(dir: &Path, categories_from_dirs: bool, import_labels: 
             stopped: f.paused,
             uploaded: f.uploaded,
             downloaded: f.downloaded,
-            tags: if import_labels { f.labels.clone() } else { vec![] },
+            tags: if import_labels {
+                f.labels.clone()
+            } else {
+                vec![]
+            },
             source: Source::File(path),
         });
     }
@@ -1051,7 +1195,10 @@ pub fn unpack_zip_file(archive: &Path, into: &Path) -> Result<PathBuf, String> {
     unpack_zip_from(f, into)
 }
 
-fn unpack_zip_from<R: std::io::Read + std::io::Seek>(archive: R, into: &Path) -> Result<PathBuf, String> {
+fn unpack_zip_from<R: std::io::Read + std::io::Seek>(
+    archive: R,
+    into: &Path,
+) -> Result<PathBuf, String> {
     use std::io::Read;
     let mut zip = zip::ZipArchive::new(archive).map_err(|e| format!("not a zip: {e}"))?;
     if zip.len() > ZIP_MAX_ENTRIES {
@@ -1061,7 +1208,12 @@ fn unpack_zip_from<R: std::io::Read + std::io::Seek>(archive: R, into: &Path) ->
     for i in 0..zip.len() {
         let mut entry = zip.by_index(i).map_err(|e| format!("zip entry {i}: {e}"))?;
         let Some(rel) = entry.enclosed_name() else {
-            return Err(format!("zip entry {:?} points outside the archive", entry.name().map_or_else(|e| e.to_string(), |n| n.into_owned())));
+            return Err(format!(
+                "zip entry {:?} points outside the archive",
+                entry
+                    .name()
+                    .map_or_else(|e| e.to_string(), |n| n.into_owned())
+            ));
         };
         let target = into.join(rel);
         if entry.is_dir() {
@@ -1071,9 +1223,13 @@ fn unpack_zip_from<R: std::io::Read + std::io::Seek>(archive: R, into: &Path) ->
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
         }
-        let mut out = std::fs::File::create(&target).map_err(|e| format!("{}: {e}", target.display()))?;
-        let n = std::io::copy(&mut (&mut entry).take(ZIP_MAX_BYTES - written + 1), &mut out)
-            .map_err(|e| format!("{}: {e}", target.display()))?;
+        let mut out =
+            std::fs::File::create(&target).map_err(|e| format!("{}: {e}", target.display()))?;
+        let n = std::io::copy(
+            &mut (&mut entry).take(ZIP_MAX_BYTES - written + 1),
+            &mut out,
+        )
+        .map_err(|e| format!("{}: {e}", target.display()))?;
         written += n;
         if written > ZIP_MAX_BYTES {
             return Err("archive unpacks to more than 8 GB: not a Transmission folder".into());
@@ -1095,11 +1251,16 @@ fn find_config_root(dir: &Path) -> Option<PathBuf> {
     subs.iter()
         .find(|p| p.join("torrents").is_dir())
         .cloned()
-        .or_else(|| subs.iter().find_map(|p| {
-            let mut inner: Vec<PathBuf> = std::fs::read_dir(p).ok()?.filter_map(|e| e.ok().map(|e| e.path())).collect();
-            inner.sort();
-            inner.into_iter().find(|q| q.join("torrents").is_dir())
-        }))
+        .or_else(|| {
+            subs.iter().find_map(|p| {
+                let mut inner: Vec<PathBuf> = std::fs::read_dir(p)
+                    .ok()?
+                    .filter_map(|e| e.ok().map(|e| e.path()))
+                    .collect();
+                inner.sort();
+                inner.into_iter().find(|q| q.join("torrents").is_dir())
+            })
+        })
 }
 
 #[cfg(test)]
@@ -1121,7 +1282,10 @@ mod transmission_tests {
         let data = b"d11:destination5:/data10:downloadedi20e6:labelsl1:a1:be6:pausedi1e8:progressd6:blocks3:alle8:uploadedi10ee";
         let f = resume_facts(data, 4).unwrap();
         assert_eq!(f.destination, "/data");
-        assert_eq!((f.uploaded, f.downloaded, f.paused, f.complete), (10, 20, true, true));
+        assert_eq!(
+            (f.uploaded, f.downloaded, f.paused, f.complete),
+            (10, 20, true, true)
+        );
         assert_eq!(f.labels, vec!["a", "b"]);
         // A pieces bitfield: 4 pieces, all set (0xF0) is complete; 0xE0 is not.
         let bits = |b: u8| {
@@ -1132,12 +1296,20 @@ mod transmission_tests {
         };
         assert!(resume_facts(&bits(0xF0), 4).unwrap().complete);
         assert!(!resume_facts(&bits(0xE0), 4).unwrap().complete);
-        assert!(!resume_facts(b"d11:destination1:/e", 4).unwrap().complete, "no progress: check");
+        assert!(
+            !resume_facts(b"d11:destination1:/e", 4).unwrap().complete,
+            "no progress: check"
+        );
     }
 
     fn torrent(name: &str) -> Vec<u8> {
         let piece = [0u8; 20];
-        let mut v = format!("d4:infod6:lengthi5e4:name{}:{}12:piece lengthi16384e6:pieces20:", name.len(), name).into_bytes();
+        let mut v = format!(
+            "d4:infod6:lengthi5e4:name{}:{}12:piece lengthi16384e6:pieces20:",
+            name.len(),
+            name
+        )
+        .into_bytes();
         v.extend_from_slice(&piece);
         v.extend_from_slice(b"ee");
         v
@@ -1160,7 +1332,10 @@ mod transmission_tests {
         let s = scan_transmission(&dir, true, true).unwrap();
         assert_eq!(s.cands.len(), 1);
         let a = &s.cands[0];
-        assert_eq!((a.name.as_str(), a.category.as_str(), a.save_path.as_str()), ("Alpha", "films", "/data/films"));
+        assert_eq!(
+            (a.name.as_str(), a.category.as_str(), a.save_path.as_str()),
+            ("Alpha", "films", "/data/films")
+        );
         assert_eq!(a.content, "/data/films/Alpha");
         assert!(a.complete);
         assert_eq!((a.uploaded, a.tags.clone()), (9, vec!["x".to_string()]));
@@ -1170,7 +1345,9 @@ mod transmission_tests {
         assert_eq!(s.problems.len(), 1, "an unreadable .torrent is reported");
         let plain = scan_transmission(&dir, false, false).unwrap();
         assert!(plain.cands[0].category.is_empty() && plain.cands[0].tags.is_empty());
-        assert!(scan_transmission(&dir.join("nope"), true, true).unwrap_err().contains("no torrents folder"));
+        assert!(scan_transmission(&dir.join("nope"), true, true)
+            .unwrap_err()
+            .contains("no torrents folder"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1179,7 +1356,8 @@ mod transmission_tests {
         {
             let mut z = zip::ZipWriter::new(&mut buf);
             for (name, data) in entries {
-                z.start_file(*name, zip::write::SimpleFileOptions::default()).unwrap();
+                z.start_file(*name, zip::write::SimpleFileOptions::default())
+                    .unwrap();
                 z.write_all(data).unwrap();
             }
             z.finish().unwrap();
@@ -1192,7 +1370,10 @@ mod transmission_tests {
         let into = std::env::temp_dir().join(format!("tr-zip-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&into);
         std::fs::create_dir_all(&into).unwrap();
-        let z = zip_of(&[("transmission/torrents/A.torrent", b"x"), ("transmission/resume/A.resume", b"y")]);
+        let z = zip_of(&[
+            ("transmission/torrents/A.torrent", b"x"),
+            ("transmission/resume/A.resume", b"y"),
+        ]);
         let root = unpack_zip(&z, &into).unwrap();
         assert_eq!(root, into.join("transmission"));
         assert!(root.join("resume/A.resume").exists());
@@ -1202,7 +1383,9 @@ mod transmission_tests {
         let evil = zip_of(&[("../escape.txt", b"x")]);
         assert!(unpack_zip(&evil, &into).unwrap_err().contains("outside"));
         assert!(!into.parent().unwrap().join("escape.txt").exists());
-        assert!(unpack_zip(&zip_of(&[("readme.txt", b"x")]), &into).unwrap_err().contains("no torrents/"));
+        assert!(unpack_zip(&zip_of(&[("readme.txt", b"x")]), &into)
+            .unwrap_err()
+            .contains("no torrents/"));
         let _ = std::fs::remove_dir_all(&into);
     }
 
@@ -1223,11 +1406,14 @@ mod transmission_tests {
         {
             let mut z = zip::ZipWriter::new(&mut buf);
             let opts = zip::write::SimpleFileOptions::default();
-            z.start_file("transmission/torrents/A.torrent", opts).unwrap();
+            z.start_file("transmission/torrents/A.torrent", opts)
+                .unwrap();
             z.write_all(b"x").unwrap();
             // A link out of the folder, then a file written "through" it.
-            z.add_symlink("transmission/escape", "../../outside", opts).unwrap();
-            z.add_symlink("transmission/abs", outside.to_str().unwrap(), opts).unwrap();
+            z.add_symlink("transmission/escape", "../../outside", opts)
+                .unwrap();
+            z.add_symlink("transmission/abs", outside.to_str().unwrap(), opts)
+                .unwrap();
             z.start_file("transmission/escape/pwned.txt", opts).unwrap();
             z.write_all(b"pwned").unwrap();
             z.finish().unwrap();
@@ -1250,7 +1436,11 @@ mod transmission_tests {
         let mut links = Vec::new();
         symlinks_under(&into, &mut links);
         assert!(links.is_empty(), "no symlink may be created: {links:?}");
-        assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0, "nothing may appear outside `into`");
+        assert_eq!(
+            std::fs::read_dir(&outside).unwrap().count(),
+            0,
+            "nothing may appear outside `into`"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 }
@@ -1286,7 +1476,10 @@ mod qbit_session_tests {
             *n += 1;
             *n
         };
-        let cookie = headers.get("cookie").and_then(|v| v.to_str().ok()).unwrap_or("");
+        let cookie = headers
+            .get("cookie")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
         let ok = (StatusCode::OK, b"d4:infode".to_vec()).into_response();
         match hash.as_str() {
             "flaky" if n <= 2 => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
@@ -1311,7 +1504,11 @@ mod qbit_session_tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let creds = QbitCreds { url: format!("http://{addr}"), username: "u".into(), password: "p".into() };
+        let creds = QbitCreds {
+            url: format!("http://{addr}"),
+            username: "u".into(),
+            password: "p".into(),
+        };
         let mut q = Qbit::login(&creds).await.expect("login");
         q.backoff = std::time::Duration::from_millis(1);
         (f, q)
@@ -1385,7 +1582,11 @@ mod qbit_session_tests {
         run_job(cands, None, Choices::default(), progress.clone(), cats, add).await;
 
         assert_eq!(progress.seeded.load(Ordering::Relaxed), 1);
-        assert_eq!(progress.stopped.load(Ordering::Relaxed), 1, "the wizard's default leaves it stopped");
+        assert_eq!(
+            progress.stopped.load(Ordering::Relaxed),
+            1,
+            "the wizard's default leaves it stopped"
+        );
         assert_eq!(progress.failed.load(Ordering::Relaxed), 1);
         let failures = progress.failures.lock().unwrap().clone();
         assert_eq!(failures.len(), 1);
@@ -1393,7 +1594,10 @@ mod qbit_session_tests {
         let kit = progress.retry.lock().unwrap().clone().expect("a retry kit");
         assert_eq!(kit.cands.len(), 1);
         assert_eq!(kit.cands[0].name, "missing");
-        assert!(kit.creds.is_none(), "a Transmission import has no password to keep");
+        assert!(
+            kit.creds.is_none(),
+            "a Transmission import has no password to keep"
+        );
         let json = progress.as_json();
         assert_eq!(json["retryable"], true);
         assert_eq!(json["failures"][0]["name"], "missing");
