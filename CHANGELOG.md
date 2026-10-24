@@ -41,6 +41,8 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   writing to the store and the engines during the departures and the flush. A
   pass that has started finishes its write; a job that is running is queued
   again at the next start, as before.
+- The peer listeners (TCP and uTP) are closed when a stop begins, not when the
+  process ends: the departures and the flush no longer take new peers in.
 - `POST /api/auth/password` takes an optional `old_password`. When it is
   given and wrong, nothing changes (403) and the failure counts in the
   failed-login limit; a blocked caller gets 429. Left out, the change is what

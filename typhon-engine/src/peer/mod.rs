@@ -84,7 +84,7 @@ async fn listen_until(
     disk_mgr: Arc<DiskManager>,
     utp: UtpHandle,
     listening: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    _stop: crate::stop::Stop,
+    stop: crate::stop::Stop,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if bindings.is_empty() {
         return Err("no bindings to listen on (config error)".into());
@@ -143,9 +143,38 @@ async fn listen_until(
                 }
                 break;
             }
+            // The stop closes the listeners, TCP and uTP, at its start: the
+            // drain and the flush that follow take no new peer in. The peers
+            // already connected are not touched; they end with the process.
+            _ = stop.wait() => {
+                info!("[peer] stop: closing the listeners");
+                close_listeners(&mut handles, &mut utp_task, &utp).await;
+                listening.store(false, std::sync::atomic::Ordering::Relaxed);
+                break;
+            }
         }
     }
     Ok(())
+}
+
+/// Let go of every listening socket and wait until the accept tasks are gone,
+/// so the ports are free when this returns.
+async fn close_listeners(
+    handles: &mut Vec<tokio::task::JoinHandle<()>>,
+    utp_task: &mut Option<tokio::task::JoinHandle<()>>,
+    utp: &UtpHandle,
+) {
+    for h in handles.iter() {
+        h.abort();
+    }
+    for h in handles.drain(..) {
+        let _ = h.await;
+    }
+    if let Some(t) = utp_task.take() {
+        t.abort();
+        let _ = t.await;
+    }
+    utp.close();
 }
 
 /// One request to move an engine's listeners to another port. `reply`, when
@@ -386,6 +415,16 @@ impl UtpHandle {
             return Ok(None);
         }
         bind_utp(port, self.device.as_deref()).await.map(Some)
+    }
+
+    /// Shut the socket down for good: the handle lets go of it, its
+    /// dispatcher ends and the UDP port is released. Dials after this find no
+    /// uTP socket, as on an engine that never had one.
+    pub fn close(&self) {
+        let old = self.inner.write().unwrap_or_else(|p| p.into_inner()).take();
+        if let Some(old) = old {
+            old.cancel.cancel();
+        }
     }
 
     /// Put `live` in place and shut the old socket down.

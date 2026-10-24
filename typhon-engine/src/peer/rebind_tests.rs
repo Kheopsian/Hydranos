@@ -225,3 +225,50 @@ async fn the_accept_backoff_doubles_from_ten_milliseconds_to_a_second() {
     accept_backoff("tcp", &e, &mut failures).await;
     assert_eq!(failures, u32::MAX);
 }
+
+/// ⭐ The listeners close when the stop begins, not when the process ends: the
+/// drain and the flush that follow must not keep taking peers in. The signal
+/// is the test's own. TCP and uTP both: the UDP port is free again.
+#[tokio::test]
+async fn the_listeners_close_when_the_stop_begins() {
+    let port = free_port();
+    let (mgr, disk) = engine("stop");
+    let utp = UtpHandle::bind(port, None).await.expect("uTP binds");
+    let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stop = crate::stop::Stop::new();
+    let (f, st) = (flag.clone(), stop.clone());
+    let task = tokio::spawn(async move {
+        let _ = listen_until(vec![binding(1, "127.0.0.1", port)], port, mgr, disk, utp, f, st).await;
+    });
+    for _ in 0..100 {
+        if flag.load(std::sync::atomic::Ordering::Relaxed) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(accepts("127.0.0.1", port).await, "the listener never came up");
+    assert!(std::net::UdpSocket::bind(("0.0.0.0", port)).is_err(), "the uTP socket is not held");
+
+    stop.begin();
+
+    let mut closed = false;
+    for _ in 0..100 {
+        if !accepts("127.0.0.1", port).await {
+            closed = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(closed, "the TCP listener still accepts after the stop began");
+    assert!(!flag.load(std::sync::atomic::Ordering::Relaxed), "the engine still says it listens");
+    let mut udp_free = false;
+    for _ in 0..100 {
+        if std::net::UdpSocket::bind(("0.0.0.0", port)).is_ok() {
+            udp_free = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(udp_free, "the uTP socket is still held after the stop began");
+    let _ = tokio::time::timeout(Duration::from_secs(2), task).await;
+}
