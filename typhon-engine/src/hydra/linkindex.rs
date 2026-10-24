@@ -298,7 +298,9 @@ pub fn unpack(blob: &[u8]) -> Option<Vec<Option<FileId>>> {
     }
     let word = |c: &[u8], i: usize| u64::from_le_bytes(c[1 + i * 8..9 + i * 8].try_into().unwrap());
     Some(
-        blob.chunks_exact(PACKED_FILE)
+        blob.as_chunks::<PACKED_FILE>()
+            .0
+            .iter()
             .map(|c| {
                 (c[0] == 1).then(|| FileId {
                     volume: word(c, 0),

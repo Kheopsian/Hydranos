@@ -195,8 +195,7 @@ pub(crate) async fn post_mcp(
             if !tool_names(true).contains(&name) {
                 return rpc_error(StatusCode::OK, id, -32602, &format!("unknown tool: {name}"));
             }
-            let outcome = if DESTRUCTIVE.contains(&name) && !destructive_allowed(&state)
-            {
+            let outcome = if DESTRUCTIVE.contains(&name) && !destructive_allowed(&state) {
                 // Not listed, and refused if called anyway: a client that
                 // cached an older tool list must not get around the switch.
                 Err(format!(

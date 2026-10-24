@@ -465,7 +465,10 @@ pub(super) async fn announce_one(
 
     // Sampled self-check. Only on a torrent that is already seeding: a leecher
     // asks for peers anyway, so its answer says nothing about numwant.
-    let verify_this = left == 0 && VERIFY_TICK.fetch_add(1, Ordering::Relaxed).is_multiple_of(VERIFY_EVERY);
+    let verify_this = left == 0
+        && VERIFY_TICK
+            .fetch_add(1, Ordering::Relaxed)
+            .is_multiple_of(VERIFY_EVERY);
 
     // The list actually announced to: the operator can edit it at runtime,
     // and `meta.trackers` is only what the .torrent said when it was added.
@@ -555,13 +558,7 @@ pub(super) async fn announce_one(
                                 typhon_engine::torrent::meta::now_secs(),
                             );
                         }
-                        cache.count_failed_message(
-                            &host,
-                            "refused",
-                            &e,
-                            &job.info_hash,
-                            event,
-                        );
+                        cache.count_failed_message(&host, "refused", &e, &job.info_hash, event);
                         torrent.last_announce_ok.store(false, Ordering::Relaxed);
                         if let Ok(mut g) = torrent.last_announce_error.lock() {
                             *g = e;

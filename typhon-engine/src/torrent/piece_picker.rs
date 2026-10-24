@@ -212,7 +212,7 @@ impl PieceMem {
         let budget = self.budget();
         let writing = self.writing();
         self.reserved
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |reserved| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |reserved| {
                 let committed = reserved + writing;
                 (budget == 0 || committed == 0 || committed + size <= budget)
                     .then_some(reserved + size)
