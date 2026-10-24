@@ -220,6 +220,8 @@ pub struct BumpReq {
 
 /// What one torrent owes the scheduler.
 struct State {
+    // Kept with the state; no code reads it today.
+    #[allow(dead_code)]
     info_hash: String,
     first_announce: bool,
     /// The next dispatch carries a forced bump. Cleared once it has.
@@ -271,6 +273,8 @@ impl PartialOrd for Deadline {
 /// A torrent handed to a worker.
 pub struct Job {
     pub info_hash: String,
+    // Carried on the job; no worker reads it today.
+    #[allow(dead_code)]
     pub first: bool,
     /// Asked for by a person: allowed past `min interval` (see `BumpReq`).
     pub forced: bool,

@@ -1081,6 +1081,8 @@ pub fn routes() -> axum::Router<AppState> {
 }
 
 /// Kept so the module owns its Arc import even when the runner changes shape.
+// No caller today. Kept, not deleted: clearing lints is not the moment to drop code.
+#[allow(dead_code)]
 pub type Shared = Arc<crate::store::StoreLock>;
 
 #[cfg(test)]

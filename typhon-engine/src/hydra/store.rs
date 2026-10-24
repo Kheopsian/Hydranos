@@ -109,7 +109,11 @@ pub struct WorkflowFacts {
     pub category: String,
     pub save_path: String,
     pub added_time: f64,
+    // Loaded with the row; the rules do not read it yet.
+    #[allow(dead_code)]
     pub completed_time: f64,
+    // Loaded with the row; the rules do not read it yet.
+    #[allow(dead_code)]
     pub seeding_time: i64,
     pub tags: Vec<String>,
     pub paused: bool,
@@ -543,6 +547,7 @@ pub struct StoreGuard<'a> {
 }
 
 impl StoreLock {
+    #[cfg(test)]
     pub fn new(store: Store) -> Self {
         Self::with_reader(store, None)
     }
@@ -726,6 +731,7 @@ impl StoreLock {
     /// repaired. A connection someone holds is left to them. The result is
     /// what `probe` reports. Without pacing, for tests.
     #[track_caller]
+    #[cfg(test)]
     pub fn heal_now(&self) -> bool {
         self.refresh(false)
     }
@@ -852,6 +858,8 @@ impl StoreLock {
     /// report the store as broken when it is only busy, and pile up blocked
     /// threads while it waited.
     #[track_caller]
+    // No caller today. Kept, not deleted: clearing lints is not the moment to drop code.
+    #[allow(dead_code)]
     pub fn try_read(&self) -> Option<Result<StoreGuard<'_>, ()>> {
         let m = self.reader.as_ref().unwrap_or(&self.inner);
         let at = std::panic::Location::caller();
@@ -2395,6 +2403,7 @@ impl Store {
     /// one endpoint, which is exactly the kind of difference that survives a
     /// review and reaches production.
     /// An empty store with the frozen schema applied, for tests.
+    #[cfg(test)]
     pub fn open_in_memory() -> anyhow::Result<Self> {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch(SCHEMA)?;
@@ -3036,6 +3045,7 @@ impl Store {
     ///
     /// It does NOT see writes made on another connection, which is why callers
     /// pair it with a TTL.
+    #[cfg(test)]
     pub fn write_mark(&self) -> u64 {
         self.conn.total_changes()
     }
@@ -4006,6 +4016,7 @@ impl Store {
     }
 
     /// Where a torrent's data is meant to live, as the store recorded it.
+    #[cfg(test)]
     pub fn save_path_of(&self, info_hash: &str) -> Option<String> {
         self.conn
             .query_row(
@@ -4030,6 +4041,8 @@ impl Store {
         Ok(())
     }
 
+    // No caller today. Kept, not deleted: clearing lints is not the moment to drop code.
+    #[allow(dead_code)]
     pub fn drop_content_key(&self, info_hash: &str) -> anyhow::Result<()> {
         self.conn.execute(
             "DELETE FROM content_index WHERE info_hash = ?1",
@@ -4137,6 +4150,7 @@ impl Store {
         Ok(out)
     }
 
+    #[cfg(test)]
     pub fn count_torrents(&self) -> anyhow::Result<i64> {
         Ok(self
             .conn
@@ -4144,6 +4158,7 @@ impl Store {
     }
 
     /// Torrent counts per session, which is what the status endpoints report.
+    #[cfg(test)]
     pub fn count_by_session(&self) -> anyhow::Result<Vec<(String, i64)>> {
         let mut stmt = self
             .conn

@@ -123,6 +123,8 @@ impl Progress {
     }
 
     /// End the job on an error the whole import cannot get past.
+    // No caller today. Kept, not deleted: clearing lints is not the moment to drop code.
+    #[allow(dead_code)]
     pub fn fail(&self, error: String) {
         *self.error.write().unwrap() = error;
         self.set_phase("error");
@@ -1087,6 +1089,7 @@ pub fn resume_facts(data: &[u8], num_pieces: u32) -> Option<ResumeFacts> {
 }
 
 /// Read the destination out of a Transmission `.resume` file.
+#[cfg(test)]
 pub fn destination_from_resume(data: &[u8]) -> Option<String> {
     resume_facts(data, 0)
         .map(|f| f.destination)
@@ -1185,6 +1188,7 @@ const ZIP_MAX_BYTES: u64 = 8 << 30;
 /// first folder (at most two levels down) that has a `torrents/` inside.
 /// Entries escaping the target (`../`, absolute names) are refused, not
 /// skipped: an archive carrying one is not a Transmission folder.
+#[cfg(test)]
 pub fn unpack_zip(bytes: &[u8], into: &Path) -> Result<PathBuf, String> {
     unpack_zip_from(std::io::Cursor::new(bytes), into)
 }

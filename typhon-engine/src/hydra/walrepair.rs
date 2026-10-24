@@ -120,12 +120,6 @@ fn header_says_wal(path: &Path) -> Result<bool, String> {
 /// hide the share's name while keeping its semantics, and the semantics are
 /// what breaks WAL.
 fn is_network(path: &Path) -> bool {
-    const NFS: i64 = 0x6969;
-    const SMB: i64 = 0x517B;
-    const CIFS: i64 = 0xFF53_4D42_u32 as i64;
-    const SMB2: i64 = 0xFE53_4D42_u32 as i64;
-    const FUSE: i64 = 0x6573_5546;
-
     let Some(parent) = path.parent() else {
         return false;
     };

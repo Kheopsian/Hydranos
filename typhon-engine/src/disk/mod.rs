@@ -89,7 +89,6 @@ use lru::LruCache;
 use std::num::NonZeroUsize;
 
 use crate::torrent::meta::TorrentState;
-use sha1::{Digest, Sha1};
 
 const CACHE_BLOCK_SIZE: u64 = 131072; // 128 KB
 const CACHE_MAX_ENTRIES: usize = 2048; // ~256 MB
@@ -951,6 +950,8 @@ mod disk_tests {
 
     /// A single-file torrent whose piece hash is the REAL hash of `content`.
     /// A fixture with a made-up hash can only ever exercise the refusal path.
+    // No caller today. Kept, not deleted: clearing lints is not the moment to drop code.
+    #[allow(dead_code)]
     fn torrent_bytes(name: &str, content: &[u8]) -> Vec<u8> {
         // One piece, sized to the content, so the whole file is piece 0.
         torrent_bytes_in_pieces(name, content, content.len())
@@ -1264,6 +1265,9 @@ mod disk_tests {
     /// Holding the descriptor cache parks the reader after its cache miss and
     /// the writer after its invalidation; on release the reader usually reads
     /// first. A few rounds make that ordering all but certain.
+    // The descriptor-cache lock is held across the awaits on purpose: that is how the
+    // test parks the read and the write.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_read_racing_a_write_never_caches_what_the_write_replaced() {
         const PIECE: usize = 16 * 1024;
@@ -1284,9 +1288,6 @@ mod disk_tests {
                 .set_len(content.len() as u64)
                 .unwrap();
 
-            // Held across the awaits on purpose: the test freezes the read and the write
-            // behind the cache lock to line them up.
-            #[allow(clippy::await_holding_lock)]
             let held = fd_cache().lock();
             let (disk, t) = (f.disk.clone(), f.torrent.clone());
             let reader = tokio::spawn(async move { disk.read_block(&t, 0, 0, 16).await });
