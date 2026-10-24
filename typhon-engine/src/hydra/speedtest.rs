@@ -137,10 +137,14 @@ pub fn spawn(state: AppState) {
         loop {
             let every = state.cfg().vpn_speedtest.interval_secs.unwrap_or(0);
             if every == 0 || plan(&state.cfg()).is_err() {
-                tokio::time::sleep(Duration::from_secs(60)).await;
+                if !crate::shutdown::sleep(Duration::from_secs(60)).await {
+                    return;
+                }
                 continue;
             }
-            tokio::time::sleep(Duration::from_secs(every.max(300))).await;
+            if !crate::shutdown::sleep(Duration::from_secs(every.max(300))).await {
+                return;
+            }
             if let Err(e) = run(&state).await {
                 tracing::warn!("periodic speedtest: {e}");
             }

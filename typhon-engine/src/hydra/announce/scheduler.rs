@@ -393,7 +393,10 @@ where
     F: Fn(Job) -> Fut + Send + Sync + 'static,
     Fut: std::future::Future<Output = Outcome> + Send,
 {
-    tokio::time::sleep(BOOT_DELAY).await;
+    let stop = typhon_engine::stop::global();
+    if !stop.sleep(BOOT_DELAY).await {
+        return;
+    }
 
     let (work_tx, work_rx) = mpsc::channel::<Job>(2 * MAX_CONCURRENCY);
     let (result_tx, mut result_rx) = mpsc::channel::<(Outcome, Duration)>(2 * MAX_CONCURRENCY);
@@ -448,6 +451,10 @@ where
             .unwrap_or_else(|| Instant::now() + Duration::from_secs(3600));
 
         tokio::select! {
+            // Nothing new is sent once the stop has begun: a regular announce
+            // after the `stopped` of the departure would list the client
+            // again. The answers still in flight finish on their own.
+            _ = stop.wait() => return,
             _ = tokio::time::sleep_until(next) => {}
             Some((outcome, took)) = result_rx.recv() => {
                 pool.done(&outcome, took);

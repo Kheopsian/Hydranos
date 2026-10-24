@@ -398,7 +398,9 @@ pub fn spawn_resume_sweeps(mgr: Arc<TorrentManager>, fast_secs: u64) {
         let tm = mgr.clone();
         tokio::spawn(async move {
             loop {
-                tokio::time::sleep(std::time::Duration::from_secs(fast_secs)).await;
+                if !crate::stop::global().sleep(std::time::Duration::from_secs(fast_secs)).await {
+                    return;
+                }
                 let tm = tm.clone();
                 let _ = tokio::task::spawn_blocking(move || tm.save_downloading_resume()).await;
             }
@@ -407,7 +409,11 @@ pub fn spawn_resume_sweeps(mgr: Arc<TorrentManager>, fast_secs: u64) {
     let tm3 = mgr;
     tokio::spawn(async move {
         loop {
-            tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+            // A sweep that has started runs to its end; none starts once the
+            // stop has begun, so the final flush is the only writer.
+            if !crate::stop::global().sleep(std::time::Duration::from_secs(300)).await {
+                return;
+            }
             // Syncs the files written since the last sweep, then commits:
             // blocking work, kept off the async workers.
             let tm = tm3.clone();

@@ -953,7 +953,9 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
             loop {
-                tick.tick().await;
+                if !shutdown::tick(&mut tick).await {
+                    return;
+                }
                 let _ = api::session_and_day(&state);
             }
         });

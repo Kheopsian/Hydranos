@@ -40,6 +40,18 @@ pub fn stopping() -> bool {
     typhon_engine::stop::global().is_set()
 }
 
+/// Wait `d` on the process-wide signal: true when the whole wait went by,
+/// false when the stop began and the loop must return. See
+/// `typhon_engine::stop::Stop::sleep`.
+pub async fn sleep(d: std::time::Duration) -> bool {
+    typhon_engine::stop::global().sleep(d).await
+}
+
+/// `Interval::tick` on the process-wide signal, same answer as `sleep`.
+pub async fn tick(interval: &mut tokio::time::Interval) -> bool {
+    typhon_engine::stop::global().tick(interval).await
+}
+
 /// Leave with the restart code. On Windows nothing supervises the process,
 /// so it starts its successor itself first, with the same arguments.
 pub fn exit_for_restart() -> ! {
