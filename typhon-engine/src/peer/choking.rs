@@ -238,6 +238,7 @@ mod tests {
             multi_file: false,
             info_dict_len: 0,
             v2: false,
+            renames: Default::default(),
         }
     }
 

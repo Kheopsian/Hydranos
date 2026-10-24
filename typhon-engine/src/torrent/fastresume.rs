@@ -56,6 +56,12 @@ pub struct ResumeData {
     /// reason as the caps: it must survive a restart and an engine move.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub download_order: Option<super::piece_picker::DownloadOrder>,
+    /// Files renamed after the torrent was added: index -> path below the
+    /// torrent's folder (`/`-joined). Empty for nearly every torrent. Kept for
+    /// the same reason as the order: a rename undone by the next restart, or
+    /// lost in an engine move, would point the torrent at files it never had.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub file_renames: std::collections::BTreeMap<usize, String>,
 }
 
 /// Save resume data for a torrent.

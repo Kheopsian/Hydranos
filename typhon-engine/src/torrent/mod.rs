@@ -969,7 +969,23 @@ impl TorrentManager {
         stopped: bool,
         seed_mode: bool,
     ) -> Result<(InfoHash, String), String> {
+        self.add_torrent_bytes_renamed(bytes, save_path, stopped, seed_mode, &Default::default())
+    }
+
+    /// `add_torrent_bytes` for data that sits under other file names than the
+    /// .torrent's (a copy of a torrent whose files were renamed): `renames` are
+    /// the source's (`TorrentMeta::renamed_files`), applied before anything
+    /// looks at the disk.
+    pub fn add_torrent_bytes_renamed(
+        &self,
+        bytes: &[u8],
+        save_path: &str,
+        stopped: bool,
+        seed_mode: bool,
+        renames: &std::collections::BTreeMap<usize, String>,
+    ) -> Result<(InfoHash, String), String> {
         let meta = metainfo::parse_torrent_bytes(bytes)?;
+        meta.restore_renamed_files(renames);
         let ih = meta.info_hash;
         let name = meta.name.clone();
 
@@ -1017,6 +1033,7 @@ impl TorrentManager {
             up_limit: 0,
             down_limit: 0,
             download_order: None,
+            file_renames: state.meta.renamed_files(),
         };
         // The record first, then the torrent: a store that refuses it refuses
         // the add, with nothing inserted and the error going back to the
@@ -1100,7 +1117,7 @@ impl TorrentManager {
         // is about to be moved or handed to another engine, and a descriptor
         // kept on the old path pins the old inode once the move unlinks it.
         let mut kept: Vec<std::path::PathBuf> = Vec::new();
-        let to_delete: Option<(Vec<std::path::PathBuf>, Option<std::path::PathBuf>)> =
+        let to_delete: Option<(Vec<std::path::PathBuf>, Vec<std::path::PathBuf>)> =
             if let Some(t) = entry {
                 t.is_removed.store(true, Ordering::Relaxed);
                 // Its pieces in flight go now, not when the last session
@@ -1116,12 +1133,21 @@ impl TorrentManager {
                     kept = files;
                     None
                 } else {
-                    let folder = if t.meta.multi_file {
-                        Some(t.save_path.read().join(&t.meta.name))
-                    } else {
-                        None
-                    };
-                    Some((files, folder))
+                    // Every folder the files sit in: more than one once files
+                    // were renamed into another.
+                    let mut folders: Vec<std::path::PathBuf> = Vec::new();
+                    if t.meta.multi_file {
+                        let save = t.save_path.read().clone();
+                        for i in 0..t.meta.files.len() {
+                            if let (Some(folder), _) = t.meta.folder_split(i) {
+                                let f = save.join(folder);
+                                if !folders.contains(&f) {
+                                    folders.push(f);
+                                }
+                            }
+                        }
+                    }
+                    Some((files, folders))
                 }
             } else { None };
         tm.map_hold = got.elapsed();
@@ -1152,7 +1178,7 @@ impl TorrentManager {
                 info_hash: hex_encode(info_hash),
             });
             tm.publish = stage.elapsed();
-            if let Some((mut files, folder)) = to_delete {
+            if let Some((mut files, folders)) = to_delete {
                 let before = files.len();
                 files.retain(|f| !spare.contains(f));
                 tm.spared = before - files.len();
@@ -1173,9 +1199,11 @@ impl TorrentManager {
                 // Multi-file: walk the torrent folder and remove empty subdirs
                 // bottom-up. remove_dir() only succeeds when empty, so any
                 // foreign file in there keeps its containing dir alive.
-                if let Some(folder) = folder {
+                if !folders.is_empty() {
                     let stage = Instant::now();
-                    remove_empty_dirs_recursive(&folder);
+                    for folder in &folders {
+                        remove_empty_dirs_recursive(folder);
+                    }
                     tm.dirs = stage.elapsed();
                 }
             }
@@ -1616,6 +1644,9 @@ impl TorrentManager {
             // reboots. Plain new() falls back to SystemTime::now(), which wipes
             // the fastresume history on every restart.
             let saved_trackers = rd.trackers.clone();
+            // Files renamed since the .torrent was added: the data sits under
+            // those names, and everything below reads the paths from `meta`.
+            meta.restore_renamed_files(&rd.file_renames);
             // Decode the bitfield here, before the meta is moved: a torrent that
             // is already complete gets no picker at all, instead of allocating
             // one, importing into it, being promoted to Seeding, and carrying it
@@ -2109,6 +2140,7 @@ impl TorrentManager {
             up_limit: t.rate_limits().0,
             down_limit: t.rate_limits().1,
             download_order: t.stored_download_order(),
+            file_renames: t.meta.renamed_files(),
         }
     }
 
@@ -2171,6 +2203,108 @@ impl TorrentManager {
     /// torrent leaves nothing for a later start to find.
     fn persist_before_insert(&self, ih: &InfoHash, rd: &fastresume::ResumeData) -> Result<(), String> {
         self.try_persist(ih, rd).inspect_err(|_| fastresume::remove(&self.resume_dir, ih))
+    }
+
+    /// Point one file of a STOPPED torrent at another path below the save
+    /// path and persist it at once, like `set_trackers`. Nothing is moved:
+    /// this is for data already sitting under the new name, which a recheck
+    /// then finds. `from` and `to` are `/`-separated and start at the save
+    /// path, folder included (`Release.A/f.mkv`), so a file may go to another
+    /// folder; a multi-file torrent's files keep one (at least two components).
+    ///
+    /// Refused while the torrent runs (its files may be open and its pieces
+    /// are being written under the old name) or is being checked; when a file
+    /// is on disk at `from` (renaming would leave it behind -- moving data
+    /// is not done); when `to` is another file's path, or one sits inside the
+    /// other as folder and file.
+    pub fn rename_file(&self, info_hash: &InfoHash, from: &str, to: &str) -> Result<(), RenameError> {
+        let Some((t, index, to_path)) = self.plan_rename(info_hash, from, to)? else { return Ok(()) };
+        let before = t.meta.disk_rel(index);
+        t.meta.set_disk_rel(index, to_path);
+        // Pieces that touch the file were counted as held under its old name:
+        // a start without a recheck must not serve whatever the new name holds.
+        let f = &t.meta.files[index];
+        if f.length > 0 {
+            let plen = t.meta.piece_length.max(1) as u64;
+            let pieces: Vec<u32> = ((f.offset / plen) as u32..=((f.offset + f.length - 1) / plen) as u32).collect();
+            t.retract_pieces(&pieces, "a file was renamed: recheck the torrent before it runs");
+        }
+        let rd = Self::build_resume_data(&t);
+        if let Err(e) = self.try_persist(info_hash, &rd) {
+            // Not kept: the next start would point the file back at its old
+            // name, so the caller is not told it took. The retracted pieces
+            // stay retracted: a recheck finds them again.
+            t.meta.set_disk_rel(index, before);
+            return Err(RenameError::Conflict(e));
+        }
+        Ok(())
+    }
+
+    /// What `rename_file` would answer, changing nothing: for a caller that
+    /// renames on several copies and wants none changed if one would refuse.
+    pub fn can_rename_file(&self, info_hash: &InfoHash, from: &str, to: &str) -> Result<(), RenameError> {
+        self.plan_rename(info_hash, from, to).map(|_| ())
+    }
+
+    /// The checks of a rename, and what it would do: `None` when `from` and
+    /// `to` are the same path.
+    #[allow(clippy::type_complexity)]
+    fn plan_rename(
+        &self,
+        info_hash: &InfoHash,
+        from: &str,
+        to: &str,
+    ) -> Result<Option<(Arc<TorrentState>, usize, std::path::PathBuf)>, RenameError> {
+        let t = self.get(info_hash).ok_or(RenameError::NotFound)?;
+        let to_path = clean_relative(to).ok_or_else(|| {
+            RenameError::Invalid(format!("{to:?} is not a relative path of plain names (no empty, '.', '..' or '\\' segment)"))
+        })?;
+        let from_path = clean_relative(from)
+            .ok_or_else(|| RenameError::Invalid(format!("{from:?} is not a relative path of plain names")))?;
+        let n = t.meta.files.len();
+        let Some(index) = (0..n).find(|&i| t.meta.disk_rel(i) == from_path) else {
+            return Err(RenameError::Invalid(format!("{from:?} is not a file of this torrent")));
+        };
+        if t.meta.multi_file && to_path.components().count() < 2 {
+            return Err(RenameError::Invalid(format!(
+                "{to:?}: the files of a multi-file torrent stay in a folder (give folder/file)"
+            )));
+        }
+        if !t.is_paused.load(Ordering::Relaxed) {
+            return Err(RenameError::Conflict("the torrent is running: stop it before renaming its files".into()));
+        }
+        if t.rechecking.load(Ordering::Relaxed) || t.status.load(Ordering::Relaxed) == TorrentStatus::Checking as u8 {
+            return Err(RenameError::Conflict("the torrent is being checked: wait for the check to end".into()));
+        }
+        if to_path == from_path {
+            return Ok(None);
+        }
+        // Compared without the case: two paths that differ only by it are one
+        // file on a case-insensitive volume.
+        let fold = |p: &std::path::Path| std::path::PathBuf::from(p.to_string_lossy().to_lowercase());
+        let to_fold = fold(&to_path);
+        for j in (0..n).filter(|&j| j != index) {
+            let other = fold(&t.meta.disk_rel(j));
+            if other == to_fold {
+                return Err(RenameError::Conflict(format!(
+                    "{to:?} is already the path of another file of this torrent (case aside)"
+                )));
+            }
+            if other.starts_with(&to_fold) || to_fold.starts_with(&other) {
+                return Err(RenameError::Conflict(format!(
+                    "{to:?} and {:?} would be a folder and a file at once",
+                    t.meta.disk_rel(j).to_string_lossy()
+                )));
+            }
+        }
+        let on_disk = t.meta.disk_path(&t.save_path.read().clone(), index);
+        if on_disk.symlink_metadata().is_ok() {
+            return Err(RenameError::Conflict(format!(
+                "a file exists on disk at {}: renaming does not move data, only points the torrent at files already under the new name",
+                on_disk.display()
+            )));
+        }
+        Ok(Some((t, index, to_path)))
     }
 
     /// Swap the in-memory save_path for a running torrent and flush
@@ -2305,6 +2439,9 @@ impl TorrentManager {
         if self.torrents.contains_key(&ih) {
             return Err("torrent already present in this engine".into());
         }
+        // Renamed files travel with the record: a move must not point the
+        // torrent back at names its data does not have.
+        meta.restore_renamed_files(&rd.file_renames);
 
         // The record first: a store that refuses it refuses the adoption, and
         // nothing has been inserted anywhere. The caller moves files only after
@@ -2520,16 +2657,51 @@ fn hex_decode_bytes(hex: &str) -> Vec<u8> {
         .unwrap_or_default()
 }
 
+/// Why `rename_file` did not rename.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RenameError {
+    /// No such torrent.
+    NotFound,
+    /// The request is wrong whatever the torrent's state: a bad path, or a
+    /// `from` that is not one of its files.
+    Invalid(String),
+    /// Right request, wrong moment or a clash with what is there.
+    Conflict(String),
+}
+
+impl std::fmt::Display for RenameError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RenameError::NotFound => write!(f, "torrent not found"),
+            RenameError::Invalid(m) | RenameError::Conflict(m) => write!(f, "{m}"),
+        }
+    }
+}
+
+/// A `/`-separated relative path of plain names, as a `PathBuf`; `None` for an
+/// empty one, an absolute one, a `\`, or a segment that is not exactly one
+/// plain name on this platform (empty, `.`, `..`, and on Windows `C:` or a
+/// device name with a prefix, which would leave the save path).
+pub fn clean_relative(p: &str) -> Option<std::path::PathBuf> {
+    if p.is_empty() || p.contains('\\') || p.contains('\0') {
+        return None;
+    }
+    let mut out = std::path::PathBuf::new();
+    for seg in p.split('/') {
+        let mut comps = std::path::Path::new(seg).components();
+        match (comps.next(), comps.next()) {
+            (Some(std::path::Component::Normal(n)), None) if n == std::ffi::OsStr::new(seg) => {}
+            _ => return None,
+        }
+        out.push(seg);
+    }
+    Some(out)
+}
+
 /// Where a torrent's files are on disk, at its current save path.
 fn data_files(t: &TorrentState) -> Vec<std::path::PathBuf> {
     let root = t.save_path.read().clone();
-    t.meta.files.iter().map(|f| {
-        if t.meta.multi_file {
-            root.join(&t.meta.name).join(&f.path)
-        } else {
-            root.join(&f.path)
-        }
-    }).collect()
+    (0..t.meta.files.len()).map(|i| t.meta.disk_path(&root, i)).collect()
 }
 
 fn remove_empty_dirs_recursive(dir: &std::path::Path) {
@@ -2572,12 +2744,8 @@ fn recheck_sem() -> &'static Semaphore {
 /// it, and several clients never create one.
 fn seed_mode_data_absent(t: &TorrentState) -> Option<String> {
     let save_path = t.save_path.read().clone();
-    for f in t.meta.files.iter().filter(|f| f.length > 0) {
-        let full = if t.meta.multi_file {
-            save_path.join(&t.meta.name).join(&f.path)
-        } else {
-            save_path.join(&f.path)
-        };
+    for (i, f) in t.meta.files.iter().enumerate().filter(|(_, f)| f.length > 0) {
+        let full = t.meta.disk_path(&save_path, i);
         match std::fs::metadata(&full) {
             Ok(m) if m.is_file() && m.len() == f.length => {}
             Ok(m) if m.is_file() => {
@@ -2617,14 +2785,7 @@ impl TorrentManager {
             None => return false,
         };
         let save_path = t.save_path.read().clone();
-        t.meta.files.iter().any(|f| {
-            let full = if t.meta.multi_file {
-                save_path.join(&t.meta.name).join(&f.path)
-            } else {
-                save_path.join(&f.path)
-            };
-            full.exists()
-        })
+        (0..t.meta.files.len()).any(|i| t.meta.disk_path(&save_path, i).exists())
     }
 
     /// Hash-check data already on disk and populate the picker with the pieces
@@ -2822,6 +2983,7 @@ impl TorrentManager {
             up_limit: t.rate_limits().0,
             down_limit: t.rate_limits().1,
             download_order: t.stored_download_order(),
+            file_renames: t.meta.renamed_files(),
         };
         self.persist(&ih, &rd);
         info!(
@@ -4058,6 +4220,178 @@ mod manager_tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// A multi-file torrent `name/{a.bin, sub/b.bin}`, 8192 bytes each, one
+    /// piece. The name may hold a `/`.
+    fn multi_blob(name: &str) -> Vec<u8> {
+        let mut info = b"d5:filesl".to_vec();
+        info.extend_from_slice(b"d6:lengthi8192e4:pathl5:a.binee");
+        info.extend_from_slice(b"d6:lengthi8192e4:pathl3:sub5:b.binee");
+        info.extend_from_slice(format!("e4:name{}:{name}12:piece lengthi16384e6:pieces20:", name.len()).as_bytes());
+        info.extend_from_slice(&[0x5A; 20]);
+        info.push(b'e');
+        let mut blob = b"d4:info".to_vec();
+        blob.extend_from_slice(&info);
+        blob.push(b'e');
+        blob
+    }
+
+    /// A saved record is not trusted: a path that is not a relative path of
+    /// plain names is ignored, the rest is applied.
+    #[test]
+    fn a_saved_rename_that_is_not_a_plain_relative_path_is_ignored() {
+        let meta = metainfo::parse_torrent_bytes(&multi_blob("pack")).unwrap();
+        let bad = ["../x/y.bin", "/abs/y.bin", "pack//y.bin", "pack/./y.bin", "pack/../../y.bin", "loose.bin", "", "p\\q/y.bin"];
+        for (i, b) in bad.iter().enumerate() {
+            meta.restore_renamed_files(&[(i % 2, b.to_string())].into_iter().collect());
+            assert!(meta.renamed_files().is_empty(), "{b:?} was applied: {:?}", meta.renamed_files());
+        }
+        meta.restore_renamed_files(&[(0, "Copy/ok.bin".to_string()), (7, "Copy/none.bin".to_string())].into_iter().collect());
+        assert_eq!(meta.renamed_files().len(), 1, "the good one, and not the file this torrent lacks");
+        assert_eq!(meta.disk_rel(0), std::path::PathBuf::from("Copy/ok.bin"));
+    }
+
+    /// Every segment must be exactly one plain name; `C:` is one only where it
+    /// is not a drive.
+    #[test]
+    fn a_rename_path_is_checked_segment_by_segment() {
+        for ok in ["a", "a/b", "a b/c.d", "..a/b", "a./b"] {
+            assert!(clean_relative(ok).is_some(), "{ok:?}");
+        }
+        for bad in ["", "/", "/a", "a/", "a//b", ".", "./a", "a/..", "../a", "a\\b", "a\0b"] {
+            assert!(clean_relative(bad).is_none(), "{bad:?}");
+        }
+        #[cfg(windows)]
+        for bad in ["C:", "C:/x", "a/C:", "a/C:x", "\\\\?\\x"] {
+            assert!(clean_relative(bad).is_none(), "{bad:?}");
+        }
+    }
+
+    /// Without a rename a torrent named `a/b` is exactly what it was: its
+    /// folder is `a/b` whole, and a removal sweeps empty folders under THAT,
+    /// not under `a`.
+    #[test]
+    fn a_torrent_named_with_a_slash_keeps_its_whole_folder() {
+        let (mgr, root) = manager("slash-name");
+        let blob = multi_blob("a/b");
+        let source = blob.clone();
+        mgr.set_blob_source(Arc::new(move |_hash: &str| Some(source.clone())));
+        let save = root.join("data");
+        let ih = mgr.add_torrent_bytes(&blob, &save.to_string_lossy(), true, false).unwrap().0;
+        let t = mgr.get(&ih).unwrap();
+        let p = std::path::PathBuf::from;
+        assert_eq!(t.meta.content_name(), "a/b");
+        assert_eq!(t.meta.folder_split(0), (Some(p("a/b")), p("a.bin")));
+        assert_eq!(t.meta.folder_split(1), (Some(p("a/b")), p("sub/b.bin")));
+        // Renamed inside that folder: still its folder.
+        mgr.rename_file(&ih, "a/b/a.bin", "a/b/z.bin").unwrap();
+        assert_eq!(t.meta.folder_split(0), (Some(p("a/b")), p("z.bin")));
+        assert_eq!(t.meta.content_name(), "a/b");
+
+        // A neighbour's empty folder under `a` is not this torrent's to sweep.
+        std::fs::create_dir_all(save.join("a/b/sub")).unwrap();
+        std::fs::create_dir_all(save.join("a/other")).unwrap();
+        std::fs::write(save.join("a/b/z.bin"), b"x").unwrap();
+        mgr.remove_torrent(&ih, false).unwrap();
+        assert!(!save.join("a/b").exists(), "its own folder is swept");
+        assert!(save.join("a/other").exists(), "the empty folder next to it is not");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A rename takes back the pieces that touch the file: counted as held
+    /// under the old name, they say nothing about the new one.
+    #[test]
+    fn a_rename_retracts_the_pieces_that_touch_the_file() {
+        let (mgr, root) = manager("rename-retract");
+        let blob = multi_blob("pack");
+        let source = blob.clone();
+        mgr.set_blob_source(Arc::new(move |_hash: &str| Some(source.clone())));
+        let save = root.join("data");
+        let ih = mgr.add_torrent_bytes(&blob, &save.to_string_lossy(), true, false).unwrap().0;
+        let t = mgr.get(&ih).unwrap();
+        t.picker.get().expect("a download has a picker").lock().unwrap().import_bitfield(&full_bitfield(1));
+        assert!(t.picker.get().unwrap().lock().unwrap().has_piece(0));
+        // Two names that differ by the case only are one file on some volumes.
+        assert!(matches!(
+            mgr.rename_file(&ih, "pack/a.bin", "pack/SUB/B.bin"),
+            Err(RenameError::Conflict(_))
+        ));
+        assert!(t.picker.get().unwrap().lock().unwrap().has_piece(0), "a refusal changes nothing");
+        mgr.rename_file(&ih, "pack/a.bin", "pack/new.bin").unwrap();
+        assert!(!t.picker.get().unwrap().lock().unwrap().has_piece(0), "the piece shared with the file is no longer held");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A file renamed while the torrent is stopped is still renamed after a
+    /// restart, the data layer reads and writes the new path, and a running
+    /// torrent refuses.
+    #[test]
+    fn a_renamed_file_survives_a_reload() {
+        let (mgr, root) = manager("rename-reload");
+        let mut info = b"d5:filesl".to_vec();
+        info.extend_from_slice(b"d6:lengthi8192e4:pathl5:a.binee");
+        info.extend_from_slice(b"d6:lengthi8192e4:pathl3:sub5:b.binee");
+        info.extend_from_slice(b"e4:name4:pack12:piece lengthi16384e6:pieces20:");
+        info.extend_from_slice(&[0x5A; 20]);
+        info.push(b'e');
+        let mut blob = b"d4:info".to_vec();
+        blob.extend_from_slice(&info);
+        blob.push(b'e');
+        let source = blob.clone();
+        mgr.set_blob_source(Arc::new(move |_hash: &str| Some(source.clone())));
+        let save = root.join("data");
+        let ih = mgr.add_torrent_bytes(&blob, &save.to_string_lossy(), true, false).unwrap().0;
+        let p = std::path::PathBuf::from;
+
+        mgr.start_torrent(&ih).unwrap();
+        assert!(matches!(mgr.rename_file(&ih, "pack/a.bin", "pack/x.bin"), Err(RenameError::Conflict(_))), "a running torrent");
+        mgr.stop_torrent(&ih).unwrap();
+        for to in ["/x", "", "../x", "pack/../x", "p//q", "p\\q", "./q", "pack/x/"] {
+            assert!(matches!(mgr.rename_file(&ih, "pack/a.bin", to), Err(RenameError::Invalid(_))), "{to:?}");
+        }
+        assert!(matches!(mgr.rename_file(&ih, "pack/zz", "pack/q"), Err(RenameError::Invalid(_))), "not a file");
+        assert!(matches!(mgr.rename_file(&ih, "a.bin", "pack/q"), Err(RenameError::Invalid(_))), "the folder is part of the path");
+        assert!(matches!(mgr.rename_file(&ih, "pack/a.bin", "loose.bin"), Err(RenameError::Invalid(_))), "a multi-file torrent keeps a folder");
+        assert!(matches!(mgr.rename_file(&ih, "pack/a.bin", "pack/sub/b.bin"), Err(RenameError::Conflict(_))), "another file's path");
+        assert!(matches!(mgr.rename_file(&ih, "pack/a.bin", "pack/sub"), Err(RenameError::Conflict(_))), "a folder of another file");
+        assert!(matches!(mgr.rename_file(&[7; 20], "pack/a.bin", "pack/q"), Err(RenameError::NotFound)));
+
+        // File by file into another folder: one of two moved is a coherent state.
+        mgr.rename_file(&ih, "pack/a.bin", "Copy/deep/x.bin").unwrap();
+        let t = mgr.get(&ih).unwrap();
+        assert_eq!(t.meta.disk_rel(0), p("Copy/deep/x.bin"));
+        assert_eq!(t.meta.disk_rel(1), p("pack/sub/b.bin"));
+        assert_eq!(t.meta.common_root(), None, "split between two folders");
+        assert_eq!(t.meta.content_name(), "pack", "the .torrent's name while split");
+        assert_eq!(t.meta.files[0].path, p("a.bin"), "the .torrent's own path is untouched");
+        let ops = t.meta.map_block(0, 0, 100);
+        assert_eq!(ops[0].path, p("Copy/deep/x.bin"), "the disk layer is handed the new path");
+        assert_eq!(t.meta.disk_path(&save, 0), save.join("Copy/deep/x.bin"));
+        // A file on disk at the old name: nothing is moved, so no rename.
+        std::fs::create_dir_all(save.join("pack/sub")).unwrap();
+        std::fs::write(save.join("pack/sub/b.bin"), b"x").unwrap();
+        assert!(matches!(mgr.rename_file(&ih, "pack/sub/b.bin", "Copy/y.bin"), Err(RenameError::Conflict(m)) if m.contains("move")));
+        std::fs::remove_file(save.join("pack/sub/b.bin")).unwrap();
+        mgr.rename_file(&ih, "pack/sub/b.bin", "Copy/y.bin").unwrap();
+        assert_eq!(t.meta.common_root(), Some("Copy".into()));
+        assert_eq!(t.meta.content_name(), "Copy", "the folder they now share");
+
+        mgr.save_all_resume();
+        mgr.flush_all_resume();
+        let again = Arc::new(TorrentManager::new(
+            root.join("data").to_string_lossy().into_owned(),
+            root.join("resume").to_string_lossy().into_owned(),
+            Arc::new(DiskManager::new(16)),
+        ));
+        let source = blob.clone();
+        again.set_blob_source(Arc::new(move |_hash: &str| Some(source.clone())));
+        assert_eq!(again.load_resume_data(), 1);
+        let t = again.get(&ih).unwrap();
+        assert_eq!(t.meta.disk_rel(0), p("Copy/deep/x.bin"), "the rename was persisted");
+        assert_eq!(t.meta.disk_rel(1), p("Copy/y.bin"));
+        assert_eq!(t.meta.content_name(), "Copy");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// ⭐⭐ The lifetime counters survive a restart; what a tracker is told
     /// does not. After a reload the session starts from zero -- a `started`
     /// carrying last month's upload is the signature tracker anti-cheat looks
@@ -4418,6 +4752,25 @@ mod manager_tests {
         let r = mgr.update_download_order(&ih, |o| o.sequential = true);
         assert!(r.is_err(), "the store refused the write, so the answer is no: {r:?}");
         assert!(!mgr.get(&ih).unwrap().download_order().sequential, "and the engine does not follow what the disk lacks");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A file rename the state store could not keep is refused, and the file
+    /// keeps the path the next start will read.
+    #[test]
+    fn a_file_rename_the_store_did_not_keep_is_refused() {
+        let (mgr, root) = manager("rename-store-down");
+        let ih = add(&mgr, "alpha");
+        let t = mgr.get(&ih).unwrap();
+        t.is_paused.store(true, Ordering::Relaxed);
+        let from = t.meta.disk_rel(0).to_string_lossy().into_owned();
+        let conn = rusqlite::Connection::open(root.join("state.db")).unwrap();
+        conn.execute("DROP TABLE torrent_state", []).unwrap();
+        drop(conn);
+
+        let r = mgr.rename_file(&ih, &from, "renamed.bin");
+        assert!(r.is_err(), "the store refused the write, so the answer is no: {r:?}");
+        assert_eq!(t.meta.disk_rel(0).to_string_lossy(), from, "and the file is where the disk record says");
         let _ = std::fs::remove_dir_all(root);
     }
 

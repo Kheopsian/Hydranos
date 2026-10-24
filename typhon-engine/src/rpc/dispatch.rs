@@ -203,7 +203,7 @@ pub fn torrent_to_json(t: &Arc<crate::torrent::meta::TorrentState>) -> Value {
 
     json!({
         "info_hash": hex_encode(&t.info_hash),
-        "name": t.meta.name,
+        "name": t.meta.content_name(),
         "state": state,
         "progress": progress,
         "total_size": t.meta.total_size,

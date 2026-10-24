@@ -219,6 +219,7 @@ pub fn parse_torrent_bytes(data: &[u8]) -> Result<TorrentMeta, String> {
         multi_file,
         info_dict_len: info_raw.len() as u32,
         v2: false,
+        renames: Default::default(),
     })
 }
 
@@ -360,6 +361,7 @@ fn parse_v2(dict: BencodeDict, info: &BencodeDict, info_raw: &[u8]) -> Result<To
         multi_file,
         info_dict_len: info_raw.len() as u32,
         v2: true,
+        renames: Default::default(),
     })
 }
 

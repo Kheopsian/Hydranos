@@ -1135,6 +1135,7 @@ mod per_engine_dial_tests {
                 multi_file: false,
                 info_dict_len: 0,
                 v2: false,
+                renames: Default::default(),
             },
             std::path::PathBuf::from("/tmp"),
             false,

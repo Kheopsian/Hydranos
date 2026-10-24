@@ -659,6 +659,7 @@ mod tests {
             multi_file: false,
             info_dict_len: 0,
             v2: false,
+            renames: Default::default(),
         }
     }
 
@@ -918,6 +919,7 @@ mod endgame_tests {
                 multi_file: false,
                 info_dict_len: 0,
                 v2: false,
+                renames: Default::default(),
             },
             PathBuf::from("/tmp"),
             false,
@@ -950,6 +952,7 @@ mod endgame_tests {
                 multi_file: false,
                 info_dict_len: 0,
                 v2: false,
+                renames: Default::default(),
             },
             PathBuf::from("/tmp"),
             false,
@@ -992,6 +995,7 @@ mod disk_failure_tests {
                 multi_file: false,
                 info_dict_len: 0,
                 v2: false,
+                renames: Default::default(),
             },
             PathBuf::from("/tmp"),
             false,
@@ -1108,6 +1112,7 @@ mod release_tests {
                 multi_file: false,
                 info_dict_len: 0,
                 v2: false,
+                renames: Default::default(),
             },
             PathBuf::from("/tmp"),
             false,
@@ -1365,6 +1370,7 @@ mod poison_tests {
                 multi_file: false,
                 info_dict_len: 0,
                 v2: false,
+                renames: Default::default(),
             },
             PathBuf::from("/nonexistent"),
             false,

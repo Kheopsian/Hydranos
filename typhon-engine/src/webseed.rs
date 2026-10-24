@@ -1040,6 +1040,7 @@ mod tests {
             multi_file: multi,
             info_dict_len: 0,
             v2: false,
+            renames: Default::default(),
         }
     }
 

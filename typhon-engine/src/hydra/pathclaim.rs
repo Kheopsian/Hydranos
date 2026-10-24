@@ -210,21 +210,24 @@ pub fn isolated_save_path(save_path: &str, name: &str, info_hash: &str) -> PathB
     Path::new(save_path).join(format!("{top} [{short}]"))
 }
 
-/// The directory a torrent's file paths hang off, as the engine joins them:
-/// `save/name` for a multi-file torrent, `save` for a single file (whose one
-/// path IS its name).
-pub fn root_of(meta: &TorrentMeta, save_path: &Path) -> PathBuf {
-    if meta.multi_file {
-        save_path.join(&meta.name)
-    } else {
-        save_path.to_path_buf()
-    }
+/// The directory a torrent's file paths hang off: the save path. Its paths
+/// start with the torrent's folder (`name/<file>`, or wherever a file was
+/// renamed to) or, for a single file, are the file's own name.
+pub fn root_of(_meta: &TorrentMeta, save_path: &Path) -> PathBuf {
+    save_path.to_path_buf()
 }
 
-/// Every file of `meta` under `save_path`: (absolute path, relative path, size).
+/// Every file of `meta` under `save_path`: (absolute path, path below the
+/// save path, size).
 pub fn files_of(meta: &TorrentMeta, save_path: &Path) -> Vec<(PathBuf, PathBuf, u64)> {
-    let root = root_of(meta, save_path);
-    meta.files.iter().map(|f| (root.join(&f.path), f.path.clone(), f.length)).collect()
+    meta.files
+        .iter()
+        .enumerate()
+        .map(|(i, f)| {
+            let rel = meta.disk_rel(i);
+            (save_path.join(&rel), rel, f.length)
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -393,10 +396,14 @@ pub fn prove(
     let plen = meta.piece_length as u64;
     let mut wanted: HashMap<PathBuf, (u32, u32)> = HashMap::new();
     let mut proven: HashSet<PathBuf> = HashSet::new();
-    for f in meta.files.iter().filter(|f| candidates.contains(&f.path)) {
+    for (i, f) in meta.files.iter().enumerate() {
+        let path = meta.disk_rel(i);
+        if !candidates.contains(&path) {
+            continue;
+        }
         if f.length == 0 {
-            if src_root.join(&f.path).is_file() {
-                proven.insert(f.path.clone());
+            if src_root.join(&path).is_file() {
+                proven.insert(path);
             }
             continue;
         }
@@ -405,7 +412,7 @@ pub fn prove(
         }
         let first = (f.offset / plen) as u32;
         let last = ((f.offset + f.length - 1) / plen) as u32;
-        wanted.insert(f.path.clone(), (first, last));
+        wanted.insert(path, (first, last));
     }
     let mut pieces: Vec<u32> = wanted.values().flat_map(|&(a, b)| a..=b).collect();
     pieces.sort_unstable();
@@ -557,7 +564,7 @@ pub fn check_add(
     mode: Mode,
 ) -> Result<AddPlan, String> {
     let save = Path::new(save_path);
-    let top = Path::new(&meta.name).components().next().map(|c| c.as_os_str().to_os_string());
+    let top = meta.common_root();
     let reservation = reserve(&save.join(top.clone().unwrap_or_default()));
 
     let all = files_of(meta, save);
@@ -759,7 +766,7 @@ fn guarded_files(state: &AppState, t: &TorrentState, links: bool) -> HashSet<Pat
     let save = t.save_path.read().clone();
     let all = files_of(&t.meta, &save);
     let mine: Vec<(PathBuf, u64)> = all.iter().map(|(a, _, l)| (a.clone(), *l)).collect();
-    let top = Path::new(&t.meta.name).components().next().map(|c| c.as_os_str().to_os_string());
+    let top = t.meta.common_root();
     let ih = t.meta.info_hash;
     let skip = move |o: &TorrentState| o.meta.info_hash == ih;
     let found = claimants(state, &bytes, &save, top.as_deref(), &mine, &skip);
@@ -1039,14 +1046,15 @@ mod tests {
 
         let want = torrent_over("Pack", &[("a.mkv", &video), ("a.nfo", b"team NFO, version two")], 16384);
         let meta = typhon_engine::torrent::metainfo::parse_torrent_bytes(&want).unwrap();
-        let candidates: HashSet<PathBuf> = ["a.mkv", "a.nfo"].iter().map(PathBuf::from).collect();
-        let proven = prove(&meta, &src, &candidates, &sha1_verify(&want));
+        // Paths start at the save path (`dir`), folder included.
+        let candidates: HashSet<PathBuf> = ["Pack/a.mkv", "Pack/a.nfo"].iter().map(PathBuf::from).collect();
+        let proven = prove(&meta, &dir, &candidates, &sha1_verify(&want));
 
         // a.mkv's last piece also covers a.nfo, which fails: a.mkv stays
         // unproven too. Downloading costs bytes; linking a file whose last
         // piece did not verify would cost correctness.
-        assert!(!proven.contains(&PathBuf::from("a.nfo")), "a same-size impostor was proven");
-        assert!(!proven.contains(&PathBuf::from("a.mkv")), "a file whose last piece failed was proven");
+        assert!(!proven.contains(&PathBuf::from("Pack/a.nfo")), "a same-size impostor was proven");
+        assert!(!proven.contains(&PathBuf::from("Pack/a.mkv")), "a file whose last piece failed was proven");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1062,10 +1070,10 @@ mod tests {
         // a.mkv ends exactly on a piece boundary: its pieces are its own.
         let want = torrent_over("Pack", &[("a.mkv", &video), ("b.nfo", b"new notes 16 B..")], 16384);
         let meta = typhon_engine::torrent::metainfo::parse_torrent_bytes(&want).unwrap();
-        let candidates: HashSet<PathBuf> = ["a.mkv", "b.nfo"].iter().map(PathBuf::from).collect();
-        let proven = prove(&meta, &src, &candidates, &sha1_verify(&want));
-        assert!(proven.contains(&PathBuf::from("a.mkv")));
-        assert!(!proven.contains(&PathBuf::from("b.nfo")));
+        let candidates: HashSet<PathBuf> = ["Pack/a.mkv", "Pack/b.nfo"].iter().map(PathBuf::from).collect();
+        let proven = prove(&meta, &dir, &candidates, &sha1_verify(&want));
+        assert!(proven.contains(&PathBuf::from("Pack/a.mkv")));
+        assert!(!proven.contains(&PathBuf::from("Pack/b.nfo")));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1313,8 +1321,8 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let want = torrent_over("Pack", &[("a.mkv", &[1u8; 100])], 16384);
         let meta = typhon_engine::torrent::metainfo::parse_torrent_bytes(&want).unwrap();
-        let candidates: HashSet<PathBuf> = [PathBuf::from("a.mkv")].into_iter().collect();
-        assert!(prove(&meta, &dir.join("Pack"), &candidates, &sha1_verify(&want)).is_empty());
+        let candidates: HashSet<PathBuf> = [PathBuf::from("Pack/a.mkv")].into_iter().collect();
+        assert!(prove(&meta, &dir, &candidates, &sha1_verify(&want)).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -296,12 +296,7 @@ pub fn torrent_files(
     save_path: &str,
 ) -> Vec<std::path::PathBuf> {
     let base = std::path::Path::new(save_path);
-    if t.meta.multi_file {
-        let root = base.join(&t.meta.name);
-        t.meta.files.iter().map(|f| root.join(&f.path)).collect()
-    } else {
-        vec![base.join(&t.meta.name)]
-    }
+    (0..t.meta.files.len()).map(|i| t.meta.disk_path(base, i)).collect()
 }
 
 /// Where a catalogue entry's files come from.

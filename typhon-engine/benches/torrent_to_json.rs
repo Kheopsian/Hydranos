@@ -26,6 +26,7 @@ fn make_torrent(i: u32) -> Arc<TorrentState> {
         // never sends metadata pieces, but the field is not optional.
         info_dict_len: 0,
         v2: false,
+        renames: Default::default(),
         url_list: Vec::new(),
     };
     let save_path = PathBuf::from("/data");
