@@ -430,6 +430,13 @@ pub struct System;
 
 impl Runner for System {
     fn run(&mut self, argv: &[String], stdin: Option<&str>) -> Result<String, String> {
+        self.run_within(argv, stdin, COMMAND_DEADLINE)
+    }
+}
+
+impl System {
+    /// `run`, with the deadline given so a test does not wait twenty seconds.
+    fn run_within(&mut self, argv: &[String], stdin: Option<&str>, deadline: std::time::Duration) -> Result<String, String> {
         use std::io::Write;
         use std::process::{Command, Stdio};
         let (prog, args) = argv.split_first().ok_or("empty command")?;
@@ -465,13 +472,13 @@ impl Runner for System {
         let status = loop {
             match child.try_wait().map_err(|e| format!("{prog}: {e}"))? {
                 Some(status) => break status,
-                None if started.elapsed() < COMMAND_DEADLINE => {
+                None if started.elapsed() < deadline => {
                     std::thread::sleep(std::time::Duration::from_millis(20))
                 }
                 None => {
                     let _ = child.kill();
                     let _ = child.wait();
-                    return Err(format!("{prog}: no answer after {}s, stopped", COMMAND_DEADLINE.as_secs()));
+                    return Err(format!("{prog}: no answer after {}s, stopped", deadline.as_secs()));
                 }
             }
         };
@@ -488,6 +495,10 @@ impl Runner for System {
 
 /// How long one `ip` or `wg` call may take before it is stopped.
 const COMMAND_DEADLINE: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// How long taking ALL the tunnels down may take, however many commands that
+/// is: each has its own deadline, and several of them add up.
+pub const DOWN_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
 
 // ---------------------------------------------------------------------------
 // Can this process do it at all
@@ -933,6 +944,19 @@ pub fn reconcile(runner: &mut dyn Runner, dir: &Path, wants: &[Want], registry: 
         }
         registry.set(t);
     }
+}
+
+/// `down_all` off the async workers, for at most `budget`. Past it the
+/// teardown is left to the blocking thread it runs on and the answer is `None`:
+/// the caller is on its way out, and a runner that does not come back must not
+/// hold the exit.
+pub async fn down_all_within<R: Runner + Send + 'static>(
+    _budget: std::time::Duration,
+    mut runner: R,
+    dir: PathBuf,
+    registry: std::sync::Arc<Registry>,
+) -> Option<usize> {
+    tokio::task::spawn_blocking(move || down_all(&mut runner, &dir, &registry)).await.ok()
 }
 
 /// Take every tunnel of this process down. Blocking.

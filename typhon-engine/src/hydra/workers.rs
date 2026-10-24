@@ -31,6 +31,12 @@ const SETTLE: Duration = Duration::from_secs(30);
 /// that runs forever over a catalogue with nothing to check is pure cost at
 /// 244k torrents.
 pub fn spawn_verify_throttle(manager: Arc<TorrentManager>) {
+    spawn_verify_throttle_until(manager, typhon_engine::stop::global().clone());
+}
+
+/// `spawn_verify_throttle` with the stop signal given, so a test can end it
+/// without raising the process-wide one.
+fn spawn_verify_throttle_until(manager: Arc<TorrentManager>, _stop: typhon_engine::stop::Stop) {
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_secs(5)).await;
         loop {

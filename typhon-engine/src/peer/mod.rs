@@ -72,6 +72,20 @@ pub async fn listen(
     utp: UtpHandle,
     listening: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    listen_until(bindings, default_port, torrent_mgr, disk_mgr, utp, listening, crate::stop::global().clone()).await
+}
+
+/// `listen` with the stop signal given, so a test can close the listeners
+/// without raising the process-wide one.
+async fn listen_until(
+    bindings: Vec<crate::config::ResolvedBinding>,
+    default_port: u16,
+    torrent_mgr: Arc<TorrentManager>,
+    disk_mgr: Arc<DiskManager>,
+    utp: UtpHandle,
+    listening: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    _stop: crate::stop::Stop,
+) -> Result<(), Box<dyn std::error::Error>> {
     if bindings.is_empty() {
         return Err("no bindings to listen on (config error)".into());
     }
