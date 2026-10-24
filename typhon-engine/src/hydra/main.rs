@@ -1369,8 +1369,10 @@ async fn wait_for_flush(
     budget: std::time::Duration,
 ) {
     for h in handles {
+        // Awaited, not slept: this runs on a runtime worker, and the stop is
+        // not the moment to take one out of the pool.
         while !h.is_finished() && started.elapsed() < budget {
-            std::thread::sleep(std::time::Duration::from_millis(50));
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
         if !h.is_finished() {
             tracing::warn!(budget_s = budget.as_secs(),
@@ -1380,6 +1382,66 @@ async fn wait_for_flush(
         let _ = h.join();
     }
     tracing::info!(took_s = started.elapsed().as_secs(), "shutdown flush complete");
+}
+
+#[cfg(test)]
+mod flush_wait_tests {
+    use super::wait_for_flush;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    /// ⭐ Waiting for the flush threads does not hold the runtime's worker:
+    /// on a single worker, a timer keeps ticking while the wait goes on. The
+    /// wait used to sleep the thread it ran on.
+    #[tokio::test(flavor = "current_thread")]
+    async fn waiting_for_the_flush_does_not_hold_the_worker() {
+        let ticks = Arc::new(AtomicUsize::new(0));
+        let t = ticks.clone();
+        let ticker = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                t.fetch_add(1, Ordering::Relaxed);
+            }
+        });
+        tokio::task::yield_now().await;
+        let slow = std::thread::spawn(|| std::thread::sleep(Duration::from_millis(400)));
+        wait_for_flush(vec![slow], Instant::now(), Duration::from_secs(10)).await;
+        ticker.abort();
+        let n = ticks.load(Ordering::Relaxed);
+        assert!(n >= 10, "the runtime ticked {n} times in 400 ms: the wait held its worker");
+    }
+
+    /// A flush that is slow but inside its budget is waited for to the end:
+    /// what the thread writes is written before the wait returns.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_flush_inside_its_budget_is_waited_for_to_the_end() {
+        let written = Arc::new(AtomicBool::new(false));
+        let w = written.clone();
+        let slow = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            w.store(true, Ordering::SeqCst);
+        });
+        wait_for_flush(vec![slow], Instant::now(), Duration::from_secs(10)).await;
+        assert!(written.load(Ordering::SeqCst), "the wait returned before the flush finished");
+    }
+
+    /// The budget still bounds the wait: a flush that outlasts it is left
+    /// behind with what it has saved.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_flush_past_its_budget_is_left_behind() {
+        let release = Arc::new(AtomicBool::new(false));
+        let r = release.clone();
+        let stuck = std::thread::spawn(move || {
+            while !r.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        });
+        let started = Instant::now();
+        wait_for_flush(vec![stuck], started, Duration::from_millis(200)).await;
+        release.store(true, Ordering::SeqCst);
+        assert!(started.elapsed() < Duration::from_secs(3), "{:?}", started.elapsed());
+    }
 }
 
 /// The log file, rotated by size: `hydranos.log` up to `LOG_MAX` bytes, then
