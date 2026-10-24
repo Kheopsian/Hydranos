@@ -272,6 +272,7 @@ impl AppState {
 ///
 /// Known to everyone who has read the repository, so it is a key in name only.
 /// `ensure_api_key` replaces it at boot on any install that still carries it.
+#[cfg(test)]
 const DEFAULT_API_KEY: &str = "change-me-in-production";
 
 /// Decide whether a request may proceed.
@@ -2319,7 +2320,6 @@ async fn get_settings(
 ) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    let cfg = state.cfg();
 
     let text = match std::fs::read_to_string(&state.config_path) {
         Ok(t) => t,
@@ -2391,7 +2391,6 @@ async fn get_startup_pause(
 ) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    let cfg = state.cfg();
     let held = state.engines.held_startup_scopes();
     Json(serde_json::json!({"held": held, "holding": !held.is_empty()})).into_response()
 }
@@ -2809,7 +2808,7 @@ pub(crate) fn add_torrent_bytes_as(
     let (info_hash, name) = engine
         .manager
         .add_torrent_bytes(bytes, &save_path, paused, seed_mode)
-        .inspect_err(|e| {
+        .inspect_err(|_| {
             // Undo the row ONLY if this call is what put it there.
             //
             // ⚠ The refusal this hits in practice is "already added", and there
@@ -3112,7 +3111,6 @@ async fn get_jobs(
 ) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    let cfg = state.cfg();
 
     let limit = query_param(&query, "limit")
         .and_then(|v| v.parse::<i64>().ok())
@@ -4094,6 +4092,7 @@ fn unmeasured_key(asc: bool) -> f64 {
 /// each node sorted for itself: a key that disagreed by one field would order
 /// two nodes' rows differently from the way each ordered its own, and rows
 /// would appear to jump between pages.
+#[cfg(test)]
 fn row_sort_key(row: &serde_json::Value, sort: &str) -> (String, f64) {
     row_sort_key_dir(row, sort, true)
 }
@@ -4655,7 +4654,6 @@ async fn get_baseline(
 ) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    let cfg = state.cfg();
 
     let (base_up, base_down) = {
         let store = state.store.lock().unwrap();
@@ -4685,7 +4683,6 @@ async fn get_tags(
 ) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    let cfg = state.cfg();
     let tags = {
         let store = state.store.read().unwrap();
         store.tags_of_session("hoard").unwrap_or_default()
@@ -4834,6 +4831,7 @@ async fn get_engines(
 // ---------------------------------------------------------------------------
 
 /// Free-space figures for a path, from statvfs.
+#[cfg(test)]
 fn disk_usage(path: &str) -> (i64, i64, f64) {
     let Some((_, total, free)) = crate::platform::usage(std::path::Path::new(path)) else {
         return (0, 0, 0.0);
@@ -5213,7 +5211,6 @@ async fn get_arr_cleanup_scan(
 ) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    let cfg = state.cfg();
     // null, not []: 3.x marshals a nil slice here and clients read the count.
     Json(serde_json::json!({"candidates": serde_json::Value::Null, "count": 0})).into_response()
 }
@@ -5225,7 +5222,6 @@ async fn get_hoard_pinned(
 ) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    let cfg = state.cfg();
     let pinned = {
         let store = state.store.read().unwrap();
         store.pinned("hoard").unwrap_or_default()
@@ -5338,7 +5334,6 @@ async fn qbit_tags(
 ) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    let cfg = state.cfg();
     let tags = {
         let store = state.store.lock().unwrap();
         store.registered_tags().unwrap_or_default()
@@ -5695,7 +5690,6 @@ async fn get_network_mode(
     let cfg = state.cfg();
 
     let race = &cfg.race;
-    let hoard = &cfg.hoard;
     let mode = crate::netmode::current(&cfg);
     let masked_proxy = mask_proxy_url(&race.announce_proxy);
     let mut fields = network_fields(&cfg);
@@ -5837,7 +5831,6 @@ async fn get_fs_browse(
 ) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    let cfg = state.cfg();
 
     let path = query_param(&query, "path").unwrap_or_else(|| "/".to_string());
     let mut dirs: Vec<String> = std::fs::read_dir(&path)
@@ -5889,7 +5882,6 @@ async fn get_bench_records(
 ) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    let cfg = state.cfg();
     // next_pib is 1 rather than 0: the next milestone after nothing is the
     // first petabyte, not "no milestone".
     let empty = serde_json::json!({
@@ -6087,7 +6079,6 @@ async fn get_network_interfaces(
 ) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    let cfg = state.cfg();
     Json(serde_json::json!({"interfaces": interfaces()})).into_response()
 }
 
@@ -6427,7 +6418,6 @@ async fn get_status(
 ) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    let cfg = state.cfg();
     Json(status_payload(&state)).into_response()
 }
 
@@ -6481,7 +6471,6 @@ async fn stream_events(
 ) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    let cfg = state.cfg();
 
     let stream = async_stream::stream! {
         // The header BEFORE the library. Hydration takes seconds at 300k
@@ -6856,7 +6845,6 @@ async fn get_bench_current(
 ) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    let cfg = state.cfg();
 
     let (base_up, base_down) = {
         let store = state.store.lock().unwrap();
@@ -7752,7 +7740,6 @@ async fn qbit_create_category(
 ) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    let cfg = state.cfg();
 
     let name = form.get("category").cloned().unwrap_or_default();
     if name.is_empty() {
@@ -7784,7 +7771,6 @@ async fn qbit_edit_category(
 ) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    let cfg = state.cfg();
 
     let name = form.get("category").cloned().unwrap_or_default();
     let save_path = form.get("savePath").cloned().unwrap_or_default();
@@ -7816,7 +7802,6 @@ async fn qbit_remove_categories(
 ) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    let cfg = state.cfg();
 
     // The field is newline-separated in qBit's own API.
     let names: Vec<String> = form
@@ -7857,7 +7842,6 @@ async fn qbit_create_tags(
 ) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    let cfg = state.cfg();
     let tags = split_list(form.get("tags").map(String::as_str).unwrap_or(""));
     let written = state.store.lock().unwrap().register_tags(&tags);
     if let Err(e) = written {
@@ -7925,7 +7909,6 @@ async fn qbit_add_tags(
 ) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    let cfg = state.cfg();
     if let Err(e) = retag(&state, &form, true) {
         return store_refused(&state, "addTags", e);
     }
@@ -7940,7 +7923,6 @@ async fn qbit_remove_tags(
 ) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    let cfg = state.cfg();
     if let Err(e) = retag(&state, &form, false) {
         return store_refused(&state, "removeTags", e);
     }
@@ -8026,7 +8008,6 @@ async fn qbit_pause(
 ) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    let cfg = state.cfg();
     if let Err(e) = set_paused(&state, &form, true) {
         return store_refused(&state, "pause", e);
     }
@@ -8041,7 +8022,6 @@ async fn qbit_resume(
 ) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    let cfg = state.cfg();
     if let Err(e) = set_paused(&state, &form, false) {
         return store_refused(&state, "resume", e);
     }
@@ -8086,7 +8066,6 @@ macro_rules! torrent_write {
         ) -> Response {
             let query = query.unwrap_or_default();
             guard!(state, headers, query);
-            let cfg = state.cfg();
             // Which copy. `?agent=` carries the row the operator clicked, so a
             // torrent seeded from three engines is paused in the one they
             // pointed at instead of whichever the lookup happened to find.
@@ -8174,7 +8153,6 @@ async fn hoard_unpin_one(
 ) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    let cfg = state.cfg();
 
     let written = {
         let store = state.store.lock().unwrap();
@@ -8649,7 +8627,6 @@ async fn category_create(
 ) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    let cfg = state.cfg();
 
     let incoming: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
     let name = incoming
@@ -9135,16 +9112,6 @@ async fn set_announce_passkey(
         "persisted": persisted,
     }))
     .into_response()
-}
-
-#[derive(serde::Deserialize)]
-struct ClientOverride {
-    #[serde(default)]
-    host: String,
-    #[serde(default)]
-    peer_id_prefix: String,
-    #[serde(default)]
-    user_agent: String,
 }
 
 /// Declare the client identity Hydra presents to one tracker.
@@ -13317,7 +13284,7 @@ async fn hoard_verify_one(
     let Some((engine_id, torrent)) = find_selected(&state, &query, &info_hash) else {
         return not_found();
     };
-    let Some(engine) = state.engines.get(&engine_id) else {
+    let Some(_engine) = state.engines.get(&engine_id) else {
         return not_found();
     };
     // The engine owns the hash, so take the typed one off the torrent instead
@@ -13511,16 +13478,6 @@ async fn vpn_speedtest_run(
     }
 }
 
-#[derive(serde::Deserialize)]
-struct ClientBulk {
-    #[serde(default)]
-    hosts: Vec<String>,
-    #[serde(default)]
-    peer_id_prefix: String,
-    #[serde(default)]
-    user_agent: String,
-}
-
 // Apply one client identity to several trackers at once.
 
 // The validation-only block that stood here is gone: its last two routes, the
@@ -13627,61 +13584,6 @@ fn tracker_rows(
         }
     }
     rows
-}
-
-/// Per-tracker announce state, in the engine's own shape.
-fn tracker_detail(
-    torrent: &std::sync::Arc<typhon_engine::torrent::meta::TorrentState>,
-) -> serde_json::Value {
-    use std::sync::atomic::Ordering;
-
-    let last_error = torrent
-        .last_announce_error
-        .lock()
-        .map(|g| g.clone())
-        .unwrap_or_default();
-    let ok = last_error.is_empty();
-    let seeders = torrent.scrape_seeders.load(Ordering::Relaxed) as i64;
-    let leechers = torrent.scrape_leechers.load(Ordering::Relaxed) as i64;
-
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    let last_at = torrent.last_announce_at.load(Ordering::Relaxed);
-    let next_at = torrent.next_announce_at.load(Ordering::Relaxed);
-    // -1 means "never" / "not known", which the UI renders as a dash. 0 is a
-    // real answer meaning "due now" and has to stay distinguishable from it.
-    let last_announce = if last_at > 0 {
-        (now - last_at).max(0)
-    } else {
-        -1
-    };
-    let next_announce = if next_at > 0 {
-        (next_at - now).max(0)
-    } else {
-        -1
-    };
-
-    let mut out = Vec::new();
-    for (tier, urls) in torrent.live_trackers.read().iter().enumerate() {
-        for url in urls {
-            out.push(serde_json::json!({
-                "url": url,
-                "tier": tier,
-                "verified": ok,
-                "endpoints": [{
-                    "last_error": if ok { "Success" } else { last_error.as_str() },
-                    "message": if ok { "" } else { last_error.as_str() },
-                    "last_announce": last_announce,
-                    "next_announce": next_announce,
-                    "scrape_complete": seeders,
-                    "scrape_incomplete": leechers,
-                }],
-            }));
-        }
-    }
-    serde_json::Value::Array(out)
 }
 
 /// One torrent in detail, native shape.
@@ -14556,7 +14458,6 @@ async fn delete_torrent(
     let delete_files = query_param(&query, "delete_files")
         .map(|v| v == "true" || v == "1")
         .unwrap_or(false);
-    let keep_data = !delete_files;
 
     // WHICH copy. Removing every engine's copy when the operator selected one
     // row would delete the other tunnels' seeds too, and the files with them if
@@ -14618,6 +14519,8 @@ async fn delete_torrent(
 /// operator is judged on.
 ///
 /// Returns (store lock wait, store lock hold), for `DeleteTimings`.
+// No caller today. Kept, not deleted: clearing lints is not the moment to drop code.
+#[allow(dead_code)]
 pub(crate) fn absorb_on_remove(
     state: &AppState,
     engine_id: &str,
@@ -26886,7 +26789,6 @@ mod remaining_routes_tests {
 #[cfg(test)]
 mod route_table_tests {
     use super::testing::*;
-    use super::*;
 
     const KEY: &str = "0123456789abcdef0123456789abcdef";
 

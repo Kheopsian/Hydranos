@@ -16,7 +16,6 @@
 //!   5. Send: RC4(VC + crypto_select + padD)
 
 use num_bigint::BigUint;
-use num_traits::One;
 use sha1::{Digest, Sha1};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -96,6 +95,8 @@ fn compute_secret(their_pubkey: &[u8], our_privkey: &BigUint) -> Vec<u8> {
     s_bytes
 }
 
+// No caller today. Kept, not deleted: clearing lints is not the moment to drop code.
+#[allow(dead_code)]
 fn sha1_hash(data: &[u8]) -> [u8; 20] {
     let mut h = Sha1::new();
     h.update(data);
@@ -424,7 +425,6 @@ pub async fn handshake_incoming_with(
     };
 
     // Read HASH('req1', S) - 20 bytes
-    let req1_buf = [0u8; 20];
     // May need to skip PadA first — but we don't know its length.
     // Read bytes until we find req1 hash match.
     // Strategy: read 20 bytes at a time, check if it matches HASH('req1', S).

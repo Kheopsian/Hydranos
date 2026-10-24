@@ -511,6 +511,7 @@ impl BenchDb {
         Ok(Self { conn })
     }
 
+    #[cfg(test)]
     pub fn open_in_memory() -> anyhow::Result<Self> {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch(SCHEMA)?;
@@ -898,6 +899,7 @@ impl BenchDb {
     }
 
     /// The most recent sample for each tracker, for the tracker stats table.
+    #[cfg(test)]
     pub fn tracker_samples_latest(&self) -> anyhow::Result<Vec<serde_json::Value>> {
         let mut stmt = self.conn.prepare(
             "SELECT s.ts, s.engine, s.tracker, s.upload_rate, s.download_rate, s.peers,
@@ -1188,6 +1190,7 @@ impl BenchDb {
     /// ORDER BY is DESC and the LIMIT applies to that order, so a capped read
     /// keeps the newest rows rather than the first ones ever written -- the
     /// opposite mistake yields a panel frozen on the day of installation.
+    #[cfg(test)]
     pub fn events(&self, limit: i64) -> anyhow::Result<Vec<RaceEvent>> {
         self.read(
             &format!(
@@ -1254,6 +1257,7 @@ impl BenchDb {
     /// 3.x does this when a torrent leaves the engine: an info hash re-added
     /// later is a new torrent, and inheriting its predecessor's timeline would
     /// date its "added" before it existed.
+    #[cfg(test)]
     pub fn purge(&self, info_hash: &str) -> anyhow::Result<()> {
         self.conn
             .execute("DELETE FROM race_events WHERE info_hash = ?1", [info_hash])?;

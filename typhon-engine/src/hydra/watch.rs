@@ -167,6 +167,7 @@ pub fn take(state: &AppState, f: &Folder, file: &Path) -> Outcome {
 
 /// One pass over every enabled folder, in turn. The daemon does not use this
 /// (see `spawn`); the tests do, where every folder is local.
+#[cfg(test)]
 pub fn scan(state: &AppState) {
     for f in folders(state).into_iter().filter(|f| f.enabled) {
         scan_one(state, &f);

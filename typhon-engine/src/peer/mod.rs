@@ -13,11 +13,9 @@ mod rebind_tests;
 pub mod session;
 pub mod transport;
 
-use std::collections::HashSet;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
-use std::sync::OnceLock;
 
 /// Incoming TCP/PROXY-v2 connections rejected because the source IP matches
 /// TYPHON_SELF_IPS (own VPS / styx netns / tunnel egress). Exposed for

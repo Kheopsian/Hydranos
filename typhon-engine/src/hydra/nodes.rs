@@ -212,8 +212,6 @@ pub async fn forward(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     /// The engine sections are found by shape, not by name.
     ///
     /// `/api/status` puts race and hoard beside `baseline`, `day_uploaded` and

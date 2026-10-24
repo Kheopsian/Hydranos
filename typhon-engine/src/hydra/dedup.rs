@@ -114,6 +114,7 @@ pub struct Layout {
 }
 
 impl Layout {
+    #[cfg(test)]
     pub fn total_len(&self) -> u64 {
         self.files.iter().map(|f| f.len).sum()
     }
@@ -222,6 +223,8 @@ fn read_string_list(blob: &[u8], mut at: usize) -> Option<(Vec<String>, usize)> 
 
 /// A torrent we already hold whose payload is the incoming one's payload.
 #[derive(Debug, Clone)]
+// No caller today. Kept, not deleted: clearing lints is not the moment to drop code.
+#[allow(dead_code)]
 pub struct Source {
     pub info_hash: String,
     pub session: String,

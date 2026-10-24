@@ -41,6 +41,7 @@ pub(crate) const NOT_KNOWN: &str = "the path is not under a folder this node kno
 /// `/config`) is normal.
 ///
 /// Blocking (it stats the disk): call it from a blocking thread.
+#[cfg(test)]
 pub(crate) fn within_known_dirs(
     state: &crate::api::AppState,
     path: &str,

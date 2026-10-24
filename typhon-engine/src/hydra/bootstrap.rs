@@ -7,7 +7,7 @@
 //! `s.router.GET(...)`, so eight routes never entered the denominator and it
 //! reported 169/169 on a list that was short.
 
-use axum::extract::{RawQuery, State};
+use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;

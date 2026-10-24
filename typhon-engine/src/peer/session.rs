@@ -328,12 +328,12 @@ pub async fn run(
     addr: SocketAddr,
     torrent: Arc<TorrentState>,
     disk: Arc<DiskManager>,
-    peer_id: [u8; 20],
+    _peer_id: [u8; 20],
     remote_peer_id: [u8; 20],
     is_encrypted: bool,
     fast_ext: bool,
     lt_ext: bool,
-    utp_socket: Option<Arc<UtpSocketUdp>>,
+    _utp_socket: Option<Arc<UtpSocketUdp>>,
     listen_port: u16,
 ) {
     let client = choking::client_from_peer_id(&remote_peer_id);
@@ -926,7 +926,7 @@ pub async fn run(
                                 } else if ext_id == crate::peer::holepunch::OUR_UT_HOLEPUNCH_ID
                                     && peer_sources_allowed(&torrent)
                                 {
-                                    use crate::peer::holepunch::{Error as PunchError, Punch};
+                                    use crate::peer::holepunch::Punch;
                                     match Punch::decode(&payload) {
                                         // Somebody we are connected to says a
                                         // peer is expecting us right now. The

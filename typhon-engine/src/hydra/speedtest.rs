@@ -10,6 +10,7 @@
 //! `/api/vpn-speedtest/latest` and `/history` read.
 
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(test)]
 use std::sync::Arc;
 use std::time::Duration;
 

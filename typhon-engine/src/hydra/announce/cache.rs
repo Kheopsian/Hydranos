@@ -34,6 +34,8 @@ pub struct Entry {
     /// The tracker that answered.
     pub tracker: String,
     pub at: Instant,
+    // Stored with the record; no code reads it today.
+    #[allow(dead_code)]
     pub interval: Duration,
 }
 
@@ -290,6 +292,7 @@ impl Cache {
     }
 
     /// Record a failure under its class, for the trackers tab.
+    #[cfg(test)]
     pub fn count_failed_kind(&self, host: &str, class: &str) {
         self.count_failed();
         self.host(host)
@@ -317,6 +320,7 @@ impl Cache {
 
     /// The clock is a parameter so the window can be tested without sleeping
     /// for an hour.
+    #[cfg(test)]
     fn count_failed_kind_at(&self, host: &str, class: &str, now: u64) {
         self.count_failed_message_at(host, class, None, now);
     }
@@ -519,6 +523,7 @@ impl Cache {
         self.entries.read().unwrap().len()
     }
 
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
