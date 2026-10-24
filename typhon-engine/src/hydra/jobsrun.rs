@@ -18,6 +18,8 @@ use std::time::Duration;
 use crate::api::AppState;
 
 /// Queue a graduation: move a torrent's data to another engine's storage.
+// Every argument is a distinct input the caller already holds; a parameter struct would only move the list.
+#[allow(clippy::too_many_arguments)]
 pub fn queue_graduation(
     state: &AppState,
     hash: &str,
@@ -42,6 +44,8 @@ pub fn queue_graduation(
 }
 
 /// `queue_graduation`, for an operator who agreed to break hardlinks.
+// Every argument is a distinct input the caller already holds; a parameter struct would only move the list.
+#[allow(clippy::too_many_arguments)]
 pub fn queue_graduation_allowing(
     state: &AppState,
     hash: &str,
@@ -708,6 +712,8 @@ fn scan_shared(
 /// root. Each candidate is then checked against the engine's live paths.
 /// `scan_claims_full` is the walk, kept under test to hold the two to the
 /// same answer.
+// A one-off shape; naming it would add an alias that nothing else uses.
+#[allow(clippy::type_complexity)]
 pub fn scan_claims(
     state: &AppState,
     root: &std::path::Path,
@@ -816,6 +822,8 @@ fn claim_of(
 /// `scan_claims` by walking every torrent of every engine: the reference the
 /// tests hold the lookup to.
 #[cfg(test)]
+// A one-off shape; naming it would add an alias that nothing else uses.
+#[allow(clippy::type_complexity)]
 pub fn scan_claims_full(
     state: &AppState,
     root: &std::path::Path,
@@ -831,6 +839,8 @@ pub fn scan_claims_full(
 
 /// Every torrent of every engine, checked one by one: what `scan_claims`
 /// falls back on when the store cannot answer.
+// A one-off shape; naming it would add an alias that nothing else uses.
+#[allow(clippy::type_complexity)]
 fn scan_claims_walk(
     state: &AppState,
     root: &std::path::Path,
@@ -955,6 +965,8 @@ fn same_file(a: &std::path::Path, b: &std::path::Path) -> bool {
 }
 
 /// Queue moving a torrent's data to `save_path` without leaving its engine.
+// Every argument is a distinct input the caller already holds; a parameter struct would only move the list.
+#[allow(clippy::too_many_arguments)]
 pub fn queue_move(
     state: &AppState,
     hash: &str,

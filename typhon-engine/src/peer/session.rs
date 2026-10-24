@@ -323,6 +323,8 @@ async fn serve_block(
     true
 }
 
+// Every argument is a distinct input the caller already holds; a parameter struct would only move the list.
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     mut framed: Framed<CryptoStream, BtCodec>,
     addr: SocketAddr,

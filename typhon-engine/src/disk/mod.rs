@@ -162,6 +162,8 @@ pub(crate) fn fail_sync_of(path: PathBuf) {
     sync_failures().lock().insert(path);
 }
 
+// A one-off shape; naming it would add an alias that nothing else uses.
+#[allow(clippy::type_complexity)]
 pub struct DiskManager {
     read_cache: Mutex<LruCache<CacheKey, CacheEntry>>,
     /// Files written and not yet synced, per torrent, with the pieces that

@@ -501,6 +501,8 @@ pub fn client_for(route: &Route) -> Result<reqwest::Client, String> {
 /// way to resolve (a tunnel's DNS server when the client is pinned to one),
 /// names fixed by the caller first (a test pins a name to a local server), and
 /// the guard of where the fetch began.
+// A one-off shape; naming it would add an alias that nothing else uses.
+#[allow(clippy::type_complexity)]
 struct FetchResolver {
     tunnel: Option<Arc<dyn reqwest::dns::Resolve>>,
     fixed: std::collections::HashMap<String, Vec<std::net::IpAddr>>,

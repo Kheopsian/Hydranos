@@ -58,6 +58,8 @@ fn registry() -> &'static RwLock<HashMap<String, Arc<Entry>>> {
 type CacheKey = (String, String);
 
 fn cache() -> &'static std::sync::Mutex<HashMap<CacheKey, (Vec<IpAddr>, Instant)>> {
+    // A one-off shape; naming it would add an alias that nothing else uses.
+    #[allow(clippy::type_complexity)]
     static C: OnceLock<std::sync::Mutex<HashMap<CacheKey, (Vec<IpAddr>, Instant)>>> =
         OnceLock::new();
     C.get_or_init(Default::default)

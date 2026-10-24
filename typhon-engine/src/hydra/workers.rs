@@ -276,6 +276,8 @@ fn slow_long_enough(
 /// With `limits.slow`, a running torrent under its threshold for long enough
 /// is skipped by the count: it keeps running, and the next candidate gets the
 /// slot. The clock is `slow_since`, read at `now`.
+// Every argument is a distinct input the caller already holds; a parameter struct would only move the list.
+#[allow(clippy::too_many_arguments)]
 fn enforce_queue(
     manager: &Arc<TorrentManager>,
     cache: &Cache,

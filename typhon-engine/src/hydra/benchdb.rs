@@ -349,6 +349,8 @@ impl RaceRecorder {
     /// Several can land on the same tick -- a torrent that finds its first peer
     /// and its first byte of upload between two looks -- so this answers a list.
     /// Each entry is (event, ts, download_time).
+    // Every argument is a distinct input the caller already holds; a parameter struct would only move the list.
+    #[allow(clippy::too_many_arguments)]
     pub fn sight(
         &mut self,
         info_hash: &str,

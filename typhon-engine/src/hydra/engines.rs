@@ -92,6 +92,8 @@ pub struct Engine {
     pub blocked: std::sync::OnceLock<String>,
 }
 
+// A one-off shape; naming it would add an alias that nothing else uses.
+#[allow(clippy::type_complexity)]
 pub struct EngineHost {
     engines: Vec<Engine>,
     /// Scopes the startup gate has released. Empty until somebody asks.

@@ -968,6 +968,8 @@ fn bump_rule(state: &AppState, name: &str, at: i64, episode: &str) {
 /// The articles a rule would take, feed by feed (qBittorrent's
 /// `matchingArticles`, which ignores `enabled`): with what took each one
 /// already, if anything did.
+// A one-off shape; naming it would add an alias that nothing else uses.
+#[allow(clippy::type_complexity)]
 pub fn matching(
     state: &AppState,
     rule: &Rule,

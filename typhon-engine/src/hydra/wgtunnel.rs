@@ -1268,6 +1268,8 @@ Endpoint = 192.0.2.10:51820
     }
 
     /// Records every command; fails the ones a closure says fail.
+    // A one-off shape; naming it would add an alias that nothing else uses.
+    #[allow(clippy::type_complexity)]
     struct Fake {
         ran: Vec<String>,
         stdin: Vec<String>,

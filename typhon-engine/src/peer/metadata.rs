@@ -183,6 +183,8 @@ pub async fn fetch_from_peer(
 }
 
 /// Race peers for the info dict; the first verified answer wins.
+// Every argument is a distinct input the caller already holds; a parameter struct would only move the list.
+#[allow(clippy::too_many_arguments)]
 pub async fn fetch(
     peers: &[SocketAddr],
     info_hash: [u8; 20],

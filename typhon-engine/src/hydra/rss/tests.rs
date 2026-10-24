@@ -11,6 +11,8 @@ const KEY: &str = "0123456789abcdef0123456789abcdef";
 
 /// An HTTP server that answers what it is told per path and records every
 /// request (path with its query, and the User-Agent).
+// A one-off shape; naming it would add an alias that nothing else uses.
+#[allow(clippy::type_complexity)]
 struct Fake {
     port: u16,
     routes: Arc<Mutex<HashMap<String, (u16, Vec<u8>)>>>,
@@ -18,6 +20,8 @@ struct Fake {
 }
 
 impl Fake {
+    // A one-off shape; naming it would add an alias that nothing else uses.
+    #[allow(clippy::type_complexity)]
     async fn start() -> Fake {
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = l.local_addr().unwrap().port();

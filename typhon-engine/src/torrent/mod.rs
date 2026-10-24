@@ -131,6 +131,8 @@ pub struct StartupIssue {
 /// The issues are listed up to this many; the count is not capped.
 pub const MAX_STARTUP_ISSUES: usize = 500;
 
+// A one-off shape; naming it would add an alias that nothing else uses.
+#[allow(clippy::type_complexity)]
 pub struct TorrentManager {
     torrents: DashMap<InfoHash, Arc<TorrentState>>,
     // Kept from construction; nothing reads it today.
@@ -1471,6 +1473,8 @@ impl TorrentManager {
 
     /// Point the manager at the store's metainfo blobs. Set once at startup,
     /// before any resume runs.
+    // A one-off shape; naming it would add an alias that nothing else uses.
+    #[allow(clippy::type_complexity)]
     pub fn set_blob_source(&self, source: Arc<dyn Fn(&str) -> Option<Vec<u8>> + Send + Sync>) {
         if let Ok(mut slot) = self.blob_source.write() {
             *slot = Some(source);
@@ -1550,6 +1554,8 @@ impl TorrentManager {
     /// path could hold a completely different torrent.
     ///
     /// Returns (imported, unrecoverable).
+    // A one-off shape; naming it would add an alias that nothing else uses.
+    #[allow(clippy::type_complexity)]
     pub fn import_missing_blobs(
         &self,
         uploads_dir: &std::path::Path,
