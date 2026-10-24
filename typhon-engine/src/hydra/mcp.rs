@@ -1021,12 +1021,22 @@ async fn move_to_category(state: &AppState, args: &Value) -> Result<Value, Strin
 }
 
 pub(crate) async fn fetch_torrent(url: &str) -> Result<Vec<u8>, String> {
+    fetch_torrent_via(&typhon_engine::egress::route(), url, |b| b).await
+}
+
+/// `fetch_torrent` on a given route, with `tweak` applied to the client
+/// builder (tests pin a name to a local server).
+pub(crate) async fn fetch_torrent_via(
+    route: &typhon_engine::egress::Route,
+    url: &str,
+    tweak: impl FnOnce(reqwest::ClientBuilder) -> reqwest::ClientBuilder,
+) -> Result<Vec<u8>, String> {
     if !(url.starts_with("http://") || url.starts_with("https://")) {
         return Err("torrent_url must be an http(s) URL".into());
     }
     // A `.torrent` URL is usually a tracker's, often with a passkey in it:
     // the daemon's own way out, never the default route behind its back.
-    let client = typhon_engine::egress::client()?;
+    let client = typhon_engine::egress::client_tweaked(route, tweak)?;
     let resp = client
         .get(url)
         .timeout(std::time::Duration::from_secs(30))
