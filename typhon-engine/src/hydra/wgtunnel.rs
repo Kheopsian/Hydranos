@@ -456,14 +456,37 @@ impl System {
         // Bounded: these run on the way out as well, after the state is
         // flushed, and an `ip` or `wg` that never returns held the exit until
         // the supervisor's SIGKILL.
-        let drain = |pipe: Option<Box<dyn std::io::Read + Send>>| {
+        //
+        // The output is collected as it comes and read when the command has
+        // ended, with a short grace for the last bytes: a child the command
+        // left behind keeps the pipe open, and waiting for its end of file
+        // waited for that child.
+        type Collected = (std::sync::Arc<Mutex<Vec<u8>>>, std::sync::Arc<std::sync::atomic::AtomicBool>);
+        let drain = |pipe: Option<Box<dyn std::io::Read + Send>>| -> Collected {
+            let buf = std::sync::Arc::new(Mutex::new(Vec::new()));
+            let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let (b, d) = (buf.clone(), done.clone());
             std::thread::spawn(move || {
-                let mut buf = Vec::new();
                 if let Some(mut p) = pipe {
-                    let _ = p.read_to_end(&mut buf);
+                    let mut chunk = [0u8; 4096];
+                    while let Ok(n) = p.read(&mut chunk) {
+                        if n == 0 {
+                            break;
+                        }
+                        b.lock().unwrap_or_else(|e| e.into_inner()).extend_from_slice(&chunk[..n]);
+                    }
                 }
-                buf
-            })
+                d.store(true, std::sync::atomic::Ordering::Release);
+            });
+            (buf, done)
+        };
+        let collect = |(buf, done): Collected| -> Vec<u8> {
+            let until = std::time::Instant::now() + PIPE_GRACE;
+            while !done.load(std::sync::atomic::Ordering::Acquire) && std::time::Instant::now() < until {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            let out = buf.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            out
         };
         use std::io::Read;
         let stdout = drain(child.stdout.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
@@ -477,13 +500,19 @@ impl System {
                 }
                 None => {
                     let _ = child.kill();
-                    let _ = child.wait();
+                    // Reaped for a moment only: a process stuck in the kernel
+                    // is not reaped by a kill, and waiting for it is the wait
+                    // this deadline exists to end.
+                    let gone_by = std::time::Instant::now() + std::time::Duration::from_secs(2);
+                    while !matches!(child.try_wait(), Ok(Some(_)) | Err(_)) && std::time::Instant::now() < gone_by {
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                    }
                     return Err(format!("{prog}: no answer after {}s, stopped", deadline.as_secs()));
                 }
             }
         };
-        let out = stdout.join().unwrap_or_default();
-        let err = stderr.join().unwrap_or_default();
+        let out = collect(stdout);
+        let err = collect(stderr);
         if status.success() {
             Ok(String::from_utf8_lossy(&out).into_owned())
         } else {
@@ -495,6 +524,9 @@ impl System {
 
 /// How long one `ip` or `wg` call may take before it is stopped.
 const COMMAND_DEADLINE: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// How long the last bytes of a finished command's output are waited for.
+const PIPE_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// How long taking ALL the tunnels down may take, however many commands that
 /// is: each has its own deadline, and several of them add up.
@@ -951,12 +983,25 @@ pub fn reconcile(runner: &mut dyn Runner, dir: &Path, wants: &[Want], registry: 
 /// the caller is on its way out, and a runner that does not come back must not
 /// hold the exit.
 pub async fn down_all_within<R: Runner + Send + 'static>(
-    _budget: std::time::Duration,
+    budget: std::time::Duration,
     mut runner: R,
     dir: PathBuf,
     registry: std::sync::Arc<Registry>,
 ) -> Option<usize> {
-    tokio::task::spawn_blocking(move || down_all(&mut runner, &dir, &registry)).await.ok()
+    let work = tokio::task::spawn_blocking(move || down_all(&mut runner, &dir, &registry));
+    match tokio::time::timeout(budget, work).await {
+        Ok(done) => done.ok(),
+        Err(_) => {
+            // The handle is let go, not aborted: a blocking thread cannot be
+            // stopped, and the runtime is told not to wait for it
+            // (`finish_runtime`).
+            tracing::warn!(
+                budget_s = budget.as_secs(),
+                "wireguard: taking the tunnels down did not finish in time; leaving without waiting for it"
+            );
+            None
+        }
+    }
 }
 
 /// Take every tunnel of this process down. Blocking.
@@ -1442,5 +1487,90 @@ mod root {
         assert_eq!(sh(&format!("ip -n {a} rule; ip -n {a} -6 rule")), before_rule, "a rule was left behind");
         assert!(live(&mut InNs(a), "wg-race").is_none(), "the device is gone");
         let _ = sh(&format!("ip netns del {a}; ip netns del {b}"));
+    }
+}
+
+#[cfg(test)]
+mod down_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    /// A runner whose command never comes back (until the test lets it go).
+    struct Stuck(std::sync::mpsc::Receiver<()>);
+    impl Runner for Stuck {
+        fn run(&mut self, _: &[String], _: Option<&str>) -> Result<String, String> {
+            let _ = self.0.recv_timeout(Duration::from_secs(30));
+            Err("released".into())
+        }
+    }
+
+    /// A runner whose commands all succeed at once.
+    struct Quick;
+    impl Runner for Quick {
+        fn run(&mut self, _: &[String], _: Option<&str>) -> Result<String, String> {
+            Ok(String::new())
+        }
+    }
+
+    /// ⭐ An `ip` or `wg` that does not return must not hold the exit: the
+    /// teardown is given up on after its budget, however long the command
+    /// sits. The state is flushed by then; what is left is the exit.
+    #[tokio::test]
+    async fn a_teardown_whose_command_never_returns_is_given_up_on_after_its_budget() {
+        let dir = std::env::temp_dir().join(format!("wgtunnel-down-stuck-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        write_managed(&dir, &[("wg-p5down".to_string(), 100)]);
+        let (release, rx) = std::sync::mpsc::channel::<()>();
+        let started = Instant::now();
+        let out = tokio::time::timeout(
+            Duration::from_secs(5),
+            down_all_within(Duration::from_millis(300), Stuck(rx), dir.clone(), std::sync::Arc::new(Registry::default())),
+        )
+        .await;
+        drop(release);
+        let out = out.expect("the teardown held the exit past its budget");
+        assert_eq!(out, None, "an unfinished teardown does not claim a count");
+        assert!(started.elapsed() < Duration::from_secs(3), "{:?}", started.elapsed());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A teardown that finishes inside its budget reports what it did.
+    #[tokio::test]
+    async fn a_teardown_that_finishes_in_time_reports_its_tunnels() {
+        let dir = std::env::temp_dir().join(format!("wgtunnel-down-ok-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        write_managed(&dir, &[("wg-p5down".to_string(), 100)]);
+        let out = down_all_within(
+            Duration::from_secs(10),
+            Quick,
+            dir.clone(),
+            std::sync::Arc::new(Registry::default()),
+        )
+        .await;
+        assert_eq!(out, Some(1));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ⭐ A command that exits but leaves a child holding its output open is
+    /// not waited for: what it printed is the answer, and the call returns.
+    #[cfg(unix)]
+    #[test]
+    fn a_command_whose_child_keeps_the_pipe_open_still_returns() {
+        let argv: Vec<String> = ["sh", "-c", "sleep 4 & echo hi"].iter().map(|s| s.to_string()).collect();
+        let started = Instant::now();
+        let out = System.run_within(&argv, None, Duration::from_secs(20));
+        assert!(started.elapsed() < Duration::from_secs(2), "waited {:?} for a pipe", started.elapsed());
+        assert_eq!(out.as_deref(), Ok("hi\n"));
+    }
+
+    /// A command that outlives its deadline is stopped and reported.
+    #[cfg(unix)]
+    #[test]
+    fn a_command_past_its_deadline_is_stopped() {
+        let argv: Vec<String> = ["sh", "-c", "sleep 30"].iter().map(|s| s.to_string()).collect();
+        let started = Instant::now();
+        let out = System.run_within(&argv, None, Duration::from_millis(300));
+        assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+        assert!(out.unwrap_err().contains("no answer"), "the deadline was not reported");
     }
 }
