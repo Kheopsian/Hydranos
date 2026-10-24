@@ -1131,7 +1131,7 @@ pub fn spawn_transit_sweep(
                     match crate::api::remove_one_torrent(
                         &state,
                         &hash,
-                        &[engine_id.clone()],
+                        std::slice::from_ref(&engine_id),
                         &engine_id,
                         true,
                     ) {
@@ -1431,7 +1431,7 @@ pub fn drain_once(
                 state,
                 &hash,
                 &torrent.meta.name,
-                &engine_id,
+                engine_id,
                 &to_engine,
                 &to_category,
                 &save_path,

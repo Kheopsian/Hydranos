@@ -161,9 +161,8 @@ mod tests {
             hex_to_url_encoded(&"41".repeat(20)).unwrap(),
             "%41".repeat(20)
         );
-        assert_eq!(
+        assert!(
             hex_to_url_encoded("00").is_none(),
-            true,
             "40 characters or nothing"
         );
         assert!(hex_to_url_encoded(&"zz".repeat(20)).is_none());

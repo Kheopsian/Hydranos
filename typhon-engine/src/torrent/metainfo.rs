@@ -1306,7 +1306,7 @@ mod tests {
             hashes * 20
         )
         .into_bytes();
-        b.extend(std::iter::repeat(9u8).take(hashes * 20));
+        b.extend(std::iter::repeat_n(9u8, hashes * 20));
         b.extend(b"ee");
         b
     }

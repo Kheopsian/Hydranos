@@ -192,10 +192,10 @@ pub(crate) async fn post_mcp(
                 .get("arguments")
                 .cloned()
                 .unwrap_or_else(|| json!({}));
-            if !tool_names(true).iter().any(|n| *n == name) {
+            if !tool_names(true).contains(&name) {
                 return rpc_error(StatusCode::OK, id, -32602, &format!("unknown tool: {name}"));
             }
-            let outcome = if DESTRUCTIVE.iter().any(|n| *n == name) && !destructive_allowed(&state)
+            let outcome = if DESTRUCTIVE.contains(&name) && !destructive_allowed(&state)
             {
                 // Not listed, and refused if called anyway: a client that
                 // cached an older tool list must not get around the switch.
@@ -578,7 +578,7 @@ fn pick_engine(state: &AppState, args: &Value) -> Result<String, String> {
             ids.first().cloned().unwrap_or_default()
         }
     });
-    if ids.iter().any(|i| *i == wanted) {
+    if ids.contains(&wanted) {
         Ok(wanted)
     } else {
         Err(format!(
@@ -2265,7 +2265,7 @@ mod tests {
         );
         let pieces = total.div_ceil(16384).max(1);
         info.extend_from_slice(format!("6:pieces{}:", pieces * 20).as_bytes());
-        info.extend(std::iter::repeat(salt).take(pieces * 20));
+        info.extend(std::iter::repeat_n(salt, pieces * 20));
         info.push(b'e');
         let announce = "https://tracker.example/announce";
         let mut out = format!("d8:announce{}:{announce}4:info", announce.len()).into_bytes();

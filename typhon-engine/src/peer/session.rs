@@ -217,7 +217,7 @@ fn may_serve(
         || torrent
             .picker
             .get()
-            .map_or(false, |pk| pk.lock().unwrap().has_piece(index));
+            .is_some_and(|pk| pk.lock().unwrap().has_piece(index));
     have_requested
         && length <= 16384
         && !stats.choked.load(Ordering::Relaxed)
@@ -524,7 +524,7 @@ pub async fn run(
         }
 
         // Deferred uploads whose slot has come.
-        if !ul_queue.is_empty() && ul_wait.map_or(true, |t| tokio::time::Instant::now() >= t) {
+        if !ul_queue.is_empty() && ul_wait.is_none_or(|t| tokio::time::Instant::now() >= t) {
             ul_wait = None;
             let mut broken = false;
             while let Some(&(index, begin, length)) = ul_queue.front() {
@@ -605,7 +605,7 @@ pub async fn run(
         }
         if dl.is_downloading()
             && !dl.peer_choking
-            && dl_wait.map_or(true, |t| tokio::time::Instant::now() >= t)
+            && dl_wait.is_none_or(|t| tokio::time::Instant::now() >= t)
         {
             dl_wait = None;
             let chain = torrent.rate_chain(Dir::Down);
@@ -1134,7 +1134,7 @@ mod metadata_serve_tests {
         info.extend_from_slice(format!("4:name{}:{name}", name.len()).as_bytes());
         info.extend_from_slice(b"12:piece lengthi16384e");
         info.extend_from_slice(format!("6:pieces{}:", pieces * 20).as_bytes());
-        info.extend(std::iter::repeat(7u8).take(pieces * 20));
+        info.extend(std::iter::repeat_n(7u8, pieces * 20));
         if private {
             info.extend_from_slice(b"7:privatei1e");
         }

@@ -707,7 +707,7 @@ impl PiecePicker {
     /// Export the `have` vector as a standard BT bitfield (MSB-first per byte).
     pub fn export_bitfield(&self) -> Vec<u8> {
         let num = self.num_pieces as usize;
-        let byte_len = (num + 7) / 8;
+        let byte_len = num.div_ceil(8);
         let mut bf = vec![0u8; byte_len];
         for (i, &h) in self.have.iter().enumerate() {
             if h {
@@ -854,7 +854,7 @@ impl PiecePicker {
         // assembled buffer then failed SHA1 in write_piece, the piece was
         // re-requested, and with a large peer set that became a permanent
         // re-download loop: ~24% of completed pieces were being discarded.
-        if pending.block_size == 0 || offset % pending.block_size != 0 {
+        if pending.block_size == 0 || !offset.is_multiple_of(pending.block_size) {
             return Block::Refused;
         }
         let block_idx = (offset / pending.block_size) as usize;

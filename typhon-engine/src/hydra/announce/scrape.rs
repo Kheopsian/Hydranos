@@ -152,7 +152,7 @@ async fn pass(
             .all()
             .into_iter()
             .map(|t| (t.info_hash, t.live_trackers.read().clone())),
-        &announced,
+        announced,
         done,
         policy,
         |host| breaker.allows(host, now),

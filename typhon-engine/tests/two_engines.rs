@@ -659,7 +659,7 @@ async fn spawn_seeder(tag: &str, torrent: &[u8], data: &[u8], peer_id: [u8; 20])
     std::fs::write(e.root.join("data").join("payload.bin"), data).unwrap();
     e.mgr
         .add_torrent_bytes(
-            &torrent.to_vec(),
+            torrent,
             &e.root.join("data").to_string_lossy(),
             false,
             true,

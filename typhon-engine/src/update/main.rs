@@ -804,7 +804,7 @@ mod tests {
 
     #[test]
     fn a_download_is_refused_past_its_cap() {
-        let body = vec![7u8; 100];
+        let body = [7u8; 100];
         assert_eq!(read_capped(&body[..], 100).unwrap().len(), 100);
         assert!(read_capped(&body[..], 99).is_err());
     }

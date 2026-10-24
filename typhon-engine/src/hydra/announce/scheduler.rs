@@ -836,7 +836,7 @@ fn measure(
             pool.trackers
                 .values()
                 .flat_map(|t| t.pending.iter())
-                .filter_map(|d| live(d)),
+                .filter_map(live),
         )
         .collect();
     let late = lags.len();
