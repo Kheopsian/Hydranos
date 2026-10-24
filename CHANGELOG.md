@@ -40,6 +40,9 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 - A resume JSON file that cannot be read is listed among the startup issues and
   kept out of the store reconcile, as a damaged state row already was, instead
   of leaving a single warn line.
+- A torrent adopted from another engine with a bitfield that cannot be used is
+  rechecked against the disk and listed among the startup issues, as it is at
+  startup, instead of starting as an empty download.
 
 ### Security
 
