@@ -20,6 +20,42 @@
 })();
 
 const API_KEY = localStorage.getItem("hydra_api_key") || "";
+
+// What a stream or a navigation carries instead of the key. EventSource, a
+// form POST and a window.open cannot set a header, and the key in their URL
+// ends up in the browser history, a proxy's access log and the Referer. The
+// daemon's own session cookie (HttpOnly, the one the qBittorrent login sets)
+// goes with every same-origin request, so the page signs in once with the key
+// it already holds and lets the cookie authenticate those. The key travels in
+// a request body and in a header, never in an address. Resolves true when
+// this browser holds a live session afterwards.
+let _sessionReady = null;
+function ensureSession(force) {
+    if (!API_KEY) return Promise.resolve(false);
+    if (_sessionReady && !force) return _sessionReady;
+    _sessionReady = (async () => {
+        try {
+            // A session already live (a reload inside its hour) costs one
+            // light request, not a new session per page load.
+            const live = await fetch("/api/provenance", { credentials: "same-origin" });
+            if (live.ok) return true;
+            // Only a key the daemon accepts is worth a login: a stale key
+            // would otherwise count against this address's failed attempts.
+            const keyed = await fetch("/api/provenance", { headers: { "X-Api-Key": API_KEY } });
+            if (!keyed.ok) return false;
+            const res = await fetch("/api/v2/auth/login", {
+                method: "POST",
+                credentials: "same-origin",
+                headers: { "Content-Type": "application/x-www-form-urlencoded" },
+                body: "username=hydranos&password=" + encodeURIComponent(API_KEY),
+            });
+            return (await res.text()).trim() === "Ok.";
+        } catch (_) {
+            return false;
+        }
+    })();
+    return _sessionReady;
+}
 let _provenance = null;
 const POLL_INTERVAL = 1000;
 
@@ -855,7 +891,7 @@ function importWizard(opts) {
         };
     }
 
-    function stepProgress() {
+    async function stepProgress() {
         box.innerHTML = `<h3 id="qb-title">${t("Importing…")}</h3>
             <p class="modal-desc" id="qb-phase">${t("Connecting…")}</p>
             <div style="background:var(--border);border-radius:4px;height:10px;overflow:hidden;margin:8px 0">
@@ -870,8 +906,8 @@ function importWizard(opts) {
                 <button id="qb-retry" style="display:none">${t("Retry failed")}</button>
                 <button class="btn-primary" id="qb-done" style="display:none">${t("Close &amp; reload")}</button>
             </div>`;
-        const q = API_KEY ? ("?apikey=" + encodeURIComponent(API_KEY)) : "";
-        const es = new EventSource("/api/import/qbit/events" + q);
+        await ensureSession(true);
+        const es = new EventSource("/api/import/qbit/events");
         const title = box.querySelector("#qb-title"),
             phase = box.querySelector("#qb-phase"), bar = box.querySelector("#qb-bar"),
             stats = box.querySelector("#qb-stats"), cur = box.querySelector("#qb-cur"),
@@ -3693,9 +3729,12 @@ async function removeNode(name) {
 /// the front asks for absolute paths, which under a prefix this Hydranos would
 /// answer itself. The server answers with a redirect carrying the remote key in
 /// the fragment, which no server ever sees.
-function openNode(name) {
-    const url = "/node/" + encodeURIComponent(name) + "/open?apikey=" + encodeURIComponent(API_KEY);
-    window.open(url, "_blank", "noopener");
+async function openNode(name) {
+    // The session cookie authenticates the navigation. Re-checked here, not
+    // trusted from page load: it may have lapsed since. One local round trip
+    // stays inside the click's transient user activation.
+    await ensureSession(true);
+    window.open("/node/" + encodeURIComponent(name) + "/open", "_blank", "noopener");
 }
 
 function _hoardMatches(t, search, skip) {
@@ -5171,9 +5210,9 @@ async function _exportSelected(format) {
     }
     const form = document.createElement("form");
     form.method = "POST";
-    // The key goes in the query because a form cannot set a header; a
-    // logged-in page carries its session cookie and needs neither.
-    form.action = "/api/torrents/export" + (API_KEY ? "?apikey=" + encodeURIComponent(API_KEY) : "");
+    // A form cannot set a header; the session cookie authenticates it.
+    await ensureSession(true);
+    form.action = "/api/torrents/export";
     form.target = "hydra-dl";
     form.style.display = "none";
     const field = (name, value) => {
@@ -7356,14 +7395,22 @@ function _rowKey(t) { return _agentKey(t.agent) + "|" + t.info_hash; }
 // that mentioned it.
 function _agentKey(name) { return _isLocalAgent(name) ? "local" : name; }
 
+let _sseOpening = false;
 function setupHoardSSE() {
+    if (_sseConn || _sseOpening) return;
+    // The stream is authenticated by the session cookie, so the session comes
+    // first; the key is never put in the stream's address.
+    _sseOpening = true;
+    ensureSession(true).finally(() => { _sseOpening = false; _openHoardSSE(); });
+}
+
+function _openHoardSSE() {
     if (_sseConn) return;
     // On a reconnect where we already hold the hoard list (e.g. returning to a
     // backgrounded tab, which closed the SSE), skip server re-hydration with
     // hydrate=0: the header still refreshes via the immediate snapshot and live
     // events resume, without re-streaming ~100k rows on every tab focus.
     const _q = [];
-    if (API_KEY) _q.push("apikey=" + encodeURIComponent(API_KEY));
     // The list is paged through /api/hoard/page now, so this stream carries the
     // live half only: status, per-row stats, adds and removes. Streaming the
     // library here as well was 250 MB and twenty seconds per hard refresh, to
@@ -7514,7 +7561,16 @@ function setupHoardSSE() {
         }
     };
     _sseConn.onerror = (_e) => {
-        // EventSource auto-reconnects. Log only.
+        // EventSource auto-reconnects on a dropped connection. A refusal ends
+        // it for good, and after a daemon restart the session is gone, so a
+        // closed stream gets a fresh session and one more attempt. Only when
+        // the sign-in worked: a key the daemon refuses must not loop.
+        if (_sseConn && _sseConn.readyState === EventSource.CLOSED) {
+            _sseConn = null;
+            setTimeout(() => {
+                ensureSession(true).then(ok => { if (ok && !document.hidden) setupHoardSSE(); });
+            }, 3000);
+        }
     };
 }
 
@@ -9710,16 +9766,33 @@ async function loadLogs() {
 function onLogsFilterChange() {
     loadLogs().then(() => { if (document.getElementById("logs-tail").checked) startLogsTail(); });
 }
-function startLogsTail() {
+async function startLogsTail() {
     stopLogsTail();
     const qs = logsQuery();
     // Every line the tail sends is new: a period filter would only hide them.
     qs.delete("since");
     qs.set("after", String(_logsLastSeq));
-    qs.set("apikey", API_KEY);
+    await ensureSession(true);
+    // Another start, or the box being unticked, may have come in while the
+    // session was being opened.
+    stopLogsTail();
+    const box = document.getElementById("logs-tail");
+    if (box && !box.checked) return;
     logsTailSource = new EventSource("/api/logs/stream?" + qs.toString());
     // The server names its events "log". `onmessage` only receives unnamed
     // ones, which is why Live never showed a line in 4.3.
+    logsTailSource.onerror = () => {
+        // As the hoard stream: a refusal closes it, a restart took the session.
+        if (logsTailSource && logsTailSource.readyState === EventSource.CLOSED) {
+            logsTailSource = null;
+            setTimeout(() => {
+                ensureSession(true).then(ok => {
+                    const b = document.getElementById("logs-tail");
+                    if (ok && b && b.checked && !logsTailSource) startLogsTail();
+                });
+            }, 3000);
+        }
+    };
     logsTailSource.addEventListener("log", (ev) => {
         try {
             const e = JSON.parse(ev.data);
