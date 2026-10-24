@@ -81,3 +81,43 @@ fn two_edits_at_once_both_land() {
     let text = std::fs::read_to_string(&s.config_path).unwrap();
     assert!(text.contains("[alpha]") && text.contains("[beta]"), "{text}");
 }
+
+/// `[mcp] torrent_roots` is written in the file by hand: no route changes it,
+/// whatever section and key a request names.
+#[tokio::test]
+async fn no_route_writes_the_torrent_roots() {
+    let s = state_from(
+        "cfgw-roots",
+        &format!("[daemon]\napi_key = \"{KEY}\"\napi_port = 8199\n\n[mcp]\ntorrent_roots = []\n"),
+    );
+    let before = std::fs::read_to_string(&s.config_path).unwrap();
+    let body = r#"{"changes":[{"section":"mcp","key":"torrent_roots","value":["/etc","/root"]}]}"#;
+    let resp = post_settings(State(s.state.clone()), RawQuery(None), keyed(KEY), body.to_string()).await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    assert_eq!(std::fs::read_to_string(&s.config_path).unwrap(), before, "nothing written");
+
+    // The shared editor every other route goes through refuses it too, and
+    // still takes any other edit.
+    assert!(!edit_config(&s.state, |doc| {
+        crate::tomledit::set_toml_value(doc, "mcp", "torrent_roots", "[\"/etc\"]")
+    }));
+    assert!(edit_config(&s.state, |doc| add_table(doc, "alpha")));
+    assert_eq!(std::fs::read_to_string(&s.config_path).unwrap().matches("torrent_roots = []").count(), 1);
+}
+
+/// The settings reset rewrites the file from the defaults and carries the
+/// secrets over; the list of folders the operator wrote there is carried too,
+/// not wiped, and a reset is no way to change it.
+#[tokio::test]
+async fn a_settings_reset_keeps_the_torrent_roots() {
+    let s = state_from(
+        "cfgw-reset-roots",
+        &format!("[daemon]\napi_key = \"{KEY}\"\napi_port = 8199\n\n[mcp]\ntorrent_roots = [\"/srv/watch\", \"/mnt/user/drop\"]\n"),
+    );
+    let resp = post_settings_reset(State(s.state.clone()), RawQuery(None), keyed(KEY)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let text = std::fs::read_to_string(&s.config_path).unwrap();
+    let doc: toml::Value = toml::from_str(&text).unwrap();
+    let roots: Vec<&str> = doc["mcp"]["torrent_roots"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
+    assert_eq!(roots, ["/srv/watch", "/mnt/user/drop"], "{text}");
+}

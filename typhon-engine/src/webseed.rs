@@ -223,15 +223,23 @@ async fn fetch_range(
 /// Whether `host` (a URL's `host_str`) names something only this machine or
 /// its LAN can reach: `localhost`, or a loopback, private, link-local, CGNAT,
 /// unique-local or unspecified address, IPv4-mapped forms included.
-fn is_internal_host(host: &str) -> bool {
+pub fn is_internal_host(host: &str) -> bool {
     let h = host.trim_start_matches('[').trim_end_matches(']').trim_end_matches('.').to_ascii_lowercase();
     if h == "localhost" || h.ends_with(".localhost") {
         return true;
     }
-    let ip = match h.parse::<std::net::IpAddr>() {
-        Ok(std::net::IpAddr::V6(v6)) => v6.to_ipv4_mapped().map(std::net::IpAddr::V4).unwrap_or(std::net::IpAddr::V6(v6)),
-        Ok(ip) => ip,
-        Err(_) => return false,
+    match h.parse::<std::net::IpAddr>() {
+        Ok(ip) => is_internal_ip(ip),
+        Err(_) => false,
+    }
+}
+
+/// Whether `ip` is an address only this machine or its LAN can reach, in the
+/// forms `is_internal_host` lists.
+pub fn is_internal_ip(ip: std::net::IpAddr) -> bool {
+    let ip = match ip {
+        std::net::IpAddr::V6(v6) => v6.to_ipv4_mapped().map(std::net::IpAddr::V4).unwrap_or(std::net::IpAddr::V6(v6)),
+        ip => ip,
     };
     match ip {
         std::net::IpAddr::V4(v4) => {
@@ -266,6 +274,81 @@ fn redirect_policy() -> reqwest::redirect::Policy {
         let from = attempt.previous().last().and_then(|u| u.host_str().map(str::to_string));
         let to_host = to.host_str().unwrap_or("");
         if is_internal_host(to_host) && from.as_deref() != Some(to_host) {
+            return attempt.error("redirect to an internal address");
+        }
+        attempt.follow()
+    })
+}
+
+/// Where a one-shot fetch began: on an internal host (a tracker, `prowlarr`,
+/// `jackett` on the local network) or on a public one. Decided from the
+/// ADDRESS the first host has, never from how its name is written: a Docker
+/// service name looks like any other name and resolves to a private address.
+///
+/// A URL whose host is written as an address, or as `localhost`, is decided at
+/// once. A URL whose host is a name is decided by the client's resolver the
+/// first time it resolves one, which is that host (see
+/// `egress::client_resolving`): internal when EVERY address it answers is
+/// internal. A name that also answers a public address counts as public, so a
+/// public server cannot pass as internal by adding one private record.
+pub struct StartGuard(std::sync::atomic::AtomicU8);
+
+const START_UNDECIDED: u8 = 0;
+const START_INTERNAL: u8 = 1;
+const START_PUBLIC: u8 = 2;
+
+impl StartGuard {
+    /// Decided now when the URL's host is an address or `localhost`.
+    pub fn for_url(url: &str) -> Self {
+        let parsed = reqwest::Url::parse(url).ok();
+        let decided = |internal: bool| if internal { START_INTERNAL } else { START_PUBLIC };
+        let state = match parsed.as_ref().and_then(|u| u.host()) {
+            Some(url::Host::Domain(d)) if is_internal_host(d) => START_INTERNAL,
+            Some(url::Host::Ipv4(ip)) => decided(is_internal_ip(ip.into())),
+            Some(url::Host::Ipv6(ip)) => decided(is_internal_ip(ip.into())),
+            _ => START_UNDECIDED,
+        };
+        StartGuard(std::sync::atomic::AtomicU8::new(state))
+    }
+
+    /// Whether the start is still to be decided.
+    pub fn is_undecided(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::Acquire) == START_UNDECIDED
+    }
+
+    /// Record where the fetch began, if it has not been recorded yet.
+    pub fn decide(&self, internal: bool) {
+        let to = if internal { START_INTERNAL } else { START_PUBLIC };
+        let _ = self.0.compare_exchange(
+            START_UNDECIDED,
+            to,
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+        );
+    }
+
+    /// Whether the fetch began on an internal host. Undecided counts as public.
+    pub fn began_internal(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::Acquire) == START_INTERNAL
+    }
+}
+
+/// The redirect policy of a fetch the operator pointed at one URL (a
+/// `.torrent` link): redirects are followed, ten at most, over http(s), except
+/// that a fetch which began on a public host is not sent on to an address
+/// written as an internal one (`is_internal_host`; a NAME that resolves to
+/// one is refused by the client's resolver). A fetch that began on an internal
+/// host may go on to any host, as before.
+pub fn redirect_policy_from_start(guard: std::sync::Arc<StartGuard>) -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(move |attempt| {
+        if attempt.previous().len() >= 10 {
+            return attempt.error("too many redirects");
+        }
+        let to = attempt.url();
+        if !matches!(to.scheme(), "http" | "https") {
+            return attempt.error("redirect to a scheme other than http(s)");
+        }
+        if !guard.began_internal() && is_internal_host(to.host_str().unwrap_or("")) {
             return attempt.error("redirect to an internal address");
         }
         attempt.follow()

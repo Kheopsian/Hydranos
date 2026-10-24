@@ -1021,22 +1021,44 @@ async fn move_to_category(state: &AppState, args: &Value) -> Result<Value, Strin
 }
 
 pub(crate) async fn fetch_torrent(url: &str) -> Result<Vec<u8>, String> {
-    fetch_torrent_via(&typhon_engine::egress::route(), url, |b| b).await
+    // Test builds only: names a test gave a fixed address, so a route that
+    // fetches a URL can be tried with a name no DNS knows.
+    #[cfg(test)]
+    let fixed: Vec<(String, std::net::IpAddr)> = TEST_HOSTS.lock().unwrap_or_else(|p| p.into_inner()).clone();
+    #[cfg(not(test))]
+    let fixed: Vec<(String, std::net::IpAddr)> = Vec::new();
+    let hosts: Vec<(&str, std::net::IpAddr)> = fixed.iter().map(|(n, ip)| (n.as_str(), *ip)).collect();
+    fetch_torrent_via(&typhon_engine::egress::route(), url, &hosts, typhon_engine::webseed::is_internal_ip).await
 }
 
-/// `fetch_torrent` on a given route, with `tweak` applied to the client
-/// builder (tests pin a name to a local server).
+/// Names fixed to an address for `fetch_torrent` in test builds. A test adds a
+/// name of its own (unique to it), so tests do not see each other's.
+#[cfg(test)]
+pub(crate) static TEST_HOSTS: std::sync::Mutex<Vec<(String, std::net::IpAddr)>> = std::sync::Mutex::new(Vec::new());
+
+/// `fetch_torrent` on a given route, with `hosts` names resolved to fixed
+/// addresses instead of by DNS, and `is_internal` deciding which addresses
+/// count as internal (tests give a name a local address and say which local
+/// addresses are the internal ones).
 pub(crate) async fn fetch_torrent_via(
     route: &typhon_engine::egress::Route,
     url: &str,
-    tweak: impl FnOnce(reqwest::ClientBuilder) -> reqwest::ClientBuilder,
+    hosts: &[(&str, std::net::IpAddr)],
+    is_internal: fn(std::net::IpAddr) -> bool,
 ) -> Result<Vec<u8>, String> {
     if !(url.starts_with("http://") || url.starts_with("https://")) {
         return Err("torrent_url must be an http(s) URL".into());
     }
     // A `.torrent` URL is usually a tracker's, often with a passkey in it:
     // the daemon's own way out, never the default route behind its back.
-    let client = typhon_engine::egress::client_tweaked(route, tweak)?;
+    // Where the fetch BEGAN is judged by the address of the first host: a
+    // service name on the local network (`prowlarr`, `jackett`, a tracker on
+    // the LAN) resolves to a private address and is as internal as one written
+    // out. One that began on an internal host may go anywhere; one that began
+    // on a public host may not reach an internal address, however the name is
+    // written, on the first request or on a redirect.
+    let guard = std::sync::Arc::new(typhon_engine::webseed::StartGuard::for_url(url));
+    let client = typhon_engine::egress::client_resolving(route, hosts, guard, is_internal)?;
     let resp = client
         .get(url)
         .timeout(std::time::Duration::from_secs(30))
@@ -1051,11 +1073,41 @@ pub(crate) async fn fetch_torrent_via(
     if resp.content_length().unwrap_or(0) as usize > MAX_TORRENT_BYTES {
         return Err(format!("{url} is larger than {MAX_TORRENT_BYTES} bytes"));
     }
-    let bytes = resp.bytes().await.map_err(|e| format!("{url}: {e}"))?;
-    if bytes.len() > MAX_TORRENT_BYTES {
-        return Err(format!("{url} is larger than {MAX_TORRENT_BYTES} bytes"));
+    // Read to the limit and no further: an answer with no length (or a lying
+    // one) is dropped at the first chunk past it, not held whole first.
+    let mut resp = resp;
+    let mut bytes: Vec<u8> = Vec::new();
+    while let Some(chunk) = resp.chunk().await.map_err(|e| format!("{url}: {}", e.without_url()))? {
+        if bytes.len() + chunk.len() > MAX_TORRENT_BYTES {
+            return Err(format!("{url} is larger than {MAX_TORRENT_BYTES} bytes"));
+        }
+        bytes.extend_from_slice(&chunk);
     }
-    Ok(bytes.to_vec())
+    Ok(bytes)
+}
+
+/// The bytes of a `.torrent` named by path: only from `[daemon] data_dir` or a
+/// folder of `[mcp] torrent_roots` (`pathroots::within_torrent_roots`), only a
+/// regular file, no larger than the limit,
+/// and only if it parses as a torrent. Whatever fails, the answer is the same
+/// one, so the call is no way to ask whether a file exists or what it holds.
+fn read_torrent_file(state: &AppState, path: &str) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    let refused = || format!("{path}: not a .torrent file this node can read");
+    let canon = crate::pathroots::within_torrent_roots(state, path).map_err(|_| refused())?;
+    let file = std::fs::File::open(&canon).map_err(|_| refused())?;
+    let meta = file.metadata().map_err(|_| refused())?;
+    if !meta.is_file() || meta.len() as usize > MAX_TORRENT_BYTES {
+        return Err(refused());
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_TORRENT_BYTES as u64 + 1).read_to_end(&mut bytes).map_err(|_| refused())?;
+    if bytes.len() > MAX_TORRENT_BYTES
+        || typhon_engine::torrent::metainfo::parse_torrent_bytes(&bytes).is_err()
+    {
+        return Err(refused());
+    }
+    Ok(bytes)
 }
 
 async fn add_torrent(state: &AppState, args: &Value) -> Result<Value, String> {
@@ -1084,11 +1136,11 @@ async fn add_torrent(state: &AppState, args: &Value) -> Result<Value, String> {
         (Some(_), Some(_)) => return Err("give torrent_path or torrent_url, not both".into()),
         (None, None) => return Err("torrent_path, torrent_url or magnet is required".into()),
         (Some(p), None) => {
-            let b = tokio::fs::read(&p).await.map_err(|e| format!("{p}: {e}"))?;
-            if b.len() > MAX_TORRENT_BYTES {
-                return Err(format!("{p} is larger than {MAX_TORRENT_BYTES} bytes"));
-            }
-            b
+            let st = state.clone();
+            let path = p.clone();
+            tokio::task::spawn_blocking(move || read_torrent_file(&st, &path))
+                .await
+                .map_err(|e| format!("read panicked: {e}"))??
         }
         (None, Some(u)) => fetch_torrent(&u).await?,
     };
@@ -1922,5 +1974,367 @@ mod tests {
         let c = compact(&row);
         assert_eq!(c["error_class"], "dead");
         assert!(c.get("injected_peers").is_none());
+    }
+
+    // --- reading a .torrent: where from, and how far ------------------------
+
+    fn outside_dir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("mcp-outside-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    async fn add_from_path(s: &TestState, path: &std::path::Path) -> Value {
+        tool_call(s, "add_torrent", json!({"category": "books", "torrent_path": path.to_string_lossy()})).await
+    }
+
+    fn error_text(r: &Value) -> String {
+        assert_eq!(r["isError"], true, "{r}");
+        r["content"][0]["text"].as_str().unwrap().to_string()
+    }
+
+    /// A node whose data folder and `[mcp] torrent_roots` are folders of their
+    /// own, with a category to add into.
+    async fn st_roots(tag: &str) -> (TestState, std::path::PathBuf, std::path::PathBuf) {
+        let data = outside_dir(&format!("{tag}-data"));
+        let root = outside_dir(&format!("{tag}-root"));
+        let s = state_from(
+            tag,
+            &format!(
+                "[daemon]\napi_key = \"{KEY}\"\ndata_dir = \"{}\"\n\n[mcp]\ntorrent_roots = [\"{}\"]\n",
+                data.display(),
+                root.display()
+            ),
+        );
+        make_category(&s, "books", &s.dir.join("books")).await;
+        (s, data, root)
+    }
+
+    /// A `.torrent` is read from the data folder or a folder the operator
+    /// listed in `[mcp] torrent_roots`, and nowhere else: not a category's
+    /// folder either, since a category is set through the API.
+    #[tokio::test]
+    async fn a_torrent_file_is_read_only_from_the_data_folder_or_the_listed_roots() {
+        let (s, data, root) = st_roots("mcp-path-roots").await;
+        let elsewhere = outside_dir("roots-elsewhere");
+        let category = s.dir.join("books");
+        std::fs::create_dir_all(&category).unwrap();
+        for (dir, name) in [(&data, "d"), (&root, "r"), (&elsewhere, "e"), (&category, "c")] {
+            std::fs::write(dir.join("t.torrent"), torrent_bytes(name)).unwrap();
+        }
+        let ok = add_from_path(&s, &data.join("t.torrent")).await;
+        assert_eq!(ok["isError"], false, "data folder: {ok}");
+        let ok = add_from_path(&s, &root.join("t.torrent")).await;
+        assert_eq!(ok["isError"], false, "listed root: {ok}");
+        error_text(&add_from_path(&s, &elsewhere.join("t.torrent")).await);
+        error_text(&add_from_path(&s, &category.join("t.torrent")).await);
+        for d in [data, root, elsewhere] {
+            let _ = std::fs::remove_dir_all(&d);
+        }
+    }
+
+    /// The folders a caller of the API can name (a torrent's save path, the
+    /// default save path) do not open to `torrent_path`: adding a torrent
+    /// there first is no way to read from there.
+    #[tokio::test]
+    async fn a_torrent_added_with_a_save_path_does_not_open_that_folder() {
+        let (s, data, root) = st_roots("mcp-path-bypass").await;
+        let other = outside_dir("bypass-other").join("state").join("torrents");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(other.join("t.torrent"), torrent_bytes("victim")).unwrap();
+        api::add_torrent_bytes(&s.state, &torrent_bytes("decoy"), "", &other.to_string_lossy(), "", true, true, "hoard")
+            .unwrap();
+        error_text(&add_from_path(&s, &other.join("t.torrent")).await);
+        for d in [data, root, other] {
+            let _ = std::fs::remove_dir_all(&d);
+        }
+    }
+
+    /// The roots are the ones the daemon started with. A settings edit that
+    /// moves `[daemon] data_dir` moves the live configuration, but not where a
+    /// `.torrent` may be read from.
+    #[tokio::test]
+    async fn a_settings_edit_of_data_dir_does_not_move_where_a_torrent_is_read_from() {
+        let (s, data, root) = st_roots("mcp-path-datadir").await;
+        let x = outside_dir("datadir-x");
+        std::fs::write(x.join("t.torrent"), torrent_bytes("moved")).unwrap();
+        error_text(&add_from_path(&s, &x.join("t.torrent")).await);
+
+        let body = json!({"changes": [{"section": "daemon", "key": "data_dir", "value": x.to_string_lossy()}]});
+        let (status, v) = internal(&s.state, Method::POST, "/api/settings", Some(body)).await;
+        assert!(status.is_success(), "{status} {v}");
+        assert_eq!(s.cfg().daemon.data_dir, x.to_string_lossy(), "the live config follows the edit");
+
+        error_text(&add_from_path(&s, &x.join("t.torrent")).await);
+        std::fs::write(data.join("t.torrent"), torrent_bytes("boot")).unwrap();
+        let ok = add_from_path(&s, &data.join("t.torrent")).await;
+        assert_eq!(ok["isError"], false, "the data folder of the start still counts: {ok}");
+        for d in [data, root, x] {
+            let _ = std::fs::remove_dir_all(&d);
+        }
+    }
+
+    /// `..` and a link that leave a root are judged by where they end up.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_dotdot_or_a_link_out_of_a_root_is_not_followed() {
+        let (s, data, root) = st_roots("mcp-path-escape").await;
+        let outside = outside_dir("escape");
+        std::fs::write(outside.join("a.torrent"), torrent_bytes("escaped")).unwrap();
+        std::os::unix::fs::symlink(&outside, data.join("link")).unwrap();
+
+        error_text(&add_from_path(&s, &data.join("link/a.torrent")).await);
+        let up = data.join("..").join("..").join(outside.strip_prefix("/").unwrap()).join("a.torrent");
+        error_text(&add_from_path(&s, &up).await);
+        for d in [data, root, outside] {
+            let _ = std::fs::remove_dir_all(&d);
+        }
+    }
+
+    /// Whatever is wrong with the path, the answer is the same: a missing
+    /// file, a folder and a file that is no torrent cannot be told apart.
+    #[tokio::test]
+    async fn a_bad_torrent_path_always_gets_the_same_answer() {
+        let (s, data, root) = st_roots("mcp-path-uniform").await;
+        std::fs::create_dir_all(data.join("sub")).unwrap();
+        std::fs::write(data.join("notes.txt"), b"not a torrent").unwrap();
+        let outside = outside_dir("uniform");
+        std::fs::write(outside.join("x.txt"), b"text").unwrap();
+
+        let mut answers = Vec::new();
+        for p in [
+            data.join("missing.torrent"),
+            data.join("sub"),
+            data.join("notes.txt"),
+            outside.join("x.txt"),
+            outside.join("missing.torrent"),
+        ] {
+            answers.push(error_text(&add_from_path(&s, &p).await));
+        }
+        // The path itself may be echoed; nothing else may differ.
+        let bare: Vec<String> = answers.iter().map(|a| a.split(": ").last().unwrap().to_string()).collect();
+        assert!(bare.iter().all(|a| a == &bare[0]), "{answers:?}");
+        for d in [data, root, outside] {
+            let _ = std::fs::remove_dir_all(&d);
+        }
+    }
+
+    // --- fetching a .torrent by URL ----------------------------------------
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    async fn read_request(sock: &mut tokio::net::TcpStream) {
+        let mut buf = vec![0u8; 4096];
+        let mut n = 0;
+        while n < buf.len() {
+            let r = sock.read(&mut buf[n..]).await.unwrap_or(0);
+            if r == 0 {
+                break;
+            }
+            n += r;
+            if buf[..n].windows(4).any(|w| w == b"\r\n\r\n") {
+                break;
+            }
+        }
+    }
+
+    /// A one-route HTTP server: answers every request with `reply`, and notes
+    /// that it was asked.
+    async fn serve(reply: Vec<u8>) -> (u16, std::sync::Arc<std::sync::atomic::AtomicBool>) {
+        serve_at("127.0.0.1", reply).await
+    }
+
+    /// `serve` on another loopback address (the whole 127/8 is this machine).
+    async fn serve_at(ip: &str, reply: Vec<u8>) -> (u16, std::sync::Arc<std::sync::atomic::AtomicBool>) {
+        let l = tokio::net::TcpListener::bind((ip, 0)).await.unwrap();
+        let port = l.local_addr().unwrap().port();
+        let hit = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let seen = hit.clone();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = l.accept().await {
+                seen.store(true, std::sync::atomic::Ordering::SeqCst);
+                read_request(&mut sock).await;
+                let _ = sock.write_all(&reply).await;
+                let _ = sock.shutdown().await;
+            }
+        });
+        (port, hit)
+    }
+
+    fn ok_reply(body: &[u8]) -> Vec<u8> {
+        let mut r = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).into_bytes();
+        r.extend_from_slice(body);
+        r
+    }
+
+    fn redirect_to(url: &str) -> Vec<u8> {
+        format!("HTTP/1.1 302 Found\r\nLocation: {url}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").into_bytes()
+    }
+
+    fn direct() -> typhon_engine::egress::Route {
+        typhon_engine::egress::Route::default()
+    }
+
+    const LOCAL: std::net::IpAddr = std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1));
+
+    fn real() -> fn(std::net::IpAddr) -> bool {
+        typhon_engine::webseed::is_internal_ip
+    }
+
+    /// For the tests of what a NAME resolves to: `LOCAL` (127.0.0.1) plays a
+    /// public address a test can still connect to, `INNER` (127.0.0.2) the
+    /// internal one.
+    const INNER: std::net::IpAddr = std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 2));
+
+    fn only_inner(ip: std::net::IpAddr) -> bool {
+        ip == INNER
+    }
+
+    /// A server out on the internet cannot send the fetch on to this machine
+    /// or its network.
+    #[tokio::test]
+    async fn a_redirect_from_a_public_host_to_an_internal_one_is_not_followed() {
+        let torrent = torrent_bytes("redirected");
+        let (inner, hit) = serve(ok_reply(&torrent)).await;
+        let (outer, _) = serve(redirect_to(&format!("http://127.0.0.1:{inner}/t.torrent"))).await;
+        let url = format!("http://public.example:{outer}/a.torrent");
+        let r = fetch_torrent_via(&direct(), &url, &[("public.example", LOCAL)], only_inner).await;
+        assert!(r.is_err(), "{r:?}");
+        assert!(!hit.load(std::sync::atomic::Ordering::SeqCst), "the internal address was asked");
+    }
+
+    /// What works stays working: a tracker that sends the fetch to a mirror,
+    /// and a LAN tracker that sends it to another LAN host.
+    #[tokio::test]
+    async fn redirects_that_stay_public_or_start_internal_are_followed() {
+        let torrent = torrent_bytes("followed");
+        let (inner, _) = serve(ok_reply(&torrent)).await;
+        let (outer, _) = serve(redirect_to(&format!("http://mirror.example:{inner}/t.torrent"))).await;
+        let url = format!("http://public.example:{outer}/a.torrent");
+        let hosts = [("public.example", LOCAL), ("mirror.example", LOCAL)];
+        let r = fetch_torrent_via(&direct(), &url, &hosts, only_inner).await;
+        assert_eq!(r.unwrap(), torrent);
+
+        let (inner, _) = serve(ok_reply(&torrent)).await;
+        let (outer, _) = serve(redirect_to(&format!("http://127.0.0.1:{inner}/t.torrent"))).await;
+        let r = fetch_torrent_via(&direct(), &format!("http://127.0.0.1:{outer}/a.torrent"), &[], real()).await;
+        assert_eq!(r.unwrap(), torrent);
+    }
+
+    /// A name is judged by the address it resolves to, not by how it is
+    /// written: a public-looking name whose DNS answers an internal address is
+    /// not a way in, whether the fetch starts on it or is redirected to it.
+    #[tokio::test]
+    async fn a_redirect_to_a_name_that_resolves_to_an_internal_address_is_not_followed() {
+        let torrent = torrent_bytes("rebound");
+        let hosts = [("public.example", LOCAL), ("rebind.example", INNER)];
+
+        // A redirect to the name.
+        let (inner, hit) = serve_at("127.0.0.2", ok_reply(&torrent)).await;
+        let (outer, _) = serve(redirect_to(&format!("http://rebind.example:{inner}/t.torrent"))).await;
+        let url = format!("http://public.example:{outer}/a.torrent");
+        let r = fetch_torrent_via(&direct(), &url, &hosts, only_inner).await;
+        assert!(r.is_err(), "redirect: {:?}", r.map(|b| b.len()));
+        assert!(!hit.load(std::sync::atomic::Ordering::SeqCst), "the internal address was asked");
+
+    }
+
+    /// A service name on the local network (`prowlarr`, `jackett`, a tracker
+    /// on the LAN) is not written like an address, but it resolves to one: a
+    /// fetch that starts on it is a fetch that started on an internal host,
+    /// and downloads as it always did.
+    #[tokio::test]
+    async fn a_starting_name_that_resolves_to_a_local_address_downloads() {
+        let torrent = torrent_bytes("service");
+        let (port, _) = serve_at("127.0.0.2", ok_reply(&torrent)).await;
+        let url = format!("http://svc.example:{port}/dl/t.torrent");
+        let r = fetch_torrent_via(&direct(), &url, &[("svc.example", INNER)], only_inner).await;
+        assert_eq!(r.unwrap(), torrent);
+
+        // It may then be sent on to a literal local address as well.
+        let (inner, _) = serve_at("127.0.0.2", ok_reply(&torrent)).await;
+        let (outer, _) = serve_at("127.0.0.2", redirect_to(&format!("http://127.0.0.2:{inner}/t.torrent"))).await;
+        let url = format!("http://svc.example:{outer}/dl/t.torrent");
+        let r = fetch_torrent_via(&direct(), &url, &[("svc.example", INNER)], only_inner).await;
+        assert_eq!(r.unwrap(), torrent, "redirect to a written local address");
+    }
+
+    /// The same, through the routes that add by link: the native add and
+    /// qBittorrent's `torrents/add` with `urls=`, which the *arr stack and
+    /// autobrr use with a Docker service name.
+    #[tokio::test]
+    async fn a_service_name_link_is_added_through_the_native_and_the_qbit_routes() {
+        use tower::ServiceExt;
+        let (s, data, root) = st_roots("mcp-url-routes").await;
+        let torrent = torrent_bytes("by-link");
+        let (port, _) = serve_at("127.0.0.2", ok_reply(&torrent)).await;
+        TEST_HOSTS.lock().unwrap().push(("svc-routes.p3test".into(), INNER));
+        let url = format!("http://svc-routes.p3test:{port}/dl/t.torrent");
+
+        let body = json!({"torrent_url": url, "category": "books", "save_path": "/tmp", "stopped": true, "seed_mode": true});
+        let (status, v) = internal(&s.state, Method::POST, "/api/torrents", Some(body)).await;
+        assert!(status.is_success(), "native add: {status} {v}");
+
+        // A second one for qBittorrent's route, another torrent so it is not "already added".
+        let torrent2 = torrent_bytes("by-link-qbit");
+        let (port2, _) = serve_at("127.0.0.2", ok_reply(&torrent2)).await;
+        let url2 = format!("http://svc-routes.p3test:{port2}/dl/t.torrent");
+        let mut form = String::new();
+        for (k, v) in [("urls", url2.as_str()), ("category", "books"), ("savepath", "/tmp"), ("paused", "true"), ("skip_checking", "true")] {
+            form.push_str(&format!("--B\r\nContent-Disposition: form-data; name=\"{k}\"\r\n\r\n{v}\r\n"));
+        }
+        form.push_str("--B--\r\n");
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/v2/torrents/add")
+            .header("X-API-Key", KEY)
+            .header("content-type", "multipart/form-data; boundary=B")
+            .body(axum::body::Body::from(form))
+            .unwrap();
+        let resp = api::router(s.state.clone()).oneshot(req).await.unwrap();
+        let (st2, bytes) = (resp.status(), axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap());
+        assert!(st2.is_success() && &bytes[..] == b"Ok.", "qbit add: {st2} {}", String::from_utf8_lossy(&bytes));
+        for d in [data, root] {
+            let _ = std::fs::remove_dir_all(&d);
+        }
+    }
+
+    /// A tracker on the local network may still send the fetch anywhere,
+    /// whatever the name it sends it to resolves to.
+    #[tokio::test]
+    async fn a_fetch_that_starts_on_an_internal_host_may_go_to_a_name_that_resolves_internal() {
+        let torrent = torrent_bytes("lan");
+        let (inner, _) = serve_at("127.0.0.2", ok_reply(&torrent)).await;
+        let (outer, _) = serve_at("127.0.0.2", redirect_to(&format!("http://rebind.example:{inner}/t.torrent"))).await;
+        let url = format!("http://127.0.0.2:{outer}/a.torrent");
+        let r = fetch_torrent_via(&direct(), &url, &[("rebind.example", INNER)], real()).await;
+        assert_eq!(r.unwrap(), torrent);
+    }
+
+    /// An answer with no length is read only as far as the limit, then the
+    /// connection is dropped: the server cannot make the daemon hold it all.
+    #[tokio::test]
+    async fn an_endless_torrent_answer_is_cut_at_the_limit() {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = l.local_addr().unwrap().port();
+        let sent = tokio::spawn(async move {
+            let (mut sock, _) = l.accept().await.unwrap();
+            read_request(&mut sock).await;
+            let _ = sock.write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n").await;
+            let chunk = vec![0u8; 1 << 20];
+            let mut sent = 0usize;
+            for _ in 0..200 {
+                if sock.write_all(&chunk).await.is_err() {
+                    break;
+                }
+                sent += chunk.len();
+            }
+            sent
+        });
+        let r = fetch_torrent_via(&direct(), &format!("http://127.0.0.1:{port}/big.torrent"), &[], real()).await;
+        assert!(r.is_err(), "{:?}", r.map(|b| b.len()));
+        let sent = tokio::time::timeout(std::time::Duration::from_secs(30), sent).await.unwrap().unwrap();
+        assert!(sent < 100 << 20, "the server was read to the end: {sent} bytes");
     }
 }

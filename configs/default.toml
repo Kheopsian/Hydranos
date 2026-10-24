@@ -378,3 +378,13 @@ password_hash = ""
 # Other machines are not declared here: each runs its own Hydranos and joins
 # as a node (install.sh --register-to <url> --token <token>; the Nodes page
 # gives the full command).
+
+# ─────────────────────────────────────────────
+# [mcp]: what the agent endpoint (/mcp) may do. Absent = the defaults below.
+#
+# [mcp]
+# allow_destructive = false      # list and allow removing torrents
+# # Folders, besides data_dir, an agent may read a .torrent from (add_torrent's
+# # torrent_path). Empty = data_dir only. Set HERE, by hand: no route of the
+# # API writes this list, so a caller of the API cannot widen what it reads.
+# torrent_roots = []             # e.g. ["/mnt/user/watch"]
