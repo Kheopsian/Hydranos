@@ -19,6 +19,12 @@ impl BtCodec {
     }
 }
 
+impl Default for BtCodec {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// A read buffer that once had to hold a large frame keeps that capacity for
 /// the life of the connection: `BytesMut::reserve` grows by doubling, and
 /// `split_to` below hands the payload out on the same allocation, so the

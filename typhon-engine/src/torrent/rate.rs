@@ -48,3 +48,9 @@ impl RateTracker {
         self.rate.load(Ordering::Relaxed)
     }
 }
+
+impl Default for RateTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}

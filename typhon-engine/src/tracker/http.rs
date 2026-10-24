@@ -1208,9 +1208,8 @@ mod announce_wire_tests {
     #[test]
     fn a_truncated_compact_peer_list_does_not_invent_a_peer() {
         let body = b"d8:intervali1800e5:peers4:\x5d\xb8\xd8\x22e";
-        match parse_announce_response(body) {
-            Ok(resp) => assert!(resp.peers.is_empty(), "no peer invented: {:?}", resp.peers),
-            Err(_) => {}
+        if let Ok(resp) = parse_announce_response(body) {
+            assert!(resp.peers.is_empty(), "no peer invented: {:?}", resp.peers)
         }
     }
 

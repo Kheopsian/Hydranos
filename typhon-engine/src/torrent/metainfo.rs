@@ -789,7 +789,7 @@ impl BencodeValue {
             None
         }
     }
-    pub fn as_dict(&self) -> Option<BencodeDict> {
+    pub fn as_dict(&self) -> Option<BencodeDict<'_>> {
         if let BencodeValue::Dict(v) = self {
             let map: HashMap<&str, &BencodeValue> =
                 v.iter().map(|(k, v)| (k.as_str(), v)).collect();

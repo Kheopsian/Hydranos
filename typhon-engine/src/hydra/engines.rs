@@ -1172,12 +1172,7 @@ mod tests {
     #[tokio::test]
     async fn a_proxied_engine_listens_by_default() {
         let (host, dir, _) = proxied_engine("proxylisten", "").await;
-        let race = host
-            .engines()
-            .iter()
-            .find(|e| e.id == "race")
-            .unwrap()
-            .clone();
+        let race = host.engines().iter().find(|e| e.id == "race").unwrap();
         for _ in 0..100 {
             if race.listening.load(std::sync::atomic::Ordering::Relaxed) {
                 break;

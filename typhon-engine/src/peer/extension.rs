@@ -67,6 +67,12 @@ impl PeerExt {
     }
 }
 
+impl Default for PeerExt {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Build the BEP 10 extension handshake payload (without the leading extended_id=0 byte).
 /// Caller prepends 0x00 (extended_id 0 = extension handshake) before sending.
 /// `metadata_size` is the size of our info dict when we hold it (so peers know
@@ -516,7 +522,7 @@ fn is_plausible_peer(addr: &SocketAddr) -> bool {
 /// Decode compact peer list (IPv6: 18 bytes per entry, BEP 7).
 fn parse_compact_v6(buf: &[u8]) -> Vec<SocketAddr> {
     let mut out = Vec::with_capacity(buf.len() / 18);
-    for chunk in buf.chunks_exact(18) {
+    for chunk in buf.as_chunks::<18>().0 {
         let mut octets = [0u8; 16];
         octets.copy_from_slice(&chunk[..16]);
         let port = u16::from_be_bytes([chunk[16], chunk[17]]);
@@ -539,7 +545,7 @@ fn parse_compact_v6(buf: &[u8]) -> Vec<SocketAddr> {
 /// Decode compact peer list (IPv4: 6 bytes per entry).
 fn parse_compact_v4(buf: &[u8]) -> Vec<SocketAddr> {
     let mut out = Vec::with_capacity(buf.len() / 6);
-    for chunk in buf.chunks_exact(6) {
+    for chunk in buf.as_chunks::<6>().0 {
         let ip = Ipv4Addr::new(chunk[0], chunk[1], chunk[2], chunk[3]);
         let port = u16::from_be_bytes([chunk[4], chunk[5]]);
         let addr = SocketAddr::new(IpAddr::V4(ip), port);
