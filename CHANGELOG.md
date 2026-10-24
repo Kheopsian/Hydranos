@@ -25,6 +25,9 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 
 ### Fixed
 
+- Changing the admin password ends every session. A client signed in through
+  the qBittorrent login (the *arr stack, cross-seed) signs in again with the
+  new password; the API key is not touched.
 - A route that does not ask for the API key itself is refused by default. Only
   the page, its static files, setup, login, the health and metrics probes, node
   registration, key-rotation confirmation, the changelog, the install script
