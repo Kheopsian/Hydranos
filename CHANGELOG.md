@@ -70,6 +70,11 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 - A file priority or download order that the state store could not write is
   refused with the error, and the engine keeps the order it had, instead of
   being acknowledged as applied while the next start would not know it.
+- The interface no longer puts the API key in an address. The live streams
+  (torrents, logs, qBittorrent import), the selection export and the node
+  link authenticate with the session cookie the page opens when it loads; the
+  key travels in a header or a request body only. The daemon still accepts
+  `?apikey=` from scripts that need it.
 
 ### Security
 
