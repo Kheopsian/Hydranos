@@ -97,6 +97,8 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   could not write is refused with the error, and the engine keeps what it had,
   instead of being acknowledged as applied while the next start would not know
   it.
+- A torrent speed cap set through the qBittorrent-compatible API that the
+  state store could not write is answered with an error instead of `Ok.`.
 - The interface no longer puts the API key in an address. The live streams
   (torrents, logs, qBittorrent import), the selection export and the node
   link authenticate with the session cookie the page opens when it loads; the
