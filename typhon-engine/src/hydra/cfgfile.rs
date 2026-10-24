@@ -93,7 +93,7 @@ enum Failed {
     Fatal(std::io::Error),
 }
 
-/// Test seam: make the write of the temporary fail, on this thread only.
+// Test seam: make the write of the temporary fail, on this thread only.
 #[cfg(test)]
 thread_local! {
     static FAIL_TEMP_WRITE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };

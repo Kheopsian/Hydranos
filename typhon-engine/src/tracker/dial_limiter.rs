@@ -217,6 +217,12 @@ impl DialPacer {
     }
 }
 
+impl Default for DialPacer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1039,6 +1039,7 @@ fn roll_back(
 ///     4.4 re-added the .torrent in seed mode instead, which marked an
 ///     incomplete torrent complete and dropped every tracker edit;
 ///  3. only then are the originals of the copied files deleted.
+///
 /// A failure in 1 deletes the copies; a failure in 2 undoes the renames and
 /// re-adds the torrent where it was. Nothing is ever deleted before the new
 /// copy is the one being served.

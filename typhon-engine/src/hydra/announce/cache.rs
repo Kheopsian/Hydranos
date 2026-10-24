@@ -383,7 +383,7 @@ impl Cache {
                 })
             })
             .collect();
-        out.sort_by(|a, b| b.1.cmp(&a.1));
+        out.sort_by_key(|a| std::cmp::Reverse(a.1));
         out
     }
 
@@ -399,7 +399,7 @@ impl Cache {
                 .push((class.clone(), n));
         }
         for v in out.values_mut() {
-            v.sort_by(|a, b| b.1.cmp(&a.1));
+            v.sort_by_key(|a| std::cmp::Reverse(a.1));
         }
         out
     }
@@ -598,7 +598,7 @@ mod tests {
         );
         // One more minute and it has aged out entirely.
         assert!(
-            c.error_breakdown_at(160).get("tracker.example").is_none(),
+            !c.error_breakdown_at(160).contains_key("tracker.example"),
             "an hour later the host is absent, not present with zero"
         );
     }
@@ -717,8 +717,8 @@ mod tests {
         c.count_failed_kind_at("old", "timeout", 0);
         c.count_failed_kind_at("new", "timeout", 500);
         let b = c.error_breakdown_at(500);
-        assert!(b.get("old").is_none());
-        assert!(b.get("new").is_some());
+        assert!(!b.contains_key("old"));
+        assert!(b.contains_key("new"));
         assert_eq!(
             c.errors.read().unwrap().len(),
             1,
