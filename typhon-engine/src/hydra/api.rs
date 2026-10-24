@@ -22322,6 +22322,41 @@ mod write_path_tests {
         assert!(!resp.status().is_server_error(), "got {:?}", resp.status());
     }
 
+    /// A tracker list or a speed cap the engine's state store could not keep
+    /// is answered with an error, not 200, and the engine keeps what it had.
+    #[tokio::test]
+    async fn an_edit_the_engine_store_did_not_keep_is_not_acknowledged() {
+        let (s, hash) = with_torrent("edit-store-down");
+        let ih = typhon_engine::torrent::hex_decode(&hash).unwrap();
+        let race = s.state.engines.get("race").unwrap();
+        let trackers_before = race.manager.get(&ih).unwrap().live_trackers.read().clone();
+        let conn = rusqlite::Connection::open(s.dir.join("race").join("state.db")).unwrap();
+        conn.execute("DROP TABLE torrent_state", []).unwrap();
+        drop(conn);
+
+        let r = super::post_torrent_limits(
+            State(s.state.clone()),
+            axum::extract::Path(hash.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            r#"{"up_kib":50}"#.to_string(),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::INTERNAL_SERVER_ERROR, "a cap the store refused");
+        assert_eq!(race.manager.get(&ih).unwrap().rate_limits(), (0, 0));
+
+        let r = super::post_torrent_trackers(
+            State(s.state.clone()),
+            axum::extract::Path(hash.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            r#"{"op":"set","tiers":[["https://edited.example/announce"]]}"#.to_string(),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::INTERNAL_SERVER_ERROR, "a tracker list the store refused");
+        assert_eq!(*race.manager.get(&ih).unwrap().live_trackers.read(), trackers_before);
+    }
+
     /// A job created by the daemon is listed and can be read back by id -- the
     /// UI polls on exactly this.
     #[tokio::test]

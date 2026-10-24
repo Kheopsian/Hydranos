@@ -2124,7 +2124,12 @@ impl TorrentManager {
         let after = t.rate_limits();
         if after != before {
             let rd = Self::build_resume_data(&t);
-            self.persist(info_hash, &rd);
+            if let Err(e) = self.try_persist(info_hash, &rd) {
+                // Not kept: the cap in force must be the one the next start
+                // will read, and the caller must not be told it took.
+                t.set_rate_limits(Some(before.0), Some(before.1));
+                return Err(e);
+            }
         }
         Ok(after)
     }
@@ -2166,36 +2171,50 @@ impl TorrentManager {
     /// forget half of.
     pub fn set_trackers(&self, info_hash: &InfoHash, tiers: Vec<Vec<String>>) -> Result<(), String> {
         let t = self.get(info_hash).ok_or("torrent not found")?;
-        *t.live_trackers.write() = tiers;
+        let before = std::mem::replace(&mut *t.live_trackers.write(), tiers);
         let rd = Self::build_resume_data(&t);
-        self.persist(info_hash, &rd);
+        if let Err(e) = self.try_persist(info_hash, &rd) {
+            // Not kept: announce to the list the next start will read, and
+            // do not tell the caller the edit took.
+            *t.live_trackers.write() = before;
+            return Err(e);
+        }
         Ok(())
     }
 
     pub fn set_save_path(&self, info_hash: &InfoHash, new_path: &str) -> Result<(), String> {
         let t = self.get(info_hash).ok_or("torrent not found")?;
         let old = data_files(&t);
-        {
-            // Under the counts lock, so a reader never sees the torrent in
-            // neither folder.
-            let mut m = self.counts();
-            let new: std::path::PathBuf = new_path.into();
-            let was = std::mem::replace(&mut *t.save_path.write(), new.clone());
-            if let Some(n) = m.get_mut(&was) {
-                if *n <= 1 {
-                    m.remove(&was);
-                } else {
-                    *n -= 1;
-                }
-            }
-            *m.entry(new).or_insert(0) += 1;
-        }
+        let was = self.swap_save_path(&t, new_path.into());
         // The old paths are no longer this torrent's: keeping their cached
         // descriptors would pin the files a move is about to unlink.
         crate::disk::evict_fds(&old);
         let rd = Self::build_resume_data(&t);
-        self.persist(info_hash, &rd);
+        if let Err(e) = self.try_persist(info_hash, &rd) {
+            // Not kept: the next start would look for the torrent where it
+            // was. The path in memory goes back to the one the record holds,
+            // and the caller, who moves files only after an Ok, is told no.
+            self.swap_save_path(&t, was);
+            return Err(e);
+        }
         Ok(())
+    }
+
+    /// Point a torrent at `new` and keep the per-folder counts right, under
+    /// the counts lock so a reader never sees the torrent in neither folder.
+    /// Returns the path it had.
+    fn swap_save_path(&self, t: &TorrentState, new: std::path::PathBuf) -> std::path::PathBuf {
+        let mut m = self.counts();
+        let was = std::mem::replace(&mut *t.save_path.write(), new.clone());
+        if let Some(n) = m.get_mut(&was) {
+            if *n <= 1 {
+                m.remove(&was);
+            } else {
+                *n -= 1;
+            }
+        }
+        *m.entry(new).or_insert(0) += 1;
+        was
     }
 
     /// Drop every trace of a torrent's durable state.
@@ -4384,6 +4403,56 @@ mod manager_tests {
         let r = mgr.update_download_order(&ih, |o| o.sequential = true);
         assert!(r.is_err(), "the store refused the write, so the answer is no: {r:?}");
         assert!(!mgr.get(&ih).unwrap().download_order().sequential, "and the engine does not follow what the disk lacks");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A tracker list the state store could not keep is not acknowledged: the
+    /// engine announces to the list it had, which is the one the next start reads.
+    #[test]
+    fn a_tracker_list_the_store_did_not_keep_is_refused() {
+        let (mgr, root) = manager("trackers-store-down");
+        let ih = add(&mgr, "alpha");
+        let before = mgr.get(&ih).unwrap().live_trackers.read().clone();
+        let conn = rusqlite::Connection::open(root.join("state.db")).unwrap();
+        conn.execute("DROP TABLE torrent_state", []).unwrap();
+        drop(conn);
+
+        let r = mgr.set_trackers(&ih, vec![vec!["https://edited.example/announce".into()]]);
+        assert!(r.is_err(), "the store refused the write, so the answer is no: {r:?}");
+        assert_eq!(*mgr.get(&ih).unwrap().live_trackers.read(), before, "and the engine keeps the list it had");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A speed cap the state store could not keep is not acknowledged: the
+    /// torrent stays under the cap it had.
+    #[test]
+    fn a_rate_cap_the_store_did_not_keep_is_refused() {
+        let (mgr, root) = manager("limits-store-down");
+        let ih = add(&mgr, "alpha");
+        let conn = rusqlite::Connection::open(root.join("state.db")).unwrap();
+        conn.execute("DROP TABLE torrent_state", []).unwrap();
+        drop(conn);
+
+        let r = mgr.set_torrent_rate_limits(&ih, Some(51_200), Some(8_192));
+        assert!(r.is_err(), "the store refused the write, so the answer is no: {r:?}");
+        assert_eq!(mgr.get(&ih).unwrap().rate_limits(), (0, 0), "and the torrent keeps the cap it had");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A save path the state store could not keep is not acknowledged: the
+    /// torrent stays where the record says it is, folder counts included.
+    #[test]
+    fn a_save_path_the_store_did_not_keep_is_refused() {
+        let (mgr, root) = manager("savepath-store-down");
+        let ih = add(&mgr, "alpha");
+        let before = mgr.get(&ih).unwrap().save_path.read().clone();
+        let conn = rusqlite::Connection::open(root.join("state.db")).unwrap();
+        conn.execute("DROP TABLE torrent_state", []).unwrap();
+        drop(conn);
+
+        let r = mgr.set_save_path(&ih, "/somewhere/else");
+        assert!(r.is_err(), "the store refused the write, so the answer is no: {r:?}");
+        assert_eq!(*mgr.get(&ih).unwrap().save_path.read(), before, "and the engine does not look where the disk does not");
         let _ = std::fs::remove_dir_all(root);
     }
 }
