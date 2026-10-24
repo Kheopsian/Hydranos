@@ -8904,7 +8904,7 @@ async fn qbit_login(
             Ok(false) => {
                 throttle.failed(who);
                 // One answer for a wrong name, a wrong password and a wrong key alike.
-                tracing::warn!(%username, "qBittorrent login refused: invalid credentials");
+                tracing::warn!(username = %crate::session::loggable(&username), "qBittorrent login refused: invalid credentials");
                 return (StatusCode::OK, "Fails.").into_response();
             }
             Err(crate::session::Busy) => {
@@ -8915,7 +8915,7 @@ async fn qbit_login(
     }
 
     let sid = state.sessions.create();
-    tracing::info!(%username, "qBittorrent client logged in");
+    tracing::info!(username = %crate::session::loggable(&username), "qBittorrent client logged in");
     // `HttpOnly` because no page of ours reads it, `SameSite=Lax` because no
     // cross-site form should be able to drive the API with it. Deliberately no
     // `Secure`: the *arr stack talks to this over plain HTTP on the LAN, and a
@@ -17581,6 +17581,10 @@ mod api_nodes_tests;
 #[cfg(test)]
 #[path = "api_shim_tests.rs"]
 mod api_shim_tests;
+
+#[cfg(test)]
+#[path = "api_access_tests.rs"]
+mod api_access_tests;
 
 #[cfg(test)]
 mod event_stream_tests {

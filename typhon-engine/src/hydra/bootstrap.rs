@@ -229,7 +229,7 @@ pub async fn setup_password(
     // page cannot read. Safe to return here and nowhere else -- this route
     // answers exactly once, then 409s forever.
     let key = state.cfg().daemon.api_key.clone();
-    tracing::info!(%username, "first-run setup completed, admin account created");
+    tracing::info!(username = %crate::session::loggable(&username), "first-run setup completed, admin account created");
     Json(serde_json::json!({"status": "ok", "username": username, "api_key": key}))
         .into_response()
 }

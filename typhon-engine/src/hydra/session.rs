@@ -106,6 +106,18 @@ impl Sessions {
     }
 }
 
+/// A name a stranger typed, made safe to put in the log: escaped, so a line
+/// break in it cannot start a line of its own, and cut, so it cannot make one
+/// line as long as the request.
+pub(crate) fn loggable(name: &str) -> String {
+    const MAX: usize = 64;
+    let mut out: String = name.chars().take(MAX).flat_map(char::escape_debug).collect();
+    if name.chars().nth(MAX).is_some() {
+        out.push_str("...");
+    }
+    out
+}
+
 /// Failed logins in a row, within [`FAIL_WINDOW`], before a caller is blocked.
 const MAX_FAILS: u32 = 5;
 const FAIL_WINDOW: Duration = Duration::from_secs(15 * 60);
