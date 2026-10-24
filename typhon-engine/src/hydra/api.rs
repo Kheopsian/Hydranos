@@ -2656,6 +2656,7 @@ async fn post_dedup_config(
         kv.push(("method".to_string(), word.to_string()));
     }
 
+    let writer = crate::cfgfile::lock();
     let Ok(doc) = std::fs::read_to_string(&state.config_path) else {
         return (StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({"error": "cannot read the config"}))).into_response();
@@ -2668,18 +2669,20 @@ async fn post_dedup_config(
         }
     };
 
-    // Never commit a config that no longer parses.
-    if toml::from_str::<toml::Value>(&doc).is_err() {
-        return (StatusCode::INTERNAL_SERVER_ERROR,
+    // Never commit a config the daemon could not load: the document must decode
+    // as a Config, not only as TOML.
+    if toml::from_str::<Config>(&doc).is_err() {
+        return (StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({"error": "edited config no longer parses"}))).into_response();
     }
-    if std::fs::write(&state.config_path, &doc).is_err() {
+    if crate::cfgfile::write_atomic(&state.config_path, &doc).is_err() {
         return (StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({"error": "cannot write the config"}))).into_response();
     }
     if let Ok(reloaded) = toml::from_str::<Config>(&doc) {
         state.set_cfg(reloaded);
     }
+    drop(writer);
 
     Json(serde_json::json!({
         "status": "ok",
@@ -8134,6 +8137,7 @@ pub(crate) fn edit_config<F>(state: &AppState, mutate: F) -> bool
 where
     F: FnOnce(&str) -> Result<String, String>,
 {
+    let _writer = crate::cfgfile::lock();
     let Ok(doc) = std::fs::read_to_string(&state.config_path) else {
         return false;
     };
@@ -8146,7 +8150,7 @@ where
         tracing::error!("refusing a config edit that would not parse");
         return false;
     }
-    if std::fs::write(&state.config_path, &edited).is_err() {
+    if crate::cfgfile::write_atomic(&state.config_path, &edited).is_err() {
         return false;
     }
     if let Ok(reloaded) = toml::from_str::<Config>(&edited) {
@@ -10489,6 +10493,7 @@ async fn post_settings(
                 Json(serde_json::json!({"error": "no changes"}))).into_response();
     }
 
+    let writer = crate::cfgfile::lock();
     let Ok(mut doc) = std::fs::read_to_string(&state.config_path) else {
         return (StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({"error": "cannot read the config"}))).into_response();
@@ -10563,21 +10568,24 @@ async fn post_settings(
     }
 
     // Never commit a config that no longer parses: the next restart would fail
-    // and the UI that wrote it would have no idea.
-    if toml::from_str::<toml::Value>(&doc).is_err() {
+    // and the UI that wrote it would have no idea. "Parses" is the Config type,
+    // not just TOML: a string for a port is valid TOML and a daemon that will
+    // not boot.
+    if toml::from_str::<Config>(&doc).is_err() {
         return (
-            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": "edited config no longer parses"})),
         )
             .into_response();
     }
-    if std::fs::write(&state.config_path, &doc).is_err() {
+    if crate::cfgfile::write_atomic(&state.config_path, &doc).is_err() {
         return (StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({"error": "cannot write the config"}))).into_response();
     }
     if let Ok(reloaded) = toml::from_str::<Config>(&doc) {
         state.set_cfg(reloaded);
     }
+    drop(writer);
     // Rate caps, peer timeout and choker reach the running engines now.
     let applied_live = state.engines.apply_config(&state.cfg());
 
@@ -13855,6 +13863,7 @@ async fn post_settings_reset(
     let cfg = state.cfg();
     let _ = cfg;
 
+    let writer = crate::cfgfile::lock();
     let Ok(current) = std::fs::read_to_string(&state.config_path) else {
         return (StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({"error": "cannot read the config"}))).into_response();
@@ -13891,13 +13900,14 @@ async fn post_settings_reset(
         return (StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({"error": "cannot write the backup"}))).into_response();
     }
-    if std::fs::write(&state.config_path, &doc).is_err() {
+    if crate::cfgfile::write_atomic(&state.config_path, &doc).is_err() {
         return (StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({"error": "cannot write the config"}))).into_response();
     }
     if let Ok(reloaded) = toml::from_str::<Config>(&doc) {
         state.set_cfg(reloaded);
     }
+    drop(writer);
 
     Json(serde_json::json!({"backup": backup, "preserved": kept, "status": "ok"}))
         .into_response()
@@ -17705,6 +17715,10 @@ mod dedup_config_tests {
 #[cfg(test)]
 #[path = "api_nodes_tests.rs"]
 mod api_nodes_tests;
+
+#[cfg(test)]
+#[path = "api_cfgwrite_tests.rs"]
+mod api_cfgwrite_tests;
 
 #[cfg(test)]
 #[path = "api_shim_tests.rs"]

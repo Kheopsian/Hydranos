@@ -85,6 +85,16 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   origin (`script-src 'self' 'unsafe-inline'`): the page loads nothing from
   elsewhere, so a script tag pointing off-site is refused. Inline handlers
   keep working; removing them is a separate, larger change.
+- The configuration file is written whole or not at all (a temporary file in
+  the same folder, flushed, then renamed over; the file keeps its mode, so a
+  0600 file stays 0600), and one edit at a time, so two edits made together both
+  land. A setting of the wrong type (a text for a port, a port above 65535) is
+  refused with a 400 and the file is left as it was, instead of being written
+  and stopping the next start. A write that fails half way (disk full) is
+  reported and leaves the file as it was; the file is written in place only
+  where a temporary cannot be created beside it or renamed over it. The file
+  keeps its owner and group: rewritten by root (a `docker exec` without `-u`),
+  a file of the user the daemon runs as does not become root's.
 
 ### Security
 
