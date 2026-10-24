@@ -25,6 +25,19 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 
 ### Fixed
 
+- The cross-origin check on a cookie write also takes the authority of the
+  request's own address when there is no `Host` header, as over HTTP/2.
+- `/mcp` is opened by the API key or a bearer token only, no longer by the
+  session cookie. The interface never calls it, and a form posted by a page of
+  the same site could otherwise have driven its tools with the cookie.
+- The cross-origin check on a cookie write also accepts an Origin equal to the
+  first `X-Forwarded-Host` or to the authority of `[daemon] public_url`, and
+  ignores a default port, so the interface keeps working behind a reverse
+  proxy that rewrites `Host`. An Origin that matches none of them is still
+  refused.
+- A session cookie no longer authorises a change (POST, PUT, PATCH, DELETE) that
+  names another origin than the host it was sent to. Requests that name no
+  origin, requests carrying the API key and reads are untouched.
 - Changing the admin password ends every session. A client signed in through
   the qBittorrent login (the *arr stack, cross-seed) signs in again with the
   new password; the API key is not touched.

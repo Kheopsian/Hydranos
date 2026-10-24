@@ -77,9 +77,13 @@ async fn no_stream() -> Response {
     (StatusCode::METHOD_NOT_ALLOWED, [(header::ALLOW, "POST")]).into_response()
 }
 
-/// The `/api` gate, or the same key sent as a bearer token.
+/// The API key (header, or the address when `api_key_in_query` is on), or the
+/// same key sent as a bearer token. Never the session cookie: this path is open
+/// to the default refusal, so nothing in front of it checks where a request
+/// came from, and a cookie rides along on a form posted from any page of the
+/// site, whatever its content type.
 fn allowed(state: &AppState, headers: &HeaderMap, query: &str) -> bool {
-    if api::authorised(state, headers, query) {
+    if api::key_authorised(state, headers, query) {
         return true;
     }
     let Some(token) = headers
@@ -97,7 +101,7 @@ fn allowed(state: &AppState, headers: &HeaderMap, query: &str) -> bool {
     match token.parse() {
         Ok(v) => {
             h.insert("X-Api-Key", v);
-            api::authorised(state, &h, "")
+            api::key_authorised(state, &h, "")
         }
         Err(_) => false,
     }
