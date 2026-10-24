@@ -16346,6 +16346,12 @@ async fn engine_dial_limits_by_id(
 }
 
 pub fn router(state: AppState) -> Router {
+    router_with(state, Router::new())
+}
+
+/// `router` with extra routes merged in before the layers go on, so a test can
+/// add the route a future change might, and see what the layers do to it.
+fn router_with(state: AppState, extra: Router<AppState>) -> Router {
     Router::new()
         .route("/health", get(get_health_gated))
         .route("/api/dedup/stats", get(get_dedup_stats))
@@ -16611,6 +16617,7 @@ pub fn router(state: AppState) -> Router {
         .merge(crate::selection::routes())
         // The agent endpoint, same reasoning: its own file, the same state.
         .merge(crate::mcp::routes())
+        .merge(extra)
         .with_state(state)
         // gzip, as 3.x does on this stream. Hydration is ~250 MB of JSON at
         // 300k torrents: a browser will not sit through that uncompressed, and
