@@ -621,7 +621,9 @@ pub(crate) fn parse_scrape(
 ) -> Result<Vec<super::scrape::ScrapeEntry>, String> {
     let body = reply_body(buf, tx, ACTION_SCRAPE)?;
     Ok(body
-        .chunks_exact(12)
+        .as_chunks::<12>()
+        .0
+        .iter()
         .zip(hashes)
         .map(|(c, h)| super::scrape::ScrapeEntry {
             info_hash: *h,

@@ -1315,7 +1315,7 @@ impl TorrentManager {
         let suspended = t.serving_suspended.load(Ordering::Relaxed);
         let _ = t
             .status
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |cur| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |cur| {
                 let busy = cur == TorrentStatus::Checking as u8
                     || (cur == TorrentStatus::Error as u8 && suspended);
                 (!busy).then_some(target as u8)
@@ -2864,7 +2864,9 @@ fn hex_decode_bytes(hex: &str) -> Vec<u8> {
         return Vec::new();
     }
     let digit = |c: u8| (c as char).to_digit(16).map(|d| d as u8);
-    raw.chunks_exact(2)
+    raw.as_chunks::<2>()
+        .0
+        .iter()
         .map(|p| Some(digit(p[0])? << 4 | digit(p[1])?))
         .collect::<Option<Vec<u8>>>()
         .unwrap_or_default()

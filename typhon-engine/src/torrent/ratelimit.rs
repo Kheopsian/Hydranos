@@ -151,7 +151,7 @@ impl RateBucket {
         let mut send = not_before;
         let _ = self
             .tat
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |tat| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |tat| {
                 let s = not_before.max(tat.saturating_sub(tau));
                 send = s;
                 Some(tat.max(s).saturating_add(cost))

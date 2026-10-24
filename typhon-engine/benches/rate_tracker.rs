@@ -33,6 +33,12 @@ impl RateTrackerMutex {
     }
 }
 
+impl Default for RateTrackerMutex {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // --- Lockless variant (AtomicU64 epoch nanos) ---
 pub struct RateTrackerAtomic {
     last_total: AtomicU64,
@@ -76,6 +82,12 @@ impl RateTrackerAtomic {
             0
         };
         self.rate.store(rate, Ordering::Relaxed);
+    }
+}
+
+impl Default for RateTrackerAtomic {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
