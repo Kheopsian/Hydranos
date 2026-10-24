@@ -25,6 +25,12 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 
 ### Fixed
 
+- A route that does not ask for the API key itself is refused by default. Only
+  the page, its static files, setup, login, the health and metrics probes, node
+  registration, key-rotation confirmation, the changelog, the install script
+  and `/mcp` answer without a key or a session; every other route is turned
+  away before its handler runs, including on a malformed body, which used to
+  get a 400 or 415 first.
 - The user name typed at a login is written to the log escaped and cut to 64
   characters: a line break in it no longer makes a line of its own.
 - An engine's upload and download rates count the bytes it moved, not the sum

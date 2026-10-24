@@ -16618,7 +16618,7 @@ fn router_with(state: AppState, extra: Router<AppState>) -> Router {
         // The agent endpoint, same reasoning: its own file, the same state.
         .merge(crate::mcp::routes())
         .merge(extra)
-        .with_state(state)
+        .with_state(state.clone())
         // gzip, as 3.x does on this stream. Hydration is ~250 MB of JSON at
         // 300k torrents: a browser will not sit through that uncompressed, and
         // the list stays empty while it tries.
@@ -16637,7 +16637,61 @@ fn router_with(state: AppState, extra: Router<AppState>) -> Router {
                 .gzip(true)
                 .compress_when(tower_http::compression::predicate::SizeAbove::new(32)),
         )
+        // Inside `qbit_refusal_shape`, so the shim's refusals still read 403.
+        .layer(axum::middleware::from_fn_with_state(state, refuse_by_default))
         .layer(axum::middleware::from_fn(qbit_refusal_shape))
+}
+
+/// The paths that answer a caller with no key and no session. Everything else
+/// is refused before its handler runs.
+///
+/// Each of these either has to work before anybody can have a key (the page,
+/// setup, login, the probes) or carries a credential of its own that this
+/// layer cannot read: `/health` and `/metrics` decide by their config switch,
+/// `/api/nodes/register` by its enrolment token, `/api/auth/api-key/confirm`
+/// by the pending key of a rotation (which is not yet THE key), `/mcp` by key
+/// or bearer token. The handlers behind them keep their own checks.
+///
+/// Adding a path here opens it to the world, and
+/// `api_access_tests` pins the list.
+const OPEN_PATHS: &[&str] = &[
+    "/",
+    "/health",
+    "/metrics",
+    "/api/setup",
+    "/api/login",
+    "/api/startup",
+    "/changelog.md",
+    "/install.sh",
+    "/api/nodes/register",
+    "/api/auth/api-key/confirm",
+    "/api/v2/auth/login",
+    "/api/v2/auth/logout",
+    "/mcp",
+];
+
+fn is_open_path(path: &str) -> bool {
+    OPEN_PATHS.contains(&path) || path.starts_with("/static/")
+}
+
+/// Refuse by default.
+///
+/// Every handler asks for the key itself (`guard!`), which holds for as long
+/// as whoever writes the next route remembers to. This asks first, for every
+/// path not in `OPEN_PATHS`, so a route added without the call is closed
+/// rather than public. The handlers' own checks stay: this is the net under
+/// them.
+async fn refuse_by_default(
+    State(state): State<AppState>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    if !is_open_path(req.uri().path())
+        && !authorised(&state, req.headers(), req.uri().query().unwrap_or_default())
+    {
+        return unauthorised();
+    }
+    next.run(req).await
 }
 
 /// Answer an unauthenticated qBittorrent call the way qBittorrent answers it.

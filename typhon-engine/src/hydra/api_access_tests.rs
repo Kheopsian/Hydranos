@@ -97,3 +97,146 @@ fn a_login_name_with_a_line_break_is_one_log_line() {
         assert!(text.len() < 1500, "a 5000-character name is cut: {} bytes", text.len());
     });
 }
+
+/// What answers without a key or a session. This list is written out here, not
+/// read from the code, so that opening one more route is a change to a test
+/// somebody has to read.
+const OPEN: &[&str] = &[
+    "/",
+    "/health",
+    "/metrics",
+    "/api/setup",
+    "/api/login",
+    "/api/startup",
+    "/changelog.md",
+    "/install.sh",
+    "/api/nodes/register",
+    "/api/auth/api-key/confirm",
+    "/api/v2/auth/login",
+    "/api/v2/auth/logout",
+    "/mcp",
+];
+
+fn is_open(path: &str) -> bool {
+    OPEN.contains(&path) || path.starts_with("/static/")
+}
+
+fn anonymous(method: &str, uri: &str) -> axum::http::Request<axum::body::Body> {
+    axum::http::Request::builder()
+        .method(method)
+        .uri(uri)
+        .body(axum::body::Body::empty())
+        .unwrap()
+}
+
+/// A route added without its own check is refused all the same.
+///
+/// Every handler asks for the key itself, which is a rule kept by whoever
+/// writes the next one. The route here asks for nothing; a caller with no key
+/// must still be turned away, and one with the key let in.
+#[tokio::test]
+async fn a_route_that_forgets_its_check_is_refused_anyway() {
+    let s = state_from("forgot", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+    let extra = Router::new().route("/api/forgotten", get(|| async { "leaked" }));
+    let call = |req: axum::http::Request<axum::body::Body>| {
+        let peer = std::net::SocketAddr::new("10.0.0.7".parse().unwrap(), 40000);
+        let app = router_with(s.state.clone(), extra.clone())
+            .layer(axum::extract::connect_info::MockConnectInfo(peer));
+        async move { app.oneshot(req).await.unwrap() }
+    };
+    let r = call(anonymous("GET", "/api/forgotten")).await;
+    assert_eq!(r.status(), StatusCode::UNAUTHORIZED, "no key, no answer");
+    let r = call(anonymous("GET", "/api/forgotten?apikey=wrong")).await;
+    assert_eq!(r.status(), StatusCode::UNAUTHORIZED, "a wrong key is no key");
+    let r = call(anonymous("GET", &format!("/api/forgotten?apikey={KEY}"))).await;
+    assert_eq!(r.status(), StatusCode::OK, "the right key still opens it");
+    let r = call(anonymous("GET", "/api/nowhere-at-all")).await;
+    assert_ne!(r.status(), StatusCode::OK);
+}
+
+/// The paths of every `.route("...` in a piece of source.
+fn routes_in(src: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = src;
+    while let Some(i) = rest.find(".route(") {
+        rest = &rest[i + ".route(".len()..];
+        if let Some(t) = rest.trim_start().strip_prefix('"') {
+            if let Some(end) = t.find('"') {
+                out.push(t[..end].to_string());
+            }
+        }
+    }
+    out
+}
+
+/// Every route of the real router, asked with no key and no session, on every
+/// verb: all of them are refused but the ones OPEN lists. The routes come from
+/// the router's own source, so a route added to it, or to one of the files it
+/// merges, is in the table the day it is written.
+#[tokio::test]
+async fn every_route_but_the_open_ones_refuses_a_caller_with_no_key() {
+    fn fn_body<'a>(src: &'a str, head: &str) -> &'a str {
+        let from = src.find(head).unwrap_or_else(|| panic!("{head} not found"));
+        &src[from..from + src[from..].find("\n}\n").unwrap()]
+    }
+    let router_src = fn_body(include_str!("api.rs"), "fn router_with(");
+    let merged: &[(&str, &str)] = &[
+        ("rulesapi", include_str!("rulesapi.rs")),
+        ("magnets", include_str!("magnets.rs")),
+        ("rss", include_str!("rss/routes.rs")),
+        ("ipfilter", include_str!("ipfilter.rs")),
+        ("watch", include_str!("watch.rs")),
+        ("selection", include_str!("selection.rs")),
+        ("mcp", include_str!("mcp.rs")),
+    ];
+    // A module merged into the router and missing from the table above would
+    // be a hole in this test, not in the router.
+    let mut named: Vec<&str> = router_src
+        .split(".merge(crate::")
+        .skip(1)
+        .filter_map(|t| t.split("::routes()").next())
+        .collect();
+    named.sort_unstable();
+    let mut known: Vec<&str> = merged.iter().map(|(n, _)| *n).collect();
+    known.sort_unstable();
+    assert_eq!(named, known, "a module merged into the router is not in this test");
+
+    let mut paths = routes_in(router_src);
+    for (_, src) in merged {
+        paths.extend(routes_in(fn_body(src, "pub fn routes()")));
+    }
+    assert!(paths.len() > 250, "only {} routes found", paths.len());
+    for open in OPEN {
+        assert!(paths.iter().any(|p| p == open), "{open} is listed as open and is not a route");
+    }
+
+    let s = state_from("every-route", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+    let mut answered = Vec::new();
+    for path in &paths {
+        if is_open(path) {
+            continue;
+        }
+        let uri: String = path
+            .split('/')
+            .map(|seg| match seg {
+                ":info_hash" => "0000000000000000000000000000000000000000",
+                s if s.starts_with(':') || s.starts_with('*') => "x",
+                s => s,
+            })
+            .collect::<Vec<_>>()
+            .join("/");
+        for method in ["GET", "POST", "PUT", "PATCH", "DELETE"] {
+            let r = call(&s.state, "10.0.0.7", anonymous(method, &uri)).await;
+            if r.status() != StatusCode::UNAUTHORIZED && r.status() != StatusCode::FORBIDDEN {
+                answered.push(format!("{method} {path} -> {}", r.status()));
+            }
+        }
+    }
+    assert!(answered.is_empty(), "answered a caller with no key:\n{}", answered.join("\n"));
+}
+
+/// The list the code refuses by is the list written above.
+#[test]
+fn the_code_opens_exactly_the_listed_paths() {
+    assert_eq!(OPEN_PATHS, OPEN);
+}
