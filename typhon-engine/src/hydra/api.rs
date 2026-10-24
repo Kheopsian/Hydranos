@@ -11308,7 +11308,11 @@ async fn qbit_torrents_download_limit(State(state): State<AppState>, RawQuery(qu
 /// download order. Shared by the `.torrent` add and a magnet's resolution.
 pub(crate) fn apply_add_options(state: &AppState, hash: &str, up: Option<u64>, down: Option<u64>, sequential: bool, first_last: bool) {
     if up.is_some() || down.is_some() {
-        shim_cap_torrents(state, &[hash.to_string()], up, down);
+        // The add itself is done and answered; a cap the store could not keep
+        // is logged, and the operator sets it again.
+        if let Err(e) = shim_cap_torrents(state, &[hash.to_string()], up, down) {
+            tracing::warn!(hash = %hash, "speed cap given at add not kept: {e}");
+        }
     }
     if sequential || first_last {
         let _ = edit_download_order(state, &torrent_copies(state, hash, ""), |o| {
@@ -11318,14 +11322,20 @@ pub(crate) fn apply_add_options(state: &AppState, hash: &str, up: Option<u64>, d
     }
 }
 
-fn shim_cap_torrents(state: &AppState, hashes: &[String], up: Option<u64>, down: Option<u64>) {
+/// Every copy is tried; the error names the ones whose engine did not keep the cap.
+fn shim_cap_torrents(state: &AppState, hashes: &[String], up: Option<u64>, down: Option<u64>) -> Result<(), String> {
+    let mut failed = Vec::new();
     for hash in hashes {
         for (engine, t) in torrent_copies(state, hash, "") {
             if let Some(e) = state.engines.get(&engine) {
-                let _ = e.manager.set_torrent_rate_limits(&t.info_hash, up, down);
+                if let Err(msg) = e.manager.set_torrent_rate_limits(&t.info_hash, up, down) {
+                    tracing::error!(engine = %engine, "speed cap not applied: {msg}");
+                    failed.push(format!("{engine}: {msg}"));
+                }
             }
         }
     }
+    if failed.is_empty() { Ok(()) } else { Err(failed.join("; ")) }
 }
 
 async fn qbit_torrents_set_limit(state: &AppState, query: &str, headers: &HeaderMap, body: &str, dir: typhon_engine::torrent::ratelimit::Dir) -> Response {
@@ -11336,11 +11346,14 @@ async fn qbit_torrents_set_limit(state: &AppState, query: &str, headers: &Header
         return (StatusCode::BAD_REQUEST, "limit is required (bytes/s)").into_response();
     };
     let hashes = shim_resolved_hashes(state, &form);
-    match dir {
+    let applied = match dir {
         typhon_engine::torrent::ratelimit::Dir::Up => shim_cap_torrents(state, &hashes, Some(limit), None),
         typhon_engine::torrent::ratelimit::Dir::Down => shim_cap_torrents(state, &hashes, None, Some(limit)),
+    };
+    match applied {
+        Ok(()) => qbit_ok(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
     }
-    qbit_ok()
 }
 
 async fn qbit_torrents_set_upload_limit(State(state): State<AppState>, RawQuery(query): RawQuery, headers: HeaderMap, body: String) -> Response {
@@ -24093,6 +24106,21 @@ mod qbit_shim_post_tests {
 
     fn listed<'a>(info: &'a serde_json::Value, hash: &str) -> &'a serde_json::Value {
         info.as_array().unwrap().iter().find(|r| r["hash"] == hash).expect("listed")
+    }
+
+    /// A cap the engine's state store could not keep is answered with an error,
+    /// not "Ok.", and the torrent keeps the cap it had.
+    #[tokio::test]
+    async fn a_torrent_cap_the_store_did_not_keep_is_not_acknowledged() {
+        let (s, hash) = populated("shim-limit-store-down", &single_file_bytes());
+        let conn = rusqlite::Connection::open(s.dir.join("race").join("state.db")).unwrap();
+        conn.execute("DROP TABLE torrent_state", []).unwrap();
+        drop(conn);
+
+        let (st, _) = call(&s, "POST", "/api/v2/torrents/setUploadLimit", &format!("hashes={hash}&limit=51200")).await;
+        assert_eq!(st, StatusCode::INTERNAL_SERVER_ERROR);
+        let (_, t) = find_torrent(&s.state, &hash).unwrap();
+        assert_eq!(t.rate_limits(), (0, 0), "the engine keeps the cap it had");
     }
 
     /// ⭐⭐ A per-torrent cap set over POST, the hash in the BODY as cross-seed
