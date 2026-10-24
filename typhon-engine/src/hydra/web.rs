@@ -40,12 +40,16 @@ pub fn page(front_only: bool) -> Response {
             // Clickjacking: the interface is never meant to be framed.
             (header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY")),
             // Defense in depth. Only directives that cannot break a same-origin
-            // single-page app are set: no plugins, no <base> hijack, no framing.
-            // A stricter script-src (dropping 'unsafe-inline') would disable the
-            // inline handlers the page is built on and needs separate UI review.
+            // single-page app are set: no plugins, no <base> hijack, no framing,
+            // and scripts only from this origin. The page loads nothing from
+            // anywhere else, so a script tag pointing off-site is refused.
+            // 'unsafe-inline' stays: the page is built on inline handlers and
+            // one inline script, and dropping it is a rewrite of the interface.
             (
                 header::CONTENT_SECURITY_POLICY,
-                HeaderValue::from_static("frame-ancestors 'none'; object-src 'none'; base-uri 'self'"),
+                HeaderValue::from_static(
+                    "frame-ancestors 'none'; object-src 'none'; base-uri 'self'; script-src 'self' 'unsafe-inline'",
+                ),
             ),
         ],
         html,
@@ -229,6 +233,24 @@ mod security_header_tests {
             .expect("the policy is text");
         for directive in ["frame-ancestors 'none'", "object-src 'none'", "base-uri 'self'"] {
             assert!(csp.contains(directive), "{what}: policy lacks `{directive}`: {csp}");
+        }
+        // Scripts from this origin only, with the inline handlers the page is
+        // built on still allowed: a policy that cut those would blank the UI.
+        let script_src = csp
+            .split(';')
+            .map(str::trim)
+            .find(|d| d.starts_with("script-src"))
+            .unwrap_or_else(|| panic!("{what}: policy has no script-src: {csp}"));
+        assert!(script_src.contains("'self'"), "{what}: script-src lacks 'self': {script_src}");
+        assert!(
+            script_src.contains("'unsafe-inline'"),
+            "{what}: script-src would block the page's inline handlers: {script_src}"
+        );
+        for foreign in ["*", "http:", "https:", "data:"] {
+            assert!(
+                !script_src.split_whitespace().any(|t| t == foreign),
+                "{what}: script-src admits `{foreign}`: {script_src}"
+            );
         }
     }
 

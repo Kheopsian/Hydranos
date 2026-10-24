@@ -81,6 +81,10 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   from the peer's bytes that holds anything but letters, digits and
   ` . _ - + !` leaves the peer unidentified. Names from the client table are
   never filtered.
+- The interface's content security policy now restricts scripts to this
+  origin (`script-src 'self' 'unsafe-inline'`): the page loads nothing from
+  elsewhere, so a script tag pointing off-site is refused. Inline handlers
+  keep working; removing them is a separate, larger change.
 
 ### Security
 
