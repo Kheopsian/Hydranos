@@ -33,71 +33,71 @@ use std::sync::Arc;
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 mod allocdiag;
+mod announce;
 mod api;
-mod httpserve;
-mod platform;
-mod tray;
-mod trayicon;
+mod benchdb;
+mod benchsampler;
+mod bootstrap;
+mod cfgfile;
+mod config;
+mod deadkeys;
+mod dedup;
 mod engines;
 mod errclass;
-mod logbuf;
-mod qbitrow;
-mod row;
-mod speedtest;
-mod dedup;
-mod pathclaim;
-mod deadkeys;
 mod export;
-mod selection;
-mod sharelimits;
-mod store;
-mod privfiles;
-mod cfgfile;
+mod fslist;
+mod gluetun;
+mod health;
+mod httpserve;
+mod igd;
+mod importer;
+mod ipfilter;
+mod jobs;
+mod jobsrun;
+mod killswitch;
+mod linkindex;
+mod linkscan;
+mod logbuf;
+mod magnets;
+mod mcp;
+mod netmode;
+mod netprobe;
+mod nodes;
+mod obs;
+mod pathclaim;
 mod pathroots;
+mod platform;
+mod portfwd;
+mod portmap;
+mod privfiles;
+mod qbitrow;
+mod raceevents;
+mod reconnect;
+mod row;
+mod rss;
+mod rules;
+mod rulesapi;
+mod rulesrun;
+mod selection;
+mod session;
+mod sharelimits;
+mod shutdown;
+mod speedtest;
+mod spoofmigration;
+mod startup;
+mod store;
 mod tomledit;
 mod trackeredit;
 mod trackerlists;
-mod spoofmigration;
+mod tray;
+mod trayicon;
+mod volumes;
 mod walrepair;
+mod watch;
 mod web;
-mod benchdb;
-mod benchsampler;
-mod netprobe;
-mod netmode;
-mod nodes;
-mod bootstrap;
-mod announce;
-mod health;
-mod importer;
-mod jobs;
-mod jobsrun;
 mod wgtun;
 mod wgtunnel;
-mod volumes;
 mod workers;
-mod portfwd;
-mod gluetun;
-mod igd;
-mod killswitch;
-mod portmap;
-mod raceevents;
-mod reconnect;
-mod config;
-mod linkindex;
-mod linkscan;
-mod rules;
-mod rulesrun;
-mod rulesapi;
-mod magnets;
-mod fslist;
-mod rss;
-mod ipfilter;
-mod watch;
-mod mcp;
-mod session;
-mod shutdown;
-mod startup;
-mod obs;
 
 use config::Config;
 
@@ -135,7 +135,10 @@ fn is_legacy_split_flag(name: &str) -> bool {
 /// The 3.x flags that took a value. Their value is swallowed with them, or a
 /// 3.x command line would print a second, more confusing warning about it.
 fn legacy_flag_takes_value(name: &str) -> bool {
-    matches!(name, "agent-addr" | "agent-token" | "agent-tls-cert" | "agent-tls-key" | "front-addr")
+    matches!(
+        name,
+        "agent-addr" | "agent-token" | "agent-tls-cert" | "agent-tls-key" | "front-addr"
+    )
 }
 
 /// Read the command line (without the program name).
@@ -155,9 +158,7 @@ fn parse_argv<I: IntoIterator<Item = String>>(argv: I, default_config: PathBuf) 
             "--console" => console = true,
             "--config" => match args.next() {
                 Some(value) => path = PathBuf::from(value),
-                None => warnings.push(format!(
-                    "--config needs a path; using {}", path.display()
-                )),
+                None => warnings.push(format!("--config needs a path; using {}", path.display())),
             },
             a if a.starts_with("--config=") => path = PathBuf::from(&a["--config=".len()..]),
             // CARGO_PKG_VERSION is 0.1.0 and has never been bumped: the
@@ -195,7 +196,11 @@ fn parse_argv<I: IntoIterator<Item = String>>(argv: I, default_config: PathBuf) 
             }
         }
     }
-    Cli::Run(Args { config: path, console, warnings })
+    Cli::Run(Args {
+        config: path,
+        console,
+        warnings,
+    })
 }
 
 /// `hydranos reset-password <password> [config]` and `hydranos hash-password
@@ -203,12 +208,21 @@ fn parse_argv<I: IntoIterator<Item = String>>(argv: I, default_config: PathBuf) 
 /// 4.3 had neither, and an unknown argument just started the daemon.
 fn password_command() {
     let argv: Vec<String> = std::env::args().skip(1).collect();
-    let Some(cmd) = argv.first().map(String::as_str) else { return };
+    let Some(cmd) = argv.first().map(String::as_str) else {
+        return;
+    };
     if cmd != "reset-password" && cmd != "hash-password" {
         return;
     }
     let Some(password) = argv.get(1) else {
-        eprintln!("usage: hydranos {cmd} <password>{}", if cmd == "reset-password" { " [path/to/default.toml]" } else { "" });
+        eprintln!(
+            "usage: hydranos {cmd} <password>{}",
+            if cmd == "reset-password" {
+                " [path/to/default.toml]"
+            } else {
+                ""
+            }
+        );
         std::process::exit(2);
     };
     if password.chars().count() < 8 {
@@ -246,11 +260,17 @@ fn password_command() {
                 eprintln!("hydranos: cannot write {}: {e}", path.display());
                 std::process::exit(1);
             }
-            println!("hydranos: password set in {}. Restart Hydranos for it to apply.", path.display());
+            println!(
+                "hydranos: password set in {}. Restart Hydranos for it to apply.",
+                path.display()
+            );
             std::process::exit(0);
         }
         _ => {
-            eprintln!("hydranos: {} would not parse after the edit; nothing written", path.display());
+            eprintln!(
+                "hydranos: {} would not parse after the edit; nothing written",
+                path.display()
+            );
             std::process::exit(1);
         }
     }
@@ -286,7 +306,10 @@ fn parse_args() -> Args {
 fn default_config_path() -> PathBuf {
     #[cfg(windows)]
     {
-        if let Some(dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf)) {
+        if let Some(dir) = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(Path::to_path_buf))
+        {
             let beside = dir.join("default.toml");
             // An install that 4.3 seeded at \config keeps it: starting on a
             // fresh config would look like every torrent and setting vanished.
@@ -396,7 +419,9 @@ async fn rescue(
     // when it was broken.
     let _ = slot.set(api::rescue_router(state));
     startup::set_phase(startup::Phase::Rescue);
-    serve.await.map_err(|e| anyhow::anyhow!("API task: {e}"))??;
+    serve
+        .await
+        .map_err(|e| anyhow::anyhow!("API task: {e}"))??;
     Ok(())
 }
 
@@ -430,7 +455,10 @@ fn seed_config(path: &Path) {
     let template = include_str!("../../../configs/default.toml");
     let seeded = template.replace(
         "data_dir = \"/config\"",
-        &format!("data_dir = \"{}\"", data_dir.display().to_string().replace('\\', "/")),
+        &format!(
+            "data_dir = \"{}\"",
+            data_dir.display().to_string().replace('\\', "/")
+        ),
     );
     match std::fs::write(path, seeded) {
         Ok(()) => eprintln!("hydranos: wrote a starting config at {}", path.display()),
@@ -456,7 +484,10 @@ fn log_file(config_path: &Path) -> Option<RotatingLog> {
     match RotatingLog::open(path.clone()) {
         Ok(f) => Some(f),
         Err(e) => {
-            eprintln!("hydranos: no log file at {} ({e}); console only", path.display());
+            eprintln!(
+                "hydranos: no log file at {} ({e}); console only",
+                path.display()
+            );
             None
         }
     }
@@ -519,12 +550,14 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
     {
         use tracing_subscriber::layer::SubscriberExt;
         use tracing_subscriber::util::SubscriberInitExt;
-        let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| "info".into());
+        let filter =
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
         let registry = tracing_subscriber::registry()
             .with(filter)
             .with(tracing_subscriber::fmt::layer())
-            .with(logbuf::LogLayer { buffer: logs.clone() });
+            .with(logbuf::LogLayer {
+                buffer: logs.clone(),
+            });
 
         // A second copy on disk, beside the config. Without it a daemon
         // started with no console -- a service, a shortcut, the Windows
@@ -586,7 +619,11 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
     // The container never hit any of it, because entrypoint.sh does its own
     // mkdir -p. Every bare-metal install did, on Linux as much as on Windows.
     if let Err(e) = std::fs::create_dir_all(&config.daemon.data_dir) {
-        tracing::warn!("could not create data_dir {}: {}", config.daemon.data_dir, e);
+        tracing::warn!(
+            "could not create data_dir {}: {}",
+            config.daemon.data_dir,
+            e
+        );
     }
 
     let host = if config.daemon.api_host.is_empty() {
@@ -594,7 +631,11 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
     } else {
         config.daemon.api_host.clone()
     };
-    let port = if config.daemon.api_port == 0 { 8199 } else { config.daemon.api_port };
+    let port = if config.daemon.api_port == 0 {
+        8199
+    } else {
+        config.daemon.api_port
+    };
     let addr = format!("{host}:{port}");
 
     // The port opens NOW, before the catalogue loads, behind a gate that
@@ -664,7 +705,9 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
     // starting a dozen workers only to stop them.
     if shutdown::stopping() {
         tracing::warn!("stop requested during startup; flushing and leaving");
-        engine_host.depart_all(std::time::Duration::from_secs(5)).await;
+        engine_host
+            .depart_all(std::time::Duration::from_secs(5))
+            .await;
         flush_on_shutdown(&engine_host, stop_budget).await;
         let _ = engine_host.wireguard_down().await;
         return Ok(());
@@ -680,9 +723,27 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
     let store = match store::Store::open(&store_path, false) {
         Ok(store) => match store.check_schema() {
             Ok(()) => store,
-            Err(e) => return rescue(&store_path, &config_path, &router_slot, serve, &e.to_string()).await,
+            Err(e) => {
+                return rescue(
+                    &store_path,
+                    &config_path,
+                    &router_slot,
+                    serve,
+                    &e.to_string(),
+                )
+                .await
+            }
         },
-        Err(e) => return rescue(&store_path, &config_path, &router_slot, serve, &e.to_string()).await,
+        Err(e) => {
+            return rescue(
+                &store_path,
+                &config_path,
+                &router_slot,
+                serve,
+                &e.to_string(),
+            )
+            .await
+        }
     };
     startup::set_phase(startup::Phase::StartingWorkers);
     tracing::info!(torrents = engine_host.total_torrents(), "engines up");
@@ -690,7 +751,9 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
     // up and their DNS is known.
     {
         let tunnels = engine_host.wireguard().clone();
-        killswitch::log_startup(&config, &|id: &str| tunnels.get(id).filter(|t| t.created).map(|t| t.dns_leak));
+        killswitch::log_startup(&config, &|id: &str| {
+            tunnels.get(id).filter(|t| t.created).map(|t| t.dns_leak)
+        });
     }
     // Categories live in the store, not the TOML, so their 3.x routing fields
     // are checked here. Same two sources as api::categories_map, same order.
@@ -698,7 +761,10 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
         let doc = store
             .meta_doc("categories")
             .filter(|d| !d.is_empty())
-            .or_else(|| std::fs::read_to_string(std::path::Path::new(&cfg_data_dir).join("categories.json")).ok());
+            .or_else(|| {
+                std::fs::read_to_string(std::path::Path::new(&cfg_data_dir).join("categories.json"))
+                    .ok()
+            });
         deadkeys::warn_categories(doc.as_deref());
     }
 
@@ -737,15 +803,22 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
             // (`portfwd::spawn_follower`); a pinned or proxied one would get a
             // port on the HOST's address that it does not even listen behind.
             let tunnelled = engine_host.wireguard().get(&engine.id).is_some();
-            if let Some(why) =
-                killswitch::home_mapping_refusal(mode, &engine.session, tunnelled, default_iface.as_deref())
-            {
+            if let Some(why) = killswitch::home_mapping_refusal(
+                mode,
+                &engine.session,
+                tunnelled,
+                default_iface.as_deref(),
+            ) {
                 tracing::info!(engine = %engine.id, "port mapping: no UPnP/NAT-PMP request to the home router: {why}");
                 portmap::record_refusal(&engine.id, engine.listen_port, &why);
                 continue;
             }
             if engine.listen_port != 0 {
-                portmap::spawn(engine.id.clone(), engine.manager.clone(), engine.listen_port);
+                portmap::spawn(
+                    engine.id.clone(),
+                    engine.manager.clone(),
+                    engine.listen_port,
+                );
             }
         }
     }
@@ -918,8 +991,7 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
     // the interface showed was blank however the node was routed.
     let public_ip: api::PublicIp =
         Arc::new(tokio::sync::Mutex::new((String::new(), String::new())));
-    let net_engines: netprobe::Snapshot =
-        Arc::new(tokio::sync::Mutex::new((Vec::new(), 0)));
+    let net_engines: netprobe::Snapshot = Arc::new(tokio::sync::Mutex::new((Vec::new(), 0)));
 
     // Warm the Records card before anyone asks. The scan takes seconds and the
     // overview header waits on its request, so computing it lazily meant the
@@ -960,7 +1032,12 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
     };
     // Started once the shared config exists, so a changed `[daemon] exit_probe`
     // applies at the next pass.
-    netprobe::spawn(state.engines.clone(), net_engines.clone(), public_ip.clone(), state.config_handle());
+    netprobe::spawn(
+        state.engines.clone(),
+        net_engines.clone(),
+        public_ip.clone(),
+        state.config_handle(),
+    );
     // The client-wide rate caps (qBittorrent's global limit) live in the
     // store, not the TOML: a qBit client sets them over the shim, and the
     // TOML editor refuses keys a file does not already have.
@@ -1112,7 +1189,9 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
     // Departures before the flush, bounded like libtorrent's
     // stop_tracker_timeout: trackers stop sending leechers to a client that
     // is going away. 4.3 sent none.
-    engines_for_shutdown.depart_all(std::time::Duration::from_secs(5)).await;
+    engines_for_shutdown
+        .depart_all(std::time::Duration::from_secs(5))
+        .await;
     flush_on_shutdown(&engines_for_shutdown, stop_budget).await;
     // After the flush, not before: the departures above leave through the
     // tunnels. Under --network host the devices would outlive the process.
@@ -1203,7 +1282,6 @@ async fn shutdown_signal() -> () {
     tracing::warn!("{which}: draining the API and flushing resume data");
 }
 
-
 const STOP_TIMEOUT_DEFAULT_S: u64 = 120;
 
 /// The shutdown flush budget from `HYDRANOS_STOP_TIMEOUT`.
@@ -1276,7 +1354,10 @@ mod cli_tests {
     #[test]
     fn known_flags_are_read_without_warnings() {
         let a = run(&["--config", "/x.toml", "--console"]);
-        assert_eq!((a.config, a.console, a.warnings.len()), (PathBuf::from("/x.toml"), true, 0));
+        assert_eq!(
+            (a.config, a.console, a.warnings.len()),
+            (PathBuf::from("/x.toml"), true, 0)
+        );
         assert_eq!(run(&["--config=/y.toml"]).config, PathBuf::from("/y.toml"));
         assert_eq!(run(&[]).config, PathBuf::from("/d.toml"));
     }
@@ -1305,7 +1386,13 @@ mod cli_tests {
             assert!(a.warnings[0].contains("--register-to"), "{flag}");
         }
         // The value of a 3.x flag goes with it, not into a second warning.
-        let a = run(&["--agent-only", "--agent-addr", ":9090", "--config", "/x.toml"]);
+        let a = run(&[
+            "--agent-only",
+            "--agent-addr",
+            ":9090",
+            "--config",
+            "/x.toml",
+        ]);
         assert_eq!(a.warnings.len(), 2, "{:?}", a.warnings);
         assert_eq!(a.config, PathBuf::from("/x.toml"));
     }
@@ -1339,7 +1426,19 @@ mod stop_timeout_tests {
 
     #[test]
     fn anything_else_is_refused_not_guessed() {
-        for bad in ["", "abc", "2 m", "1.5m", "-5", "m", "30s1m", "1m1m", "5x", "10ms", "99999999999999999999"] {
+        for bad in [
+            "",
+            "abc",
+            "2 m",
+            "1.5m",
+            "-5",
+            "m",
+            "30s1m",
+            "1m1m",
+            "5x",
+            "10ms",
+            "99999999999999999999",
+        ] {
             assert_eq!(p(bad), None, "{bad:?}");
         }
     }
@@ -1355,7 +1454,10 @@ mod stop_timeout_tests {
 ///
 /// Engines are flushed on threads of their own: one slow disk must not spend
 /// another engine's share of the budget.
-async fn flush_on_shutdown(engines: &std::sync::Arc<engines::EngineHost>, budget: std::time::Duration) {
+async fn flush_on_shutdown(
+    engines: &std::sync::Arc<engines::EngineHost>,
+    budget: std::time::Duration,
+) {
     let started = std::time::Instant::now();
 
     let handles: Vec<_> = engines
@@ -1395,13 +1497,18 @@ async fn wait_for_flush(
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
         if !h.is_finished() {
-            tracing::warn!(budget_s = budget.as_secs(),
-                           "shutdown flush hit HYDRANOS_STOP_TIMEOUT; leaving with what is saved");
+            tracing::warn!(
+                budget_s = budget.as_secs(),
+                "shutdown flush hit HYDRANOS_STOP_TIMEOUT; leaving with what is saved"
+            );
             return;
         }
         let _ = h.join();
     }
-    tracing::info!(took_s = started.elapsed().as_secs(), "shutdown flush complete");
+    tracing::info!(
+        took_s = started.elapsed().as_secs(),
+        "shutdown flush complete"
+    );
 }
 
 #[cfg(test)]
@@ -1429,7 +1536,10 @@ mod flush_wait_tests {
         wait_for_flush(vec![slow], Instant::now(), Duration::from_secs(10)).await;
         ticker.abort();
         let n = ticks.load(Ordering::Relaxed);
-        assert!(n >= 10, "the runtime ticked {n} times in 400 ms: the wait held its worker");
+        assert!(
+            n >= 10,
+            "the runtime ticked {n} times in 400 ms: the wait held its worker"
+        );
     }
 
     /// A flush that is slow but inside its budget is waited for to the end:
@@ -1443,7 +1553,10 @@ mod flush_wait_tests {
             w.store(true, Ordering::SeqCst);
         });
         wait_for_flush(vec![slow], Instant::now(), Duration::from_secs(10)).await;
-        assert!(written.load(Ordering::SeqCst), "the wait returned before the flush finished");
+        assert!(
+            written.load(Ordering::SeqCst),
+            "the wait returned before the flush finished"
+        );
     }
 
     /// The budget still bounds the wait: a flush that outlasts it is left
@@ -1460,7 +1573,11 @@ mod flush_wait_tests {
         let started = Instant::now();
         wait_for_flush(vec![stuck], started, Duration::from_millis(200)).await;
         release.store(true, Ordering::SeqCst);
-        assert!(started.elapsed() < Duration::from_secs(3), "{:?}", started.elapsed());
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "{:?}",
+            started.elapsed()
+        );
     }
 }
 
@@ -1472,7 +1589,11 @@ mod runtime_exit_tests {
     use std::time::{Duration, Instant};
 
     fn runtime() -> tokio::runtime::Runtime {
-        tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap()
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap()
     }
 
     /// ⭐ Blocking work that does not end (a file move that takes minutes)
@@ -1492,7 +1613,10 @@ mod runtime_exit_tests {
         finish_runtime(rt, Duration::from_millis(200));
         let took = t.elapsed();
         drop(release);
-        assert!(took < Duration::from_secs(3), "the exit waited {took:?} for a blocking task");
+        assert!(
+            took < Duration::from_secs(3),
+            "the exit waited {took:?} for a blocking task"
+        );
     }
 
     /// Blocking work that ends inside the grace is waited for: a write that
@@ -1510,7 +1634,10 @@ mod runtime_exit_tests {
         });
         started_rx.recv().unwrap();
         finish_runtime(rt, Duration::from_secs(10));
-        assert!(done.load(Ordering::SeqCst), "the runtime closed on a write that was still running");
+        assert!(
+            done.load(Ordering::SeqCst),
+            "the runtime closed on a write that was still running"
+        );
     }
 }
 
@@ -1533,7 +1660,9 @@ impl RotatingLog {
     fn open(path: PathBuf) -> std::io::Result<Self> {
         let file = privfiles::log_open_options().open(&path)?;
         let size = file.metadata().map(|m| m.len()).unwrap_or(0);
-        Ok(RotatingLog(std::sync::Arc::new(std::sync::Mutex::new(RotatingInner { path, file, size }))))
+        Ok(RotatingLog(std::sync::Arc::new(std::sync::Mutex::new(
+            RotatingInner { path, file, size },
+        ))))
     }
 }
 
@@ -1545,7 +1674,9 @@ impl RotatingInner {
             PathBuf::from(p)
         };
         // Close before renaming: Windows refuses to rename an open file.
-        self.file = std::fs::OpenOptions::new().append(true).open(if cfg!(windows) { "NUL" } else { "/dev/null" })?;
+        self.file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(if cfg!(windows) { "NUL" } else { "/dev/null" })?;
         let _ = std::fs::remove_file(name(LOG_KEEP));
         for i in (1..LOG_KEEP).rev() {
             let _ = std::fs::rename(name(i), name(i + 1));
@@ -1568,7 +1699,11 @@ impl std::io::Write for RotatingLog {
         Ok(n)
     }
     fn flush(&mut self) -> std::io::Result<()> {
-        self.0.lock().unwrap_or_else(|p| p.into_inner()).file.flush()
+        self.0
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .file
+            .flush()
     }
 }
 

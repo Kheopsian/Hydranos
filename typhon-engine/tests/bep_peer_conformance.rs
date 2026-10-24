@@ -67,7 +67,10 @@ fn the_reserved_bytes_claim_fast_and_extended_and_nothing_more() {
     assert_eq!(reserved[5], 0x10, "BEP 10 Extension Protocol");
     for (i, b) in reserved.iter().enumerate() {
         if i != 5 && i != 7 {
-            assert_eq!(*b, 0, "reserved[{i}] claims an extension we do not implement");
+            assert_eq!(
+                *b, 0,
+                "reserved[{i}] claims an extension we do not implement"
+            );
         }
     }
 }
@@ -125,10 +128,37 @@ fn bep3_the_core_message_ids_are_the_numbers_the_spec_gives() {
     for (id, msg) in expected {
         assert_eq!(msg.encode_payload()[0], id, "{msg:?} is message id {id}");
     }
-    assert_eq!(Message::Bitfield { data: Bytes::new() }.encode_payload()[0], 5);
-    assert_eq!(Message::Request { index: 0, begin: 0, length: 0 }.encode_payload()[0], 6);
-    assert_eq!(Message::Piece { index: 0, begin: 0, data: Bytes::new() }.encode_payload()[0], 7);
-    assert_eq!(Message::Cancel { index: 0, begin: 0, length: 0 }.encode_payload()[0], 8);
+    assert_eq!(
+        Message::Bitfield { data: Bytes::new() }.encode_payload()[0],
+        5
+    );
+    assert_eq!(
+        Message::Request {
+            index: 0,
+            begin: 0,
+            length: 0
+        }
+        .encode_payload()[0],
+        6
+    );
+    assert_eq!(
+        Message::Piece {
+            index: 0,
+            begin: 0,
+            data: Bytes::new()
+        }
+        .encode_payload()[0],
+        7
+    );
+    assert_eq!(
+        Message::Cancel {
+            index: 0,
+            begin: 0,
+            length: 0
+        }
+        .encode_payload()[0],
+        8
+    );
 }
 
 /// BEP 3: `have` carries a 4-byte big-endian piece index; `request` and
@@ -141,11 +171,23 @@ fn bep3_the_core_messages_round_trip_through_the_wire() {
         Message::Interested,
         Message::NotInterested,
         Message::Have { piece: 0x0102_0304 },
-        Message::Request { index: 1, begin: 16384, length: 16384 },
-        Message::Cancel { index: 9, begin: 32768, length: 16384 },
+        Message::Request {
+            index: 1,
+            begin: 16384,
+            length: 16384,
+        },
+        Message::Cancel {
+            index: 9,
+            begin: 32768,
+            length: 16384,
+        },
     ] {
         let back = round_trip(&msg);
-        assert_eq!(format!("{back:?}"), format!("{msg:?}"), "{msg:?} did not survive");
+        assert_eq!(
+            format!("{back:?}"),
+            format!("{msg:?}"),
+            "{msg:?} did not survive"
+        );
     }
 }
 
@@ -162,7 +204,11 @@ fn bep3_a_piece_index_is_big_endian() {
 #[test]
 fn bep3_a_piece_carries_its_index_begin_and_block() {
     let block = Bytes::from_static(b"sixteen kib, honest");
-    let back = round_trip(&Message::Piece { index: 3, begin: 16384, data: block.clone() });
+    let back = round_trip(&Message::Piece {
+        index: 3,
+        begin: 16384,
+        data: block.clone(),
+    });
     match back {
         Message::Piece { index, begin, data } => {
             assert_eq!((index, begin), (3, 16384));
@@ -194,7 +240,15 @@ fn bep6_the_fast_extension_ids_are_the_numbers_the_spec_gives() {
     assert_eq!(Message::Suggest { piece: 0 }.encode_payload()[0], 13);
     assert_eq!(Message::HaveAll.encode_payload()[0], 14);
     assert_eq!(Message::HaveNone.encode_payload()[0], 15);
-    assert_eq!(Message::Reject { index: 0, begin: 0, length: 0 }.encode_payload()[0], 16);
+    assert_eq!(
+        Message::Reject {
+            index: 0,
+            begin: 0,
+            length: 0
+        }
+        .encode_payload()[0],
+        16
+    );
     assert_eq!(Message::AllowedFast { piece: 0 }.encode_payload()[0], 17);
 }
 
@@ -202,8 +256,16 @@ fn bep6_the_fast_extension_ids_are_the_numbers_the_spec_gives() {
 /// can match it to what it asked for.
 #[test]
 fn bep6_a_reject_echoes_the_request_it_refuses() {
-    match round_trip(&Message::Reject { index: 4, begin: 16384, length: 16384 }) {
-        Message::Reject { index, begin, length } => {
+    match round_trip(&Message::Reject {
+        index: 4,
+        begin: 16384,
+        length: 16384,
+    }) {
+        Message::Reject {
+            index,
+            begin,
+            length,
+        } => {
             assert_eq!((index, begin, length), (4, 16384, 16384));
         }
         other => panic!("a reject decoded as {other:?}"),
@@ -226,13 +288,23 @@ fn bep6_have_all_and_have_none_carry_no_payload() {
 #[test]
 fn bep10_an_extended_message_is_id_twenty_then_the_sub_id() {
     let payload = Bytes::from_static(b"d1:md6:ut_pexi1eee");
-    let encoded = Message::Extended { ext_id: 0, payload: payload.clone() }.encode_payload();
+    let encoded = Message::Extended {
+        ext_id: 0,
+        payload: payload.clone(),
+    }
+    .encode_payload();
     assert_eq!(encoded[0], 20, "BEP 10 rides on message id 20");
     assert_eq!(encoded[1], 0, "extended id 0 is the handshake");
     assert_eq!(&encoded[2..], &payload[..]);
 
-    match round_trip(&Message::Extended { ext_id: 3, payload: payload.clone() }) {
-        Message::Extended { ext_id, payload: back } => {
+    match round_trip(&Message::Extended {
+        ext_id: 3,
+        payload: payload.clone(),
+    }) {
+        Message::Extended {
+            ext_id,
+            payload: back,
+        } => {
             assert_eq!(ext_id, 3);
             assert_eq!(back, payload);
         }
@@ -250,7 +322,14 @@ fn bep3_the_length_prefix_is_four_bytes_big_endian() {
     let mut codec = BtCodec::new();
     let mut out = BytesMut::new();
     codec
-        .encode(Message::Request { index: 1, begin: 2, length: 3 }, &mut out)
+        .encode(
+            Message::Request {
+                index: 1,
+                begin: 2,
+                length: 3,
+            },
+            &mut out,
+        )
         .expect("encode");
     // 1 byte of id + 12 of payload
     assert_eq!(&out[0..4], &[0, 0, 0, 13], "length 13, high byte first");
@@ -281,7 +360,9 @@ fn bep3_a_keepalive_is_a_length_of_zero_and_no_payload() {
 fn an_oversized_frame_is_refused_on_its_header() {
     let mut codec = BtCodec::new();
     let mut buf = BytesMut::from(&[0xFFu8, 0xFF, 0xFF, 0xFF][..]);
-    let err = codec.decode(&mut buf).expect_err("a 4 GiB frame is refused");
+    let err = codec
+        .decode(&mut buf)
+        .expect_err("a 4 GiB frame is refused");
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
     assert!(buf.capacity() < 1 << 20, "nothing was reserved for it");
 }
@@ -303,14 +384,22 @@ fn two_messages_in_one_read_decode_separately() {
     let mut codec = BtCodec::new();
     let mut buf = BytesMut::new();
     codec.encode(Message::Interested, &mut buf).expect("encode");
-    codec.encode(Message::Have { piece: 42 }, &mut buf).expect("encode");
+    codec
+        .encode(Message::Have { piece: 42 }, &mut buf)
+        .expect("encode");
 
-    assert!(matches!(codec.decode(&mut buf).expect("decode"), Some(Message::Interested)));
+    assert!(matches!(
+        codec.decode(&mut buf).expect("decode"),
+        Some(Message::Interested)
+    ));
     match codec.decode(&mut buf).expect("decode") {
         Some(Message::Have { piece }) => assert_eq!(piece, 42),
         other => panic!("expected a have, got {other:?}"),
     }
-    assert!(codec.decode(&mut buf).expect("decode").is_none(), "and nothing more");
+    assert!(
+        codec.decode(&mut buf).expect("decode").is_none(),
+        "and nothing more"
+    );
 }
 
 /// An id we do not know is carried, not fatal. BEP 3 tells a client to ignore
@@ -320,7 +409,10 @@ fn two_messages_in_one_read_decode_separately() {
 fn an_unknown_message_id_is_ignored_not_fatal() {
     let mut codec = BtCodec::new();
     let mut buf = BytesMut::from(&[0u8, 0, 0, 2, 200, 1][..]);
-    match codec.decode(&mut buf).expect("an unknown id is not an error") {
+    match codec
+        .decode(&mut buf)
+        .expect("an unknown id is not an error")
+    {
         Some(Message::Unknown { id, .. }) => assert_eq!(id, 200),
         other => panic!("expected an unknown message, got {other:?}"),
     }

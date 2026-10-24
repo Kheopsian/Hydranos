@@ -1,7 +1,7 @@
+use sha1::{Digest, Sha1};
 use std::path::PathBuf;
-use sha1::{Sha1, Digest};
 
-use super::meta::{TorrentMeta, FileEntry, InfoHash};
+use super::meta::{FileEntry, InfoHash, TorrentMeta};
 
 /// Parse a .torrent file and extract metadata.
 /// Decode a torrent path/name byte string. Prefer UTF-8; fall back to Latin-1
@@ -67,8 +67,11 @@ pub fn parse_torrent_bytes(data: &[u8]) -> Result<TorrentMeta, String> {
     let info_raw = find_info_raw(data)?;
     let info_hash = sha1_hash(&info_raw);
 
-    let info = dict.get("info").ok_or("missing info dict")?
-        .as_dict().ok_or("info is not a dict")?;
+    let info = dict
+        .get("info")
+        .ok_or("missing info dict")?
+        .as_dict()
+        .ok_or("info is not a dict")?;
 
     // BEP 52, v2 only: no v1 `pieces`, a `file tree` instead. A hybrid has
     // both and is read below as the v1 torrent it also is -- its v1 hashes
@@ -80,18 +83,22 @@ pub fn parse_torrent_bytes(data: &[u8]) -> Result<TorrentMeta, String> {
 
     // Piece length. Read as an i64: a bare `as u32` turned 0 into a torrent
     // that never completes, -1 into 4 GiB, and 2^32 + 16384 into 16384.
-    let piece_length = info.get("piece length")
+    let piece_length = info
+        .get("piece length")
         .ok_or("missing piece length")?
-        .as_int().ok_or("piece length not int")?;
+        .as_int()
+        .ok_or("piece length not int")?;
     let piece_length = u32::try_from(piece_length)
         .ok()
         .filter(|&p| p > 0)
         .ok_or_else(|| format!("piece length {piece_length} out of range"))?;
 
     // Pieces (concatenated 20-byte SHA1 hashes)
-    let pieces_raw = info.get("pieces")
+    let pieces_raw = info
+        .get("pieces")
         .ok_or("missing pieces")?
-        .as_bytes().ok_or("pieces not bytes")?;
+        .as_bytes()
+        .ok_or("pieces not bytes")?;
     if pieces_raw.len() % 20 != 0 {
         return Err("pieces length not multiple of 20".into());
     }
@@ -99,12 +106,15 @@ pub fn parse_torrent_bytes(data: &[u8]) -> Result<TorrentMeta, String> {
 
     // Name
     let name = decode_path_str(
-        info.get("name").ok_or("missing name")?
-            .as_bytes().ok_or("name not bytes")?
+        info.get("name")
+            .ok_or("missing name")?
+            .as_bytes()
+            .ok_or("name not bytes")?,
     );
 
     // Private
-    let private = info.get("private")
+    let private = info
+        .get("private")
         .and_then(|v| v.as_int())
         .map(|v| v == 1)
         .unwrap_or(false);
@@ -118,9 +128,13 @@ pub fn parse_torrent_bytes(data: &[u8]) -> Result<TorrentMeta, String> {
         for f in file_list {
             let fd = f.as_dict().ok_or("file entry not dict")?;
             let length = file_length(fd.get("length").ok_or("missing file length")?)?;
-            let path_parts = fd.get("path").ok_or("missing file path")?
-                .as_list().ok_or("file path not list")?;
-            let path: PathBuf = path_parts.iter()
+            let path_parts = fd
+                .get("path")
+                .ok_or("missing file path")?
+                .as_list()
+                .ok_or("file path not list")?;
+            let path: PathBuf = path_parts
+                .iter()
                 .filter_map(|p| p.as_bytes())
                 .map(decode_path_str)
                 .collect();
@@ -131,7 +145,11 @@ pub fn parse_torrent_bytes(data: &[u8]) -> Result<TorrentMeta, String> {
             let attr = fd.get("attr").and_then(|a| a.as_bytes()).unwrap_or(&[]);
             let is_pad = attr.contains(&b'p') || path.starts_with(".pad");
             if !is_pad {
-                files.push(FileEntry { path, offset, length });
+                files.push(FileEntry {
+                    path,
+                    offset,
+                    length,
+                });
             }
             offset = offset.checked_add(length).ok_or("file lengths overflow")?;
         }
@@ -140,7 +158,15 @@ pub fn parse_torrent_bytes(data: &[u8]) -> Result<TorrentMeta, String> {
         // Single-file torrent
         let length = file_length(info.get("length").ok_or("missing length")?)?;
         let path = PathBuf::from(&name);
-        (vec![FileEntry { path, offset: 0, length }], length, false)
+        (
+            vec![FileEntry {
+                path,
+                offset: 0,
+                length,
+            }],
+            length,
+            false,
+        )
     };
 
     // One hash per piece of the stream, no more, no fewer: every offset the
@@ -168,7 +194,8 @@ pub fn parse_torrent_bytes(data: &[u8]) -> Result<TorrentMeta, String> {
         if let Some(tiers) = al.as_list() {
             for tier in tiers {
                 if let Some(urls) = tier.as_list() {
-                    let tier_urls: Vec<String> = urls.iter()
+                    let tier_urls: Vec<String> = urls
+                        .iter()
                         .filter_map(|u| u.as_string().map(|s| s.to_string()))
                         .collect();
                     if !tier_urls.is_empty() {
@@ -235,7 +262,10 @@ fn trackers_and_seeds(dict: &BencodeDict) -> (Vec<Vec<String>>, Vec<String>) {
     if let Some(tiers) = dict.get("announce-list").and_then(|v| v.as_list()) {
         for tier in tiers {
             if let Some(urls) = tier.as_list() {
-                let t: Vec<String> = urls.iter().filter_map(|u| u.as_string().map(|s| s.to_string())).collect();
+                let t: Vec<String> = urls
+                    .iter()
+                    .filter_map(|u| u.as_string().map(|s| s.to_string()))
+                    .collect();
                 if !t.is_empty() {
                     trackers.push(t);
                 }
@@ -252,7 +282,13 @@ fn trackers_and_seeds(dict: &BencodeDict) -> (Vec<Vec<String>>, Vec<String>) {
         if let Some(s) = ul.as_string().filter(|s| !s.is_empty()) {
             url_list.push(s.to_string());
         } else if let Some(items) = ul.as_list() {
-            url_list.extend(items.iter().filter_map(|u| u.as_string()).filter(|s| !s.is_empty()).map(String::from));
+            url_list.extend(
+                items
+                    .iter()
+                    .filter_map(|u| u.as_string())
+                    .filter(|s| !s.is_empty())
+                    .map(String::from),
+            );
         }
     }
     (trackers, url_list)
@@ -265,7 +301,11 @@ struct V2File {
     root: Option<[u8; 32]>,
 }
 
-fn walk_file_tree(node: &BencodeValue, prefix: &std::path::Path, out: &mut Vec<V2File>) -> Result<(), String> {
+fn walk_file_tree(
+    node: &BencodeValue,
+    prefix: &std::path::Path,
+    out: &mut Vec<V2File>,
+) -> Result<(), String> {
     let BencodeValue::Dict(entries) = node else {
         return Err("file tree node is not a dict".into());
     };
@@ -276,7 +316,10 @@ fn walk_file_tree(node: &BencodeValue, prefix: &std::path::Path, out: &mut Vec<V
             // A file: its properties under the empty key.
             Some(leaf) => {
                 let leaf = leaf.as_dict().ok_or("file entry is not a dict")?;
-                let length = leaf.get("length").and_then(|l| l.as_int()).ok_or("file without length")?;
+                let length = leaf
+                    .get("length")
+                    .and_then(|l| l.as_int())
+                    .ok_or("file without length")?;
                 if length < 0 {
                     return Err("negative file length".into());
                 }
@@ -290,7 +333,11 @@ fn walk_file_tree(node: &BencodeValue, prefix: &std::path::Path, out: &mut Vec<V
                     None if length > 0 => return Err("a non-empty file has no pieces root".into()),
                     None => None,
                 };
-                out.push(V2File { path, length: length as u64, root });
+                out.push(V2File {
+                    path,
+                    length: length as u64,
+                    root,
+                });
             }
             None => walk_file_tree(child, &path, out)?,
         }
@@ -299,7 +346,9 @@ fn walk_file_tree(node: &BencodeValue, prefix: &std::path::Path, out: &mut Vec<V
 }
 
 fn v2_files(info: &BencodeDict) -> Result<Vec<V2File>, String> {
-    let tree = info.get("file tree").ok_or("v2 torrent without a file tree")?;
+    let tree = info
+        .get("file tree")
+        .ok_or("v2 torrent without a file tree")?;
     let mut files = Vec::new();
     walk_file_tree(tree, std::path::Path::new(""), &mut files)?;
     if files.is_empty() {
@@ -321,12 +370,22 @@ fn parse_v2(dict: BencodeDict, info: &BencodeDict, info_raw: &[u8]) -> Result<To
     let mut info_hash = [0u8; 20];
     info_hash.copy_from_slice(&full[..20]);
 
-    let piece_length = info.get("piece length").and_then(|v| v.as_int()).ok_or("missing piece length")?;
-    if piece_length < 16384 || (piece_length as u64).count_ones() != 1 || piece_length > u32::MAX as i64 {
+    let piece_length = info
+        .get("piece length")
+        .and_then(|v| v.as_int())
+        .ok_or("missing piece length")?;
+    if piece_length < 16384
+        || (piece_length as u64).count_ones() != 1
+        || piece_length > u32::MAX as i64
+    {
         return Err("a v2 piece length is a power of two of at least 16 KiB".into());
     }
     let pl = piece_length as u64;
-    let name = decode_path_str(info.get("name").and_then(|v| v.as_bytes()).ok_or("missing name")?);
+    let name = decode_path_str(
+        info.get("name")
+            .and_then(|v| v.as_bytes())
+            .ok_or("missing name")?,
+    );
     let private = info.get("private").and_then(|v| v.as_int()) == Some(1);
 
     let tree = v2_files(info)?;
@@ -337,10 +396,17 @@ fn parse_v2(dict: BencodeDict, info: &BencodeDict, info_raw: &[u8]) -> Result<To
     let mut pos = 0u64;
     let mut end = 0u64;
     for f in &tree {
-        files.push(FileEntry { path: f.path.clone(), offset: pos, length: f.length });
+        files.push(FileEntry {
+            path: f.path.clone(),
+            offset: pos,
+            length: f.length,
+        });
         if f.length > 0 {
             end = pos.checked_add(f.length).ok_or("file lengths overflow")?;
-            pos = end.div_ceil(pl).checked_mul(pl).ok_or("file lengths overflow")?;
+            pos = end
+                .div_ceil(pl)
+                .checked_mul(pl)
+                .ok_or("file lengths overflow")?;
         }
     }
     for f in &files {
@@ -370,7 +436,10 @@ fn skip_value(data: &[u8], pos: usize) -> Result<usize, String> {
     match data.get(pos) {
         Some(b'd') | Some(b'l') => find_dict_end(data, pos),
         Some(b'i') => {
-            let e = data[pos..].iter().position(|&b| b == b'e').ok_or("unterminated int")?;
+            let e = data[pos..]
+                .iter()
+                .position(|&b| b == b'e')
+                .ok_or("unterminated int")?;
             Ok(pos + e + 1)
         }
         Some(b'0'..=b'9') => raw_string(data, pos).map(|(_, end)| end),
@@ -380,8 +449,14 @@ fn skip_value(data: &[u8], pos: usize) -> Result<usize, String> {
 
 /// A bencoded string at `pos`: its bytes and where it ends.
 fn raw_string(data: &[u8], pos: usize) -> Result<(&[u8], usize), String> {
-    let c = data[pos..].iter().position(|&b| b == b':').ok_or("bad string")?;
-    let len: usize = std::str::from_utf8(&data[pos..pos + c]).map_err(|_| "bad string")?.parse().map_err(|_| "bad string")?;
+    let c = data[pos..]
+        .iter()
+        .position(|&b| b == b':')
+        .ok_or("bad string")?;
+    let len: usize = std::str::from_utf8(&data[pos..pos + c])
+        .map_err(|_| "bad string")?
+        .parse()
+        .map_err(|_| "bad string")?;
     let start = pos + c + 1;
     let end = start.checked_add(len).ok_or("string past the end")?;
     let bytes = data.get(start..end).ok_or("string past the end")?;
@@ -429,8 +504,14 @@ pub fn v2_piece_table(data: &[u8]) -> Result<Vec<crate::torrent::merkle::PieceCh
     use crate::torrent::merkle::{self, PieceCheck, BLOCK};
     let value = bencode_decode(data)?;
     let dict = value.as_dict().ok_or("torrent is not a dict")?;
-    let info = dict.get("info").and_then(|i| i.as_dict()).ok_or("missing info dict")?;
-    let pl = info.get("piece length").and_then(|v| v.as_int()).ok_or("missing piece length")? as u64;
+    let info = dict
+        .get("info")
+        .and_then(|i| i.as_dict())
+        .ok_or("missing info dict")?;
+    let pl = info
+        .get("piece length")
+        .and_then(|v| v.as_int())
+        .ok_or("missing piece length")? as u64;
     let layers = piece_layers(data)?;
     let per_piece = (pl / BLOCK as u64) as usize;
     // The root of a subtree of zero leaves, one piece wide: what stands for
@@ -446,12 +527,22 @@ pub fn v2_piece_table(data: &[u8]) -> Result<Vec<crate::torrent::merkle::PieceCh
         let Some(root) = f.root else { continue };
         let n = f.length.div_ceil(pl) as usize;
         if f.length <= pl {
-            out.push(PieceCheck { hash: root, data_len: f.length as u32, leaves: merkle::small_file_leaves(f.length) as u32 });
+            out.push(PieceCheck {
+                hash: root,
+                data_len: f.length as u32,
+                leaves: merkle::small_file_leaves(f.length) as u32,
+            });
             continue;
         }
-        let layer = layers.get(&root).ok_or_else(|| format!("no piece layer for {}", f.path.display()))?;
+        let layer = layers
+            .get(&root)
+            .ok_or_else(|| format!("no piece layer for {}", f.path.display()))?;
         if layer.len() != n * 32 {
-            return Err(format!("the piece layer of {} has {} hashes, expected {n}", f.path.display(), layer.len() / 32));
+            return Err(format!(
+                "the piece layer of {} has {} hashes, expected {n}",
+                f.path.display(),
+                layer.len() / 32
+            ));
         }
         let mut level: Vec<[u8; 32]> = layer.chunks(32).map(|c| c.try_into().unwrap()).collect();
         level.resize(n.next_power_of_two(), pad);
@@ -459,11 +550,18 @@ pub fn v2_piece_table(data: &[u8]) -> Result<Vec<crate::torrent::merkle::PieceCh
             level = level.chunks(2).map(|p| merkle_pair(&p[0], &p[1])).collect();
         }
         if level[0] != root {
-            return Err(format!("the piece layer of {} does not hash to its pieces root", f.path.display()));
+            return Err(format!(
+                "the piece layer of {} does not hash to its pieces root",
+                f.path.display()
+            ));
         }
         for (j, h) in layer.chunks(32).enumerate() {
             let data_len = (f.length - j as u64 * pl).min(pl);
-            out.push(PieceCheck { hash: h.try_into().unwrap(), data_len: data_len as u32, leaves: per_piece as u32 });
+            out.push(PieceCheck {
+                hash: h.try_into().unwrap(),
+                data_len: data_len as u32,
+                leaves: per_piece as u32,
+            });
         }
     }
     Ok(out)
@@ -530,9 +628,10 @@ pub fn piece_hashes_from_bytes(data: &[u8]) -> Result<Vec<[u8; 20]>, String> {
 #[cfg(test)]
 pub fn piece_hashes_from_file(path: &str) -> Result<Vec<[u8; 20]>, String> {
     let info_raw = info_dict_from_file(path)?;
-    let dict = bencode_decode(&info_raw)
-        .map_err(|e| format!("{}: info dict: {}", path, e))?;
-    let dict = dict.as_dict().ok_or_else(|| format!("{}: info is not a dict", path))?;
+    let dict = bencode_decode(&info_raw).map_err(|e| format!("{}: info dict: {}", path, e))?;
+    let dict = dict
+        .as_dict()
+        .ok_or_else(|| format!("{}: info is not a dict", path))?;
     let raw = dict
         .get("pieces")
         .ok_or_else(|| format!("{}: missing pieces", path))?
@@ -616,23 +715,30 @@ fn find_dict_end(data: &[u8], start: usize) -> Result<usize, String> {
             }
             b'i' => {
                 i += 1;
-                while i < data.len() && data[i] != b'e' { i += 1; }
+                while i < data.len() && data[i] != b'e' {
+                    i += 1;
+                }
                 i += 1; // skip 'e'
             }
             b'e' => {
                 depth -= 1;
                 i += 1;
-                if depth == 0 { return Ok(i); }
+                if depth == 0 {
+                    return Ok(i);
+                }
             }
             b'0'..=b'9' => {
                 let num_start = i;
-                while i < data.len() && data[i] != b':' { i += 1; }
+                while i < data.len() && data[i] != b':' {
+                    i += 1;
+                }
                 let len_str = std::str::from_utf8(&data[num_start..i])
                     .map_err(|_| "invalid string length")?;
                 let len: usize = len_str.parse().map_err(|_| "invalid string length")?;
                 // checked: a forged huge length must not wrap `i` backwards and
                 // spin the scanner forever (release has no overflow-checks).
-                i = i.checked_add(1)
+                i = i
+                    .checked_add(1)
                     .and_then(|x| x.checked_add(len))
                     .ok_or("string length overflow")?;
             }
@@ -656,22 +762,37 @@ use std::collections::HashMap;
 
 impl BencodeValue {
     pub fn as_int(&self) -> Option<i64> {
-        if let BencodeValue::Int(v) = self { Some(*v) } else { None }
+        if let BencodeValue::Int(v) = self {
+            Some(*v)
+        } else {
+            None
+        }
     }
     pub fn as_bytes(&self) -> Option<&[u8]> {
-        if let BencodeValue::Bytes(v) = self { Some(v) } else { None }
+        if let BencodeValue::Bytes(v) = self {
+            Some(v)
+        } else {
+            None
+        }
     }
     pub fn as_string(&self) -> Option<&str> {
-        if let BencodeValue::Bytes(v) = self { std::str::from_utf8(v).ok() } else { None }
+        if let BencodeValue::Bytes(v) = self {
+            std::str::from_utf8(v).ok()
+        } else {
+            None
+        }
     }
     pub fn as_list(&self) -> Option<&[BencodeValue]> {
-        if let BencodeValue::List(v) = self { Some(v) } else { None }
+        if let BencodeValue::List(v) = self {
+            Some(v)
+        } else {
+            None
+        }
     }
     pub fn as_dict(&self) -> Option<BencodeDict> {
         if let BencodeValue::Dict(v) = self {
-            let map: HashMap<&str, &BencodeValue> = v.iter()
-                .map(|(k, v)| (k.as_str(), v))
-                .collect();
+            let map: HashMap<&str, &BencodeValue> =
+                v.iter().map(|(k, v)| (k.as_str(), v)).collect();
             Some(BencodeDict(map))
         } else {
             None
@@ -716,19 +837,22 @@ fn decode_value(data: &[u8], pos: usize, depth: usize) -> Result<(BencodeValue, 
 }
 
 fn decode_int(data: &[u8], pos: usize) -> Result<(BencodeValue, usize), String> {
-    let end = data[pos+1..].iter().position(|&b| b == b'e')
+    let end = data[pos + 1..]
+        .iter()
+        .position(|&b| b == b'e')
         .ok_or("unterminated int")?;
-    let s = std::str::from_utf8(&data[pos+1..pos+1+end])
-        .map_err(|_| "invalid int")?;
+    let s = std::str::from_utf8(&data[pos + 1..pos + 1 + end]).map_err(|_| "invalid int")?;
     let v: i64 = s.parse().map_err(|_| "invalid int")?;
     Ok((BencodeValue::Int(v), pos + 1 + end + 1))
 }
 
 fn decode_string(data: &[u8], pos: usize) -> Result<(BencodeValue, usize), String> {
-    let colon = data[pos..].iter().position(|&b| b == b':')
+    let colon = data[pos..]
+        .iter()
+        .position(|&b| b == b':')
         .ok_or("unterminated string length")?;
-    let len_str = std::str::from_utf8(&data[pos..pos+colon])
-        .map_err(|_| "invalid string length")?;
+    let len_str =
+        std::str::from_utf8(&data[pos..pos + colon]).map_err(|_| "invalid string length")?;
     let len: usize = len_str.parse().map_err(|_| "invalid string length")?;
     let start = pos + colon + 1;
     let end = start.checked_add(len).ok_or("string length overflow")?;
@@ -848,7 +972,10 @@ mod tests {
     fn a_file_path_that_climbs_out_is_refused() {
         let e = refused(&with_paths("show", &[&["..", "..", "etc", "cron.d", "x"]]));
         assert!(e.contains("unsafe path"), "{e}");
-        refused(&with_paths("show", &[&["ok.bin"], &["sub", "..", "..", "x"]]));
+        refused(&with_paths(
+            "show",
+            &[&["ok.bin"], &["sub", "..", "..", "x"]],
+        ));
     }
 
     #[test]
@@ -888,11 +1015,16 @@ mod tests {
 
     #[test]
     fn ordinary_nested_paths_still_parse() {
-        let m = parse_torrent_bytes(&with_paths("Show S01", &[&["e01.mkv"], &["Extras", "making of.mkv"]]))
-            .expect("a normal torrent");
+        let m = parse_torrent_bytes(&with_paths(
+            "Show S01",
+            &[&["e01.mkv"], &["Extras", "making of.mkv"]],
+        ))
+        .expect("a normal torrent");
         assert_eq!(m.files.len(), 2);
-        parse_torrent_bytes(&with_paths("file..name.v2.bin", &[])).expect("dots inside a name are fine");
-        parse_torrent_bytes(&with_paths("show", &[&[".hidden"]])).expect("a dotfile is a plain name");
+        parse_torrent_bytes(&with_paths("file..name.v2.bin", &[]))
+            .expect("dots inside a name are fine");
+        parse_torrent_bytes(&with_paths("show", &[&[".hidden"]]))
+            .expect("a dotfile is a plain name");
     }
 
     /// Smallest legal single-file torrent, with `n` piece hashes. Info keys
@@ -920,7 +1052,11 @@ mod tests {
 
     fn write_temp(name: &str, bytes: &[u8]) -> String {
         let mut p = std::env::temp_dir();
-        p.push(format!("typhon-test-{}-{}.torrent", std::process::id(), name));
+        p.push(format!(
+            "typhon-test-{}-{}.torrent",
+            std::process::id(),
+            name
+        ));
         std::fs::write(&p, bytes).unwrap();
         p.to_string_lossy().into_owned()
     }
@@ -989,9 +1125,16 @@ mod tests {
         let ops = m.map_block(0, 0, 16384);
         assert_eq!(ops.len(), 2);
         assert!(!ops[0].pad && ops[0].length == 100);
-        assert!(ops[1].pad && ops[1].length == 16384 - 100, "the rest of piece 0 is padding");
+        assert!(
+            ops[1].pad && ops[1].length == 16384 - 100,
+            "the rest of piece 0 is padding"
+        );
         let ops = m.map_block(1, 0, 10);
-        assert_eq!((ops.len(), ops[0].pad, ops[0].file_offset), (1, false, 0), "piece 1 is b.bin");
+        assert_eq!(
+            (ops.len(), ops[0].pad, ops[0].file_offset),
+            (1, false, 0),
+            "piece 1 is b.bin"
+        );
     }
 
     struct V2 {
@@ -1044,7 +1187,10 @@ mod tests {
             t.extend(bstr(&v));
         }
         t.extend(b"ee");
-        V2 { torrent: t, files: out_files }
+        V2 {
+            torrent: t,
+            files: out_files,
+        }
     }
 
     /// ⭐ Every piece of a v2 torrent is aligned to its file and checks
@@ -1053,13 +1199,28 @@ mod tests {
     fn a_v2_torrent_reads_and_every_piece_checks() {
         use sha2::{Digest, Sha256};
         let pl = 65536;
-        let v = v2_torrent(pl, &[("a.bin", 100), ("b.bin", 3 * 16384 + 5), ("c.bin", 3 * pl + 1000)]);
+        let v = v2_torrent(
+            pl,
+            &[
+                ("a.bin", 100),
+                ("b.bin", 3 * 16384 + 5),
+                ("c.bin", 3 * pl + 1000),
+            ],
+        );
         let m = parse_torrent_bytes(&v.torrent).expect("v2 parses");
         assert!(m.v2 && m.multi_file);
         let info = find_info_raw(&v.torrent).unwrap();
-        assert_eq!(m.info_hash[..], Sha256::digest(&info)[..20], "the truncated SHA-256");
+        assert_eq!(
+            m.info_hash[..],
+            Sha256::digest(&info)[..20],
+            "the truncated SHA-256"
+        );
         let offs: Vec<u64> = m.files.iter().map(|f| f.offset).collect();
-        assert_eq!(offs, vec![0, pl as u64, 2 * pl as u64], "each file on a piece boundary");
+        assert_eq!(
+            offs,
+            vec![0, pl as u64, 2 * pl as u64],
+            "each file on a piece boundary"
+        );
         assert_eq!(m.num_pieces, 1 + 1 + 4);
 
         let table = v2_piece_table(&v.torrent).expect("layers check out");
@@ -1089,16 +1250,25 @@ mod tests {
         let last = t.len() - 3;
         assert!(at < last);
         t[last] ^= 0xff;
-        assert!(v2_piece_table(&t).unwrap_err().contains("does not hash to its pieces root"));
+        assert!(v2_piece_table(&t)
+            .unwrap_err()
+            .contains("does not hash to its pieces root"));
     }
 
     #[test]
     fn a_malformed_v2_torrent_is_refused() {
         let v = v2_torrent(65536, &[("a.bin", 10)]);
-        let bad_pl = String::from_utf8_lossy(&v.torrent).replace("piece lengthi65536e", "piece lengthi65535e");
-        assert!(parse_torrent_bytes(bad_pl.as_bytes()).is_err(), "not a power of two");
+        let bad_pl = String::from_utf8_lossy(&v.torrent)
+            .replace("piece lengthi65536e", "piece lengthi65535e");
+        assert!(
+            parse_torrent_bytes(bad_pl.as_bytes()).is_err(),
+            "not a power of two"
+        );
         let single = parse_torrent_bytes(&v.torrent).unwrap();
-        assert!(!single.multi_file, "one file at the top is a single-file torrent");
+        assert!(
+            !single.multi_file,
+            "one file at the top is a single-file torrent"
+        );
         assert_eq!(single.files[0].path, std::path::PathBuf::from("a.bin"));
     }
 
@@ -1108,7 +1278,11 @@ mod tests {
     #[test]
     fn a_second_info_dict_is_refused() {
         let info = |name: &str| {
-            let mut i = format!("d6:lengthi16384e4:name{}:{name}12:piece lengthi16384e6:pieces20:", name.len()).into_bytes();
+            let mut i = format!(
+                "d6:lengthi16384e4:name{}:{name}12:piece lengthi16384e6:pieces20:",
+                name.len()
+            )
+            .into_bytes();
             i.extend([1u8; 20]);
             i.push(b'e');
             i
@@ -1140,14 +1314,20 @@ mod tests {
     #[test]
     fn piece_length_is_a_positive_u32() {
         for pl in ["0", "-1", "4294983680"] {
-            assert!(parse_torrent_bytes(&single("16384", pl, 1)).is_err(), "piece length {pl} accepted");
+            assert!(
+                parse_torrent_bytes(&single("16384", pl, 1)).is_err(),
+                "piece length {pl} accepted"
+            );
         }
         parse_torrent_bytes(&single("16384", "16384", 1)).expect("a sane one");
     }
 
     #[test]
     fn file_lengths_are_non_negative_and_their_sum_does_not_wrap() {
-        assert!(parse_torrent_bytes(&single("-1", "16384", 1)).is_err(), "negative length accepted");
+        assert!(
+            parse_torrent_bytes(&single("-1", "16384", 1)).is_err(),
+            "negative length accepted"
+        );
         let mut info = b"d5:filesl".to_vec();
         for n in ["a", "b", "c"] {
             info.extend(format!("d6:lengthi{}e4:pathl1:{n}ee", i64::MAX).as_bytes());
@@ -1158,15 +1338,30 @@ mod tests {
         let mut t = b"d4:info".to_vec();
         t.extend(info);
         t.push(b'e');
-        assert!(parse_torrent_bytes(&t).is_err(), "a wrapped total size accepted");
+        assert!(
+            parse_torrent_bytes(&t).is_err(),
+            "a wrapped total size accepted"
+        );
     }
 
     #[test]
     fn the_piece_count_matches_the_size() {
-        assert!(parse_torrent_bytes(&single("100", "16384", 0)).is_err(), "no piece for 100 bytes");
-        assert!(parse_torrent_bytes(&single("16385", "16384", 1)).is_err(), "one piece short");
-        assert!(parse_torrent_bytes(&single("16384", "16384", 2)).is_err(), "one piece too many");
-        assert!(parse_torrent_bytes(&single(&(1u64 << 60).to_string(), "16384", 1)).is_err(), "2^60 bytes in one piece");
+        assert!(
+            parse_torrent_bytes(&single("100", "16384", 0)).is_err(),
+            "no piece for 100 bytes"
+        );
+        assert!(
+            parse_torrent_bytes(&single("16385", "16384", 1)).is_err(),
+            "one piece short"
+        );
+        assert!(
+            parse_torrent_bytes(&single("16384", "16384", 2)).is_err(),
+            "one piece too many"
+        );
+        assert!(
+            parse_torrent_bytes(&single(&(1u64 << 60).to_string(), "16384", 1)).is_err(),
+            "2^60 bytes in one piece"
+        );
         parse_torrent_bytes(&single("16385", "16384", 2)).expect("exact count");
     }
 
@@ -1189,8 +1384,14 @@ mod tests {
             t
         };
         let m = i64::MAX as u64;
-        assert!(parse_torrent_bytes(&v2(&[m, m, m])).is_err(), "wrapped offsets accepted");
-        assert!(parse_torrent_bytes(&v2(&[1 << 50])).is_err(), "more pieces than a u32 counts");
+        assert!(
+            parse_torrent_bytes(&v2(&[m, m, m])).is_err(),
+            "wrapped offsets accepted"
+        );
+        assert!(
+            parse_torrent_bytes(&v2(&[1 << 50])).is_err(),
+            "more pieces than a u32 counts"
+        );
         parse_torrent_bytes(&v2(&[100, 20000])).expect("a sane one");
     }
 
@@ -1200,7 +1401,10 @@ mod tests {
         assert!(bencode_decode(b"d1:ai1e").is_err(), "open dict accepted");
         let (mut t, _) = torrent_bytes(1);
         assert_eq!(t.pop(), Some(b'e'));
-        assert!(parse_torrent_bytes(&t).is_err(), "a truncated torrent accepted");
+        assert!(
+            parse_torrent_bytes(&t).is_err(),
+            "a truncated torrent accepted"
+        );
         bencode_decode(b"d1:ali1eee").expect("a closed one");
     }
 
@@ -1217,14 +1421,21 @@ mod tests {
         bytes[at + 9] = b'5';
         bytes.remove(bytes.len() - 3);
         let path = write_temp("truncated", &bytes);
-        assert!(piece_hashes_from_file(&path).is_err(), "truncated table accepted");
+        assert!(
+            piece_hashes_from_file(&path).is_err(),
+            "truncated table accepted"
+        );
         std::fs::remove_file(&path).ok();
     }
 
     /// The info dict of a one-piece torrent named `name`, whose single piece
     /// hash is `fill` repeated.
     fn one_piece_info(name: &str, fill: u8) -> Vec<u8> {
-        let mut i = format!("d6:lengthi16384e4:name{}:{name}12:piece lengthi16384e6:pieces20:", name.len()).into_bytes();
+        let mut i = format!(
+            "d6:lengthi16384e4:name{}:{name}12:piece lengthi16384e6:pieces20:",
+            name.len()
+        )
+        .into_bytes();
         i.extend([fill; 20]);
         i.push(b'e');
         i
@@ -1245,11 +1456,23 @@ mod tests {
         t.extend(&real);
         t.push(b'e');
 
-        assert_eq!(info_dict_from_bytes(&t).expect("the real info dict"), real, "the dict handed to BEP 9");
+        assert_eq!(
+            info_dict_from_bytes(&t).expect("the real info dict"),
+            real,
+            "the dict handed to BEP 9"
+        );
         let m = parse_torrent_bytes(&t).expect("a valid torrent");
         assert_eq!(m.name, "real.bin");
-        assert_eq!(m.info_hash, sha1_hash(&real), "hashed the dict that names the files");
-        assert_ne!(m.info_hash, sha1_hash(&decoy), "took the identity of the dict in the comment");
+        assert_eq!(
+            m.info_hash,
+            sha1_hash(&real),
+            "hashed the dict that names the files"
+        );
+        assert_ne!(
+            m.info_hash,
+            sha1_hash(&decoy),
+            "took the identity of the dict in the comment"
+        );
     }
 
     /// A comment that merely mentions `4:info` is a string, not a key.
@@ -1310,7 +1533,9 @@ mod tests {
         };
         within(move || {
             info_dict_from_bytes(&build(5)).expect("a shallow one is fine");
-            info_dict_from_bytes(&build(1000)).map(|v| v.len()).expect_err("1000 levels accepted");
+            info_dict_from_bytes(&build(1000))
+                .map(|v| v.len())
+                .expect_err("1000 levels accepted");
         });
     }
 
@@ -1319,11 +1544,19 @@ mod tests {
     /// scanner then walks the same bytes forever.
     #[test]
     fn the_dict_end_scanner_refuses_a_forged_string_length() {
-        for forged in ["18446744073709551615", "18446744073709551614", "9223372036854775808"] {
+        for forged in [
+            "18446744073709551615",
+            "18446744073709551614",
+            "9223372036854775808",
+        ] {
             let data = format!("l{forged}:xe").into_bytes();
             within(move || assert!(find_dict_end(&data, 0).is_err(), "length {forged} accepted"));
         }
-        assert_eq!(find_dict_end(b"l5:abcdee", 0), Ok(9), "an honest length still reads");
+        assert_eq!(
+            find_dict_end(b"l5:abcdee", 0),
+            Ok(9),
+            "an honest length still reads"
+        );
         // The same forged length behind a key, as a torrent carries it.
         let mut t = b"d1:z".to_vec();
         t.extend(b"l18446744073709551615:xe4:info");

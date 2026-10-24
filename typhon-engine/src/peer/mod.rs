@@ -1,23 +1,23 @@
 pub mod bencode;
-pub mod extension;
 pub mod choking;
 pub mod download;
+pub mod extension;
 pub mod handshake;
 pub mod holepunch;
 pub mod message;
 pub mod metadata;
 pub mod peerclient;
-pub mod session;
-pub mod transport;
 pub mod proxy_protocol;
 #[cfg(test)]
 mod rebind_tests;
+pub mod session;
+pub mod transport;
 
 use std::collections::HashSet;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::Arc;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 /// Incoming TCP/PROXY-v2 connections rejected because the source IP matches
 /// TYPHON_SELF_IPS (own VPS / styx netns / tunnel egress). Exposed for
@@ -39,14 +39,14 @@ pub type Socks5Config = (String, u16, Option<(String, String)>);
 // untouched), and keeps the old port when the new one cannot be bound.
 // The rebind channel lives on the TorrentManager: one listener per engine, so
 // one channel per engine. See `TorrentManager::request_listen_rebind`.
+use librqbit_utp::UtpSocketUdp;
 use std::time::Duration;
 use tokio::net::{TcpListener, TcpSocket};
-use librqbit_utp::UtpSocketUdp;
 use tracing::{info, warn};
 
 use crate::disk::DiskManager;
-use crate::torrent::TorrentManager;
 use crate::peer::transport::PeerTransport;
+use crate::torrent::TorrentManager;
 
 /// Listen for incoming peer connections on TCP (one listener per binding,
 /// each with its own peer_id used in the BT handshake) and uTP (one shared
@@ -72,7 +72,16 @@ pub async fn listen(
     utp: UtpHandle,
     listening: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    listen_until(bindings, default_port, torrent_mgr, disk_mgr, utp, listening, crate::stop::global().clone()).await
+    listen_until(
+        bindings,
+        default_port,
+        torrent_mgr,
+        disk_mgr,
+        utp,
+        listening,
+        crate::stop::global().clone(),
+    )
+    .await
 }
 
 /// `listen` with the stop signal given, so a test can close the listeners
@@ -91,7 +100,8 @@ async fn listen_until(
     }
     // Refused before any socket: outside Linux a pinned listener would be an
     // unpinned one (`netpin::DEVICE_PIN_SUPPORTED`).
-    if !crate::netpin::DEVICE_PIN_SUPPORTED && bindings.iter().any(|b| b.egress.device().is_some()) {
+    if !crate::netpin::DEVICE_PIN_SUPPORTED && bindings.iter().any(|b| b.egress.device().is_some())
+    {
         return Err(crate::netpin::UNSUPPORTED.into());
     }
 
@@ -300,9 +310,15 @@ fn bind_round(
                 continue;
             }
         }
-        socket.set_reuseaddr(true).map_err(|e| format!("{}: {e}", b.addr))?;
-        socket.bind(b.addr).map_err(|e| format!("cannot bind {}: {e}", b.addr))?;
-        let listener = socket.listen(4096).map_err(|e| format!("cannot listen on {}: {e}", b.addr))?;
+        socket
+            .set_reuseaddr(true)
+            .map_err(|e| format!("{}: {e}", b.addr))?;
+        socket
+            .bind(b.addr)
+            .map_err(|e| format!("cannot bind {}: {e}", b.addr))?;
+        let listener = socket
+            .listen(4096)
+            .map_err(|e| format!("cannot listen on {}: {e}", b.addr))?;
         out.push((listener, b.clone()));
     }
     Ok(out)
@@ -349,8 +365,11 @@ fn spawn_utp(
     } else {
         default_port
     };
-    info!("[peer] uTP listening on {} (peer_id from binding[0], advertised_port={})",
-        sock.bind_addr(), utp_advertised_port);
+    info!(
+        "[peer] uTP listening on {} (peer_id from binding[0], advertised_port={})",
+        sock.bind_addr(),
+        utp_advertised_port
+    );
     let tm = torrent_mgr.clone();
     let dm = disk_mgr.clone();
     let u = Some(sock.clone());
@@ -429,7 +448,11 @@ impl UtpHandle {
 
     /// Put `live` in place and shut the old socket down.
     fn install(&self, live: UtpLive) {
-        let old = self.inner.write().unwrap_or_else(|p| p.into_inner()).replace(live);
+        let old = self
+            .inner
+            .write()
+            .unwrap_or_else(|p| p.into_inner())
+            .replace(live);
         if let Some(old) = old {
             old.cancel.cancel();
         }
@@ -452,7 +475,9 @@ async fn bind_utp(port: u16, device: Option<&str>) -> Result<UtpLive, String> {
         .map(|d| d.parse::<librqbit_utp::BindDevice>())
         .transpose()
         .map_err(|e| format!("bind_device is not usable for the uTP socket: {e}"))?;
-    let udp_opts = librqbit_utp::UtpSocketUdpOpts { bind_device: dev.as_ref() };
+    let udp_opts = librqbit_utp::UtpSocketUdpOpts {
+        bind_device: dev.as_ref(),
+    };
     let sock = UtpSocketUdp::new_udp_with_opts(bind, opts, udp_opts)
         .await
         .map_err(|e| format!("cannot bind the uTP socket on {bind}: {e}"))?;
@@ -507,7 +532,6 @@ pub fn set_session_pinning(on: bool) {
     }
 }
 
-
 /// Pool size for the next build. Refused once the pool exists: tearing down
 /// runtimes that carry live sessions is not worth it, and silently ignoring the
 /// request would make a measurement lie about what it measured.
@@ -533,7 +557,9 @@ pub fn session_runtimes_n() -> usize {
     {
         return n;
     }
-    std::thread::available_parallelism().map(|v| v.get()).unwrap_or(1)
+    std::thread::available_parallelism()
+        .map(|v| v.get())
+        .unwrap_or(1)
 }
 
 fn session_runtimes() -> &'static [tokio::runtime::Handle] {
@@ -541,7 +567,10 @@ fn session_runtimes() -> &'static [tokio::runtime::Handle] {
         let n = session_runtimes_n();
         let mut handles = Vec::with_capacity(n);
         for i in 0..n {
-            let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
                 Ok(r) => r,
                 Err(e) => {
                     warn!("[peer] session runtime {} failed: {}", i, e);
@@ -555,7 +584,10 @@ fn session_runtimes() -> &'static [tokio::runtime::Handle] {
                     rt.block_on(std::future::pending::<()>());
                 });
         }
-        info!("[peer] thread-per-core: {} dedicated session runtimes", handles.len());
+        info!(
+            "[peer] thread-per-core: {} dedicated session runtimes",
+            handles.len()
+        );
         handles
     })
 }
@@ -569,9 +601,14 @@ fn session_runtimes() -> &'static [tokio::runtime::Handle] {
 async fn accept_backoff(kind: &str, e: &std::io::Error, failures: &mut u32) {
     *failures = failures.saturating_add(1);
     if failures.is_power_of_two() {
-        warn!("[peer] {} accept error ({} in a row): {}", kind, failures, e);
+        warn!(
+            "[peer] {} accept error ({} in a row): {}",
+            kind, failures, e
+        );
     }
-    let ms = 10u64.saturating_mul(1u64 << (*failures - 1).min(7)).min(1000);
+    let ms = 10u64
+        .saturating_mul(1u64 << (*failures - 1).min(7))
+        .min(1000);
     tokio::time::sleep(Duration::from_millis(ms)).await;
 }
 
@@ -615,7 +652,16 @@ async fn tcp_accept_loop(
         };
         if rts.is_empty() {
             tokio::spawn(async move {
-                handle_incoming(PeerTransport::Tcp(stream), addr, tm, dm, peer_id, u, listen_port).await;
+                handle_incoming(
+                    PeerTransport::Tcp(stream),
+                    addr,
+                    tm,
+                    dm,
+                    peer_id,
+                    u,
+                    listen_port,
+                )
+                .await;
             });
         } else {
             let idx = SESSION_RR.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % rts.len();
@@ -624,7 +670,16 @@ async fn tcp_accept_loop(
                     rts[idx].spawn(async move {
                         match tokio::net::TcpStream::from_std(std_s) {
                             Ok(s) => {
-                                handle_incoming(PeerTransport::Tcp(s), addr, tm, dm, peer_id, u, listen_port).await;
+                                handle_incoming(
+                                    PeerTransport::Tcp(s),
+                                    addr,
+                                    tm,
+                                    dm,
+                                    peer_id,
+                                    u,
+                                    listen_port,
+                                )
+                                .await;
                             }
                             Err(e) => warn!("[peer] from_std failed: {}", e),
                         }
@@ -651,11 +706,19 @@ pub async fn listen_proxy_v2(
     egress: crate::netpin::Egress,
     utp_socket: Option<Arc<UtpSocketUdp>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let addr_str = if bind_addr.is_empty() { "[::]".to_string() } else { bind_addr };
+    let addr_str = if bind_addr.is_empty() {
+        "[::]".to_string()
+    } else {
+        bind_addr
+    };
     let sockaddr: std::net::SocketAddr = format!("{}:{}", addr_str, port)
         .parse()
         .map_err(|e| format!("invalid proxy-v2 listen addr {}:{}: {}", addr_str, port, e))?;
-    let socket = if sockaddr.is_ipv4() { TcpSocket::new_v4()? } else { TcpSocket::new_v6()? };
+    let socket = if sockaddr.is_ipv4() {
+        TcpSocket::new_v4()?
+    } else {
+        TcpSocket::new_v6()?
+    };
     // Pinned like the main listener, for the same reason: an accepted socket
     // inherits the device, so the reply to the relay leaves by the tunnel the
     // relay reached us through, not by the default route.
@@ -675,7 +738,10 @@ pub async fn listen_proxy_v2(
     socket.set_reuseaddr(true)?;
     socket.bind(sockaddr)?;
     let listener = socket.listen(4096)?;
-    info!("[peer] PROXY v2 TCP listening on {} (backlog=4096)", sockaddr);
+    info!(
+        "[peer] PROXY v2 TCP listening on {} (backlog=4096)",
+        sockaddr
+    );
 
     let mut failures = 0u32;
     loop {
@@ -700,7 +766,16 @@ pub async fn listen_proxy_v2(
                     // catches real self-loops via peer_id, and the IP filter
                     // blocked cross-engine peers behind the same public IP.
                     stream.set_nodelay(true).ok();
-                    handle_incoming(PeerTransport::Tcp(stream), real_addr, tm, dm, peer_id, u, port).await;
+                    handle_incoming(
+                        PeerTransport::Tcp(stream),
+                        real_addr,
+                        tm,
+                        dm,
+                        peer_id,
+                        u,
+                        port,
+                    )
+                    .await;
                 }
                 Err(e) => warn!("[peer] proxy-v2 {}", e),
             }
@@ -724,7 +799,12 @@ async fn accept_proxied(
     if !is_trusted_proxy_source(&wire_addr, trusted) {
         return Err(format!("reject untrusted src {}", wire_addr));
     }
-    match tokio::time::timeout(Duration::from_secs(5), proxy_protocol::parse_v2(&mut stream)).await {
+    match tokio::time::timeout(
+        Duration::from_secs(5),
+        proxy_protocol::parse_v2(&mut stream),
+    )
+    .await
+    {
         Ok(Ok(real_addr)) => Ok((stream, real_addr)),
         Ok(Err(e)) => Err(format!("parse err from {}: {}", wire_addr, e)),
         Err(_) => Err(format!("read timeout from {}", wire_addr)),
@@ -762,12 +842,12 @@ fn is_trusted_proxy_source(addr: &SocketAddr, extras: &[std::net::IpAddr]) -> bo
             }
         }
     };
-    if v4.is_loopback() { return true; }
+    if v4.is_loopback() {
+        return true;
+    }
     let o = v4.octets();
     // RFC1918 including Docker default bridge 172.17.0.0/16
-    o[0] == 10
-        || (o[0] == 172 && (16..=31).contains(&o[1]))
-        || (o[0] == 192 && o[1] == 168)
+    o[0] == 10 || (o[0] == 172 && (16..=31).contains(&o[1])) || (o[0] == 192 && o[1] == 168)
 }
 
 async fn utp_accept_loop(
@@ -792,7 +872,16 @@ async fn utp_accept_loop(
         let dm = disk_mgr.clone();
         let u = utp_socket.clone();
         tokio::spawn(async move {
-            handle_incoming(PeerTransport::Utp(stream), addr, tm, dm, peer_id, u, listen_port).await;
+            handle_incoming(
+                PeerTransport::Utp(stream),
+                addr,
+                tm,
+                dm,
+                peer_id,
+                u,
+                listen_port,
+            )
+            .await;
         });
     }
 }
@@ -829,7 +918,8 @@ pub static HAVE_RX_DISARMED: std::sync::atomic::AtomicU64 = std::sync::atomic::A
 pub static HAVE_RX_LAGGED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Inbound handshakes refused because the torrent asked for is stopped.
-pub static INBOUND_REFUSED_PAUSED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static INBOUND_REFUSED_PAUSED: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 
 /// Inbound handshakes refused because the engine already holds
 /// `max_connections` live sessions.
@@ -868,18 +958,22 @@ const MAX_HANDSHAKING: usize = 4096;
 /// allocation, which it can spread connections over freely).
 const MAX_HANDSHAKING_PER_SOURCE: u32 = 32;
 static HANDSHAKING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-static HANDSHAKING_BY_SOURCE: std::sync::OnceLock<dashmap::DashMap<std::net::IpAddr, u32>> = std::sync::OnceLock::new();
+static HANDSHAKING_BY_SOURCE: std::sync::OnceLock<dashmap::DashMap<std::net::IpAddr, u32>> =
+    std::sync::OnceLock::new();
 
 /// Inbound connections closed unread because too many were already in their
 /// handshake, from that source or overall.
-pub static INBOUND_REFUSED_BUSY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static INBOUND_REFUSED_BUSY: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 
 /// Inbound plaintext handshakes closed because `peer_encryption = require`.
-pub static PLAINTEXT_INBOUND_REFUSED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static PLAINTEXT_INBOUND_REFUSED: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 
 /// Inbound handshakes dropped because their source is being ignored
 /// (`max_unknown_infohash_per_ip`).
-pub static INBOUND_REFUSED_IGNORED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static INBOUND_REFUSED_IGNORED: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 
 /// Window over which a source's unknown-info_hash handshakes are counted.
 const UNKNOWN_HASH_WINDOW: Duration = Duration::from_secs(60);
@@ -937,9 +1031,17 @@ impl UnknownHashLimiter {
                 return false;
             }
         }
-        let mut e = self.sources.entry(key).or_insert(UnknownHashEntry { window_start: now, count: 0, ignored_until: None });
+        let mut e = self.sources.entry(key).or_insert(UnknownHashEntry {
+            window_start: now,
+            count: 0,
+            ignored_until: None,
+        });
         if e.expired(now) {
-            *e = UnknownHashEntry { window_start: now, count: 0, ignored_until: None };
+            *e = UnknownHashEntry {
+                window_start: now,
+                count: 0,
+                ignored_until: None,
+            };
         }
         if e.ignored_until.is_some() {
             return true;
@@ -983,7 +1085,10 @@ impl HandshakeSlot {
             return None;
         }
         let key = handshake_source(ip);
-        let mut n = HANDSHAKING_BY_SOURCE.get_or_init(Default::default).entry(key).or_insert(0);
+        let mut n = HANDSHAKING_BY_SOURCE
+            .get_or_init(Default::default)
+            .entry(key)
+            .or_insert(0);
         if *n >= MAX_HANDSHAKING_PER_SOURCE {
             drop(n);
             HANDSHAKING.fetch_sub(1, Ordering::Relaxed);
@@ -1017,10 +1122,10 @@ async fn handle_incoming(
     utp_socket: Option<Arc<UtpSocketUdp>>,
     listen_port: u16,
 ) {
+    use crate::crypto::stream::CryptoStream;
+    use crate::wire::codec::BtCodec;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio_util::codec::Framed;
-    use crate::wire::codec::BtCodec;
-    use crate::crypto::stream::CryptoStream;
 
     // Before anything costs: no handshake, no MSE, no log line per attempt
     // from a range somebody filtered precisely because it knocks a lot.
@@ -1029,7 +1134,11 @@ async fn handle_incoming(
         return;
     }
     let unknown_limit = torrent_mgr.policy().unknown_hash_limit();
-    if unknown_limit > 0 && torrent_mgr.unknown_hashes().is_ignored(addr.ip(), std::time::Instant::now()) {
+    if unknown_limit > 0
+        && torrent_mgr
+            .unknown_hashes()
+            .is_ignored(addr.ip(), std::time::Instant::now())
+    {
         INBOUND_REFUSED_IGNORED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         return;
     }
@@ -1062,12 +1171,18 @@ async fn handle_incoming(
         Ok(Err(_)) => return,
         Err(_) => {
             HS_TIMED_OUT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            tracing::debug!("[peer] {} sent nothing within {:?}, dropping", addr, HS_TIMEOUT);
+            tracing::debug!(
+                "[peer] {} sent nothing within {:?}, dropping",
+                addr,
+                HS_TIMEOUT
+            );
             return;
         }
     }
 
-    let (crypto_stream, torrent, fast_ext, lt_ext, remote_peer_id, is_encrypted) = if head == PLAIN_HANDSHAKE_HEAD {
+    let (crypto_stream, torrent, fast_ext, lt_ext, remote_peer_id, is_encrypted) = if head
+        == PLAIN_HANDSHAKE_HEAD
+    {
         // Plaintext BT handshake — 20 bytes read, 48 to go. `rest` is what
         // follows the length byte, as before.
         let mut rest = [0u8; 67];
@@ -1075,7 +1190,10 @@ async fn handle_incoming(
         match tokio::time::timeout(HS_TIMEOUT, stream.read_exact(&mut rest[19..])).await {
             Ok(Ok(_)) => {}
             Ok(Err(_)) => return,
-            Err(_) => { HS_TIMED_OUT.fetch_add(1, std::sync::atomic::Ordering::Relaxed); return; }
+            Err(_) => {
+                HS_TIMED_OUT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return;
+            }
         }
         // `peer_encryption = require`: a plaintext handshake is closed before
         // the torrent is even looked up, so it learns nothing.
@@ -1098,7 +1216,11 @@ async fn handle_incoming(
                 return;
             }
             None => {
-                torrent_mgr.unknown_hashes().note_unknown(addr.ip(), std::time::Instant::now(), unknown_limit);
+                torrent_mgr.unknown_hashes().note_unknown(
+                    addr.ip(),
+                    std::time::Instant::now(),
+                    unknown_limit,
+                );
                 return;
             }
         };
@@ -1121,10 +1243,20 @@ async fn handle_incoming(
         match tokio::time::timeout(HS_TIMEOUT, stream.write_all(&reply)).await {
             Ok(Ok(_)) => {}
             Ok(Err(_)) => return,
-            Err(_) => { HS_TIMED_OUT.fetch_add(1, std::sync::atomic::Ordering::Relaxed); return; }
+            Err(_) => {
+                HS_TIMED_OUT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return;
+            }
         }
 
-        (CryptoStream::plain(stream), torrent, fast_ext, ext_proto, remote_pid, false)
+        (
+            CryptoStream::plain(stream),
+            torrent,
+            fast_ext,
+            ext_proto,
+            remote_pid,
+            false,
+        )
     } else {
         // MSE handshake — the 20 bytes already read are the start of the DH
         // public key, handed on intact.
@@ -1140,7 +1272,10 @@ async fn handle_incoming(
                 warn!("[peer] {} MSE: failed to read Ya", addr);
                 return;
             }
-            Err(_) => { HS_TIMED_OUT.fetch_add(1, std::sync::atomic::Ordering::Relaxed); return; }
+            Err(_) => {
+                HS_TIMED_OUT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return;
+            }
         }
 
         let tm_clone = torrent_mgr.clone();
@@ -1162,7 +1297,8 @@ async fn handle_incoming(
                 },
                 torrent_mgr.policy().encryption() == crate::peer::extension::Encryption::Require,
             ),
-        ).await;
+        )
+        .await;
         let mse_res = match mse_res {
             Ok(r) => r,
             Err(_) => {
@@ -1183,11 +1319,22 @@ async fn handle_incoming(
                 if at_connection_cap(&torrent) {
                     return;
                 }
-                (CryptoStream::new(stream, Some(enc), Some(dec)), torrent, hs.fast_extension, hs.extended_protocol, hs.peer_id, true)
+                (
+                    CryptoStream::new(stream, Some(enc), Some(dec)),
+                    torrent,
+                    hs.fast_extension,
+                    hs.extended_protocol,
+                    hs.peer_id,
+                    true,
+                )
             }
             Err(e) => {
                 if unknown_skey.load(std::sync::atomic::Ordering::Relaxed) {
-                    torrent_mgr.unknown_hashes().note_unknown(addr.ip(), std::time::Instant::now(), unknown_limit);
+                    torrent_mgr.unknown_hashes().note_unknown(
+                        addr.ip(),
+                        std::time::Instant::now(),
+                        unknown_limit,
+                    );
                 }
                 warn!("[peer] {} MSE handshake failed: {}", addr, e);
                 return;
@@ -1280,8 +1427,14 @@ mod proxy_trust_tests {
     /// listener -- or, read the other way round, trust one that is public.
     #[test]
     fn a_v4_mapped_address_is_judged_as_the_v4_it_is() {
-        assert!(is_trusted_proxy_source(&addr("[::ffff:10.0.0.1]:16271"), &[]));
-        assert!(is_trusted_proxy_source(&addr("[::ffff:127.0.0.1]:16271"), &[]));
+        assert!(is_trusted_proxy_source(
+            &addr("[::ffff:10.0.0.1]:16271"),
+            &[]
+        ));
+        assert!(is_trusted_proxy_source(
+            &addr("[::ffff:127.0.0.1]:16271"),
+            &[]
+        ));
         assert!(
             !is_trusted_proxy_source(&addr("[::ffff:93.184.216.34]:16271"), &[]),
             "public is public, in either notation"
@@ -1295,7 +1448,10 @@ mod proxy_trust_tests {
         let named: IpAddr = "93.184.216.34".parse().unwrap();
         let extras = vec![named];
 
-        assert!(is_trusted_proxy_source(&addr("93.184.216.34:16271"), &extras));
+        assert!(is_trusted_proxy_source(
+            &addr("93.184.216.34:16271"),
+            &extras
+        ));
         assert!(
             is_trusted_proxy_source(&addr("93.184.216.34:9999"), &extras),
             "the port is not part of the identity"
@@ -1324,7 +1480,10 @@ mod proxy_v2_accept_tests {
 
     /// A PROXY v2 header for a TCP/IPv4 peer at `src`, as haproxy sends it.
     fn header(src: std::net::SocketAddrV4) -> Vec<u8> {
-        let mut h = vec![0x0D, 0x0A, 0x0D, 0x0A, 0x00, 0x0D, 0x0A, 0x51, 0x55, 0x49, 0x54, 0x0A, 0x21, 0x11, 0, 12];
+        let mut h = vec![
+            0x0D, 0x0A, 0x0D, 0x0A, 0x00, 0x0D, 0x0A, 0x51, 0x55, 0x49, 0x54, 0x0A, 0x21, 0x11, 0,
+            12,
+        ];
         h.extend_from_slice(&src.ip().octets());
         h.extend_from_slice(&[192, 0, 2, 1]);
         h.extend_from_slice(&src.port().to_be_bytes());
@@ -1334,7 +1493,11 @@ mod proxy_v2_accept_tests {
 
     /// One real connection: the client writes `bytes`, the server side is
     /// handed to `accept_proxied` as if it came from `wire`.
-    async fn accept_as(wire: &str, trusted: &[std::net::IpAddr], bytes: Vec<u8>) -> Result<std::net::SocketAddr, String> {
+    async fn accept_as(
+        wire: &str,
+        trusted: &[std::net::IpAddr],
+        bytes: Vec<u8>,
+    ) -> Result<std::net::SocketAddr, String> {
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let at = l.local_addr().unwrap();
         let client = tokio::spawn(async move {
@@ -1343,7 +1506,9 @@ mod proxy_v2_accept_tests {
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         });
         let (s, _) = l.accept().await.unwrap();
-        let out = accept_proxied(s, wire.parse().unwrap(), trusted).await.map(|(_, real)| real);
+        let out = accept_proxied(s, wire.parse().unwrap(), trusted)
+            .await
+            .map(|(_, real)| real);
         client.abort();
         out
     }
@@ -1353,11 +1518,15 @@ mod proxy_v2_accept_tests {
     #[tokio::test]
     async fn a_trusted_relay_hands_over_the_real_peer_address() {
         let real = "198.51.100.7:51413".parse().unwrap();
-        let got = accept_as("127.0.0.1:40000", &[], header(real)).await.unwrap();
+        let got = accept_as("127.0.0.1:40000", &[], header(real))
+            .await
+            .unwrap();
         assert_eq!(got, std::net::SocketAddr::V4(real));
         // A public relay is trusted only once listed.
         let relay: std::net::IpAddr = "203.0.113.20".parse().unwrap();
-        let got = accept_as("203.0.113.20:40000", &[relay], header(real)).await.unwrap();
+        let got = accept_as("203.0.113.20:40000", &[relay], header(real))
+            .await
+            .unwrap();
         assert_eq!(got, std::net::SocketAddr::V4(real));
     }
 
@@ -1366,10 +1535,17 @@ mod proxy_v2_accept_tests {
     #[tokio::test]
     async fn an_untrusted_source_is_refused() {
         let real = "198.51.100.7:51413".parse().unwrap();
-        let err = accept_as("203.0.113.66:40000", &[], header(real)).await.unwrap_err();
+        let err = accept_as("203.0.113.66:40000", &[], header(real))
+            .await
+            .unwrap_err();
         assert!(err.contains("untrusted"), "{err}");
         let listed: std::net::IpAddr = "203.0.113.20".parse().unwrap();
-        assert!(accept_as("203.0.113.66:40000", &[listed], header(real)).await.is_err(), "another listed IP is not this one");
+        assert!(
+            accept_as("203.0.113.66:40000", &[listed], header(real))
+                .await
+                .is_err(),
+            "another listed IP is not this one"
+        );
     }
 }
 
@@ -1396,7 +1572,10 @@ mod unknown_hash_limiter_tests {
         assert!(l.note_unknown(a, t0, 3), "the fourth is over");
         assert!(l.is_ignored(a, t0 + Duration::from_secs(599)));
         assert!(!l.is_ignored(a, t0 + UNKNOWN_HASH_IGNORE), "the ban ends");
-        assert!(!l.is_ignored(ip("192.168.99.2"), t0), "another source is untouched");
+        assert!(
+            !l.is_ignored(ip("192.168.99.2"), t0),
+            "another source is untouched"
+        );
         assert!(!l.note_unknown(a, t0, 0), "limit 0 counts nothing");
     }
 
@@ -1448,7 +1627,13 @@ mod paused_inbound_tests {
     use std::sync::Arc;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    fn manager(tag: &str) -> (Arc<TorrentManager>, Arc<crate::disk::DiskManager>, std::path::PathBuf) {
+    fn manager(
+        tag: &str,
+    ) -> (
+        Arc<TorrentManager>,
+        Arc<crate::disk::DiskManager>,
+        std::path::PathBuf,
+    ) {
         let root = std::env::temp_dir().join(format!("typhon-inb-{tag}-{}", std::process::id()));
         let (data, resume) = (root.join("data"), root.join("resume"));
         std::fs::create_dir_all(&data).unwrap();
@@ -1477,12 +1662,25 @@ mod paused_inbound_tests {
 
     /// One plaintext handshake from a real TCP peer; what came back, if anything,
     /// before the server side closed or 5 s passed.
-    async fn knock(mgr: Arc<TorrentManager>, disk: Arc<crate::disk::DiskManager>, ih: [u8; 20]) -> Vec<u8> {
+    async fn knock(
+        mgr: Arc<TorrentManager>,
+        disk: Arc<crate::disk::DiskManager>,
+        ih: [u8; 20],
+    ) -> Vec<u8> {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let at = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             let (s, addr) = listener.accept().await.unwrap();
-            handle_incoming(super::PeerTransport::Tcp(s), addr, mgr, disk, [7u8; 20], None, at.port()).await;
+            handle_incoming(
+                super::PeerTransport::Tcp(s),
+                addr,
+                mgr,
+                disk,
+                [7u8; 20],
+                None,
+                at.port(),
+            )
+            .await;
         });
         let mut c = tokio::net::TcpStream::connect(at).await.unwrap();
         let mut hs = vec![19u8];
@@ -1492,10 +1690,11 @@ mod paused_inbound_tests {
         hs.extend_from_slice(&[9u8; 20]);
         c.write_all(&hs).await.unwrap();
         let mut got = vec![0u8; 68];
-        let n = match tokio::time::timeout(std::time::Duration::from_secs(5), c.read(&mut got)).await {
-            Ok(Ok(n)) => n,
-            _ => 0,
-        };
+        let n =
+            match tokio::time::timeout(std::time::Duration::from_secs(5), c.read(&mut got)).await {
+                Ok(Ok(n)) => n,
+                _ => 0,
+            };
         drop(c);
         server.abort();
         got.truncate(n);
@@ -1508,7 +1707,12 @@ mod paused_inbound_tests {
     async fn by_default_a_plaintext_handshake_for_a_known_torrent_is_answered() {
         let (mgr, disk, root) = manager("plain-default");
         let (ih, _) = mgr
-            .add_torrent_bytes(&torrent_bytes(), root.join("data").to_str().unwrap(), false, false)
+            .add_torrent_bytes(
+                &torrent_bytes(),
+                root.join("data").to_str().unwrap(),
+                false,
+                false,
+            )
             .unwrap();
         assert_eq!(knock(mgr, disk, ih).await.len(), 68);
         let _ = std::fs::remove_dir_all(root);
@@ -1521,11 +1725,20 @@ mod paused_inbound_tests {
     async fn require_encryption_refuses_an_inbound_plaintext_handshake() {
         let (mgr, disk, root) = manager("require");
         let (ih, _) = mgr
-            .add_torrent_bytes(&torrent_bytes(), root.join("data").to_str().unwrap(), false, false)
+            .add_torrent_bytes(
+                &torrent_bytes(),
+                root.join("data").to_str().unwrap(),
+                false,
+                false,
+            )
             .unwrap();
 
         let answered = knock(mgr.clone(), disk.clone(), ih).await;
-        assert_eq!(answered.len(), 68, "allow (default) answers a plaintext handshake");
+        assert_eq!(
+            answered.len(),
+            68,
+            "allow (default) answers a plaintext handshake"
+        );
 
         mgr.policy().set_encryption("prefer");
         let answered = knock(mgr.clone(), disk.clone(), ih).await;
@@ -1533,7 +1746,11 @@ mod paused_inbound_tests {
 
         mgr.policy().set_encryption("require");
         let refused = knock(mgr.clone(), disk.clone(), ih).await;
-        assert!(refused.is_empty(), "require: plaintext closed unanswered, got {} bytes", refused.len());
+        assert!(
+            refused.is_empty(),
+            "require: plaintext closed unanswered, got {} bytes",
+            refused.len()
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1552,7 +1769,12 @@ mod paused_inbound_tests {
 
         let (mgr, disk, root) = manager("mse-19");
         let (ih, _) = mgr
-            .add_torrent_bytes(&torrent_bytes(), root.join("data").to_str().unwrap(), false, false)
+            .add_torrent_bytes(
+                &torrent_bytes(),
+                root.join("data").to_str().unwrap(),
+                false,
+                false,
+            )
             .unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let at = listener.local_addr().unwrap();
@@ -1560,23 +1782,45 @@ mod paused_inbound_tests {
             let mgr = mgr.clone();
             async move {
                 let (s, addr) = listener.accept().await.unwrap();
-                handle_incoming(super::PeerTransport::Tcp(s), addr, mgr, disk, [7u8; 20], None, at.port()).await;
+                handle_incoming(
+                    super::PeerTransport::Tcp(s),
+                    addr,
+                    mgr,
+                    disk,
+                    [7u8; 20],
+                    None,
+                    at.port(),
+                )
+                .await;
             }
         });
 
         let (xa, ya) = crate::crypto::mse::gen_keypair_starting_with(19);
-        assert_eq!(ya[0], 19, "the fixture: a public key that begins with the plaintext length byte");
+        assert_eq!(
+            ya[0], 19,
+            "the fixture: a public key that begins with the plaintext length byte"
+        );
         let mut t = super::PeerTransport::Tcp(tokio::net::TcpStream::connect(at).await.unwrap());
         let done = tokio::time::timeout(
             std::time::Duration::from_secs(10),
-            crate::crypto::mse::handshake_outgoing_keyed(&mut t, &ih, b"-TY0001-initiator000", false, xa, ya),
+            crate::crypto::mse::handshake_outgoing_keyed(
+                &mut t,
+                &ih,
+                b"-TY0001-initiator000",
+                false,
+                xa,
+                ya,
+            ),
         )
         .await
         .expect("the handshake finished in time");
         let (enc, dec, hs) = done.expect(
             "an MSE initiator whose public key starts with byte 19 was taken for a plaintext handshake and dropped",
         );
-        assert_eq!(hs.peer_id, [7u8; 20], "the reply is ours: the handshake went through the MSE path");
+        assert_eq!(
+            hs.peer_id, [7u8; 20],
+            "the reply is ours: the handshake went through the MSE path"
+        );
 
         // Same keys on both sides: the session's first message decrypts into
         // something the codec reads, and what we send is understood.
@@ -1586,13 +1830,24 @@ mod paused_inbound_tests {
         );
         match tokio::time::timeout(std::time::Duration::from_secs(5), peer.next()).await {
             Ok(Some(Ok(_))) => {}
-            other => panic!("the session's first message did not decrypt into a message: {other:?}"),
+            other => {
+                panic!("the session's first message did not decrypt into a message: {other:?}")
+            }
         }
-        peer.send(crate::peer::message::Message::Interested).await.unwrap();
+        peer.send(crate::peer::message::Message::Interested)
+            .await
+            .unwrap();
         let torrent = mgr.get(&ih).unwrap();
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
-        while !torrent.peer_stats.iter().any(|e| e.value().interested.load(Ordering::Relaxed)) {
-            assert!(tokio::time::Instant::now() < deadline, "what we encrypted was not decrypted by the session");
+        while !torrent
+            .peer_stats
+            .iter()
+            .any(|e| e.value().interested.load(Ordering::Relaxed))
+        {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "what we encrypted was not decrypted by the session"
+            );
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
         server.abort();
@@ -1606,10 +1861,17 @@ mod paused_inbound_tests {
     async fn by_default_unknown_infohashes_never_get_a_source_ignored() {
         let (mgr, disk, root) = manager("unknown-default");
         let (ih, _) = mgr
-            .add_torrent_bytes(&torrent_bytes(), root.join("data").to_str().unwrap(), false, false)
+            .add_torrent_bytes(
+                &torrent_bytes(),
+                root.join("data").to_str().unwrap(),
+                false,
+                false,
+            )
             .unwrap();
         for i in 0..50u8 {
-            assert!(knock(mgr.clone(), disk.clone(), [i.wrapping_add(100); 20]).await.is_empty());
+            assert!(knock(mgr.clone(), disk.clone(), [i.wrapping_add(100); 20])
+                .await
+                .is_empty());
         }
         assert_eq!(knock(mgr, disk, ih).await.len(), 68);
         let _ = std::fs::remove_dir_all(root);
@@ -1623,27 +1885,44 @@ mod paused_inbound_tests {
     async fn unknown_infohash_limit_ignores_a_source_that_keeps_guessing() {
         let (mgr, disk, root) = manager("unknown");
         let (ih, _) = mgr
-            .add_torrent_bytes(&torrent_bytes(), root.join("data").to_str().unwrap(), false, false)
+            .add_torrent_bytes(
+                &torrent_bytes(),
+                root.join("data").to_str().unwrap(),
+                false,
+                false,
+            )
             .unwrap();
 
         for i in 0..6u8 {
             let r = knock(mgr.clone(), disk.clone(), [i; 20]).await;
             assert!(r.is_empty());
         }
-        assert_eq!(knock(mgr.clone(), disk.clone(), ih).await.len(), 68, "limit 0: never ignored");
+        assert_eq!(
+            knock(mgr.clone(), disk.clone(), ih).await.len(),
+            68,
+            "limit 0: never ignored"
+        );
 
         mgr.policy().set_unknown_hash_limit(3);
         for i in 0..3u8 {
             assert!(knock(mgr.clone(), disk.clone(), [i; 20]).await.is_empty());
         }
-        assert_eq!(knock(mgr.clone(), disk.clone(), ih).await.len(), 68, "three guesses in: still heard");
+        assert_eq!(
+            knock(mgr.clone(), disk.clone(), ih).await.len(),
+            68,
+            "three guesses in: still heard"
+        );
         assert!(knock(mgr.clone(), disk.clone(), [9u8; 20]).await.is_empty());
         assert!(
             knock(mgr.clone(), disk.clone(), ih).await.is_empty(),
             "past the limit the source is ignored, a real info_hash included"
         );
         mgr.policy().set_unknown_hash_limit(0);
-        assert_eq!(knock(mgr.clone(), disk.clone(), ih).await.len(), 68, "limit off: heard again");
+        assert_eq!(
+            knock(mgr.clone(), disk.clone(), ih).await.len(),
+            68,
+            "limit off: heard again"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1658,23 +1937,51 @@ mod paused_inbound_tests {
         let mut known = [0u8; 20];
         for (mgr, root) in [(&race, &root_a), (&hoard, &root_b)] {
             let (ih, _) = mgr
-                .add_torrent_bytes(&torrent_bytes(), root.join("data").to_str().unwrap(), false, false)
+                .add_torrent_bytes(
+                    &torrent_bytes(),
+                    root.join("data").to_str().unwrap(),
+                    false,
+                    false,
+                )
                 .unwrap();
             known = ih;
             mgr.policy().set_unknown_hash_limit(2);
         }
         for i in 0..2u8 {
-            assert!(knock(race.clone(), race_disk.clone(), [i + 40; 20]).await.is_empty());
+            assert!(knock(race.clone(), race_disk.clone(), [i + 40; 20])
+                .await
+                .is_empty());
         }
         for i in 0..2u8 {
-            assert!(knock(hoard.clone(), hoard_disk.clone(), [i + 60; 20]).await.is_empty());
+            assert!(knock(hoard.clone(), hoard_disk.clone(), [i + 60; 20])
+                .await
+                .is_empty());
         }
-        assert_eq!(knock(hoard.clone(), hoard_disk.clone(), known).await.len(), 68, "the hoard counted only its own two");
-        assert_eq!(knock(race.clone(), race_disk.clone(), known).await.len(), 68, "the race counted only its own two");
+        assert_eq!(
+            knock(hoard.clone(), hoard_disk.clone(), known).await.len(),
+            68,
+            "the hoard counted only its own two"
+        );
+        assert_eq!(
+            knock(race.clone(), race_disk.clone(), known).await.len(),
+            68,
+            "the race counted only its own two"
+        );
         // The race goes over its own limit: only the race ignores the source.
-        assert!(knock(race.clone(), race_disk.clone(), [99u8; 20]).await.is_empty());
-        assert!(knock(race.clone(), race_disk.clone(), known).await.is_empty(), "the race ignores the source");
-        assert_eq!(knock(hoard.clone(), hoard_disk.clone(), known).await.len(), 68, "the hoard still hears it");
+        assert!(knock(race.clone(), race_disk.clone(), [99u8; 20])
+            .await
+            .is_empty());
+        assert!(
+            knock(race.clone(), race_disk.clone(), known)
+                .await
+                .is_empty(),
+            "the race ignores the source"
+        );
+        assert_eq!(
+            knock(hoard.clone(), hoard_disk.clone(), known).await.len(),
+            68,
+            "the hoard still hears it"
+        );
         let _ = std::fs::remove_dir_all(root_a);
         let _ = std::fs::remove_dir_all(root_b);
     }
@@ -1686,15 +1993,27 @@ mod paused_inbound_tests {
     async fn a_stopped_torrent_refuses_an_inbound_handshake() {
         let (mgr, disk, root) = manager("stopped");
         let (ih, _) = mgr
-            .add_torrent_bytes(&torrent_bytes(), root.join("data").to_str().unwrap(), true, false)
+            .add_torrent_bytes(
+                &torrent_bytes(),
+                root.join("data").to_str().unwrap(),
+                true,
+                false,
+            )
             .unwrap();
 
         let refused = knock(mgr.clone(), disk.clone(), ih).await;
-        assert!(refused.is_empty(), "a stopped torrent answered a handshake: {} bytes", refused.len());
+        assert!(
+            refused.is_empty(),
+            "a stopped torrent answered a handshake: {} bytes",
+            refused.len()
+        );
 
         mgr.start_torrent(&ih).unwrap();
         let answered = knock(mgr.clone(), disk.clone(), ih).await;
-        assert!(answered.len() >= 48 && answered[0] == 19, "a started torrent must answer");
+        assert!(
+            answered.len() >= 48 && answered[0] == 19,
+            "a started torrent must answer"
+        );
         assert_eq!(&answered[28..48], &ih, "with its own info hash");
 
         let _ = std::fs::remove_dir_all(&root);
@@ -1707,18 +2026,30 @@ mod paused_inbound_tests {
     async fn an_engine_at_its_connection_ceiling_refuses_an_inbound_handshake() {
         let (mgr, disk, root) = manager("ceiling");
         let (ih, _) = mgr
-            .add_torrent_bytes(&torrent_bytes(), root.join("data").to_str().unwrap(), false, false)
+            .add_torrent_bytes(
+                &torrent_bytes(),
+                root.join("data").to_str().unwrap(),
+                false,
+                false,
+            )
             .unwrap();
         let limiter = mgr.limiter().clone();
         limiter.set_max_connections(1);
         limiter.connection_opened();
 
         let refused = knock(mgr.clone(), disk.clone(), ih).await;
-        assert!(refused.is_empty(), "an engine at its ceiling answered a handshake: {} bytes", refused.len());
+        assert!(
+            refused.is_empty(),
+            "an engine at its ceiling answered a handshake: {} bytes",
+            refused.len()
+        );
 
         limiter.connection_closed();
         let answered = knock(mgr.clone(), disk.clone(), ih).await;
-        assert!(answered.len() >= 48 && answered[0] == 19, "under the ceiling it answers");
+        assert!(
+            answered.len() >= 48 && answered[0] == 19,
+            "under the ceiling it answers"
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1749,11 +2080,18 @@ mod accept_error_tests {
                 .env("TYPHON_ACCEPT_CHILD", "1")
                 .output()
                 .unwrap();
-            let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+            let text = format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
             assert!(out.status.success() && text.contains("1 passed"), "{text}");
             return;
         }
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         rt.block_on(async {
             let root = std::env::temp_dir().join(format!("typhon-emfile-{}", std::process::id()));
             std::fs::create_dir_all(root.join("r")).unwrap();
@@ -1765,7 +2103,9 @@ mod accept_error_tests {
             ));
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let at = listener.local_addr().unwrap();
-            let _clients: Vec<_> = (0..4).map(|_| std::net::TcpStream::connect(at).unwrap()).collect();
+            let _clients: Vec<_> = (0..4)
+                .map(|_| std::net::TcpStream::connect(at).unwrap())
+                .collect();
 
             // No descriptor left to hand out: the limit just above the highest
             // open one, and every hole below it filled.
@@ -1790,7 +2130,10 @@ mod accept_error_tests {
             )
             .await;
             let spent = cpu_ms() - before;
-            assert!(spent < 300, "the accept loop burnt {spent} ms of CPU in one second");
+            assert!(
+                spent < 300,
+                "the accept loop burnt {spent} ms of CPU in one second"
+            );
         });
     }
 }
@@ -1800,7 +2143,12 @@ mod handshake_cap_tests {
     use std::sync::{Arc, Mutex};
     use tokio::io::AsyncReadExt;
 
-    fn manager(tag: &str) -> (Arc<crate::torrent::TorrentManager>, Arc<crate::disk::DiskManager>) {
+    fn manager(
+        tag: &str,
+    ) -> (
+        Arc<crate::torrent::TorrentManager>,
+        Arc<crate::disk::DiskManager>,
+    ) {
         let root = std::env::temp_dir().join(format!("typhon-hscap-{tag}-{}", std::process::id()));
         std::fs::create_dir_all(root.join("r")).unwrap();
         let disk = Arc::new(crate::disk::DiskManager::new(1));
@@ -1821,7 +2169,14 @@ mod handshake_cap_tests {
         let (mgr, disk) = manager("src");
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let at = listener.local_addr().unwrap();
-        let server = tokio::spawn(super::tcp_accept_loop(listener, mgr, disk, [7u8; 20], None, at.port()));
+        let server = tokio::spawn(super::tcp_accept_loop(
+            listener,
+            mgr,
+            disk,
+            [7u8; 20],
+            None,
+            at.port(),
+        ));
         let mut socks = Vec::new();
         for _ in 0..64 {
             let s = tokio::net::TcpSocket::new_v4().unwrap();
@@ -1830,14 +2185,20 @@ mod handshake_cap_tests {
         }
         let closed = futures::future::join_all(socks.iter_mut().map(|s| async move {
             let mut b = [0u8; 1];
-            matches!(tokio::time::timeout(std::time::Duration::from_secs(2), s.read(&mut b)).await, Ok(Ok(0)) | Ok(Err(_)))
+            matches!(
+                tokio::time::timeout(std::time::Duration::from_secs(2), s.read(&mut b)).await,
+                Ok(Ok(0)) | Ok(Err(_))
+            )
         }))
         .await
         .into_iter()
         .filter(|c| *c)
         .count();
         server.abort();
-        assert_eq!(closed, 32, "the 32 connections past the cap are closed, the first 32 are not");
+        assert_eq!(
+            closed, 32,
+            "the 32 connections past the cap are closed, the first 32 are not"
+        );
     }
 
     #[derive(Clone, Default)]
@@ -1871,17 +2232,27 @@ mod handshake_cap_tests {
                 .env("TYPHON_LOG_CHILD", "1")
                 .output()
                 .unwrap();
-            let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+            let text = format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
             assert!(out.status.success() && text.contains("1 passed"), "{text}");
             return;
         }
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         rt.block_on(inbound_log_child());
     }
 
     async fn inbound_log_child() {
         let out = Captured::default();
-        let sub = tracing_subscriber::fmt().with_max_level(tracing::Level::INFO).with_writer(out.clone()).finish();
+        let sub = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(out.clone())
+            .finish();
         let _g = tracing::subscriber::set_default(sub);
         let (mgr, disk) = manager("log");
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1889,7 +2260,16 @@ mod handshake_cap_tests {
         let c = tokio::net::TcpStream::connect(at).await.unwrap();
         let (s, addr) = listener.accept().await.unwrap();
         drop(c);
-        super::handle_incoming(super::PeerTransport::Tcp(s), addr, mgr, disk, [7u8; 20], None, at.port()).await;
+        super::handle_incoming(
+            super::PeerTransport::Tcp(s),
+            addr,
+            mgr,
+            disk,
+            [7u8; 20],
+            None,
+            at.port(),
+        )
+        .await;
         tracing::info!("[peer] control line");
         let text = String::from_utf8_lossy(&out.0.lock().unwrap()).into_owned();
         assert!(text.contains("control line"), "the capture works: {text:?}");
@@ -1903,7 +2283,8 @@ mod holepunch_flood_tests {
     use std::sync::Arc;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    const NAME: &str = "peer::holepunch_flood_tests::a_peer_cannot_have_us_dial_more_than_ten_connects_a_minute";
+    const NAME: &str =
+        "peer::holepunch_flood_tests::a_peer_cannot_have_us_dial_more_than_ten_connects_a_minute";
 
     /// ⭐ A connected peer sending fifty hole-punch `Connect` in a row has us
     /// act on ten. Each would otherwise queue a dial to the address it names.
@@ -1917,11 +2298,19 @@ mod holepunch_flood_tests {
                 .env("TYPHON_PUNCH_CHILD", "1")
                 .output()
                 .unwrap();
-            let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+            let text = format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
             assert!(out.status.success() && text.contains("1 passed"), "{text}");
             return;
         }
-        let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
         rt.block_on(async {
             let root = std::env::temp_dir().join(format!("typhon-punch-{}", std::process::id()));
             std::fs::create_dir_all(root.join("r")).unwrap();
@@ -1931,20 +2320,32 @@ mod holepunch_flood_tests {
                 root.join("r").to_string_lossy().into_owned(),
                 disk.clone(),
             ));
-            let mut info = b"d6:lengthi16384e4:name5:punch12:piece lengthi16384e6:pieces20:".to_vec();
+            let mut info =
+                b"d6:lengthi16384e4:name5:punch12:piece lengthi16384e6:pieces20:".to_vec();
             info.extend_from_slice(&[0x5Au8; 20]);
             info.push(b'e');
             let mut torrent = b"d4:info".to_vec();
             torrent.extend_from_slice(&info);
             torrent.push(b'e');
-            let (ih, _) = mgr.add_torrent_bytes(&torrent, root.to_str().unwrap(), false, false).unwrap();
+            let (ih, _) = mgr
+                .add_torrent_bytes(&torrent, root.to_str().unwrap(), false, false)
+                .unwrap();
 
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let at = listener.local_addr().unwrap();
             let (m, d) = (mgr.clone(), disk.clone());
             tokio::spawn(async move {
                 let (s, addr) = listener.accept().await.unwrap();
-                super::handle_incoming(super::PeerTransport::Tcp(s), addr, m, d, [7u8; 20], None, at.port()).await;
+                super::handle_incoming(
+                    super::PeerTransport::Tcp(s),
+                    addr,
+                    m,
+                    d,
+                    [7u8; 20],
+                    None,
+                    at.port(),
+                )
+                .await;
             });
             let mut c = tokio::net::TcpStream::connect(at).await.unwrap();
             let mut hs = vec![19u8];
@@ -1969,7 +2370,10 @@ mod holepunch_flood_tests {
             let dials = crate::tracker::DIAL_ENQUEUED.load(Ordering::Relaxed)
                 + crate::tracker::DIAL_ENQUEUE_DROPPED.load(Ordering::Relaxed)
                 - before;
-            assert!(dials >= 1, "the fixture reaches the Connect handling at all");
+            assert!(
+                dials >= 1,
+                "the fixture reaches the Connect handling at all"
+            );
             assert_eq!(dials, 10, "fifty Connect, ten dials");
         });
     }

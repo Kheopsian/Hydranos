@@ -38,12 +38,20 @@ pub struct Route {
 }
 
 /// The refusal when the kill switch is on and nothing says where to go.
-pub const NO_ROUTE: &str = "kill switch: no proxy ([proxy] socks5_host) and no interface ([daemon] bind_interface) \
+pub const NO_ROUTE: &str =
+    "kill switch: no proxy ([proxy] socks5_host) and no interface ([daemon] bind_interface) \
      for the daemon's own traffic, so it is not sent at all (never by the default route)";
 
 impl Route {
     /// From the `[proxy]` keys 3.x already had and the `[daemon]` ones.
-    pub fn new(socks5_host: &str, socks5_port: u16, user: &str, pass: &str, interface: &str, kill_switch: bool) -> Route {
+    pub fn new(
+        socks5_host: &str,
+        socks5_port: u16,
+        user: &str,
+        pass: &str,
+        interface: &str,
+        kill_switch: bool,
+    ) -> Route {
         let host = socks5_host.trim();
         let proxy = if host.is_empty() {
             String::new()
@@ -57,16 +65,29 @@ impl Route {
                     crate::config::userinfo_escape(pass)
                 )
             };
-            let host = if host.contains(':') && !host.starts_with('[') { format!("[{host}]") } else { host.to_string() };
+            let host = if host.contains(':') && !host.starts_with('[') {
+                format!("[{host}]")
+            } else {
+                host.to_string()
+            };
             let port = if socks5_port == 0 { 1080 } else { socks5_port };
             format!("socks5h://{auth}{host}:{port}")
         };
-        Route { proxy, interface: interface.trim().to_string(), kill_switch, refusal: String::new() }
+        Route {
+            proxy,
+            interface: interface.trim().to_string(),
+            kill_switch,
+            refusal: String::new(),
+        }
     }
 
     /// A route that sends nothing, and says why.
     pub fn refused(reason: impl Into<String>) -> Route {
-        Route { kill_switch: true, refusal: reason.into(), ..Route::default() }
+        Route {
+            kill_switch: true,
+            refusal: reason.into(),
+            ..Route::default()
+        }
     }
 
     /// No proxy, no interface: the default route.
@@ -78,7 +99,10 @@ impl Route {
     pub fn describe(&self) -> String {
         let mut parts = Vec::new();
         if !self.proxy.is_empty() {
-            parts.push(format!("proxy {}", crate::tracker::http::redact_proxy(&self.proxy)));
+            parts.push(format!(
+                "proxy {}",
+                crate::tracker::http::redact_proxy(&self.proxy)
+            ));
         }
         if !self.interface.is_empty() {
             parts.push(format!("interface {}", self.interface));
@@ -98,7 +122,11 @@ impl Route {
 
     /// `describe` without the kill switch's mention.
     pub fn describe_bare(&self) -> String {
-        Route { kill_switch: false, ..self.clone() }.describe()
+        Route {
+            kill_switch: false,
+            ..self.clone()
+        }
+        .describe()
     }
 
     /// Whether a request may leave by this route right now; why not otherwise.
@@ -118,7 +146,10 @@ impl Route {
         }
         if !self.proxy.is_empty() {
             reqwest::Proxy::all(&self.proxy).map_err(|e| {
-                format!("proxy {} is not usable: {e}", crate::tracker::http::redact_proxy(&self.proxy))
+                format!(
+                    "proxy {} is not usable: {e}",
+                    crate::tracker::http::redact_proxy(&self.proxy)
+                )
             })?;
         }
         Ok(())
@@ -193,7 +224,13 @@ pub struct Resolved {
 /// usable REFUSES: never the default route in its place. The two explicit
 /// directs -- `egress = "direct"`, an engine marked direct -- are a choice and
 /// are not refused; nor is gluetun, whose network namespace is the tunnel.
-pub fn resolve(mode: &str, armed: bool, setting: &str, proxy: &Route, engines: &[EngineExit]) -> Resolved {
+pub fn resolve(
+    mode: &str,
+    armed: bool,
+    setting: &str,
+    proxy: &Route,
+    engines: &[EngineExit],
+) -> Resolved {
     let done = |route: Route, kind: &'static str, engine: &str, via: String| Resolved {
         route,
         kind,
@@ -207,28 +244,57 @@ pub fn resolve(mode: &str, armed: bool, setting: &str, proxy: &Route, engines: &
         via: format!("nothing: {why}"),
     };
     let direct = |kind: &'static str, via: &str| {
-        let r = Route { proxy: String::new(), interface: proxy.interface.clone(), kill_switch: false, refusal: String::new() };
-        let via = if r.interface.is_empty() { via.to_string() } else { format!("{via}, bound to {}", r.interface) };
+        let r = Route {
+            proxy: String::new(),
+            interface: proxy.interface.clone(),
+            kill_switch: false,
+            refusal: String::new(),
+        };
+        let via = if r.interface.is_empty() {
+            via.to_string()
+        } else {
+            format!("{via}, bound to {}", r.interface)
+        };
         done(r, kind, "", via)
     };
     let borrow = |e: &EngineExit| -> Resolved {
         if let Some(why) = &e.blocked {
-            return refuse(format!("engine {} is blocked by the kill switch ({why})", e.id));
+            return refuse(format!(
+                "engine {} is blocked by the kill switch ({why})",
+                e.id
+            ));
         }
         match &e.route {
             Some(r) => {
-                let r = Route { kill_switch: armed, ..r.clone() };
+                let r = Route {
+                    kill_switch: armed,
+                    ..r.clone()
+                };
                 let (kind, via) = if e.tunnelled {
-                    ("engine_tunnel", format!("the WireGuard tunnel of engine {} ({})", e.id, r.interface))
+                    (
+                        "engine_tunnel",
+                        format!("the WireGuard tunnel of engine {} ({})", e.id, r.interface),
+                    )
                 } else if !r.proxy.is_empty() {
-                    ("engine_proxy", format!("the proxy of engine {} ({})", e.id, r.describe_bare()))
+                    (
+                        "engine_proxy",
+                        format!("the proxy of engine {} ({})", e.id, r.describe_bare()),
+                    )
                 } else {
-                    ("engine_interface", format!("the interface of engine {} ({})", e.id, r.interface))
+                    (
+                        "engine_interface",
+                        format!("the interface of engine {} ({})", e.id, r.interface),
+                    )
                 };
                 done(r, kind, &e.id, via)
             }
             // An engine marked direct: borrowing its way out is choosing it.
-            None => done(Route::default(), "engine_direct", &e.id, format!("direct, like engine {}", e.id)),
+            None => done(
+                Route::default(),
+                "engine_direct",
+                &e.id,
+                format!("direct, like engine {}", e.id),
+            ),
         }
     };
     let setting = match Setting::parse(setting) {
@@ -239,27 +305,41 @@ pub fn resolve(mode: &str, armed: bool, setting: &str, proxy: &Route, engines: &
         Setting::Direct => direct("direct", "direct (the host's default route)"),
         Setting::Proxy => {
             if proxy.proxy.is_empty() {
-                return refuse("[daemon] egress = \"proxy\" but [proxy] socks5_host is empty".into());
+                return refuse(
+                    "[daemon] egress = \"proxy\" but [proxy] socks5_host is empty".into(),
+                );
             }
-            let r = Route { kill_switch: armed, ..proxy.clone() };
+            let r = Route {
+                kill_switch: armed,
+                ..proxy.clone()
+            };
             let via = format!("the [proxy] SOCKS5 proxy ({})", r.describe_bare());
             done(r, "proxy", "", via)
         }
         Setting::Engine(id) => match engines.iter().find(|e| e.id == id) {
             Some(e) => borrow(e),
-            None => refuse(format!("[daemon] egress names engine {id:?}, which this node does not run")),
+            None => refuse(format!(
+                "[daemon] egress names engine {id:?}, which this node does not run"
+            )),
         },
         Setting::Auto => {
             // The race engine first: it is the one the operator watches.
             let pick = |want: &dyn Fn(&EngineExit) -> bool| {
-                engines.iter().find(|e| e.id == "race" && want(e)).or_else(|| engines.iter().find(|e| want(e)))
+                engines
+                    .iter()
+                    .find(|e| e.id == "race" && want(e))
+                    .or_else(|| engines.iter().find(|e| want(e)))
             };
             match mode {
                 "socks5" | "proxy_v2" => {
-                    let has_proxy = |e: &EngineExit| e.blocked.is_none() && e.route.as_ref().is_some_and(|r| !r.proxy.is_empty());
+                    let has_proxy = |e: &EngineExit| {
+                        e.blocked.is_none() && e.route.as_ref().is_some_and(|r| !r.proxy.is_empty())
+                    };
                     match pick(&has_proxy) {
                         Some(e) => borrow(e),
-                        None if armed => refuse(format!("{mode} mode, and no engine has a SOCKS5 proxy to lend")),
+                        None if armed => refuse(format!(
+                            "{mode} mode, and no engine has a SOCKS5 proxy to lend"
+                        )),
                         None => direct("direct", "direct (no engine has a proxy to lend)"),
                     }
                 }
@@ -267,7 +347,9 @@ pub fn resolve(mode: &str, armed: bool, setting: &str, proxy: &Route, engines: &
                     let tunnelled = |e: &EngineExit| e.blocked.is_none() && e.tunnelled;
                     match pick(&tunnelled) {
                         Some(e) => borrow(e),
-                        None if armed => refuse("WireGuard mode, and no engine has a tunnel to lend".into()),
+                        None if armed => {
+                            refuse("WireGuard mode, and no engine has a tunnel to lend".into())
+                        }
                         None => direct("direct", "direct (no engine has a tunnel to lend)"),
                     }
                 }
@@ -300,7 +382,13 @@ pub fn tunnel_device(engine_id: &str) -> String {
     const IFNAMSIZ_MAX: usize = 15;
     let clean: String = engine_id
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     let room = IFNAMSIZ_MAX - PREFIX.len();
     if clean.len() <= room && clean == engine_id {
@@ -322,7 +410,9 @@ pub fn tunnel_device(engine_id: &str) -> String {
 fn interface_usable(dev: &str) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     if !std::path::Path::new("/sys/class/net").join(dev).exists() {
-        return Err(format!("interface {dev} is not there; the daemon's traffic is not sent by another one"));
+        return Err(format!(
+            "interface {dev} is not there; the daemon's traffic is not sent by another one"
+        ));
     }
     Ok(())
 }
@@ -354,7 +444,11 @@ pub fn set(route: Route) -> bool {
 
 /// The route in force.
 pub fn route() -> Arc<Route> {
-    current().read().unwrap_or_else(|p| p.into_inner()).1.clone()
+    current()
+        .read()
+        .unwrap_or_else(|p| p.into_inner())
+        .1
+        .clone()
 }
 
 /// The same settings on reqwest's async and blocking builders, which share
@@ -364,12 +458,17 @@ macro_rules! apply_route {
         let route: &Route = $route;
         // No Referer: a `.torrent` link is often `/dl/ID/PASSKEY`, and a
         // redirect to a CDN or a mirror would carry it there in the header.
-        let mut b = $builder.user_agent(crate::config::user_agent()).referer(false);
+        let mut b = $builder
+            .user_agent(crate::config::user_agent())
+            .referer(false);
         if !route.proxy.is_empty() {
             // `no_proxy` first: an HTTP_PROXY in the environment is a second
             // way out the operator did not write here.
             let p = reqwest::Proxy::all(&route.proxy).map_err(|e| {
-                format!("proxy {} is not usable: {e}", crate::tracker::http::redact_proxy(&route.proxy))
+                format!(
+                    "proxy {} is not usable: {e}",
+                    crate::tracker::http::redact_proxy(&route.proxy)
+                )
             })?;
             b = b.no_proxy().proxy(p);
         } else if route.kill_switch {
@@ -406,7 +505,10 @@ struct FetchResolver {
     tunnel: Option<Arc<dyn reqwest::dns::Resolve>>,
     fixed: std::collections::HashMap<String, Vec<std::net::IpAddr>>,
     /// `None` behind a proxy: the proxy resolves the target, not us.
-    guard: Option<(Arc<crate::webseed::StartGuard>, fn(std::net::IpAddr) -> bool)>,
+    guard: Option<(
+        Arc<crate::webseed::StartGuard>,
+        fn(std::net::IpAddr) -> bool,
+    )>,
 }
 
 impl reqwest::dns::Resolve for FetchResolver {
@@ -417,7 +519,9 @@ impl reqwest::dns::Resolve for FetchResolver {
         let guard = self.guard.clone();
         Box::pin(async move {
             let mut addrs: Vec<std::net::SocketAddr> = if let Some(ips) = fixed {
-                ips.into_iter().map(|ip| std::net::SocketAddr::new(ip, 0)).collect()
+                ips.into_iter()
+                    .map(|ip| std::net::SocketAddr::new(ip, 0))
+                    .collect()
             } else if let Some(t) = tunnel {
                 t.resolve(name).await?.collect()
             } else {
@@ -434,7 +538,8 @@ impl reqwest::dns::Resolve for FetchResolver {
                     // addresses are kept, for it and for every redirect.
                     addrs.retain(|a| !is_internal(a.ip()));
                     if addrs.is_empty() {
-                        let e: Box<dyn std::error::Error + Send + Sync> = "the name resolves to an internal address".into();
+                        let e: Box<dyn std::error::Error + Send + Sync> =
+                            "the name resolves to an internal address".into();
                         return Err(e);
                     }
                 }
@@ -462,16 +567,23 @@ pub fn client_resolving(
     is_internal: fn(std::net::IpAddr) -> bool,
 ) -> Result<reqwest::Client, String> {
     route.preflight()?;
-    let tunnel: Option<Arc<dyn reqwest::dns::Resolve>> = (route.proxy.is_empty() && !route.interface.is_empty())
-        .then(|| crate::tunneldns::Resolver::new(&route.interface) as Arc<dyn reqwest::dns::Resolve>);
-    let mut map: std::collections::HashMap<String, Vec<std::net::IpAddr>> = std::collections::HashMap::new();
+    let tunnel: Option<Arc<dyn reqwest::dns::Resolve>> = (route.proxy.is_empty()
+        && !route.interface.is_empty())
+    .then(|| crate::tunneldns::Resolver::new(&route.interface) as Arc<dyn reqwest::dns::Resolve>);
+    let mut map: std::collections::HashMap<String, Vec<std::net::IpAddr>> =
+        std::collections::HashMap::new();
     for (name, ip) in fixed {
         map.entry(name.to_ascii_lowercase()).or_default().push(*ip);
     }
     let redirect = crate::webseed::redirect_policy_from_start(guard.clone());
     let guard = route.proxy.is_empty().then_some((guard, is_internal));
-    let resolver = Arc::new(FetchResolver { tunnel, fixed: map, guard });
-    let b = apply_route!(reqwest::Client::builder().redirect(redirect), route).dns_resolver(resolver);
+    let resolver = Arc::new(FetchResolver {
+        tunnel,
+        fixed: map,
+        guard,
+    });
+    let b =
+        apply_route!(reqwest::Client::builder().redirect(redirect), route).dns_resolver(resolver);
     b.build().map_err(|e| format!("http client: {e}"))
 }
 
@@ -563,7 +675,10 @@ mod tests {
                     s.write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0]).await?;
                     let mut req = [0u8; 1024];
                     let _ = s.read(&mut req).await?;
-                    s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok").await?;
+                    s.write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+                    )
+                    .await?;
                     Ok(())
                 });
             }
@@ -587,7 +702,10 @@ mod tests {
         assert_eq!(body, "ok");
         // socks5h: the name went to the proxy, so no DNS query left from here
         // (`.invalid` would not have resolved anyway).
-        assert_eq!(*seen.lock().unwrap(), vec!["lists.hydranos.invalid".to_string()]);
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec!["lists.hydranos.invalid".to_string()]
+        );
     }
 
     /// The test the kill switch exists for: the proxy is not there, and the
@@ -601,7 +719,9 @@ mod tests {
         tokio::spawn(async move {
             while let Ok((mut s, _)) = target.accept().await {
                 h.fetch_add(1, Ordering::SeqCst);
-                let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await;
+                let _ = s
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                    .await;
             }
         });
         // A port nobody listens on.
@@ -609,10 +729,18 @@ mod tests {
         let dead_port = dead.local_addr().unwrap().port();
         drop(dead);
         let route = Route::new("127.0.0.1", dead_port, "u", "p@ss", "", true);
-        let r = client_for(&route).unwrap().get(format!("http://127.0.0.1:{target_port}/")).send().await;
+        let r = client_for(&route)
+            .unwrap()
+            .get(format!("http://127.0.0.1:{target_port}/"))
+            .send()
+            .await;
         assert!(r.is_err(), "a dead proxy is a failed request");
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        assert_eq!(hits.load(Ordering::SeqCst), 0, "no direct connection to the target");
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            0,
+            "no direct connection to the target"
+        );
     }
 
     #[test]
@@ -644,10 +772,19 @@ mod tests {
     #[test]
     fn a_refused_route_refuses_with_its_reason() {
         let r = Route::refused("engine vpn1 is blocked");
-        assert_eq!(client_for(&r).err().as_deref(), Some("engine vpn1 is blocked"));
-        assert_eq!(blocking_client_for(&r).err().as_deref(), Some("engine vpn1 is blocked"));
+        assert_eq!(
+            client_for(&r).err().as_deref(),
+            Some("engine vpn1 is blocked")
+        );
+        assert_eq!(
+            blocking_client_for(&r).err().as_deref(),
+            Some("engine vpn1 is blocked")
+        );
         assert!(r.describe().starts_with("nothing"));
-        assert_eq!(Setting::parse(" Engine:race "), Ok(Setting::Engine("race".into())));
+        assert_eq!(
+            Setting::parse(" Engine:race "),
+            Ok(Setting::Engine("race".into()))
+        );
         assert_eq!(Setting::parse(""), Ok(Setting::Auto));
         assert!(Setting::parse("engine:").is_err() && Setting::parse("wireguard").is_err());
         // Resolved with nothing to lend while armed: refused, not direct.
@@ -663,14 +800,20 @@ mod tests {
         assert_eq!(tunnel_device("race"), "wg-race");
         let long = tunnel_device("a-very-long-engine-name");
         assert!(long.len() <= 15 && long.starts_with("wg-"), "{long}");
-        assert_ne!(tunnel_device("a-very-long-engine-one"), tunnel_device("a-very-long-engine-two"));
+        assert_ne!(
+            tunnel_device("a-very-long-engine-one"),
+            tunnel_device("a-very-long-engine-two")
+        );
         assert_eq!(tunnel_device("a b"), tunnel_device("a b"), "stable");
     }
 
     #[test]
     fn a_new_route_is_a_new_generation() {
         let before = route();
-        let other = Route { interface: "lo".into(), ..(*before).clone() };
+        let other = Route {
+            interface: "lo".into(),
+            ..(*before).clone()
+        };
         assert!(set(other.clone()));
         assert!(!set(other), "the same route twice is no change");
         set((*before).clone());

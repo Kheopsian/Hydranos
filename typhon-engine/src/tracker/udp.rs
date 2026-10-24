@@ -95,7 +95,10 @@ pub fn event_code(event: &str) -> u32 {
 
 pub fn is_udp(url: &str) -> bool {
     // `get`, not a slice: a non-ASCII character can straddle byte 6.
-    url.len() > 6 && url.get(..6).is_some_and(|p| p.eq_ignore_ascii_case("udp://"))
+    url.len() > 6
+        && url
+            .get(..6)
+            .is_some_and(|p| p.eq_ignore_ascii_case("udp://"))
 }
 
 /// Host, port and BEP 41 URL data (path and query) of a `udp://` URL.
@@ -136,7 +139,13 @@ pub(crate) fn connect_packet(tx: u32) -> [u8; 16] {
 ///
 /// `ip` is taken from the request on the IPv4 leg only: the field is four
 /// bytes, and on an IPv6 announce the tracker must use the source address.
-pub(crate) fn announce_packet(conn: u64, tx: u32, a: &UdpAnnounce, url_data: &str, v6: bool) -> Vec<u8> {
+pub(crate) fn announce_packet(
+    conn: u64,
+    tx: u32,
+    a: &UdpAnnounce,
+    url_data: &str,
+    v6: bool,
+) -> Vec<u8> {
     let mut p = Vec::with_capacity(98 + url_data.len() + 8);
     p.extend_from_slice(&conn.to_be_bytes());
     p.extend_from_slice(&ACTION_ANNOUNCE.to_be_bytes());
@@ -183,10 +192,19 @@ pub(crate) fn reply_body(buf: &[u8], tx: u32, want: u32) -> Result<&[u8], String
     if action == ACTION_ERROR {
         let msg = String::from_utf8_lossy(&buf[8..]);
         let msg = msg.trim_end_matches('\0').trim();
-        return Err(format!("tracker: {}", if msg.is_empty() { "(no reason given)" } else { msg }));
+        return Err(format!(
+            "tracker: {}",
+            if msg.is_empty() {
+                "(no reason given)"
+            } else {
+                msg
+            }
+        ));
     }
     if action != want {
-        return Err(format!("udp: tracker answered action {action}, expected {want}"));
+        return Err(format!(
+            "udp: tracker answered action {action}, expected {want}"
+        ));
     }
     Ok(&buf[8..])
 }
@@ -281,16 +299,22 @@ impl Family {
             #[cfg(target_os = "linux")]
             {
                 use std::os::unix::io::AsRawFd;
-                let egress = crate::netpin::Egress { device: device.to_string(), ..Default::default() };
+                let egress = crate::netpin::Egress {
+                    device: device.to_string(),
+                    ..Default::default()
+                };
                 crate::netpin::pin_fd(std.as_raw_fd(), &egress)
                     .map_err(|e| format!("udp: pin to {device}: {e}"))?;
             }
             #[cfg(not(target_os = "linux"))]
-            return Err(format!("udp: bind_interface {device:?} cannot be applied on this platform"));
+            return Err(format!(
+                "udp: bind_interface {device:?} cannot be applied on this platform"
+            ));
         }
         std.set_nonblocking(true).map_err(|e| format!("udp: {e}"))?;
         let sock = Arc::new(UdpSocket::from_std(std).map_err(|e| format!("udp: {e}"))?);
-        let pending: Arc<DashMap<u32, (SocketAddr, oneshot::Sender<Vec<u8>>)>> = Arc::new(DashMap::new());
+        let pending: Arc<DashMap<u32, (SocketAddr, oneshot::Sender<Vec<u8>>)>> =
+            Arc::new(DashMap::new());
         let alive = Arc::new(AtomicBool::new(true));
         {
             let sock = sock.clone();
@@ -306,7 +330,9 @@ impl Family {
                                 continue;
                             }
                             let tx = u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]);
-                            if let Some((_, (_, reply))) = pending.remove_if(&tx, |_, (to, _)| *to == from) {
+                            if let Some((_, (_, reply))) =
+                                pending.remove_if(&tx, |_, (to, _)| *to == from)
+                            {
                                 let _ = reply.send(buf[..n].to_vec());
                             }
                         }
@@ -319,11 +345,21 @@ impl Family {
                 }
             });
         }
-        Ok(Family { sock, pending, alive, runtime: tokio::runtime::Handle::current().id() })
+        Ok(Family {
+            sock,
+            pending,
+            alive,
+            runtime: tokio::runtime::Handle::current().id(),
+        })
     }
 
     /// Send, wait, send again with a new transaction id, as WAITS says.
-    async fn exchange(&self, to: SocketAddr, mut packet: Vec<u8>, tx_at: usize) -> Result<(Vec<u8>, u32), String> {
+    async fn exchange(
+        &self,
+        to: SocketAddr,
+        mut packet: Vec<u8>,
+        tx_at: usize,
+    ) -> Result<(Vec<u8>, u32), String> {
         for wait in WAITS {
             let tx = loop {
                 let t = rand::random::<u32>();
@@ -375,7 +411,10 @@ impl Client {
         let cell = if v6 { &self.v6 } else { &self.v4 };
         let mut slot = cell.lock().unwrap_or_else(|p| p.into_inner());
         let here = tokio::runtime::Handle::current().id();
-        if let Some(f) = slot.as_ref().filter(|f| f.alive.load(Ordering::Relaxed) && f.runtime == here) {
+        if let Some(f) = slot
+            .as_ref()
+            .filter(|f| f.alive.load(Ordering::Relaxed) && f.runtime == here)
+        {
             return Ok(f.clone());
         }
         let f = Arc::new(Family::open(v6, &self.device)?);
@@ -402,19 +441,36 @@ impl Client {
             .into_iter()
             .find(|a| a.is_ipv6() == v6)
             .ok_or_else(|| {
-                format!("udp: {host} has no {} address (unreachable)", if v6 { "IPv6" } else { "IPv4" })
+                format!(
+                    "udp: {host} has no {} address (unreachable)",
+                    if v6 { "IPv6" } else { "IPv4" }
+                )
             })?;
         self.dns.insert(key, (addr, Instant::now()));
         Ok(addr)
     }
 
-    async fn announce_family(&self, a: &UdpAnnounce, host: &str, port: u16, url_data: &str, v6: bool) -> Result<AnnounceResponse, String> {
+    async fn announce_family(
+        &self,
+        a: &UdpAnnounce,
+        host: &str,
+        port: u16,
+        url_data: &str,
+        v6: bool,
+    ) -> Result<AnnounceResponse, String> {
         let fam = self.family(v6)?;
         let to = self.resolve(host, port, v6).await?;
-        let conn = match self.conns.get(&to).filter(|e| e.1.elapsed() < CONNECTION_TTL).map(|e| e.0) {
+        let conn = match self
+            .conns
+            .get(&to)
+            .filter(|e| e.1.elapsed() < CONNECTION_TTL)
+            .map(|e| e.0)
+        {
             Some(id) => id,
             None => {
-                let (reply, tx) = fam.exchange(to, connect_packet(0).to_vec(), CONNECT_TX_AT).await?;
+                let (reply, tx) = fam
+                    .exchange(to, connect_packet(0).to_vec(), CONNECT_TX_AT)
+                    .await?;
                 let id = parse_connect(&reply, tx)?;
                 self.conns.insert(to, (id, Instant::now()));
                 id
@@ -436,15 +492,27 @@ impl Client {
 
     /// BEP 15 scrape of up to 74 torrents, over IPv4 when the tracker has an
     /// IPv4 address, else IPv6: counts are the same either way.
-    async fn scrape(&self, tracker: &str, hashes: &[[u8; 20]]) -> Result<Vec<super::scrape::ScrapeEntry>, String> {
-        let (host, port, _) = split_url(tracker).ok_or_else(|| "udp: not a udp://host:port tracker URL".to_string())?;
+    async fn scrape(
+        &self,
+        tracker: &str,
+        hashes: &[[u8; 20]],
+    ) -> Result<Vec<super::scrape::ScrapeEntry>, String> {
+        let (host, port, _) = split_url(tracker)
+            .ok_or_else(|| "udp: not a udp://host:port tracker URL".to_string())?;
         let v6 = self.resolve(&host, port, false).await.is_err();
         let fam = self.family(v6)?;
         let to = self.resolve(&host, port, v6).await?;
-        let conn = match self.conns.get(&to).filter(|e| e.1.elapsed() < CONNECTION_TTL).map(|e| e.0) {
+        let conn = match self
+            .conns
+            .get(&to)
+            .filter(|e| e.1.elapsed() < CONNECTION_TTL)
+            .map(|e| e.0)
+        {
             Some(id) => id,
             None => {
-                let (reply, tx) = fam.exchange(to, connect_packet(0).to_vec(), CONNECT_TX_AT).await?;
+                let (reply, tx) = fam
+                    .exchange(to, connect_packet(0).to_vec(), CONNECT_TX_AT)
+                    .await?;
                 let id = parse_connect(&reply, tx)?;
                 self.conns.insert(to, (id, Instant::now()));
                 id
@@ -458,16 +526,23 @@ impl Client {
         for h in hashes {
             p.extend_from_slice(h);
         }
-        let answer = fam.exchange(to, p, 12).await.and_then(|(reply, tx)| parse_scrape(&reply, tx, hashes));
+        let answer = fam
+            .exchange(to, p, 12)
+            .await
+            .and_then(|(reply, tx)| parse_scrape(&reply, tx, hashes));
         if answer.is_err() {
             self.conns.remove(&to);
         }
         answer
     }
 
-    pub async fn announce(&self, a: &UdpAnnounce, mode: IpMode) -> Result<AnnounceResponse, String> {
-        let (host, port, url_data) =
-            split_url(&a.tracker).ok_or_else(|| "udp: not a udp://host:port tracker URL".to_string())?;
+    pub async fn announce(
+        &self,
+        a: &UdpAnnounce,
+        mode: IpMode,
+    ) -> Result<AnnounceResponse, String> {
+        let (host, port, url_data) = split_url(&a.tracker)
+            .ok_or_else(|| "udp: not a udp://host:port tracker URL".to_string())?;
         match mode {
             IpMode::V4 => self.announce_family(a, &host, port, &url_data, false).await,
             IpMode::V6 => self.announce_family(a, &host, port, &url_data, true).await,
@@ -499,7 +574,8 @@ pub async fn send_announce(a: &UdpAnnounce, mode: IpMode) -> Result<AnnounceResp
 /// What a `udp://` tracker records when the engine's announces are proxied.
 /// Shown as-is on the Trackers tab, so it says what happened, why, and that
 /// it is deliberate -- a bare "skipped" reads like a bug to fix.
-pub const UDP_PROXIED_REFUSAL: &str = "UDP trackers do not go through a SOCKS5 proxy (no UDP ASSOCIATE): \
+pub const UDP_PROXIED_REFUSAL: &str =
+    "UDP trackers do not go through a SOCKS5 proxy (no UDP ASSOCIATE): \
      they will not be announced while this proxy is active";
 
 /// One client per interface: connection ids and sockets belong to the path
@@ -509,7 +585,12 @@ static PINNED: OnceLock<Mutex<std::collections::HashMap<String, Arc<Client>>>> =
 /// `send_announce` from the engine's interface. Empty device = the default
 /// route. `proxy` is the engine's announce proxy (empty = the environment
 /// fallback): when there is one, the announce is refused, never sent around it.
-pub async fn send_announce_on(a: &UdpAnnounce, mode: IpMode, device: &str, proxy: &str) -> Result<AnnounceResponse, String> {
+pub async fn send_announce_on(
+    a: &UdpAnnounce,
+    mode: IpMode,
+    device: &str,
+    proxy: &str,
+) -> Result<AnnounceResponse, String> {
     if super::http::announces_proxied(proxy) {
         return Err(UDP_PROXIED_REFUSAL.into());
     }
@@ -521,14 +602,23 @@ pub async fn send_announce_on(a: &UdpAnnounce, mode: IpMode, device: &str, proxy
         let map = PINNED.get_or_init(Default::default);
         let mut map = map.lock().unwrap_or_else(|p| p.into_inner());
         map.entry(device.to_string())
-            .or_insert_with(|| Arc::new(Client { device: device.to_string(), ..Client::default() }))
+            .or_insert_with(|| {
+                Arc::new(Client {
+                    device: device.to_string(),
+                    ..Client::default()
+                })
+            })
             .clone()
     };
     client.announce(a, mode).await
 }
 
 /// A scrape reply: seeders, completed, leechers per hash, in request order.
-pub(crate) fn parse_scrape(buf: &[u8], tx: u32, hashes: &[[u8; 20]]) -> Result<Vec<super::scrape::ScrapeEntry>, String> {
+pub(crate) fn parse_scrape(
+    buf: &[u8],
+    tx: u32,
+    hashes: &[[u8; 20]],
+) -> Result<Vec<super::scrape::ScrapeEntry>, String> {
     let body = reply_body(buf, tx, ACTION_SCRAPE)?;
     Ok(body
         .chunks_exact(12)
@@ -544,19 +634,32 @@ pub(crate) fn parse_scrape(buf: &[u8], tx: u32, hashes: &[[u8; 20]]) -> Result<V
 /// Scrape a `udp://` tracker from the engine's interface. Refused while the
 /// engine's announces are proxied, exactly as an announce is: sent around
 /// the proxy, it would show the tracker this host's own address.
-pub async fn send_scrape_on(tracker: &str, hashes: &[[u8; 20]], device: &str, proxy: &str) -> Result<Vec<super::scrape::ScrapeEntry>, String> {
+pub async fn send_scrape_on(
+    tracker: &str,
+    hashes: &[[u8; 20]],
+    device: &str,
+    proxy: &str,
+) -> Result<Vec<super::scrape::ScrapeEntry>, String> {
     if super::http::announces_proxied(proxy) {
         return Err(UDP_PROXIED_REFUSAL.into());
     }
     let device = device.trim();
     if device.is_empty() {
-        return CLIENT.get_or_init(Client::default).scrape(tracker, hashes).await;
+        return CLIENT
+            .get_or_init(Client::default)
+            .scrape(tracker, hashes)
+            .await;
     }
     let client = {
         let map = PINNED.get_or_init(Default::default);
         let mut map = map.lock().unwrap_or_else(|p| p.into_inner());
         map.entry(device.to_string())
-            .or_insert_with(|| Arc::new(Client { device: device.to_string(), ..Client::default() }))
+            .or_insert_with(|| {
+                Arc::new(Client {
+                    device: device.to_string(),
+                    ..Client::default()
+                })
+            })
             .clone()
     };
     client.scrape(tracker, hashes).await
@@ -578,9 +681,20 @@ mod tests {
             r.extend_from_slice(&l.to_be_bytes());
         }
         let got = parse_scrape(&r, 7, &[[1; 20], [2; 20]]).unwrap();
-        assert_eq!((got[0].complete, got[0].incomplete, got[1].complete, got[1].incomplete), (5, 2, 0, 9));
+        assert_eq!(
+            (
+                got[0].complete,
+                got[0].incomplete,
+                got[1].complete,
+                got[1].incomplete
+            ),
+            (5, 2, 0, 9)
+        );
         assert_eq!(got[1].info_hash, [2; 20]);
-        assert!(parse_scrape(&r, 8, &[[1; 20]]).is_err(), "another transaction");
+        assert!(
+            parse_scrape(&r, 8, &[[1; 20]]).is_err(),
+            "another transaction"
+        );
     }
 
     /// The UDP announcer resolves through the tunnel's DNS server too.
@@ -589,11 +703,21 @@ mod tests {
         let _one = crate::tunneldns::tests::LO.lock().await;
         let (dns, asked) = crate::tunneldns::tests::fake_server([127, 0, 0, 9]).await;
         crate::tunneldns::tests::register("lo", dns);
-        let c = Client { device: "lo".into(), ..Default::default() };
+        let c = Client {
+            device: "lo".into(),
+            ..Default::default()
+        };
         let got = c.resolve("udp.tunnel-dns.invalid", 1337, false).await;
         crate::tunneldns::forget("lo");
-        assert_eq!(got.unwrap(), "127.0.0.9:1337".parse::<SocketAddr>().unwrap());
-        assert!(asked.lock().unwrap().iter().any(|n| n == "udp.tunnel-dns.invalid"));
+        assert_eq!(
+            got.unwrap(),
+            "127.0.0.9:1337".parse::<SocketAddr>().unwrap()
+        );
+        assert!(asked
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|n| n == "udp.tunnel-dns.invalid"));
     }
 
     fn req(tracker: &str) -> UdpAnnounce {
@@ -618,12 +742,19 @@ mod tests {
             split_url("udp://tracker.opentrackr.org:1337/announce"),
             Some(("tracker.opentrackr.org".into(), 1337, "/announce".into()))
         );
-        assert_eq!(split_url("UDP://t.example:80"), Some(("t.example".into(), 80, "".into())));
+        assert_eq!(
+            split_url("UDP://t.example:80"),
+            Some(("t.example".into(), 80, "".into()))
+        );
         assert_eq!(
             split_url("udp://[2001:db8::1]:6969/announce/KEY?x=1"),
             Some(("2001:db8::1".into(), 6969, "/announce/KEY?x=1".into()))
         );
-        assert_eq!(split_url("udp://t.example/announce"), None, "no port, no guess");
+        assert_eq!(
+            split_url("udp://t.example/announce"),
+            None,
+            "no port, no guess"
+        );
         assert_eq!(split_url("udp://t.example:0/announce"), None);
         assert_eq!(split_url("http://t.example:80/announce"), None);
     }
@@ -650,7 +781,11 @@ mod tests {
         assert_eq!(&p[96..98], &16172u16.to_be_bytes());
 
         let six = announce_packet(1, 2, &a, "", true);
-        assert_eq!(&six[84..88], &[0, 0, 0, 0], "no IPv4 ip= on an IPv6 announce");
+        assert_eq!(
+            &six[84..88],
+            &[0, 0, 0, 0],
+            "no IPv4 ip= on an IPv6 announce"
+        );
     }
 
     /// BEP 41: the path and query after the 98 bytes, in options of at most
@@ -699,8 +834,13 @@ mod tests {
         r.extend_from_slice(&3u32.to_be_bytes());
         r.extend_from_slice(&5u32.to_be_bytes());
         r.extend_from_slice(b"Unregistered torrent\0");
-        assert_eq!(parse_announce(&r, 5, false).unwrap_err(), "tracker: Unregistered torrent");
-        assert!(reply_body(&r, 6, 1).unwrap_err().contains("another transaction"));
+        assert_eq!(
+            parse_announce(&r, 5, false).unwrap_err(),
+            "tracker: Unregistered torrent"
+        );
+        assert!(reply_body(&r, 6, 1)
+            .unwrap_err()
+            .contains("another transaction"));
         assert!(reply_body(&[0, 0, 0], 5, 1).is_err());
     }
 
@@ -721,7 +861,10 @@ mod tests {
     /// A tracker in a test: answers connect with an id, checks the announce
     /// carries it, and replies with one peer. Everything goes over a real
     /// socket through the real client.
-    async fn fake_tracker(conn_id: u64, answer_announce: bool) -> (SocketAddr, tokio::task::JoinHandle<Vec<Vec<u8>>>) {
+    async fn fake_tracker(
+        conn_id: u64,
+        answer_announce: bool,
+    ) -> (SocketAddr, tokio::task::JoinHandle<Vec<Vec<u8>>>) {
         let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let addr = sock.local_addr().unwrap();
         let h = tokio::spawn(async move {
@@ -739,7 +882,11 @@ mod tests {
                     r.extend_from_slice(&conn_id.to_be_bytes());
                     sock.send_to(&r, from).await.unwrap();
                 } else if answer_announce {
-                    assert_eq!(&p[..8], &conn_id.to_be_bytes(), "the announce carries the id");
+                    assert_eq!(
+                        &p[..8],
+                        &conn_id.to_be_bytes(),
+                        "the announce carries the id"
+                    );
                     let mut r = 1u32.to_be_bytes().to_vec();
                     r.extend_from_slice(tx);
                     r.extend_from_slice(&900u32.to_be_bytes());
@@ -764,13 +911,20 @@ mod tests {
         let got = client.announce(&a, IpMode::V4).await.expect("answered");
         assert_eq!((got.interval, got.incomplete, got.complete), (900, 1, 2));
         assert_eq!(got.peers, vec!["127.0.0.1:6881".parse().unwrap()]);
-        client.announce(&a, IpMode::V4).await.expect("answered again");
+        client
+            .announce(&a, IpMode::V4)
+            .await
+            .expect("answered again");
 
         let seen = tracker.await.unwrap();
         let connects = seen.iter().filter(|p| p.len() == 16).count();
         assert_eq!(connects, 1, "one connect for two announces");
         assert_eq!(seen.len(), 3);
-        assert_eq!(&seen[1][98..], &[&[0x2u8, 9][..], b"/announce"].concat()[..], "URL data sent");
+        assert_eq!(
+            &seen[1][98..],
+            &[&[0x2u8, 9][..], b"/announce"].concat()[..],
+            "URL data sent"
+        );
     }
 
     /// A tracker that never answers the announce is a timeout, classified as
@@ -782,7 +936,10 @@ mod tests {
         let a = req(&format!("udp://127.0.0.1:{}", addr.port()));
         let err = client.announce(&a, IpMode::V4).await.unwrap_err();
         assert!(err.contains("timed out"), "{err}");
-        assert!(client.conns.is_empty(), "the id is not reused after a failure");
+        assert!(
+            client.conns.is_empty(),
+            "the id is not reused after a failure"
+        );
     }
 
     /// A datagram with the right transaction id from the WRONG address is
@@ -798,10 +955,21 @@ mod tests {
         let mut forged = 0u32.to_be_bytes().to_vec();
         forged.extend_from_slice(&77u32.to_be_bytes());
         forged.extend_from_slice(&[0; 8]);
-        let local = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), fam.sock.local_addr().unwrap().port());
+        let local = SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            fam.sock.local_addr().unwrap().port(),
+        );
         spoofer.send_to(&forged, local).await.unwrap();
-        assert!(tokio::time::timeout(Duration::from_millis(300), rx).await.is_err(), "not delivered");
-        assert!(fam.pending.contains_key(&77), "still waiting for the real one");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), rx)
+                .await
+                .is_err(),
+            "not delivered"
+        );
+        assert!(
+            fam.pending.contains_key(&77),
+            "still waiting for the real one"
+        );
     }
 
     /// The socket belongs to the runtime it was opened on: another runtime is
@@ -810,12 +978,20 @@ mod tests {
     #[test]
     fn a_family_is_kept_per_runtime() {
         let client = Client::default();
-        let rt = || tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let rt = || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+        };
         let (a, b) = (rt(), rt());
         let first = a.block_on(async { client.family(false).unwrap() });
         let again = a.block_on(async { client.family(false).unwrap() });
         assert!(Arc::ptr_eq(&first, &again), "same runtime, same socket");
         let other = b.block_on(async { client.family(false).unwrap() });
-        assert!(!Arc::ptr_eq(&first, &other), "another runtime, its own socket");
+        assert!(
+            !Arc::ptr_eq(&first, &other),
+            "another runtime, its own socket"
+        );
     }
 }

@@ -138,7 +138,11 @@ fn registry() -> &'static std::sync::Mutex<std::collections::BTreeMap<String, St
 
 /// The last outcome for one engine, if its mapper ever ran.
 pub fn status(engine: &str) -> Option<Status> {
-    registry().lock().unwrap_or_else(|p| p.into_inner()).get(engine).cloned()
+    registry()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(engine)
+        .cloned()
 }
 
 fn record(engine: &str, internal_port: u16, outcome: &Result<Granted, String>) {
@@ -160,36 +164,86 @@ fn record(engine: &str, internal_port: u16, outcome: &Result<Granted, String>) {
             at,
             ..Default::default()
         },
-        Err(e) => Status { internal_port, error: e.clone(), at, ..Default::default() },
+        Err(e) => Status {
+            internal_port,
+            error: e.clone(),
+            at,
+            ..Default::default()
+        },
     };
-    registry().lock().unwrap_or_else(|p| p.into_inner()).insert(engine.to_string(), st);
+    registry()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(engine.to_string(), st);
 }
 
 /// No mapping is asked for this engine, and why.
 pub fn record_refusal(engine: &str, internal_port: u16, why: &str) {
-    let st = Status { internal_port, refused: why.to_string(), ..Default::default() };
-    registry().lock().unwrap_or_else(|p| p.into_inner()).insert(engine.to_string(), st);
+    let st = Status {
+        internal_port,
+        refused: why.to_string(),
+        ..Default::default()
+    };
+    registry()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(engine.to_string(), st);
 }
 
 /// NAT-PMP, TCP then UDP on the port TCP was granted.
-pub async fn natpmp_both(target: std::net::SocketAddr, internal_port: u16, attempts: usize) -> Result<Granted, String> {
-    let tcp = portfwd::map_to(target, true, internal_port, internal_port, LEASE, attempts, None).await?;
-    let udp = portfwd::map_to(target, false, internal_port, tcp.external_port, LEASE, attempts, None)
-        .await
-        .err()
-        .map(|e| format!("UDP not forwarded, uTP and DHT peers cannot reach this engine: {e}"));
-    Ok(Granted { how: Mapped::NatPmp { external_port: tcp.external_port }, udp_error: udp })
+pub async fn natpmp_both(
+    target: std::net::SocketAddr,
+    internal_port: u16,
+    attempts: usize,
+) -> Result<Granted, String> {
+    let tcp = portfwd::map_to(
+        target,
+        true,
+        internal_port,
+        internal_port,
+        LEASE,
+        attempts,
+        None,
+    )
+    .await?;
+    let udp = portfwd::map_to(
+        target,
+        false,
+        internal_port,
+        tcp.external_port,
+        LEASE,
+        attempts,
+        None,
+    )
+    .await
+    .err()
+    .map(|e| format!("UDP not forwarded, uTP and DHT peers cannot reach this engine: {e}"));
+    Ok(Granted {
+        how: Mapped::NatPmp {
+            external_port: tcp.external_port,
+        },
+        udp_error: udp,
+    })
 }
 
 /// UPnP, TCP then UDP. IGD cannot grant another external port: we ask for
 /// ours and it agrees or refuses.
-pub async fn upnp_both(gateway: &igd::Gateway, local: &str, internal_port: u16) -> Result<Granted, String> {
+pub async fn upnp_both(
+    gateway: &igd::Gateway,
+    local: &str,
+    internal_port: u16,
+) -> Result<Granted, String> {
     igd::add_mapping(gateway, local, internal_port, internal_port, "TCP", LEASE).await?;
     let udp = igd::add_mapping(gateway, local, internal_port, internal_port, "UDP", LEASE)
         .await
         .err()
         .map(|e| format!("UDP not forwarded, uTP and DHT peers cannot reach this engine: {e}"));
-    Ok(Granted { how: Mapped::Upnp { external_port: internal_port }, udp_error: udp })
+    Ok(Granted {
+        how: Mapped::Upnp {
+            external_port: internal_port,
+        },
+        udp_error: udp,
+    })
 }
 
 /// Try NAT-PMP, then UPnP, and say which worked.
@@ -235,7 +289,11 @@ pub async fn map_once(internal_port: u16) -> Result<Granted, String> {
 /// listen-port change made live is mapped within seconds, not at the next
 /// start: until 4.4 the mapper kept renewing the port the engine had left.
 /// The old port's lease is simply not renewed and expires on the router.
-pub fn spawn(engine: String, manager: std::sync::Arc<typhon_engine::torrent::TorrentManager>, configured_port: u16) {
+pub fn spawn(
+    engine: String,
+    manager: std::sync::Arc<typhon_engine::torrent::TorrentManager>,
+    configured_port: u16,
+) {
     tokio::spawn(async move {
         loop {
             let internal_port = manager.listen_port_now(configured_port);
@@ -270,7 +328,9 @@ pub fn spawn(engine: String, manager: std::sync::Arc<typhon_engine::torrent::Tor
             // Sleep, but wake as soon as the engine moves to another port.
             let until = tokio::time::Instant::now() + wait;
             while tokio::time::Instant::now() < until {
-                if !crate::shutdown::sleep(PORT_WATCH.min(until - tokio::time::Instant::now())).await {
+                if !crate::shutdown::sleep(PORT_WATCH.min(until - tokio::time::Instant::now()))
+                    .await
+                {
                     return;
                 }
                 if manager.listen_port_now(configured_port) != internal_port {
@@ -332,7 +392,13 @@ eth0\t0001A8C0\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0
     }
 
     /// A NAT-PMP gateway granting `port` to every request; records the ops.
-    async fn natpmp_gateway(port: u16, refuse_udp: bool) -> (std::net::SocketAddr, std::sync::Arc<std::sync::Mutex<Vec<u8>>>) {
+    async fn natpmp_gateway(
+        port: u16,
+        refuse_udp: bool,
+    ) -> (
+        std::net::SocketAddr,
+        std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    ) {
         let sock = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let addr = sock.local_addr().unwrap();
         let ops: std::sync::Arc<std::sync::Mutex<Vec<u8>>> = Default::default();
@@ -364,9 +430,17 @@ eth0\t0001A8C0\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0
     async fn natpmp_maps_tcp_and_udp_on_one_port() {
         let (gw, ops) = natpmp_gateway(16171, false).await;
         let g = natpmp_both(gw, 16171, 1).await.unwrap();
-        assert_eq!(g.how, Mapped::NatPmp { external_port: 16171 });
+        assert_eq!(
+            g.how,
+            Mapped::NatPmp {
+                external_port: 16171
+            }
+        );
         assert_eq!(g.udp_error, None);
-        assert_eq!(*ops.lock().unwrap(), vec![portfwd::OP_MAP_TCP, portfwd::OP_MAP_UDP]);
+        assert_eq!(
+            *ops.lock().unwrap(),
+            vec![portfwd::OP_MAP_TCP, portfwd::OP_MAP_UDP]
+        );
     }
 
     /// A UDP refusal keeps the TCP mapping and says what it costs.
@@ -375,7 +449,10 @@ eth0\t0001A8C0\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0
         let (gw, _) = natpmp_gateway(16171, true).await;
         let g = natpmp_both(gw, 16171, 1).await.unwrap();
         assert_eq!(g.external_port(), 16171);
-        assert!(g.udp_error.as_deref().unwrap_or_default().contains("uTP"), "{g:?}");
+        assert!(
+            g.udp_error.as_deref().unwrap_or_default().contains("uTP"),
+            "{g:?}"
+        );
         record("udp-refused", 16171, &Ok(g));
         let st = status("udp-refused").unwrap();
         assert!(st.tcp && !st.udp, "{st:?}");
@@ -390,8 +467,11 @@ eth0\t0001A8C0\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             for _ in 0..n {
-                let Ok((mut sock, _)) = listener.accept() else { return };
-                sock.set_read_timeout(Some(std::time::Duration::from_millis(300))).ok();
+                let Ok((mut sock, _)) = listener.accept() else {
+                    return;
+                };
+                sock.set_read_timeout(Some(std::time::Duration::from_millis(300)))
+                    .ok();
                 let mut buf = Vec::new();
                 let mut chunk = [0u8; 4096];
                 while let Ok(k) = sock.read(&mut chunk) {
@@ -404,7 +484,9 @@ eth0\t0001A8C0\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0
                     }
                 }
                 let _ = tx.send(String::from_utf8_lossy(&buf).into_owned());
-                let _ = sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                let _ = sock.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                );
             }
         });
         (format!("http://127.0.0.1:{port}/ctl"), rx)
@@ -419,24 +501,45 @@ eth0\t0001A8C0\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0
             service_type: "urn:schemas-upnp-org:service:WANIPConnection:1".into(),
         };
         let g = upnp_both(&gw, "192.168.99.50", 16172).await.unwrap();
-        assert_eq!(g, Granted { how: Mapped::Upnp { external_port: 16172 }, udp_error: None });
+        assert_eq!(
+            g,
+            Granted {
+                how: Mapped::Upnp {
+                    external_port: 16172
+                },
+                udp_error: None
+            }
+        );
         let first = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
         let second = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
         assert!(first.contains("<NewProtocol>TCP</NewProtocol>"), "{first}");
-        assert!(second.contains("<NewProtocol>UDP</NewProtocol>"), "{second}");
-        assert!(second.contains("<NewExternalPort>16172</NewExternalPort>"), "{second}");
+        assert!(
+            second.contains("<NewProtocol>UDP</NewProtocol>"),
+            "{second}"
+        );
+        assert!(
+            second.contains("<NewExternalPort>16172</NewExternalPort>"),
+            "{second}"
+        );
     }
 
     /// What `/api/port-forward` reads: the last outcome, failure or refusal
     /// included.
     #[test]
     fn the_status_says_what_happened() {
-        record("st-fail", 1234, &Err("NAT-PMP: no answer | UPnP: no router".into()));
+        record(
+            "st-fail",
+            1234,
+            &Err("NAT-PMP: no answer | UPnP: no router".into()),
+        );
         let st = status("st-fail").unwrap();
         assert_eq!((st.tcp, st.udp, st.internal_port), (false, false, 1234));
         assert!(st.error.contains("UPnP"));
         record_refusal("st-refused", 4321, "behind a SOCKS5 proxy");
-        assert_eq!(status("st-refused").unwrap().refused, "behind a SOCKS5 proxy");
+        assert_eq!(
+            status("st-refused").unwrap().refused,
+            "behind a SOCKS5 proxy"
+        );
         assert!(status("never-ran").is_none());
     }
 

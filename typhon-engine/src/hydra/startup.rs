@@ -119,7 +119,11 @@ pub fn restores() -> Vec<EngineRestore> {
         .iter()
         .map(|(id, m)| {
             let (done, total) = m.restore_progress();
-            EngineRestore { id: id.clone(), restored: done.min(total), total }
+            EngineRestore {
+                id: id.clone(),
+                restored: done.min(total),
+                total,
+            }
         })
         .collect()
 }
@@ -191,10 +195,14 @@ fn starting_router(early: Early) -> Router {
         // The setup screen is shown while starting, so its POST arrives
         // here too: a GET-only route answered 405, read as "Setup failed
         // (405)". The 503 says why, and to come back.
-        .route("/api/setup", get(move || {
-            let setup = setup.clone();
-            async move { Json(setup) }
-        }).post(|| async { not_yet() }))
+        .route(
+            "/api/setup",
+            get(move || {
+                let setup = setup.clone();
+                async move { Json(setup) }
+            })
+            .post(|| async { not_yet() }),
+        )
         .fallback(|| async { not_yet() })
 }
 
@@ -221,20 +229,50 @@ fn starting_health() -> Response {
 /// scrape that got "connection refused" for minutes read as a dead target.
 fn starting_metrics() -> Response {
     let mut x = crate::obs::Exposition::new();
-    x.family("hydra_up", "gauge", "1 while the process answers.", &[(vec![], 1.0)]);
+    x.family(
+        "hydra_up",
+        "gauge",
+        "1 while the process answers.",
+        &[(vec![], 1.0)],
+    );
     x.family(
         "hydra_uptime_seconds",
         "gauge",
         "Seconds since the process started, the catalogue load included.",
         &[(vec![], uptime_secs() as f64)],
     );
-    x.family("hydra_starting", "gauge", "1 while the catalogue loads.", &[(vec![], 1.0)]);
+    x.family(
+        "hydra_starting",
+        "gauge",
+        "1 while the catalogue loads.",
+        &[(vec![], 1.0)],
+    );
     let rs = restores();
-    let restored: Vec<_> = rs.iter().map(|r| (vec![("engine", r.id.clone())], r.restored as f64)).collect();
-    let total: Vec<_> = rs.iter().map(|r| (vec![("engine", r.id.clone())], r.total as f64)).collect();
-    x.family("hydra_startup_restored", "gauge", "Resume records gone through so far.", &restored);
-    x.family("hydra_startup_records", "gauge", "Resume records to go through.", &total);
-    ([(header::CONTENT_TYPE, "text/plain; version=0.0.4")], x.finish()).into_response()
+    let restored: Vec<_> = rs
+        .iter()
+        .map(|r| (vec![("engine", r.id.clone())], r.restored as f64))
+        .collect();
+    let total: Vec<_> = rs
+        .iter()
+        .map(|r| (vec![("engine", r.id.clone())], r.total as f64))
+        .collect();
+    x.family(
+        "hydra_startup_restored",
+        "gauge",
+        "Resume records gone through so far.",
+        &restored,
+    );
+    x.family(
+        "hydra_startup_records",
+        "gauge",
+        "Resume records to go through.",
+        &total,
+    );
+    (
+        [(header::CONTENT_TYPE, "text/plain; version=0.0.4")],
+        x.finish(),
+    )
+        .into_response()
 }
 
 /// Everything else, until the router is in place.
@@ -260,7 +298,11 @@ mod tests {
     use tower::ServiceExt;
 
     fn early() -> Early {
-        Early { front_only: false, needs_setup: false, network_storage: "" }
+        Early {
+            front_only: false,
+            needs_setup: false,
+            network_storage: "",
+        }
     }
 
     async fn call(r: &Router, path: &str) -> (StatusCode, serde_json::Value) {
@@ -270,8 +312,13 @@ mod tests {
             .await
             .unwrap();
         let status = resp.status();
-        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
-        (status, serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null))
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+        )
     }
 
     /// The gate answers from the first second, with the real figures, and
@@ -310,25 +357,53 @@ mod tests {
         // Anything else says it is not there yet, and how far it got.
         let (st, body) = call(&gate, "/api/status").await;
         assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE);
-        assert!(body["error"].as_str().unwrap().contains("starting"), "{body}");
-        assert!(body.get("version").is_none(), "a deploy script waits for /api/status to carry a version");
+        assert!(
+            body["error"].as_str().unwrap().contains("starting"),
+            "{body}"
+        );
+        assert!(
+            body.get("version").is_none(),
+            "a deploy script waits for /api/status to carry a version"
+        );
 
         let (st, body) = call(&gate, "/api/setup").await;
         assert_eq!(st, StatusCode::OK);
         assert_eq!(body["store_repair"], false);
-        let req = axum::http::Request::builder().method("POST").uri("/api/setup").body(axum::body::Body::from("{}")).unwrap();
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/setup")
+            .body(axum::body::Body::from("{}"))
+            .unwrap();
         let r = gate.clone().oneshot(req).await.unwrap();
-        assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE, "a setup posted while starting is told to wait, not 405");
+        assert_eq!(
+            r.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "a setup posted while starting is told to wait, not 405"
+        );
 
-        let _ = slot.set(Router::new().route("/api/status", get(|| async { Json(serde_json::json!({"version": "x"})) })));
+        let _ = slot.set(Router::new().route(
+            "/api/status",
+            get(|| async { Json(serde_json::json!({"version": "x"})) }),
+        ));
         let (st, body) = call(&gate, "/api/status").await;
-        assert_eq!(st, StatusCode::OK, "the real router answers once it is in place");
+        assert_eq!(
+            st,
+            StatusCode::OK,
+            "the real router answers once it is in place"
+        );
         assert_eq!(body["version"], "x");
     }
 
     #[test]
     fn phases_round_trip() {
-        for p in [Phase::Loading, Phase::Connecting, Phase::OpeningStore, Phase::StartingWorkers, Phase::Ready, Phase::Rescue] {
+        for p in [
+            Phase::Loading,
+            Phase::Connecting,
+            Phase::OpeningStore,
+            Phase::StartingWorkers,
+            Phase::Ready,
+            Phase::Rescue,
+        ] {
             assert_eq!(Phase::from_u8(p as u8), p);
         }
     }

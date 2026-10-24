@@ -35,7 +35,10 @@ fn torrent_bytes(name: &str) -> Vec<u8> {
 /// A torrent in this instance's race engine, saved under the test's own dir.
 fn add_local(s: &TestState, name: &str) -> String {
     let engines = s.engines.engines();
-    let engine = engines.iter().find(|e| e.id == "race").expect("race engine");
+    let engine = engines
+        .iter()
+        .find(|e| e.id == "race")
+        .expect("race engine");
     let save = s.dir.join("data");
     std::fs::create_dir_all(&save).unwrap();
     let (ih, _) = engine
@@ -51,7 +54,9 @@ struct Served {
 }
 
 async fn serve(app: axum::Router) -> Served {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
     let addr = listener.local_addr().expect("addr");
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
     tokio::spawn(async move {
@@ -61,7 +66,10 @@ async fn serve(app: axum::Router) -> Served {
             })
             .await;
     });
-    Served { url: format!("http://{addr}"), _shutdown: tx }
+    Served {
+        url: format!("http://{addr}"),
+        _shutdown: tx,
+    }
 }
 
 /// A node hosting ONE engine, `vpn1`, and only the per-id page route: the
@@ -103,8 +111,14 @@ fn declare(s: &TestState, name: &str, url: &str, api_key: &str) {
 }
 
 fn wait_job(s: &TestState, hash: &str, node: &str, engine: &str, deadline: i64) -> String {
-    let params = serde_json::json!({"name": "x", "node": node, "engine": engine, "deadline": deadline}).to_string();
-    s.store.lock().unwrap().create_waiting_job("handoff", hash, &params, 16384).unwrap()
+    let params =
+        serde_json::json!({"name": "x", "node": node, "engine": engine, "deadline": deadline})
+            .to_string();
+    s.store
+        .lock()
+        .unwrap()
+        .create_waiting_job("handoff", hash, &params, 16384)
+        .unwrap()
 }
 
 fn far_future() -> i64 {
@@ -126,9 +140,16 @@ async fn a_move_to_a_nodes_extra_engine_is_confirmed_and_drops_the_local_copy() 
     declare(&s, "seedbox", &node.url, NODE_KEY);
     let id = wait_job(&s, &hash, "seedbox", "vpn1", far_future());
 
-    assert_eq!(handoff_watch_once(&s.state).await, 1, "one local copy dropped");
+    assert_eq!(
+        handoff_watch_once(&s.state).await,
+        1,
+        "one local copy dropped"
+    );
     assert_eq!(s.store.lock().unwrap().job(&id).unwrap().state, "done");
-    assert!(!held_locally(&s, &hash), "the local copy is gone once the node holds it all");
+    assert!(
+        !held_locally(&s, &hash),
+        "the local copy is gone once the node holds it all"
+    );
 }
 
 /// With no engine named, every engine of the node is asked: the far side's
@@ -157,7 +178,10 @@ async fn an_incomplete_move_records_progress_and_fails_safe_at_its_deadline() {
     assert_eq!(handoff_watch_once(&s.state).await, 0);
     let j = s.store.lock().unwrap().job(&id).unwrap();
     assert_eq!(j.state, "waiting", "still waiting");
-    assert_eq!(j.progress_bytes, 8192, "half of 16 KiB, as the node reported");
+    assert_eq!(
+        j.progress_bytes, 8192,
+        "half of 16 KiB, as the node reported"
+    );
 
     // Another torrent the node never listed, past its deadline.
     s.store.lock().unwrap().cancel_job(&id);
@@ -179,8 +203,18 @@ async fn a_cancelled_move_keeps_the_local_copy() {
     declare(&s, "seedbox", &node.url, NODE_KEY);
     let id = wait_job(&s, &hash, "seedbox", "vpn1", far_future());
 
-    let resp = super::delete_job(State(s.state.clone()), Path(id.clone()), RawQuery(None), keyed(KEY)).await;
-    assert_eq!(resp.status(), StatusCode::OK, "a waiting job can be cancelled");
+    let resp = super::delete_job(
+        State(s.state.clone()),
+        Path(id.clone()),
+        RawQuery(None),
+        keyed(KEY),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "a waiting job can be cancelled"
+    );
     assert_eq!(handoff_watch_once(&s.state).await, 0);
     assert_eq!(s.store.lock().unwrap().job(&id).unwrap().state, "cancelled");
     assert!(held_locally(&s, &hash), "nothing deleted after a cancel");
@@ -217,8 +251,14 @@ async fn a_node_that_does_not_answer_leaves_the_move_waiting() {
 async fn a_waiting_move_is_listed_on_the_jobs_route() {
     let s = st("handoff-listed");
     let id = wait_job(&s, &"a".repeat(40), "seedbox", "vpn1", far_future());
-    let v = body_json(super::get_jobs(State(s.state.clone()), RawQuery(None), keyed(KEY)).await).await;
-    let row = v.as_array().unwrap().iter().find(|j| j["id"] == serde_json::json!(id)).expect("listed");
+    let v =
+        body_json(super::get_jobs(State(s.state.clone()), RawQuery(None), keyed(KEY)).await).await;
+    let row = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|j| j["id"] == serde_json::json!(id))
+        .expect("listed");
     assert_eq!(row["type"], "handoff");
     assert_eq!(row["state"], "waiting");
     assert_eq!(row["params"]["node"], "seedbox");
@@ -228,8 +268,19 @@ async fn a_waiting_move_is_listed_on_the_jobs_route() {
 // #70: edit, rename, key rotation
 // ---------------------------------------------------------------------------
 
-async fn patch(s: &TestState, name: &str, body: serde_json::Value) -> (StatusCode, serde_json::Value) {
-    let resp = super::patch_node(State(s.state.clone()), Path(name.into()), RawQuery(None), keyed(KEY), body.to_string()).await;
+async fn patch(
+    s: &TestState,
+    name: &str,
+    body: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    let resp = super::patch_node(
+        State(s.state.clone()),
+        Path(name.into()),
+        RawQuery(None),
+        keyed(KEY),
+        body.to_string(),
+    )
+    .await;
     let code = resp.status();
     (code, body_json(resp).await)
 }
@@ -242,7 +293,11 @@ async fn a_node_can_be_renamed_and_its_waiting_moves_follow() {
     let id = wait_job(&s, &"b".repeat(40), "alpha", "", far_future());
 
     let (code, _) = patch(&s, "alpha", serde_json::json!({"name": "beta"})).await;
-    assert_eq!(code, StatusCode::CONFLICT, "a rename never merges two nodes");
+    assert_eq!(
+        code,
+        StatusCode::CONFLICT,
+        "a rename never merges two nodes"
+    );
     let (code, _) = patch(&s, "alpha", serde_json::json!({"name": "a/b"})).await;
     assert_eq!(code, StatusCode::BAD_REQUEST);
     let (code, v) = patch(&s, "alpha", serde_json::json!({"name": "gamma"})).await;
@@ -251,7 +306,11 @@ async fn a_node_can_be_renamed_and_its_waiting_moves_follow() {
 
     let store = s.store.lock().unwrap();
     assert!(store.node("alpha").unwrap().is_none());
-    assert_eq!(store.node("gamma").unwrap().unwrap().api_key, NODE_KEY, "the key went with it");
+    assert_eq!(
+        store.node("gamma").unwrap().unwrap().api_key,
+        NODE_KEY,
+        "the key went with it"
+    );
     let p: serde_json::Value = serde_json::from_str(&store.job(&id).unwrap().params).unwrap();
     assert_eq!(p["node"], "gamma");
 }
@@ -260,16 +319,29 @@ async fn a_node_can_be_renamed_and_its_waiting_moves_follow() {
 async fn editing_a_node_is_refused_for_loopback_unknown_nodes_and_empty_bodies() {
     let s = st("node-edit-refusals");
     declare(&s, "alpha", "http://10.0.0.5:8199", NODE_KEY);
-    let (code, _) = patch(&s, "alpha", serde_json::json!({"url": "http://127.0.0.1:8199"})).await;
+    let (code, _) = patch(
+        &s,
+        "alpha",
+        serde_json::json!({"url": "http://127.0.0.1:8199"}),
+    )
+    .await;
     assert_eq!(code, StatusCode::BAD_REQUEST);
     let (code, _) = patch(&s, "alpha", serde_json::json!({})).await;
     assert_eq!(code, StatusCode::BAD_REQUEST);
     let (code, _) = patch(&s, "nobody", serde_json::json!({"name": "x"})).await;
     assert_eq!(code, StatusCode::NOT_FOUND);
     // A new address that does not answer is not saved.
-    let (code, _) = patch(&s, "alpha", serde_json::json!({"url": "http://192.0.2.1:1"})).await;
+    let (code, _) = patch(
+        &s,
+        "alpha",
+        serde_json::json!({"url": "http://192.0.2.1:1"}),
+    )
+    .await;
     assert_eq!(code, StatusCode::BAD_REQUEST);
-    assert_eq!(s.store.lock().unwrap().node("alpha").unwrap().unwrap().url, "http://10.0.0.5:8199");
+    assert_eq!(
+        s.store.lock().unwrap().node("alpha").unwrap().unwrap().url,
+        "http://10.0.0.5:8199"
+    );
 }
 
 /// ⭐⭐ The whole rotation, against a real second Hydranos: the node adopts a
@@ -280,7 +352,10 @@ async fn rotating_a_nodes_key_switches_both_sides_and_retires_the_old_key() {
     // The pending key is process-wide: nothing else may mint one meanwhile.
     let _pending = crate::nodes::PENDING_KEY_TEST_LOCK.lock().await;
     let controller = st("rotate-controller");
-    let node = state_from("rotate-node", &format!("[daemon]\napi_key = \"{NODE_KEY}\"\n"));
+    let node = state_from(
+        "rotate-node",
+        &format!("[daemon]\napi_key = \"{NODE_KEY}\"\n"),
+    );
     let served = serve(crate::api::router(node.state.clone())).await;
     declare(&controller, "seedbox", &served.url, NODE_KEY);
 
@@ -293,15 +368,34 @@ async fn rotating_a_nodes_key_switches_both_sides_and_retires_the_old_key() {
     .await;
     assert_eq!(resp.status(), StatusCode::OK);
     let v = body_json(resp).await;
-    let new_key = v["api_key"].as_str().expect("the new key is returned once").to_string();
+    let new_key = v["api_key"]
+        .as_str()
+        .expect("the new key is returned once")
+        .to_string();
     assert_ne!(new_key, NODE_KEY);
-    assert_eq!(v["health"]["online"], true, "the node answers the new key: {v}");
+    assert_eq!(
+        v["health"]["online"], true,
+        "the node answers the new key: {v}"
+    );
 
-    assert_eq!(controller.store.lock().unwrap().node("seedbox").unwrap().unwrap().api_key, new_key);
+    assert_eq!(
+        controller
+            .store
+            .lock()
+            .unwrap()
+            .node("seedbox")
+            .unwrap()
+            .unwrap()
+            .api_key,
+        new_key
+    );
     assert_eq!(node.state.cfg().daemon.api_key, new_key, "live on the node");
     let on_disk = std::fs::read_to_string(&node.state.config_path).unwrap();
     assert!(on_disk.contains(&new_key), "persisted for the next boot");
-    assert!(!authorised(&node.state, &keyed(NODE_KEY), ""), "the old key is refused");
+    assert!(
+        !authorised(&node.state, &keyed(NODE_KEY), ""),
+        "the old key is refused"
+    );
     assert!(authorised(&node.state, &keyed(&new_key), ""));
 }
 
@@ -309,7 +403,10 @@ async fn rotating_a_nodes_key_switches_both_sides_and_retires_the_old_key() {
 /// key cannot confirm a rotation it did not see.
 #[tokio::test]
 async fn a_confirmation_with_any_other_key_is_refused() {
-    let node = state_from("rotate-wrong", &format!("[daemon]\napi_key = \"{NODE_KEY}\"\n"));
+    let node = state_from(
+        "rotate-wrong",
+        &format!("[daemon]\napi_key = \"{NODE_KEY}\"\n"),
+    );
     for k in [NODE_KEY, "", "not-the-pending-key-at-all"] {
         let mut h = HeaderMap::new();
         if !k.is_empty() {
@@ -324,7 +421,11 @@ async fn a_confirmation_with_any_other_key_is_refused() {
 /// Starting a rotation needs the current key, like any other route.
 #[tokio::test]
 async fn starting_a_rotation_needs_the_current_key() {
-    let node = state_from("rotate-guard", &format!("[daemon]\napi_key = \"{NODE_KEY}\"\n"));
-    let resp = super::post_api_key_rotate(State(node.state.clone()), RawQuery(None), keyed("wrong")).await;
+    let node = state_from(
+        "rotate-guard",
+        &format!("[daemon]\napi_key = \"{NODE_KEY}\"\n"),
+    );
+    let resp =
+        super::post_api_key_rotate(State(node.state.clone()), RawQuery(None), keyed("wrong")).await;
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }

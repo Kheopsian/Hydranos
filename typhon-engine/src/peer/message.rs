@@ -52,8 +52,12 @@ impl Message {
             MSG_UNCHOKE => Ok(Message::Unchoke),
             MSG_INTERESTED => Ok(Message::Interested),
             MSG_NOT_INTERESTED => Ok(Message::NotInterested),
-            MSG_HAVE if buf.len() >= 4 => Ok(Message::Have { piece: buf.get_u32() }),
-            MSG_BITFIELD => Ok(Message::Bitfield { data: buf.copy_to_bytes(buf.remaining()) }),
+            MSG_HAVE if buf.len() >= 4 => Ok(Message::Have {
+                piece: buf.get_u32(),
+            }),
+            MSG_BITFIELD => Ok(Message::Bitfield {
+                data: buf.copy_to_bytes(buf.remaining()),
+            }),
             MSG_REQUEST if buf.len() >= 12 => Ok(Message::Request {
                 index: buf.get_u32(),
                 begin: buf.get_u32(),
@@ -72,25 +76,35 @@ impl Message {
             }),
             MSG_HAVE_ALL => Ok(Message::HaveAll),
             MSG_HAVE_NONE => Ok(Message::HaveNone),
-            MSG_SUGGEST if buf.len() >= 4 => Ok(Message::Suggest { piece: buf.get_u32() }),
+            MSG_SUGGEST if buf.len() >= 4 => Ok(Message::Suggest {
+                piece: buf.get_u32(),
+            }),
             MSG_REJECT if buf.len() >= 12 => Ok(Message::Reject {
                 index: buf.get_u32(),
                 begin: buf.get_u32(),
                 length: buf.get_u32(),
             }),
-            MSG_ALLOWED_FAST if buf.len() >= 4 => Ok(Message::AllowedFast { piece: buf.get_u32() }),
+            MSG_ALLOWED_FAST if buf.len() >= 4 => Ok(Message::AllowedFast {
+                piece: buf.get_u32(),
+            }),
             MSG_EXTENDED if !buf.is_empty() => {
                 let ext_id = buf.get_u8();
-                Ok(Message::Extended { ext_id, payload: buf.copy_to_bytes(buf.remaining()) })
+                Ok(Message::Extended {
+                    ext_id,
+                    payload: buf.copy_to_bytes(buf.remaining()),
+                })
             }
-            _ => Ok(Message::Unknown { id, payload: buf.copy_to_bytes(buf.remaining()) }),
+            _ => Ok(Message::Unknown {
+                id,
+                payload: buf.copy_to_bytes(buf.remaining()),
+            }),
         }
     }
 
     pub fn encode_payload(&self) -> Vec<u8> {
         let mut buf = Vec::new();
         match self {
-            Message::KeepAlive => {},
+            Message::KeepAlive => {}
             Message::Choke => buf.push(MSG_CHOKE),
             Message::Unchoke => buf.push(MSG_UNCHOKE),
             Message::Interested => buf.push(MSG_INTERESTED),
@@ -103,7 +117,11 @@ impl Message {
                 buf.push(MSG_BITFIELD);
                 buf.extend_from_slice(data);
             }
-            Message::Request { index, begin, length } => {
+            Message::Request {
+                index,
+                begin,
+                length,
+            } => {
                 buf.push(MSG_REQUEST);
                 buf.put_u32(*index);
                 buf.put_u32(*begin);
@@ -115,7 +133,11 @@ impl Message {
                 buf.put_u32(*begin);
                 buf.extend_from_slice(data);
             }
-            Message::Cancel { index, begin, length } => {
+            Message::Cancel {
+                index,
+                begin,
+                length,
+            } => {
                 buf.push(MSG_CANCEL);
                 buf.put_u32(*index);
                 buf.put_u32(*begin);
@@ -127,7 +149,11 @@ impl Message {
                 buf.push(MSG_SUGGEST);
                 buf.put_u32(*piece);
             }
-            Message::Reject { index, begin, length } => {
+            Message::Reject {
+                index,
+                begin,
+                length,
+            } => {
                 buf.push(MSG_REJECT);
                 buf.put_u32(*index);
                 buf.put_u32(*begin);

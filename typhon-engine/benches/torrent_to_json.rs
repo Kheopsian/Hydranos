@@ -4,15 +4,15 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use std::path::PathBuf;
 use std::sync::Arc;
-use typhon_engine::torrent::meta::{TorrentMeta, TorrentState, FileEntry};
 use typhon_engine::rpc::dispatch::torrent_to_json;
+use typhon_engine::torrent::meta::{FileEntry, TorrentMeta, TorrentState};
 
 fn make_torrent(i: u32) -> Arc<TorrentState> {
     let meta = TorrentMeta {
         info_hash: [i as u8; 20],
         name: format!("torrent-{}", i),
-        num_pieces: 500,                      // hashes live in the .torrent
-        piece_length: 1 << 20,                // 1 MB pieces
+        num_pieces: 500,       // hashes live in the .torrent
+        piece_length: 1 << 20, // 1 MB pieces
         total_size: 500 * (1 << 20),
         files: vec![FileEntry {
             path: PathBuf::from(format!("file-{}.bin", i)),
@@ -64,5 +64,10 @@ fn bench_json_13k_serialize(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_json_one, bench_json_13k, bench_json_13k_serialize);
+criterion_group!(
+    benches,
+    bench_json_one,
+    bench_json_13k,
+    bench_json_13k_serialize
+);
 criterion_main!(benches);

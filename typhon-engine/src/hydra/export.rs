@@ -97,7 +97,10 @@ pub fn run<W: Write>(
                 out.write_all(b"\n")?;
             }
             out.flush()?;
-            Ok(Summary { written: hashes.len(), missing: 0 })
+            Ok(Summary {
+                written: hashes.len(),
+                missing: 0,
+            })
         }
         Format::Csv => {
             let mut out = out;
@@ -139,7 +142,10 @@ pub fn run<W: Write>(
                         // Fail closed: the operator asked for the passkeys to
                         // stay home, and a file we cannot rewrite may carry one.
                         Err(_) => {
-                            missing.push((hash.to_string(), "unreadable .torrent, trackers could not be removed"));
+                            missing.push((
+                                hash.to_string(),
+                                "unreadable .torrent, trackers could not be removed",
+                            ));
                             return Ok(());
                         }
                     }
@@ -181,7 +187,9 @@ fn each_row(
     for chunk in hashes.chunks(BATCH) {
         let rows = {
             let guard = store.read().unwrap_or_else(|p| p.into_inner());
-            guard.export_rows(chunk).map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?
+            guard
+                .export_rows(chunk)
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?
         };
         let by_hash: std::collections::HashMap<&str, &ExportRow> =
             rows.iter().map(|r| (r.info_hash.as_str(), r)).collect();
@@ -197,7 +205,13 @@ fn each_row(
 pub fn entry_name(name: &str, hash: &str) -> String {
     let cleaned: String = name
         .chars()
-        .map(|c| if c.is_control() || "/\\:*?\"<>|".contains(c) { '_' } else { c })
+        .map(|c| {
+            if c.is_control() || "/\\:*?\"<>|".contains(c) {
+                '_'
+            } else {
+                c
+            }
+        })
         .collect();
     let mut s = cleaned.trim().trim_start_matches('.').to_string();
     // 150 bytes leaves room for the suffix under the 255 most filesystems allow.
@@ -271,7 +285,10 @@ fn skip_depth(data: &[u8], pos: usize, depth: usize) -> Result<usize, String> {
     match data.get(pos) {
         None => Err("unexpected end of data".into()),
         Some(b'i') => {
-            let end = data[pos + 1..].iter().position(|&b| b == b'e').ok_or("unterminated int")?;
+            let end = data[pos + 1..]
+                .iter()
+                .position(|&b| b == b'e')
+                .ok_or("unterminated int")?;
             Ok(pos + 1 + end + 1)
         }
         Some(b'l') | Some(b'd') => {
@@ -288,7 +305,11 @@ fn skip_depth(data: &[u8], pos: usize, depth: usize) -> Result<usize, String> {
             }
         }
         Some(b'0'..=b'9') => {
-            let colon = data[pos..].iter().position(|&b| b == b':').ok_or("string without ':'")? + pos;
+            let colon = data[pos..]
+                .iter()
+                .position(|&b| b == b':')
+                .ok_or("string without ':'")?
+                + pos;
             let len: usize = std::str::from_utf8(&data[pos..colon])
                 .ok()
                 .and_then(|s| s.parse().ok())
@@ -351,7 +372,11 @@ fn tracker_host(url: &str) -> String {
     let host = authority.rsplit('@').next().unwrap_or("");
     // An IPv6 literal keeps its brackets; otherwise the port goes.
     if host.starts_with('[') {
-        return host.split(']').next().map(|h| format!("{h}]")).unwrap_or_default();
+        return host
+            .split(']')
+            .next()
+            .map(|h| format!("{h}]"))
+            .unwrap_or_default();
     }
     host.split(':').next().unwrap_or("").to_ascii_lowercase()
 }
@@ -423,7 +448,9 @@ impl<W: Write> ZipStream<W> {
         let size = u32::try_from(data.len())
             .ok()
             .filter(|&s| (s as u64) < U32_FULL)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "entry larger than 4 GiB"))?;
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "entry larger than 4 GiB")
+            })?;
         let name_b = name.as_bytes();
         let name_len = u16::try_from(name_b.len())
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "entry name too long"))?;
@@ -466,7 +493,14 @@ impl<W: Write> ZipStream<W> {
         put16(&mut c, 0); // disk
         put16(&mut c, 0); // internal attributes
         put32(&mut c, 0o100644 << 16); // a regular file, rw-r--r--
-        put32(&mut c, if zip64 { U32_FULL as u32 } else { offset as u32 });
+        put32(
+            &mut c,
+            if zip64 {
+                U32_FULL as u32
+            } else {
+                offset as u32
+            },
+        );
         c.extend_from_slice(name_b);
         if zip64 {
             put16(&mut c, 0x0001);
@@ -485,7 +519,10 @@ impl<W: Write> ZipStream<W> {
         spill.file.seek(io::SeekFrom::Start(0))?;
         let copied = io::copy(&mut (&mut spill.file).take(self.cd_len), &mut self.out)?;
         if copied != self.cd_len {
-            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "central directory spill came back short"));
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "central directory spill came back short",
+            ));
         }
         self.at += self.cd_len;
 
@@ -516,8 +553,22 @@ impl<W: Write> ZipStream<W> {
         let n16 = if many { 0xFFFF } else { self.entries as u16 };
         put16(&mut e, n16);
         put16(&mut e, n16);
-        put32(&mut e, if large { U32_FULL as u32 } else { self.cd_len as u32 });
-        put32(&mut e, if far { U32_FULL as u32 } else { cd_start as u32 });
+        put32(
+            &mut e,
+            if large {
+                U32_FULL as u32
+            } else {
+                self.cd_len as u32
+            },
+        );
+        put32(
+            &mut e,
+            if far {
+                U32_FULL as u32
+            } else {
+                cd_start as u32
+            },
+        );
         put16(&mut e, 0);
         self.out.write_all(&e)?;
         self.at += e.len() as u64;
@@ -580,7 +631,11 @@ impl Spill {
             std::process::id(),
             rand::random::<u64>()
         ));
-        let file = std::fs::OpenOptions::new().read(true).write(true).create_new(true).open(&path)?;
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)?;
         Ok(Spill { path, file })
     }
 }
@@ -620,7 +675,10 @@ const CHUNK: usize = 64 << 10;
 
 impl ChanWriter {
     pub fn new(tx: tokio::sync::mpsc::Sender<Chunk>) -> Self {
-        ChanWriter { tx, buf: Vec::with_capacity(CHUNK) }
+        ChanWriter {
+            tx,
+            buf: Vec::with_capacity(CHUNK),
+        }
     }
 
     fn send(&mut self) -> io::Result<()> {
@@ -676,7 +734,18 @@ mod tests {
         let mut hashes = Vec::new();
         for t in ts {
             let h = hash_of(t);
-            store.insert_torrent(&h, "hoard", t, "/data/x", "movies", 1_700_000_000.0, false, "a,b").unwrap();
+            store
+                .insert_torrent(
+                    &h,
+                    "hoard",
+                    t,
+                    "/data/x",
+                    "movies",
+                    1_700_000_000.0,
+                    false,
+                    "a,b",
+                )
+                .unwrap();
             hashes.push(h);
         }
         (StoreLock::new(store), hashes)
@@ -716,7 +785,10 @@ mod tests {
     #[test]
     fn entry_names_are_safe_everywhere_and_never_collide_by_name() {
         let h1 = "0123456789abcdef0123456789abcdef01234567";
-        assert_eq!(entry_name("a/b:c*?.mkv", h1), "a_b_c__.mkv [01234567].torrent");
+        assert_eq!(
+            entry_name("a/b:c*?.mkv", h1),
+            "a_b_c__.mkv [01234567].torrent"
+        );
         assert_eq!(entry_name("..", h1), format!("{h1}.torrent"));
         assert_eq!(entry_name("", h1), format!("{h1}.torrent"));
         assert_eq!(entry_name("  x. ", h1), "x [01234567].torrent");
@@ -730,7 +802,13 @@ mod tests {
     fn hashes_are_cleaned_deduplicated_and_kept_in_order() {
         let a = "A".repeat(40);
         let b = "b".repeat(64);
-        let raw = vec![a.clone(), "xyz".into(), b.clone(), a.to_lowercase(), "g".repeat(40)];
+        let raw = vec![
+            a.clone(),
+            "xyz".into(),
+            b.clone(),
+            a.to_lowercase(),
+            "g".repeat(40),
+        ];
         assert_eq!(clean_hashes(&raw), vec![a.to_lowercase(), b]);
     }
 
@@ -743,7 +821,13 @@ mod tests {
         let asked = vec![hashes[0].clone(), absent.clone(), hashes[1].clone()];
         let mut out = Vec::new();
         let s = run(&store, &asked, Format::Zip, false, &mut out).unwrap();
-        assert_eq!(s, Summary { written: 2, missing: 1 });
+        assert_eq!(
+            s,
+            Summary {
+                written: 2,
+                missing: 1
+            }
+        );
 
         let mut z = unzip(out);
         assert_eq!(z.len(), 3);
@@ -775,13 +859,17 @@ mod tests {
         let mut zip = ZipStream::new(&mut out).unwrap();
         zip.big = 100;
         for i in 0..20 {
-            zip.add(&format!("f{i}.torrent"), format!("payload {i}").as_bytes()).unwrap();
+            zip.add(&format!("f{i}.torrent"), format!("payload {i}").as_bytes())
+                .unwrap();
         }
         zip.finish().unwrap();
         let mut z = unzip(out);
         assert_eq!(z.len(), 20);
         for i in [0, 7, 19] {
-            assert_eq!(read_entry(&mut z, &format!("f{i}.torrent")), format!("payload {i}").into_bytes());
+            assert_eq!(
+                read_entry(&mut z, &format!("f{i}.torrent")),
+                format!("payload {i}").into_bytes()
+            );
         }
     }
 
@@ -810,18 +898,40 @@ mod tests {
 
     #[test]
     fn a_csv_export_names_tracker_hosts_never_their_urls() {
-        let t = torrent("a, \"quoted\" name", "https://user@Tracker.Example:8443/PASSKEY/announce");
+        let t = torrent(
+            "a, \"quoted\" name",
+            "https://user@Tracker.Example:8443/PASSKEY/announce",
+        );
         let (store, hashes) = store_with(&[t]);
         let absent = "e".repeat(40);
         let mut out = Vec::new();
-        let s = run(&store, &[hashes[0].clone(), absent.clone()], Format::Csv, false, &mut out).unwrap();
-        assert_eq!(s, Summary { written: 1, missing: 1 });
+        let s = run(
+            &store,
+            &[hashes[0].clone(), absent.clone()],
+            Format::Csv,
+            false,
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(
+            s,
+            Summary {
+                written: 1,
+                missing: 1
+            }
+        );
         let text = String::from_utf8(out).unwrap();
         let lines: Vec<&str> = text.lines().collect();
-        assert_eq!(lines[0], "info_hash,name,size,category,tags,trackers,added_unix,save_path");
+        assert_eq!(
+            lines[0],
+            "info_hash,name,size,category,tags,trackers,added_unix,save_path"
+        );
         assert_eq!(
             lines[1],
-            format!("{},\"a, \"\"quoted\"\" name\",5,movies,\"a,b\",tracker.example,1700000000,/data/x", hashes[0])
+            format!(
+                "{},\"a, \"\"quoted\"\" name\",5,movies,\"a,b\",tracker.example,1700000000,/data/x",
+                hashes[0]
+            )
         );
         assert_eq!(lines[2], format!("{absent},,,,,,,"));
         assert!(!text.contains("PASSKEY"));
@@ -842,7 +952,10 @@ mod tests {
         };
         assert_eq!(
             csv_line(&row),
-            format!("{},'=SUM(1+1),5,'+cat,\"'@t,ok\",'=host.example,-5,'-1+1\n", "a".repeat(40))
+            format!(
+                "{},'=SUM(1+1),5,'+cat,\"'@t,ok\",'=host.example,-5,'-1+1\n",
+                "a".repeat(40)
+            )
         );
         assert_eq!(csv_field("\tx"), "'\tx");
         assert_eq!(csv_field("\rx"), "\"'\rx\"");
@@ -855,7 +968,10 @@ mod tests {
         let asked = vec!["a".repeat(40), "b".repeat(40)];
         let mut out = Vec::new();
         run(&store, &asked, Format::Txt, false, &mut out).unwrap();
-        assert_eq!(String::from_utf8(out).unwrap(), format!("{}\n{}\n", asked[0], asked[1]));
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            format!("{}\n{}\n", asked[0], asked[1])
+        );
     }
 
     #[test]
@@ -878,9 +994,14 @@ mod tests {
             t
         };
         let shallow = nested(50);
-        assert_eq!(without_trackers(&shallow).expect("50 levels is fine"), shallow);
+        assert_eq!(
+            without_trackers(&shallow).expect("50 levels is fine"),
+            shallow
+        );
         let deep = nested(200);
-        let e = without_trackers(&deep).map(|v| v.len()).expect_err("200 levels accepted");
+        let e = without_trackers(&deep)
+            .map(|v| v.len())
+            .expect_err("200 levels accepted");
         assert!(e.contains("too deep"), "{e}");
     }
 

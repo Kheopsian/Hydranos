@@ -265,12 +265,24 @@ mod tests {
     // local disk opens fine and must be left alone.
     #[test]
     fn repair_needs_both_the_share_and_the_wal() {
-        let both = Diagnosis { on_network: true, in_wal: true, ..Default::default() };
+        let both = Diagnosis {
+            on_network: true,
+            in_wal: true,
+            ..Default::default()
+        };
         assert!(both.needs_repair());
 
         for d in [
-            Diagnosis { on_network: true, in_wal: false, ..Default::default() },
-            Diagnosis { on_network: false, in_wal: true, ..Default::default() },
+            Diagnosis {
+                on_network: true,
+                in_wal: false,
+                ..Default::default()
+            },
+            Diagnosis {
+                on_network: false,
+                in_wal: true,
+                ..Default::default()
+            },
             Diagnosis::default(),
         ] {
             assert!(!d.needs_repair(), "{d:?} must open normally");
@@ -284,7 +296,8 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         {
             let conn = rusqlite::Connection::open(&path).unwrap();
-            conn.execute_batch("CREATE TABLE t (a INTEGER); INSERT INTO t VALUES (1);").unwrap();
+            conn.execute_batch("CREATE TABLE t (a INTEGER); INSERT INTO t VALUES (1);")
+                .unwrap();
             conn.pragma_update(None, "journal_mode", "WAL").unwrap();
             conn.execute("INSERT INTO t VALUES (2)", []).unwrap();
         }

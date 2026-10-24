@@ -1,24 +1,24 @@
+pub mod fastresume;
+pub mod merkle;
 pub mod meta;
 pub mod metainfo;
-pub mod merkle;
 pub mod piece_picker;
-pub mod fastresume;
-pub mod statedb;
 pub mod rate;
 pub mod ratelimit;
+pub mod statedb;
 
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use dashmap::{DashMap, DashSet};
 use tracing::{info, warn};
 
-use meta::{InfoHash, TorrentState, TorrentStatus};
 use crate::disk::DiskManager;
-use std::sync::OnceLock;
 use futures::StreamExt;
+use meta::{InfoHash, TorrentState, TorrentStatus};
+use sha1::{Digest, Sha1};
+use std::sync::OnceLock;
 use tokio::sync::Semaphore;
-use sha1::{Sha1, Digest};
 
 /// Where one `remove_torrent` spent its time.
 ///
@@ -394,7 +394,10 @@ impl TorrentManager {
 
     /// IPs whose PROXY v2 headers this engine trusts.
     pub fn trusted_proxy_sources(&self) -> &[std::net::IpAddr] {
-        self.trusted_proxy_sources.get().map(|v| v.as_slice()).unwrap_or(&[])
+        self.trusted_proxy_sources
+            .get()
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
     }
 
     pub fn set_trusted_proxy_sources(&self, ips: Vec<std::net::IpAddr>) {
@@ -425,25 +428,32 @@ impl TorrentManager {
             return Err("the listener is not up: the engine is not on the network".into());
         };
         let (reply, rx) = tokio::sync::oneshot::channel();
-        tx.send(crate::peer::Rebind { port, reply: Some(reply) })
-            .map_err(|_| "the listener has stopped".to_string())?;
-        rx.await.map_err(|_| "the listener has stopped".to_string())?
+        tx.send(crate::peer::Rebind {
+            port,
+            reply: Some(reply),
+        })
+        .map_err(|_| "the listener has stopped".to_string())?;
+        rx.await
+            .map_err(|_| "the listener has stopped".to_string())?
     }
 
     /// Called by the listener once a new port is bound.
     pub fn set_live_port(&self, port: u16) {
-        self.live_port.store(port, std::sync::atomic::Ordering::Relaxed);
+        self.live_port
+            .store(port, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// One more peer from outside opened a connection to this engine.
     pub fn note_inbound_peer(&self) {
-        self.inbound_peers.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.inbound_peers
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Peers from outside (not our own addresses) that connected to this
     /// engine since it started: the one proof of reachability nobody can fake.
     pub fn inbound_peers(&self) -> u64 {
-        self.inbound_peers.load(std::sync::atomic::Ordering::Relaxed)
+        self.inbound_peers
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// The port the listener holds: the one a rebind moved it to, or the
@@ -460,7 +470,10 @@ impl TorrentManager {
     /// translating NAT that is NOT the port we listen on, and announcing the
     /// listen port there hands every peer a port nobody forwards.
     pub fn announced_port(&self, configured: u16) -> u16 {
-        match self.external_port.load(std::sync::atomic::Ordering::Relaxed) {
+        match self
+            .external_port
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
             0 => self.listen_port_now(configured),
             p => p,
         }
@@ -468,12 +481,14 @@ impl TorrentManager {
 
     /// Set (or clear, with 0) the port a translating NAT gives the outside.
     pub fn set_external_port(&self, port: u16) {
-        self.external_port.store(port, std::sync::atomic::Ordering::Relaxed);
+        self.external_port
+            .store(port, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Hold (or release) every announce until the listen port is known.
     pub fn set_port_pending(&self, pending: bool) {
-        self.port_pending.store(pending, std::sync::atomic::Ordering::Relaxed);
+        self.port_pending
+            .store(pending, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn port_pending(&self) -> bool {
@@ -549,9 +564,14 @@ impl TorrentManager {
         let (completed_tx, completed_rx) = tokio::sync::mpsc::unbounded_channel();
         // One policy per engine, shared by its torrents and its magnet jobs.
         let policy: Arc<crate::peer::extension::PeerPolicy> = Default::default();
-        let mirror_json = std::env::var("TYPHON_RESUME_JSON").map(|v| v == "1").unwrap_or(false);
+        let mirror_json = std::env::var("TYPHON_RESUME_JSON")
+            .map(|v| v == "1")
+            .unwrap_or(false);
         let mut db_issue: Option<StartupIssue> = None;
-        let state_db = if std::env::var("TYPHON_STATE_DB").map(|v| v == "0").unwrap_or(false) {
+        let state_db = if std::env::var("TYPHON_STATE_DB")
+            .map(|v| v == "0")
+            .unwrap_or(false)
+        {
             info!("[statedb] disabled by TYPHON_STATE_DB=0, using legacy resume JSON only");
             None
         } else {
@@ -568,7 +588,11 @@ impl TorrentManager {
                     Some(Arc::new(db))
                 }
                 Err(e) => {
-                    warn!("[statedb] could not open {}: {} -- falling back to resume JSON", path.display(), e);
+                    warn!(
+                        "[statedb] could not open {}: {} -- falling back to resume JSON",
+                        path.display(),
+                        e
+                    );
                     db_issue = Some(StartupIssue {
                         info_hash: String::new(),
                         kind: "state_db_unavailable",
@@ -659,7 +683,11 @@ impl TorrentManager {
                     // Do not lose the record over a transient database error:
                     // fall back to the JSON file for this one write, which the
                     // next start still knows how to read.
-                    warn!("[statedb] put {} failed: {} -- writing JSON instead", &rd.info_hash[..8.min(rd.info_hash.len())], e);
+                    warn!(
+                        "[statedb] put {} failed: {} -- writing JSON instead",
+                        &rd.info_hash[..8.min(rd.info_hash.len())],
+                        e
+                    );
                     fastresume::save(&self.resume_dir, ih, rd);
                     return Err(format!("the state store did not keep the change: {e}"));
                 }
@@ -785,8 +813,12 @@ impl TorrentManager {
         self.incomplete.len()
     }
 
-    fn counts(&self) -> std::sync::MutexGuard<'_, std::collections::HashMap<std::path::PathBuf, usize>> {
-        self.save_path_counts.lock().unwrap_or_else(|p| p.into_inner())
+    fn counts(
+        &self,
+    ) -> std::sync::MutexGuard<'_, std::collections::HashMap<std::path::PathBuf, usize>> {
+        self.save_path_counts
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
     }
 
     fn count_save_path(&self, path: &std::path::Path) {
@@ -952,8 +984,8 @@ impl TorrentManager {
         stopped: bool,
         seed_mode: bool,
     ) -> Result<(InfoHash, String), String> {
-        let bytes = std::fs::read(torrent_path)
-            .map_err(|e| format!("read {}: {}", torrent_path, e))?;
+        let bytes =
+            std::fs::read(torrent_path).map_err(|e| format!("read {}: {}", torrent_path, e))?;
         self.add_torrent_bytes(&bytes, save_path, stopped, seed_mode)
     }
 
@@ -997,13 +1029,17 @@ impl TorrentManager {
         self.adopt(&state);
 
         if stopped {
-            state.status.store(TorrentStatus::Stopped as u8, Ordering::Relaxed);
+            state
+                .status
+                .store(TorrentStatus::Stopped as u8, Ordering::Relaxed);
             state.is_paused.store(true, Ordering::Relaxed);
         } else if !seed_mode {
             // Default-start fresh DL torrents in Downloading so the public
             // API doesn't surface "stopped" between add_torrent and the
             // first start_torrent call. Previously status stayed at 0.
-            state.status.store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+            state
+                .status
+                .store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
         }
 
         // skip_checking vouches for the bytes, not for the path. A save_path
@@ -1045,7 +1081,8 @@ impl TorrentManager {
         let total_size = state_arc.meta.total_size;
         let num_pieces = state_arc.meta.num_pieces();
         let private = state_arc.meta.private;
-        self.skey_index.insert(crate::crypto::mse::sha1_combine(b"req2", &ih), ih);
+        self.skey_index
+            .insert(crate::crypto::mse::sha1_combine(b"req2", &ih), ih);
         // A fresh non-seed_mode torrent has something to fetch until proven
         // otherwise; `collect_incomplete` prunes it once it completes.
         if !state_arc.seed_mode {
@@ -1149,10 +1186,13 @@ impl TorrentManager {
                     }
                     Some((files, folders))
                 }
-            } else { None };
+            } else {
+                None
+            };
         tm.map_hold = got.elapsed();
         let stage = Instant::now();
-        self.skey_index.remove(&crate::crypto::mse::sha1_combine(b"req2", info_hash));
+        self.skey_index
+            .remove(&crate::crypto::mse::sha1_combine(b"req2", info_hash));
         self.incomplete.remove(info_hash);
         let removed = self.torrents.remove(info_hash);
         if let Some((_, t)) = &removed {
@@ -1186,7 +1226,11 @@ impl TorrentManager {
                 for f in &files {
                     if let Err(e) = std::fs::remove_file(f) {
                         if e.kind() != std::io::ErrorKind::NotFound {
-                            warn!("remove_torrent: failed to delete file {}: {}", f.display(), e);
+                            warn!(
+                                "remove_torrent: failed to delete file {}: {}",
+                                f.display(),
+                                e
+                            );
                         }
                     }
                 }
@@ -1259,17 +1303,23 @@ impl TorrentManager {
             // Has a picker = was added without seed_mode = download mode
             let picker = t.picker.get().unwrap();
             let p = picker.lock().unwrap();
-            if p.is_complete() { TorrentStatus::Seeding } else { TorrentStatus::Downloading }
+            if p.is_complete() {
+                TorrentStatus::Seeding
+            } else {
+                TorrentStatus::Downloading
+            }
         };
         // In one step with the two checks above: a recheck setting Checking
         // between a plain read and a plain write was overwritten, which is
         // the very clobber those checks are there to prevent.
         let suspended = t.serving_suspended.load(Ordering::Relaxed);
-        let _ = t.status.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |cur| {
-            let busy = cur == TorrentStatus::Checking as u8
-                || (cur == TorrentStatus::Error as u8 && suspended);
-            (!busy).then_some(target as u8)
-        });
+        let _ = t
+            .status
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |cur| {
+                let busy = cur == TorrentStatus::Checking as u8
+                    || (cur == TorrentStatus::Error as u8 && suspended);
+                (!busy).then_some(target as u8)
+            });
         // The status is settled: open the interval if this is now a seed.
         t.fold_seed_time(crate::torrent::meta::now_secs());
         Ok(())
@@ -1306,7 +1356,8 @@ impl TorrentManager {
         // torrent and drop the open interval on the floor.
         t.fold_seed_time(crate::torrent::meta::now_secs());
         t.is_paused.store(true, Ordering::Relaxed);
-        t.status.store(TorrentStatus::Stopped as u8, Ordering::Relaxed);
+        t.status
+            .store(TorrentStatus::Stopped as u8, Ordering::Relaxed);
         // BEP 3: tell the trackers we are leaving. Without it a stop is silent
         // and every tracker keeps us in the swarm until the entry goes stale,
         // handing our address to leechers we will not answer.
@@ -1327,7 +1378,11 @@ impl TorrentManager {
     /// torrent keeps its peer connections and keeps announcing (seedtime
     /// preserved), but serves no Piece Requests so it does zero disk I/O.
     /// Used by the per-disk seed-slot manager for HDD anti-thrash.
-    pub fn set_serving_suspended(&self, info_hash: &InfoHash, suspended: bool) -> Result<(), String> {
+    pub fn set_serving_suspended(
+        &self,
+        info_hash: &InfoHash,
+        suspended: bool,
+    ) -> Result<(), String> {
         let t = self.get(info_hash).ok_or("torrent not found")?;
         t.serving_suspended.store(suspended, Ordering::Relaxed);
         Ok(())
@@ -1358,11 +1413,17 @@ impl TorrentManager {
                 let (imported, unreadable) = db.import_legacy(&self.resume_dir);
                 self.refuse_unreadable_files(&unreadable);
                 if imported > 0 {
-                    info!("[statedb] first start on SQLite state: {} records carried over", imported);
+                    info!(
+                        "[statedb] first start on SQLite state: {} records carried over",
+                        imported
+                    );
                 }
             }
             Ok(_) => {}
-            Err(e) => warn!("[statedb] cannot count the records ({}); not importing resume/", e),
+            Err(e) => warn!(
+                "[statedb] cannot count the records ({}); not importing resume/",
+                e
+            ),
         }
         let (records, unreadable) = db.load_all_reporting();
         // A row that cannot be read is refused, not forgotten: refused records
@@ -1407,10 +1468,7 @@ impl TorrentManager {
 
     /// Point the manager at the store's metainfo blobs. Set once at startup,
     /// before any resume runs.
-    pub fn set_blob_source(
-        &self,
-        source: Arc<dyn Fn(&str) -> Option<Vec<u8>> + Send + Sync>,
-    ) {
+    pub fn set_blob_source(&self, source: Arc<dyn Fn(&str) -> Option<Vec<u8>> + Send + Sync>) {
         if let Ok(mut slot) = self.blob_source.write() {
             *slot = Some(source);
         }
@@ -1419,7 +1477,10 @@ impl TorrentManager {
     /// Has a store been wired as the metainfo source? Without one, every piece
     /// downloaded is refused for want of its hash.
     pub fn has_blob_source(&self) -> bool {
-        self.blob_source.read().map(|s| s.is_some()).unwrap_or(false)
+        self.blob_source
+            .read()
+            .map(|s| s.is_some())
+            .unwrap_or(false)
     }
 
     /// The metainfo of one resume record. The store, and nothing else.
@@ -1527,7 +1588,11 @@ impl TorrentManager {
         if let Ok(mut g) = self.startup_issues.lock() {
             g.0 += 1;
             if g.1.len() < MAX_STARTUP_ISSUES {
-                g.1.push(StartupIssue { info_hash: info_hash.to_string(), kind, detail });
+                g.1.push(StartupIssue {
+                    info_hash: info_hash.to_string(),
+                    kind,
+                    detail,
+                });
             }
         }
     }
@@ -1535,12 +1600,18 @@ impl TorrentManager {
     /// What startup could not restore: (how many, the first
     /// `MAX_STARTUP_ISSUES`). Empty on a healthy library.
     pub fn startup_issues(&self) -> (usize, Vec<StartupIssue>) {
-        self.startup_issues.lock().map(|g| g.clone()).unwrap_or_default()
+        self.startup_issues
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default()
     }
 
     /// The records this engine refused at startup. Empty on a healthy library.
     pub fn refused_records(&self) -> std::collections::HashSet<String> {
-        self.refused_records.lock().map(|r| r.clone()).unwrap_or_default()
+        self.refused_records
+            .lock()
+            .map(|r| r.clone())
+            .unwrap_or_default()
     }
 
     pub fn load_resume_data(self: &Arc<Self>) -> usize {
@@ -1579,7 +1650,11 @@ impl TorrentManager {
             let meta = match parsed {
                 Ok(m) => m,
                 Err(e) => {
-                    warn!("[resume] skip {}: {}", &rd.info_hash[..8.min(rd.info_hash.len())], e);
+                    warn!(
+                        "[resume] skip {}: {}",
+                        &rd.info_hash[..8.min(rd.info_hash.len())],
+                        e
+                    );
                     self.note_startup_issue(
                         &rd.info_hash,
                         "resume_skipped",
@@ -1657,7 +1732,8 @@ impl TorrentManager {
             // is not "nothing downloaded". The torrent loads, and the disk
             // says what it holds (queued below). A seed_mode record never had
             // a bitfield to rely on.
-            let bitfield_unusable = !rd.bitfield.is_empty() && resume_bits.is_empty() && !rd.seed_mode;
+            let bitfield_unusable =
+                !rd.bitfield.is_empty() && resume_bits.is_empty() && !rd.seed_mode;
             if bitfield_unusable {
                 self.note_startup_issue(
                     &rd.info_hash,
@@ -1716,17 +1792,26 @@ impl TorrentManager {
             // of thousands of torrents) plus a brief non-seeding window.
             if rd.paused {
                 state.is_paused.store(true, Ordering::Relaxed);
-                state.status.store(TorrentStatus::Stopped as u8, Ordering::Relaxed);
+                state
+                    .status
+                    .store(TorrentStatus::Stopped as u8, Ordering::Relaxed);
             } else if rd.seed_mode || state.picker.get().is_none() {
-                state.status.store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+                state
+                    .status
+                    .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
                 state.release_have_tx();
             } else if state.picker.get().unwrap().lock().unwrap().is_complete() {
-                state.status.store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+                state
+                    .status
+                    .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
                 state.release_have_tx();
             } else {
-                state.status.store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+                state
+                    .status
+                    .store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
             }
-            self.skey_index.insert(crate::crypto::mse::sha1_combine(b"req2", &ih), ih);
+            self.skey_index
+                .insert(crate::crypto::mse::sha1_combine(b"req2", &ih), ih);
             // The status was just decided above from the resume record, so
             // trust it rather than re-deriving the answer.
             if state.status.load(Ordering::Relaxed) == TorrentStatus::Downloading as u8 {
@@ -1767,12 +1852,22 @@ impl TorrentManager {
             if tokio::runtime::Handle::try_current().is_ok() {
                 for ih in &to_recheck {
                     if let Err(e) = self.recheck(ih) {
-                        warn!("[resume] recheck of {} not started: {}", &hex_encode(ih)[..8], e);
+                        warn!(
+                            "[resume] recheck of {} not started: {}",
+                            &hex_encode(ih)[..8],
+                            e
+                        );
                     }
                 }
-                info!("[resume] {} torrents with an unusable bitfield are being rechecked", to_recheck.len());
+                info!(
+                    "[resume] {} torrents with an unusable bitfield are being rechecked",
+                    to_recheck.len()
+                );
             } else {
-                warn!("[resume] {} torrents have an unusable bitfield and no runtime to recheck them", to_recheck.len());
+                warn!(
+                    "[resume] {} torrents have an unusable bitfield and no runtime to recheck them",
+                    to_recheck.len()
+                );
             }
         }
         loaded
@@ -1836,12 +1931,17 @@ impl TorrentManager {
         let (moved_ul, moved_dl) = self.moved();
         self.upload_rate.update(moved_ul);
         self.download_rate.update(moved_dl);
-        self.cached_total_uploaded.store(total_ul, Ordering::Relaxed);
-        self.cached_total_downloaded.store(total_dl, Ordering::Relaxed);
+        self.cached_total_uploaded
+            .store(total_ul, Ordering::Relaxed);
+        self.cached_total_downloaded
+            .store(total_dl, Ordering::Relaxed);
         self.totals_ready.store(true, Ordering::Release);
-        self.cached_active_peers.store(active_peers, Ordering::Relaxed);
-        self.cached_torrents_with_peers.store(with_peers, Ordering::Relaxed);
-        self.cached_torrents_uploading.store(uploading, Ordering::Relaxed);
+        self.cached_active_peers
+            .store(active_peers, Ordering::Relaxed);
+        self.cached_torrents_with_peers
+            .store(with_peers, Ordering::Relaxed);
+        self.cached_torrents_uploading
+            .store(uploading, Ordering::Relaxed);
         for (slot, n) in self.cached_status_counts.iter().zip(by_status) {
             slot.store(n, Ordering::Relaxed);
         }
@@ -1859,7 +1959,10 @@ impl TorrentManager {
 
     /// (gone through, to go through) of the startup restore.
     pub fn restore_progress(&self) -> (usize, usize) {
-        (self.restore_done.load(Ordering::Relaxed), self.restore_total.load(Ordering::Relaxed))
+        (
+            self.restore_done.load(Ordering::Relaxed),
+            self.restore_total.load(Ordering::Relaxed),
+        )
     }
 
     // NOTE: per-peer rate tracking removed — on-demand compute done in
@@ -1869,7 +1972,10 @@ impl TorrentManager {
     pub fn update_unseeded_count(&self) {
         let mut total = 0usize;
         for entry in self.torrents.iter() {
-            total += entry.value().peer_stats.iter()
+            total += entry
+                .value()
+                .peer_stats
+                .iter()
                 .filter(|e| !e.value().is_seed.load(Ordering::Relaxed))
                 .count();
         }
@@ -1933,7 +2039,12 @@ impl TorrentManager {
             // Before the fingerprint: the fingerprint reads the counter.
             t.fold_seed_time(now);
             let fp = fingerprint_of(t);
-            if self.last_saved.get(&t.info_hash).map(|p| *p.value() == fp).unwrap_or(false) {
+            if self
+                .last_saved
+                .get(&t.info_hash)
+                .map(|p| *p.value() == fp)
+                .unwrap_or(false)
+            {
                 continue;
             }
             dirty.push(Self::build_resume_data(t));
@@ -1964,7 +2075,11 @@ impl TorrentManager {
             Err(e) => {
                 // Never drop a sweep silently: fall back to the JSON files for
                 // this round rather than leave the changes unpersisted.
-                warn!("[statedb] sweep commit failed: {} -- writing {} JSON records instead", e, dirty.len());
+                warn!(
+                    "[statedb] sweep commit failed: {} -- writing {} JSON records instead",
+                    e,
+                    dirty.len()
+                );
                 for (rd, ih) in dirty.iter().zip(hashes.iter()) {
                     fastresume::save(&self.resume_dir, ih, rd);
                 }
@@ -1983,21 +2098,30 @@ impl TorrentManager {
     /// move, are left to the full sweep (a torrent written to but not yet
     /// counted stays in the set and is picked up by the next pass).
     pub fn save_downloading_resume(&self) -> usize {
-        let Some(db) = self.state_db.clone() else { return 0 };
+        let Some(db) = self.state_db.clone() else {
+            return 0;
+        };
         let started = std::time::Instant::now();
         let moved: Vec<InfoHash> = self
             .disk
             .written_torrents()
             .into_iter()
             .filter(|ih| {
-                let Some(t) = self.torrents.get(ih) else { return false };
-                let Some(p) = t.picker.get() else { return false };
+                let Some(t) = self.torrents.get(ih) else {
+                    return false;
+                };
+                let Some(p) = t.picker.get() else {
+                    return false;
+                };
                 if t.seed_mode {
                     return false;
                 }
                 let p = p.lock().unwrap();
                 !p.is_complete()
-                    && self.last_saved.get(ih).map_or(true, |s| s.value().num_have != p.num_have())
+                    && self
+                        .last_saved
+                        .get(ih)
+                        .map_or(true, |s| s.value().num_have != p.num_have())
             })
             .collect();
         if moved.is_empty() {
@@ -2020,7 +2144,12 @@ impl TorrentManager {
             let Some(t) = self.get(ih) else { continue };
             t.fold_seed_time(now);
             let fp = fingerprint_of(&t);
-            if self.last_saved.get(ih).map(|p| *p.value() == fp).unwrap_or(false) {
+            if self
+                .last_saved
+                .get(ih)
+                .map(|p| *p.value() == fp)
+                .unwrap_or(false)
+            {
                 continue;
             }
             dirty.push(Self::build_resume_data(&t));
@@ -2049,7 +2178,11 @@ impl TorrentManager {
                 n
             }
             Err(e) => {
-                warn!("[statedb] quick pass commit failed: {} -- writing {} JSON records instead", e, dirty.len());
+                warn!(
+                    "[statedb] quick pass commit failed: {} -- writing {} JSON records instead",
+                    e,
+                    dirty.len()
+                );
                 for (rd, ih) in dirty.iter().zip(hashes.iter()) {
                     fastresume::save(&self.resume_dir, ih, rd);
                 }
@@ -2072,7 +2205,10 @@ impl TorrentManager {
             by_torrent.entry(f.info_hash).or_default().push(f);
         }
         for (ih, failures) in by_torrent {
-            let mut pieces: Vec<u32> = failures.iter().flat_map(|f| f.pieces.iter().copied()).collect();
+            let mut pieces: Vec<u32> = failures
+                .iter()
+                .flat_map(|f| f.pieces.iter().copied())
+                .collect();
             pieces.sort_unstable();
             pieces.dedup();
             let files = failures
@@ -2201,8 +2337,13 @@ impl TorrentManager {
     /// is written BEFORE the torrent is inserted anywhere, and when the store
     /// refuses it the JSON fallback it left behind goes too, so a refused
     /// torrent leaves nothing for a later start to find.
-    fn persist_before_insert(&self, ih: &InfoHash, rd: &fastresume::ResumeData) -> Result<(), String> {
-        self.try_persist(ih, rd).inspect_err(|_| fastresume::remove(&self.resume_dir, ih))
+    fn persist_before_insert(
+        &self,
+        ih: &InfoHash,
+        rd: &fastresume::ResumeData,
+    ) -> Result<(), String> {
+        self.try_persist(ih, rd)
+            .inspect_err(|_| fastresume::remove(&self.resume_dir, ih))
     }
 
     /// Point one file of a STOPPED torrent at another path below the save
@@ -2217,8 +2358,15 @@ impl TorrentManager {
     /// is on disk at `from` (renaming would leave it behind -- moving data
     /// is not done); when `to` is another file's path, or one sits inside the
     /// other as folder and file.
-    pub fn rename_file(&self, info_hash: &InfoHash, from: &str, to: &str) -> Result<(), RenameError> {
-        let Some((t, index, to_path)) = self.plan_rename(info_hash, from, to)? else { return Ok(()) };
+    pub fn rename_file(
+        &self,
+        info_hash: &InfoHash,
+        from: &str,
+        to: &str,
+    ) -> Result<(), RenameError> {
+        let Some((t, index, to_path)) = self.plan_rename(info_hash, from, to)? else {
+            return Ok(());
+        };
         let before = t.meta.disk_rel(index);
         t.meta.set_disk_rel(index, to_path);
         // Pieces that touch the file were counted as held under its old name:
@@ -2226,8 +2374,12 @@ impl TorrentManager {
         let f = &t.meta.files[index];
         if f.length > 0 {
             let plen = t.meta.piece_length.max(1) as u64;
-            let pieces: Vec<u32> = ((f.offset / plen) as u32..=((f.offset + f.length - 1) / plen) as u32).collect();
-            t.retract_pieces(&pieces, "a file was renamed: recheck the torrent before it runs");
+            let pieces: Vec<u32> =
+                ((f.offset / plen) as u32..=((f.offset + f.length - 1) / plen) as u32).collect();
+            t.retract_pieces(
+                &pieces,
+                "a file was renamed: recheck the torrent before it runs",
+            );
         }
         let rd = Self::build_resume_data(&t);
         if let Err(e) = self.try_persist(info_hash, &rd) {
@@ -2242,7 +2394,12 @@ impl TorrentManager {
 
     /// What `rename_file` would answer, changing nothing: for a caller that
     /// renames on several copies and wants none changed if one would refuse.
-    pub fn can_rename_file(&self, info_hash: &InfoHash, from: &str, to: &str) -> Result<(), RenameError> {
+    pub fn can_rename_file(
+        &self,
+        info_hash: &InfoHash,
+        from: &str,
+        to: &str,
+    ) -> Result<(), RenameError> {
         self.plan_rename(info_hash, from, to).map(|_| ())
     }
 
@@ -2259,11 +2416,14 @@ impl TorrentManager {
         let to_path = clean_relative(to).ok_or_else(|| {
             RenameError::Invalid(format!("{to:?} is not a relative path of plain names (no empty, '.', '..' or '\\' segment)"))
         })?;
-        let from_path = clean_relative(from)
-            .ok_or_else(|| RenameError::Invalid(format!("{from:?} is not a relative path of plain names")))?;
+        let from_path = clean_relative(from).ok_or_else(|| {
+            RenameError::Invalid(format!("{from:?} is not a relative path of plain names"))
+        })?;
         let n = t.meta.files.len();
         let Some(index) = (0..n).find(|&i| t.meta.disk_rel(i) == from_path) else {
-            return Err(RenameError::Invalid(format!("{from:?} is not a file of this torrent")));
+            return Err(RenameError::Invalid(format!(
+                "{from:?} is not a file of this torrent"
+            )));
         };
         if t.meta.multi_file && to_path.components().count() < 2 {
             return Err(RenameError::Invalid(format!(
@@ -2271,17 +2431,24 @@ impl TorrentManager {
             )));
         }
         if !t.is_paused.load(Ordering::Relaxed) {
-            return Err(RenameError::Conflict("the torrent is running: stop it before renaming its files".into()));
+            return Err(RenameError::Conflict(
+                "the torrent is running: stop it before renaming its files".into(),
+            ));
         }
-        if t.rechecking.load(Ordering::Relaxed) || t.status.load(Ordering::Relaxed) == TorrentStatus::Checking as u8 {
-            return Err(RenameError::Conflict("the torrent is being checked: wait for the check to end".into()));
+        if t.rechecking.load(Ordering::Relaxed)
+            || t.status.load(Ordering::Relaxed) == TorrentStatus::Checking as u8
+        {
+            return Err(RenameError::Conflict(
+                "the torrent is being checked: wait for the check to end".into(),
+            ));
         }
         if to_path == from_path {
             return Ok(None);
         }
         // Compared without the case: two paths that differ only by it are one
         // file on a case-insensitive volume.
-        let fold = |p: &std::path::Path| std::path::PathBuf::from(p.to_string_lossy().to_lowercase());
+        let fold =
+            |p: &std::path::Path| std::path::PathBuf::from(p.to_string_lossy().to_lowercase());
         let to_fold = fold(&to_path);
         for j in (0..n).filter(|&j| j != index) {
             let other = fold(&t.meta.disk_rel(j));
@@ -2315,7 +2482,11 @@ impl TorrentManager {
     /// the change survives a crash before the next periodic save. Mirrors
     /// set_save_path: mutate, then persist, in one call the caller cannot
     /// forget half of.
-    pub fn set_trackers(&self, info_hash: &InfoHash, tiers: Vec<Vec<String>>) -> Result<(), String> {
+    pub fn set_trackers(
+        &self,
+        info_hash: &InfoHash,
+        tiers: Vec<Vec<String>>,
+    ) -> Result<(), String> {
         let t = self.get(info_hash).ok_or("torrent not found")?;
         let before = std::mem::replace(&mut *t.live_trackers.write(), tiers);
         let rd = Self::build_resume_data(&t);
@@ -2374,13 +2545,21 @@ impl TorrentManager {
     fn forget_state(
         &self,
         info_hash: &InfoHash,
-    ) -> (std::time::Duration, std::time::Duration, std::time::Duration) {
+    ) -> (
+        std::time::Duration,
+        std::time::Duration,
+        std::time::Duration,
+    ) {
         let (mut wait, mut hold) = Default::default();
         if let Some(db) = &self.state_db {
             let (r, w, h) = db.remove_timed(&hex_encode(info_hash));
             (wait, hold) = (w, h);
             if let Err(e) = r {
-                warn!("[statedb] remove {} failed: {}", &hex_encode(info_hash)[..8], e);
+                warn!(
+                    "[statedb] remove {} failed: {}",
+                    &hex_encode(info_hash)[..8],
+                    e
+                );
             }
         }
         let rest = std::time::Instant::now();
@@ -2407,7 +2586,10 @@ impl TorrentManager {
     /// The caller is responsible for having already moved (or decided not to
     /// move) the payload files, and for removing the torrent from the source
     /// engine afterwards: this end only adopts.
-    pub fn import_state(self: &Arc<Self>, rd: &fastresume::ResumeData) -> Result<(InfoHash, String), String> {
+    pub fn import_state(
+        self: &Arc<Self>,
+        rd: &fastresume::ResumeData,
+    ) -> Result<(InfoHash, String), String> {
         let meta = self
             .metainfo_for(rd)
             .map_err(|e| format!("import: {}: {}", rd.info_hash, e))?;
@@ -2424,7 +2606,10 @@ impl TorrentManager {
         let meta = metainfo::parse_torrent_bytes(metainfo)
             .map_err(|e| format!("import: {}: {}", rd.info_hash, e))?;
         if hex_encode(&meta.info_hash) != rd.info_hash.to_lowercase() {
-            return Err(format!("import: the metainfo given is not {}", rd.info_hash));
+            return Err(format!(
+                "import: the metainfo given is not {}",
+                rd.info_hash
+            ));
         }
         self.import_state_with(rd, meta)
     }
@@ -2494,20 +2679,29 @@ impl TorrentManager {
         }
         if rd.paused {
             state.is_paused.store(true, Ordering::Relaxed);
-            state.status.store(TorrentStatus::Stopped as u8, Ordering::Relaxed);
+            state
+                .status
+                .store(TorrentStatus::Stopped as u8, Ordering::Relaxed);
         } else if rd.seed_mode || state.picker.get().is_none() {
-            state.status.store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+            state
+                .status
+                .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
         } else if state.picker.get().unwrap().lock().unwrap().is_complete() {
-            state.status.store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+            state
+                .status
+                .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
         } else {
-            state.status.store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+            state
+                .status
+                .store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
         }
 
         let state = Arc::new(state);
         let total_size = state.meta.total_size;
         let num_pieces = state.meta.num_pieces();
         let private = state.meta.private;
-        self.skey_index.insert(crate::crypto::mse::sha1_combine(b"req2", &ih), ih);
+        self.skey_index
+            .insert(crate::crypto::mse::sha1_combine(b"req2", &ih), ih);
         if !state.seed_mode {
             self.incomplete.insert(ih);
         }
@@ -2532,10 +2726,17 @@ impl TorrentManager {
             );
             if tokio::runtime::Handle::try_current().is_ok() {
                 if let Err(e) = self.recheck(&ih) {
-                    warn!("[import] recheck of {} not started: {}", &hex_encode(&ih)[..8], e);
+                    warn!(
+                        "[import] recheck of {} not started: {}",
+                        &hex_encode(&ih)[..8],
+                        e
+                    );
                 }
             } else {
-                warn!("[import] {} has an unusable bitfield and no runtime to recheck it", &hex_encode(&ih)[..8]);
+                warn!(
+                    "[import] {} has an unusable bitfield and no runtime to recheck it",
+                    &hex_encode(&ih)[..8]
+                );
             }
         }
         Ok((ih, name))
@@ -2555,7 +2756,10 @@ impl TorrentManager {
 /// picker holds gaps (a recheck, a piece given back) must come back as the
 /// download it is.
 fn trusted_whole(t: &TorrentState) -> bool {
-    t.seed_mode && t.picker.get().map_or(true, |p| p.lock().unwrap().is_complete())
+    t.seed_mode
+        && t.picker
+            .get()
+            .map_or(true, |p| p.lock().unwrap().is_complete())
 }
 
 fn fingerprint_of(t: &TorrentState) -> statedb::Fingerprint {
@@ -2563,7 +2767,11 @@ fn fingerprint_of(t: &TorrentState) -> statedb::Fingerprint {
         total_uploaded: t.total_uploaded.load(Ordering::Relaxed),
         total_downloaded: t.total_downloaded.load(Ordering::Relaxed),
         completed_time: t.completed_time.load(Ordering::Relaxed),
-        num_have: t.picker.get().map(|p| p.lock().unwrap().num_have()).unwrap_or(0),
+        num_have: t
+            .picker
+            .get()
+            .map(|p| p.lock().unwrap().num_have())
+            .unwrap_or(0),
         paused: t.is_paused.load(Ordering::Relaxed),
         seed_mode: t.seed_mode,
         // ⚠ HOURS, not seconds. The counter moves every second a torrent
@@ -2591,7 +2799,10 @@ pub fn hex_decode(hex: &str) -> Result<InfoHash, String> {
     let digit = |c: u8| (c as char).to_digit(16).map(|d| d as u8);
     let mut hash = [0u8; 20];
     for (slot, p) in hash.iter_mut().zip(hex.as_bytes().chunks_exact(2)) {
-        *slot = digit(p[0]).zip(digit(p[1])).map(|(h, l)| h << 4 | l).ok_or("invalid hex")?;
+        *slot = digit(p[0])
+            .zip(digit(p[1]))
+            .map(|(h, l)| h << 4 | l)
+            .ok_or("invalid hex")?;
     }
     Ok(hash)
 }
@@ -2649,7 +2860,9 @@ fn bitfield_is_complete(bytes: &[u8], num_pieces: u32) -> bool {
 /// torrent against the disk.
 fn hex_decode_bytes(hex: &str) -> Vec<u8> {
     let raw = hex.as_bytes();
-    if raw.len() % 2 != 0 { return Vec::new(); }
+    if raw.len() % 2 != 0 {
+        return Vec::new();
+    }
     let digit = |c: u8| (c as char).to_digit(16).map(|d| d as u8);
     raw.chunks_exact(2)
         .map(|p| Some(digit(p[0])? << 4 | digit(p[1])?))
@@ -2701,11 +2914,15 @@ pub fn clean_relative(p: &str) -> Option<std::path::PathBuf> {
 /// Where a torrent's files are on disk, at its current save path.
 fn data_files(t: &TorrentState) -> Vec<std::path::PathBuf> {
     let root = t.save_path.read().clone();
-    (0..t.meta.files.len()).map(|i| t.meta.disk_path(&root, i)).collect()
+    (0..t.meta.files.len())
+        .map(|i| t.meta.disk_path(&root, i))
+        .collect()
 }
 
 fn remove_empty_dirs_recursive(dir: &std::path::Path) {
-    if !dir.is_dir() { return; }
+    if !dir.is_dir() {
+        return;
+    }
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
             let p = entry.path();
@@ -2716,7 +2933,6 @@ fn remove_empty_dirs_recursive(dir: &std::path::Path) {
     }
     let _ = std::fs::remove_dir(dir);
 }
-
 
 /// Bounds how many rechecks hash the disk at once. Recheck is triggered per
 /// add / per explicit request (never a boot-wide O(N) scan), but a burst of
@@ -2744,7 +2960,13 @@ fn recheck_sem() -> &'static Semaphore {
 /// it, and several clients never create one.
 fn seed_mode_data_absent(t: &TorrentState) -> Option<String> {
     let save_path = t.save_path.read().clone();
-    for (i, f) in t.meta.files.iter().enumerate().filter(|(_, f)| f.length > 0) {
+    for (i, f) in t
+        .meta
+        .files
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| f.length > 0)
+    {
         let full = t.meta.disk_path(&save_path, i);
         match std::fs::metadata(&full) {
             Ok(m) if m.is_file() && m.len() == f.length => {}
@@ -2757,7 +2979,12 @@ fn seed_mode_data_absent(t: &TorrentState) -> Option<String> {
                 ))
             }
             Ok(_) => return Some(format!("skip_checking: not a file: {}", full.display())),
-            Err(e) => return Some(format!("skip_checking: missing file {}: {e}", full.display())),
+            Err(e) => {
+                return Some(format!(
+                    "skip_checking: missing file {}: {e}",
+                    full.display()
+                ))
+            }
         }
     }
     None
@@ -2840,7 +3067,8 @@ impl TorrentManager {
             mgr.run_recheck(ih, t.clone()).await;
             if was_error {
                 let back = t.status.load(Ordering::Relaxed);
-                if back == TorrentStatus::Downloading as u8 || back == TorrentStatus::Seeding as u8 {
+                if back == TorrentStatus::Downloading as u8 || back == TorrentStatus::Seeding as u8
+                {
                     // Same as a resume: a new announce session, `started` to
                     // every tracker, no departure left over, and the announcer
                     // asked to go now.
@@ -2880,7 +3108,8 @@ impl TorrentManager {
             .and_then(|v| v.parse::<usize>().ok())
             .filter(|v| *v > 0)
             .unwrap_or(16);
-        let unreadable: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
+        let unreadable: Arc<std::sync::Mutex<Option<String>>> =
+            Arc::new(std::sync::Mutex::new(None));
         let mut verified: Vec<u32> = futures::stream::iter(0..num_pieces)
             .map(|piece| {
                 let t = t.clone();
@@ -2918,14 +3147,19 @@ impl TorrentManager {
         let unreadable = unreadable.lock().unwrap().take();
         if let Some(why) = unreadable {
             if t.is_paused.load(Ordering::Relaxed) {
-                t.status.store(TorrentStatus::Stopped as u8, Ordering::Relaxed);
+                t.status
+                    .store(TorrentStatus::Stopped as u8, Ordering::Relaxed);
             } else {
-                t.status.store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+                t.status
+                    .store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
                 t.mark_error(&format!(
                     "cannot read the data: {why}. Check the volume is mounted and readable, then recheck this torrent"
                 ));
             }
-            warn!("[recheck] {} not verified: the disk could not be read: {why}", &hex_encode(&ih)[..8]);
+            warn!(
+                "[recheck] {} not verified: the disk could not be read: {why}",
+                &hex_encode(&ih)[..8]
+            );
             return;
         }
         verified.sort_unstable();
@@ -3009,7 +3243,9 @@ fn record_matches_file(record_hash: &str, file_hash: &InfoHash) -> bool {
 mod resume_identity_tests {
     use super::record_matches_file;
 
-    fn hash(byte: u8) -> [u8; 20] { [byte; 20] }
+    fn hash(byte: u8) -> [u8; 20] {
+        [byte; 20]
+    }
 
     /// The case this exists to stop. A record keyed A pointing at a file that
     /// parses to B used to restore B -- under a hash no database had ever
@@ -3217,10 +3453,18 @@ mod lifecycle_tests {
     // skip_checking on a path that does not hold the data
     // -----------------------------------------------------------------------
 
-    fn add_seed(mgr: &Arc<TorrentManager>, root: &std::path::Path, name: &str, stopped: bool) -> Arc<TorrentState> {
+    fn add_seed(
+        mgr: &Arc<TorrentManager>,
+        root: &std::path::Path,
+        name: &str,
+        stopped: bool,
+    ) -> Arc<TorrentState> {
         let save = root.join("data").to_string_lossy().into_owned();
         let bytes = torrent_bytes(name, "https://tracker.example/announce", 16384);
-        let ih = mgr.add_torrent_bytes(&bytes, &save, stopped, true).unwrap().0;
+        let ih = mgr
+            .add_torrent_bytes(&bytes, &save, stopped, true)
+            .unwrap()
+            .0;
         mgr.get(&ih).unwrap()
     }
 
@@ -3229,7 +3473,10 @@ mod lifecycle_tests {
         let (mgr, root) = manager("seed-ok");
         std::fs::write(root.join("data").join("book.epub"), vec![0u8; 16384]).unwrap();
         let t = add_seed(&mgr, &root, "book.epub", false);
-        assert_eq!(t.status.load(Ordering::Relaxed), TorrentStatus::Seeding as u8);
+        assert_eq!(
+            t.status.load(Ordering::Relaxed),
+            TorrentStatus::Seeding as u8
+        );
         assert!(t.error_msg.lock().unwrap().is_empty());
     }
 
@@ -3239,7 +3486,10 @@ mod lifecycle_tests {
         let t = add_seed(&mgr, &root, "book.epub", false);
         assert_eq!(t.status.load(Ordering::Relaxed), TorrentStatus::Error as u8);
         let msg = t.error_msg.lock().unwrap().clone();
-        assert!(msg.contains("missing file") && msg.contains("book.epub"), "{msg}");
+        assert!(
+            msg.contains("missing file") && msg.contains("book.epub"),
+            "{msg}"
+        );
         assert!(t.serving_suspended.load(Ordering::Relaxed));
     }
 
@@ -3250,7 +3500,10 @@ mod lifecycle_tests {
         let t = add_seed(&mgr, &root, "book.epub", false);
         assert_eq!(t.status.load(Ordering::Relaxed), TorrentStatus::Error as u8);
         let msg = t.error_msg.lock().unwrap().clone();
-        assert!(msg.contains("wrong size") && msg.contains("100 bytes"), "{msg}");
+        assert!(
+            msg.contains("wrong size") && msg.contains("100 bytes"),
+            "{msg}"
+        );
     }
 
     #[test]
@@ -3301,7 +3554,9 @@ mod lifecycle_tests {
     fn bytes_that_are_not_a_torrent_are_refused() {
         let (mgr, root) = manager("junk");
         let save = root.join("data").to_string_lossy().into_owned();
-        assert!(mgr.add_torrent_bytes(b"not bencode", &save, true, false).is_err());
+        assert!(mgr
+            .add_torrent_bytes(b"not bencode", &save, true, false)
+            .is_err());
         assert_eq!(mgr.count(), 0);
         std::fs::remove_dir_all(&root).ok();
     }
@@ -3316,8 +3571,15 @@ mod lifecycle_tests {
             add(&mgr, &root, n);
         }
         assert_eq!(mgr.count(), 3);
-        assert_eq!(mgr.collect_torrents(2, |_| true).len(), 2, "the ceiling holds");
-        assert!(mgr.collect_torrents(10, |_| false).is_empty(), "the filter holds");
+        assert_eq!(
+            mgr.collect_torrents(2, |_| true).len(),
+            2,
+            "the ceiling holds"
+        );
+        assert!(
+            mgr.collect_torrents(10, |_| false).is_empty(),
+            "the filter holds"
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -3336,22 +3598,34 @@ mod lifecycle_tests {
         let quiet = add(&mgr, &root, "quiet");
         let spoken = add(&mgr, &root, "spoken");
         for ih in [&quiet, &spoken] {
-            mgr.get(ih).unwrap().pending_announce_event.store(0, Ordering::Relaxed);
+            mgr.get(ih)
+                .unwrap()
+                .pending_announce_event
+                .store(0, Ordering::Relaxed);
         }
-        mgr.get(&spoken).unwrap().last_announce_at.store(1_700_000_000, Ordering::Relaxed);
+        mgr.get(&spoken)
+            .unwrap()
+            .last_announce_at
+            .store(1_700_000_000, Ordering::Relaxed);
 
         mgr.restore_stopped(&quiet).expect("restored");
         mgr.restore_stopped(&spoken).expect("restored");
 
         let q = mgr.get(&quiet).unwrap();
-        assert!(q.is_paused.load(Ordering::Relaxed), "the stop itself is restored");
+        assert!(
+            q.is_paused.load(Ordering::Relaxed),
+            "the stop itself is restored"
+        );
         assert_eq!(
             q.pending_announce_event.load(Ordering::Relaxed),
             crate::torrent::meta::ANNOUNCE_EVENT_NONE,
             "no departure for a torrent this process never announced"
         );
         assert_eq!(
-            mgr.get(&spoken).unwrap().pending_announce_event.load(Ordering::Relaxed),
+            mgr.get(&spoken)
+                .unwrap()
+                .pending_announce_event
+                .load(Ordering::Relaxed),
             ANNOUNCE_EVENT_STOPPED,
             "this process said started, so the tracker must hear stopped"
         );
@@ -3371,7 +3645,11 @@ mod lifecycle_tests {
         );
         mgr.stop_torrent(&ih).expect("stopped");
         let owed = t.pending_announce_event.load(Ordering::Relaxed);
-        assert_ne!(owed & crate::torrent::meta::ANNOUNCE_EVENT_COMPLETED, 0, "completion kept");
+        assert_ne!(
+            owed & crate::torrent::meta::ANNOUNCE_EVENT_COMPLETED,
+            0,
+            "completion kept"
+        );
         assert_ne!(owed & ANNOUNCE_EVENT_STOPPED, 0, "departure owed");
         std::fs::remove_dir_all(&root).ok();
     }
@@ -3384,11 +3662,14 @@ mod lifecycle_tests {
         let ih = add(&mgr, &root, "again");
         let t = mgr.get(&ih).unwrap();
         t.total_uploaded.store(10_000, Ordering::Relaxed);
-        t.announce_book.lock().unwrap().push(crate::torrent::meta::TrackerSlot {
-            key: 1,
-            started: true,
-            ..Default::default()
-        });
+        t.announce_book
+            .lock()
+            .unwrap()
+            .push(crate::torrent::meta::TrackerSlot {
+                key: 1,
+                started: true,
+                ..Default::default()
+            });
 
         mgr.stop_torrent(&ih).expect("stopped");
         mgr.start_torrent(&ih).expect("resumed");
@@ -3454,7 +3735,11 @@ mod lifecycle_tests {
         }));
         mgr.on_completed(&ih);
         assert_eq!(*heard.lock().unwrap(), vec![ih]);
-        assert_eq!(asked.load(Ordering::Relaxed), 1, "the tracker is still told");
+        assert_eq!(
+            asked.load(Ordering::Relaxed),
+            1,
+            "the tracker is still told"
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -3483,10 +3768,18 @@ mod lifecycle_tests {
         // failure is not "no such file".
         std::fs::create_dir(root.join("data").join("bad")).unwrap();
         let save = root.join("data").to_string_lossy().into_owned();
-        let ih = mgr.add_torrent_bytes(&bytes, &save, false, false).expect("added").0;
+        let ih = mgr
+            .add_torrent_bytes(&bytes, &save, false, false)
+            .expect("added")
+            .0;
         let t = mgr.get(&ih).unwrap();
         {
-            let mut p = t.picker.get().expect("a download has a picker").lock().unwrap();
+            let mut p = t
+                .picker
+                .get()
+                .expect("a download has a picker")
+                .lock()
+                .unwrap();
             p.set_have(0);
         }
 
@@ -3498,8 +3791,16 @@ mod lifecycle_tests {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        assert_eq!(t.status.load(Ordering::Relaxed), TorrentStatus::Error as u8, "the fault is shown");
-        assert!(t.error_msg.lock().unwrap().contains("cannot read"), "and named: {}", t.error_msg.lock().unwrap());
+        assert_eq!(
+            t.status.load(Ordering::Relaxed),
+            TorrentStatus::Error as u8,
+            "the fault is shown"
+        );
+        assert!(
+            t.error_msg.lock().unwrap().contains("cannot read"),
+            "and named: {}",
+            t.error_msg.lock().unwrap()
+        );
         assert!(
             t.picker.get().unwrap().lock().unwrap().has_piece(0),
             "what was known is kept: an unreadable disk says nothing about the pieces"
@@ -3524,7 +3825,9 @@ mod lifecycle_tests {
             }
             std::fs::write(root.join("data").join("half"), &on_disk).unwrap();
             let mut info = Vec::new();
-            info.extend_from_slice(b"d6:lengthi32768e4:name4:half12:piece lengthi16384e6:pieces40:");
+            info.extend_from_slice(
+                b"d6:lengthi32768e4:name4:half12:piece lengthi16384e6:pieces40:",
+            );
             for chunk in data.chunks(16384) {
                 let mut hasher = Sha1::new();
                 hasher.update(chunk);
@@ -3537,21 +3840,37 @@ mod lifecycle_tests {
             let blob = bytes.clone();
             mgr.set_blob_source(Arc::new(move |_: &str| Some(blob.clone())));
             let save = root.join("data").to_string_lossy().into_owned();
-            let ih = mgr.add_torrent_bytes(&bytes, &save, false, false).expect("added").0;
+            let ih = mgr
+                .add_torrent_bytes(&bytes, &save, false, false)
+                .expect("added")
+                .0;
             let t = mgr.get(&ih).unwrap();
-            t.picker.get().expect("a download has a picker").lock().unwrap().set_have(0);
-            t.announce_book.lock().unwrap().push(crate::torrent::meta::TrackerSlot {
-                key: 1,
-                started: true,
-                ..Default::default()
-            });
-            t.status.store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+            t.picker
+                .get()
+                .expect("a download has a picker")
+                .lock()
+                .unwrap()
+                .set_have(0);
+            t.announce_book
+                .lock()
+                .unwrap()
+                .push(crate::torrent::meta::TrackerSlot {
+                    key: 1,
+                    started: true,
+                    ..Default::default()
+                });
+            t.status
+                .store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
 
             match cause {
                 "data_lost" => t.mark_data_lost("sync failed"),
                 _ => t.mark_write_error("disk full"),
             }
-            assert_eq!(t.status.load(Ordering::Relaxed), TorrentStatus::Error as u8, "{cause}");
+            assert_eq!(
+                t.status.load(Ordering::Relaxed),
+                TorrentStatus::Error as u8,
+                "{cause}"
+            );
             // The runner saw the error and said `stopped`: the trackers dropped us.
             t.announce_book.lock().unwrap()[0].started = false;
             t.pending_announce_event.store(0, Ordering::Relaxed);
@@ -3569,8 +3888,15 @@ mod lifecycle_tests {
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
-            assert!(!t.rechecking.load(Ordering::SeqCst), "{cause}: the recheck ended");
-            assert_eq!(t.status.load(Ordering::Relaxed), TorrentStatus::Downloading as u8, "{cause}");
+            assert!(
+                !t.rechecking.load(Ordering::SeqCst),
+                "{cause}: the recheck ended"
+            );
+            assert_eq!(
+                t.status.load(Ordering::Relaxed),
+                TorrentStatus::Downloading as u8,
+                "{cause}"
+            );
 
             assert_eq!(
                 asked.load(Ordering::Relaxed),
@@ -3583,7 +3909,11 @@ mod lifecycle_tests {
                 "{cause}: no departure is owed to a torrent that is back"
             );
             assert!(
-                t.announce_book.lock().unwrap().iter().all(|s| !s.started && !s.stopped_owed),
+                t.announce_book
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .all(|s| !s.started && !s.stopped_owed),
                 "{cause}: every tracker is owed a fresh started"
             );
             std::fs::remove_dir_all(&root).ok();
@@ -3615,7 +3945,10 @@ mod lifecycle_tests {
         let blob = bytes.clone();
         mgr.set_blob_source(Arc::new(move |_: &str| Some(blob.clone())));
         let save = root.join("data").to_string_lossy().into_owned();
-        let ih = mgr.add_torrent_bytes(&bytes, &save, false, false).expect("added").0;
+        let ih = mgr
+            .add_torrent_bytes(&bytes, &save, false, false)
+            .expect("added")
+            .0;
         let t = mgr.get(&ih).unwrap();
 
         mgr.recheck(&ih).expect("recheck starts");
@@ -3625,10 +3958,18 @@ mod lifecycle_tests {
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
-        assert_eq!(t.status.load(Ordering::Relaxed), TorrentStatus::Seeding as u8, "verified whole");
-        assert!(completions.try_recv().is_err(), "a recheck is not a completion");
         assert_eq!(
-            t.pending_announce_event.load(Ordering::Relaxed) & crate::torrent::meta::ANNOUNCE_EVENT_COMPLETED,
+            t.status.load(Ordering::Relaxed),
+            TorrentStatus::Seeding as u8,
+            "verified whole"
+        );
+        assert!(
+            completions.try_recv().is_err(),
+            "a recheck is not a completion"
+        );
+        assert_eq!(
+            t.pending_announce_event.load(Ordering::Relaxed)
+                & crate::torrent::meta::ANNOUNCE_EVENT_COMPLETED,
             0,
             "and the trackers are not told `completed`"
         );
@@ -3652,7 +3993,10 @@ mod lifecycle_tests {
         mgr.stop_torrent(&ih).expect("stopped");
 
         assert!(t.is_paused.load(Ordering::Relaxed));
-        assert_eq!(t.status.load(Ordering::Relaxed), TorrentStatus::Stopped as u8);
+        assert_eq!(
+            t.status.load(Ordering::Relaxed),
+            TorrentStatus::Stopped as u8
+        );
         assert_eq!(
             t.pending_announce_event.load(Ordering::Relaxed),
             ANNOUNCE_EVENT_STOPPED,
@@ -3799,7 +4143,9 @@ mod lifecycle_tests {
         let ih = add(&from, &root_a, "orphan");
         let state = from.export_state(&ih).expect("exported");
 
-        let err = into.import_state(&state).expect_err("no store, no metainfo");
+        let err = into
+            .import_state(&state)
+            .expect_err("no store, no metainfo");
         assert!(err.contains("store"), "{err}");
         assert!(!into.has(&ih));
 
@@ -3828,7 +4174,10 @@ mod lifecycle_tests {
             held.is_removed.load(Ordering::Relaxed),
             "the Arc a peer task still holds knows it is over"
         );
-        assert!(mgr.remove_torrent(&ih, true).is_err(), "and twice is an error");
+        assert!(
+            mgr.remove_torrent(&ih, true).is_err(),
+            "and twice is an error"
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -3915,9 +4264,14 @@ mod manager_tests {
     }
 
     fn add(mgr: &Arc<TorrentManager>, name: &str) -> InfoHash {
-        mgr.add_torrent_bytes(&torrent_bytes(name, &["https://tracker.example/announce"]), "/tmp", true, true)
-            .unwrap_or_else(|e| panic!("add {name}: {e}"))
-            .0
+        mgr.add_torrent_bytes(
+            &torrent_bytes(name, &["https://tracker.example/announce"]),
+            "/tmp",
+            true,
+            true,
+        )
+        .unwrap_or_else(|e| panic!("add {name}: {e}"))
+        .0
     }
 
     /// ⭐ A torrent removed while it downloads keeps nothing in flight, even
@@ -3936,26 +4290,51 @@ mod manager_tests {
         let picker = t.picker.get().expect("a download has a picker").clone();
         picker.lock().unwrap().start_piece(0, 16384, 16384, 41);
         picker.lock().unwrap().receive_block(0, 0, &[0u8; 8192]); // refused: wrong size
-        assert_eq!(mgr.piece_mem().pieces(), 1, "the engine counts the picker it adopted");
+        assert_eq!(
+            mgr.piece_mem().pieces(),
+            1,
+            "the engine counts the picker it adopted"
+        );
         // A second torrent's piece, to show the removal takes only its own.
         let other = mgr
-            .add_torrent_bytes(&torrent_bytes("echo", &["https://tracker.example/announce"]), &root.join("data").to_string_lossy(), true, false)
+            .add_torrent_bytes(
+                &torrent_bytes("echo", &["https://tracker.example/announce"]),
+                &root.join("data").to_string_lossy(),
+                true,
+                false,
+            )
             .unwrap()
             .0;
-        mgr.get(&other).unwrap().picker.get().unwrap().lock().unwrap().start_piece(0, 16384, 16384, 42);
+        mgr.get(&other)
+            .unwrap()
+            .picker
+            .get()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .start_piece(0, 16384, 16384, 42);
         assert_eq!(mgr.piece_mem().pieces(), 2);
 
         // `t` stands for a session still holding the torrent.
         mgr.remove_torrent(&ih, true).expect("removed");
         assert_eq!(picker.lock().unwrap().in_flight(), (0, 0));
-        assert_eq!((mgr.piece_mem().pieces(), mgr.piece_mem().bytes()), (1, 0), "only the other torrent's");
+        assert_eq!(
+            (mgr.piece_mem().pieces(), mgr.piece_mem().bytes()),
+            (1, 0),
+            "only the other torrent's"
+        );
 
-        t.status.store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+        t.status
+            .store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
         t.is_paused.store(false, Ordering::Relaxed);
-        let mut dl = crate::peer::download::DownloadState::new(t.clone(), Arc::new(DiskManager::new(4)));
+        let mut dl =
+            crate::peer::download::DownloadState::new(t.clone(), Arc::new(DiskManager::new(4)));
         dl.on_have_all();
         dl.on_unchoke();
-        assert!(dl.get_requests().is_empty(), "a removed torrent asks for nothing");
+        assert!(
+            dl.get_requests().is_empty(),
+            "a removed torrent asks for nothing"
+        );
         drop(dl);
         drop(t);
         drop(picker);
@@ -3972,18 +4351,41 @@ mod manager_tests {
         let (mgr, root) = manager("totals");
         let a = add(&mgr, "alpha");
         let b = add(&mgr, "bravo");
-        mgr.get(&a).unwrap().total_uploaded.store(1_000, Ordering::Relaxed);
-        mgr.get(&b).unwrap().total_uploaded.store(234, Ordering::Relaxed);
-        mgr.get(&b).unwrap().total_downloaded.store(56, Ordering::Relaxed);
+        mgr.get(&a)
+            .unwrap()
+            .total_uploaded
+            .store(1_000, Ordering::Relaxed);
+        mgr.get(&b)
+            .unwrap()
+            .total_uploaded
+            .store(234, Ordering::Relaxed);
+        mgr.get(&b)
+            .unwrap()
+            .total_downloaded
+            .store(56, Ordering::Relaxed);
         assert_eq!(mgr.len(), 2);
-        assert_eq!(mgr.totals(), (1_234, 56), "before any tick: counted in place");
+        assert_eq!(
+            mgr.totals(),
+            (1_234, 56),
+            "before any tick: counted in place"
+        );
         mgr.update_rates();
-        assert_eq!(mgr.totals(), (1_234, 56), "after a tick: same figure, from the cache");
-        mgr.get(&a).unwrap().total_uploaded.store(2_000, Ordering::Relaxed);
+        assert_eq!(
+            mgr.totals(),
+            (1_234, 56),
+            "after a tick: same figure, from the cache"
+        );
+        mgr.get(&a)
+            .unwrap()
+            .total_uploaded
+            .store(2_000, Ordering::Relaxed);
         assert_eq!(mgr.totals(), (1_234, 56), "between ticks the cache holds");
         mgr.update_rates();
         assert_eq!(mgr.totals(), (2_234, 56));
-        assert_eq!(mgr.count_where(|t| t.total_downloaded.load(Ordering::Relaxed) > 0), 1);
+        assert_eq!(
+            mgr.count_where(|t| t.total_downloaded.load(Ordering::Relaxed) > 0),
+            1
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -4103,8 +4505,15 @@ mod manager_tests {
         )
         .expect("set");
         let counts = mgr.tracker_host_counts();
-        assert_eq!(counts.get("other.example").copied(), Some(1), "got {counts:?}");
-        assert!(counts.get("tracker.example").is_none(), "the old host is gone: {counts:?}");
+        assert_eq!(
+            counts.get("other.example").copied(),
+            Some(1),
+            "got {counts:?}"
+        );
+        assert!(
+            counts.get("tracker.example").is_none(),
+            "the old host is gone: {counts:?}"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -4141,7 +4550,9 @@ mod manager_tests {
     #[test]
     fn something_that_is_not_a_torrent_is_refused() {
         let (mgr, root) = manager("notatorrent");
-        assert!(mgr.add_torrent_bytes(b"this is not bencode", "/tmp", true, true).is_err());
+        assert!(mgr
+            .add_torrent_bytes(b"this is not bencode", "/tmp", true, true)
+            .is_err());
         assert!(mgr.add_torrent_bytes(b"", "/tmp", true, true).is_err());
         assert_eq!(mgr.count(), 0, "nothing was stored");
         let _ = std::fs::remove_dir_all(root);
@@ -4153,7 +4564,12 @@ mod manager_tests {
         let (mgr, root) = manager("dup");
         add(&mgr, "alpha");
         assert!(mgr
-            .add_torrent_bytes(&torrent_bytes("alpha", &["https://tracker.example/announce"]), "/tmp", true, true)
+            .add_torrent_bytes(
+                &torrent_bytes("alpha", &["https://tracker.example/announce"]),
+                "/tmp",
+                true,
+                true
+            )
             .is_err());
         assert_eq!(mgr.count(), 1);
         let _ = std::fs::remove_dir_all(root);
@@ -4165,7 +4581,10 @@ mod manager_tests {
     fn every_tier_of_the_announce_list_is_read() {
         let (mgr, root) = manager("tiers");
         mgr.add_torrent_bytes(
-            &torrent_bytes("multi", &["https://a.example/announce", "https://b.example/announce"]),
+            &torrent_bytes(
+                "multi",
+                &["https://a.example/announce", "https://b.example/announce"],
+            ),
             "/tmp",
             true,
             true,
@@ -4186,7 +4605,11 @@ mod manager_tests {
         mgr.update_unseeded_count();
         mgr.save_all_resume();
         mgr.flush_all_resume();
-        assert_eq!(mgr.load_resume_data(), 0, "nothing was written, nothing loads");
+        assert_eq!(
+            mgr.load_resume_data(),
+            0,
+            "nothing was written, nothing loads"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -4226,7 +4649,13 @@ mod manager_tests {
         let mut info = b"d5:filesl".to_vec();
         info.extend_from_slice(b"d6:lengthi8192e4:pathl5:a.binee");
         info.extend_from_slice(b"d6:lengthi8192e4:pathl3:sub5:b.binee");
-        info.extend_from_slice(format!("e4:name{}:{name}12:piece lengthi16384e6:pieces20:", name.len()).as_bytes());
+        info.extend_from_slice(
+            format!(
+                "e4:name{}:{name}12:piece lengthi16384e6:pieces20:",
+                name.len()
+            )
+            .as_bytes(),
+        );
         info.extend_from_slice(&[0x5A; 20]);
         info.push(b'e');
         let mut blob = b"d4:info".to_vec();
@@ -4240,13 +4669,37 @@ mod manager_tests {
     #[test]
     fn a_saved_rename_that_is_not_a_plain_relative_path_is_ignored() {
         let meta = metainfo::parse_torrent_bytes(&multi_blob("pack")).unwrap();
-        let bad = ["../x/y.bin", "/abs/y.bin", "pack//y.bin", "pack/./y.bin", "pack/../../y.bin", "loose.bin", "", "p\\q/y.bin"];
+        let bad = [
+            "../x/y.bin",
+            "/abs/y.bin",
+            "pack//y.bin",
+            "pack/./y.bin",
+            "pack/../../y.bin",
+            "loose.bin",
+            "",
+            "p\\q/y.bin",
+        ];
         for (i, b) in bad.iter().enumerate() {
             meta.restore_renamed_files(&[(i % 2, b.to_string())].into_iter().collect());
-            assert!(meta.renamed_files().is_empty(), "{b:?} was applied: {:?}", meta.renamed_files());
+            assert!(
+                meta.renamed_files().is_empty(),
+                "{b:?} was applied: {:?}",
+                meta.renamed_files()
+            );
         }
-        meta.restore_renamed_files(&[(0, "Copy/ok.bin".to_string()), (7, "Copy/none.bin".to_string())].into_iter().collect());
-        assert_eq!(meta.renamed_files().len(), 1, "the good one, and not the file this torrent lacks");
+        meta.restore_renamed_files(
+            &[
+                (0, "Copy/ok.bin".to_string()),
+                (7, "Copy/none.bin".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        assert_eq!(
+            meta.renamed_files().len(),
+            1,
+            "the good one, and not the file this torrent lacks"
+        );
         assert_eq!(meta.disk_rel(0), std::path::PathBuf::from("Copy/ok.bin"));
     }
 
@@ -4257,7 +4710,9 @@ mod manager_tests {
         for ok in ["a", "a/b", "a b/c.d", "..a/b", "a./b"] {
             assert!(clean_relative(ok).is_some(), "{ok:?}");
         }
-        for bad in ["", "/", "/a", "a/", "a//b", ".", "./a", "a/..", "../a", "a\\b", "a\0b"] {
+        for bad in [
+            "", "/", "/a", "a/", "a//b", ".", "./a", "a/..", "../a", "a\\b", "a\0b",
+        ] {
             assert!(clean_relative(bad).is_none(), "{bad:?}");
         }
         #[cfg(windows)]
@@ -4276,7 +4731,10 @@ mod manager_tests {
         let source = blob.clone();
         mgr.set_blob_source(Arc::new(move |_hash: &str| Some(source.clone())));
         let save = root.join("data");
-        let ih = mgr.add_torrent_bytes(&blob, &save.to_string_lossy(), true, false).unwrap().0;
+        let ih = mgr
+            .add_torrent_bytes(&blob, &save.to_string_lossy(), true, false)
+            .unwrap()
+            .0;
         let t = mgr.get(&ih).unwrap();
         let p = std::path::PathBuf::from;
         assert_eq!(t.meta.content_name(), "a/b");
@@ -4293,7 +4751,10 @@ mod manager_tests {
         std::fs::write(save.join("a/b/z.bin"), b"x").unwrap();
         mgr.remove_torrent(&ih, false).unwrap();
         assert!(!save.join("a/b").exists(), "its own folder is swept");
-        assert!(save.join("a/other").exists(), "the empty folder next to it is not");
+        assert!(
+            save.join("a/other").exists(),
+            "the empty folder next to it is not"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -4306,18 +4767,32 @@ mod manager_tests {
         let source = blob.clone();
         mgr.set_blob_source(Arc::new(move |_hash: &str| Some(source.clone())));
         let save = root.join("data");
-        let ih = mgr.add_torrent_bytes(&blob, &save.to_string_lossy(), true, false).unwrap().0;
+        let ih = mgr
+            .add_torrent_bytes(&blob, &save.to_string_lossy(), true, false)
+            .unwrap()
+            .0;
         let t = mgr.get(&ih).unwrap();
-        t.picker.get().expect("a download has a picker").lock().unwrap().import_bitfield(&full_bitfield(1));
+        t.picker
+            .get()
+            .expect("a download has a picker")
+            .lock()
+            .unwrap()
+            .import_bitfield(&full_bitfield(1));
         assert!(t.picker.get().unwrap().lock().unwrap().has_piece(0));
         // Two names that differ by the case only are one file on some volumes.
         assert!(matches!(
             mgr.rename_file(&ih, "pack/a.bin", "pack/SUB/B.bin"),
             Err(RenameError::Conflict(_))
         ));
-        assert!(t.picker.get().unwrap().lock().unwrap().has_piece(0), "a refusal changes nothing");
+        assert!(
+            t.picker.get().unwrap().lock().unwrap().has_piece(0),
+            "a refusal changes nothing"
+        );
         mgr.rename_file(&ih, "pack/a.bin", "pack/new.bin").unwrap();
-        assert!(!t.picker.get().unwrap().lock().unwrap().has_piece(0), "the piece shared with the file is no longer held");
+        assert!(
+            !t.picker.get().unwrap().lock().unwrap().has_piece(0),
+            "the piece shared with the file is no longer held"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -4339,39 +4814,112 @@ mod manager_tests {
         let source = blob.clone();
         mgr.set_blob_source(Arc::new(move |_hash: &str| Some(source.clone())));
         let save = root.join("data");
-        let ih = mgr.add_torrent_bytes(&blob, &save.to_string_lossy(), true, false).unwrap().0;
+        let ih = mgr
+            .add_torrent_bytes(&blob, &save.to_string_lossy(), true, false)
+            .unwrap()
+            .0;
         let p = std::path::PathBuf::from;
 
         mgr.start_torrent(&ih).unwrap();
-        assert!(matches!(mgr.rename_file(&ih, "pack/a.bin", "pack/x.bin"), Err(RenameError::Conflict(_))), "a running torrent");
+        assert!(
+            matches!(
+                mgr.rename_file(&ih, "pack/a.bin", "pack/x.bin"),
+                Err(RenameError::Conflict(_))
+            ),
+            "a running torrent"
+        );
         mgr.stop_torrent(&ih).unwrap();
-        for to in ["/x", "", "../x", "pack/../x", "p//q", "p\\q", "./q", "pack/x/"] {
-            assert!(matches!(mgr.rename_file(&ih, "pack/a.bin", to), Err(RenameError::Invalid(_))), "{to:?}");
+        for to in [
+            "/x",
+            "",
+            "../x",
+            "pack/../x",
+            "p//q",
+            "p\\q",
+            "./q",
+            "pack/x/",
+        ] {
+            assert!(
+                matches!(
+                    mgr.rename_file(&ih, "pack/a.bin", to),
+                    Err(RenameError::Invalid(_))
+                ),
+                "{to:?}"
+            );
         }
-        assert!(matches!(mgr.rename_file(&ih, "pack/zz", "pack/q"), Err(RenameError::Invalid(_))), "not a file");
-        assert!(matches!(mgr.rename_file(&ih, "a.bin", "pack/q"), Err(RenameError::Invalid(_))), "the folder is part of the path");
-        assert!(matches!(mgr.rename_file(&ih, "pack/a.bin", "loose.bin"), Err(RenameError::Invalid(_))), "a multi-file torrent keeps a folder");
-        assert!(matches!(mgr.rename_file(&ih, "pack/a.bin", "pack/sub/b.bin"), Err(RenameError::Conflict(_))), "another file's path");
-        assert!(matches!(mgr.rename_file(&ih, "pack/a.bin", "pack/sub"), Err(RenameError::Conflict(_))), "a folder of another file");
-        assert!(matches!(mgr.rename_file(&[7; 20], "pack/a.bin", "pack/q"), Err(RenameError::NotFound)));
+        assert!(
+            matches!(
+                mgr.rename_file(&ih, "pack/zz", "pack/q"),
+                Err(RenameError::Invalid(_))
+            ),
+            "not a file"
+        );
+        assert!(
+            matches!(
+                mgr.rename_file(&ih, "a.bin", "pack/q"),
+                Err(RenameError::Invalid(_))
+            ),
+            "the folder is part of the path"
+        );
+        assert!(
+            matches!(
+                mgr.rename_file(&ih, "pack/a.bin", "loose.bin"),
+                Err(RenameError::Invalid(_))
+            ),
+            "a multi-file torrent keeps a folder"
+        );
+        assert!(
+            matches!(
+                mgr.rename_file(&ih, "pack/a.bin", "pack/sub/b.bin"),
+                Err(RenameError::Conflict(_))
+            ),
+            "another file's path"
+        );
+        assert!(
+            matches!(
+                mgr.rename_file(&ih, "pack/a.bin", "pack/sub"),
+                Err(RenameError::Conflict(_))
+            ),
+            "a folder of another file"
+        );
+        assert!(matches!(
+            mgr.rename_file(&[7; 20], "pack/a.bin", "pack/q"),
+            Err(RenameError::NotFound)
+        ));
 
         // File by file into another folder: one of two moved is a coherent state.
-        mgr.rename_file(&ih, "pack/a.bin", "Copy/deep/x.bin").unwrap();
+        mgr.rename_file(&ih, "pack/a.bin", "Copy/deep/x.bin")
+            .unwrap();
         let t = mgr.get(&ih).unwrap();
         assert_eq!(t.meta.disk_rel(0), p("Copy/deep/x.bin"));
         assert_eq!(t.meta.disk_rel(1), p("pack/sub/b.bin"));
         assert_eq!(t.meta.common_root(), None, "split between two folders");
-        assert_eq!(t.meta.content_name(), "pack", "the .torrent's name while split");
-        assert_eq!(t.meta.files[0].path, p("a.bin"), "the .torrent's own path is untouched");
+        assert_eq!(
+            t.meta.content_name(),
+            "pack",
+            "the .torrent's name while split"
+        );
+        assert_eq!(
+            t.meta.files[0].path,
+            p("a.bin"),
+            "the .torrent's own path is untouched"
+        );
         let ops = t.meta.map_block(0, 0, 100);
-        assert_eq!(ops[0].path, p("Copy/deep/x.bin"), "the disk layer is handed the new path");
+        assert_eq!(
+            ops[0].path,
+            p("Copy/deep/x.bin"),
+            "the disk layer is handed the new path"
+        );
         assert_eq!(t.meta.disk_path(&save, 0), save.join("Copy/deep/x.bin"));
         // A file on disk at the old name: nothing is moved, so no rename.
         std::fs::create_dir_all(save.join("pack/sub")).unwrap();
         std::fs::write(save.join("pack/sub/b.bin"), b"x").unwrap();
-        assert!(matches!(mgr.rename_file(&ih, "pack/sub/b.bin", "Copy/y.bin"), Err(RenameError::Conflict(m)) if m.contains("move")));
+        assert!(
+            matches!(mgr.rename_file(&ih, "pack/sub/b.bin", "Copy/y.bin"), Err(RenameError::Conflict(m)) if m.contains("move"))
+        );
         std::fs::remove_file(save.join("pack/sub/b.bin")).unwrap();
-        mgr.rename_file(&ih, "pack/sub/b.bin", "Copy/y.bin").unwrap();
+        mgr.rename_file(&ih, "pack/sub/b.bin", "Copy/y.bin")
+            .unwrap();
         assert_eq!(t.meta.common_root(), Some("Copy".into()));
         assert_eq!(t.meta.content_name(), "Copy", "the folder they now share");
 
@@ -4386,7 +4934,11 @@ mod manager_tests {
         again.set_blob_source(Arc::new(move |_hash: &str| Some(source.clone())));
         assert_eq!(again.load_resume_data(), 1);
         let t = again.get(&ih).unwrap();
-        assert_eq!(t.meta.disk_rel(0), p("Copy/deep/x.bin"), "the rename was persisted");
+        assert_eq!(
+            t.meta.disk_rel(0),
+            p("Copy/deep/x.bin"),
+            "the rename was persisted"
+        );
         assert_eq!(t.meta.disk_rel(1), p("Copy/y.bin"));
         assert_eq!(t.meta.content_name(), "Copy");
         let _ = std::fs::remove_dir_all(root);
@@ -4419,13 +4971,25 @@ mod manager_tests {
         assert_eq!(again.load_resume_data(), 1);
 
         let t = again.get(&ih).unwrap();
-        assert_eq!(t.total_uploaded.load(Ordering::Relaxed), 500_000_000_000, "the lifetime total is kept");
+        assert_eq!(
+            t.total_uploaded.load(Ordering::Relaxed),
+            500_000_000_000,
+            "the lifetime total is kept"
+        );
         again.update_rates();
-        assert_eq!(again.moved(), (0, 0), "a reloaded lifetime is not this process's traffic");
+        assert_eq!(
+            again.moved(),
+            (0, 0),
+            "a reloaded lifetime is not this process's traffic"
+        );
         assert_eq!(t.session_uploaded(), 0, "a new session reports from zero");
         assert_eq!(t.session_downloaded(), 0);
         t.total_uploaded.fetch_add(4096, Ordering::Relaxed);
-        assert_eq!(t.session_uploaded(), 4096, "and counts what this session moves");
+        assert_eq!(
+            t.session_uploaded(),
+            4096,
+            "and counts what this session moves"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -4437,10 +5001,20 @@ mod manager_tests {
         let (mgr, root) = manager("resume-ratecap");
         let ih = add(&mgr, "alpha");
         let other = add(&mgr, "beta");
-        assert_eq!(mgr.set_torrent_rate_limits(&ih, Some(51_200), Some(8_192)), Ok((51_200, 8_192)));
+        assert_eq!(
+            mgr.set_torrent_rate_limits(&ih, Some(51_200), Some(8_192)),
+            Ok((51_200, 8_192))
+        );
         // Lifting a cap that was never set is a no-op, not an allocation.
-        assert_eq!(mgr.set_torrent_rate_limits(&other, Some(0), Some(0)), Ok((0, 0)));
-        assert!(mgr.set_torrent_rate_limits(&[9u8; 20], Some(1), None).is_err(), "unknown hash");
+        assert_eq!(
+            mgr.set_torrent_rate_limits(&other, Some(0), Some(0)),
+            Ok((0, 0))
+        );
+        assert!(
+            mgr.set_torrent_rate_limits(&[9u8; 20], Some(1), None)
+                .is_err(),
+            "unknown hash"
+        );
 
         let again = Arc::new(TorrentManager::new(
             root.join("data").to_string_lossy().into_owned(),
@@ -4451,12 +5025,21 @@ mod manager_tests {
         let blob_b = torrent_bytes("beta", &["https://tracker.example/announce"]);
         let (ha, hb) = (hex_encode(&ih), hex_encode(&other));
         again.set_blob_source(Arc::new(move |hash: &str| {
-            if hash == ha { Some(blob.clone()) } else if hash == hb { Some(blob_b.clone()) } else { None }
+            if hash == ha {
+                Some(blob.clone())
+            } else if hash == hb {
+                Some(blob_b.clone())
+            } else {
+                None
+            }
         }));
         assert_eq!(again.load_resume_data(), 2);
         let t = again.get(&ih).unwrap();
         assert_eq!(t.rate_limits(), (51_200, 8_192), "the cap came back");
-        assert!(t.rate_chain(ratelimit::Dir::Up).is_limited(), "and it is enforced, not only reported");
+        assert!(
+            t.rate_chain(ratelimit::Dir::Up).is_limited(),
+            "and it is enforced, not only reported"
+        );
         assert_eq!(again.get(&other).unwrap().rate_limits(), (0, 0));
         let _ = std::fs::remove_dir_all(root);
     }
@@ -4478,12 +5061,33 @@ mod manager_tests {
             })
             .unwrap();
         assert!(o.sequential && o.first_last && o.file_prio == vec![piece_picker::PRIO_MAX]);
-        assert!(mgr.get(&ih).unwrap().picker.get().unwrap().lock().unwrap().has_order());
-        assert!(mgr.update_download_order(&[9u8; 20], |o| o.sequential = true).is_err(), "unknown hash");
+        assert!(mgr
+            .get(&ih)
+            .unwrap()
+            .picker
+            .get()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .has_order());
+        assert!(
+            mgr.update_download_order(&[9u8; 20], |o| o.sequential = true)
+                .is_err(),
+            "unknown hash"
+        );
         // Set on a seed: kept and shown, nothing to act on.
-        assert!(mgr.update_download_order(&other, |o| o.sequential = true).unwrap().sequential);
-        mgr.update_download_order(&other, |o| o.sequential = false).unwrap();
-        assert_eq!(mgr.get(&other).unwrap().stored_download_order(), None, "off again = nothing stored");
+        assert!(
+            mgr.update_download_order(&other, |o| o.sequential = true)
+                .unwrap()
+                .sequential
+        );
+        mgr.update_download_order(&other, |o| o.sequential = false)
+            .unwrap();
+        assert_eq!(
+            mgr.get(&other).unwrap().stored_download_order(),
+            None,
+            "off again = nothing stored"
+        );
 
         let again = Arc::new(TorrentManager::new(
             root.join("data").to_string_lossy().into_owned(),
@@ -4493,12 +5097,21 @@ mod manager_tests {
         let blob_b = torrent_bytes("beta", &["https://tracker.example/announce"]);
         let (ha, hb) = (hex_encode(&ih), hex_encode(&other));
         again.set_blob_source(Arc::new(move |hash: &str| {
-            if hash == ha { Some(blob.clone()) } else if hash == hb { Some(blob_b.clone()) } else { None }
+            if hash == ha {
+                Some(blob.clone())
+            } else if hash == hb {
+                Some(blob_b.clone())
+            } else {
+                None
+            }
         }));
         assert_eq!(again.load_resume_data(), 2);
         let t = again.get(&ih).unwrap();
         assert_eq!(t.download_order(), o, "the order came back");
-        assert!(t.picker.get().unwrap().lock().unwrap().has_order(), "and the picker follows it");
+        assert!(
+            t.picker.get().unwrap().lock().unwrap().has_order(),
+            "and the picker follows it"
+        );
         assert_eq!(again.get(&other).unwrap().stored_download_order(), None);
         let _ = std::fs::remove_dir_all(root);
     }
@@ -4548,18 +5161,35 @@ mod manager_tests {
         mgr.get(&a).unwrap().restore_lifetime(9_000_000, 1_000);
         mgr.update_rates();
         assert_eq!(mgr.moved(), (0, 0), "history is not traffic");
-        mgr.get(&a).unwrap().total_uploaded.fetch_add(500, Ordering::Relaxed);
-        mgr.get(&a).unwrap().total_downloaded.fetch_add(16_384, Ordering::Relaxed);
+        mgr.get(&a)
+            .unwrap()
+            .total_uploaded
+            .fetch_add(500, Ordering::Relaxed);
+        mgr.get(&a)
+            .unwrap()
+            .total_downloaded
+            .fetch_add(16_384, Ordering::Relaxed);
         mgr.update_rates();
         assert_eq!(mgr.moved(), (500, 16_384));
         mgr.update_rates();
         assert_eq!(mgr.moved(), (500, 16_384), "a quiet tick adds nothing");
         // Removal settles what moved since the last tick, and nothing more.
-        mgr.get(&a).unwrap().total_uploaded.fetch_add(7, Ordering::Relaxed);
+        mgr.get(&a)
+            .unwrap()
+            .total_uploaded
+            .fetch_add(7, Ordering::Relaxed);
         mgr.remove_torrent(&a, true).expect("removed");
-        assert_eq!(mgr.moved(), (507, 16_384), "the last 7 bytes are not lost with the torrent");
+        assert_eq!(
+            mgr.moved(),
+            (507, 16_384),
+            "the last 7 bytes are not lost with the torrent"
+        );
         mgr.update_rates();
-        assert_eq!(mgr.moved(), (507, 16_384), "and the delete itself is not traffic");
+        assert_eq!(
+            mgr.moved(),
+            (507, 16_384),
+            "and the delete itself is not traffic"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -4576,10 +5206,17 @@ mod manager_tests {
         let a = add(&mgr, "alpha");
         let t = mgr.get(&a).unwrap();
         t.total_uploaded.fetch_add(1_000, Ordering::Relaxed);
-        let (ul, dl) = (t.total_uploaded.load(Ordering::Relaxed), t.total_downloaded.load(Ordering::Relaxed));
+        let (ul, dl) = (
+            t.total_uploaded.load(Ordering::Relaxed),
+            t.total_downloaded.load(Ordering::Relaxed),
+        );
         mgr.remove_torrent(&a, true).expect("removed");
         assert_eq!(mgr.moved(), (1_000, 0));
-        assert_eq!(t.take_uncounted_with(ul, dl), (0, 0), "the late tick finds it settled");
+        assert_eq!(
+            t.take_uncounted_with(ul, dl),
+            (0, 0),
+            "the late tick finds it settled"
+        );
         // A tick holding an OLDER read than the mark must not drag it back:
         // the next reader would count the gap again.
         t.total_uploaded.fetch_add(50, Ordering::Relaxed);
@@ -4629,8 +5266,13 @@ mod manager_tests {
         let blob = torrent_bytes("alpha", &["https://tracker.example/announce"]);
         dst.set_blob_source(Arc::new(move |_hash: &str| Some(blob.clone())));
         let ih = add(&src, "alpha");
-        src.get(&ih).unwrap().restore_lifetime(4_000_000_000, 16_384);
-        src.get(&ih).unwrap().total_uploaded.fetch_add(100, Ordering::Relaxed);
+        src.get(&ih)
+            .unwrap()
+            .restore_lifetime(4_000_000_000, 16_384);
+        src.get(&ih)
+            .unwrap()
+            .total_uploaded
+            .fetch_add(100, Ordering::Relaxed);
         src.update_rates();
         assert_eq!(src.moved(), (100, 0));
 
@@ -4639,12 +5281,30 @@ mod manager_tests {
         src.remove_torrent(&ih, true).expect("source lets go");
         src.update_rates();
         dst.update_rates();
-        assert_eq!(src.moved(), (100, 0), "the source keeps what it moved, no more");
-        assert_eq!(dst.moved(), (0, 0), "the destination did not move 4 GB by adopting it");
-        assert_eq!(dst.get(&ih).unwrap().total_uploaded.load(Ordering::Relaxed), 4_000_000_100);
-        assert_eq!(dst.get(&ih).unwrap().session_uploaded(), 0, "a tracker is not told 4 GB went up just now");
+        assert_eq!(
+            src.moved(),
+            (100, 0),
+            "the source keeps what it moved, no more"
+        );
+        assert_eq!(
+            dst.moved(),
+            (0, 0),
+            "the destination did not move 4 GB by adopting it"
+        );
+        assert_eq!(
+            dst.get(&ih).unwrap().total_uploaded.load(Ordering::Relaxed),
+            4_000_000_100
+        );
+        assert_eq!(
+            dst.get(&ih).unwrap().session_uploaded(),
+            0,
+            "a tracker is not told 4 GB went up just now"
+        );
 
-        dst.get(&ih).unwrap().total_uploaded.fetch_add(25, Ordering::Relaxed);
+        dst.get(&ih)
+            .unwrap()
+            .total_uploaded
+            .fetch_add(25, Ordering::Relaxed);
         dst.update_rates();
         assert_eq!(dst.moved(), (25, 0), "and counts what it moves from there");
         let _ = std::fs::remove_dir_all(root);
@@ -4662,7 +5322,9 @@ mod manager_tests {
         let blob = torrent_bytes("alpha", &["https://tracker.example/announce"]);
         dst.set_blob_source(Arc::new(move |_hash: &str| Some(blob.clone())));
         let ih = add(&src, "alpha");
-        src.get(&ih).unwrap().restore_lifetime(4_000_000_000, 8_000_000_000);
+        src.get(&ih)
+            .unwrap()
+            .restore_lifetime(4_000_000_000, 8_000_000_000);
         let rd = src.export_state(&ih).expect("exported");
 
         // Seed the engine trackers while it holds nothing, then adopt.
@@ -4671,8 +5333,16 @@ mod manager_tests {
         std::thread::sleep(std::time::Duration::from_millis(650));
         dst.update_rates();
         assert_eq!(dst.moved(), (0, 0));
-        assert_eq!(dst.upload_rate.get(), 0, "adopting 4 GB of history is not upload");
-        assert_eq!(dst.download_rate.get(), 0, "adopting 8 GB of history is not download");
+        assert_eq!(
+            dst.upload_rate.get(),
+            0,
+            "adopting 4 GB of history is not upload"
+        );
+        assert_eq!(
+            dst.download_rate.get(),
+            0,
+            "adopting 8 GB of history is not download"
+        );
 
         // Real traffic after the adoption still shows.
         let t = dst.get(&ih).unwrap();
@@ -4682,7 +5352,10 @@ mod manager_tests {
         dst.update_rates();
         assert_eq!(dst.moved(), (6_000_000, 3_000_000));
         assert!(dst.upload_rate.get() > 0, "real upload still registers");
-        assert!(dst.upload_rate.get() < 100_000_000, "and is the traffic, not the history");
+        assert!(
+            dst.upload_rate.get() < 100_000_000,
+            "and is the traffic, not the history"
+        );
         assert!(dst.download_rate.get() > 0, "real download still registers");
         assert!(dst.download_rate.get() < 100_000_000);
         let _ = std::fs::remove_dir_all(root);
@@ -4712,7 +5385,12 @@ mod manager_tests {
             "the disk is asked, the torrent does not start empty"
         );
         let (_, issues) = dst.startup_issues();
-        assert!(issues.iter().any(|i| i.info_hash == rd.info_hash && i.kind == "bitfield_discarded"), "{issues:?}");
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.info_hash == rd.info_hash && i.kind == "bitfield_discarded"),
+            "{issues:?}"
+        );
         let _ = std::fs::remove_dir_all(root);
         let _ = std::fs::remove_dir_all(root2);
     }
@@ -4731,7 +5409,10 @@ mod manager_tests {
         rd.bitfield = String::new();
 
         dst.import_state(&rd).expect("imported");
-        assert_ne!(dst.get(&ih).unwrap().status.load(Ordering::Relaxed), TorrentStatus::Checking as u8);
+        assert_ne!(
+            dst.get(&ih).unwrap().status.load(Ordering::Relaxed),
+            TorrentStatus::Checking as u8
+        );
         assert!(dst.startup_issues().1.is_empty());
         let _ = std::fs::remove_dir_all(root);
         let _ = std::fs::remove_dir_all(root2);
@@ -4750,8 +5431,14 @@ mod manager_tests {
         drop(conn);
 
         let r = mgr.update_download_order(&ih, |o| o.sequential = true);
-        assert!(r.is_err(), "the store refused the write, so the answer is no: {r:?}");
-        assert!(!mgr.get(&ih).unwrap().download_order().sequential, "and the engine does not follow what the disk lacks");
+        assert!(
+            r.is_err(),
+            "the store refused the write, so the answer is no: {r:?}"
+        );
+        assert!(
+            !mgr.get(&ih).unwrap().download_order().sequential,
+            "and the engine does not follow what the disk lacks"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -4769,8 +5456,15 @@ mod manager_tests {
         drop(conn);
 
         let r = mgr.rename_file(&ih, &from, "renamed.bin");
-        assert!(r.is_err(), "the store refused the write, so the answer is no: {r:?}");
-        assert_eq!(t.meta.disk_rel(0).to_string_lossy(), from, "and the file is where the disk record says");
+        assert!(
+            r.is_err(),
+            "the store refused the write, so the answer is no: {r:?}"
+        );
+        assert_eq!(
+            t.meta.disk_rel(0).to_string_lossy(),
+            from,
+            "and the file is where the disk record says"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -4790,10 +5484,19 @@ mod manager_tests {
         drop(conn);
 
         let r = dst.import_state(&rd);
-        assert!(r.is_err(), "the store refused the record, so the answer is no: {r:?}");
+        assert!(
+            r.is_err(),
+            "the store refused the record, so the answer is no: {r:?}"
+        );
         assert!(dst.get(&ih).is_none(), "and nothing is in the catalogue");
         assert!(dst.save_paths().is_empty(), "nor counted under a folder");
-        assert!(!root2.join("resume").join(format!("{}.json", hex_encode(&ih))).exists(), "nor left as a file a later start would read");
+        assert!(
+            !root2
+                .join("resume")
+                .join(format!("{}.json", hex_encode(&ih)))
+                .exists(),
+            "nor left as a file a later start would read"
+        );
         assert!(src.get(&ih).is_some(), "the source still holds it");
         let _ = std::fs::remove_dir_all(root);
         let _ = std::fs::remove_dir_all(root2);
@@ -4812,10 +5515,19 @@ mod manager_tests {
         let bytes = torrent_bytes("alpha", &["https://tracker.example/announce"]);
         let ih = metainfo::parse_torrent_bytes(&bytes).unwrap().info_hash;
         let r = mgr.add_torrent_bytes(&bytes, &root.join("data").to_string_lossy(), true, false);
-        assert!(r.is_err(), "the store refused the record, so the answer is no: {r:?}");
+        assert!(
+            r.is_err(),
+            "the store refused the record, so the answer is no: {r:?}"
+        );
         assert!(mgr.get(&ih).is_none(), "and no torrent is in the catalogue");
         assert!(mgr.save_paths().is_empty(), "nor counted under a folder");
-        assert!(!root.join("resume").join(format!("{}.json", hex_encode(&ih))).exists(), "nor left as a file a later start would read");
+        assert!(
+            !root
+                .join("resume")
+                .join(format!("{}.json", hex_encode(&ih)))
+                .exists(),
+            "nor left as a file a later start would read"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -4831,8 +5543,15 @@ mod manager_tests {
         drop(conn);
 
         let r = mgr.set_trackers(&ih, vec![vec!["https://edited.example/announce".into()]]);
-        assert!(r.is_err(), "the store refused the write, so the answer is no: {r:?}");
-        assert_eq!(*mgr.get(&ih).unwrap().live_trackers.read(), before, "and the engine keeps the list it had");
+        assert!(
+            r.is_err(),
+            "the store refused the write, so the answer is no: {r:?}"
+        );
+        assert_eq!(
+            *mgr.get(&ih).unwrap().live_trackers.read(),
+            before,
+            "and the engine keeps the list it had"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -4847,8 +5566,15 @@ mod manager_tests {
         drop(conn);
 
         let r = mgr.set_torrent_rate_limits(&ih, Some(51_200), Some(8_192));
-        assert!(r.is_err(), "the store refused the write, so the answer is no: {r:?}");
-        assert_eq!(mgr.get(&ih).unwrap().rate_limits(), (0, 0), "and the torrent keeps the cap it had");
+        assert!(
+            r.is_err(),
+            "the store refused the write, so the answer is no: {r:?}"
+        );
+        assert_eq!(
+            mgr.get(&ih).unwrap().rate_limits(),
+            (0, 0),
+            "and the torrent keeps the cap it had"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -4864,8 +5590,15 @@ mod manager_tests {
         drop(conn);
 
         let r = mgr.set_save_path(&ih, "/somewhere/else");
-        assert!(r.is_err(), "the store refused the write, so the answer is no: {r:?}");
-        assert_eq!(*mgr.get(&ih).unwrap().save_path.read(), before, "and the engine does not look where the disk does not");
+        assert!(
+            r.is_err(),
+            "the store refused the write, so the answer is no: {r:?}"
+        );
+        assert_eq!(
+            *mgr.get(&ih).unwrap().save_path.read(),
+            before,
+            "and the engine does not look where the disk does not"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 }
@@ -4904,12 +5637,23 @@ mod unreadable_state_tests {
             Arc::new(crate::disk::DiskManager::new(16)),
         ));
         mgr.load_resume_data();
-        assert!(mgr.refused_records().contains(&hash), "its row must be kept");
+        assert!(
+            mgr.refused_records().contains(&hash),
+            "its row must be kept"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    fn unreadable_json_root(tag: &str) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf, String) {
-        let root = std::env::temp_dir().join(format!("typhon-unreadable-{tag}-{}", std::process::id()));
+    fn unreadable_json_root(
+        tag: &str,
+    ) -> (
+        std::path::PathBuf,
+        std::path::PathBuf,
+        std::path::PathBuf,
+        String,
+    ) {
+        let root =
+            std::env::temp_dir().join(format!("typhon-unreadable-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let (data, resume) = (root.join("data"), root.join("resume"));
         std::fs::create_dir_all(&data).unwrap();
@@ -4920,11 +5664,16 @@ mod unreadable_state_tests {
     }
 
     fn assert_reported(mgr: &TorrentManager, hash: &str) {
-        assert!(mgr.refused_records().contains(hash), "its record must be kept, not forgotten");
+        assert!(
+            mgr.refused_records().contains(hash),
+            "its record must be kept, not forgotten"
+        );
         let (n, issues) = mgr.startup_issues();
         assert!(n >= 1);
         assert!(
-            issues.iter().any(|i| i.info_hash == hash && i.kind == "resume_unreadable"),
+            issues
+                .iter()
+                .any(|i| i.info_hash == hash && i.kind == "resume_unreadable"),
             "and listed among the startup issues: {issues:?}"
         );
     }

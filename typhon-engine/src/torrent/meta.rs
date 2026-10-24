@@ -1,10 +1,12 @@
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, AtomicI64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
-use parking_lot::RwLock;
 use bytes::Bytes;
-use tokio::sync::broadcast;
 use dashmap::DashMap;
+use parking_lot::RwLock;
+use std::path::PathBuf;
+use std::sync::atomic::{
+    AtomicBool, AtomicI64, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering,
+};
+use std::sync::{Arc, Mutex, OnceLock};
+use tokio::sync::broadcast;
 
 use super::piece_picker::PiecePicker;
 use super::rate::RateTracker;
@@ -128,7 +130,12 @@ impl TorrentMeta {
     pub fn common_root(&self) -> Option<std::ffi::OsString> {
         let mut root: Option<std::ffi::OsString> = None;
         for i in 0..self.files.len() {
-            let first = self.disk_rel(i).components().next()?.as_os_str().to_os_string();
+            let first = self
+                .disk_rel(i)
+                .components()
+                .next()?
+                .as_os_str()
+                .to_os_string();
             match &root {
                 None => root = Some(first),
                 Some(r) if *r == first => {}
@@ -163,7 +170,15 @@ impl TorrentMeta {
         match self.renames.0.read().as_deref() {
             Some(map) => map
                 .iter()
-                .map(|(i, p)| (*i, p.components().map(|c| c.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/")))
+                .map(|(i, p)| {
+                    (
+                        *i,
+                        p.components()
+                            .map(|c| c.as_os_str().to_string_lossy())
+                            .collect::<Vec<_>>()
+                            .join("/"),
+                    )
+                })
                 .collect(),
             None => Default::default(),
         }
@@ -182,8 +197,12 @@ impl TorrentMeta {
                 continue;
             }
             match super::clean_relative(p) {
-                Some(path) if !self.multi_file || path.components().count() >= 2 => self.set_disk_rel(*i, path),
-                _ => tracing::warn!(torrent = %self.name, file = *i, "a saved renamed path is not usable and was ignored"),
+                Some(path) if !self.multi_file || path.components().count() >= 2 => {
+                    self.set_disk_rel(*i, path)
+                }
+                _ => {
+                    tracing::warn!(torrent = %self.name, file = *i, "a saved renamed path is not usable and was ignored")
+                }
             }
         }
     }
@@ -219,11 +238,18 @@ impl TorrentMeta {
     /// the files are split between folders.
     pub fn content_name(&self) -> String {
         if !self.multi_file && self.files.len() == 1 {
-            return self.disk_rel(0).components().map(|c| c.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/");
+            return self
+                .disk_rel(0)
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/");
         }
         let mut shared: Option<PathBuf> = None;
         for i in 0..self.files.len() {
-            let Some(folder) = self.folder_split(i).0 else { return self.name.clone() };
+            let Some(folder) = self.folder_split(i).0 else {
+                return self.name.clone();
+            };
             match &shared {
                 None => shared = Some(folder),
                 Some(s) if *s == folder => {}
@@ -231,7 +257,11 @@ impl TorrentMeta {
             }
         }
         match shared {
-            Some(f) => f.components().map(|c| c.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/"),
+            Some(f) => f
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/"),
             None => self.name.clone(),
         }
     }
@@ -263,7 +293,12 @@ impl TorrentMeta {
             }
             if pos < f.offset {
                 let gap = (f.offset - pos).min(remaining);
-                ops.push(FileOp { path: PathBuf::new(), file_offset: 0, length: gap as u32, pad: true });
+                ops.push(FileOp {
+                    path: PathBuf::new(),
+                    file_offset: 0,
+                    length: gap as u32,
+                    pad: true,
+                });
                 pos += gap;
                 remaining -= gap;
                 if remaining == 0 {
@@ -281,7 +316,9 @@ impl TorrentMeta {
             });
             pos += to_read;
             remaining -= to_read;
-            if remaining == 0 { break; }
+            if remaining == 0 {
+                break;
+            }
         }
         ops
     }
@@ -452,9 +489,13 @@ impl PeerGuard {
     pub fn mark_interested(&self, interested: bool) {
         let prev = self.was_interested.swap(interested, Ordering::Relaxed);
         if interested && !prev {
-            self.torrent.peers_interested.fetch_add(1, Ordering::Relaxed);
+            self.torrent
+                .peers_interested
+                .fetch_add(1, Ordering::Relaxed);
         } else if !interested && prev {
-            self.torrent.peers_interested.fetch_sub(1, Ordering::Relaxed);
+            self.torrent
+                .peers_interested
+                .fetch_sub(1, Ordering::Relaxed);
         }
     }
 }
@@ -466,7 +507,9 @@ impl Drop for PeerGuard {
         self.torrent.limiter().connection_closed();
         self.torrent.connected_addrs.remove(&self.addr);
         if self.was_interested.load(Ordering::Relaxed) {
-            self.torrent.peers_interested.fetch_sub(1, Ordering::Relaxed);
+            self.torrent
+                .peers_interested
+                .fetch_sub(1, Ordering::Relaxed);
         }
     }
 }
@@ -753,7 +796,6 @@ pub struct TorrentState {
     pub connected_addrs: DashMap<std::net::SocketAddr, ()>,
 }
 
-
 /// Unix seconds. The seed counter needs a wall clock, not a monotonic one:
 /// it is persisted and compared across restarts.
 pub fn now_secs() -> i64 {
@@ -777,7 +819,8 @@ impl TorrentState {
     /// an over-counted obligation is one deleted too early.
     pub fn fold_seed_time(&self, now: i64) {
         use std::sync::atomic::Ordering;
-        let seeding = self.status.load(Ordering::Relaxed) == crate::torrent::TorrentStatus::Seeding as u8
+        let seeding = self.status.load(Ordering::Relaxed)
+            == crate::torrent::TorrentStatus::Seeding as u8
             && !self.is_paused.load(Ordering::Relaxed)
             && !self.is_removed.load(Ordering::Relaxed);
         let since = self.seed_since.load(Ordering::Relaxed);
@@ -789,7 +832,8 @@ impl TorrentState {
         }
         // A clock that jumped backwards leaves `since` in the future; storing
         // `now` anyway is what keeps the next fold from crediting the gap.
-        self.seed_since.store(if seeding { now } else { 0 }, Ordering::Relaxed);
+        self.seed_since
+            .store(if seeding { now } else { 0 }, Ordering::Relaxed);
     }
 
     /// The counter including the interval still open, without mutating it.
@@ -798,7 +842,11 @@ impl TorrentState {
         use std::sync::atomic::Ordering;
         let base = self.seed_secs.load(Ordering::Relaxed);
         let since = self.seed_since.load(Ordering::Relaxed);
-        if since > 0 { base + (now - since).max(0) } else { base }
+        if since > 0 {
+            base + (now - since).max(0)
+        } else {
+            base
+        }
     }
 }
 
@@ -810,8 +858,14 @@ impl TorrentState {
     /// this process, or resumed after a stop. Not on a periodic announce, and
     /// not on a recheck: those are the same session.
     pub fn begin_announce_session(&self) {
-        self.session_base_up.store(self.total_uploaded.load(Ordering::Relaxed), Ordering::Relaxed);
-        self.session_base_down.store(self.total_downloaded.load(Ordering::Relaxed), Ordering::Relaxed);
+        self.session_base_up.store(
+            self.total_uploaded.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+        self.session_base_down.store(
+            self.total_downloaded.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
         if let Ok(mut book) = self.announce_book.lock() {
             for slot in book.iter_mut() {
                 slot.started = false;
@@ -853,7 +907,10 @@ impl TorrentState {
             }
             total.saturating_sub(mark.fetch_max(total, Ordering::Relaxed))
         }
-        (take(up, &self.last_counted_up), take(down, &self.last_counted_down))
+        (
+            take(up, &self.last_counted_up),
+            take(down, &self.last_counted_down),
+        )
     }
 
     /// `take_uncounted_with` on the totals as they are now.
@@ -894,7 +951,9 @@ impl TorrentState {
             // that never tells a tracker we have data we do not.
             return self.meta.total_size;
         };
-        let Ok(p) = picker.lock() else { return self.meta.total_size };
+        let Ok(p) = picker.lock() else {
+            return self.meta.total_size;
+        };
         let n = self.meta.num_pieces();
         if n == 0 {
             return 0;
@@ -934,13 +993,22 @@ impl TorrentState {
     }
 
     /// Every bucket a block of this torrent has to clear, narrowest first.
-    pub fn rate_chain(&self, dir: crate::torrent::ratelimit::Dir) -> crate::torrent::ratelimit::Chain<'_> {
-        crate::torrent::ratelimit::Chain::new(self.own_rates.get().map(|b| b.as_ref()), self.engine_rates(), dir)
+    pub fn rate_chain(
+        &self,
+        dir: crate::torrent::ratelimit::Dir,
+    ) -> crate::torrent::ratelimit::Chain<'_> {
+        crate::torrent::ratelimit::Chain::new(
+            self.own_rates.get().map(|b| b.as_ref()),
+            self.engine_rates(),
+            dir,
+        )
     }
 
     /// This torrent's own caps in bytes/s, `(up, down)`. 0 = none.
     pub fn rate_limits(&self) -> (u64, u64) {
-        self.own_rates.get().map_or((0, 0), |p| (p.up.rate(), p.down.rate()))
+        self.own_rates
+            .get()
+            .map_or((0, 0), |p| (p.up.rate(), p.down.rate()))
     }
 
     /// Set this torrent's own caps in bytes/s; `None` leaves a direction as it
@@ -964,13 +1032,20 @@ impl TorrentState {
 
     /// This torrent's download order; the default when none was set.
     pub fn download_order(&self) -> super::piece_picker::DownloadOrder {
-        self.download_order.read().as_deref().cloned().unwrap_or_default()
+        self.download_order
+            .read()
+            .as_deref()
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// `(sequential, first_last)` without copying the per-file list: what a
     /// listing row reports, read for every torrent of a page.
     pub fn download_order_flags(&self) -> (bool, bool) {
-        self.download_order.read().as_deref().map_or((false, false), |o| (o.sequential, o.first_last))
+        self.download_order
+            .read()
+            .as_deref()
+            .map_or((false, false), |o| (o.sequential, o.first_last))
     }
 
     /// The order as the resume record keeps it: `None` for the default.
@@ -988,13 +1063,22 @@ impl TorrentState {
     /// with nothing to pick, an order has nothing to act on.
     pub fn set_download_order(&self, mut order: super::piece_picker::DownloadOrder) -> bool {
         let n = self.meta.files.len();
-        if order.file_prio.len() != n || order.file_prio.iter().all(|&p| p == super::piece_picker::PRIO_NORMAL) {
+        if order.file_prio.len() != n
+            || order
+                .file_prio
+                .iter()
+                .all(|&p| p == super::piece_picker::PRIO_NORMAL)
+        {
             // A record from another file list (it cannot happen for one
             // info-hash, but a stray value must not index out of range), or
             // all normal: nothing per file to keep.
             order.file_prio = Vec::new();
         }
-        let new = if order.is_default() { None } else { Some(Box::new(order)) };
+        let new = if order.is_default() {
+            None
+        } else {
+            Some(Box::new(order))
+        };
         {
             let mut slot = self.download_order.write();
             if *slot == new {
@@ -1010,11 +1094,18 @@ impl TorrentState {
     /// when the order changes and when a picker is created for a torrent that
     /// had none (a recheck of a seed).
     pub fn apply_download_order(&self) {
-        let Some(picker) = self.picker.get() else { return };
+        let Some(picker) = self.picker.get() else {
+            return;
+        };
         let order = {
             let slot = self.download_order.read();
             slot.as_deref().and_then(|o| {
-                super::piece_picker::PickOrder::build(o, &self.meta.files, self.meta.piece_length, self.meta.num_pieces())
+                super::piece_picker::PickOrder::build(
+                    o,
+                    &self.meta.files,
+                    self.meta.piece_length,
+                    self.meta.num_pieces(),
+                )
             })
         };
         if let Ok(mut p) = picker.lock() {
@@ -1195,7 +1286,6 @@ impl TorrentState {
         table.get(piece as usize).cloned().map(PieceCheck::V2)
     }
 
-
     pub fn new(meta: TorrentMeta, save_path: PathBuf, seed_mode: bool) -> Self {
         Self::new_with_times(meta, save_path, seed_mode, None, None, !seed_mode)
     }
@@ -1302,7 +1392,8 @@ impl TorrentState {
         if let Ok(mut g) = self.error_msg.lock() {
             *g = msg.to_string();
         }
-        self.status.store(TorrentStatus::Error as u8, Ordering::Relaxed);
+        self.status
+            .store(TorrentStatus::Error as u8, Ordering::Relaxed);
         self.serving_suspended.store(true, Ordering::Relaxed);
         tracing::warn!("torrent {:?} parked in error: {}", self.meta.name, msg);
     }
@@ -1321,7 +1412,8 @@ impl TorrentState {
         if let Ok(mut g) = self.error_msg.lock() {
             *g = msg.to_string();
         }
-        self.status.store(TorrentStatus::Error as u8, Ordering::Relaxed);
+        self.status
+            .store(TorrentStatus::Error as u8, Ordering::Relaxed);
         tracing::error!(torrent = %self.meta.name, "stopped fetching: {}", msg);
     }
 
@@ -1345,11 +1437,16 @@ impl TorrentState {
                 .get()
                 .is_some_and(|p| p.lock().unwrap().num_have() == 0);
             if nothing_held {
-                let _ = self.files_checked.compare_exchange(0, 2, Ordering::SeqCst, Ordering::SeqCst);
+                let _ =
+                    self.files_checked
+                        .compare_exchange(0, 2, Ordering::SeqCst, Ordering::SeqCst);
                 return;
             }
         }
-        match self.files_checked.compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst) {
+        match self
+            .files_checked
+            .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst)
+        {
             Ok(_) => {
                 let t = self.clone();
                 let _ = tokio::task::spawn_blocking(move || t.check_files_back_the_state()).await;
@@ -1402,7 +1499,12 @@ impl TorrentState {
             // The bytes this file lacks, and every piece that touches them.
             let (from, to) = (f.offset + actual, f.offset + f.length);
             lost.extend((from / plen..=(to - 1) / plen).map(|p| p as u32));
-            short.push(format!("{} ({} of {} bytes)", path.display(), actual, f.length));
+            short.push(format!(
+                "{} ({} of {} bytes)",
+                path.display(),
+                actual,
+                f.length
+            ));
         }
         if lost.is_empty() {
             return;
@@ -1471,7 +1573,8 @@ impl TorrentState {
         }
         let cur = self.status.load(Ordering::Relaxed);
         if cur == TorrentStatus::Seeding as u8 || cur == TorrentStatus::Downloading as u8 {
-            self.status.store(TorrentStatus::Error as u8, Ordering::Relaxed);
+            self.status
+                .store(TorrentStatus::Error as u8, Ordering::Relaxed);
         }
         tracing::error!(torrent = %self.meta.name, "{}", msg);
     }
@@ -1592,7 +1695,11 @@ mod tests {
         // way it does in production, from the store. The path is still handed
         // back so the callers' cleanup stays harmless.
         let mut p = std::env::temp_dir();
-        p.push(format!("typhon-state-{}-{}.torrent", std::process::id(), tag));
+        p.push(format!(
+            "typhon-state-{}-{}.torrent",
+            std::process::id(),
+            tag
+        ));
         let path = p.to_string_lossy().into_owned();
         let meta = crate::torrent::metainfo::parse_torrent_bytes(&bytes).unwrap();
         let st = TorrentState::new(meta, std::path::PathBuf::from("/tmp"), true);
@@ -1637,7 +1744,11 @@ mod tests {
         // And with no source wired at all (a torrent built outside a manager).
         let meta2 = crate::torrent::metainfo::parse_torrent_bytes(&bytes).unwrap();
         let bare = TorrentState::new(meta2, std::path::PathBuf::from("/tmp"), true);
-        assert_eq!(bare.piece_hash(0), None, "verified a piece with no blob source");
+        assert_eq!(
+            bare.piece_hash(0),
+            None,
+            "verified a piece with no blob source"
+        );
     }
 
     /// A seeder holds no hashes until something asks to verify, and then it
@@ -1645,10 +1756,16 @@ mod tests {
     #[test]
     fn piece_hash_loads_on_demand_and_matches() {
         let (st, hashes, path) = state_for("ondemand", 4);
-        assert!(st.piece_hashes.lock().unwrap().is_none(), "hashes were loaded eagerly");
+        assert!(
+            st.piece_hashes.lock().unwrap().is_none(),
+            "hashes were loaded eagerly"
+        );
         assert_eq!(st.piece_hash(0), Some(hashes[0]));
         assert_eq!(st.piece_hash(3), Some(hashes[3]));
-        assert!(st.piece_hashes.lock().unwrap().is_some(), "table was not cached");
+        assert!(
+            st.piece_hashes.lock().unwrap().is_some(),
+            "table was not cached"
+        );
         assert_eq!(st.piece_hash(4), None, "out-of-range piece returned a hash");
         std::fs::remove_file(&path).ok();
     }
@@ -1662,7 +1779,10 @@ mod tests {
     #[test]
     fn seeding_torrent_never_allocates_the_have_ring() {
         let (st, _, path) = state_for("havetx-seed", 3);
-        assert!(st.have_tx.read().is_none(), "ring allocated at construction");
+        assert!(
+            st.have_tx.read().is_none(),
+            "ring allocated at construction"
+        );
         assert!(st.subscribe_have().is_none(), "subscribe created a ring");
         assert!(st.have_tx.read().is_none(), "subscribe left a ring behind");
         std::fs::remove_file(&path).ok();
@@ -1691,10 +1811,16 @@ mod tests {
         let _ = st.have_sender();
         st.release_have_tx();
         assert!(st.have_tx.read().is_none(), "release kept the ring");
-        assert!(st.subscribe_have().is_none(), "release left a subscribable ring");
+        assert!(
+            st.subscribe_have().is_none(),
+            "release left a subscribable ring"
+        );
         st.release_have_tx(); // idempotent
         let _ = st.have_sender();
-        assert!(st.have_tx.read().is_some(), "could not rebuild after release");
+        assert!(
+            st.have_tx.read().is_some(),
+            "could not rebuild after release"
+        );
         std::fs::remove_file(&path).ok();
     }
 
@@ -1706,12 +1832,19 @@ mod tests {
         assert!(st.piece_hashes.lock().unwrap().is_some());
 
         st.release_piece_hashes();
-        assert!(st.piece_hashes.lock().unwrap().is_none(), "release kept the table");
+        assert!(
+            st.piece_hashes.lock().unwrap().is_none(),
+            "release kept the table"
+        );
         st.release_piece_hashes(); // no-op, must not panic
         assert!(st.piece_hashes.lock().unwrap().is_none());
 
         // Still correct afterwards: a later recheck reloads from the store.
-        assert_eq!(st.piece_hash(1), Some(hashes[1]), "reload after release failed");
+        assert_eq!(
+            st.piece_hash(1),
+            Some(hashes[1]),
+            "reload after release failed"
+        );
         std::fs::remove_file(&path).ok();
     }
 
@@ -1724,7 +1857,11 @@ mod tests {
         assert_eq!(st.piece_hash(0), Some(hashes[0]));
         st.release_piece_hashes();
         *blob.lock().unwrap() = None;
-        assert_eq!(st.piece_hash(0), None, "answered from a table it claimed to release");
+        assert_eq!(
+            st.piece_hash(0),
+            None,
+            "answered from a table it claimed to release"
+        );
     }
 
     /// A verification already in flight keeps the table it started with, so
@@ -1750,7 +1887,11 @@ mod tests {
     fn piece_hash_is_none_when_the_store_loses_the_blob() {
         let (st, _, blob) = state_with_store(3);
         *blob.lock().unwrap() = None;
-        assert_eq!(st.piece_hash(0), None, "verification passed without a hash table");
+        assert_eq!(
+            st.piece_hash(0),
+            None,
+            "verification passed without a hash table"
+        );
     }
 
     /// A metainfo that no longer agrees with the metadata is refused whole,
@@ -1760,7 +1901,11 @@ mod tests {
         let (st, _, blob) = state_with_store(5);
         let (other, _) = torrent_bytes(2);
         *blob.lock().unwrap() = Some(other);
-        assert_eq!(st.piece_hash(0), None, "accepted a table of the wrong length");
+        assert_eq!(
+            st.piece_hash(0),
+            None,
+            "accepted a table of the wrong length"
+        );
     }
 
     /// One shard still has to behave like the set it replaced.
@@ -1772,7 +1917,10 @@ mod tests {
         let b: std::net::SocketAddr = "10.0.0.2:6881".parse().unwrap();
         assert!(addrs.insert(a, ()).is_none(), "first insert was not new");
         assert!(addrs.insert(b, ()).is_none());
-        assert!(addrs.insert(a, ()).is_some(), "duplicate insert must report the old entry");
+        assert!(
+            addrs.insert(a, ()).is_some(),
+            "duplicate insert must report the old entry"
+        );
         assert_eq!(addrs.len(), 2, "duplicate must not grow the map");
         assert!(addrs.contains_key(&a));
         assert!(addrs.remove(&a).is_some());
@@ -1858,7 +2006,8 @@ mod error_recovery_tests {
             PathBuf::from("/tmp"),
             false,
         ));
-        t.status.store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+        t.status
+            .store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
         t
     }
 
@@ -1921,7 +2070,13 @@ mod announce_session_tests {
     fn meta(total: u64, piece: u32) -> TorrentMeta {
         let n = ((total + piece as u64 - 1) / piece as u64) as usize;
         let mut info = Vec::new();
-        info.extend_from_slice(format!("d6:lengthi{total}e4:name1:x12:piece lengthi{piece}e6:pieces{}:", n * 20).as_bytes());
+        info.extend_from_slice(
+            format!(
+                "d6:lengthi{total}e4:name1:x12:piece lengthi{piece}e6:pieces{}:",
+                n * 20
+            )
+            .as_bytes(),
+        );
         info.extend(std::iter::repeat(0xAB).take(n * 20));
         info.push(b'e');
         let mut out = b"d8:announce20:http://t.example/ann4:info".to_vec();
@@ -1936,7 +2091,14 @@ mod announce_session_tests {
     fn left_counts_the_pieces_we_do_not_hold() {
         // Three pieces of 16 KiB and a short last one of 1 000 bytes.
         let total = 3 * 16384 + 1000;
-        let t = TorrentState::new_with_times(meta(total, 16384), "/tmp".into(), false, Some(1), Some(0), true);
+        let t = TorrentState::new_with_times(
+            meta(total, 16384),
+            "/tmp".into(),
+            false,
+            Some(1),
+            Some(0),
+            true,
+        );
         assert_eq!(t.bytes_left(), total, "nothing held, everything left");
         {
             let p = t.picker.get().unwrap();
@@ -1944,25 +2106,51 @@ mod announce_session_tests {
             p.set_have(0);
             p.set_have(3);
         }
-        assert_eq!(t.bytes_left(), 2 * 16384, "the short last piece counts at its real size");
+        assert_eq!(
+            t.bytes_left(),
+            2 * 16384,
+            "the short last piece counts at its real size"
+        );
         t.total_downloaded.store(0, Ordering::Relaxed);
-        assert_eq!(t.bytes_left(), 2 * 16384, "the traffic counter is irrelevant");
-        t.status.store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+        assert_eq!(
+            t.bytes_left(),
+            2 * 16384,
+            "the traffic counter is irrelevant"
+        );
+        t.status
+            .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
         assert_eq!(t.bytes_left(), 0, "a seed needs nothing");
     }
 
     #[test]
     fn the_session_counters_never_go_negative() {
-        let t = TorrentState::new_with_times(meta(16384, 16384), "/tmp".into(), true, Some(1), Some(0), false);
+        let t = TorrentState::new_with_times(
+            meta(16384, 16384),
+            "/tmp".into(),
+            true,
+            Some(1),
+            Some(0),
+            false,
+        );
         t.total_uploaded.store(100, Ordering::Relaxed);
         t.begin_announce_session();
         t.total_uploaded.store(50, Ordering::Relaxed);
-        assert_eq!(t.session_uploaded(), 0, "a counter that moved back reads zero, never wraps");
+        assert_eq!(
+            t.session_uploaded(),
+            0,
+            "a counter that moved back reads zero, never wraps"
+        );
     }
 
     #[test]
     fn tracker_keys_are_stable_and_distinct() {
-        assert_eq!(tracker_key("https://a/announce"), tracker_key("https://a/announce"));
-        assert_ne!(tracker_key("https://a/announce"), tracker_key("https://b/announce"));
+        assert_eq!(
+            tracker_key("https://a/announce"),
+            tracker_key("https://a/announce")
+        );
+        assert_ne!(
+            tracker_key("https://a/announce"),
+            tracker_key("https://b/announce")
+        );
     }
 }

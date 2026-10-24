@@ -93,10 +93,16 @@ mod tests {
         let now = Instant::now();
         for _ in 0..FAIL_THRESHOLD - 1 {
             b.record("dead.example", false, now);
-            assert!(b.allows("dead.example", now), "one bad announce is not an outage");
+            assert!(
+                b.allows("dead.example", now),
+                "one bad announce is not an outage"
+            );
         }
         b.record("dead.example", false, now);
-        assert!(!b.allows("dead.example", now), "it stopped answering, stop asking");
+        assert!(
+            !b.allows("dead.example", now),
+            "it stopped answering, stop asking"
+        );
         assert_eq!(b.tripped(now), ["dead.example"]);
     }
 
@@ -109,7 +115,10 @@ mod tests {
         }
         assert!(!b.allows("dead.example", now));
         let later = now + COOLDOWN + Duration::from_secs(1);
-        assert!(b.allows("dead.example", later), "a tracker is given another chance");
+        assert!(
+            b.allows("dead.example", later),
+            "a tracker is given another chance"
+        );
         assert!(b.tripped(later).is_empty());
     }
 
@@ -126,7 +135,10 @@ mod tests {
         for _ in 0..FAIL_THRESHOLD - 1 {
             b.record("flaky.example", false, now);
         }
-        assert!(b.allows("flaky.example", now), "the count restarted from zero");
+        assert!(
+            b.allows("flaky.example", now),
+            "the count restarted from zero"
+        );
     }
 
     #[test]
@@ -136,6 +148,9 @@ mod tests {
         for _ in 0..FAIL_THRESHOLD * 3 {
             b.record("", false, now);
         }
-        assert!(b.allows("", now), "a URL we could not read a host from is not a host");
+        assert!(
+            b.allows("", now),
+            "a URL we could not read a host from is not a host"
+        );
     }
 }

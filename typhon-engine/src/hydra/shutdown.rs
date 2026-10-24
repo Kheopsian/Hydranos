@@ -58,7 +58,10 @@ pub fn exit_for_restart() -> ! {
     #[cfg(windows)]
     {
         if let Ok(exe) = std::env::current_exe() {
-            match std::process::Command::new(exe).args(std::env::args_os().skip(1)).spawn() {
+            match std::process::Command::new(exe)
+                .args(std::env::args_os().skip(1))
+                .spawn()
+            {
                 Ok(_) => tracing::info!("restart: successor started"),
                 Err(e) => tracing::error!("restart: cannot start the successor: {e}"),
             }
@@ -82,7 +85,10 @@ pub const STOP_EVENT: &str = "Local\\HydranosStop";
 #[cfg(windows)]
 pub fn spawn_stop_event_listener() {
     use windows_sys::Win32::System::Threading::{CreateEventW, WaitForSingleObject, INFINITE};
-    let name: Vec<u16> = STOP_EVENT.encode_utf16().chain(std::iter::once(0)).collect();
+    let name: Vec<u16> = STOP_EVENT
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
     // Manual reset, initially unset.
     let handle = unsafe { CreateEventW(std::ptr::null(), 1, 0, name.as_ptr()) };
     if handle.is_null() {

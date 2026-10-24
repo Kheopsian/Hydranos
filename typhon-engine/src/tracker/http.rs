@@ -61,7 +61,9 @@ pub fn effective_proxy(configured: &str) -> Option<String> {
 /// A proxy URL without its credentials, for a log line or an error.
 pub fn redact_proxy(url: &str) -> String {
     match (url.find("://"), url.rfind('@')) {
-        (Some(scheme), Some(at)) if at > scheme => format!("{}://***@{}", &url[..scheme], &url[at + 1..]),
+        (Some(scheme), Some(at)) if at > scheme => {
+            format!("{}://***@{}", &url[..scheme], &url[at + 1..])
+        }
         _ => url.to_string(),
     }
 }
@@ -160,7 +162,12 @@ pub fn announce_key(peer_id: &[u8], info_hash: &[u8; 20]) -> String {
 fn key_with_salt(salt: u64, peer_id: &[u8], info_hash: &[u8; 20]) -> String {
     // FNV-1a, 32 bits. Opaque, stable, and cheap; secrecy comes from the salt.
     let mut h: u32 = 0x811c_9dc5;
-    for b in salt.to_le_bytes().iter().chain(peer_id.iter()).chain(info_hash.iter()) {
+    for b in salt
+        .to_le_bytes()
+        .iter()
+        .chain(peer_id.iter())
+        .chain(info_hash.iter())
+    {
         h ^= *b as u32;
         h = h.wrapping_mul(0x0100_0193);
     }
@@ -178,11 +185,26 @@ pub async fn announce(
     left: u64,
     event: &str,
 ) -> Result<AnnounceResponse, String> {
-    announce_on(tracker_url, info_hash, peer_id, port, uploaded, downloaded, left, event, "", "").await
+    announce_on(
+        tracker_url,
+        info_hash,
+        peer_id,
+        port,
+        uploaded,
+        downloaded,
+        left,
+        event,
+        "",
+        "",
+    )
+    .await
 }
 
 /// Pin a client builder to an interface, or refuse where that is impossible.
-pub(crate) fn pin_builder(builder: reqwest::ClientBuilder, device: &str) -> Result<reqwest::ClientBuilder, String> {
+pub(crate) fn pin_builder(
+    builder: reqwest::ClientBuilder,
+    device: &str,
+) -> Result<reqwest::ClientBuilder, String> {
     let device = device.trim();
     if device.is_empty() {
         return Ok(builder);
@@ -197,12 +219,17 @@ pub(crate) fn pin_builder(builder: reqwest::ClientBuilder, device: &str) -> Resu
         // The tracker's NAME too: in a managed tunnel it is asked of the
         // tunnel's DNS server through the tunnel, not of the host's resolver
         // (`tunneldns`). Through a proxy it is never resolved here at all.
-        Ok(builder.interface(device).dns_resolver(crate::tunneldns::Resolver::new(device)))
+        Ok(builder
+            .interface(device)
+            .dns_resolver(crate::tunneldns::Resolver::new(device)))
     }
     #[cfg(not(target_os = "linux"))]
     {
         let _ = builder;
-        Err(format!("bind_interface {device:?}: {}", crate::netpin::UNSUPPORTED))
+        Err(format!(
+            "bind_interface {device:?}: {}",
+            crate::netpin::UNSUPPORTED
+        ))
     }
 }
 
@@ -221,7 +248,20 @@ pub async fn announce_on(
     device: &str,
     proxy: &str,
 ) -> Result<AnnounceResponse, String> {
-    announce_on_mode(tracker_url, info_hash, peer_id, port, uploaded, downloaded, left, event, device, proxy, IpMode::Auto).await
+    announce_on_mode(
+        tracker_url,
+        info_hash,
+        peer_id,
+        port,
+        uploaded,
+        downloaded,
+        left,
+        event,
+        device,
+        proxy,
+        IpMode::Auto,
+    )
+    .await
 }
 
 /// The local address that pins a direct announce to one family, none for
@@ -288,7 +328,11 @@ pub async fn announce_on_mode(
         // rather than degrading.
         if left == 0 { 0 } else { 200 },
         announce_key(peer_id, info_hash),
-        if event.is_empty() { String::new() } else { format!("&event={}", event) },
+        if event.is_empty() {
+            String::new()
+        } else {
+            format!("&event={}", event)
+        },
     );
 
     // HTTP GET with timeout, through the engine's proxy when it has one.
@@ -312,8 +356,8 @@ pub async fn announce_on_mode(
         .build()
         .map_err(|e| format!("http client: {}", fmt_err_chain(&e)))?;
 
-
-    let resp = client.get(&url)
+    let resp = client
+        .get(&url)
         .send()
         .await
         .map_err(|e| format!("http request: {}", fmt_err_chain(&e.without_url())))?;
@@ -322,7 +366,8 @@ pub async fn announce_on_mode(
         return Err(http_error(resp).await);
     }
 
-    let body = read_capped(resp, MAX_TRACKER_BODY).await
+    let body = read_capped(resp, MAX_TRACKER_BODY)
+        .await
         .map_err(|e| format!("http body: {e}"))?;
 
     // Parse bencoded response
@@ -352,9 +397,16 @@ pub(crate) async fn read_capped(resp: reqwest::Response, max: usize) -> Result<V
 }
 
 /// At most `max` bytes of `resp`'s body, and whether there was more.
-pub(crate) async fn read_prefix(mut resp: reqwest::Response, max: usize) -> Result<(Vec<u8>, bool), String> {
+pub(crate) async fn read_prefix(
+    mut resp: reqwest::Response,
+    max: usize,
+) -> Result<(Vec<u8>, bool), String> {
     let mut out = Vec::new();
-    while let Some(chunk) = resp.chunk().await.map_err(|e| fmt_err_chain(&e.without_url()))? {
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .map_err(|e| fmt_err_chain(&e.without_url()))?
+    {
         let room = max - out.len();
         if chunk.len() > room {
             out.extend_from_slice(&chunk[..room]);
@@ -403,7 +455,12 @@ fn parse_announce_response(data: &[u8]) -> Result<AnnounceResponse, String> {
 
     // Counts are displayed, never trusted for anything else; a negative one is
     // a tracker bug and reads as zero rather than wrapping to four billion.
-    let count = |k: &str| dict.get(k).and_then(|v| v.as_int()).unwrap_or(0).clamp(0, u32::MAX as i64) as u32;
+    let count = |k: &str| {
+        dict.get(k)
+            .and_then(|v| v.as_int())
+            .unwrap_or(0)
+            .clamp(0, u32::MAX as i64) as u32
+    };
     let complete = count("complete");
     let incomplete = count("incomplete");
 
@@ -558,8 +615,9 @@ impl IpMode {
 /// different ways, and a client cached for one must never carry the other's
 /// announces -- a direct engine's client handed to a proxied one is the
 /// home address published by a cache hit.
-static ANNOUNCE_CLIENTS: OnceLock<std::sync::Mutex<std::collections::HashMap<(String, String, bool), reqwest::Client>>> =
-    OnceLock::new();
+static ANNOUNCE_CLIENTS: OnceLock<
+    std::sync::Mutex<std::collections::HashMap<(String, String, bool), reqwest::Client>>,
+> = OnceLock::new();
 
 fn family_client(v6: bool, device: &str, proxy: &str) -> Result<reqwest::Client, String> {
     let device = device.trim();
@@ -722,7 +780,6 @@ async fn http_error(resp: reqwest::Response) -> String {
 
 /// Parse one tracker answer. Shared by both families.
 async fn finish_announce(resp: reqwest::Response) -> Result<AnnounceResponse, String> {
-
     if !resp.status().is_success() {
         return Err(http_error(resp).await);
     }
@@ -759,8 +816,14 @@ pub(crate) mod endless {
     /// Answers every connection with `status` (e.g. `"200 OK"`), no length,
     /// `prefix`, then `fill` bytes until the client hangs up. Returns its base
     /// URL and the count of bytes written, all connections together.
-    pub(crate) async fn server(status: &'static str, prefix: Vec<u8>, fill: u8) -> (String, Arc<AtomicUsize>) {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    pub(crate) async fn server(
+        status: &'static str,
+        prefix: Vec<u8>,
+        fill: u8,
+    ) -> (String, Arc<AtomicUsize>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
         let addr = listener.local_addr().expect("addr");
         let written = Arc::new(AtomicUsize::new(0));
         let w = written.clone();
@@ -771,7 +834,9 @@ pub(crate) mod endless {
                     let mut req = [0u8; 4096];
                     let _ = s.read(&mut req).await;
                     let head = format!("HTTP/1.1 {status}\r\nConnection: close\r\n\r\n");
-                    if s.write_all(head.as_bytes()).await.is_err() || s.write_all(&prefix).await.is_err() {
+                    if s.write_all(head.as_bytes()).await.is_err()
+                        || s.write_all(&prefix).await.is_err()
+                    {
                         return;
                     }
                     let block = vec![fill; 64 * 1024];
@@ -808,8 +873,12 @@ mod announce_wire_tests {
     #[tokio::test]
     async fn an_announce_answer_past_the_cap_is_refused_unread() {
         for v6_path in [false, true] {
-            let (base, written) =
-                endless::server("200 OK", b"d8:intervali1800e5:peers12000000:".to_vec(), 0x01).await;
+            let (base, written) = endless::server(
+                "200 OK",
+                b"d8:intervali1800e5:peers12000000:".to_vec(),
+                0x01,
+            )
+            .await;
             let url = format!("{base}/announce");
             let out = tokio::time::timeout(std::time::Duration::from_secs(10), async {
                 if v6_path {
@@ -847,7 +916,17 @@ mod announce_wire_tests {
             interval: 1800,
             min_interval: 0,
             peers: (0..800u32)
-                .map(|i| SocketAddr::new(IpAddr::V4(Ipv4Addr::new(base, (i >> 16) as u8, (i >> 8) as u8, i as u8)), 6881))
+                .map(|i| {
+                    SocketAddr::new(
+                        IpAddr::V4(Ipv4Addr::new(
+                            base,
+                            (i >> 16) as u8,
+                            (i >> 8) as u8,
+                            i as u8,
+                        )),
+                        6881,
+                    )
+                })
                 .collect(),
             complete: 0,
             incomplete: 0,
@@ -867,12 +946,24 @@ mod announce_wire_tests {
         let (base, _) = endless::server("503 Service Unavailable", b"busy ".to_vec(), b'x').await;
         let out = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            announce(&format!("{base}/announce"), &[0xABu8; 20], &[0xCDu8; 20], 16371, 0, 0, 0, ""),
+            announce(
+                &format!("{base}/announce"),
+                &[0xABu8; 20],
+                &[0xCDu8; 20],
+                16371,
+                0,
+                0,
+                0,
+                "",
+            ),
         )
         .await
         .expect("answered before the 15 s client timeout");
         let e = out.expect_err("a 503 is an error");
-        assert!(e.contains("503") && e.contains("busy xxx"), "the start of the body is quoted: {e}");
+        assert!(
+            e.contains("503") && e.contains("busy xxx"),
+            "the start of the body is quoted: {e}"
+        );
     }
 
     struct FakeTracker {
@@ -884,7 +975,9 @@ mod announce_wire_tests {
     /// announce path does is HTTP, so the honest fixture is a real server.
     async fn fake_tracker(body: &'static [u8]) -> FakeTracker {
         let app = Router::new().route("/announce", get(move || async move { body.to_vec() }));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
         let addr = listener.local_addr().expect("addr");
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
         tokio::spawn(async move {
@@ -894,7 +987,10 @@ mod announce_wire_tests {
                 })
                 .await;
         });
-        FakeTracker { url: format!("http://{addr}/announce"), _shutdown: tx }
+        FakeTracker {
+            url: format!("http://{addr}/announce"),
+            _shutdown: tx,
+        }
     }
 
     /// A compact peer list is 6 bytes per peer: 4 of address, 2 of port, big
@@ -908,9 +1004,18 @@ mod announce_wire_tests {
     #[tokio::test]
     async fn the_min_interval_the_tracker_states_is_read() {
         let t = fake_tracker(OK_BODY).await;
-        let resp = announce(&t.url, &[0xABu8; 20], &[0xCDu8; 20], 16371, 0, 0, 0, "started")
-            .await
-            .expect("the tracker answered");
+        let resp = announce(
+            &t.url,
+            &[0xABu8; 20],
+            &[0xCDu8; 20],
+            16371,
+            0,
+            0,
+            0,
+            "started",
+        )
+        .await
+        .expect("the tracker answered");
         assert_eq!(resp.interval, 1800);
         assert_eq!(resp.min_interval, 900, "the floor is carried, not dropped");
     }
@@ -940,18 +1045,37 @@ mod announce_wire_tests {
         let (dns, asked) = crate::tunneldns::tests::fake_server([127, 0, 0, 1]).await;
         crate::tunneldns::tests::register("lo", dns);
         let url = t.url.replace("127.0.0.1", "tracker.tunnel-dns.invalid");
-        let resp = announce_on(&url, &[0xABu8; 20], &[0xCDu8; 20], 16371, 0, 0, 0, "", "lo", "").await;
+        let resp = announce_on(
+            &url,
+            &[0xABu8; 20],
+            &[0xCDu8; 20],
+            16371,
+            0,
+            0,
+            0,
+            "",
+            "lo",
+            "",
+        )
+        .await;
         crate::tunneldns::forget("lo");
         let resp = resp.expect("resolved by the tunnel server, then announced on lo");
         assert_eq!(resp.complete, 5);
-        assert!(asked.lock().unwrap().iter().any(|n| n == "tracker.tunnel-dns.invalid"));
+        assert!(asked
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|n| n == "tracker.tunnel-dns.invalid"));
     }
 
     /// A direct announce held to a family binds that family's wildcard; a
     /// proxied one, or `Auto`, binds nothing.
     #[test]
     fn a_held_family_binds_its_wildcard_and_a_proxy_or_auto_binds_none() {
-        assert_eq!(family_bind(IpMode::V4, false), Some("0.0.0.0".parse().unwrap()));
+        assert_eq!(
+            family_bind(IpMode::V4, false),
+            Some("0.0.0.0".parse().unwrap())
+        );
         assert_eq!(family_bind(IpMode::V6, false), Some("::".parse().unwrap()));
         assert_eq!(family_bind(IpMode::Auto, false), None);
         assert_eq!(family_bind(IpMode::V4, true), None);
@@ -964,7 +1088,9 @@ mod announce_wire_tests {
         let ih = [0xABu8; 20];
         let ask = |m| announce_on_mode(&t.url, &ih, &[0xCDu8; 20], 16371, 0, 0, 0, "", "", "", m);
         ask(IpMode::V4).await.expect("v4 reaches a v4 tracker");
-        ask(IpMode::V6).await.expect_err("a v6-bound socket cannot dial v4");
+        ask(IpMode::V6)
+            .await
+            .expect_err("a v6-bound socket cannot dial v4");
     }
 
     /// ⭐ A tracker refusing us answers 200 with a `failure reason`. Treating
@@ -976,7 +1102,11 @@ mod announce_wire_tests {
     #[tokio::test]
     async fn a_failure_reason_is_carried_rather_than_read_as_success() {
         const REASON: &str = "unregistered torrent pass";
-        assert_eq!(REASON.len(), 25, "the fixture length is computed, not counted");
+        assert_eq!(
+            REASON.len(),
+            25,
+            "the fixture length is computed, not counted"
+        );
         const FAIL: &[u8] = b"d14:failure reason25:unregistered torrent passe";
 
         let t = fake_tracker(FAIL).await;
@@ -1030,7 +1160,10 @@ mod announce_wire_tests {
         let raw = [0x00u8, 0x41, 0x7f, 0x80, 0xff];
         let out = url_encode_binary(&raw);
         assert!(out.contains("%00"), "got {out}");
-        assert!(out.contains("%80"), "a high byte is escaped, not re-encoded: {out}");
+        assert!(
+            out.contains("%80"),
+            "a high byte is escaped, not re-encoded: {out}"
+        );
         assert!(out.contains("%FF") || out.contains("%ff"), "got {out}");
         assert!(out.contains('A'), "an unreserved byte stays literal: {out}");
     }
@@ -1052,7 +1185,10 @@ mod announce_wire_tests {
         let out = url_encode_binary(&hash);
         assert!(!out.is_empty());
         assert!(!out.contains(' '), "a space would break the query: {out}");
-        assert!(!out.contains('&'), "an ampersand would break the query: {out}");
+        assert!(
+            !out.contains('&'),
+            "an ampersand would break the query: {out}"
+        );
     }
 
     /// The response parser is what every announce goes through; a missing
@@ -1099,7 +1235,11 @@ mod announce_wire_tests {
     #[test]
     fn a_warning_is_carried_and_the_answer_still_counts() {
         let msg = "client is outdated";
-        let body = format!("d8:intervali900e5:peers0:15:warning message{}:{}e", msg.len(), msg);
+        let body = format!(
+            "d8:intervali900e5:peers0:15:warning message{}:{}e",
+            msg.len(),
+            msg
+        );
         let resp = parse_announce_response(body.as_bytes()).expect("a warning is not a failure");
         assert_eq!(resp.warning.as_deref(), Some(msg));
         assert_eq!(resp.interval, 900);
@@ -1109,8 +1249,13 @@ mod announce_wire_tests {
     #[test]
     fn bep31_retry_in_is_read_from_a_refusal() {
         let err = parse_announce_response(b"d14:failure reason4:busy8:retry ini5ee").unwrap_err();
-        assert_eq!(retry_hint(&err), Some(RetryHint::After(std::time::Duration::from_secs(300))), "{err}");
-        let never = parse_announce_response(b"d14:failure reason6:banned8:retry in5:nevere").unwrap_err();
+        assert_eq!(
+            retry_hint(&err),
+            Some(RetryHint::After(std::time::Duration::from_secs(300))),
+            "{err}"
+        );
+        let never =
+            parse_announce_response(b"d14:failure reason6:banned8:retry in5:nevere").unwrap_err();
         assert_eq!(retry_hint(&never), Some(RetryHint::Never), "{never}");
         let plain = parse_announce_response(b"d14:failure reason4:nopee").unwrap_err();
         assert_eq!(retry_hint(&plain), None, "no hint, no invented wait");
@@ -1142,7 +1287,10 @@ mod announce_wire_tests {
     fn impossible_values_are_not_wrapped_into_huge_ones() {
         let body = b"d8:completei-3e10:incompletei-1e8:intervali-60e12:min intervali-5e5:peers0:e";
         let resp = parse_announce_response(body).expect("parses");
-        assert_eq!(resp.interval, 1800, "a negative interval falls back to the default");
+        assert_eq!(
+            resp.interval, 1800,
+            "a negative interval falls back to the default"
+        );
         assert_eq!(resp.min_interval, 0);
         assert_eq!((resp.complete, resp.incomplete), (0, 0));
     }
@@ -1151,11 +1299,13 @@ mod announce_wire_tests {
     /// port must not wrap onto somebody else's.
     #[test]
     fn a_peer_on_an_impossible_port_is_dropped() {
-        let compact = b"d8:intervali1800e5:peers12:\x0a\x00\x00\x01\x00\x00\x0a\x00\x00\x02\x1a\xe1e";
+        let compact =
+            b"d8:intervali1800e5:peers12:\x0a\x00\x00\x01\x00\x00\x0a\x00\x00\x02\x1a\xe1e";
         let resp = parse_announce_response(compact).unwrap();
         assert_eq!(resp.peers.len(), 1, "{:?}", resp.peers);
         assert_eq!(resp.peers[0].port(), 6881);
-        let dict = b"d8:intervali1800e5:peersld2:ip8:10.0.0.14:porti70000eed2:ip8:10.0.0.24:porti6881eeee";
+        let dict =
+            b"d8:intervali1800e5:peersld2:ip8:10.0.0.14:porti70000eed2:ip8:10.0.0.24:porti6881eeee";
         let resp = parse_announce_response(dict).unwrap();
         assert_eq!(resp.peers, vec!["10.0.0.2:6881".parse().unwrap()]);
     }
@@ -1166,8 +1316,16 @@ mod announce_wire_tests {
     fn the_key_is_stable_and_not_derivable_from_the_peer_id() {
         let pid = b"-HY4240-abcdefghijkl";
         let ih = [7u8; 20];
-        assert_eq!(announce_key(pid, &ih), announce_key(pid, &ih), "stable for the session");
-        assert_ne!(key_with_salt(1, pid, &ih), key_with_salt(2, pid, &ih), "the salt changes it");
+        assert_eq!(
+            announce_key(pid, &ih),
+            announce_key(pid, &ih),
+            "stable for the session"
+        );
+        assert_ne!(
+            key_with_salt(1, pid, &ih),
+            key_with_salt(2, pid, &ih),
+            "the salt changes it"
+        );
         let k = announce_key(pid, &ih);
         assert_eq!(k.len(), 8);
         assert!(k.chars().all(|c| c.is_ascii_hexdigit()), "{k}");
@@ -1214,7 +1372,9 @@ pub(crate) mod redirect_trap {
     /// `status` is the redirect line (e.g. `"302 Found"`); the target answers
     /// 200 with `target_body`.
     pub(crate) async fn start(status: &'static str, target_body: &'static [u8]) -> Trap {
-        let target = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind target");
+        let target = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind target");
         let target_addr = target.local_addr().expect("addr");
         let reached = Arc::new(AtomicUsize::new(0));
         let r = reached.clone();
@@ -1234,7 +1394,9 @@ pub(crate) mod redirect_trap {
             }
         });
 
-        let front = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind front");
+        let front = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind front");
         let front_addr = front.local_addr().expect("addr");
         let asked = Arc::new(AtomicUsize::new(0));
         let a = asked.clone();
@@ -1252,7 +1414,11 @@ pub(crate) mod redirect_trap {
                 });
             }
         });
-        Trap { base: format!("http://{front_addr}"), asked, reached }
+        Trap {
+            base: format!("http://{front_addr}"),
+            asked,
+            reached,
+        }
     }
 }
 
@@ -1270,7 +1436,12 @@ mod redirect_tests {
     /// listener is never contacted.
     #[tokio::test]
     async fn an_announce_does_not_follow_a_redirect() {
-        for status in ["301 Moved Permanently", "302 Found", "307 Temporary Redirect", "308 Permanent Redirect"] {
+        for status in [
+            "301 Moved Permanently",
+            "302 Found",
+            "307 Temporary Redirect",
+            "308 Permanent Redirect",
+        ] {
             let trap = redirect_trap::start(status, ANSWER).await;
             let url = format!("{}/announce?passkey=SECRET", trap.base);
             let out = tokio::time::timeout(
@@ -1279,9 +1450,21 @@ mod redirect_tests {
             )
             .await
             .expect("the client gave up on its own");
-            assert_eq!(trap.reached.load(Ordering::SeqCst), 0, "{status}: the redirect target was contacted");
-            assert!(out.is_err(), "{status}: a redirect is not an answer: {:?}", out.map(|r| r.interval));
-            assert_eq!(trap.asked.load(Ordering::SeqCst), 1, "{status}: the tracker was asked once");
+            assert_eq!(
+                trap.reached.load(Ordering::SeqCst),
+                0,
+                "{status}: the redirect target was contacted"
+            );
+            assert!(
+                out.is_err(),
+                "{status}: a redirect is not an answer: {:?}",
+                out.map(|r| r.interval)
+            );
+            assert_eq!(
+                trap.asked.load(Ordering::SeqCst),
+                1,
+                "{status}: the tracker was asked once"
+            );
         }
     }
 
@@ -1294,8 +1477,16 @@ mod redirect_tests {
             let out = tokio::time::timeout(DEADLINE, send_announce(&url, "t", IpMode::V4))
                 .await
                 .expect("the client gave up on its own");
-            assert_eq!(trap.reached.load(Ordering::SeqCst), 0, "{status}: the redirect target was contacted");
-            assert!(out.is_err(), "{status}: a redirect is not an answer: {:?}", out.map(|r| r.interval));
+            assert_eq!(
+                trap.reached.load(Ordering::SeqCst),
+                0,
+                "{status}: the redirect target was contacted"
+            );
+            assert!(
+                out.is_err(),
+                "{status}: a redirect is not an answer: {:?}",
+                out.map(|r| r.interval)
+            );
         }
     }
 }

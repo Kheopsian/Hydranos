@@ -102,7 +102,11 @@ impl Default for RateBucket {
 
 impl RateBucket {
     pub const fn new() -> Self {
-        Self { rate: AtomicU64::new(0), tat: AtomicU64::new(0), generation: AtomicU64::new(0) }
+        Self {
+            rate: AtomicU64::new(0),
+            tat: AtomicU64::new(0),
+            generation: AtomicU64::new(0),
+        }
     }
 
     /// The cap, in bytes per second. 0 = unlimited.
@@ -145,11 +149,13 @@ impl RateBucket {
         let burst = (rate * BURST_WINDOW_NS / 1_000_000_000).max(MIN_BURST_BYTES);
         let tau = (burst * 1_000_000_000 / rate) as u64;
         let mut send = not_before;
-        let _ = self.tat.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |tat| {
-            let s = not_before.max(tat.saturating_sub(tau));
-            send = s;
-            Some(tat.max(s).saturating_add(cost))
-        });
+        let _ = self
+            .tat
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |tat| {
+                let s = not_before.max(tat.saturating_sub(tau));
+                send = s;
+                Some(tat.max(s).saturating_add(cost))
+            });
         send
     }
 }
@@ -271,12 +277,18 @@ impl Gate {
     pub fn admit(&mut self, n: u64, chain: &Chain<'_>) -> Admit {
         let generation = chain.generation();
         if !chain.is_limited() {
-            *self = Gate { generation, ..Gate::default() };
+            *self = Gate {
+                generation,
+                ..Gate::default()
+            };
             return Admit::Now;
         }
         if generation != self.generation {
             // Booked under a rate that no longer holds: forget it, book anew.
-            *self = Gate { generation, ..Gate::default() };
+            *self = Gate {
+                generation,
+                ..Gate::default()
+            };
         }
         let now = now_ns();
         if self.credit > 0 && self.due > now {
@@ -316,7 +328,11 @@ pub async fn acquire(n: u64, chain: &Chain<'_>) {
 /// KiB/s, as a config file and a human write it, to the bytes/s a bucket holds.
 /// Negative and zero both mean unlimited.
 pub fn kib_to_bytes(kib: i64) -> u64 {
-    if kib <= 0 { 0 } else { (kib as u64).saturating_mul(1024) }
+    if kib <= 0 {
+        0
+    } else {
+        (kib as u64).saturating_mul(1024)
+    }
 }
 
 #[cfg(test)]
@@ -348,8 +364,14 @@ mod tests {
         let took = pump(&mut gate, &chain, 1024 * 1024).await;
         // Burst = 128 KiB = 0.25 s of credit up front: the last block is due
         // at 1.72 s.
-        assert!(took >= Duration::from_millis(1700), "1 MiB at 512 KiB/s took {took:?}");
-        assert!(took <= Duration::from_millis(2600), "and not much more: {took:?}");
+        assert!(
+            took >= Duration::from_millis(1700),
+            "1 MiB at 512 KiB/s took {took:?}"
+        );
+        assert!(
+            took <= Duration::from_millis(2600),
+            "and not much more: {took:?}"
+        );
     }
 
     #[tokio::test]
@@ -377,11 +399,17 @@ mod tests {
         for _ in 0..3 {
             assert_eq!(gate.admit(16384, &chain), Admit::Now);
         }
-        let Admit::Wait(t) = gate.admit(16384, &chain) else { panic!("16 KiB/s must bite") };
+        let Admit::Wait(t) = gate.admit(16384, &chain) else {
+            panic!("16 KiB/s must bite")
+        };
         assert!(t > Instant::now());
 
         engine.engine.down.set_rate(0);
-        assert_eq!(gate.admit(16384, &chain), Admit::Now, "lifting the cap releases at once");
+        assert_eq!(
+            gate.admit(16384, &chain),
+            Admit::Now,
+            "lifting the cap releases at once"
+        );
     }
 
     /// A long reservation is reported in steps of at most `MAX_WAIT`, so a
@@ -411,7 +439,10 @@ mod tests {
         torrent.up.set_rate(256 * 1024);
         let chain = Chain::new(Some(&torrent), &engine, Dir::Up);
         let took = pump(&mut Gate::default(), &chain, 512 * 1024).await;
-        assert!(took >= Duration::from_millis(1600), "the torrent's 256 KiB/s: {took:?}");
+        assert!(
+            took >= Duration::from_millis(1600),
+            "the torrent's 256 KiB/s: {took:?}"
+        );
 
         let engine = EngineRates::default();
         let torrent = RatePair::default();
@@ -419,7 +450,10 @@ mod tests {
         torrent.up.set_rate(4 * 1024 * 1024);
         let chain = Chain::new(Some(&torrent), &engine, Dir::Up);
         let took = pump(&mut Gate::default(), &chain, 512 * 1024).await;
-        assert!(took >= Duration::from_millis(1600), "the engine's 256 KiB/s: {took:?}");
+        assert!(
+            took >= Duration::from_millis(1600),
+            "the engine's 256 KiB/s: {took:?}"
+        );
     }
 
     /// The client level is shared by every engine under it: two engines each
@@ -436,11 +470,19 @@ mod tests {
         let (mut ga, mut gb) = (Gate::default(), Gate::default());
         let start = Instant::now();
         let ((), ()) = tokio::join!(
-            async { pump(&mut ga, &ca, 256 * 1024).await; },
-            async { pump(&mut gb, &cb, 256 * 1024).await; },
+            async {
+                pump(&mut ga, &ca, 256 * 1024).await;
+            },
+            async {
+                pump(&mut gb, &cb, 256 * 1024).await;
+            },
         );
         // 512 KiB at 256 KiB/s, less the burst: the last block is due at 1.69 s.
-        assert!(start.elapsed() >= Duration::from_millis(1600), "{:?}", start.elapsed());
+        assert!(
+            start.elapsed() >= Duration::from_millis(1600),
+            "{:?}",
+            start.elapsed()
+        );
     }
 
     /// Many sessions behind one cap share it: the total, not each of them,
@@ -462,7 +504,11 @@ mod tests {
             t.await.unwrap();
         }
         // 512 KiB at 256 KiB/s: two seconds, less the 64 KiB burst.
-        assert!(start.elapsed() >= Duration::from_millis(1600), "{:?}", start.elapsed());
+        assert!(
+            start.elapsed() >= Duration::from_millis(1600),
+            "{:?}",
+            start.elapsed()
+        );
     }
 
     #[test]

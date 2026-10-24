@@ -1,10 +1,10 @@
-use std::fs::File;
+use parking_lot::Mutex;
 use std::collections::HashMap;
+use std::fs::File;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::OnceLock;
-use parking_lot::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 pub static FD_CACHE_HIT: AtomicU64 = AtomicU64::new(0);
@@ -33,15 +33,21 @@ fn get_or_open(path: &PathBuf) -> std::io::Result<Arc<File>> {
     // first, a later write to that same not-yet-complete file reused the RO fd
     // and pwrite failed with EBADF, wedging the piece into an infinite
     // re-download loop.
-    let f = match std::fs::OpenOptions::new().read(true).write(true).open(path) {
+    let f = match std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+    {
         Ok(f) => Arc::new(f),
         // A file we may read but not write -- a read-only mount, a 0444 seed
         // -- is still served, from a read-only handle that is NOT cached: a
         // later write to it opens its own, and fails for the real reason.
-        Err(e) if matches!(
-            e.kind(),
-            std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ReadOnlyFilesystem
-        ) => {
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ReadOnlyFilesystem
+            ) =>
+        {
             return std::fs::File::open(path).map(Arc::new).map_err(|_| e);
         }
         Err(e) => return Err(e),
@@ -80,11 +86,11 @@ use bytes::Bytes;
 use lru::LruCache;
 use std::num::NonZeroUsize;
 
-use sha1::{Sha1, Digest};
 use crate::torrent::meta::TorrentState;
+use sha1::{Digest, Sha1};
 
-const CACHE_BLOCK_SIZE: u64 = 131072;        // 128 KB
-const CACHE_MAX_ENTRIES: usize = 2048;        // ~256 MB
+const CACHE_BLOCK_SIZE: u64 = 131072; // 128 KB
+const CACHE_MAX_ENTRIES: usize = 2048; // ~256 MB
 const CACHE_TTL: Duration = Duration::from_secs(60);
 
 pub static DISK_CACHE_HIT: AtomicU64 = AtomicU64::new(0);
@@ -202,9 +208,7 @@ impl DiskManager {
     /// none.
     pub fn new(_max_open_files: usize) -> Self {
         Self {
-            read_cache: Mutex::new(LruCache::new(
-                NonZeroUsize::new(CACHE_MAX_ENTRIES).unwrap()
-            )),
+            read_cache: Mutex::new(LruCache::new(NonZeroUsize::new(CACHE_MAX_ENTRIES).unwrap())),
             written: Arc::new(Mutex::new(HashMap::new())),
             write_gen: (0..WRITE_GEN_STRIPES).map(|_| AtomicU64::new(0)).collect(),
         }
@@ -299,7 +303,10 @@ impl DiskManager {
             return read_block_direct(torrent, piece, offset, length).await;
         }
 
-        let key = CacheKey { info_hash: torrent.info_hash, block_start };
+        let key = CacheKey {
+            info_hash: torrent.info_hash,
+            block_start,
+        };
 
         {
             let mut cache = self.read_cache.lock();
@@ -310,8 +317,12 @@ impl DiskManager {
                     drop(cache);
                     let end = offset_in_block + length as usize;
                     if end > data.len() {
-                        return Err(format!("cached block too short: {}..{} vs {}",
-                            offset_in_block, end, data.len()));
+                        return Err(format!(
+                            "cached block too short: {}..{} vs {}",
+                            offset_in_block,
+                            end,
+                            data.len()
+                        ));
                     }
                     return Ok(Bytes::copy_from_slice(&data[offset_in_block..end]));
                 } else {
@@ -329,29 +340,39 @@ impl DiskManager {
         // A block past the end must not wrap the subtraction into a huge read.
         let block_len = match block_end.checked_sub(block_start) {
             Some(n) => n as u32,
-            None => return Err(format!("block start {} past end {}", block_start, block_end)),
+            None => {
+                return Err(format!(
+                    "block start {} past end {}",
+                    block_start, block_end
+                ))
+            }
         };
         let block_piece = (block_start / piece_size) as u32;
         let block_offset_in_piece = (block_start % piece_size) as u32;
 
-        let block_bytes = match read_range(torrent, block_piece, block_offset_in_piece, block_len).await {
-            Ok(b) => b,
-            // The 128 KB window around the request may reach into sectors the
-            // request does not need: ask for the request alone before blaming
-            // anything, and blame only what it spans.
-            Err(first) if first.unreadable => {
-                return match read_range(torrent, piece, offset, length).await {
-                    Ok(b) => Ok(b),
-                    Err(e) => Err(give_up_on(torrent, piece, offset, length, e)),
-                };
-            }
-            Err(e) => return Err(give_up_on(torrent, piece, offset, length, e)),
-        };
+        let block_bytes =
+            match read_range(torrent, block_piece, block_offset_in_piece, block_len).await {
+                Ok(b) => b,
+                // The 128 KB window around the request may reach into sectors the
+                // request does not need: ask for the request alone before blaming
+                // anything, and blame only what it spans.
+                Err(first) if first.unreadable => {
+                    return match read_range(torrent, piece, offset, length).await {
+                        Ok(b) => Ok(b),
+                        Err(e) => Err(give_up_on(torrent, piece, offset, length, e)),
+                    };
+                }
+                Err(e) => return Err(give_up_on(torrent, piece, offset, length, e)),
+            };
 
         let end = offset_in_block + length as usize;
         if end > block_bytes.len() {
-            return Err(format!("short block read: need {}..{} got {}",
-                offset_in_block, end, block_bytes.len()));
+            return Err(format!(
+                "short block read: need {}..{} got {}",
+                offset_in_block,
+                end,
+                block_bytes.len()
+            ));
         }
         let result = Bytes::copy_from_slice(&block_bytes[offset_in_block..end]);
 
@@ -362,10 +383,13 @@ impl DiskManager {
             // bump: either this put lands first and the write pops it, or the
             // write came first and this read may predate it.
             if self.write_gen[stripe].load(Ordering::SeqCst) == seen {
-                cache.put(key, CacheEntry {
-                    data: Arc::new(block_vec),
-                    inserted_at: Instant::now(),
-                });
+                cache.put(
+                    key,
+                    CacheEntry {
+                        data: Arc::new(block_vec),
+                        inserted_at: Instant::now(),
+                    },
+                );
             }
         }
 
@@ -394,10 +418,13 @@ impl DiskManager {
         // A piece we cannot check is a piece we refuse, not one we accept.
         let check = match torrent.piece_check(piece) {
             Some(c) => c,
-            None => return Err(format!(
-                "no piece hashes for {}; refusing to accept piece {}",
-                torrent.info_hash_hex(), piece
-            )),
+            None => {
+                return Err(format!(
+                    "no piece hashes for {}; refusing to accept piece {}",
+                    torrent.info_hash_hex(),
+                    piece
+                ))
+            }
         };
 
         let outcome = tokio::task::spawn_blocking(move || {
@@ -432,7 +459,11 @@ impl DiskManager {
                 }
                 {
                     let mut w = written.lock();
-                    let pieces = w.entry(info_hash).or_default().entry(full_path).or_default();
+                    let pieces = w
+                        .entry(info_hash)
+                        .or_default()
+                        .entry(full_path)
+                        .or_default();
                     if pieces.last() != Some(&piece) {
                         pieces.push(piece);
                     }
@@ -490,7 +521,10 @@ impl DiskManager {
 fn blocks(info_hash: [u8; 20], first_block: u64, end: u64) -> impl Iterator<Item = CacheKey> {
     (first_block..end)
         .step_by(CACHE_BLOCK_SIZE as usize)
-        .map(move |block_start| CacheKey { info_hash, block_start })
+        .map(move |block_start| CacheKey {
+            info_hash,
+            block_start,
+        })
 }
 
 /// Stream a piece block straight from the page cache to a plaintext TCP peer
@@ -520,7 +554,9 @@ pub fn path_is_zfs(path: &std::path::Path) -> bool {
     st.f_type as u64 == 0x2fc12fc1 // ZFS_SUPER_MAGIC
 }
 #[cfg(not(unix))]
-pub fn path_is_zfs(_path: &std::path::Path) -> bool { false }
+pub fn path_is_zfs(_path: &std::path::Path) -> bool {
+    false
+}
 
 /// Non-blocking page-cache residency probe (preadv2 RWF_NOWAIT, 1 byte). True
 /// if the block's first page is already cached -> safe to sendfile without
@@ -529,13 +565,18 @@ pub fn path_is_zfs(_path: &std::path::Path) -> bool { false }
 pub fn is_block_resident(file: &File, offset: u64) -> bool {
     use std::os::unix::io::AsRawFd;
     let mut b = [0u8; 1];
-    let iov = libc::iovec { iov_base: b.as_mut_ptr() as *mut libc::c_void, iov_len: 1 };
+    let iov = libc::iovec {
+        iov_base: b.as_mut_ptr() as *mut libc::c_void,
+        iov_len: 1,
+    };
     // RWF_NOWAIT (0x8): returns EAGAIN instead of blocking if not in page cache.
     let n = unsafe { libc::preadv2(file.as_raw_fd(), &iov, 1, offset as libc::off_t, 0x8) };
     n == 1
 }
 #[cfg(not(unix))]
-pub fn is_block_resident(_file: &File, _offset: u64) -> bool { false }
+pub fn is_block_resident(_file: &File, _offset: u64) -> bool {
+    false
+}
 
 #[cfg(unix)]
 pub async fn serve_block_sendfile(
@@ -567,9 +608,18 @@ pub async fn serve_block_sendfile(
                     libc::MSG_NOSIGNAL,
                 )
             };
-            if n < 0 { Err(std::io::Error::last_os_error()) } else { Ok(n as usize) }
+            if n < 0 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(n as usize)
+            }
         }) {
-            Ok(0) => return Err(std::io::Error::new(std::io::ErrorKind::WriteZero, "send header 0")),
+            Ok(0) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    "send header 0",
+                ))
+            }
             Ok(n) => hoff += n,
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
             Err(e) => return Err(e),
@@ -583,9 +633,18 @@ pub async fn serve_block_sendfile(
         sock.writable().await?;
         match sock.try_io(Interest::WRITABLE, || {
             let n = unsafe { libc::sendfile(sock.as_raw_fd(), file_fd, &mut off, remaining) };
-            if n < 0 { Err(std::io::Error::last_os_error()) } else { Ok(n as usize) }
+            if n < 0 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(n as usize)
+            }
         }) {
-            Ok(0) => return Err(std::io::Error::new(std::io::ErrorKind::WriteZero, "sendfile 0")),
+            Ok(0) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    "sendfile 0",
+                ))
+            }
             Ok(n) => remaining -= n,
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
             Err(e) => return Err(e),
@@ -633,7 +692,13 @@ struct ReadFailure {
 /// or served again, and a recheck brings them back -- and the torrent's error
 /// says so. EMFILE and the like are transient and must NOT drag a healthy
 /// torrent down with them.
-fn give_up_on(torrent: &TorrentState, piece: u32, offset: u32, length: u32, e: ReadFailure) -> String {
+fn give_up_on(
+    torrent: &TorrentState,
+    piece: u32,
+    offset: u32,
+    length: u32,
+    e: ReadFailure,
+) -> String {
     if e.missing {
         torrent.mark_error(&e.msg);
     } else if e.unreadable {
@@ -646,7 +711,11 @@ fn give_up_on(torrent: &TorrentState, piece: u32, offset: u32, length: u32, e: R
             &format!(
                 "unreadable on disk, piece {} no longer counted as held: {}. Check the disk, \
                  then recheck this torrent",
-                pieces.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", "),
+                pieces
+                    .iter()
+                    .map(|p| p.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", "),
                 e.msg
             ),
         );
@@ -708,16 +777,25 @@ async fn read_range(
     })?
 }
 
-
 /// `pread_exact` for the serve path, with a seam for tests: unreadable sectors
 /// cannot be had from a unit test, so a path can be told to fail here.
 #[cfg(not(test))]
-fn serve_read(file: &File, _path: &std::path::Path, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
+fn serve_read(
+    file: &File,
+    _path: &std::path::Path,
+    buf: &mut [u8],
+    offset: u64,
+) -> std::io::Result<()> {
     pread_exact(file, buf, offset)
 }
 
 #[cfg(test)]
-fn serve_read(file: &File, path: &std::path::Path, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
+fn serve_read(
+    file: &File,
+    path: &std::path::Path,
+    buf: &mut [u8],
+    offset: u64,
+) -> std::io::Result<()> {
     if read_failures().lock().contains(path) {
         return Err(std::io::Error::from_raw_os_error(5));
     }
@@ -751,7 +829,10 @@ fn pwrite_all(file: &std::fs::File, buf: &[u8], offset: u64) -> std::io::Result<
     while written < buf.len() {
         let n = file.seek_write(&buf[written..], offset + written as u64)?;
         if n == 0 {
-            return Err(std::io::Error::new(std::io::ErrorKind::WriteZero, "seek_write returned 0"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                "seek_write returned 0",
+            ));
         }
         written += n;
     }
@@ -769,7 +850,10 @@ fn pread_exact(file: &std::fs::File, buf: &mut [u8], offset: u64) -> std::io::Re
     while read < buf.len() {
         let n = file.seek_read(&mut buf[read..], offset + read as u64)?;
         if n == 0 {
-            return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "seek_read returned 0"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "seek_read returned 0",
+            ));
         }
         read += n;
     }
@@ -941,7 +1025,12 @@ mod disk_tests {
             )
             .expect("the fixture torrent parses");
         let torrent = mgr.get(&ih).expect("just added");
-        Fixture { _mgr: mgr, torrent, disk, root }
+        Fixture {
+            _mgr: mgr,
+            torrent,
+            disk,
+            root,
+        }
     }
 
     /// ⭐ A piece is checked against its hash BEFORE it lands. Accepting one
@@ -963,11 +1052,23 @@ mod disk_tests {
     async fn a_piece_that_matches_its_hash_is_accepted_and_readable() {
         let content = vec![7u8; 4096];
         let f = fixture("goodhash", &content);
-        let ok = f.disk.write_piece(&f.torrent, 0, content.clone()).await.unwrap();
+        let ok = f
+            .disk
+            .write_piece(&f.torrent, 0, content.clone())
+            .await
+            .unwrap();
         assert!(ok, "the piece hashes correctly and must be kept");
 
-        let back = f.disk.read_block(&f.torrent, 0, 0, content.len() as u32).await.unwrap();
-        assert_eq!(&back[..], &content[..], "what was written is what comes back");
+        let back = f
+            .disk
+            .read_block(&f.torrent, 0, 0, content.len() as u32)
+            .await
+            .unwrap();
+        assert_eq!(
+            &back[..],
+            &content[..],
+            "what was written is what comes back"
+        );
     }
 
     /// ⭐ A read that starts past the end of the torrent is an error, not a
@@ -976,10 +1077,18 @@ mod disk_tests {
     async fn a_read_starting_past_the_end_is_an_error() {
         let content = vec![7u8; 4096];
         let f = fixture("pastend", &content);
-        assert!(f.disk.write_piece(&f.torrent, 0, content.clone()).await.unwrap());
+        assert!(f
+            .disk
+            .write_piece(&f.torrent, 0, content.clone())
+            .await
+            .unwrap());
         // 4096-byte torrent: offset 3 MiB is far beyond its only cache block.
         let r = f.disk.read_block(&f.torrent, 0, 3 << 20, 16).await;
-        assert!(r.is_err(), "read past the end returned {:?}", r.map(|b| b.len()));
+        assert!(
+            r.is_err(),
+            "read past the end returned {:?}",
+            r.map(|b| b.len())
+        );
         // A read inside it still works.
         let back = f.disk.read_block(&f.torrent, 0, 100, 16).await.unwrap();
         assert_eq!(&back[..], &content[100..116]);
@@ -994,7 +1103,11 @@ mod disk_tests {
         let blocker = f.root.join("not-a-folder");
         std::fs::write(&blocker, b"x").unwrap();
         *f.torrent.save_path.write() = blocker.join("sub");
-        let e = f.disk.write_piece(&f.torrent, 0, content).await.unwrap_err();
+        let e = f
+            .disk
+            .write_piece(&f.torrent, 0, content)
+            .await
+            .unwrap_err();
         assert!(e.contains("create folder"), "{e}");
     }
 
@@ -1005,7 +1118,11 @@ mod disk_tests {
     async fn written_files_are_synced_before_the_state_is_saved() {
         let content = vec![7u8; 4096];
         let f = fixture("sync", &content);
-        assert!(f.disk.write_piece(&f.torrent, 0, content.clone()).await.unwrap());
+        assert!(f
+            .disk
+            .write_piece(&f.torrent, 0, content.clone())
+            .await
+            .unwrap());
         assert_eq!(f.disk.sync_written().synced, 1, "the one file written");
         assert_eq!(f.disk.sync_written().synced, 0, "nothing new since");
         assert!(f.disk.write_piece(&f.torrent, 0, content).await.unwrap());
@@ -1020,8 +1137,16 @@ mod disk_tests {
         let content = vec![7u8; 4096];
         let f = fixture("synconly", &content);
         assert!(f.disk.write_piece(&f.torrent, 0, content).await.unwrap());
-        assert_eq!(f.disk.sync_torrent(&[0u8; 20]).synced, 0, "another torrent wrote nothing");
-        assert_eq!(f.disk.sync_torrent(&f.torrent.info_hash).synced, 1, "its one file");
+        assert_eq!(
+            f.disk.sync_torrent(&[0u8; 20]).synced,
+            0,
+            "another torrent wrote nothing"
+        );
+        assert_eq!(
+            f.disk.sync_torrent(&f.torrent.info_hash).synced,
+            1,
+            "its one file"
+        );
         assert_eq!(f.disk.sync_written().synced, 0, "and it left the set");
     }
 
@@ -1033,7 +1158,11 @@ mod disk_tests {
             *b = (i % 251) as u8;
         }
         let f = fixture("window", &content);
-        assert!(f.disk.write_piece(&f.torrent, 0, content.clone()).await.unwrap());
+        assert!(f
+            .disk
+            .write_piece(&f.torrent, 0, content.clone())
+            .await
+            .unwrap());
 
         let back = f.disk.read_block(&f.torrent, 0, 1000, 256).await.unwrap();
         assert_eq!(&back[..], &content[1000..1256]);
@@ -1046,7 +1175,11 @@ mod disk_tests {
     async fn a_cached_read_answers_what_the_disk_holds() {
         let content = vec![3u8; 4096];
         let f = fixture("cache", &content);
-        assert!(f.disk.write_piece(&f.torrent, 0, content.clone()).await.unwrap());
+        assert!(f
+            .disk
+            .write_piece(&f.torrent, 0, content.clone())
+            .await
+            .unwrap());
 
         let first = f.disk.read_block(&f.torrent, 0, 0, 512).await.unwrap();
         let second = f.disk.read_block(&f.torrent, 0, 0, 512).await.unwrap();
@@ -1060,13 +1193,21 @@ mod disk_tests {
     async fn rewriting_a_piece_invalidates_what_was_cached_over_it() {
         let content = vec![1u8; 4096];
         let f = fixture("invalidate", &content);
-        assert!(f.disk.write_piece(&f.torrent, 0, content.clone()).await.unwrap());
+        assert!(f
+            .disk
+            .write_piece(&f.torrent, 0, content.clone())
+            .await
+            .unwrap());
         let before = f.disk.read_block(&f.torrent, 0, 0, 16).await.unwrap();
         assert_eq!(&before[..], &[1u8; 16][..]);
 
         // The same bytes again: the write must still drop the cached block
         // rather than leave a stale one behind.
-        assert!(f.disk.write_piece(&f.torrent, 0, content.clone()).await.unwrap());
+        assert!(f
+            .disk
+            .write_piece(&f.torrent, 0, content.clone())
+            .await
+            .unwrap());
         let after = f.disk.read_block(&f.torrent, 0, 0, 16).await.unwrap();
         assert_eq!(&after[..], &before[..]);
     }
@@ -1077,7 +1218,11 @@ mod disk_tests {
     async fn a_read_past_the_end_is_an_error_not_a_short_read() {
         let content = vec![5u8; 1024];
         let f = fixture("past", &content);
-        assert!(f.disk.write_piece(&f.torrent, 0, content.clone()).await.unwrap());
+        assert!(f
+            .disk
+            .write_piece(&f.torrent, 0, content.clone())
+            .await
+            .unwrap());
         assert!(f.disk.read_block(&f.torrent, 0, 1000, 4096).await.is_err());
         assert!(f.disk.read_block(&f.torrent, 99, 0, 16).await.is_err());
     }
@@ -1098,7 +1243,11 @@ mod disk_tests {
     async fn the_zero_copy_path_answers_for_a_request_inside_one_file() {
         let content = vec![2u8; 4096];
         let f = fixture("sendfile", &content);
-        assert!(f.disk.write_piece(&f.torrent, 0, content.clone()).await.unwrap());
+        assert!(f
+            .disk
+            .write_piece(&f.torrent, 0, content.clone())
+            .await
+            .unwrap());
         let got = f.disk.block_file(&f.torrent, 0, 0, 512);
         assert!(got.is_some(), "a single-file torrent has one descriptor");
         let (_, offset) = got.unwrap();
@@ -1120,7 +1269,11 @@ mod disk_tests {
         content.extend_from_slice(&[2u8; PIECE]);
         for round in 0..20 {
             let f = fixture_in_pieces(&format!("race{round}"), &content, PIECE);
-            assert!(f.disk.write_piece(&f.torrent, 0, content[..PIECE].to_vec()).await.unwrap());
+            assert!(f
+                .disk
+                .write_piece(&f.torrent, 0, content[..PIECE].to_vec())
+                .await
+                .unwrap());
             // Full length on disk, so piece 1 reads back as zeros until written.
             std::fs::OpenOptions::new()
                 .write(true)
@@ -1141,7 +1294,11 @@ mod disk_tests {
             assert!(writer.await.unwrap().unwrap());
 
             let got = f.disk.read_block(&f.torrent, 1, 0, 16).await.unwrap();
-            assert_eq!(&got[..], &[2u8; 16][..], "round {round}: piece 1 as written");
+            assert_eq!(
+                &got[..],
+                &[2u8; 16][..],
+                "round {round}: piece 1 as written"
+            );
         }
     }
 
@@ -1156,13 +1313,23 @@ mod disk_tests {
     async fn a_torrent_removed_with_its_data_kept_lets_go_of_its_files() {
         let content = vec![4u8; 4096];
         let f = fixture("keepdata", &content);
-        assert!(f.disk.write_piece(&f.torrent, 0, content.clone()).await.unwrap());
+        assert!(f
+            .disk
+            .write_piece(&f.torrent, 0, content.clone())
+            .await
+            .unwrap());
         let path = f.root.join("data").join("payload.bin");
-        assert!(holds_descriptor_for(&path), "the write cached its descriptor");
+        assert!(
+            holds_descriptor_for(&path),
+            "the write cached its descriptor"
+        );
 
         f._mgr.remove_torrent(&f.torrent.info_hash, true).unwrap();
         assert!(path.exists(), "the data stays");
-        assert!(!holds_descriptor_for(&path), "but no descriptor holds it any more");
+        assert!(
+            !holds_descriptor_for(&path),
+            "but no descriptor holds it any more"
+        );
     }
 
     /// Changing where a torrent lives drops the descriptors of where it was.
@@ -1170,7 +1337,11 @@ mod disk_tests {
     async fn a_new_save_path_lets_go_of_the_old_files() {
         let content = vec![6u8; 4096];
         let f = fixture("relocate", &content);
-        assert!(f.disk.write_piece(&f.torrent, 0, content.clone()).await.unwrap());
+        assert!(f
+            .disk
+            .write_piece(&f.torrent, 0, content.clone())
+            .await
+            .unwrap());
         let old = f.root.join("data").join("payload.bin");
         assert!(holds_descriptor_for(&old));
 
@@ -1179,7 +1350,10 @@ mod disk_tests {
         f._mgr
             .set_save_path(&f.torrent.info_hash, moved.to_string_lossy().as_ref())
             .unwrap();
-        assert!(!holds_descriptor_for(&old), "the old path is no longer this torrent's");
+        assert!(
+            !holds_descriptor_for(&old),
+            "the old path is no longer this torrent's"
+        );
     }
 
     fn four_piece_fixture(tag: &str) -> (Fixture, Vec<Vec<u8>>) {
@@ -1190,16 +1364,27 @@ mod disk_tests {
         let chunks = content.chunks(4096).map(|c| c.to_vec()).collect();
         let f = fixture_in_pieces(tag, &content, 4096);
         // The fixture is added stopped; these are downloads under way.
-        f.torrent
-            .status
-            .store(crate::torrent::meta::TorrentStatus::Downloading as u8, Ordering::Relaxed);
+        f.torrent.status.store(
+            crate::torrent::meta::TorrentStatus::Downloading as u8,
+            Ordering::Relaxed,
+        );
         (f, chunks)
     }
 
     /// What `commit` does once a piece is down: written, then counted held.
     async fn download(f: &Fixture, piece: u32, data: &[u8]) {
-        assert!(f.disk.write_piece(&f.torrent, piece, data.to_vec()).await.unwrap());
-        f.torrent.picker.get().unwrap().lock().unwrap().set_have(piece);
+        assert!(f
+            .disk
+            .write_piece(&f.torrent, piece, data.to_vec())
+            .await
+            .unwrap());
+        f.torrent
+            .picker
+            .get()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .set_have(piece);
     }
 
     fn held(f: &Fixture) -> Vec<u32> {
@@ -1209,7 +1394,11 @@ mod disk_tests {
 
     fn saved_bitfield(f: &Fixture) -> String {
         let db = crate::torrent::statedb::StateDb::open(&f.root.join("state.db")).unwrap();
-        db.load_all().into_iter().next().expect("a record was saved").bitfield
+        db.load_all()
+            .into_iter()
+            .next()
+            .expect("a record was saved")
+            .bitfield
     }
 
     /// ⭐ A file that will not sync takes its pieces out of what we hold, and
@@ -1227,7 +1416,11 @@ mod disk_tests {
 
         f._mgr.save_all_resume();
 
-        assert_eq!(held(&f), Vec::<u32>::new(), "nothing durable is vouched for");
+        assert_eq!(
+            held(&f),
+            Vec::<u32>::new(),
+            "nothing durable is vouched for"
+        );
         assert_eq!(saved_bitfield(&f), "00", "and the record says so");
         let msg = f.torrent.error_msg.lock().unwrap().clone();
         assert!(msg.contains("sync"), "the torrent says why: {msg:?}");
@@ -1264,9 +1457,10 @@ mod disk_tests {
         for (i, c) in chunks.iter().enumerate() {
             download(&f, i as u32, c).await;
         }
-        f.torrent
-            .status
-            .store(crate::torrent::meta::TorrentStatus::Seeding as u8, Ordering::Relaxed);
+        f.torrent.status.store(
+            crate::torrent::meta::TorrentStatus::Seeding as u8,
+            Ordering::Relaxed,
+        );
         fail_sync_of(f.root.join("data").join("payload.bin"));
 
         f._mgr.on_completed(&f.torrent.info_hash);
@@ -1289,16 +1483,21 @@ mod disk_tests {
         for (i, c) in chunks.iter().enumerate() {
             download(&f, i as u32, c).await;
         }
-        f.torrent
-            .status
-            .store(crate::torrent::meta::TorrentStatus::Seeding as u8, Ordering::Relaxed);
+        f.torrent.status.store(
+            crate::torrent::meta::TorrentStatus::Seeding as u8,
+            Ordering::Relaxed,
+        );
         f._mgr.save_all_resume();
         fail_read_of(f.root.join("data").join("payload.bin"));
 
         let r = f.disk.read_block(&f.torrent, 1, 0, 16).await;
         assert!(r.is_err(), "the read fails");
 
-        assert_eq!(held(&f), vec![0, 2, 3], "only the unreadable piece is given up");
+        assert_eq!(
+            held(&f),
+            vec![0, 2, 3],
+            "only the unreadable piece is given up"
+        );
         let msg = f.torrent.error_msg.lock().unwrap().clone();
         assert!(msg.contains("piece 1"), "the torrent says which: {msg:?}");
         assert_ne!(
@@ -1323,7 +1522,11 @@ mod disk_tests {
     /// what spawns the resume sweeps. Nothing is reached on the network
     /// (DHT, LSD and webseed off, a free local port).
     async fn start_session(f: &Fixture, extra: &str) {
-        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
         let cfg: crate::config::EngineConfig = serde_json::from_str(&format!(
             r#"{{"listen_port":{port},"dht_enabled":false,"lsd_enabled":false,"enable_webseed":false{extra}}}"#
         ))
@@ -1358,7 +1561,11 @@ mod disk_tests {
 
         let_pass(61).await;
 
-        assert_eq!(saved_bitfield_opt(&f).as_deref(), Some("c0"), "two pieces held, saved after 61 s");
+        assert_eq!(
+            saved_bitfield_opt(&f).as_deref(),
+            Some("c0"),
+            "two pieces held, saved after 61 s"
+        );
     }
 
     /// The quick pass writes a torrent only when its progress moved, and never
@@ -1377,11 +1584,19 @@ mod disk_tests {
             .execute_batch("UPDATE torrent_state SET bitfield='zz'")
             .unwrap();
         let_pass(60).await;
-        assert_eq!(saved_bitfield_opt(&f).as_deref(), Some("zz"), "no progress: not rewritten");
+        assert_eq!(
+            saved_bitfield_opt(&f).as_deref(),
+            Some("zz"),
+            "no progress: not rewritten"
+        );
 
         download(&f, 1, &chunks[1]).await;
         let_pass(60).await;
-        assert_eq!(saved_bitfield_opt(&f).as_deref(), Some("c0"), "progress: rewritten");
+        assert_eq!(
+            saved_bitfield_opt(&f).as_deref(),
+            Some("c0"),
+            "progress: rewritten"
+        );
 
         // Whole now: the quick pass leaves it to the full sweep.
         rusqlite::Connection::open(f.root.join("state.db"))
@@ -1391,7 +1606,11 @@ mod disk_tests {
         download(&f, 2, &chunks[2]).await;
         download(&f, 3, &chunks[3]).await;
         let_pass(60).await;
-        assert_eq!(saved_bitfield_opt(&f).as_deref(), Some("zz"), "finished: left to the full sweep");
+        assert_eq!(
+            saved_bitfield_opt(&f).as_deref(),
+            Some("zz"),
+            "finished: left to the full sweep"
+        );
     }
 
     /// A seeding torrent is never in the quick pass.
@@ -1401,12 +1620,17 @@ mod disk_tests {
         for (i, c) in chunks.iter().enumerate() {
             download(&f, i as u32, c).await;
         }
-        f.torrent
-            .status
-            .store(crate::torrent::meta::TorrentStatus::Seeding as u8, Ordering::Relaxed);
+        f.torrent.status.store(
+            crate::torrent::meta::TorrentStatus::Seeding as u8,
+            Ordering::Relaxed,
+        );
         start_session(&f, "").await;
         let_pass(120).await;
-        assert_eq!(saved_bitfield_opt(&f).as_deref(), Some(""), "only the record made at add, before the full sweep");
+        assert_eq!(
+            saved_bitfield_opt(&f).as_deref(),
+            Some(""),
+            "only the record made at add, before the full sweep"
+        );
     }
 
     /// 0 turns the quick pass off: back to one sweep every five minutes.
@@ -1416,16 +1640,33 @@ mod disk_tests {
         start_session(&f, r#","resume_fast_secs":0"#).await;
         download(&f, 0, &chunks[0]).await;
         let_pass(250).await;
-        assert_eq!(saved_bitfield_opt(&f).as_deref(), Some(""), "only the record made at add, before the five minutes");
+        assert_eq!(
+            saved_bitfield_opt(&f).as_deref(),
+            Some(""),
+            "only the record made at add, before the five minutes"
+        );
         let_pass(60).await;
-        assert_eq!(saved_bitfield_opt(&f).as_deref(), Some("80"), "the full sweep still runs");
+        assert_eq!(
+            saved_bitfield_opt(&f).as_deref(),
+            Some("80"),
+            "the full sweep still runs"
+        );
     }
 
     /// A second engine over the first one's state, as after a restart, once
     /// `sql` has been run on the state database behind its back.
-    fn restart_after(f: &Fixture, sql: &str) -> (Arc<crate::torrent::TorrentManager>, Arc<crate::torrent::meta::TorrentState>) {
+    fn restart_after(
+        f: &Fixture,
+        sql: &str,
+    ) -> (
+        Arc<crate::torrent::TorrentManager>,
+        Arc<crate::torrent::meta::TorrentState>,
+    ) {
         f._mgr.save_all_resume();
-        rusqlite::Connection::open(f.root.join("state.db")).unwrap().execute_batch(sql).unwrap();
+        rusqlite::Connection::open(f.root.join("state.db"))
+            .unwrap()
+            .execute_batch(sql)
+            .unwrap();
         let mgr = Arc::new(crate::torrent::TorrentManager::new(
             f.root.join("data").to_string_lossy().into_owned(),
             f.root.join("resume").to_string_lossy().into_owned(),
@@ -1470,10 +1711,16 @@ mod disk_tests {
         download(&f, 1, &chunks[1]).await;
         let (mgr, t) = restart_after(&f, "UPDATE torrent_state SET bitfield='zz'");
 
-        assert_eq!(held_after_settling(&t, &[0, 1]).await, vec![0, 1], "what is on disk is recognised");
+        assert_eq!(
+            held_after_settling(&t, &[0, 1]).await,
+            vec![0, 1],
+            "what is on disk is recognised"
+        );
         let (_, issues) = mgr.startup_issues();
         assert!(
-            issues.iter().any(|i| i.info_hash == hex_of(&f) && i.kind == "bitfield_discarded"),
+            issues
+                .iter()
+                .any(|i| i.info_hash == hex_of(&f) && i.kind == "bitfield_discarded"),
             "and the anomaly is listed: {issues:?}"
         );
     }
@@ -1490,9 +1737,16 @@ mod disk_tests {
             "DROP TRIGGER IF EXISTS bitfield_sum_reset; UPDATE torrent_state SET bitfield='f0'",
         );
 
-        assert_eq!(held_after_settling(&t, &[0, 1]).await, vec![0, 1], "only what the disk holds");
+        assert_eq!(
+            held_after_settling(&t, &[0, 1]).await,
+            vec![0, 1],
+            "only what the disk holds"
+        );
         let (_, issues) = mgr.startup_issues();
-        assert!(issues.iter().any(|i| i.kind == "bitfield_discarded"), "{issues:?}");
+        assert!(
+            issues.iter().any(|i| i.kind == "bitfield_discarded"),
+            "{issues:?}"
+        );
     }
 
     fn hex_of(f: &Fixture) -> String {
@@ -1503,7 +1757,11 @@ mod disk_tests {
     async fn the_zero_copy_path_declines_a_request_it_cannot_satisfy_whole() {
         let content = vec![2u8; 1024];
         let f = fixture("sendfile-decline", &content);
-        assert!(f.disk.write_piece(&f.torrent, 0, content.clone()).await.unwrap());
+        assert!(f
+            .disk
+            .write_piece(&f.torrent, 0, content.clone())
+            .await
+            .unwrap());
         assert!(
             f.disk.block_file(&f.torrent, 0, 0, 99_999).is_none(),
             "a length the file cannot satisfy is declined, not truncated"

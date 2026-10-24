@@ -179,7 +179,10 @@ user_agent = "qBittorrent/5.2.2"
             "https://t.myanonamouse.net/announce/KEY".to_string(),
         ]];
         assert!(is_affected(&affected, &h));
-        assert!(!is_affected(&untouched, &h), "its identity was never borrowed");
+        assert!(
+            !is_affected(&untouched, &h),
+            "its identity was never borrowed"
+        );
     }
 
     /// The case that matters most: someone who never spoofed anything keeps

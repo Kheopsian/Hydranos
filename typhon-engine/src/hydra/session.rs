@@ -60,7 +60,10 @@ impl Sessions {
         if map.len() >= MAX_SESSIONS {
             // Oldest first: the one that has gone longest without a request is
             // the one least likely to be a client still working.
-            if let Some(oldest) = map.iter().min_by_key(|(_, seen)| **seen).map(|(k, _)| k.clone())
+            if let Some(oldest) = map
+                .iter()
+                .min_by_key(|(_, seen)| **seen)
+                .map(|(k, _)| k.clone())
             {
                 map.remove(&oldest);
             }
@@ -116,7 +119,11 @@ impl Sessions {
 /// line as long as the request.
 pub(crate) fn loggable(name: &str) -> String {
     const MAX: usize = 64;
-    let mut out: String = name.chars().take(MAX).flat_map(char::escape_debug).collect();
+    let mut out: String = name
+        .chars()
+        .take(MAX)
+        .flat_map(char::escape_debug)
+        .collect();
     if name.chars().nth(MAX).is_some() {
         out.push_str("...");
     }
@@ -238,7 +245,10 @@ impl Throttle {
 
     /// A good password: the caller's slate is clean.
     pub fn succeeded(&self, who: Caller) {
-        self.inner.lock().unwrap_or_else(|e| e.into_inner()).remove(&who);
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&who);
     }
 }
 
@@ -327,10 +337,18 @@ mod tests {
         for _ in 0..4 {
             t.failed_at(who, now);
         }
-        assert_eq!(t.blocked_for_at(who, now), None, "four fails are not a block");
+        assert_eq!(
+            t.blocked_for_at(who, now),
+            None,
+            "four fails are not a block"
+        );
         t.failed_at(who, now);
         assert_eq!(t.blocked_for_at(who, now), Some(FIRST_BLOCK));
-        assert_eq!(t.blocked_for_at(caller("203.0.113.10"), now), None, "only that caller");
+        assert_eq!(
+            t.blocked_for_at(caller("203.0.113.10"), now),
+            None,
+            "only that caller"
+        );
         let mut expect = FIRST_BLOCK;
         for _ in 0..8 {
             now += expect;
@@ -395,7 +413,8 @@ mod tests {
         }
         assert_eq!(t.inner.lock().unwrap().len(), MAX_TRACKED);
         assert!(
-            t.blocked_for_at(blocked, start + Duration::from_millis(2)).is_some(),
+            t.blocked_for_at(blocked, start + Duration::from_millis(2))
+                .is_some(),
             "the idlest caller, but blocked: fresh addresses do not flush it"
         );
     }
@@ -435,8 +454,14 @@ mod tests {
     #[test]
     fn cookies_are_split_on_semicolons() {
         assert_eq!(cookie_value("SID=abc", "SID").as_deref(), Some("abc"));
-        assert_eq!(cookie_value("a=1; SID=abc; b=2", "SID").as_deref(), Some("abc"));
-        assert_eq!(cookie_value("a=1; SID=\"abc\"", "SID").as_deref(), Some("abc"));
+        assert_eq!(
+            cookie_value("a=1; SID=abc; b=2", "SID").as_deref(),
+            Some("abc")
+        );
+        assert_eq!(
+            cookie_value("a=1; SID=\"abc\"", "SID").as_deref(),
+            Some("abc")
+        );
         assert_eq!(cookie_value("a=1; b=2", "SID"), None);
         // A cookie whose name merely ends in SID is a different cookie.
         assert_eq!(cookie_value("XSID=abc", "SID"), None);

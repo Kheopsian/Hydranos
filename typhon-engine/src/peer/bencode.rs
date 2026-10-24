@@ -12,9 +12,27 @@ pub enum Bencode {
 }
 
 impl Bencode {
-    pub fn as_int(&self) -> Option<i64> { if let Bencode::Int(i) = self { Some(*i) } else { None } }
-    pub fn as_bytes(&self) -> Option<&[u8]> { if let Bencode::Bytes(b) = self { Some(b) } else { None } }
-    pub fn as_dict(&self) -> Option<&BTreeMap<Vec<u8>, Bencode>> { if let Bencode::Dict(d) = self { Some(d) } else { None } }
+    pub fn as_int(&self) -> Option<i64> {
+        if let Bencode::Int(i) = self {
+            Some(*i)
+        } else {
+            None
+        }
+    }
+    pub fn as_bytes(&self) -> Option<&[u8]> {
+        if let Bencode::Bytes(b) = self {
+            Some(b)
+        } else {
+            None
+        }
+    }
+    pub fn as_dict(&self) -> Option<&BTreeMap<Vec<u8>, Bencode>> {
+        if let Bencode::Dict(d) = self {
+            Some(d)
+        } else {
+            None
+        }
+    }
 
     pub fn dict_get(&self, key: &[u8]) -> Option<&Bencode> {
         self.as_dict().and_then(|d| d.get(key))
@@ -34,7 +52,9 @@ impl Bencode {
             }
             Bencode::List(l) => {
                 out.push(b'l');
-                for v in l { v.encode(out); }
+                for v in l {
+                    v.encode(out);
+                }
                 out.push(b'e');
             }
             Bencode::Dict(d) => {
@@ -79,12 +99,19 @@ pub fn decode_prefix(input: &[u8]) -> Result<(Bencode, usize), &'static str> {
 }
 
 fn decode_one(input: &[u8], pos: &mut usize, depth: usize) -> Result<Bencode, &'static str> {
-    if depth >= MAX_DEPTH { return Err("bencode nested too deep"); }
-    if *pos >= input.len() { return Err("eof"); }
+    if depth >= MAX_DEPTH {
+        return Err("bencode nested too deep");
+    }
+    if *pos >= input.len() {
+        return Err("eof");
+    }
     match input[*pos] {
         b'i' => {
             *pos += 1;
-            let end = input[*pos..].iter().position(|&b| b == b'e').ok_or("no e for int")?;
+            let end = input[*pos..]
+                .iter()
+                .position(|&b| b == b'e')
+                .ok_or("no e for int")?;
             let s = std::str::from_utf8(&input[*pos..*pos + end]).map_err(|_| "int utf8")?;
             let n: i64 = s.parse().map_err(|_| "int parse")?;
             *pos += end + 1;
@@ -96,7 +123,9 @@ fn decode_one(input: &[u8], pos: &mut usize, depth: usize) -> Result<Bencode, &'
             while *pos < input.len() && input[*pos] != b'e' {
                 list.push(decode_one(input, pos, depth + 1)?);
             }
-            if *pos >= input.len() { return Err("no e for list"); }
+            if *pos >= input.len() {
+                return Err("no e for list");
+            }
             *pos += 1;
             Ok(Bencode::List(list))
         }
@@ -105,21 +134,31 @@ fn decode_one(input: &[u8], pos: &mut usize, depth: usize) -> Result<Bencode, &'
             let mut dict = BTreeMap::new();
             while *pos < input.len() && input[*pos] != b'e' {
                 let k = decode_one(input, pos, depth + 1)?;
-                let key = match k { Bencode::Bytes(b) => b, _ => return Err("dict key not bytes") };
+                let key = match k {
+                    Bencode::Bytes(b) => b,
+                    _ => return Err("dict key not bytes"),
+                };
                 let v = decode_one(input, pos, depth + 1)?;
                 dict.insert(key, v);
             }
-            if *pos >= input.len() { return Err("no e for dict"); }
+            if *pos >= input.len() {
+                return Err("no e for dict");
+            }
             *pos += 1;
             Ok(Bencode::Dict(dict))
         }
         b'0'..=b'9' => {
-            let colon = input[*pos..].iter().position(|&b| b == b':').ok_or("no colon")?;
+            let colon = input[*pos..]
+                .iter()
+                .position(|&b| b == b':')
+                .ok_or("no colon")?;
             let s = std::str::from_utf8(&input[*pos..*pos + colon]).map_err(|_| "len utf8")?;
             let n: usize = s.parse().map_err(|_| "len parse")?;
             *pos += colon + 1;
             let end = pos.checked_add(n).ok_or("len overflow")?;
-            if end > input.len() { return Err("bytes truncated"); }
+            if end > input.len() {
+                return Err("bytes truncated");
+            }
             let bytes = input[*pos..end].to_vec();
             *pos = end;
             Ok(Bencode::Bytes(bytes))

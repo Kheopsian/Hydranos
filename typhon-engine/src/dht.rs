@@ -15,8 +15,8 @@
 //! unbounded `FuturesUnordered`, so an orphaned task is not merely idle: it grows
 //! the heap for as long as the process lives.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 
 use dashmap::DashMap;
 use futures::StreamExt;
@@ -95,10 +95,19 @@ pub fn lsd_policy(config: &crate::config::EngineConfig) -> Discovery {
 async fn tunnel_bootstrap(device: &str) -> Vec<String> {
     let mut out = Vec::new();
     for router in librqbit_dht::DHT_BOOTSTRAP {
-        let Some((host, port)) = router.rsplit_once(':') else { continue };
+        let Some((host, port)) = router.rsplit_once(':') else {
+            continue;
+        };
         match crate::tunneldns::resolve(device, host).await {
-            Ok(ips) => out.extend(ips.into_iter().map(|ip| std::net::SocketAddr::new(ip, port.parse().unwrap_or(6881)).to_string())),
-            Err(e) => warn!("[dht] bootstrap router {} not resolved through the tunnel: {}", host, e),
+            Ok(ips) => {
+                out.extend(ips.into_iter().map(|ip| {
+                    std::net::SocketAddr::new(ip, port.parse().unwrap_or(6881)).to_string()
+                }))
+            }
+            Err(e) => warn!(
+                "[dht] bootstrap router {} not resolved through the tunnel: {}",
+                host, e
+            ),
         }
     }
     out
@@ -128,7 +137,10 @@ pub struct DhtSession {
 /// Whether a torrent has nothing left to download: seed mode, or no picker
 /// (it seeds), or a complete one.
 fn is_finished(t: &TorrentState) -> bool {
-    t.seed_mode || t.picker.get().is_none_or(|p| p.lock().unwrap_or_else(|e| e.into_inner()).is_complete())
+    t.seed_mode
+        || t.picker
+            .get()
+            .is_none_or(|p| p.lock().unwrap_or_else(|e| e.into_inner()).is_complete())
 }
 
 /// Whether the DHT should follow this torrent: never a private one (BEP 27),
@@ -290,7 +302,8 @@ mod tests {
     /// and LSD with it; without a proxy the switch is the operator's.
     #[test]
     fn a_proxied_engine_runs_no_dht_and_no_lsd() {
-        let proxied = config(r#"{"socks5_outbound_host":"10.0.0.1","dht_enabled":true,"lsd_enabled":true}"#);
+        let proxied =
+            config(r#"{"socks5_outbound_host":"10.0.0.1","dht_enabled":true,"lsd_enabled":true}"#);
         assert_eq!(dht_policy(&proxied), Discovery::Off(OFF_BEHIND_PROXY));
         assert_eq!(lsd_policy(&proxied), Discovery::Off(LSD_OFF_BEHIND_PROXY));
 
@@ -333,7 +346,11 @@ mod tests {
     }
 
     fn torrent_bytes(name: &str, private: bool) -> Vec<u8> {
-        let mut info = format!("d6:lengthi16384e4:name{}:{name}12:piece lengthi16384e6:pieces20:", name.len()).into_bytes();
+        let mut info = format!(
+            "d6:lengthi16384e4:name{}:{name}12:piece lengthi16384e6:pieces20:",
+            name.len()
+        )
+        .into_bytes();
         let mut piece = [0xCDu8; 20];
         piece[..name.len().min(20)].copy_from_slice(&name.as_bytes()[..name.len().min(20)]);
         info.extend_from_slice(&piece);
@@ -354,7 +371,9 @@ mod tests {
     fn peer_discovery_is_allowed_for_public_torrents_finished_or_not() {
         let (mgr, root) = manager("allows");
         let add = |name: &str, private: bool, seed: bool| {
-            let (ih, _) = mgr.add_torrent_bytes(&torrent_bytes(name, private), "/tmp", false, seed).unwrap();
+            let (ih, _) = mgr
+                .add_torrent_bytes(&torrent_bytes(name, private), "/tmp", false, seed)
+                .unwrap();
             mgr.get(&ih).unwrap()
         };
         assert!(add("down", false, false).meta.allows_peer_discovery());
@@ -369,7 +388,9 @@ mod tests {
     fn finished_torrents_follow_the_dht_only_when_the_option_says_so() {
         let (mgr, root) = manager("follow");
         let add = |name: &str, private: bool, seed: bool| {
-            let (ih, _) = mgr.add_torrent_bytes(&torrent_bytes(name, private), "/tmp", false, seed).unwrap();
+            let (ih, _) = mgr
+                .add_torrent_bytes(&torrent_bytes(name, private), "/tmp", false, seed)
+                .unwrap();
             mgr.get(&ih).unwrap()
         };
         let down = add("down", false, false);
@@ -377,8 +398,14 @@ mod tests {
         let private = add("priv", true, false);
         assert!(private.meta.private);
         for follow in [true, false] {
-            assert!(tracks_in_dht(&down, follow), "a download is followed (follow={follow})");
-            assert!(!tracks_in_dht(&private, follow), "a private torrent never is (follow={follow})");
+            assert!(
+                tracks_in_dht(&down, follow),
+                "a download is followed (follow={follow})"
+            );
+            assert!(
+                !tracks_in_dht(&private, follow),
+                "a private torrent never is (follow={follow})"
+            );
         }
         assert!(tracks_in_dht(&seed, true), "default: a seed is followed");
         assert!(!tracks_in_dht(&seed, false), "option off: a seed is not");
@@ -387,8 +414,13 @@ mod tests {
 
     /// A node with no bootstrap peers: enough to own a `tracked` table.
     async fn offline_session() -> Arc<DhtSession> {
-        let config = librqbit_dht::DhtConfig { bootstrap_addrs: Some(Vec::new()), ..Default::default() };
-        let dht = DhtBuilder::with_config(config).await.expect("offline dht node");
+        let config = librqbit_dht::DhtConfig {
+            bootstrap_addrs: Some(Vec::new()),
+            ..Default::default()
+        };
+        let dht = DhtBuilder::with_config(config)
+            .await
+            .expect("offline dht node");
         Arc::new(DhtSession {
             dht,
             tracked: DashMap::new(),
@@ -405,17 +437,28 @@ mod tests {
     #[tokio::test]
     async fn a_lookup_stopped_for_a_finished_torrent_is_forgotten() {
         let (mgr, root) = manager("forget");
-        let (ih, _) = mgr.add_torrent_bytes(&torrent_bytes("fin", false), "/tmp", false, false).unwrap();
+        let (ih, _) = mgr
+            .add_torrent_bytes(&torrent_bytes("fin", false), "/tmp", false, false)
+            .unwrap();
         let torrent = mgr.get(&ih).unwrap();
         let session = offline_session().await;
         let peer: std::net::SocketAddr = "192.168.99.7:6881".parse().unwrap();
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         session.track_with(torrent.clone(), tokio_stream_from(rx));
-        assert_eq!((session.tracked_count(), session.torrents_tracked()), (1, 1));
+        assert_eq!(
+            (session.tracked_count(), session.torrents_tracked()),
+            (1, 1)
+        );
 
         // The torrent finishes; the next peer found stops the lookup.
-        torrent.picker.get().expect("picker").lock().unwrap().set_have(0);
+        torrent
+            .picker
+            .get()
+            .expect("picker")
+            .lock()
+            .unwrap()
+            .set_have(0);
         assert!(!tracks_in_dht(&torrent, false));
         tx.send(peer).unwrap();
         for _ in 0..100 {
@@ -424,13 +467,24 @@ mod tests {
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
-        assert_eq!(session.tracked_count(), 0, "the stopped lookup left its entry behind");
-        assert_eq!(session.torrents_tracked(), 0, "torrents_tracked counts a lookup that is gone");
+        assert_eq!(
+            session.tracked_count(),
+            0,
+            "the stopped lookup left its entry behind"
+        );
+        assert_eq!(
+            session.torrents_tracked(),
+            0,
+            "torrents_tracked counts a lookup that is gone"
+        );
 
         // An incomplete torrent can be followed again (the same hash, new task).
         let (_tx2, rx2) = tokio::sync::mpsc::unbounded_channel();
         session.track_with(torrent, tokio_stream_from(rx2));
-        assert_eq!((session.tracked_count(), session.torrents_tracked()), (1, 1));
+        assert_eq!(
+            (session.tracked_count(), session.torrents_tracked()),
+            (1, 1)
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 

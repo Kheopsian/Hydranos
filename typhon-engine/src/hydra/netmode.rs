@@ -24,7 +24,11 @@ pub const SOCKS5_KEYS: [&str; 6] = [
     "announce_proxy",
     "announce_ip",
 ];
-pub const PROXY_V2_KEYS: [&str; 3] = ["listen_port_proxy_v2", "listen_addr_proxy_v2", "proxy_v2_trusted_sources"];
+pub const PROXY_V2_KEYS: [&str; 3] = [
+    "listen_port_proxy_v2",
+    "listen_addr_proxy_v2",
+    "proxy_v2_trusted_sources",
+];
 pub const GLUETUN_KEYS: [&str; 3] = ["gluetun_port_forward", "gluetun_url", "gluetun_api_key"];
 /// The tunnel assignments. Cleared by any other mode: a tunnel left enabled
 /// would keep being built at each boot under a page saying the node is not
@@ -55,7 +59,9 @@ fn deduce(cfg: &Config) -> &'static str {
         "gluetun"
     } else if race.listen_port_proxy_v2 != 0 || hoard.listen_port_proxy_v2 != 0 {
         "proxy_v2"
-    } else if !race.socks5_outbound_host.trim().is_empty() || !hoard.socks5_outbound_host.trim().is_empty() {
+    } else if !race.socks5_outbound_host.trim().is_empty()
+        || !hoard.socks5_outbound_host.trim().is_empty()
+    {
         "socks5"
     } else {
         "direct"
@@ -127,10 +133,12 @@ pub fn restart_required(cfg: &Config, running: &[(String, Session)]) -> bool {
     if wanted.len() != running.len() {
         return true;
     }
-    wanted.iter().any(|e| match running.iter().find(|(id, _)| *id == e.id) {
-        Some((_, s)) => fingerprint(s) != fingerprint(&e.session),
-        None => true,
-    })
+    wanted
+        .iter()
+        .any(|e| match running.iter().find(|(id, _)| *id == e.id) {
+            Some((_, s)) => fingerprint(s) != fingerprint(&e.session),
+            None => true,
+        })
 }
 
 /// The warning for an engine whose announces go through a proxy while it
@@ -150,7 +158,10 @@ pub const DHT_OFF_BEHIND_PROXY: &str = "DHT is off behind the SOCKS5 proxy: it i
 pub fn warnings(cfg: &Config, has_udp: &dyn Fn(&str) -> bool) -> Vec<String> {
     let mut out = Vec::new();
     let udp_behind_proxy = cfg.local_engines().iter().any(|e| {
-        typhon_engine::tracker::http::effective_proxy(&crate::engines::session_http_proxy(&e.session)).is_some()
+        typhon_engine::tracker::http::effective_proxy(&crate::engines::session_http_proxy(
+            &e.session,
+        ))
+        .is_some()
             && (e.session.udp_trackers() || has_udp(&e.id))
     });
     if udp_behind_proxy {
@@ -175,10 +186,16 @@ pub fn warnings(cfg: &Config, has_udp: &dyn Fn(&str) -> bool) -> Vec<String> {
     // Said when saved, not discovered as an engine that seeds nothing.
     for v in crate::killswitch::plan(cfg).engines {
         if let Some(why) = v.exit.blocked {
-            out.push(format!("{}: the kill switch keeps this engine off the network ({why}).", v.engine));
+            out.push(format!(
+                "{}: the kill switch keeps this engine off the network ({why}).",
+                v.engine
+            ));
         }
     }
-    if mode != "socks5" && mode != "proxy_v2" && typhon_engine::tracker::http::env_announce_proxy().is_some() {
+    if mode != "socks5"
+        && mode != "proxy_v2"
+        && typhon_engine::tracker::http::env_announce_proxy().is_some()
+    {
         out.push("TYPHON_ANNOUNCE_PROXY is set in the environment: announces and webseed fetches go through it, whatever mode this page shows.".to_string());
     }
     out
@@ -193,27 +210,52 @@ mod tests {
     }
 
     fn running(c: &Config) -> Vec<(String, Session)> {
-        c.local_engines().into_iter().map(|e| (e.id, e.session)).collect()
+        c.local_engines()
+            .into_iter()
+            .map(|e| (e.id, e.session))
+            .collect()
     }
 
     /// A saved mode is read back as saved, WireGuard included, which the
     /// deduction could never produce.
     #[test]
     fn the_saved_mode_wins_and_an_old_file_is_still_deduced() {
-        assert_eq!(current(&cfg("[network]\nmode = \"wireguard\"\n")), "wireguard");
-        assert_eq!(current(&cfg("[race]\nsocks5_outbound_host = \"10.0.0.1\"\n")), "socks5");
-        assert_eq!(current(&cfg("[race]\nlisten_port_proxy_v2 = 16271\n")), "proxy_v2");
-        assert_eq!(current(&cfg("[hoard]\ngluetun_port_forward = true\n")), "gluetun");
+        assert_eq!(
+            current(&cfg("[network]\nmode = \"wireguard\"\n")),
+            "wireguard"
+        );
+        assert_eq!(
+            current(&cfg("[race]\nsocks5_outbound_host = \"10.0.0.1\"\n")),
+            "socks5"
+        );
+        assert_eq!(
+            current(&cfg("[race]\nlisten_port_proxy_v2 = 16271\n")),
+            "proxy_v2"
+        );
+        assert_eq!(
+            current(&cfg("[hoard]\ngluetun_port_forward = true\n")),
+            "gluetun"
+        );
         assert_eq!(current(&cfg("")), "direct");
-        assert_eq!(current(&cfg("[network]\nmode = \"nonsense\"\n")), "direct", "unknown = deduced");
+        assert_eq!(
+            current(&cfg("[network]\nmode = \"nonsense\"\n")),
+            "direct",
+            "unknown = deduced"
+        );
     }
 
     #[test]
     fn each_mode_clears_what_it_does_not_own() {
         let direct = cleared_keys("direct");
-        assert!(SOCKS5_KEYS.iter().chain(&PROXY_V2_KEYS).chain(&GLUETUN_KEYS).all(|k| direct.contains(k)));
+        assert!(SOCKS5_KEYS
+            .iter()
+            .chain(&PROXY_V2_KEYS)
+            .chain(&GLUETUN_KEYS)
+            .all(|k| direct.contains(k)));
         let socks = cleared_keys("socks5");
-        assert!(!socks.contains(&"socks5_outbound_host") && socks.contains(&"listen_port_proxy_v2"));
+        assert!(
+            !socks.contains(&"socks5_outbound_host") && socks.contains(&"listen_port_proxy_v2")
+        );
         let pv2 = cleared_keys("proxy_v2");
         assert!(!pv2.contains(&"socks5_outbound_host") && !pv2.contains(&"listen_port_proxy_v2"));
         assert!(pv2.contains(&"gluetun_url"));
@@ -221,7 +263,10 @@ mod tests {
         assert!(!gl.contains(&"gluetun_url") && gl.contains(&"socks5_outbound_host"));
         // Any mode but WireGuard switches the tunnels off.
         for m in ["direct", "gluetun", "socks5", "proxy_v2"] {
-            assert!(WIREGUARD_KEYS.iter().all(|k| cleared_keys(m).contains(k)), "{m} keeps a tunnel");
+            assert!(
+                WIREGUARD_KEYS.iter().all(|k| cleared_keys(m).contains(k)),
+                "{m} keeps a tunnel"
+            );
         }
         assert!(!cleared_keys("wireguard").contains(&"wireguard_config"));
     }
@@ -244,10 +289,19 @@ mod tests {
     fn the_dht_going_off_behind_the_proxy_is_said_when_saved() {
         let none = |_: &str| false;
         let proxied = cfg("[race]\nsocks5_outbound_host = \"10.0.0.1\"\n");
-        assert!(warnings(&proxied, &none).iter().any(|w| w == DHT_OFF_BEHIND_PROXY));
+        assert!(warnings(&proxied, &none)
+            .iter()
+            .any(|w| w == DHT_OFF_BEHIND_PROXY));
         let no_dht = cfg("[race]\nsocks5_outbound_host = \"10.0.0.1\"\nenable_dht = false\n[hoard]\nenable_dht = false\n");
-        assert!(!warnings(&no_dht, &none).iter().any(|w| w == DHT_OFF_BEHIND_PROXY), "nothing to turn off");
-        assert!(!warnings(&cfg(""), &none).iter().any(|w| w == DHT_OFF_BEHIND_PROXY));
+        assert!(
+            !warnings(&no_dht, &none)
+                .iter()
+                .any(|w| w == DHT_OFF_BEHIND_PROXY),
+            "nothing to turn off"
+        );
+        assert!(!warnings(&cfg(""), &none)
+            .iter()
+            .any(|w| w == DHT_OFF_BEHIND_PROXY));
     }
 
     /// ⭐ Exact, both ways: an unchanged network needs no restart, any
@@ -256,9 +310,15 @@ mod tests {
     fn a_restart_is_asked_for_exactly_when_the_engines_would_change() {
         let before = cfg("[race]\nlisten_port = 16171\n[hoard]\nlisten_port = 16172\n");
         let run = running(&before);
-        assert!(!restart_required(&before, &run), "same config, nothing to do");
+        assert!(
+            !restart_required(&before, &run),
+            "same config, nothing to do"
+        );
         let mode_only = cfg("[network]\nmode = \"direct\"\n[race]\nlisten_port = 16171\n[hoard]\nlisten_port = 16172\n");
-        assert!(!restart_required(&mode_only, &run), "recording the mode changes no engine");
+        assert!(
+            !restart_required(&mode_only, &run),
+            "recording the mode changes no engine"
+        );
         let socks = cfg("[race]\nlisten_port = 16171\nsocks5_outbound_host = \"10.0.0.1\"\n[hoard]\nlisten_port = 16172\n");
         assert!(restart_required(&socks, &run), "a proxy is set up at boot");
         let port = cfg("[race]\nlisten_port = 16999\n[hoard]\nlisten_port = 16172\n");
@@ -269,12 +329,34 @@ mod tests {
     fn udp_trackers_behind_a_proxy_are_warned_about_when_saved() {
         let none = |_: &str| false;
         let proxied = cfg("[race]\nsocks5_outbound_host = \"10.0.0.1\"\n");
-        assert!(warnings(&proxied, &none).iter().any(|w| w == UDP_BEHIND_PROXY), "UDP is on by default");
-        let udp_off = cfg("[race]\nsocks5_outbound_host = \"10.0.0.1\"\nenable_udp_trackers = false\n\
-                           [hoard]\nenable_udp_trackers = false\n");
-        assert!(!warnings(&udp_off, &none).iter().any(|w| w == UDP_BEHIND_PROXY), "nothing UDP to lose");
+        assert!(
+            warnings(&proxied, &none)
+                .iter()
+                .any(|w| w == UDP_BEHIND_PROXY),
+            "UDP is on by default"
+        );
+        let udp_off = cfg(
+            "[race]\nsocks5_outbound_host = \"10.0.0.1\"\nenable_udp_trackers = false\n\
+                           [hoard]\nenable_udp_trackers = false\n",
+        );
+        assert!(
+            !warnings(&udp_off, &none)
+                .iter()
+                .any(|w| w == UDP_BEHIND_PROXY),
+            "nothing UDP to lose"
+        );
         let some = |id: &str| id == "race";
-        assert!(warnings(&udp_off, &some).iter().any(|w| w == UDP_BEHIND_PROXY), "but torrents that list one");
-        assert!(!warnings(&cfg(""), &some).iter().any(|w| w == UDP_BEHIND_PROXY), "no proxy, no warning");
+        assert!(
+            warnings(&udp_off, &some)
+                .iter()
+                .any(|w| w == UDP_BEHIND_PROXY),
+            "but torrents that list one"
+        );
+        assert!(
+            !warnings(&cfg(""), &some)
+                .iter()
+                .any(|w| w == UDP_BEHIND_PROXY),
+            "no proxy, no warning"
+        );
     }
 }

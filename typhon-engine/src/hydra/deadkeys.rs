@@ -59,11 +59,21 @@ const NODES: &str = "enrol that machine as a node: install.sh --register-to <url
                      (the Nodes page gives the full command)";
 
 const fn dead(scope: Scope, why: &'static str, instead: &'static str) -> DeadKey {
-    DeadKey { scope, why, instead, only_if_set: false }
+    DeadKey {
+        scope,
+        why,
+        instead,
+        only_if_set: false,
+    }
 }
 
 const fn dead_if_set(scope: Scope, why: &'static str, instead: &'static str) -> DeadKey {
-    DeadKey { scope, why, instead, only_if_set: true }
+    DeadKey {
+        scope,
+        why,
+        instead,
+        only_if_set: true,
+    }
 }
 
 /// Every key Hydranos accepts and ignores.
@@ -171,7 +181,10 @@ pub const DEAD_KEYS: &[DeadKey] = &[
 ];
 
 fn message(location: &str, key: &DeadKey) -> String {
-    format!("config: {location} is ignored: {}. Instead: {}.", key.why, key.instead)
+    format!(
+        "config: {location} is ignored: {}. Instead: {}.",
+        key.why, key.instead
+    )
 }
 
 fn is_set_toml(v: &Value) -> bool {
@@ -202,12 +215,16 @@ fn is_set_json(v: &serde_json::Value) -> bool {
 fn blocks(root: &toml::value::Table) -> Vec<(String, &toml::value::Table)> {
     let mut out = Vec::new();
     for kind in ["agent", "engine"] {
-        let Some(Value::Array(list)) = root.get(kind) else { continue };
+        let Some(Value::Array(list)) = root.get(kind) else {
+            continue;
+        };
         for (i, item) in list.iter().enumerate() {
             let Value::Table(t) = item else { continue };
-            let named = ["name", "engine_id"]
-                .iter()
-                .find_map(|k| t.get(*k).and_then(Value::as_str).filter(|s| !s.trim().is_empty()));
+            let named = ["name", "engine_id"].iter().find_map(|k| {
+                t.get(*k)
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.trim().is_empty())
+            });
             let label = match named {
                 Some(n) => format!("[[{kind}]] {n:?}"),
                 None => format!("[[{kind}]] #{}", i + 1),
@@ -242,7 +259,11 @@ pub fn config_warnings(raw: &str) -> Vec<String> {
                     cur = cur.and_then(|v| v.get(p));
                 }
                 if let Some(v) = cur {
-                    let location = if v.is_table() { format!("[{path}]") } else { path.to_string() };
+                    let location = if v.is_table() {
+                        format!("[{path}]")
+                    } else {
+                        path.to_string()
+                    };
                     hit(location, v);
                 }
             }
@@ -283,14 +304,22 @@ pub fn category_warnings(doc: &str) -> Vec<String> {
     };
     let mut out = Vec::new();
     for key in DEAD_KEYS {
-        let Scope::Category(field) = key.scope else { continue };
+        let Scope::Category(field) = key.scope else {
+            continue;
+        };
         let names: Vec<&str> = cats
             .iter()
-            .filter(|(_, c)| c.get(field).is_some_and(|v| !key.only_if_set || is_set_json(v)))
+            .filter(|(_, c)| {
+                c.get(field)
+                    .is_some_and(|v| !key.only_if_set || is_set_json(v))
+            })
             .map(|(name, _)| name.as_str())
             .collect();
         if !names.is_empty() {
-            out.push(message(&format!("category field `{field}` (in {})", names.join(", ")), key));
+            out.push(message(
+                &format!("category field `{field}` (in {})", names.join(", ")),
+                key,
+            ));
         }
     }
     out
@@ -298,7 +327,9 @@ pub fn category_warnings(doc: &str) -> Vec<String> {
 
 /// Log every dead key of the config file once.
 pub fn warn_config(path: &std::path::Path) {
-    let Ok(raw) = std::fs::read_to_string(path) else { return };
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return;
+    };
     for w in config_warnings(&raw) {
         tracing::warn!("{w}");
     }
@@ -335,7 +366,10 @@ mod tests {
         assert_eq!(cfg.race.listen_port, 16171);
         assert_eq!(cfg.hoard.listen_port, 16172);
         // LSD is read, and written out as the documented per-role default.
-        assert_eq!((cfg.race.enable_lsd, cfg.hoard.enable_lsd), (Some(true), Some(false)));
+        assert_eq!(
+            (cfg.race.enable_lsd, cfg.hoard.enable_lsd),
+            (Some(true), Some(false))
+        );
     }
 
     /// A top-level option documented in the template as a commented line is
@@ -346,7 +380,8 @@ mod tests {
         let line = "# announce_cleartext_passkey = \"warn\"";
         assert!(TEMPLATE.contains(line), "the template documents the option");
         let edited = TEMPLATE.replace(line, "announce_cleartext_passkey = \"refuse\"");
-        let cfg: crate::config::Config = toml::from_str(&edited).expect("the edited template parses");
+        let cfg: crate::config::Config =
+            toml::from_str(&edited).expect("the edited template parses");
         assert_eq!(cfg.announce_cleartext_passkey, "refuse");
     }
 
@@ -438,15 +473,25 @@ id = "race-0"
             "race_drain.min_age_minutes",
         ];
         for loc in expect {
-            let n = w.iter().filter(|m| m.starts_with(&format!("config: {loc} is ignored"))).count();
+            let n = w
+                .iter()
+                .filter(|m| m.starts_with(&format!("config: {loc} is ignored")))
+                .count();
             assert_eq!(n, 1, "{loc} warned {n} times in {w:#?}");
         }
-        assert_eq!(w.len(), expect.len(), "nothing else is warned about: {w:#?}");
+        assert_eq!(
+            w.len(),
+            expect.len(),
+            "nothing else is warned about: {w:#?}"
+        );
         // The remote agent is told where multi-machine went.
         let addr = w.iter().find(|m| m.contains("\"de-1\" addr")).unwrap();
         assert!(addr.contains("install.sh --register-to"), "{addr}");
         // The reason and the replacement are both in the line.
-        let li = w.iter().find(|m| m.contains("race.listen_interfaces")).unwrap();
+        let li = w
+            .iter()
+            .find(|m| m.contains("race.listen_interfaces"))
+            .unwrap();
         assert!(li.contains("bind_interface"), "{li}");
     }
 
@@ -488,7 +533,11 @@ socks5_host = "10.0.0.1"
                    [engine.session]\nlisten_port = 26991\nlisten_interfaces = \"10.0.0.2:26991\"\n";
         let w = config_warnings(raw);
         assert_eq!(w.len(), 1, "{w:#?}");
-        assert!(w[0].starts_with("config: [[engine]] \"vpn7\" session.listen_interfaces is ignored"), "{}", w[0]);
+        assert!(
+            w[0].starts_with("config: [[engine]] \"vpn7\" session.listen_interfaces is ignored"),
+            "{}",
+            w[0]
+        );
     }
 
     #[test]
@@ -507,8 +556,15 @@ socks5_host = "10.0.0.1"
         }"#;
         let w = category_warnings(doc);
         assert_eq!(w.len(), 2, "{w:#?}");
-        assert!(w.iter().any(|m| m.contains("`strategy` (in films, series)")), "{w:#?}");
-        assert!(w.iter().any(|m| m.contains("`placement` (in series)")), "{w:#?}");
+        assert!(
+            w.iter()
+                .any(|m| m.contains("`strategy` (in films, series)")),
+            "{w:#?}"
+        );
+        assert!(
+            w.iter().any(|m| m.contains("`placement` (in series)")),
+            "{w:#?}"
+        );
         assert!(category_warnings("{}").is_empty());
         assert!(category_warnings("not json").is_empty());
     }
@@ -520,7 +576,9 @@ socks5_host = "10.0.0.1"
     #[test]
     fn the_settings_editor_hides_every_dead_config_key() {
         let js = include_str!("../../../web/static/app.js");
-        let start = js.find("const _DEAD_SETTINGS").expect("app.js has _DEAD_SETTINGS");
+        let start = js
+            .find("const _DEAD_SETTINGS")
+            .expect("app.js has _DEAD_SETTINGS");
         let list = &js[start..start + js[start..].find("]);").expect("list ends")];
         for k in DEAD_KEYS {
             let wanted: Vec<String> = match k.scope {
@@ -532,7 +590,11 @@ socks5_host = "10.0.0.1"
                     .iter()
                     .map(|s| {
                         let (key, table) = (format!("\"{s}::{name}\""), format!("\"{s}.{name}\""));
-                        if list.contains(&key) { key } else { table }
+                        if list.contains(&key) {
+                            key
+                        } else {
+                            table
+                        }
                     })
                     .collect(),
                 Scope::Block(_) | Scope::Category(_) => continue,

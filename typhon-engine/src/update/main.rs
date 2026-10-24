@@ -43,7 +43,13 @@ struct Args {
 }
 
 fn parse() -> Args {
-    let mut a = Args { dir: PathBuf::from("."), config: None, tag: None, check: false, yes: false };
+    let mut a = Args {
+        dir: PathBuf::from("."),
+        config: None,
+        tag: None,
+        check: false,
+        yes: false,
+    };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -82,7 +88,10 @@ checksum published beside it.";
 
 fn run() -> Result<(), String> {
     let args = parse();
-    let config = args.config.clone().unwrap_or_else(|| args.dir.join("default.toml"));
+    let config = args
+        .config
+        .clone()
+        .unwrap_or_else(|| args.dir.join("default.toml"));
     let route = route_from(&config)?;
     if !route.is_direct() || route.kill_switch {
         println!("network: {}", route.describe());
@@ -113,7 +122,11 @@ fn run() -> Result<(), String> {
             asset.name, asset.size
         ));
     }
-    println!("downloading {} ({:.1} MB)", asset.name, asset.size as f64 / 1e6);
+    println!(
+        "downloading {} ({:.1} MB)",
+        asset.name,
+        asset.size as f64 / 1e6
+    );
 
     let bytes = get_bytes(&asset.url)?;
     let want = expected_sha(&latest, &asset.name)?;
@@ -170,11 +183,16 @@ fn release_url(tag: Option<&str>) -> Result<String, String> {
         };
         let numbers = core.split('.').collect::<Vec<_>>();
         let core_ok = numbers.len() == 3
-            && numbers.iter().all(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
-        let suffix_ok = suffix
-            .is_none_or(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.'));
+            && numbers
+                .iter()
+                .all(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+        let suffix_ok = suffix.is_none_or(|s| {
+            !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.')
+        });
         if !core_ok || !suffix_ok {
-            return Err(format!("--tag {t:?} is not a release tag (expected vX.Y.Z)"));
+            return Err(format!(
+                "--tag {t:?} is not a release tag (expected vX.Y.Z)"
+            ));
         }
     }
     Ok(match tag {
@@ -191,7 +209,10 @@ fn resolve(tag: Option<&str>) -> Result<Release, String> {
     if let Some(msg) = v.get("message").and_then(|m| m.as_str()) {
         return Err(format!("GitHub says: {msg}"));
     }
-    let tag = v["tag_name"].as_str().ok_or("the release has no tag")?.to_string();
+    let tag = v["tag_name"]
+        .as_str()
+        .ok_or("the release has no tag")?
+        .to_string();
     let assets = v["assets"]
         .as_array()
         .map(|a| {
@@ -218,7 +239,9 @@ fn asset_url_ok(url: &str) -> Result<(), String> {
     if u.scheme() == "https" && u.host_str() == Some("github.com") {
         Ok(())
     } else {
-        Err(format!("{url:?} is not a github.com address -- refusing to download from it"))
+        Err(format!(
+            "{url:?} is not a github.com address -- refusing to download from it"
+        ))
     }
 }
 
@@ -228,22 +251,28 @@ fn pick_asset(r: &Release) -> Result<Asset, String> {
     let want_ext = if cfg!(windows) { ".zip" } else { ".tar.gz" };
     r.assets
         .iter()
-        .find(|a| {
-            a.name.contains(os) && a.name.contains(arch) && a.name.ends_with(want_ext)
-        })
+        .find(|a| a.name.contains(os) && a.name.contains(arch) && a.name.ends_with(want_ext))
         .cloned()
         .ok_or_else(|| {
             format!(
                 "release {} publishes nothing for {os}-{arch}{want_ext}\n  it has: {}",
                 r.tag,
-                r.assets.iter().map(|a| a.name.as_str()).collect::<Vec<_>>().join(", ")
+                r.assets
+                    .iter()
+                    .map(|a| a.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             )
         })
         .and_then(|a| asset_url_ok(&a.url).map(|()| a))
 }
 
 fn platform_os() -> &'static str {
-    if cfg!(windows) { "windows" } else { "linux" }
+    if cfg!(windows) {
+        "windows"
+    } else {
+        "linux"
+    }
 }
 
 fn platform_arch() -> &'static str {
@@ -256,11 +285,9 @@ fn platform_arch() -> &'static str {
 /// The published checksum, read from the `.sha256` beside the archive.
 fn expected_sha(r: &Release, archive: &str) -> Result<String, String> {
     let name = format!("{archive}.sha256");
-    let a = r
-        .assets
-        .iter()
-        .find(|a| a.name == name)
-        .ok_or_else(|| format!("no {name} published beside the archive -- refusing to install unverified bytes"))?;
+    let a = r.assets.iter().find(|a| a.name == name).ok_or_else(|| {
+        format!("no {name} published beside the archive -- refusing to install unverified bytes")
+    })?;
     asset_url_ok(&a.url)?;
     let text = get_text(&a.url)?;
     sha_from_text(&text).ok_or_else(|| format!("{name} does not hold a sha256"))
@@ -303,22 +330,38 @@ fn route_from(path: &Path) -> Result<typhon_engine::egress::Route, String> {
 
 fn resolve_file(v: &toml::Value) -> typhon_engine::egress::Resolved {
     use typhon_engine::egress::{EngineExit, Route};
-    let s = |t: &toml::Value, k: &str| t.get(k).and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+    let s = |t: &toml::Value, k: &str| {
+        t.get(k)
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string()
+    };
     let n = |t: &toml::Value, k: &str| t.get(k).and_then(|x| x.as_integer()).unwrap_or(0);
     let b = |t: &toml::Value, k: &str| t.get(k).and_then(|x| x.as_bool());
     let empty = toml::Value::Table(Default::default());
     let section = |k: &str| v.get(k).cloned().unwrap_or_else(|| empty.clone());
-    let (daemon, proxy, race, hoard) = (section("daemon"), section("proxy"), section("race"), section("hoard"));
+    let (daemon, proxy, race, hoard) = (
+        section("daemon"),
+        section("proxy"),
+        section("race"),
+        section("hoard"),
+    );
 
     // The mode as saved, else the daemon's pre-4.4 deduction.
     let saved = v.get("network").map(|t| s(t, "mode")).unwrap_or_default();
-    let mode = if ["direct", "wireguard", "gluetun", "socks5", "proxy_v2"].contains(&saved.as_str()) {
+    let mode = if ["direct", "wireguard", "gluetun", "socks5", "proxy_v2"].contains(&saved.as_str())
+    {
         saved
-    } else if b(&race, "gluetun_port_forward") == Some(true) || b(&hoard, "gluetun_port_forward") == Some(true) {
+    } else if b(&race, "gluetun_port_forward") == Some(true)
+        || b(&hoard, "gluetun_port_forward") == Some(true)
+    {
         "gluetun".into()
     } else if n(&race, "listen_port_proxy_v2") != 0 || n(&hoard, "listen_port_proxy_v2") != 0 {
         "proxy_v2".into()
-    } else if !s(&race, "socks5_outbound_host").is_empty() || !s(&hoard, "socks5_outbound_host").is_empty() {
+    } else if !s(&race, "socks5_outbound_host").is_empty()
+        || !s(&hoard, "socks5_outbound_host").is_empty()
+    {
         "socks5".into()
     } else {
         "direct".into()
@@ -326,19 +369,34 @@ fn resolve_file(v: &toml::Value) -> typhon_engine::egress::Resolved {
     let armed = b(&daemon, "kill_switch").unwrap_or(mode != "direct");
 
     // The engines: race, hoard, then the local blocks over their role.
-    let mut engines: Vec<(String, toml::Value)> = vec![("race".into(), race.clone()), ("hoard".into(), hoard.clone())];
+    let mut engines: Vec<(String, toml::Value)> = vec![
+        ("race".into(), race.clone()),
+        ("hoard".into(), hoard.clone()),
+    ];
     for list in ["agent", "engine"] {
         for a in v.get(list).and_then(|x| x.as_array()).into_iter().flatten() {
             let role = s(a, "role");
             if !s(a, "addr").is_empty() || (role != "race" && role != "hoard") {
                 continue;
             }
-            let id = if s(a, "engine_id").is_empty() { s(a, "name") } else { s(a, "engine_id") };
+            let id = if s(a, "engine_id").is_empty() {
+                s(a, "name")
+            } else {
+                s(a, "engine_id")
+            };
             if id.is_empty() {
                 continue;
             }
-            let mut merged = if role == "race" { race.clone() } else { hoard.clone() };
-            let own = a.get("session").and_then(|x| x.as_table()).cloned().unwrap_or_default();
+            let mut merged = if role == "race" {
+                race.clone()
+            } else {
+                hoard.clone()
+            };
+            let own = a
+                .get("session")
+                .and_then(|x| x.as_table())
+                .cloned()
+                .unwrap_or_default();
             if let Some(m) = merged.as_table_mut() {
                 // An extra engine has neither its role's tunnel nor its
                 // role's "direct on purpose" (`Config::local_engines`).
@@ -357,8 +415,14 @@ fn resolve_file(v: &toml::Value) -> typhon_engine::egress::Resolved {
     let exits: Vec<EngineExit> = engines
         .iter()
         .map(|(id, t)| {
-            let tunnelled = mode == "wireguard" && b(t, "wireguard_enabled") == Some(true) && !s(t, "wireguard_config").is_empty();
-            let iface = if tunnelled { typhon_engine::egress::tunnel_device(id) } else { s(t, "bind_interface") };
+            let tunnelled = mode == "wireguard"
+                && b(t, "wireguard_enabled") == Some(true)
+                && !s(t, "wireguard_config").is_empty();
+            let iface = if tunnelled {
+                typhon_engine::egress::tunnel_device(id)
+            } else {
+                s(t, "bind_interface")
+            };
             let host = s(t, "socks5_outbound_host");
             let route = (tunnelled || !iface.is_empty() || !host.is_empty()).then(|| {
                 Route::new(
@@ -370,12 +434,22 @@ fn resolve_file(v: &toml::Value) -> typhon_engine::egress::Resolved {
                     false,
                 )
             });
-            let direct = b(t, "allow_direct") == Some(true) || (mode == "wireguard" && b(t, "wireguard_enabled") == Some(false));
+            let direct = b(t, "allow_direct") == Some(true)
+                || (mode == "wireguard" && b(t, "wireguard_enabled") == Some(false));
             let blocked = (armed
                 && !direct
-                && if mode == "wireguard" { !tunnelled } else { route.is_none() && mode != "gluetun" })
-                .then(|| "no way out of its own, and not marked direct".to_string());
-            EngineExit { id: id.clone(), route, tunnelled, blocked }
+                && if mode == "wireguard" {
+                    !tunnelled
+                } else {
+                    route.is_none() && mode != "gluetun"
+                })
+            .then(|| "no way out of its own, and not marked direct".to_string());
+            EngineExit {
+                id: id.clone(),
+                route,
+                tunnelled,
+                blocked,
+            }
         })
         .collect();
     let proxy_route = Route::new(
@@ -430,7 +504,9 @@ fn get_bytes(url: &str) -> Result<Vec<u8>, String> {
 /// Everything `r` holds, refused past `max` bytes rather than buffered.
 fn read_capped(r: impl Read, max: u64) -> Result<Vec<u8>, String> {
     let mut out = Vec::new();
-    r.take(max + 1).read_to_end(&mut out).map_err(|e| e.to_string())?;
+    r.take(max + 1)
+        .read_to_end(&mut out)
+        .map_err(|e| e.to_string())?;
     if out.len() as u64 > max {
         return Err(format!("more than {max} bytes, refused"));
     }
@@ -456,8 +532,12 @@ fn sha256_hex(data: &[u8]) -> String {
 fn is_ours(name: &str) -> bool {
     matches!(
         name,
-        "hydranos" | "hydranos.exe" | "hydranos-engine" | "hydranos-engine.exe"
-            | "hydranos-update" | "hydranos-update.exe"
+        "hydranos"
+            | "hydranos.exe"
+            | "hydranos-engine"
+            | "hydranos-engine.exe"
+            | "hydranos-update"
+            | "hydranos-update.exe"
     )
 }
 
@@ -472,32 +552,50 @@ fn unpack(bytes: &[u8], name: &str) -> Result<Vec<(String, Vec<u8>)>, String> {
         let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes))
             .map_err(|e| format!("the archive is not a zip: {e}"))?;
         for i in 0..zip.len() {
-            let mut f = zip.by_index(i).map_err(|e| format!("reading the zip: {e}"))?;
+            let mut f = zip
+                .by_index(i)
+                .map_err(|e| format!("reading the zip: {e}"))?;
             // zip 9: `name()` is fallible (a name that is not valid text is not ours).
-            let Some(base) = f.name().ok().and_then(|n| n.rsplit(['/', '\\']).next().map(str::to_string)) else {
+            let Some(base) = f
+                .name()
+                .ok()
+                .and_then(|n| n.rsplit(['/', '\\']).next().map(str::to_string))
+            else {
                 continue;
             };
             if !is_ours(&base) {
                 continue;
             }
             let mut buf = Vec::new();
-            f.read_to_end(&mut buf).map_err(|e| format!("extracting {base}: {e}"))?;
+            f.read_to_end(&mut buf)
+                .map_err(|e| format!("extracting {base}: {e}"))?;
             out.push((base, buf));
         }
     } else {
         let gz = flate2::read::GzDecoder::new(bytes);
         let mut tar = tar::Archive::new(gz);
-        for entry in tar.entries().map_err(|e| format!("reading the tarball: {e}"))? {
+        for entry in tar
+            .entries()
+            .map_err(|e| format!("reading the tarball: {e}"))?
+        {
             let mut entry = entry.map_err(|e| format!("reading the tarball: {e}"))?;
-            let path = entry.path().map_err(|e| format!("a tar entry has no path: {e}"))?;
-            let Some(base) = path.file_name().and_then(|s| s.to_str()).map(str::to_string) else {
+            let path = entry
+                .path()
+                .map_err(|e| format!("a tar entry has no path: {e}"))?;
+            let Some(base) = path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .map(str::to_string)
+            else {
                 continue;
             };
             if !is_ours(&base) {
                 continue;
             }
             let mut buf = Vec::new();
-            entry.read_to_end(&mut buf).map_err(|e| format!("extracting {base}: {e}"))?;
+            entry
+                .read_to_end(&mut buf)
+                .map_err(|e| format!("extracting {base}: {e}"))?;
             out.push((base, buf));
         }
     }
@@ -562,7 +660,10 @@ fn signal_stop_event() -> bool {
     use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::System::Threading::{OpenEventW, SetEvent, EVENT_MODIFY_STATE};
     // Same name as `shutdown::STOP_EVENT` in the daemon.
-    let name: Vec<u16> = "Local\\HydranosStop".encode_utf16().chain(std::iter::once(0)).collect();
+    let name: Vec<u16> = "Local\\HydranosStop"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
     unsafe {
         let h = OpenEventW(EVENT_MODIFY_STATE, 0, name.as_ptr());
         if h.is_null() {
@@ -595,7 +696,10 @@ fn swap(dir: &Path, staged: &[(String, Vec<u8>)]) -> Result<(), String> {
         if let Err(e) = write_exe(&target, bytes) {
             // Put it back rather than leave the install without a daemon.
             let _ = std::fs::rename(&backup, &target);
-            return Err(format!("writing {}: {e} -- the old binary is back", target.display()));
+            return Err(format!(
+                "writing {}: {e} -- the old binary is back",
+                target.display()
+            ));
         }
         done.push(backup);
         println!("  replaced {name}");
@@ -624,8 +728,15 @@ fn write_exe(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 
 /// What is installed, asked of the binary itself.
 fn installed_version(dir: &Path) -> Option<String> {
-    let exe = dir.join(if cfg!(windows) { "hydranos.exe" } else { "hydranos" });
-    let out = std::process::Command::new(&exe).arg("--version").output().ok()?;
+    let exe = dir.join(if cfg!(windows) {
+        "hydranos.exe"
+    } else {
+        "hydranos"
+    });
+    let out = std::process::Command::new(&exe)
+        .arg("--version")
+        .output()
+        .ok()?;
     let text = String::from_utf8_lossy(&out.stdout);
     // "hydranos 4.1.7"
     text.split_whitespace().nth(1).map(str::to_string)
@@ -638,7 +749,10 @@ fn confirm(tag: &str) -> Result<bool, String> {
     std::io::stdin()
         .read_line(&mut line)
         .map_err(|e| format!("cannot read the answer: {e}"))?;
-    Ok(matches!(line.trim().to_lowercase().as_str(), "y" | "yes" | "o" | "oui"))
+    Ok(matches!(
+        line.trim().to_lowercase().as_str(),
+        "y" | "yes" | "o" | "oui"
+    ))
 }
 
 #[cfg(test)]
@@ -670,7 +784,10 @@ mod tests {
             "file:///etc/passwd",
             "not a url",
         ] {
-            assert!(pick_asset(&release_with(bad)).is_err(), "{bad:?} must be refused");
+            assert!(
+                pick_asset(&release_with(bad)).is_err(),
+                "{bad:?} must be refused"
+            );
         }
         // The checksum comes from the same list, so it gets the same refusal
         // (and before any request is made).
@@ -701,14 +818,24 @@ mod tests {
         assert!(release_url(Some("4.5.0")).is_ok());
         assert!(release_url(Some("v4.4.0-rc8")).is_ok());
         assert!(release_url(None).unwrap().ends_with("/releases/latest"));
-        for bad in ["../../../user/repos", "v4.4.4/../../x", "v4.4.4?x=1", "v4.4.4#", "", "latest", "v4.4", "v4.4.4 "] {
+        for bad in [
+            "../../../user/repos",
+            "v4.4.4/../../x",
+            "v4.4.4?x=1",
+            "v4.4.4#",
+            "",
+            "latest",
+            "v4.4",
+            "v4.4.4 ",
+        ] {
             assert!(release_url(Some(bad)).is_err(), "{bad:?} must be refused");
         }
     }
 
     #[test]
     fn the_updater_leaves_the_way_the_daemon_does() {
-        let path = std::env::temp_dir().join(format!("hydranos-update-route-{}.toml", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("hydranos-update-route-{}.toml", std::process::id()));
         std::fs::write(
             &path,
             "[daemon]\negress = \"proxy\"\nbind_interface = \"wg0\"\nkill_switch = true\n[proxy]\nsocks5_host = \"10.0.0.1\"\nsocks5_port = 1080\n",
@@ -727,7 +854,9 @@ mod tests {
         assert!(route_from(&path).is_err());
         let _ = std::fs::remove_file(&path);
         // No file: the default route, as before.
-        assert!(route_from(Path::new("/nonexistent/default.toml")).unwrap().is_direct());
+        assert!(route_from(Path::new("/nonexistent/default.toml"))
+            .unwrap()
+            .is_direct());
     }
 
     fn resolved(text: &str) -> typhon_engine::egress::Resolved {
@@ -746,10 +875,18 @@ mod tests {
         let wg = resolved(
             "[network]\nmode = \"wireguard\"\n[race]\nwireguard_enabled = true\nwireguard_config = \"a.conf\"\n",
         );
-        assert_eq!((wg.kind, wg.route.interface.as_str()), ("engine_tunnel", "wg-race"));
+        assert_eq!(
+            (wg.kind, wg.route.interface.as_str()),
+            ("engine_tunnel", "wg-race")
+        );
         assert!(wg.route.kill_switch);
-        let socks = resolved("[network]\nmode = \"socks5\"\n[hoard]\nsocks5_outbound_host = \"10.0.0.2\"\n");
-        assert_eq!(socks.route.proxy, "socks5h://10.0.0.2:1080", "the first engine with a proxy");
+        let socks = resolved(
+            "[network]\nmode = \"socks5\"\n[hoard]\nsocks5_outbound_host = \"10.0.0.2\"\n",
+        );
+        assert_eq!(
+            socks.route.proxy, "socks5h://10.0.0.2:1080",
+            "the first engine with a proxy"
+        );
         let none = resolved("[network]\nmode = \"wireguard\"\n");
         assert_eq!(none.kind, "refused");
         assert!(typhon_engine::egress::blocking_client_for(&none.route).is_err());
@@ -762,27 +899,46 @@ mod tests {
     #[test]
     fn an_old_config_without_a_saved_mode_has_its_mode_deduced_like_the_daemon_does() {
         let gluetun = resolved("[race]\ngluetun_port_forward = true\n");
-        assert_eq!(gluetun.kind, "gluetun", "inside gluetun the default route is the tunnel");
+        assert_eq!(
+            gluetun.kind, "gluetun",
+            "inside gluetun the default route is the tunnel"
+        );
         let hoard_gluetun = resolved("[hoard]\ngluetun_port_forward = true\n");
-        assert_eq!(hoard_gluetun.kind, "gluetun", "either engine's flag will do");
+        assert_eq!(
+            hoard_gluetun.kind, "gluetun",
+            "either engine's flag will do"
+        );
 
         let v2 = resolved("[hoard]\nlisten_port_proxy_v2 = 9000\nsocks5_outbound_host = \"10.0.0.3\"\nsocks5_outbound_port = 1081\n");
         assert_eq!((v2.kind, v2.engine.as_str()), ("engine_proxy", "hoard"));
         assert_eq!(v2.route.proxy, "socks5h://10.0.0.3:1081");
-        assert!(v2.route.kill_switch, "a non-direct mode arms the kill switch unless the file says otherwise");
+        assert!(
+            v2.route.kill_switch,
+            "a non-direct mode arms the kill switch unless the file says otherwise"
+        );
 
         let socks = resolved("[race]\nsocks5_outbound_host = \"10.0.0.2\"\n");
-        assert_eq!((socks.kind, socks.engine.as_str()), ("engine_proxy", "race"));
-        assert_eq!(socks.route.proxy, "socks5h://10.0.0.2:1080", "the default port");
+        assert_eq!(
+            (socks.kind, socks.engine.as_str()),
+            ("engine_proxy", "race")
+        );
+        assert_eq!(
+            socks.route.proxy, "socks5h://10.0.0.2:1080",
+            "the default port"
+        );
     }
 
     #[test]
     fn a_saved_mode_beats_what_the_engines_sections_suggest() {
         let r = resolved("[network]\nmode = \"direct\"\n[race]\ngluetun_port_forward = true\nsocks5_outbound_host = \"10.0.0.2\"\n");
         assert_eq!(r.kind, "direct");
-        assert!(r.route.is_direct() && !r.route.kill_switch, "direct mode is not armed by default");
+        assert!(
+            r.route.is_direct() && !r.route.kill_switch,
+            "direct mode is not armed by default"
+        );
         // An unknown saved mode is not a mode: the deduction takes over.
-        let unknown = resolved("[network]\nmode = \"carrier_pigeon\"\n[race]\ngluetun_port_forward = true\n");
+        let unknown =
+            resolved("[network]\nmode = \"carrier_pigeon\"\n[race]\ngluetun_port_forward = true\n");
         assert_eq!(unknown.kind, "gluetun");
     }
 
@@ -791,7 +947,10 @@ mod tests {
         let r = resolved("[daemon]\negress = \"direct\"\nbind_interface = \"eth9\"\n[network]\nmode = \"socks5\"\n");
         assert_eq!(r.kind, "direct");
         assert_eq!(r.route.interface, "eth9");
-        assert!(!r.route.kill_switch, "an explicit direct is a choice, not a refusal");
+        assert!(
+            !r.route.kill_switch,
+            "an explicit direct is a choice, not a refusal"
+        );
     }
 
     // ---- the engines a way out can be borrowed from ----
@@ -809,7 +968,11 @@ mod tests {
             "[daemon]\negress = \"engine:vpn1\"\n[network]\nmode = \"socks5\"\n[[agent]]\nname = \"vpn1\"\nrole = \"hoard\"\n\
              [agent.session]\nsocks5_outbound_host = \"10.0.0.8\"\n",
         );
-        assert_eq!((named.kind, named.engine.as_str()), ("engine_proxy", "vpn1"), "[[agent]] blocks count as well, named by `name`");
+        assert_eq!(
+            (named.kind, named.engine.as_str()),
+            ("engine_proxy", "vpn1"),
+            "[[agent]] blocks count as well, named by `name`"
+        );
         assert_eq!(named.route.proxy, "socks5h://10.0.0.8:1080");
     }
 
@@ -821,8 +984,15 @@ mod tests {
             "[daemon]\negress = \"engine:race\"\n[network]\nmode = \"socks5\"\n[race]\nsocks5_outbound_host = \"10.0.0.2\"\n\
              [[engine]]\nengine_id = \"race\"\nrole = \"race\"\n[engine.session]\nbind_interface = \"wg9\"\n",
         );
-        assert_eq!((r.kind, r.engine.as_str()), ("engine_proxy", "race"), "the role's proxy is kept under the block's settings");
-        assert_eq!(r.route.interface, "wg9", "and the block's own device is laid over it");
+        assert_eq!(
+            (r.kind, r.engine.as_str()),
+            ("engine_proxy", "race"),
+            "the role's proxy is kept under the block's settings"
+        );
+        assert_eq!(
+            r.route.interface, "wg9",
+            "and the block's own device is laid over it"
+        );
         assert_eq!(r.route.proxy, "socks5h://10.0.0.2:1080");
     }
 
@@ -837,8 +1007,15 @@ mod tests {
         assert_eq!((race.kind, race.engine.as_str()), ("engine_direct", "race"));
         let vpn1 = resolved(&format!("[daemon]\negress = \"engine:vpn1\"\n{toml}"));
         assert_eq!(vpn1.kind, "refused");
-        assert!(vpn1.via.contains("vpn1") && vpn1.via.contains("blocked by the kill switch"), "{}", vpn1.via);
-        assert!(typhon_engine::egress::blocking_client_for(&vpn1.route).is_err(), "and nothing is downloaded through it");
+        assert!(
+            vpn1.via.contains("vpn1") && vpn1.via.contains("blocked by the kill switch"),
+            "{}",
+            vpn1.via
+        );
+        assert!(
+            typhon_engine::egress::blocking_client_for(&vpn1.route).is_err(),
+            "and nothing is downloaded through it"
+        );
     }
 
     #[test]
@@ -848,7 +1025,9 @@ mod tests {
             "[[agent]]\nname = \"far\"\nrole = \"watcher\"\n",
             "[[agent]]\nrole = \"race\"\n",
         ] {
-            let r = resolved(&format!("[daemon]\negress = \"engine:far\"\n[network]\nmode = \"socks5\"\n{block}"));
+            let r = resolved(&format!(
+                "[daemon]\negress = \"engine:far\"\n[network]\nmode = \"socks5\"\n{block}"
+            ));
             assert_eq!(r.kind, "refused", "{block}");
             assert!(r.via.contains("does not run"), "{}", r.via);
         }
@@ -862,13 +1041,22 @@ mod tests {
              [engine.session]\nwireguard_enabled = true\nwireguard_config = \"vpn1.conf\"\n",
         );
         assert_eq!((r.kind, r.engine.as_str()), ("engine_tunnel", "vpn1"));
-        assert_eq!(r.route.interface, typhon_engine::egress::tunnel_device("vpn1"));
+        assert_eq!(
+            r.route.interface,
+            typhon_engine::egress::tunnel_device("vpn1")
+        );
         assert!(r.route.kill_switch);
         // A tunnel turned off on purpose is a way to go direct, not a hole.
         let off = resolved("[network]\nmode = \"wireguard\"\n[race]\nwireguard_enabled = false\n");
-        assert_eq!(off.kind, "refused", "auto in WireGuard mode wants a tunnel to lend; a direct engine is not one");
+        assert_eq!(
+            off.kind, "refused",
+            "auto in WireGuard mode wants a tunnel to lend; a direct engine is not one"
+        );
         let named = resolved("[daemon]\negress = \"engine:race\"\n[network]\nmode = \"wireguard\"\n[race]\nwireguard_enabled = false\n");
-        assert_eq!((named.kind, named.engine.as_str()), ("engine_direct", "race"));
+        assert_eq!(
+            (named.kind, named.engine.as_str()),
+            ("engine_direct", "race")
+        );
     }
 
     // ---- the deductions of the mode and of the engines' exits ----
@@ -880,10 +1068,17 @@ mod tests {
     fn either_engines_proxy_v2_listener_deduces_the_proxy_v2_mode() {
         for section in ["race", "hoard"] {
             let r = resolved(&format!("[{section}]\nlisten_port_proxy_v2 = 9000\n"));
-            assert_eq!(r.kind, "refused", "[{section}] alone: proxy_v2 mode, armed, and no proxy to lend");
+            assert_eq!(
+                r.kind, "refused",
+                "[{section}] alone: proxy_v2 mode, armed, and no proxy to lend"
+            );
             assert!(r.route.kill_switch);
         }
-        assert_eq!(resolved("[race]\nlisten_port_proxy_v2 = 0\n").kind, "direct", "a zero port is no listener");
+        assert_eq!(
+            resolved("[race]\nlisten_port_proxy_v2 = 0\n").kind,
+            "direct",
+            "a zero port is no listener"
+        );
     }
 
     /// A block named like a role's engine IS that engine: it keeps the role's
@@ -896,14 +1091,25 @@ mod tests {
                 "[daemon]\negress = \"engine:{role}\"\n[network]\nmode = \"socks5\"\n[{role}]\nallow_direct = true\n\
                  [[engine]]\nengine_id = \"{role}\"\nrole = \"{role}\"\n"
             ));
-            assert_eq!((direct.kind, direct.engine.as_str()), ("engine_direct", role), "{role}");
+            assert_eq!(
+                (direct.kind, direct.engine.as_str()),
+                ("engine_direct", role),
+                "{role}"
+            );
             let tunnel = resolved(&format!(
                 "[daemon]\negress = \"engine:{role}\"\n[network]\nmode = \"wireguard\"\n\
                  [{role}]\nwireguard_enabled = true\nwireguard_config = \"a.conf\"\n\
                  [[engine]]\nengine_id = \"{role}\"\nrole = \"{role}\"\n"
             ));
-            assert_eq!((tunnel.kind, tunnel.engine.as_str()), ("engine_tunnel", role), "{role}");
-            assert_eq!(tunnel.route.interface, typhon_engine::egress::tunnel_device(role));
+            assert_eq!(
+                (tunnel.kind, tunnel.engine.as_str()),
+                ("engine_tunnel", role),
+                "{role}"
+            );
+            assert_eq!(
+                tunnel.route.interface,
+                typhon_engine::egress::tunnel_device(role)
+            );
         }
     }
 
@@ -926,7 +1132,10 @@ mod tests {
             "[daemon]\negress = \"engine:race\"\n[network]\nmode = \"socks5\"\n[race]\nwireguard_enabled = true\n\
              wireguard_config = \"a.conf\"\nsocks5_outbound_host = \"10.0.0.4\"\n",
         );
-        assert_eq!((socks.kind, socks.engine.as_str()), ("engine_proxy", "race"));
+        assert_eq!(
+            (socks.kind, socks.engine.as_str()),
+            ("engine_proxy", "race")
+        );
         assert_eq!(socks.route.proxy, "socks5h://10.0.0.4:1080");
     }
 
@@ -934,10 +1143,16 @@ mod tests {
     /// out of its own.
     #[test]
     fn an_interface_alone_or_a_proxy_host_alone_is_a_way_out() {
-        let iface = resolved("[daemon]\negress = \"engine:race\"\n[race]\nbind_interface = \"eth9\"\n");
-        assert_eq!((iface.kind, iface.engine.as_str()), ("engine_interface", "race"));
+        let iface =
+            resolved("[daemon]\negress = \"engine:race\"\n[race]\nbind_interface = \"eth9\"\n");
+        assert_eq!(
+            (iface.kind, iface.engine.as_str()),
+            ("engine_interface", "race")
+        );
         assert_eq!(iface.route.interface, "eth9");
-        let host = resolved("[daemon]\negress = \"engine:hoard\"\n[hoard]\nsocks5_outbound_host = \"10.0.0.6\"\n");
+        let host = resolved(
+            "[daemon]\negress = \"engine:hoard\"\n[hoard]\nsocks5_outbound_host = \"10.0.0.6\"\n",
+        );
         assert_eq!((host.kind, host.engine.as_str()), ("engine_proxy", "hoard"));
         assert_eq!(host.route.proxy, "socks5h://10.0.0.6:1080");
     }
@@ -947,30 +1162,66 @@ mod tests {
     /// another mode.
     #[test]
     fn only_a_deliberate_direct_exempts_an_engine_from_the_kill_switch() {
-        let unset = resolved("[daemon]\negress = \"engine:race\"\n[network]\nmode = \"wireguard\"\n");
-        assert_eq!(unset.kind, "refused", "WireGuard mode with the tunnel flag absent is a hole, not a choice");
-        assert!(unset.via.contains("blocked by the kill switch"), "{}", unset.via);
+        let unset =
+            resolved("[daemon]\negress = \"engine:race\"\n[network]\nmode = \"wireguard\"\n");
+        assert_eq!(
+            unset.kind, "refused",
+            "WireGuard mode with the tunnel flag absent is a hole, not a choice"
+        );
+        assert!(
+            unset.via.contains("blocked by the kill switch"),
+            "{}",
+            unset.via
+        );
         let other_mode = resolved(
             "[daemon]\negress = \"engine:race\"\n[network]\nmode = \"socks5\"\n[race]\nwireguard_enabled = false\n",
         );
-        assert_eq!(other_mode.kind, "refused", "a tunnel switched off means nothing outside WireGuard mode");
-        assert!(other_mode.via.contains("blocked by the kill switch"), "{}", other_mode.via);
+        assert_eq!(
+            other_mode.kind, "refused",
+            "a tunnel switched off means nothing outside WireGuard mode"
+        );
+        assert!(
+            other_mode.via.contains("blocked by the kill switch"),
+            "{}",
+            other_mode.via
+        );
     }
 
     // ---- reading and unpacking an archive ----
 
     #[test]
     fn sha256_is_the_hex_digest() {
-        assert_eq!(sha256_hex(b"abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
-        assert_eq!(sha256_hex(b""), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(
+            sha256_hex(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
     }
 
     #[test]
     fn only_the_daemons_own_binaries_are_replaceable() {
-        for ours in ["hydranos", "hydranos.exe", "hydranos-engine", "hydranos-engine.exe", "hydranos-update", "hydranos-update.exe"] {
+        for ours in [
+            "hydranos",
+            "hydranos.exe",
+            "hydranos-engine",
+            "hydranos-engine.exe",
+            "hydranos-update",
+            "hydranos-update.exe",
+        ] {
             assert!(is_ours(ours), "{ours}");
         }
-        for not in ["default.toml", "hydranos.log", "hydranos.old", "Hydranos", "hydranos-update.sha256", "", "data"] {
+        for not in [
+            "default.toml",
+            "hydranos.log",
+            "hydranos.old",
+            "Hydranos",
+            "hydranos-update.sha256",
+            "",
+            "data",
+        ] {
             assert!(!is_ours(not), "{not:?} must stay where it is");
         }
     }
@@ -981,14 +1232,19 @@ mod tests {
         impl Read for Broken {
             fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
                 if self.0 == 0 {
-                    return Err(std::io::Error::new(std::io::ErrorKind::ConnectionReset, "reset by peer"));
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::ConnectionReset,
+                        "reset by peer",
+                    ));
                 }
                 self.0 -= 1;
                 buf[0] = 1;
                 Ok(1)
             }
         }
-        assert!(read_capped(Broken(3), 100).unwrap_err().contains("reset by peer"));
+        assert!(read_capped(Broken(3), 100)
+            .unwrap_err()
+            .contains("reset by peer"));
         assert_eq!(read_capped(&b""[..], 0).unwrap(), Vec::<u8>::new());
         let e = read_capped(&[0u8; 11][..], 10).unwrap_err();
         assert!(e.contains("more than 10 bytes"), "{e}");
@@ -1009,7 +1265,8 @@ mod tests {
 
     fn zipped(files: &[(&str, &[u8])]) -> Vec<u8> {
         let mut z = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
-        let opts = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        let opts = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
         for (path, data) in files {
             z.start_file(*path, opts).unwrap();
             z.write_all(data).unwrap();
@@ -1029,13 +1286,19 @@ mod tests {
     fn a_tarball_gives_up_its_binaries_and_nothing_else() {
         let archive = tarball(&[
             ("hydranos-v4.4.4-linux-amd64/hydranos", b"daemon bytes"),
-            ("hydranos-v4.4.4-linux-amd64/hydranos-update", b"updater bytes"),
+            (
+                "hydranos-v4.4.4-linux-amd64/hydranos-update",
+                b"updater bytes",
+            ),
             ("hydranos-v4.4.4-linux-amd64/default.toml", b"[daemon]\n"),
             ("hydranos-v4.4.4-linux-amd64/data/hydranos.log", b"log"),
             ("hydranos-engine", b"engine bytes"),
         ]);
         let staged = unpack(&archive, "hydranos-v4.4.4-linux-amd64.tar.gz").unwrap();
-        assert_eq!(names(&staged), vec!["hydranos", "hydranos-engine", "hydranos-update"]);
+        assert_eq!(
+            names(&staged),
+            vec!["hydranos", "hydranos-engine", "hydranos-update"]
+        );
         let get = |n: &str| staged.iter().find(|(name, _)| name == n).unwrap().1.clone();
         assert_eq!(get("hydranos"), b"daemon bytes");
         assert_eq!(get("hydranos-engine"), b"engine bytes");
@@ -1045,20 +1308,35 @@ mod tests {
     fn a_zip_gives_up_its_binaries_whatever_the_path_separator() {
         let archive = zipped(&[
             ("hydranos-v4.4.4-windows-amd64/hydranos.exe", b"daemon exe"),
-            ("hydranos-v4.4.4-windows-amd64\\hydranos-update.exe", b"updater exe"),
+            (
+                "hydranos-v4.4.4-windows-amd64\\hydranos-update.exe",
+                b"updater exe",
+            ),
             ("hydranos-v4.4.4-windows-amd64/default.toml", b"[daemon]\n"),
             ("README.txt", b"read me"),
         ]);
         let staged = unpack(&archive, "hydranos-v4.4.4-windows-amd64.zip").unwrap();
         assert_eq!(names(&staged), vec!["hydranos-update.exe", "hydranos.exe"]);
-        assert_eq!(staged.iter().find(|(n, _)| n == "hydranos.exe").unwrap().1, b"daemon exe");
+        assert_eq!(
+            staged.iter().find(|(n, _)| n == "hydranos.exe").unwrap().1,
+            b"daemon exe"
+        );
     }
 
     #[test]
     fn an_archive_with_no_binary_of_ours_stages_nothing() {
-        let tgz = unpack(&tarball(&[("pkg/default.toml", b"x"), ("pkg/lib/hydranos.so", b"y")]), "r.tar.gz").unwrap();
-        assert!(tgz.is_empty(), "the caller turns this into 'no binary this updater recognises'");
-        assert!(unpack(&zipped(&[("notes.txt", b"x")]), "r.zip").unwrap().is_empty());
+        let tgz = unpack(
+            &tarball(&[("pkg/default.toml", b"x"), ("pkg/lib/hydranos.so", b"y")]),
+            "r.tar.gz",
+        )
+        .unwrap();
+        assert!(
+            tgz.is_empty(),
+            "the caller turns this into 'no binary this updater recognises'"
+        );
+        assert!(unpack(&zipped(&[("notes.txt", b"x")]), "r.zip")
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -1074,14 +1352,18 @@ mod tests {
     // ---- replacing the binaries ----
 
     fn scratch(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("hydranos-update-{tag}-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("hydranos-update-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
 
     fn staged(items: &[(&str, &[u8])]) -> Vec<(String, Vec<u8>)> {
-        items.iter().map(|(n, b)| (n.to_string(), b.to_vec())).collect()
+        items
+            .iter()
+            .map(|(n, b)| (n.to_string(), b.to_vec()))
+            .collect()
     }
 
     /// Only what the install already has is replaced; the old copy goes once
@@ -1092,23 +1374,52 @@ mod tests {
         std::fs::write(dir.join("hydranos"), b"old daemon").unwrap();
         std::fs::write(dir.join("hydranos-engine"), b"old engine").unwrap();
         std::fs::write(dir.join("default.toml"), b"[daemon]\napi_port = 8199\n").unwrap();
-        std::fs::write(dir.join("hydranos-engine.old"), b"a leftover of an earlier update").unwrap();
+        std::fs::write(
+            dir.join("hydranos-engine.old"),
+            b"a leftover of an earlier update",
+        )
+        .unwrap();
 
         swap(
             &dir,
-            &staged(&[("hydranos", b"new daemon"), ("hydranos-engine", b"new engine"), ("hydranos-update", b"new updater")]),
+            &staged(&[
+                ("hydranos", b"new daemon"),
+                ("hydranos-engine", b"new engine"),
+                ("hydranos-update", b"new updater"),
+            ]),
         )
         .unwrap();
 
         assert_eq!(std::fs::read(dir.join("hydranos")).unwrap(), b"new daemon");
-        assert_eq!(std::fs::read(dir.join("hydranos-engine")).unwrap(), b"new engine");
-        assert!(!dir.join("hydranos-update").exists(), "an install that never had it does not get it");
-        assert!(!dir.join("hydranos.old").exists() && !dir.join("hydranos-engine.old").exists(), "no backup left behind");
-        assert_eq!(std::fs::read(dir.join("default.toml")).unwrap(), b"[daemon]\napi_port = 8199\n", "settings stay");
+        assert_eq!(
+            std::fs::read(dir.join("hydranos-engine")).unwrap(),
+            b"new engine"
+        );
+        assert!(
+            !dir.join("hydranos-update").exists(),
+            "an install that never had it does not get it"
+        );
+        assert!(
+            !dir.join("hydranos.old").exists() && !dir.join("hydranos-engine.old").exists(),
+            "no backup left behind"
+        );
+        assert_eq!(
+            std::fs::read(dir.join("default.toml")).unwrap(),
+            b"[daemon]\napi_port = 8199\n",
+            "settings stay"
+        );
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            assert_eq!(std::fs::metadata(dir.join("hydranos")).unwrap().permissions().mode() & 0o777, 0o755, "runnable");
+            assert_eq!(
+                std::fs::metadata(dir.join("hydranos"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o755,
+                "runnable"
+            );
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1125,7 +1436,11 @@ mod tests {
 
         let e = swap(&dir, &staged(&[("hydranos", b"new daemon")])).unwrap_err();
         assert!(e.contains("cannot move") && e.contains("aside"), "{e}");
-        assert_eq!(std::fs::read(dir.join("hydranos")).unwrap(), b"old daemon", "the old daemon is still the daemon");
+        assert_eq!(
+            std::fs::read(dir.join("hydranos")).unwrap(),
+            b"old daemon",
+            "the old daemon is still the daemon"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1147,7 +1462,10 @@ mod tests {
     #[test]
     fn the_target_is_this_platforms_archive() {
         assert!(matches!(platform_arch(), "arm64" | "amd64"));
-        assert_eq!(platform_os(), if cfg!(windows) { "windows" } else { "linux" });
+        assert_eq!(
+            platform_os(),
+            if cfg!(windows) { "windows" } else { "linux" }
+        );
     }
 
     // ---- choosing the asset ----
@@ -1159,7 +1477,9 @@ mod tests {
                 .iter()
                 .map(|n| Asset {
                     name: n.to_string(),
-                    url: format!("https://github.com/Kheopsian/Hydranos/releases/download/v4.4.4/{n}"),
+                    url: format!(
+                        "https://github.com/Kheopsian/Hydranos/releases/download/v4.4.4/{n}"
+                    ),
                     size: 10,
                 })
                 .collect(),
@@ -1181,14 +1501,23 @@ mod tests {
             &format!("{right}.sha256"),
             &right,
         ]);
-        assert_eq!(pick_asset(&r).unwrap().name, right, "not the checksum that sits beside it either");
+        assert_eq!(
+            pick_asset(&r).unwrap().name,
+            right,
+            "not the checksum that sits beside it either"
+        );
     }
 
     #[test]
     fn a_release_with_nothing_for_this_platform_lists_what_it_has() {
-        let e = pick_asset(&named(&["hydranos-v4.4.4-plan9-mips.tar.gz", "notes.txt"])).err().expect("refused");
+        let e = pick_asset(&named(&["hydranos-v4.4.4-plan9-mips.tar.gz", "notes.txt"]))
+            .err()
+            .expect("refused");
         assert!(e.contains("v4.4.4") && e.contains(platform_os()), "{e}");
-        assert!(e.contains("hydranos-v4.4.4-plan9-mips.tar.gz, notes.txt"), "{e}");
+        assert!(
+            e.contains("hydranos-v4.4.4-plan9-mips.tar.gz, notes.txt"),
+            "{e}"
+        );
         let empty = pick_asset(&named(&[])).err().expect("refused");
         assert!(empty.contains("it has: "), "{empty}");
     }
@@ -1197,7 +1526,10 @@ mod tests {
     fn a_checksum_that_is_not_published_beside_the_archive_is_a_refusal() {
         let r = named(&["hydranos-v4.4.4-linux-amd64.tar.gz", "other.tar.gz.sha256"]);
         let e = expected_sha(&r, "hydranos-v4.4.4-linux-amd64.tar.gz").unwrap_err();
-        assert!(e.contains("hydranos-v4.4.4-linux-amd64.tar.gz.sha256") && e.contains("unverified"), "{e}");
+        assert!(
+            e.contains("hydranos-v4.4.4-linux-amd64.tar.gz.sha256") && e.contains("unverified"),
+            "{e}"
+        );
     }
 
     // ---- the HTTP half, against a server on this machine ----
@@ -1210,7 +1542,9 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         let status = status.to_string();
         std::thread::spawn(move || {
-            let Ok((mut sock, _)) = listener.accept() else { return };
+            let Ok((mut sock, _)) = listener.accept() else {
+                return;
+            };
             let mut req = Vec::new();
             let mut buf = [0u8; 1024];
             while !req.windows(4).any(|w| w == b"\r\n\r\n") {
@@ -1220,7 +1554,10 @@ mod tests {
                 }
             }
             let _ = tx.send(String::from_utf8_lossy(&req).into_owned());
-            let head = format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+            let head = format!(
+                "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
             let _ = sock.write_all(head.as_bytes());
             let _ = sock.write_all(&body);
         });
@@ -1230,7 +1567,10 @@ mod tests {
     #[test]
     fn a_text_is_fetched_with_this_tools_identity() {
         let (url, rx) = serve("200 OK", b"{\"tag_name\":\"v4.4.4\"}".to_vec());
-        assert_eq!(get_text(&format!("{url}/repos/x/releases/latest")).unwrap(), "{\"tag_name\":\"v4.4.4\"}");
+        assert_eq!(
+            get_text(&format!("{url}/repos/x/releases/latest")).unwrap(),
+            "{\"tag_name\":\"v4.4.4\"}"
+        );
         let req = rx.recv().unwrap().to_lowercase();
         assert!(req.starts_with("get /repos/x/releases/latest "), "{req}");
         assert!(req.contains("user-agent: hydranos-update"), "{req}");
@@ -1250,7 +1590,11 @@ mod tests {
     fn an_archive_comes_back_byte_for_byte() {
         let payload: Vec<u8> = (0..=255u8).cycle().take(5000).collect();
         let (url, _rx) = serve("200 OK", payload.clone());
-        assert_eq!(get_bytes(&url).unwrap(), payload, "not text: bytes that are not UTF-8 survive");
+        assert_eq!(
+            get_bytes(&url).unwrap(),
+            payload,
+            "not text: bytes that are not UTF-8 survive"
+        );
     }
 
     #[test]
@@ -1282,11 +1626,23 @@ mod tests {
         fake_daemon(&dir, "#!/bin/sh\necho \"hydranos 4.1.7\"\n");
         assert_eq!(installed_version(&dir).as_deref(), Some("4.1.7"));
         fake_daemon(&dir, "#!/bin/sh\necho\n");
-        assert_eq!(installed_version(&dir), None, "a binary that says nothing has no version");
+        assert_eq!(
+            installed_version(&dir),
+            None,
+            "a binary that says nothing has no version"
+        );
         fake_daemon(&dir, "#!/bin/sh\necho hydranos\n");
-        assert_eq!(installed_version(&dir), None, "a name with no number is not a version");
+        assert_eq!(
+            installed_version(&dir),
+            None,
+            "a name with no number is not a version"
+        );
         let _ = std::fs::remove_dir_all(&dir);
-        assert_eq!(installed_version(&scratch("version-none").join("missing")), None, "no binary there");
+        assert_eq!(
+            installed_version(&scratch("version-none").join("missing")),
+            None,
+            "no binary there"
+        );
         let _ = std::fs::remove_dir_all(scratch("version-none"));
     }
 
@@ -1295,10 +1651,17 @@ mod tests {
     #[test]
     fn a_checksum_file_yields_only_a_whole_sha256() {
         let hex = "0123456789ABCDEF".repeat(4);
-        assert_eq!(sha_from_text(&format!("{hex}  hydranos.tar.gz\n")), Some(hex.to_lowercase()));
+        assert_eq!(
+            sha_from_text(&format!("{hex}  hydranos.tar.gz\n")),
+            Some(hex.to_lowercase())
+        );
         assert_eq!(sha_from_text(&hex[..63]), None, "one digit short");
         assert_eq!(sha_from_text(&format!("{hex}0")), None, "one digit long");
-        assert_eq!(sha_from_text(&format!("{}g", &hex[..63])), None, "a letter that is not hex");
+        assert_eq!(
+            sha_from_text(&format!("{}g", &hex[..63])),
+            None,
+            "a letter that is not hex"
+        );
         assert_eq!(sha_from_text(""), None, "an empty file");
     }
 }

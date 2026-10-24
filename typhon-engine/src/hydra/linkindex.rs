@@ -78,7 +78,13 @@ pub fn path_key(p: &Path) -> u64 {
 /// A measured torrent, its paths traded for their keys.
 pub fn keyed(e: Entry) -> Entry<u64> {
     let (hash, files) = e;
-    (hash, files.into_iter().map(|(p, st)| (path_key(&p), st)).collect())
+    (
+        hash,
+        files
+            .into_iter()
+            .map(|(p, st)| (path_key(&p), st))
+            .collect(),
+    )
 }
 
 /// Count the catalogue, then answer for each torrent. Pure: every syscall has
@@ -109,11 +115,7 @@ pub fn compute<K: Hash + Eq>(entries: &[Entry<K>]) -> HashMap<String, LinkFacts>
             // If it ever does, the honest answer is "someone else may hold
             // this", never "free to delete": saturating to zero here would turn
             // a counting bug into deleted files.
-            let ext = if held > st.links {
-                1
-            } else {
-                st.links - held
-            };
+            let ext = if held > st.links { 1 } else { st.links - held };
             f.external_links = f.external_links.max(ext);
         }
         out.insert(hash.clone(), f);
@@ -163,7 +165,10 @@ pub struct DiskUsage {
 /// what `stat` reports.
 pub fn usage<K: Hash + Eq>(entries: &[Entry<K>]) -> DiskUsage {
     let mut held = names_held(entries);
-    let mut out = DiskUsage { torrents: entries.len() as u64, ..Default::default() };
+    let mut out = DiskUsage {
+        torrents: entries.len() as u64,
+        ..Default::default()
+    };
     for (_, files) in entries {
         for (_, st) in files {
             let Some(st) = st else {
@@ -172,7 +177,9 @@ pub fn usage<K: Hash + Eq>(entries: &[Entry<K>]) -> DiskUsage {
             };
             // Taken out of the map on first sight: that is what counts an
             // inode once however many torrents name it, with no second set.
-            let Some(names) = held.remove(&(st.volume, st.index)) else { continue };
+            let Some(names) = held.remove(&(st.volume, st.index)) else {
+                continue;
+            };
             out.data_bytes += st.size;
             // `names > links` is incoherent (see `compute`); like there, it
             // reads as "someone else may hold this".
@@ -324,10 +331,7 @@ mod tests {
     fn e(hash: &str, files: &[(&str, Option<FileId>)]) -> Entry {
         (
             hash.to_string(),
-            files
-                .iter()
-                .map(|(p, s)| (PathBuf::from(p), *s))
-                .collect(),
+            files.iter().map(|(p, s)| (PathBuf::from(p), *s)).collect(),
         )
     }
 
@@ -376,8 +380,14 @@ mod tests {
             e("E2", &[("/t/E.bin", st(5, 2, 1000))]),
             e("M", &[("/t/M.bin", None)]),
         ]);
-        assert_eq!(got.data_bytes, 5000, "a hardlinked cross-seed is one file on disk");
-        assert_eq!(got.shared_bytes, 3000, "A, B and E have a name outside; C and D do not");
+        assert_eq!(
+            got.data_bytes, 5000,
+            "a hardlinked cross-seed is one file on disk"
+        );
+        assert_eq!(
+            got.shared_bytes, 3000,
+            "A, B and E have a name outside; C and D do not"
+        );
         assert_eq!(got.missing_files, 1);
         assert_eq!(got.torrents, 9);
     }
@@ -401,13 +411,24 @@ mod tests {
         let keyed_fixture: Vec<Entry<u64>> = fixture.iter().cloned().map(keyed).collect();
         assert_eq!(compute(&keyed_fixture), compute(&fixture));
         assert_eq!(usage(&keyed_fixture), usage(&fixture));
-        assert_eq!(compute(&keyed_fixture)["E1"].external_links, 1, "one path, however spelled, is one name");
+        assert_eq!(
+            compute(&keyed_fixture)["E1"].external_links,
+            1,
+            "one path, however spelled, is one name"
+        );
     }
 
     /// An inode number is only unique within its volume.
     #[test]
     fn usage_keeps_one_inode_number_on_two_volumes_apart() {
-        let on = |volume| Some(FileId { volume, index: 7, links: 1, size: 100 });
+        let on = |volume| {
+            Some(FileId {
+                volume,
+                index: 7,
+                links: 1,
+                size: 100,
+            })
+        };
         let got = usage(&[e("a", &[("/a/f", on(1))]), e("b", &[("/b/f", on(2))])]);
         assert_eq!(got.data_bytes, 200);
         assert_eq!(got.shared_bytes, 0);
@@ -529,7 +550,11 @@ mod tests {
         assert_eq!(blob.len(), 3 * PACKED_FILE);
         assert_eq!(unpack(&blob), Some(stats.clone()));
         assert_eq!(missing_files(&stats), 1);
-        assert_eq!(unpack(&[]), Some(Vec::new()), "a torrent with no file is still a measurement");
+        assert_eq!(
+            unpack(&[]),
+            Some(Vec::new()),
+            "a torrent with no file is still a measurement"
+        );
     }
 
     #[test]
@@ -566,7 +591,10 @@ mod tests {
             now.external_links, 1,
             "a name appeared since the scan, so the torrent is no longer free to delete"
         );
-        assert_eq!(now.freeable_bytes, 0, "and unlinking one of two frees nothing");
+        assert_eq!(
+            now.freeable_bytes, 0,
+            "and unlinking one of two frees nothing"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

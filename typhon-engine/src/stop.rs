@@ -86,13 +86,22 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_sleep_runs_its_course_until_the_stop_begins() {
         let stop = Stop::new();
-        assert!(stop.sleep(Duration::from_secs(5)).await, "no stop: the whole wait goes by");
+        assert!(
+            stop.sleep(Duration::from_secs(5)).await,
+            "no stop: the whole wait goes by"
+        );
         let s = stop.clone();
         let waiting = tokio::spawn(async move { s.sleep(Duration::from_secs(3600)).await });
         tokio::task::yield_now().await;
         stop.begin();
-        assert!(!waiting.await.unwrap(), "the stop ends an hour-long wait at once");
-        assert!(!stop.sleep(Duration::from_secs(1)).await, "and nothing waits once it has begun");
+        assert!(
+            !waiting.await.unwrap(),
+            "the stop ends an hour-long wait at once"
+        );
+        assert!(
+            !stop.sleep(Duration::from_secs(1)).await,
+            "and nothing waits once it has begun"
+        );
         stop.wait().await;
     }
 

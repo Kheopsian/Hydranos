@@ -145,7 +145,10 @@ pub fn layout(torrent_bytes: &[u8]) -> Option<Layout> {
         return Some(Layout {
             name,
             multi_file: false,
-            files: vec![Entry { rel: String::new(), len }],
+            files: vec![Entry {
+                rel: String::new(),
+                len,
+            }],
         });
     };
 
@@ -159,14 +162,21 @@ pub fn layout(torrent_bytes: &[u8]) -> Option<Layout> {
             break;
         };
         let (comps, end) = read_string_list(torrent_bytes, path_at + b"4:pathl".len())?;
-        files.push(Entry { rel: comps.join("/"), len });
+        files.push(Entry {
+            rel: comps.join("/"),
+            len,
+        });
         cursor = end;
     }
 
     if files.is_empty() {
         return None;
     }
-    Some(Layout { name, multi_file: true, files })
+    Some(Layout {
+        name,
+        multi_file: true,
+        files,
+    })
 }
 
 fn find_key(blob: &[u8], needle: &[u8]) -> Option<usize> {
@@ -264,30 +274,43 @@ pub fn plan(
     // Identical `pieces` guarantees the same byte stream, not the same cut
     // through it. Comparing the size list is what makes pairing by index safe.
     if have.files.len() != want.files.len()
-        || have.files.iter().zip(&want.files).any(|(a, b)| a.len != b.len)
+        || have
+            .files
+            .iter()
+            .zip(&want.files)
+            .any(|(a, b)| a.len != b.len)
     {
         return Err(Refusal::LayoutMismatch);
     }
 
     let mut out = Plan::default();
     for i in 0..want.files.len() {
-        let (Some(src), Some(dst)) =
-            (have.on_disk(have_save_path, i), want.on_disk(want_save_path, i))
-        else {
+        let (Some(src), Some(dst)) = (
+            have.on_disk(have_save_path, i),
+            want.on_disk(want_save_path, i),
+        ) else {
             return Err(Refusal::LayoutMismatch);
         };
 
         let md = std::fs::metadata(&src)
             .map_err(|_| Refusal::SourceIncomplete(src.to_string_lossy().into_owned()))?;
         if md.len() != have.files[i].len {
-            return Err(Refusal::SourceIncomplete(src.to_string_lossy().into_owned()));
+            return Err(Refusal::SourceIncomplete(
+                src.to_string_lossy().into_owned(),
+            ));
         }
         if dst.exists() {
-            return Err(Refusal::DestinationOccupied(dst.to_string_lossy().into_owned()));
+            return Err(Refusal::DestinationOccupied(
+                dst.to_string_lossy().into_owned(),
+            ));
         }
 
         out.bytes += have.files[i].len;
-        out.links.push(Link { from: src, to: dst, len: have.files[i].len });
+        out.links.push(Link {
+            from: src,
+            to: dst,
+            len: have.files[i].len,
+        });
     }
 
     out.cross_device = out
@@ -382,7 +405,10 @@ fn reflink(from: &Path, to: &Path) -> std::io::Result<()> {
 
     let src = std::fs::File::open(from)?;
     // create_new: never clone over a file someone else just put there.
-    let dst = std::fs::OpenOptions::new().write(true).create_new(true).open(to)?;
+    let dst = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(to)?;
     // SAFETY: both descriptors are open for the duration of the call, and
     // FICLONE reads no memory from us beyond the integer argument.
     let rc = unsafe { libc::ioctl(dst.as_raw_fd(), FICLONE as _, src.as_raw_fd()) };
@@ -472,15 +498,30 @@ mod tests {
         assert!(l.multi_file);
         assert_eq!(l.name, "Pack");
         assert_eq!(l.files.len(), 2);
-        assert_eq!(l.files[0], Entry { rel: "a.mkv".into(), len: 10 });
-        assert_eq!(l.files[1], Entry { rel: "b.nfo".into(), len: 20 });
+        assert_eq!(
+            l.files[0],
+            Entry {
+                rel: "a.mkv".into(),
+                len: 10
+            }
+        );
+        assert_eq!(
+            l.files[1],
+            Entry {
+                rel: "b.nfo".into(),
+                len: 20
+            }
+        );
     }
 
     #[test]
     fn on_disk_puts_multi_file_under_the_root() {
         let t = multi("Pack", &[("a.mkv", 10)]);
         let l = layout(&t).unwrap();
-        assert_eq!(l.on_disk("/data", 0).unwrap(), PathBuf::from("/data/Pack/a.mkv"));
+        assert_eq!(
+            l.on_disk("/data", 0).unwrap(),
+            PathBuf::from("/data/Pack/a.mkv")
+        );
 
         let s = layout(&single("f.mkv", 10, 1)).unwrap();
         assert_eq!(s.on_disk("/data", 0).unwrap(), PathBuf::from("/data/f.mkv"));
@@ -492,7 +533,10 @@ mod tests {
         // link the wrong file to the wrong name.
         let have = layout(&multi("A", &[("one", 100)])).unwrap();
         let want = layout(&multi("B", &[("x", 50), ("y", 50)])).unwrap();
-        assert_eq!(plan(&have, "/a", &want, "/b").unwrap_err(), Refusal::LayoutMismatch);
+        assert_eq!(
+            plan(&have, "/a", &want, "/b").unwrap_err(),
+            Refusal::LayoutMismatch
+        );
     }
 
     #[test]
@@ -573,14 +617,25 @@ mod tests {
 
         let p = Plan {
             links: vec![
-                Link { from: src.join("P").join("a"), to: dst.join("P").join("a"), len: 4 },
-                Link { from: src.join("P").join("b"), to: dst.join("P").join("b"), len: 4 },
+                Link {
+                    from: src.join("P").join("a"),
+                    to: dst.join("P").join("a"),
+                    len: 4,
+                },
+                Link {
+                    from: src.join("P").join("b"),
+                    to: dst.join("P").join("b"),
+                    len: 4,
+                },
             ],
             cross_device: false,
             bytes: 8,
         };
         assert!(apply(&p, Method::Hardlink).is_err());
-        assert!(!dst.join("P").join("a").exists(), "first link was left behind");
+        assert!(
+            !dst.join("P").join("a").exists(),
+            "first link was left behind"
+        );
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -617,7 +672,10 @@ mod tests {
             Err(e) => {
                 // Set where TMPDIR is known to clone, so a run there cannot
                 // pass on the refusal branch alone.
-                assert!(std::env::var_os("DEDUP_TEST_MUST_CLONE").is_none(), "clone refused: {e}");
+                assert!(
+                    std::env::var_os("DEDUP_TEST_MUST_CLONE").is_none(),
+                    "clone refused: {e}"
+                );
                 assert!(!made.exists(), "a refused clone left a file behind");
             }
         }

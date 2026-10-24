@@ -61,7 +61,8 @@ impl RateTrackerAtomic {
             self.last_total.store(current_total, Ordering::Relaxed);
             return;
         }
-        if self.last_time_ns
+        if self
+            .last_time_ns
             .compare_exchange(prev_time, now, Ordering::Relaxed, Ordering::Relaxed)
             .is_err()
         {
@@ -71,7 +72,9 @@ impl RateTrackerAtomic {
         let delta = current_total.saturating_sub(prev_total);
         let rate = if elapsed_ns > 0 {
             ((delta as u128 * 1_000_000_000u128) / elapsed_ns as u128) as u64
-        } else { 0 };
+        } else {
+            0
+        };
         self.rate.store(rate, Ordering::Relaxed);
     }
 }

@@ -26,7 +26,9 @@ static CACHE: Mutex<Option<HashMap<String, (Instant, Vec<String>)>>> = Mutex::ne
 /// with a host.
 pub fn is_announce_url(u: &str) -> bool {
     let l = u.trim().to_ascii_lowercase();
-    let rest = ["http://", "https://", "udp://"].iter().find_map(|p| l.strip_prefix(p));
+    let rest = ["http://", "https://", "udp://"]
+        .iter()
+        .find_map(|p| l.strip_prefix(p));
     matches!(rest, Some(r) if !r.is_empty() && !r.starts_with('/') && !r.starts_with(':'))
 }
 
@@ -53,12 +55,21 @@ pub fn parse(body: &str) -> Vec<String> {
 /// The list as last fetched, if it was, however old. For the convergence
 /// check, which must not wait on the network.
 pub fn cached(url: &str) -> Option<Vec<String>> {
-    CACHE.lock().ok()?.as_ref()?.get(url).map(|(_, v)| v.clone())
+    CACHE
+        .lock()
+        .ok()?
+        .as_ref()?
+        .get(url)
+        .map(|(_, v)| v.clone())
 }
 
 /// The list, fetched when the cached copy is missing or older than a day.
 pub fn get(url: &str) -> Result<Vec<String>, String> {
-    if let Some((at, v)) = CACHE.lock().ok().and_then(|c| c.as_ref()?.get(url).cloned()) {
+    if let Some((at, v)) = CACHE
+        .lock()
+        .ok()
+        .and_then(|c| c.as_ref()?.get(url).cloned())
+    {
         if at.elapsed() < TTL {
             return Ok(v);
         }
@@ -66,7 +77,8 @@ pub fn get(url: &str) -> Result<Vec<String>, String> {
     match fetch(url) {
         Ok(v) => {
             if let Ok(mut c) = CACHE.lock() {
-                c.get_or_insert_with(HashMap::new).insert(url.to_string(), (Instant::now(), v.clone()));
+                c.get_or_insert_with(HashMap::new)
+                    .insert(url.to_string(), (Instant::now(), v.clone()));
             }
             Ok(v)
         }
@@ -80,18 +92,27 @@ pub(crate) fn fetch(url: &str) -> Result<Vec<String>, String> {
     // The daemon's own way out (`[proxy]`, `[daemon] bind_interface`), not
     // the default route: the list host would otherwise see the home address
     // of a node whose engines all sit in a tunnel.
-    let client = typhon_engine::egress::blocking_client().map_err(|e| format!("tracker list {url}: {e}"))?;
+    let client =
+        typhon_engine::egress::blocking_client().map_err(|e| format!("tracker list {url}: {e}"))?;
     let resp = client
         .get(url)
         .timeout(Duration::from_secs(20))
         .send()
         .map_err(|e| format!("tracker list {url}: {e}"))?;
     if !resp.status().is_success() {
-        return Err(format!("tracker list {url}: HTTP {}", resp.status().as_u16()));
+        return Err(format!(
+            "tracker list {url}: HTTP {}",
+            resp.status().as_u16()
+        ));
     }
-    let body = resp.bytes().map_err(|e| format!("tracker list {url}: {e}"))?;
+    let body = resp
+        .bytes()
+        .map_err(|e| format!("tracker list {url}: {e}"))?;
     if body.len() > MAX_BYTES {
-        return Err(format!("tracker list {url}: {} bytes, not a tracker list", body.len()));
+        return Err(format!(
+            "tracker list {url}: {} bytes, not a tracker list",
+            body.len()
+        ));
     }
     let urls = parse(&String::from_utf8_lossy(&body));
     if urls.is_empty() {
@@ -109,7 +130,10 @@ mod tests {
         let body = "udp://tracker.opentrackr.org:1337/announce\n\n# comment\nhttp://t.example/announce\nnot a url\nudp://tracker.opentrackr.org:1337/announce\nftp://x/y\n";
         assert_eq!(
             parse(body),
-            vec!["udp://tracker.opentrackr.org:1337/announce", "http://t.example/announce"]
+            vec![
+                "udp://tracker.opentrackr.org:1337/announce",
+                "http://t.example/announce"
+            ]
         );
     }
 

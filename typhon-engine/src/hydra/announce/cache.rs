@@ -21,7 +21,10 @@ use std::time::{Duration, Instant};
 /// same tracker to an operator.
 pub(crate) fn host_of(tracker: &str) -> String {
     let s = tracker.split("://").nth(1).unwrap_or(tracker);
-    s.split(|c| c == '/' || c == ':').next().unwrap_or("").to_string()
+    s.split(|c| c == '/' || c == ':')
+        .next()
+        .unwrap_or("")
+        .to_string()
 }
 
 /// The last answer one tracker gave about one torrent.
@@ -125,14 +128,22 @@ pub struct ErrorSample {
 /// Two messages that differ only in their numbers are one message: "retry in
 /// 37s" and "retry in 41s" would otherwise take every slot.
 fn same_message(a: &str, b: &str) -> bool {
-    let strip = |s: &str| s.chars().filter(|c| !c.is_ascii_digit()).collect::<String>();
+    let strip = |s: &str| {
+        s.chars()
+            .filter(|c| !c.is_ascii_digit())
+            .collect::<String>()
+    };
     a.len().abs_diff(b.len()) <= 8 && strip(a) == strip(b)
 }
 
 impl Window {
     fn note(&mut self, now: u64, message: &str, info_hash: &str, event: &str) {
         let message: String = message.chars().take(SAMPLE_MAX_CHARS).collect();
-        if let Some(i) = self.samples.iter().position(|s| same_message(&s.message, &message)) {
+        if let Some(i) = self
+            .samples
+            .iter()
+            .position(|s| same_message(&s.message, &message))
+        {
             let mut s = self.samples.remove(i);
             s.count += 1;
             s.last_min = now;
@@ -180,7 +191,11 @@ impl Window {
     /// that may never come.
     fn total(&self, now: u64) -> u64 {
         let cutoff = Self::cutoff(now);
-        self.buckets.iter().filter(|(m, _)| *m >= cutoff).map(|(_, n)| n).sum()
+        self.buckets
+            .iter()
+            .filter(|(m, _)| *m >= cutoff)
+            .map(|(_, n)| n)
+            .sum()
     }
 }
 
@@ -231,19 +246,28 @@ pub struct HostOutcomes {
 
 impl Cache {
     pub fn count_ok(&self, host: &str) {
-        self.announces_ok.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.host(host).ok.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.announces_ok
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.host(host)
+            .ok
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn count_failed(&self) {
-        self.announces_failed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.announces_failed
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// The outcome counters of one host, created on first use. A read lock on
     /// the announce path: the table holds one entry per tracker, and only a
     /// tracker seen for the first time takes the write lock.
     fn host(&self, host: &str) -> Arc<HostOutcomes> {
-        if let Some(h) = self.per_host.read().unwrap_or_else(|e| e.into_inner()).get(host) {
+        if let Some(h) = self
+            .per_host
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(host)
+        {
             return h.clone();
         }
         self.per_host
@@ -271,7 +295,9 @@ impl Cache {
     /// Record a failure under its class, for the trackers tab.
     pub fn count_failed_kind(&self, host: &str, class: &str) {
         self.count_failed();
-        self.host(host).failed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.host(host)
+            .failed
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.count_failed_kind_at(host, class, now_min());
     }
 
@@ -286,7 +312,9 @@ impl Cache {
         event: &str,
     ) {
         self.count_failed();
-        self.host(host).failed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.host(host)
+            .failed
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.count_failed_message_at(host, class, Some((message, info_hash, event)), now_min());
     }
 
@@ -304,7 +332,9 @@ impl Cache {
         now: u64,
     ) {
         let mut errors = self.errors.write().unwrap();
-        let w = errors.entry((host.to_string(), class.to_string())).or_default();
+        let w = errors
+            .entry((host.to_string(), class.to_string()))
+            .or_default();
         w.add(now);
         if let Some((message, info_hash, event)) = sample {
             w.note(now, message, info_hash, event);
@@ -347,7 +377,10 @@ impl Cache {
                         .iter()
                         .rev()
                         .filter(|s| s.last_min >= cutoff)
-                        .map(|s| ErrorSample { ago_mins: now.saturating_sub(s.last_min), ..s.clone() })
+                        .map(|s| ErrorSample {
+                            ago_mins: now.saturating_sub(s.last_min),
+                            ..s.clone()
+                        })
                         .collect();
                     (class.clone(), n, samples)
                 })
@@ -364,7 +397,9 @@ impl Cache {
             if n == 0 {
                 continue;
             }
-            out.entry(host.clone()).or_default().push((class.clone(), n));
+            out.entry(host.clone())
+                .or_default()
+                .push((class.clone(), n));
         }
         for v in out.values_mut() {
             v.sort_by(|a, b| b.1.cmp(&a.1));
@@ -452,8 +487,10 @@ impl Cache {
     pub fn forget(&self, info_hash: &str) {
         use std::sync::atomic::Ordering;
         if let Some(e) = self.entries.write().unwrap().remove(info_hash) {
-            self.swarm_seeds_total.fetch_sub(e.complete, Ordering::Relaxed);
-            self.swarm_leechers_total.fetch_sub(e.incomplete, Ordering::Relaxed);
+            self.swarm_seeds_total
+                .fetch_sub(e.complete, Ordering::Relaxed);
+            self.swarm_leechers_total
+                .fetch_sub(e.incomplete, Ordering::Relaxed);
         }
     }
 
@@ -505,7 +542,10 @@ mod tests {
         c.count_failed_message("b.example", "other", "boom", "00", "started");
         assert_eq!(
             c.host_outcomes(),
-            vec![("a.example".to_string(), 2, 1), ("b.example".to_string(), 0, 1)]
+            vec![
+                ("a.example".to_string(), 2, 1),
+                ("b.example".to_string(), 0, 1)
+            ]
         );
         assert_eq!(c.outcomes(), (2, 2));
     }
@@ -603,8 +643,15 @@ mod tests {
         let c = Cache::default();
         c.count_failed_kind_at("t", "timeout", 0);
         c.count_failed_kind_at("t", "timeout", 0);
-        assert!(c.error_breakdown_at(500).is_empty(), "the breakdown forgets");
-        assert_eq!(c.outcomes().1, 0, "counted by count_failed, not by the window");
+        assert!(
+            c.error_breakdown_at(500).is_empty(),
+            "the breakdown forgets"
+        );
+        assert_eq!(
+            c.outcomes().1,
+            0,
+            "counted by count_failed, not by the window"
+        );
         c.count_failed_kind("t", "timeout");
         assert_eq!(c.outcomes().1, 1, "the lifetime counter still only grows");
     }
@@ -617,7 +664,12 @@ mod tests {
         let c = Cache::default();
         let s = Some(("HTTP 429: retry in 37s", "aa", "started"));
         c.count_failed_message_at("t", "rate_limited", s, 10);
-        c.count_failed_message_at("t", "rate_limited", Some(("HTTP 429: retry in 41s", "bb", "")), 12);
+        c.count_failed_message_at(
+            "t",
+            "rate_limited",
+            Some(("HTTP 429: retry in 41s", "bb", "")),
+            12,
+        );
         c.count_failed_message_at("t", "rate_limited", Some(("banned client", "cc", "")), 13);
         let got = c.error_samples_at("t", 15);
         assert_eq!(got.len(), 1);
@@ -625,7 +677,10 @@ mod tests {
         assert_eq!((class.as_str(), *n), ("rate_limited", 3));
         assert_eq!(samples.len(), 2, "two messages, not three: {samples:?}");
         assert_eq!(samples[0].message, "banned client", "most recent first");
-        assert_eq!(samples[1].message, "HTTP 429: retry in 41s", "the latest wording is shown");
+        assert_eq!(
+            samples[1].message, "HTTP 429: retry in 41s",
+            "the latest wording is shown"
+        );
         assert_eq!(samples[1].count, 2);
         assert_eq!(samples[1].info_hash, "bb", "the torrent of the latest one");
         assert_eq!(samples[1].ago_mins, 3);
@@ -646,7 +701,12 @@ mod tests {
         c.count_failed_message_at("t", "other", Some(("fresh", "bb", "")), 100);
         let got = c.error_samples_at("t", 100);
         assert_eq!(got[0].1, 1, "the count is the window's");
-        assert_eq!(got[0].2.len(), 1, "only the message inside the window: {:?}", got[0].2);
+        assert_eq!(
+            got[0].2.len(),
+            1,
+            "only the message inside the window: {:?}",
+            got[0].2
+        );
         let long = "x".repeat(5000);
         c.count_failed_message_at("t", "other", Some((&long, "cc", "")), 100);
         assert!(c.error_samples_at("t", 100)[0].2[0].message.chars().count() <= SAMPLE_MAX_CHARS);
@@ -662,6 +722,10 @@ mod tests {
         let b = c.error_breakdown_at(500);
         assert!(b.get("old").is_none());
         assert!(b.get("new").is_some());
-        assert_eq!(c.errors.read().unwrap().len(), 1, "the dead entry is dropped, not kept at zero");
+        assert_eq!(
+            c.errors.read().unwrap().len(),
+            1,
+            "the dead entry is dropped, not kept at zero"
+        );
     }
 }

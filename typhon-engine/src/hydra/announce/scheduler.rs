@@ -17,8 +17,8 @@
 
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap};
-use std::sync::{Arc, OnceLock};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use tokio::sync::{mpsc, oneshot};
@@ -114,8 +114,8 @@ const MIN_NEW_PER_CYCLE: usize = 100;
 /// exceeds the steady state -- it just reaches it. The catalogue is taken on in
 /// ONE interval whatever its size: half an hour for 5k as for 1M.
 fn admit_quota(total: usize) -> usize {
-    let per_cycle = total.saturating_mul(RECONCILE.as_secs() as usize)
-        / DEFAULT_INTERVAL.as_secs() as usize;
+    let per_cycle =
+        total.saturating_mul(RECONCILE.as_secs() as usize) / DEFAULT_INTERVAL.as_secs() as usize;
     per_cycle.max(MIN_NEW_PER_CYCLE)
 }
 
@@ -371,7 +371,10 @@ impl Admission {
         }
         // Against the quota for the WHOLE catalogue, which is what the
         // scheduler will actually apply -- not the floor.
-        let total = self.admitted.load(Ordering::Relaxed).saturating_add(waiting);
+        let total = self
+            .admitted
+            .load(Ordering::Relaxed)
+            .saturating_add(waiting);
         let cycles = waiting.div_ceil(admit_quota(total as usize) as u64);
         (cycles * RECONCILE.as_secs()) as i64
     }
@@ -387,8 +390,7 @@ pub async fn run<C, F, Fut>(
     announce: Arc<F>,
     mut bump_rx: mpsc::Receiver<BumpReq>,
     admission: Arc<Admission>,
-)
-where
+) where
     C: Catalogue,
     F: Fn(Job) -> Fut + Send + Sync + 'static,
     Fut: std::future::Future<Output = Outcome> + Send,
@@ -605,7 +607,9 @@ impl Tracker {
             // its gain drowns in the noise, and each missed probe cost 10% --
             // archive.org fell from 28 to 12 while answering at its usual speed.
             self.limit = before;
-        } else if self.throttled as f64 / n > THROTTLE_BACKOFF || self.timed_out as f64 / n > TIMEOUT_BACKOFF {
+        } else if self.throttled as f64 / n > THROTTLE_BACKOFF
+            || self.timed_out as f64 / n > TIMEOUT_BACKOFF
+        {
             self.limit = (self.limit * 4 / 5).max(HOST_MIN);
         } else if mean > QUEUE_FACTOR * self.best_s {
             // The tracker is queueing us: more concurrency is only a longer queue.
@@ -657,7 +661,9 @@ impl Pool {
                 break;
             }
             let Reverse(d) = heap.pop().expect("peeked");
-            let Some(state) = states.get(&d.info_hash) else { continue };
+            let Some(state) = states.get(&d.info_hash) else {
+                continue;
+            };
             // A deadline made before a bump: its replacement is in the heap.
             if d.epoch != state.epoch || state.in_flight {
                 continue;
@@ -670,10 +676,14 @@ impl Pool {
         }
         for (host, t) in self.trackers.iter_mut() {
             while t.in_flight < t.limit && self.in_flight < MAX_CONCURRENCY {
-                let Some(d) = t.pending.pop_front() else { break };
+                let Some(d) = t.pending.pop_front() else {
+                    break;
+                };
                 // Checked again: it may have been bumped or dispatched while
                 // it waited here.
-                let Some(state) = states.get_mut(&d.info_hash) else { continue };
+                let Some(state) = states.get_mut(&d.info_hash) else {
+                    continue;
+                };
                 if d.epoch != state.epoch || state.in_flight {
                     continue;
                 }
@@ -711,14 +721,22 @@ impl Pool {
         }
         if !outcome.gone {
             let t = took.as_secs_f64();
-            self.latency_s = if self.answered == 0 && self.latency_s == 0.0 { t } else { self.latency_s + LATENCY_ALPHA * (t - self.latency_s) };
+            self.latency_s = if self.answered == 0 && self.latency_s == 0.0 {
+                t
+            } else {
+                self.latency_s + LATENCY_ALPHA * (t - self.latency_s)
+            };
             self.answered += 1;
             self.throttled += outcome.throttled as u64;
         }
     }
 
     fn adjust(&mut self) {
-        self.last_throttled = if self.answered == 0 { 0.0 } else { self.throttled as f64 / self.answered as f64 };
+        self.last_throttled = if self.answered == 0 {
+            0.0
+        } else {
+            self.throttled as f64 / self.answered as f64
+        };
         self.answered = 0;
         self.throttled = 0;
         for t in self.trackers.values_mut() {
@@ -726,11 +744,16 @@ impl Pool {
         }
         // A tracker nothing is queued on and nothing is in flight to holds no
         // state worth keeping; it starts over if it comes back.
-        self.trackers.retain(|_, t| t.in_flight > 0 || !t.pending.is_empty() || t.n > 0);
+        self.trackers
+            .retain(|_, t| t.in_flight > 0 || !t.pending.is_empty() || t.n > 0);
     }
 
     fn limit(&self) -> usize {
-        self.trackers.values().map(|t| t.limit).sum::<usize>().min(MAX_CONCURRENCY)
+        self.trackers
+            .values()
+            .map(|t| t.limit)
+            .sum::<usize>()
+            .min(MAX_CONCURRENCY)
     }
 }
 
@@ -744,14 +767,19 @@ struct Health {
 
 impl Health {
     fn publish(&self, a: &Admission, pool: &Pool) {
-        a.needed_milli.store((self.needed_per_s * 1000.0) as u64, Ordering::Relaxed);
+        a.needed_milli
+            .store((self.needed_per_s * 1000.0) as u64, Ordering::Relaxed);
         a.late.store(self.late as u64, Ordering::Relaxed);
         a.lag_p50_s.store(self.lag_p50.as_secs(), Ordering::Relaxed);
         a.lag_p90_s.store(self.lag_p90.as_secs(), Ordering::Relaxed);
         a.concurrency.store(pool.limit() as u64, Ordering::Relaxed);
         a.in_flight.store(pool.in_flight as u64, Ordering::Relaxed);
-        a.latency_ms.store((pool.latency_s * 1000.0) as u64, Ordering::Relaxed);
-        a.throttled_permille.store((pool.last_throttled * 1000.0).round() as u64, Ordering::Relaxed);
+        a.latency_ms
+            .store((pool.latency_s * 1000.0) as u64, Ordering::Relaxed);
+        a.throttled_permille.store(
+            (pool.last_throttled * 1000.0).round() as u64,
+            Ordering::Relaxed,
+        );
         let mut v: Vec<TrackerSnapshot> = pool
             .trackers
             .iter()
@@ -761,10 +789,18 @@ impl Health {
                 in_flight: t.in_flight,
                 waiting: t.pending.len(),
                 latency_ms: (t.shown_s * 1000.0) as u64,
-                best_ms: if t.best_s.is_finite() { (t.best_s * 1000.0) as u64 } else { 0 },
+                best_ms: if t.best_s.is_finite() {
+                    (t.best_s * 1000.0) as u64
+                } else {
+                    0
+                },
             })
             .collect();
-        v.sort_by(|a, b| b.waiting.cmp(&a.waiting).then(b.in_flight.cmp(&a.in_flight)));
+        v.sort_by(|a, b| {
+            b.waiting
+                .cmp(&a.waiting)
+                .then(b.in_flight.cmp(&a.in_flight))
+        });
         if let Ok(mut g) = a.trackers.lock() {
             *g = v;
         }
@@ -782,7 +818,10 @@ fn measure(
     pool: &Pool,
     now: Instant,
 ) -> Health {
-    let needed_per_s: f64 = states.values().map(|s| 1.0 / s.interval_s.max(1) as f64).sum();
+    let needed_per_s: f64 = states
+        .values()
+        .map(|s| 1.0 / s.interval_s.max(1) as f64)
+        .sum();
     let live = |d: &Deadline| -> Option<Duration> {
         let s = states.get(&d.info_hash)?;
         if s.epoch != d.epoch || s.in_flight || d.at + LATE_AFTER > now {
@@ -793,7 +832,12 @@ fn measure(
     let mut lags: Vec<Duration> = heap
         .iter()
         .filter_map(|Reverse(d)| live(d))
-        .chain(pool.trackers.values().flat_map(|t| t.pending.iter()).filter_map(|d| live(d)))
+        .chain(
+            pool.trackers
+                .values()
+                .flat_map(|t| t.pending.iter())
+                .filter_map(|d| live(d)),
+        )
         .collect();
     let late = lags.len();
     let pct = |lags: &mut Vec<Duration>, p: usize| -> Duration {
@@ -805,7 +849,12 @@ fn measure(
     };
     let lag_p50 = pct(&mut lags, 50);
     let lag_p90 = pct(&mut lags, 90);
-    Health { needed_per_s, late, lag_p50, lag_p90 }
+    Health {
+        needed_per_s,
+        late,
+        lag_p50,
+        lag_p90,
+    }
 }
 
 /// Run a synchronous pass without holding a runtime worker hostage.
@@ -863,7 +912,10 @@ fn reconcile_now<C: Catalogue>(
                 // Interned: a million torrents share a handful of trackers.
                 host: {
                     let h = catalogue.host_of(&hash);
-                    hosts.entry(h.clone()).or_insert_with(|| Arc::from(h.as_str())).clone()
+                    hosts
+                        .entry(h.clone())
+                        .or_insert_with(|| Arc::from(h.as_str()))
+                        .clone()
                 },
             },
         );
@@ -876,7 +928,11 @@ fn reconcile_now<C: Catalogue>(
         // limit exists to prevent, and it would only get bigger now that the
         // quota scales with the catalogue.
         let at = Instant::now() + spread(&hash, RECONCILE);
-        heap.push(Reverse(Deadline { at, info_hash: hash, epoch: 0 }));
+        heap.push(Reverse(Deadline {
+            at,
+            info_hash: hash,
+            epoch: 0,
+        }));
     }
     // A torrent in flight is left alone: its worker still holds it, and its
     // result will remove it.
@@ -885,7 +941,9 @@ fn reconcile_now<C: Catalogue>(
     // Published after the retain, so the two numbers describe the same moment.
     let admitted = states.len() as u64;
     admission.admitted.store(admitted, Ordering::Relaxed);
-    admission.waiting.store(total.saturating_sub(admitted), Ordering::Relaxed);
+    admission
+        .waiting
+        .store(total.saturating_sub(admitted), Ordering::Relaxed);
     added
 }
 
@@ -918,7 +976,9 @@ fn bump_now(
     if let Some(last) = state.last_bump {
         let since = now.duration_since(last);
         if since < BUMP_COOLDOWN {
-            return BumpOutcome::Cooldown { retry_in: BUMP_COOLDOWN - since };
+            return BumpOutcome::Cooldown {
+                retry_in: BUMP_COOLDOWN - since,
+            };
         }
     }
     // Already with a worker: the announce the caller wants is in progress.
@@ -930,7 +990,11 @@ fn bump_now(
     state.epoch += 1;
     state.last_bump = Some(now);
     state.forced_next |= forced;
-    heap.push(Reverse(Deadline { at: now, info_hash: hash, epoch: state.epoch }));
+    heap.push(Reverse(Deadline {
+        at: now,
+        info_hash: hash,
+        epoch: state.epoch,
+    }));
     BumpOutcome::Bumped
 }
 
@@ -942,9 +1006,21 @@ mod tests {
     fn deadlines_come_out_earliest_first() {
         let mut heap = BinaryHeap::new();
         let now = Instant::now();
-        heap.push(Reverse(Deadline { at: now + Duration::from_secs(30), info_hash: "c".into(), epoch: 0 }));
-        heap.push(Reverse(Deadline { at: now + Duration::from_secs(10), info_hash: "a".into(), epoch: 0 }));
-        heap.push(Reverse(Deadline { at: now + Duration::from_secs(20), info_hash: "b".into(), epoch: 0 }));
+        heap.push(Reverse(Deadline {
+            at: now + Duration::from_secs(30),
+            info_hash: "c".into(),
+            epoch: 0,
+        }));
+        heap.push(Reverse(Deadline {
+            at: now + Duration::from_secs(10),
+            info_hash: "a".into(),
+            epoch: 0,
+        }));
+        heap.push(Reverse(Deadline {
+            at: now + Duration::from_secs(20),
+            info_hash: "b".into(),
+            epoch: 0,
+        }));
         let order: Vec<String> =
             std::iter::from_fn(|| heap.pop().map(|Reverse(d)| d.info_hash)).collect();
         assert_eq!(order, ["a", "b", "c"], "a min-heap, not a max-heap");
@@ -955,8 +1031,16 @@ mod tests {
         // Without the tie-break the ordering would be by insertion luck, and a
         // heap that is not a total order can loop on peek/pop.
         let now = Instant::now();
-        let a = Deadline { at: now, info_hash: "aaa".into(), epoch: 0 };
-        let b = Deadline { at: now, info_hash: "bbb".into(), epoch: 0 };
+        let a = Deadline {
+            at: now,
+            info_hash: "aaa".into(),
+            epoch: 0,
+        };
+        let b = Deadline {
+            at: now,
+            info_hash: "bbb".into(),
+            epoch: 0,
+        };
         assert!(a < b);
     }
 
@@ -984,7 +1068,8 @@ mod tests {
         a.waiting.store(MIN_NEW_PER_CYCLE as u64, Ordering::Relaxed);
         assert_eq!(a.drain_seconds(), RECONCILE.as_secs() as i64);
 
-        a.waiting.store(MIN_NEW_PER_CYCLE as u64 + 1, Ordering::Relaxed);
+        a.waiting
+            .store(MIN_NEW_PER_CYCLE as u64 + 1, Ordering::Relaxed);
         assert_eq!(a.drain_seconds(), 2 * RECONCILE.as_secs() as i64);
 
         // The number that made this worth showing: a 300k catalogue at boot.
@@ -1016,16 +1101,50 @@ mod tests {
         let mut states = HashMap::new();
         let mut heap = BinaryHeap::new();
 
-        reconcile_now(&catalogue, &mut states, &mut heap, &admission, &mut HashMap::new());
-        assert_eq!(admission.admitted.load(Ordering::Relaxed), MIN_NEW_PER_CYCLE as u64);
-        assert_eq!(admission.waiting.load(Ordering::Relaxed), (MIN_NEW_PER_CYCLE * 2) as u64);
+        reconcile_now(
+            &catalogue,
+            &mut states,
+            &mut heap,
+            &admission,
+            &mut HashMap::new(),
+        );
+        assert_eq!(
+            admission.admitted.load(Ordering::Relaxed),
+            MIN_NEW_PER_CYCLE as u64
+        );
+        assert_eq!(
+            admission.waiting.load(Ordering::Relaxed),
+            (MIN_NEW_PER_CYCLE * 2) as u64
+        );
 
-        reconcile_now(&catalogue, &mut states, &mut heap, &admission, &mut HashMap::new());
-        assert_eq!(admission.admitted.load(Ordering::Relaxed), (MIN_NEW_PER_CYCLE * 2) as u64);
-        assert_eq!(admission.waiting.load(Ordering::Relaxed), MIN_NEW_PER_CYCLE as u64);
+        reconcile_now(
+            &catalogue,
+            &mut states,
+            &mut heap,
+            &admission,
+            &mut HashMap::new(),
+        );
+        assert_eq!(
+            admission.admitted.load(Ordering::Relaxed),
+            (MIN_NEW_PER_CYCLE * 2) as u64
+        );
+        assert_eq!(
+            admission.waiting.load(Ordering::Relaxed),
+            MIN_NEW_PER_CYCLE as u64
+        );
 
-        reconcile_now(&catalogue, &mut states, &mut heap, &admission, &mut HashMap::new());
-        assert_eq!(admission.waiting.load(Ordering::Relaxed), 0, "the whole catalogue is in");
+        reconcile_now(
+            &catalogue,
+            &mut states,
+            &mut heap,
+            &admission,
+            &mut HashMap::new(),
+        );
+        assert_eq!(
+            admission.waiting.load(Ordering::Relaxed),
+            0,
+            "the whole catalogue is in"
+        );
         assert_eq!(admission.drain_seconds(), 0);
     }
 
@@ -1046,7 +1165,10 @@ mod tests {
         // The rule is about large catalogues, where the absolute numbers bite.
         for total in [50_000usize, 300_000, 1_000_000] {
             let quota = admit_quota(total);
-            assert!(quota > MIN_NEW_PER_CYCLE, "{total} should be past the floor");
+            assert!(
+                quota > MIN_NEW_PER_CYCLE,
+                "{total} should be past the floor"
+            );
             let admit_per_s = quota as f64 / RECONCILE.as_secs_f64();
             let steady_per_s = total as f64 / DEFAULT_INTERVAL.as_secs_f64();
             assert!(
@@ -1100,9 +1222,13 @@ mod tests {
         // Spread across the window rather than clumped: every tenth of the
         // window holds some of them.
         let tenth = window.as_millis() / 10;
-        let buckets: std::collections::HashSet<u128> =
-            offsets.iter().map(|o| o / tenth).collect();
-        assert_eq!(buckets.len(), 10, "500 torrents left {} of 10 slots empty", 10 - buckets.len());
+        let buckets: std::collections::HashSet<u128> = offsets.iter().map(|o| o / tenth).collect();
+        assert_eq!(
+            buckets.len(),
+            10,
+            "500 torrents left {} of 10 slots empty",
+            10 - buckets.len()
+        );
     }
 
     /// Deterministic: the same torrent always lands on the same offset, so a
@@ -1116,7 +1242,11 @@ mod tests {
             spread(&"b".repeat(40), RECONCILE),
             "two torrents must not share one offset"
         );
-        assert_eq!(spread(&h, Duration::ZERO), Duration::ZERO, "a zero window is not a panic");
+        assert_eq!(
+            spread(&h, Duration::ZERO),
+            Duration::ZERO,
+            "a zero window is not a panic"
+        );
     }
 
     /// The phase is not a property of the info hash alone: two processes (two
@@ -1127,9 +1257,13 @@ mod tests {
     fn the_offset_changes_with_the_process_salt() {
         let h = "a".repeat(40);
         let window = RECONCILE;
-        assert_eq!(spread_with_salt(1, &h, window), spread_with_salt(1, &h, window));
-        let distinct: std::collections::HashSet<Duration> =
-            (0..16u64).map(|salt| spread_with_salt(salt, &h, window)).collect();
+        assert_eq!(
+            spread_with_salt(1, &h, window),
+            spread_with_salt(1, &h, window)
+        );
+        let distinct: std::collections::HashSet<Duration> = (0..16u64)
+            .map(|salt| spread_with_salt(salt, &h, window))
+            .collect();
         assert!(
             distinct.len() > 1,
             "16 different salts gave one phase: the offset is a function of the hash alone"
@@ -1150,7 +1284,14 @@ mod tests {
     }
 
     fn answered(throttled: bool) -> Outcome {
-        Outcome { info_hash: "x".into(), next_in: DEFAULT_INTERVAL, gone: false, throttled, timed_out: false, registration_retry: false }
+        Outcome {
+            info_hash: "x".into(),
+            next_in: DEFAULT_INTERVAL,
+            gone: false,
+            throttled,
+            timed_out: false,
+            registration_retry: false,
+        }
     }
 
     /// Feed a tracker one cycle of `n` answers at `lat` seconds and step it.
@@ -1160,7 +1301,11 @@ mod tests {
             t.done(&answered(false), Duration::from_secs_f64(lat));
         }
         if busy {
-            t.pending.push_back(Deadline { at: Instant::now(), info_hash: "q".into(), epoch: 0 });
+            t.pending.push_back(Deadline {
+                at: Instant::now(),
+                info_hash: "q".into(),
+                epoch: 0,
+            });
         } else {
             t.pending.clear();
         }
@@ -1208,10 +1353,22 @@ mod tests {
         let tail = 100;
         let max_limit = *limits[limits.len() - tail..].iter().max().unwrap();
         let mean_rate: f64 = rates[rates.len() - tail..].iter().sum::<f64>() / tail as f64;
-        let max_lat = lats[lats.len() - tail..].iter().cloned().fold(0.0, f64::max);
-        assert!(max_limit < 175 * 2, "limit reached {max_limit}, the knee is 175");
-        assert!(mean_rate > 350.0 * 0.85, "throughput {mean_rate:.0}/s, ceiling 350/s");
-        assert!(max_lat < 0.5 * 2.0, "latency {max_lat:.2} s: the tracker's queue must not grow");
+        let max_lat = lats[lats.len() - tail..]
+            .iter()
+            .cloned()
+            .fold(0.0, f64::max);
+        assert!(
+            max_limit < 175 * 2,
+            "limit reached {max_limit}, the knee is 175"
+        );
+        assert!(
+            mean_rate > 350.0 * 0.85,
+            "throughput {mean_rate:.0}/s, ceiling 350/s"
+        );
+        assert!(
+            max_lat < 0.5 * 2.0,
+            "latency {max_lat:.2} s: the tracker's queue must not grow"
+        );
     }
 
     /// Naturally spread answers -- half fast, half slow, no queue -- are not
@@ -1226,7 +1383,11 @@ mod tests {
                 let lat = if i % 2 == 0 { 0.1 } else { 0.9 };
                 t.done(&answered(false), Duration::from_secs_f64(lat));
             }
-            t.pending.push_back(Deadline { at: Instant::now(), info_hash: "q".into(), epoch: 0 });
+            t.pending.push_back(Deadline {
+                at: Instant::now(),
+                info_hash: "q".into(),
+                epoch: 0,
+            });
             t.adjust();
         }
         assert!(t.limit > HOST_START, "grew to {}, never cut", t.limit);
@@ -1273,7 +1434,11 @@ mod tests {
             lowest = lowest.min(t.limit);
         }
         assert!(t.best_s > 1.0, "best moved to {}", t.best_s);
-        assert!(t.limit > lowest, "grew again at the new normal: {} from {lowest}", t.limit);
+        assert!(
+            t.limit > lowest,
+            "grew again at the new normal: {} from {lowest}",
+            t.limit
+        );
     }
 
     /// A tracker slower than its one lucky cycle, whatever we send, is not
@@ -1318,7 +1483,10 @@ mod tests {
         let before = t.limit;
         for i in 0..100 {
             t.in_flight += 1;
-            let o = Outcome { timed_out: i < 10, ..answered(false) };
+            let o = Outcome {
+                timed_out: i < 10,
+                ..answered(false)
+            };
             t.done(&o, Duration::from_millis(500));
         }
         t.adjust();
@@ -1354,13 +1522,33 @@ mod tests {
         let fast: Arc<str> = Arc::from("fast.example");
         for i in 0..100 {
             let h = format!("s{i}");
-            states.insert(h.clone(), State { host: slow.clone(), ..fresh(&h) });
-            heap.push(Reverse(Deadline { at: now, info_hash: h, epoch: 0 }));
+            states.insert(
+                h.clone(),
+                State {
+                    host: slow.clone(),
+                    ..fresh(&h)
+                },
+            );
+            heap.push(Reverse(Deadline {
+                at: now,
+                info_hash: h,
+                epoch: 0,
+            }));
         }
         for i in 0..10 {
             let h = format!("f{i}");
-            states.insert(h.clone(), State { host: fast.clone(), ..fresh(&h) });
-            heap.push(Reverse(Deadline { at: now, info_hash: h, epoch: 0 }));
+            states.insert(
+                h.clone(),
+                State {
+                    host: fast.clone(),
+                    ..fresh(&h)
+                },
+            );
+            heap.push(Reverse(Deadline {
+                at: now,
+                info_hash: h,
+                epoch: 0,
+            }));
         }
         let mut pool = Pool::default();
         pool.dispatch(now, &mut heap, &mut states, &tx);
@@ -1368,16 +1556,40 @@ mod tests {
         while let Ok(j) = rx.try_recv() {
             sent.push(j.info_hash);
         }
-        assert_eq!(sent.iter().filter(|h| h.starts_with('f')).count(), 10, "every fast torrent went out");
-        assert_eq!(sent.iter().filter(|h| h.starts_with('s')).count(), HOST_START, "the slow tracker got its limit, no more");
-        assert_eq!(pool.trackers[&slow].pending.len(), 100 - HOST_START, "the rest waits on the slow tracker's queue");
-        assert!(heap.is_empty(), "nothing due is left in the heap to spin on");
+        assert_eq!(
+            sent.iter().filter(|h| h.starts_with('f')).count(),
+            10,
+            "every fast torrent went out"
+        );
+        assert_eq!(
+            sent.iter().filter(|h| h.starts_with('s')).count(),
+            HOST_START,
+            "the slow tracker got its limit, no more"
+        );
+        assert_eq!(
+            pool.trackers[&slow].pending.len(),
+            100 - HOST_START,
+            "the rest waits on the slow tracker's queue"
+        );
+        assert!(
+            heap.is_empty(),
+            "nothing due is left in the heap to spin on"
+        );
         // A freed slot on the slow tracker takes the next in its queue.
         let first = sent.iter().find(|h| h.starts_with('s')).unwrap().clone();
         states.get_mut(&first).unwrap().in_flight = false;
-        pool.done(&Outcome { info_hash: first, ..answered(false) }, Duration::from_millis(100));
+        pool.done(
+            &Outcome {
+                info_hash: first,
+                ..answered(false)
+            },
+            Duration::from_millis(100),
+        );
         pool.dispatch(now, &mut heap, &mut states, &tx);
-        assert_eq!(rx.try_recv().map(|j| j.info_hash.starts_with('s')), Ok(true));
+        assert_eq!(
+            rx.try_recv().map(|j| j.info_hash.starts_with('s')),
+            Ok(true)
+        );
     }
 
     /// Lateness counts only real deadlines: not the future, not a torrent a
@@ -1387,11 +1599,35 @@ mod tests {
         let now = Instant::now() + Duration::from_secs(1000);
         let mut states = HashMap::new();
         states.insert("late".to_string(), fresh("late"));
-        states.insert("soon".to_string(), State { interval_s: 60, ..fresh("soon") });
-        states.insert("held".to_string(), State { in_flight: true, ..fresh("held") });
-        states.insert("bumped".to_string(), State { epoch: 1, ..fresh("bumped") });
+        states.insert(
+            "soon".to_string(),
+            State {
+                interval_s: 60,
+                ..fresh("soon")
+            },
+        );
+        states.insert(
+            "held".to_string(),
+            State {
+                in_flight: true,
+                ..fresh("held")
+            },
+        );
+        states.insert(
+            "bumped".to_string(),
+            State {
+                epoch: 1,
+                ..fresh("bumped")
+            },
+        );
         let mut heap = BinaryHeap::new();
-        let d = |h: &str, at: Instant, epoch: u64| Reverse(Deadline { at, info_hash: h.into(), epoch });
+        let d = |h: &str, at: Instant, epoch: u64| {
+            Reverse(Deadline {
+                at,
+                info_hash: h.into(),
+                epoch,
+            })
+        };
         heap.push(d("late", now - Duration::from_secs(100), 0));
         heap.push(d("soon", now + Duration::from_secs(10), 0));
         heap.push(d("held", now - Duration::from_secs(500), 0));
@@ -1405,25 +1641,40 @@ mod tests {
         assert!((h.needed_per_s - want).abs() < 1e-9, "{}", h.needed_per_s);
     }
 
-
-
     #[test]
     fn a_deadline_just_due_is_not_late() {
         let now = Instant::now() + Duration::from_secs(100);
         let mut states = HashMap::new();
         states.insert("a".to_string(), fresh("a"));
         let mut heap = BinaryHeap::new();
-        heap.push(Reverse(Deadline { at: now - Duration::from_secs(2), info_hash: "a".into(), epoch: 0 }));
-        assert_eq!(measure(&states, &heap, &Pool::default(), now).late, 0, "dispatch takes a moment");
+        heap.push(Reverse(Deadline {
+            at: now - Duration::from_secs(2),
+            info_hash: "a".into(),
+            epoch: 0,
+        }));
+        assert_eq!(
+            measure(&states, &heap, &Pool::default(), now).late,
+            0,
+            "dispatch takes a moment"
+        );
     }
 
     /// A person's bump lifts `min interval`; an owed event's does not.
     #[test]
     fn a_person_s_bump_is_forced_and_an_internal_one_is_not() {
         let (mut states, mut heap) = (HashMap::new(), BinaryHeap::new());
-        assert_eq!(bump_now(&mut states, &mut heap, "ev".into(), false), BumpOutcome::Bumped);
-        assert!(!states["ev"].forced_next, "an owed event is not a forced re-announce");
-        assert_eq!(bump_now(&mut states, &mut heap, "btn".into(), true), BumpOutcome::Bumped);
+        assert_eq!(
+            bump_now(&mut states, &mut heap, "ev".into(), false),
+            BumpOutcome::Bumped
+        );
+        assert!(
+            !states["ev"].forced_next,
+            "an owed event is not a forced re-announce"
+        );
+        assert_eq!(
+            bump_now(&mut states, &mut heap, "btn".into(), true),
+            BumpOutcome::Bumped
+        );
         assert!(states["btn"].forced_next, "the button is");
     }
 
@@ -1438,7 +1689,11 @@ mod tests {
             ..answered(false)
         };
         assert_eq!(wait_after(&o(7, true)), Duration::from_secs(7));
-        assert_eq!(wait_after(&o(1, true)), REGISTRATION_RETRY_FLOOR, "never a spin");
+        assert_eq!(
+            wait_after(&o(1, true)),
+            REGISTRATION_RETRY_FLOOR,
+            "never a spin"
+        );
         assert_eq!(wait_after(&o(7, false)), MIN_INTERVAL);
         assert_eq!(wait_after(&o(0, false)), DEFAULT_INTERVAL);
         assert_eq!(wait_after(&o(900, false)), Duration::from_secs(900));
@@ -1453,14 +1708,31 @@ mod tests {
         states.insert("b".to_string(), fresh("b"));
         let now = Instant::now();
         // "a" is not due for half an hour.
-        heap.push(Reverse(Deadline { at: now + DEFAULT_INTERVAL, info_hash: "a".into(), epoch: 0 }));
-        heap.push(Reverse(Deadline { at: now + Duration::from_secs(60), info_hash: "b".into(), epoch: 0 }));
+        heap.push(Reverse(Deadline {
+            at: now + DEFAULT_INTERVAL,
+            info_hash: "a".into(),
+            epoch: 0,
+        }));
+        heap.push(Reverse(Deadline {
+            at: now + Duration::from_secs(60),
+            info_hash: "b".into(),
+            epoch: 0,
+        }));
 
-        assert_eq!(bump_now(&mut states, &mut heap, "a".into(), true), BumpOutcome::Bumped);
+        assert_eq!(
+            bump_now(&mut states, &mut heap, "a".into(), true),
+            BumpOutcome::Bumped
+        );
 
         let Reverse(head) = heap.peek().expect("a deadline");
-        assert_eq!(head.info_hash, "a", "the bumped torrent must come out first");
-        assert!(head.at <= Instant::now(), "and it must be due now, not later");
+        assert_eq!(
+            head.info_hash, "a",
+            "the bumped torrent must come out first"
+        );
+        assert!(
+            head.at <= Instant::now(),
+            "and it must be due now, not later"
+        );
     }
 
     /// Without the epoch this test fails by announcing twice: the deadline the
@@ -1470,15 +1742,26 @@ mod tests {
         let mut states = HashMap::new();
         let mut heap = BinaryHeap::new();
         states.insert("a".to_string(), fresh("a"));
-        heap.push(Reverse(Deadline { at: Instant::now(), info_hash: "a".into(), epoch: 0 }));
+        heap.push(Reverse(Deadline {
+            at: Instant::now(),
+            info_hash: "a".into(),
+            epoch: 0,
+        }));
 
-        assert_eq!(bump_now(&mut states, &mut heap, "a".into(), true), BumpOutcome::Bumped);
+        assert_eq!(
+            bump_now(&mut states, &mut heap, "a".into(), true),
+            BumpOutcome::Bumped
+        );
 
         let epoch = states["a"].epoch;
         assert_eq!(epoch, 1);
         let stale = heap.iter().filter(|Reverse(d)| d.epoch != epoch).count();
         let live = heap.iter().filter(|Reverse(d)| d.epoch == epoch).count();
-        assert_eq!((stale, live), (1, 1), "one superseded deadline, one current");
+        assert_eq!(
+            (stale, live),
+            (1, 1),
+            "one superseded deadline, one current"
+        );
     }
 
     /// The button must not become a hammer on a private tracker.
@@ -1512,19 +1795,34 @@ mod tests {
         let mut heap = BinaryHeap::new();
         states.insert("a".to_string(), fresh("a"));
 
-        assert_eq!(bump_now(&mut states, &mut heap, "a".into(), true), BumpOutcome::Bumped);
+        assert_eq!(
+            bump_now(&mut states, &mut heap, "a".into(), true),
+            BumpOutcome::Bumped
+        );
         match bump_now(&mut states, &mut heap, "a".into(), true) {
             BumpOutcome::Cooldown { retry_in } => {
                 assert!(retry_in <= BUMP_COOLDOWN, "never longer than the cooldown");
-                assert!(!retry_in.is_zero(), "and a caller can be told when to retry");
+                assert!(
+                    !retry_in.is_zero(),
+                    "and a caller can be told when to retry"
+                );
             }
             other => panic!("expected a cooldown refusal, got {other:?}"),
         }
 
         // A torrent already with a worker is refused for its own reason: the
         // announce being asked for is the one in progress.
-        states.insert("b".to_string(), State { in_flight: true, ..fresh("b") });
-        assert_eq!(bump_now(&mut states, &mut heap, "b".into(), true), BumpOutcome::InFlight);
+        states.insert(
+            "b".to_string(),
+            State {
+                in_flight: true,
+                ..fresh("b")
+            },
+        );
+        assert_eq!(
+            bump_now(&mut states, &mut heap, "b".into(), true),
+            BumpOutcome::InFlight
+        );
     }
 
     /// A torrent still waiting its turn to join must be announceable by hand:
@@ -1535,10 +1833,19 @@ mod tests {
         let mut states = HashMap::new();
         let mut heap = BinaryHeap::new();
 
-        assert_eq!(bump_now(&mut states, &mut heap, "new".into(), true), BumpOutcome::Bumped);
+        assert_eq!(
+            bump_now(&mut states, &mut heap, "new".into(), true),
+            BumpOutcome::Bumped
+        );
 
-        assert!(states.contains_key("new"), "admitted outside MIN_NEW_PER_CYCLE");
-        assert!(states["new"].first_announce, "and it announces as a first announce");
+        assert!(
+            states.contains_key("new"),
+            "admitted outside MIN_NEW_PER_CYCLE"
+        );
+        assert!(
+            states["new"].first_announce,
+            "and it announces as a first announce"
+        );
         assert_eq!(heap.len(), 1);
     }
 
@@ -1546,7 +1853,13 @@ mod tests {
     /// honouring it would be a flood we inflicted on ourselves.
     #[test]
     fn an_absurd_tracker_interval_falls_back_to_the_default() {
-        let clamp = |d: Duration| if d < MIN_INTERVAL { DEFAULT_INTERVAL } else { d };
+        let clamp = |d: Duration| {
+            if d < MIN_INTERVAL {
+                DEFAULT_INTERVAL
+            } else {
+                d
+            }
+        };
         assert_eq!(clamp(Duration::from_secs(1)), DEFAULT_INTERVAL);
         assert_eq!(clamp(Duration::from_secs(0)), DEFAULT_INTERVAL);
         assert_eq!(clamp(Duration::from_secs(1800)), Duration::from_secs(1800));

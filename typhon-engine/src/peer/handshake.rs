@@ -3,8 +3,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use crate::peer::transport::PeerTransport;
 
 const PROTOCOL: &[u8] = b"BitTorrent protocol";
-const RESERVED_FAST: u8 = 0x04;      // BEP 6 Fast Extension (reserved[7])
-const RESERVED_EXTENDED: u8 = 0x10;  // BEP 10 Extension Protocol (reserved[5])
+const RESERVED_FAST: u8 = 0x04; // BEP 6 Fast Extension (reserved[7])
+const RESERVED_EXTENDED: u8 = 0x10; // BEP 10 Extension Protocol (reserved[5])
 
 pub struct HandshakeResult {
     pub peer_id: [u8; 20],
@@ -82,7 +82,12 @@ pub fn parse_handshake(buf: &[u8; 68]) -> Result<HandshakeResult, String> {
     let mut peer_id = [0u8; 20];
     info_hash.copy_from_slice(&buf[28..48]);
     peer_id.copy_from_slice(&buf[48..68]);
-    Ok(HandshakeResult { peer_id, info_hash, fast_extension, extended_protocol })
+    Ok(HandshakeResult {
+        peer_id,
+        info_hash,
+        fast_extension,
+        extended_protocol,
+    })
 }
 
 async fn send_handshake(
@@ -96,6 +101,9 @@ async fn send_handshake(
 
 async fn read_handshake(stream: &mut PeerTransport) -> Result<HandshakeResult, String> {
     let mut buf = [0u8; 68];
-    stream.read_exact(&mut buf).await.map_err(|e| e.to_string())?;
+    stream
+        .read_exact(&mut buf)
+        .await
+        .map_err(|e| e.to_string())?;
     parse_handshake(&buf)
 }

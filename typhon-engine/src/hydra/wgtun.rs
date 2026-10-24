@@ -153,7 +153,10 @@ pub fn redacted(conf: &Conf) -> Conf {
 }
 
 fn split_list(v: &str) -> Vec<String> {
-    v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
+    v.split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
 }
 
 /// FwMark accepts decimal and 0x-prefixed hex, as wg-quick does.
@@ -203,7 +206,10 @@ PersistentKeepalive = 25
     fn setconf_carries_only_what_wg_understands() {
         let out = setconf_text(&parse(SAMPLE).unwrap());
         for rejected in ["Address", "DNS", "MTU", "Table"] {
-            assert!(!out.contains(rejected), "{rejected} would make wg refuse the file:\n{out}");
+            assert!(
+                !out.contains(rejected),
+                "{rejected} would make wg refuse the file:\n{out}"
+            );
         }
         assert!(out.contains("PrivateKey = "));
         assert!(out.contains("AllowedIPs = 0.0.0.0/0, ::/0"));
@@ -216,7 +222,10 @@ PersistentKeepalive = 25
         let r = redacted(&parse(SAMPLE).unwrap());
         assert_eq!(r.private_key, "[redacted]");
         assert_eq!(r.peers[0].preshared_key, "[redacted]");
-        assert_eq!(r.peers[0].public_key, "aPublicKeyValue=", "a public key is public");
+        assert_eq!(
+            r.peers[0].public_key, "aPublicKeyValue=",
+            "a public key is public"
+        );
         assert_eq!(r.peers[0].endpoint, "1.2.3.4:51820");
     }
 

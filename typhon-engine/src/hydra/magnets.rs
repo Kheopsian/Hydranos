@@ -60,16 +60,14 @@ fn percent_decode(s: &str) -> String {
     let mut i = 0;
     while i < b.len() {
         match b[i] {
-            b'%' if i + 2 < b.len() => {
-                match (hex_nibble(b[i + 1]), hex_nibble(b[i + 2])) {
-                    (Some(h), Some(l)) => {
-                        out.push(h * 16 + l);
-                        i += 3;
-                        continue;
-                    }
-                    _ => out.push(b'%'),
+            b'%' if i + 2 < b.len() => match (hex_nibble(b[i + 1]), hex_nibble(b[i + 2])) {
+                (Some(h), Some(l)) => {
+                    out.push(h * 16 + l);
+                    i += 3;
+                    continue;
                 }
-            }
+                _ => out.push(b'%'),
+            },
             b'+' => out.push(b' '),
             c => out.push(c),
         }
@@ -131,7 +129,12 @@ pub fn parse(uri: &str) -> Result<Magnet, String> {
     };
     let mut info_hash = None;
     let mut v2_only = false;
-    let mut m = Magnet { info_hash: [0; 20], name: String::new(), trackers: Vec::new(), peers: Vec::new() };
+    let mut m = Magnet {
+        info_hash: [0; 20],
+        name: String::new(),
+        trackers: Vec::new(),
+        peers: Vec::new(),
+    };
     for pair in query.split('&') {
         let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
         // `tr.1`, `xt.2`: numbered repeats, same meaning.
@@ -167,7 +170,9 @@ pub fn parse(uri: &str) -> Result<Magnet, String> {
     match info_hash {
         Some(h) => m.info_hash = h,
         None if v2_only => {
-            return Err("this magnet has only a v2 info hash (btmh); add the .torrent file instead".into())
+            return Err(
+                "this magnet has only a v2 info hash (btmh); add the .torrent file instead".into(),
+            )
         }
         None => return Err("the magnet has no info hash (xt=urn:btih:...)".into()),
     }
@@ -219,7 +224,16 @@ pub fn request(
     paused: bool,
     engine_override: &str,
 ) -> Result<String, String> {
-    request_with(state, uri, category, save_path, tags, paused, false, engine_override)
+    request_with(
+        state,
+        uri,
+        category,
+        save_path,
+        tags,
+        paused,
+        false,
+        engine_override,
+    )
 }
 
 /// What a qBittorrent add asks of the torrent beyond where it goes: kept with
@@ -269,7 +283,17 @@ pub fn request_with(
     seed_mode: bool,
     engine_override: &str,
 ) -> Result<String, String> {
-    request_with_options(state, uri, category, save_path, tags, paused, seed_mode, engine_override, &AddOptions::default())
+    request_with_options(
+        state,
+        uri,
+        category,
+        save_path,
+        tags,
+        paused,
+        seed_mode,
+        engine_override,
+        &AddOptions::default(),
+    )
 }
 
 /// `request_with`, and what the add asked of the torrent (`AddOptions`).
@@ -289,9 +313,14 @@ pub fn request_with_options(
     let hash = hex(&m.info_hash);
     let (engine_id, category_path) = crate::api::placement(state, category, engine_override);
     if save_path.is_empty() && category_path.is_empty() {
-        return Err(format!("no save path: category {category:?} is unknown and no savepath was given"));
+        return Err(format!(
+            "no save path: category {category:?} is unknown and no savepath was given"
+        ));
     }
-    let engine = state.engines.get(&engine_id).ok_or_else(|| format!("no engine {engine_id}"))?;
+    let engine = state
+        .engines
+        .get(&engine_id)
+        .ok_or_else(|| format!("no engine {engine_id}"))?;
     if engine.manager.get(&m.info_hash).is_some() {
         return Err(format!("{hash}: already added"));
     }
@@ -325,7 +354,10 @@ pub fn request_with_options(
 /// Start a resolution in the engine the request is for.
 fn kick(state: &AppState, row: &crate::store::MagnetRow) -> Result<(), String> {
     let m = parse(&row.uri)?;
-    let engine = state.engines.get(&row.engine).ok_or_else(|| format!("no engine {}", row.engine))?;
+    let engine = state
+        .engines
+        .get(&row.engine)
+        .ok_or_else(|| format!("no engine {}", row.engine))?;
     // The binding the peers are dialled from. An engine that is not on the
     // network has none, and resolving from the default route would show the
     // swarm this host's own address.
@@ -335,7 +367,12 @@ fn kick(state: &AppState, row: &crate::store::MagnetRow) -> Result<(), String> {
         .ok_or_else(|| format!("engine {} is not on the network", row.engine))?;
     // The announce option as it is now, not as the engine started with it.
     let mut cfg = cfg.clone();
-    cfg.announce_cleartext_passkey = state.config.read().unwrap_or_else(|e| e.into_inner()).announce_cleartext_passkey.clone();
+    cfg.announce_cleartext_passkey = state
+        .config
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .announce_cleartext_passkey
+        .clone();
     engine.manager.magnet().start(
         m.info_hash,
         m.trackers,
@@ -362,7 +399,9 @@ pub fn drive(state: &AppState) -> usize {
             fail(state, &mut row, &why);
             continue;
         };
-        let Some(ih) = crate::store::hex20(&row.info_hash) else { continue };
+        let Some(ih) = crate::store::hex20(&row.info_hash) else {
+            continue;
+        };
         match engine.manager.magnet().state_of(&ih) {
             // Nothing running: first try after a restart, or the pause after
             // a failure is over.
@@ -402,8 +441,15 @@ pub fn drive(state: &AppState) -> usize {
 }
 
 /// The metadata is in: check it, build the .torrent, add it. True if added.
-pub(crate) fn complete(state: &AppState, row: &mut crate::store::MagnetRow, dict: &[u8], now: i64) -> bool {
-    let Some(ih) = crate::store::hex20(&row.info_hash) else { return false };
+pub(crate) fn complete(
+    state: &AppState,
+    row: &mut crate::store::MagnetRow,
+    dict: &[u8],
+    now: i64,
+) -> bool {
+    let Some(ih) = crate::store::hex20(&row.info_hash) else {
+        return false;
+    };
     // BEP 9 peers are strangers: the dict is only the torrent if it hashes
     // to the magnet's info hash.
     let got: [u8; 20] = Sha1::digest(dict).into();
@@ -423,11 +469,24 @@ pub(crate) fn complete(state: &AppState, row: &mut crate::store::MagnetRow, dict
     let bytes = torrent_from_dict(dict, &trackers);
     let opts = AddOptions::decode(&row.options);
     // The layout is only knowable now: whether the torrent is one file.
-    if opts.no_subfolder && typhon_engine::torrent::metainfo::parse_torrent_bytes(&bytes).is_ok_and(|m| m.multi_file) {
-        fail(state, row, "contentLayout NoSubfolder on a multi-file torrent is not supported");
+    if opts.no_subfolder
+        && typhon_engine::torrent::metainfo::parse_torrent_bytes(&bytes).is_ok_and(|m| m.multi_file)
+    {
+        fail(
+            state,
+            row,
+            "contentLayout NoSubfolder on a multi-file torrent is not supported",
+        );
         return false;
     }
-    let save_path = match crate::api::add_save_path(state, &bytes, &row.category, &row.engine, &row.save_path, opts.subfolder) {
+    let save_path = match crate::api::add_save_path(
+        state,
+        &bytes,
+        &row.category,
+        &row.engine,
+        &row.save_path,
+        opts.subfolder,
+    ) {
         Ok(p) => p,
         Err(e) => {
             fail(state, row, &e);
@@ -435,10 +494,24 @@ pub(crate) fn complete(state: &AppState, row: &mut crate::store::MagnetRow, dict
         }
     };
     match crate::api::add_torrent_bytes(
-        state, &bytes, &row.category, &save_path, &row.tags, row.paused, row.seed_mode, &row.engine,
+        state,
+        &bytes,
+        &row.category,
+        &save_path,
+        &row.tags,
+        row.paused,
+        row.seed_mode,
+        &row.engine,
     ) {
         Ok((hash, _)) => {
-            crate::api::apply_add_options(state, &hash, opts.up_limit, opts.dl_limit, opts.sequential, opts.first_last);
+            crate::api::apply_add_options(
+                state,
+                &hash,
+                opts.up_limit,
+                opts.dl_limit,
+                opts.sequential,
+                opts.first_last,
+            );
             tracing::info!(info_hash = %row.info_hash, name = %row.name, "magnet resolved and added");
             forget(state, &row.info_hash);
             true
@@ -469,18 +542,31 @@ fn fail(state: &AppState, row: &mut crate::store::MagnetRow, why: &str) {
 
 /// Drop a request, and whatever resolution is running for it.
 pub fn forget(state: &AppState, info_hash: &str) -> bool {
-    let row = state.store.lock().ok().and_then(|s| s.magnet(info_hash).ok().flatten());
+    let row = state
+        .store
+        .lock()
+        .ok()
+        .and_then(|s| s.magnet(info_hash).ok().flatten());
     if let (Some(row), Some(ih)) = (&row, crate::store::hex20(info_hash)) {
         if let Some(engine) = state.engines.get(&row.engine) {
             engine.manager.magnet().forget(&ih);
         }
     }
-    state.store.lock().map(|s| s.delete_magnet(info_hash).unwrap_or(false)).unwrap_or(false)
+    state
+        .store
+        .lock()
+        .map(|s| s.delete_magnet(info_hash).unwrap_or(false))
+        .unwrap_or(false)
 }
 
 /// Put a failed request back in line, from the first attempt.
 pub fn retry(state: &AppState, info_hash: &str) -> bool {
-    let Some(mut row) = state.store.lock().ok().and_then(|s| s.magnet(info_hash).ok().flatten()) else {
+    let Some(mut row) = state
+        .store
+        .lock()
+        .ok()
+        .and_then(|s| s.magnet(info_hash).ok().flatten())
+    else {
         return false;
     };
     row.state = "resolving".into();
@@ -501,15 +587,28 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 
 fn unauthorised() -> Response {
-    (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "Invalid or missing API key"}))).into_response()
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(serde_json::json!({"error": "Invalid or missing API key"})),
+    )
+        .into_response()
 }
 
 /// The magnets waiting for metadata, and the ones that gave up.
-async fn list(State(state): State<AppState>, RawQuery(q): RawQuery, headers: HeaderMap) -> Response {
+async fn list(
+    State(state): State<AppState>,
+    RawQuery(q): RawQuery,
+    headers: HeaderMap,
+) -> Response {
     if !crate::api::authorised(&state, &headers, &q.unwrap_or_default()) {
         return unauthorised();
     }
-    let rows = state.store.lock().ok().and_then(|s| s.magnets().ok()).unwrap_or_default();
+    let rows = state
+        .store
+        .lock()
+        .ok()
+        .and_then(|s| s.magnets().ok())
+        .unwrap_or_default();
     let out: Vec<serde_json::Value> = rows
         .iter()
         .map(|r| {
@@ -541,7 +640,11 @@ async fn remove(
     if forget(&state, &hash.to_ascii_lowercase()) {
         Json(serde_json::json!({"status": "ok"})).into_response()
     } else {
-        (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "no such magnet"}))).into_response()
+        (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "no such magnet"})),
+        )
+            .into_response()
     }
 }
 
@@ -557,7 +660,11 @@ async fn retry_route(
     if retry(&state, &hash.to_ascii_lowercase()) {
         Json(serde_json::json!({"status": "resolving"})).into_response()
     } else {
-        (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "no such magnet"}))).into_response()
+        (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "no such magnet"})),
+        )
+            .into_response()
     }
 }
 
@@ -598,7 +705,14 @@ mod tests {
         .unwrap();
         assert_eq!(hex(&m.info_hash), H);
         assert_eq!(m.name, "Some Book (EPUB)");
-        assert_eq!(m.trackers, vec!["udp://t.example:1337/announce", "https://t2.example/announce"], "deduplicated, in order");
+        assert_eq!(
+            m.trackers,
+            vec![
+                "udp://t.example:1337/announce",
+                "https://t2.example/announce"
+            ],
+            "deduplicated, in order"
+        );
         assert_eq!(m.peers, vec!["10.0.0.1:6881".parse().unwrap()]);
     }
 
@@ -606,9 +720,16 @@ mod tests {
     #[test]
     fn a_base32_info_hash_is_the_same_hash() {
         let b32 = "ZHQVOY7XELZD5GFCTXWN7LRUDOMNKMCW";
-        assert_eq!(hex(&parse(&format!("magnet:?xt=urn:btih:{b32}")).unwrap().info_hash), H);
         assert_eq!(
-            hex(&parse(&format!("MAGNET:?xt=urn:btih:{}", H.to_uppercase())).unwrap().info_hash),
+            hex(&parse(&format!("magnet:?xt=urn:btih:{b32}"))
+                .unwrap()
+                .info_hash),
+            H
+        );
+        assert_eq!(
+            hex(&parse(&format!("MAGNET:?xt=urn:btih:{}", H.to_uppercase()))
+                .unwrap()
+                .info_hash),
             H,
             "case does not matter"
         );
@@ -616,32 +737,58 @@ mod tests {
 
     #[test]
     fn what_is_not_a_usable_magnet_is_refused_by_name() {
-        assert!(parse("http://example/x.torrent").unwrap_err().contains("not a magnet"));
-        assert!(parse("magnet:?dn=nothing").unwrap_err().contains("no info hash"));
-        assert!(parse("magnet:?xt=urn:btih:1234").unwrap_err().contains("not a 40-hex"));
+        assert!(parse("http://example/x.torrent")
+            .unwrap_err()
+            .contains("not a magnet"));
+        assert!(parse("magnet:?dn=nothing")
+            .unwrap_err()
+            .contains("no info hash"));
+        assert!(parse("magnet:?xt=urn:btih:1234")
+            .unwrap_err()
+            .contains("not a 40-hex"));
         let v2 = "magnet:?xt=urn:btmh:1220caf1e1c30e81cb361b9ee167c4aa64228a7fa4fa9f6105232b28ad099f3a302e";
         assert!(parse(v2).unwrap_err().contains("v2"));
         let hybrid = format!("magnet:?xt=urn:btih:{H}&xt=urn:btmh:1220caf1e1c30e81cb361b9ee167c4aa64228a7fa4fa9f6105232b28ad099f3a302e");
-        assert_eq!(hex(&parse(&hybrid).unwrap().info_hash), H, "a hybrid resolves by its v1 hash");
+        assert_eq!(
+            hex(&parse(&hybrid).unwrap().info_hash),
+            H,
+            "a hybrid resolves by its v1 hash"
+        );
     }
 
     /// ⭐ The rebuilt .torrent has the magnet's info hash: the dict is kept
     /// byte for byte, and the file parses with the trackers as tiers.
     #[test]
     fn the_rebuilt_torrent_has_the_magnets_info_hash() {
-        let dict = b"d6:lengthi16384e4:name4:book12:piece lengthi16384e6:pieces20:AAAAAAAAAAAAAAAAAAAAe".to_vec();
+        let dict =
+            b"d6:lengthi16384e4:name4:book12:piece lengthi16384e6:pieces20:AAAAAAAAAAAAAAAAAAAAe"
+                .to_vec();
         let want: [u8; 20] = Sha1::digest(&dict).into();
-        let bytes = torrent_from_dict(&dict, &["udp://t.example:1337/announce".into(), "https://t2.example/a".into()]);
+        let bytes = torrent_from_dict(
+            &dict,
+            &[
+                "udp://t.example:1337/announce".into(),
+                "https://t2.example/a".into(),
+            ],
+        );
         let meta = typhon_engine::torrent::metainfo::parse_torrent_bytes(&bytes).expect("parses");
         assert_eq!(meta.info_hash, want);
         assert_eq!(meta.name, "book");
         let no_trackers = torrent_from_dict(&dict, &[]);
-        assert_eq!(typhon_engine::torrent::metainfo::parse_torrent_bytes(&no_trackers).unwrap().info_hash, want);
+        assert_eq!(
+            typhon_engine::torrent::metainfo::parse_torrent_bytes(&no_trackers)
+                .unwrap()
+                .info_hash,
+            want
+        );
     }
 
     #[test]
     fn the_pause_between_attempts_grows_and_stops_growing() {
-        assert_eq!((backoff(0), backoff(1), backoff(2), backoff(3), backoff(9)), (0, 60, 300, 900, 900));
+        assert_eq!(
+            (backoff(0), backoff(1), backoff(2), backoff(3), backoff(9)),
+            (0, 60, 300, 900, 900)
+        );
     }
 }
 
@@ -658,10 +805,16 @@ mod flow_tests {
 
     /// An info dict, and the magnet that names it.
     fn dict_and_magnet(name: &str) -> (Vec<u8>, String) {
-        let dict = format!("d6:lengthi16384e4:name{}:{name}12:piece lengthi16384e6:pieces20:BBBBBBBBBBBBBBBBBBBBe", name.len())
-            .into_bytes();
+        let dict = format!(
+            "d6:lengthi16384e4:name{}:{name}12:piece lengthi16384e6:pieces20:BBBBBBBBBBBBBBBBBBBBe",
+            name.len()
+        )
+        .into_bytes();
         let ih: [u8; 20] = Sha1::digest(&dict).into();
-        let uri = format!("magnet:?xt=urn:btih:{}&dn={name}&tr=udp%3A%2F%2Ft.example%3A1337%2Fannounce", hex(&ih));
+        let uri = format!(
+            "magnet:?xt=urn:btih:{}&dn={name}&tr=udp%3A%2F%2Ft.example%3A1337%2Fannounce",
+            hex(&ih)
+        );
         (dict, uri)
     }
 
@@ -674,10 +827,21 @@ mod flow_tests {
     #[test]
     fn what_can_be_refused_up_front_is() {
         let s = st("mag-refuse");
-        assert!(request(&s.state, "not a magnet", "", "/tmp", "", false, "hoard").unwrap_err().contains("not a magnet"));
+        assert!(
+            request(&s.state, "not a magnet", "", "/tmp", "", false, "hoard")
+                .unwrap_err()
+                .contains("not a magnet")
+        );
         let (_, uri) = dict_and_magnet("nowhere");
-        assert!(request(&s.state, &uri, "no-such-category", "", "", false, "hoard").unwrap_err().contains("no save path"));
-        assert!(s.state.store.lock().unwrap().magnets().unwrap().is_empty(), "nothing kept for a refusal");
+        assert!(
+            request(&s.state, &uri, "no-such-category", "", "", false, "hoard")
+                .unwrap_err()
+                .contains("no save path")
+        );
+        assert!(
+            s.state.store.lock().unwrap().magnets().unwrap().is_empty(),
+            "nothing kept for a refusal"
+        );
     }
 
     /// ⭐ The whole path once the metadata is in: the rebuilt torrent is
@@ -688,7 +852,8 @@ mod flow_tests {
     fn resolved_metadata_is_added_as_asked_and_the_request_goes() {
         let s = st("mag-done");
         let (dict, uri) = dict_and_magnet("resolved-book");
-        let hash = request(&s.state, &uri, "", "/tmp", "books,new", true, "hoard").expect("accepted");
+        let hash =
+            request(&s.state, &uri, "", "/tmp", "books,new", true, "hoard").expect("accepted");
         let mut r = row(&s, &hash).expect("kept in the store");
         assert_eq!(r.state, "resolving");
 
@@ -697,12 +862,20 @@ mod flow_tests {
         let (engine, t) = crate::api::find_torrent(&s.state, &hash).expect("the torrent is here");
         assert_eq!(engine, "hoard");
         assert_eq!(t.meta.name, "resolved-book");
-        assert!(t.is_paused.load(std::sync::atomic::Ordering::Relaxed), "added paused, as asked");
-        assert_eq!(t.live_trackers.read().concat(), vec!["udp://t.example:1337/announce".to_string()]);
+        assert!(
+            t.is_paused.load(std::sync::atomic::Ordering::Relaxed),
+            "added paused, as asked"
+        );
+        assert_eq!(
+            t.live_trackers.read().concat(),
+            vec!["udp://t.example:1337/announce".to_string()]
+        );
         let tags = s.state.store.lock().unwrap().tags_of(&hash);
         assert_eq!(tags, vec!["books".to_string(), "new".to_string()]);
         // And a second request for it is refused: it is here now.
-        assert!(request(&s.state, &uri, "", "/tmp", "", false, "hoard").unwrap_err().contains("already added"));
+        assert!(request(&s.state, &uri, "", "/tmp", "", false, "hoard")
+            .unwrap_err()
+            .contains("already added"));
     }
 
     /// ⭐ What a qBittorrent add asked -- caps, download order, a folder for
@@ -712,15 +885,32 @@ mod flow_tests {
     fn a_magnets_add_options_wait_for_it_and_land_on_the_torrent() {
         let s = st("mag-opts");
         let (dict, uri) = dict_and_magnet("opts-book");
-        let opts = AddOptions { up_limit: Some(51_200), dl_limit: None, sequential: true, first_last: false, subfolder: true, no_subfolder: false };
-        let hash = request_with_options(&s.state, &uri, "", "/tmp", "", true, false, "hoard", &opts).expect("accepted");
+        let opts = AddOptions {
+            up_limit: Some(51_200),
+            dl_limit: None,
+            sequential: true,
+            first_last: false,
+            subfolder: true,
+            no_subfolder: false,
+        };
+        let hash =
+            request_with_options(&s.state, &uri, "", "/tmp", "", true, false, "hoard", &opts)
+                .expect("accepted");
         let mut r = row(&s, &hash).expect("kept");
-        assert_eq!(AddOptions::decode(&r.options), opts, "kept with the request");
+        assert_eq!(
+            AddOptions::decode(&r.options),
+            opts,
+            "kept with the request"
+        );
         assert!(complete(&s.state, &mut r, &dict, crate::store::now_secs()));
         let (_, t) = crate::api::find_torrent(&s.state, &hash).expect("added");
         assert_eq!(t.rate_limits().0, 51_200, "upLimit");
         assert!(t.download_order().sequential, "sequentialDownload");
-        assert_eq!(*t.save_path.read(), std::path::PathBuf::from("/tmp/opts-book"), "Subfolder on a single file");
+        assert_eq!(
+            *t.save_path.read(),
+            std::path::PathBuf::from("/tmp/opts-book"),
+            "Subfolder on a single file"
+        );
     }
 
     /// NoSubfolder on a multi-file torrent is refused, as for a `.torrent`,
@@ -731,8 +921,13 @@ mod flow_tests {
         let dict = b"d5:filesld6:lengthi16384e4:pathl1:aeee4:name5:multi12:piece lengthi16384e6:pieces20:CCCCCCCCCCCCCCCCCCCCe".to_vec();
         let ih: [u8; 20] = Sha1::digest(&dict).into();
         let uri = format!("magnet:?xt=urn:btih:{}&dn=multi", hex(&ih));
-        let opts = AddOptions { no_subfolder: true, ..Default::default() };
-        let hash = request_with_options(&s.state, &uri, "", "/tmp", "", true, false, "hoard", &opts).unwrap();
+        let opts = AddOptions {
+            no_subfolder: true,
+            ..Default::default()
+        };
+        let hash =
+            request_with_options(&s.state, &uri, "", "/tmp", "", true, false, "hoard", &opts)
+                .unwrap();
         let mut r = row(&s, &hash).unwrap();
         assert!(!complete(&s.state, &mut r, &dict, crate::store::now_secs()));
         assert!(crate::api::find_torrent(&s.state, &hash).is_none());
@@ -775,7 +970,11 @@ mod flow_tests {
         let (_, uri) = dict_and_magnet("stuck");
         let hash = request(&s.state, &uri, "", "/tmp", "", false, "hoard").unwrap();
         drive(&s.state);
-        assert_eq!(row(&s, &hash).unwrap().state, "resolving", "young: still waiting");
+        assert_eq!(
+            row(&s, &hash).unwrap().state,
+            "resolving",
+            "young: still waiting"
+        );
         let mut r = row(&s, &hash).unwrap();
         r.added_at -= 3600;
         s.state.store.lock().unwrap().put_magnet(&r).unwrap();
@@ -795,20 +994,45 @@ mod flow_tests {
     async fn the_api_accepts_a_magnet_lists_it_and_removes_it() {
         let s = st("mag-api");
         let (_, uri) = dict_and_magnet("apibook");
-        let body = serde_json::json!({"magnet_uri": uri, "save_path": "/tmp", "engine": "hoard"}).to_string();
-        let r = crate::api::post_torrent_add(State(s.state.clone()), RawQuery(None), keyed(KEY), body).await;
+        let body = serde_json::json!({"magnet_uri": uri, "save_path": "/tmp", "engine": "hoard"})
+            .to_string();
+        let r =
+            crate::api::post_torrent_add(State(s.state.clone()), RawQuery(None), keyed(KEY), body)
+                .await;
         assert_eq!(r.status(), axum::http::StatusCode::ACCEPTED);
         let v = body_json(r).await;
         let hash = v["info_hash"].as_str().unwrap().to_string();
         assert_eq!(v["status"], "resolving");
 
-        let listed = body_json(list(State(s.state.clone()), RawQuery(None), keyed(KEY)).await).await;
+        let listed =
+            body_json(list(State(s.state.clone()), RawQuery(None), keyed(KEY)).await).await;
         assert_eq!(listed["magnets"][0]["info_hash"], hash);
         assert_eq!(listed["magnets"][0]["name"], "apibook");
-        let gone = remove(State(s.state.clone()), Path(hash.clone()), RawQuery(None), keyed(KEY)).await;
+        let gone = remove(
+            State(s.state.clone()),
+            Path(hash.clone()),
+            RawQuery(None),
+            keyed(KEY),
+        )
+        .await;
         assert!(gone.status().is_success());
-        let again = remove(State(s.state.clone()), Path(hash), RawQuery(None), keyed(KEY)).await;
+        let again = remove(
+            State(s.state.clone()),
+            Path(hash),
+            RawQuery(None),
+            keyed(KEY),
+        )
+        .await;
         assert_eq!(again.status(), axum::http::StatusCode::NOT_FOUND);
-        assert_eq!(list(State(s.state.clone()), RawQuery(None), axum::http::HeaderMap::new()).await.status(), axum::http::StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            list(
+                State(s.state.clone()),
+                RawQuery(None),
+                axum::http::HeaderMap::new()
+            )
+            .await
+            .status(),
+            axum::http::StatusCode::UNAUTHORIZED
+        );
     }
 }

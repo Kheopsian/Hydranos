@@ -94,10 +94,18 @@ pub fn plan(
         if left == 0 {
             break;
         }
-        if announced(&ih) || done.get(&ih).is_some_and(|at| now.saturating_duration_since(*at) < AGAIN) {
+        if announced(&ih)
+            || done
+                .get(&ih)
+                .is_some_and(|at| now.saturating_duration_since(*at) < AGAIN)
+        {
             continue;
         }
-        let target = tiers.iter().flatten().filter_map(|u| target_for(policy, u)).find(|t| allows(&t.host()));
+        let target = tiers
+            .iter()
+            .flatten()
+            .filter_map(|u| target_for(policy, u))
+            .find(|t| allows(&t.host()));
         if let Some(t) = target {
             out.entry(t).or_default().push(ih);
             left -= 1;
@@ -107,14 +115,22 @@ pub fn plan(
 }
 
 /// One engine's scrape loop, beside its announcer.
-pub fn spawn(manager: Arc<TorrentManager>, policy: super::PolicyHandle, cache: Arc<Cache>, breaker: Arc<Breaker>) {
+pub fn spawn(
+    manager: Arc<TorrentManager>,
+    policy: super::PolicyHandle,
+    cache: Arc<Cache>,
+    breaker: Arc<Breaker>,
+) {
     tokio::spawn(async move {
         let mut done: HashMap<InfoHash, Instant> = HashMap::new();
         tokio::time::sleep(FIRST).await;
         loop {
             // Held: not a word to any tracker, a scrape included.
             if !manager.limiter().dials_paused() {
-                let policy = policy.read().map(|p| p.clone()).unwrap_or_else(|e| e.into_inner().clone());
+                let policy = policy
+                    .read()
+                    .map(|p| p.clone())
+                    .unwrap_or_else(|e| e.into_inner().clone());
                 pass(&manager, &policy, &cache, &breaker, &mut done).await;
             }
             tokio::time::sleep(PASS).await;
@@ -122,11 +138,20 @@ pub fn spawn(manager: Arc<TorrentManager>, policy: super::PolicyHandle, cache: A
     });
 }
 
-async fn pass(manager: &Arc<TorrentManager>, policy: &Policy, cache: &Cache, breaker: &Breaker, done: &mut HashMap<InfoHash, Instant>) {
+async fn pass(
+    manager: &Arc<TorrentManager>,
+    policy: &Policy,
+    cache: &Cache,
+    breaker: &Breaker,
+    done: &mut HashMap<InfoHash, Instant>,
+) {
     let now = Instant::now();
     let announced = |ih: &InfoHash| cache.has(&typhon_engine::torrent::hex_encode(ih));
     let groups = plan(
-        manager.all().into_iter().map(|t| (t.info_hash, t.live_trackers.read().clone())),
+        manager
+            .all()
+            .into_iter()
+            .map(|t| (t.info_hash, t.live_trackers.read().clone())),
         &announced,
         done,
         policy,
@@ -141,7 +166,11 @@ async fn pass(manager: &Arc<TorrentManager>, policy: &Policy, cache: &Cache, bre
     for ih in groups.values().flatten() {
         done.insert(*ih, now);
     }
-    let (device, proxy, ua) = (policy.device.clone(), policy.proxy.clone(), policy.user_agent.clone());
+    let (device, proxy, ua) = (
+        policy.device.clone(),
+        policy.proxy.clone(),
+        policy.user_agent.clone(),
+    );
     let filled: usize = futures::stream::iter(groups)
         .map(|(target, hashes)| {
             let (device, proxy, ua) = (device.clone(), proxy.clone(), ua.clone());
@@ -166,12 +195,21 @@ async fn pass(manager: &Arc<TorrentManager>, policy: &Policy, cache: &Cache, bre
         })
         .fold(0, |a, n| async move { a + n })
         .await;
-    tracing::info!(filled, "scrape: swarm counts for torrents not announced yet");
+    tracing::info!(
+        filled,
+        "scrape: swarm counts for torrents not announced yet"
+    );
 }
 
 /// Every batch for one tracker, one after the other. Stops at the first
 /// error: the next pass tries again, the tracker does not get hammered.
-async fn scrape_host(target: &Target, hashes: &[InfoHash], ua: &str, device: &str, proxy: &str) -> Vec<ScrapeEntry> {
+async fn scrape_host(
+    target: &Target,
+    hashes: &[InfoHash],
+    ua: &str,
+    device: &str,
+    proxy: &str,
+) -> Vec<ScrapeEntry> {
     let mut out = Vec::new();
     for (i, batch) in hashes.chunks(BATCH).enumerate() {
         if i > 0 {
@@ -179,7 +217,9 @@ async fn scrape_host(target: &Target, hashes: &[InfoHash], ua: &str, device: &st
         }
         let got = match target {
             Target::Http(url) => tscrape::http_scrape_on(url, batch, ua, device, proxy).await,
-            Target::Udp(url) => typhon_engine::tracker::udp::send_scrape_on(url, batch, device, proxy).await,
+            Target::Udp(url) => {
+                typhon_engine::tracker::udp::send_scrape_on(url, batch, device, proxy).await
+            }
         };
         match got {
             Ok(v) => out.extend(v),
@@ -210,9 +250,23 @@ mod tests {
     fn only_torrents_without_an_announce_answer_are_planned() {
         let p = Policy::default();
         let now = Instant::now();
-        let ts = vec![(ih(1), tiers(&["https://t.example/announce"])), (ih(2), tiers(&["https://t.example/announce"]))];
-        let g = plan(ts.into_iter(), |h| *h == ih(1), &HashMap::new(), &p, |_| true, 100, now);
-        assert_eq!(g.get(&Target::Http("https://t.example/scrape".into())), Some(&vec![ih(2)]));
+        let ts = vec![
+            (ih(1), tiers(&["https://t.example/announce"])),
+            (ih(2), tiers(&["https://t.example/announce"])),
+        ];
+        let g = plan(
+            ts.into_iter(),
+            |h| *h == ih(1),
+            &HashMap::new(),
+            &p,
+            |_| true,
+            100,
+            now,
+        );
+        assert_eq!(
+            g.get(&Target::Http("https://t.example/scrape".into())),
+            Some(&vec![ih(2)])
+        );
         assert_eq!(g.values().flatten().count(), 1);
     }
 
@@ -226,15 +280,53 @@ mod tests {
         // which BEP 48 gives no scrape URL -- such a tracker is not scraped
         // rather than scraped with the key the announces replace.
         assert_eq!(target_for(&p, "https://t.example/announce/OLDKEY"), None);
-        assert_eq!(target_for(&p, "https://t.example/announce?passkey=K"), Some(Target::Http("https://t.example/scrape?passkey=K".into())));
+        assert_eq!(
+            target_for(&p, "https://t.example/announce?passkey=K"),
+            Some(Target::Http("https://t.example/scrape?passkey=K".into()))
+        );
         let now = Instant::now();
-        let ts = vec![(ih(3), tiers(&["https://noscrape.example/a", "udp://u.example:1337/announce"]))];
-        let g = plan(ts.clone().into_iter(), |_| false, &HashMap::new(), &p, |_| true, 100, now);
+        let ts = vec![(
+            ih(3),
+            tiers(&[
+                "https://noscrape.example/a",
+                "udp://u.example:1337/announce",
+            ]),
+        )];
+        let g = plan(
+            ts.clone().into_iter(),
+            |_| false,
+            &HashMap::new(),
+            &p,
+            |_| true,
+            100,
+            now,
+        );
         assert!(g.contains_key(&Target::Udp("udp://u.example:1337/announce".into())));
         p.skip_udp = true;
-        assert!(plan(ts.clone().into_iter(), |_| false, &HashMap::new(), &p, |_| true, 100, now).is_empty());
+        assert!(plan(
+            ts.clone().into_iter(),
+            |_| false,
+            &HashMap::new(),
+            &p,
+            |_| true,
+            100,
+            now
+        )
+        .is_empty());
         p.skip_udp = false;
-        assert!(plan(ts.into_iter(), |_| false, &HashMap::new(), &p, |h| h != "u.example", 100, now).is_empty(), "breaker open");
+        assert!(
+            plan(
+                ts.into_iter(),
+                |_| false,
+                &HashMap::new(),
+                &p,
+                |h| h != "u.example",
+                100,
+                now
+            )
+            .is_empty(),
+            "breaker open"
+        );
     }
 
     /// With `announce_cleartext_passkey = "refuse"` the announce to a plain
@@ -244,7 +336,8 @@ mod tests {
     #[test]
     fn refuse_also_stops_the_scrape_of_a_plain_http_tracker_with_a_passkey() {
         let mut p = Policy::default();
-        p.passkeys.insert("configured.example".into(), "SECRETKEY0123456789".into());
+        p.passkeys
+            .insert("configured.example".into(), "SECRETKEY0123456789".into());
         let configured = "http://configured.example/announce";
         let in_url = "http://inurl.example/announce?passkey=0123456789abcdef0123";
         // Default (warn): scraped as before, passkey applied.
@@ -254,15 +347,44 @@ mod tests {
         assert_eq!(target_for(&p, configured), None);
         assert_eq!(target_for(&p, in_url), None);
         // https, udp and a key-free http tracker keep their scrape.
-        assert!(matches!(target_for(&p, "https://configured.example/announce"), Some(Target::Http(_))));
-        assert!(matches!(target_for(&p, "udp://u.example:1337/announce"), Some(Target::Udp(_))));
-        assert!(matches!(target_for(&p, "http://plain.example/announce"), Some(Target::Http(_))));
+        assert!(matches!(
+            target_for(&p, "https://configured.example/announce"),
+            Some(Target::Http(_))
+        ));
+        assert!(matches!(
+            target_for(&p, "udp://u.example:1337/announce"),
+            Some(Target::Udp(_))
+        ));
+        assert!(matches!(
+            target_for(&p, "http://plain.example/announce"),
+            Some(Target::Http(_))
+        ));
         // The plan never selects the refused tracker; it falls to the next.
         let ts = vec![(ih(4), tiers(&[configured, in_url]))];
-        assert!(plan(ts.clone().into_iter(), |_| false, &HashMap::new(), &p, |_| true, 100, Instant::now()).is_empty());
+        assert!(plan(
+            ts.clone().into_iter(),
+            |_| false,
+            &HashMap::new(),
+            &p,
+            |_| true,
+            100,
+            Instant::now()
+        )
+        .is_empty());
         let ts = vec![(ih(4), tiers(&[configured, "https://ok.example/announce"]))];
-        let g = plan(ts.into_iter(), |_| false, &HashMap::new(), &p, |_| true, 100, Instant::now());
-        assert_eq!(g.keys().cloned().collect::<Vec<_>>(), vec![Target::Http("https://ok.example/scrape".into())]);
+        let g = plan(
+            ts.into_iter(),
+            |_| false,
+            &HashMap::new(),
+            &p,
+            |_| true,
+            100,
+            Instant::now(),
+        );
+        assert_eq!(
+            g.keys().cloned().collect::<Vec<_>>(),
+            vec![Target::Http("https://ok.example/scrape".into())]
+        );
     }
 
     /// The budget caps a pass, and a torrent scraped recently waits AGAIN.
@@ -270,10 +392,49 @@ mod tests {
     fn a_pass_is_bounded_and_does_not_repeat_itself() {
         let p = Policy::default();
         let now = Instant::now();
-        let ts: Vec<_> = (0..10u8).map(|i| (ih(i), tiers(&["http://t.example/announce"]))).collect();
-        assert_eq!(plan(ts.clone().into_iter(), |_| false, &HashMap::new(), &p, |_| true, 4, now).values().flatten().count(), 4);
+        let ts: Vec<_> = (0..10u8)
+            .map(|i| (ih(i), tiers(&["http://t.example/announce"])))
+            .collect();
+        assert_eq!(
+            plan(
+                ts.clone().into_iter(),
+                |_| false,
+                &HashMap::new(),
+                &p,
+                |_| true,
+                4,
+                now
+            )
+            .values()
+            .flatten()
+            .count(),
+            4
+        );
         let done: HashMap<_, _> = (0..10u8).map(|i| (ih(i), now)).collect();
-        assert!(plan(ts.clone().into_iter(), |_| false, &done, &p, |_| true, 100, now).is_empty());
-        assert_eq!(plan(ts.into_iter(), |_| false, &done, &p, |_| true, 100, now + AGAIN).values().flatten().count(), 10);
+        assert!(plan(
+            ts.clone().into_iter(),
+            |_| false,
+            &done,
+            &p,
+            |_| true,
+            100,
+            now
+        )
+        .is_empty());
+        assert_eq!(
+            plan(
+                ts.into_iter(),
+                |_| false,
+                &done,
+                &p,
+                |_| true,
+                100,
+                now + AGAIN
+            )
+            .values()
+            .flatten()
+            .count(),
+            10
+        );
     }
 }

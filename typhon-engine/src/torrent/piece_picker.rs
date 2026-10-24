@@ -81,7 +81,12 @@ pub struct PickOrder {
 impl PickOrder {
     /// `None` for the default order: the picker then takes the exact path it
     /// took before these settings existed.
-    pub fn build(order: &DownloadOrder, files: &[FileEntry], piece_length: u32, num_pieces: u32) -> Option<Box<PickOrder>> {
+    pub fn build(
+        order: &DownloadOrder,
+        files: &[FileEntry],
+        piece_length: u32,
+        num_pieces: u32,
+    ) -> Option<Box<PickOrder>> {
         if order.is_default() {
             return None;
         }
@@ -111,7 +116,10 @@ impl PickOrder {
         } else {
             None
         };
-        Some(Box::new(PickOrder { sequential: order.sequential, rank }))
+        Some(Box::new(PickOrder {
+            sequential: order.sequential,
+            rank,
+        }))
     }
 }
 
@@ -206,7 +214,8 @@ impl PieceMem {
         self.reserved
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |reserved| {
                 let committed = reserved + writing;
-                (budget == 0 || committed == 0 || committed + size <= budget).then_some(reserved + size)
+                (budget == 0 || committed == 0 || committed + size <= budget)
+                    .then_some(reserved + size)
             })
             .is_ok()
     }
@@ -214,7 +223,10 @@ impl PieceMem {
     /// Count `len` bytes as being written until the hold is dropped.
     pub fn hold_write(self: &Arc<Self>, len: u64) -> WriteHold {
         self.writing.fetch_add(len, Ordering::Relaxed);
-        WriteHold { mem: self.clone(), len }
+        WriteHold {
+            mem: self.clone(),
+            len,
+        }
     }
 
     /// Resolves at the next write that gives budget back.
@@ -262,17 +274,22 @@ fn memory_ceiling() -> Option<u64> {
 /// `memory_ceiling` read under `root` instead of `/`, so a test can lay out
 /// its own /proc and /sys.
 fn memory_ceiling_at(root: &std::path::Path) -> Option<u64> {
-    let total = std::fs::read_to_string(root.join("proc/meminfo")).ok().and_then(|s| {
-        s.lines()
-            .find_map(|l| l.strip_prefix("MemTotal:"))
-            .and_then(|v| v.trim().trim_end_matches("kB").trim().parse::<u64>().ok())
-            .map(|kb| kb * 1024)
-    });
+    let total = std::fs::read_to_string(root.join("proc/meminfo"))
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find_map(|l| l.strip_prefix("MemTotal:"))
+                .and_then(|v| v.trim().trim_end_matches("kB").trim().parse::<u64>().ok())
+                .map(|kb| kb * 1024)
+        });
     let cgroup = cgroup_v2_limit(root).or_else(|| {
-        ["sys/fs/cgroup/memory.max", "sys/fs/cgroup/memory/memory.limit_in_bytes"]
-            .iter()
-            .find_map(|p| std::fs::read_to_string(root.join(p)).ok())
-            .and_then(|s| s.trim().parse::<u64>().ok())
+        [
+            "sys/fs/cgroup/memory.max",
+            "sys/fs/cgroup/memory/memory.limit_in_bytes",
+        ]
+        .iter()
+        .find_map(|p| std::fs::read_to_string(root.join(p)).ok())
+        .and_then(|s| s.trim().parse::<u64>().ok())
     });
     match (total, cgroup) {
         (Some(t), Some(c)) => Some(t.min(c)),
@@ -285,7 +302,11 @@ fn memory_ceiling_at(root: &std::path::Path) -> Option<u64> {
 /// cgroup, not on /sys/fs/cgroup itself; "max" means no limit at that level.
 fn cgroup_v2_limit(root: &std::path::Path) -> Option<u64> {
     let own = std::fs::read_to_string(root.join("proc/self/cgroup")).ok()?;
-    let rel = own.lines().find_map(|l| l.strip_prefix("0::"))?.trim().trim_start_matches('/');
+    let rel = own
+        .lines()
+        .find_map(|l| l.strip_prefix("0::"))?
+        .trim()
+        .trim_start_matches('/');
     // A cgroup outside our namespace shows as "/../..": not under our mount.
     if rel.split('/').any(|c| c == "..") {
         return None;
@@ -294,7 +315,10 @@ fn cgroup_v2_limit(root: &std::path::Path) -> Option<u64> {
     let mut dir = base.join(rel);
     let mut tightest: Option<u64> = None;
     loop {
-        if let Some(v) = std::fs::read_to_string(dir.join("memory.max")).ok().and_then(|s| s.trim().parse::<u64>().ok()) {
+        if let Some(v) = std::fs::read_to_string(dir.join("memory.max"))
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+        {
             tightest = Some(tightest.map_or(v, |t| t.min(v)));
         }
         if dir == base || !dir.pop() || !dir.starts_with(&base) {
@@ -329,9 +353,9 @@ pub enum Block {
 /// Rarest-first piece picker for download mode.
 pub struct PiecePicker {
     num_pieces: u32,
-    have: Vec<bool>,           // pieces we have
-    availability: Vec<u16>,    // how many peers have each piece (u16: le swarm ne depasse jamais 65535 copies)
-    pending: HashMap<u32, PendingPiece>,  // piece index -> in-flight reservation and the blocks received
+    have: Vec<bool>,                     // pieces we have
+    availability: Vec<u16>, // how many peers have each piece (u16: le swarm ne depasse jamais 65535 copies)
+    pending: HashMap<u32, PendingPiece>, // piece index -> in-flight reservation and the blocks received
     /// Bytes of block data held across `pending`: what this picker costs.
     held_bytes: u64,
     /// Full size of the pieces in `pending`: what they will cost complete.
@@ -510,7 +534,8 @@ impl PiecePicker {
             let byte_idx = piece as usize / 8;
             let bit_idx = 7 - (piece % 8);
             if byte_idx < bitfield.len() && (bitfield[byte_idx] >> bit_idx) & 1 == 1 {
-                self.availability[piece as usize] = self.availability[piece as usize].saturating_add(1);
+                self.availability[piece as usize] =
+                    self.availability[piece as usize].saturating_add(1);
             }
         }
     }
@@ -528,7 +553,8 @@ impl PiecePicker {
             let byte_idx = piece as usize / 8;
             let bit_idx = 7 - (piece % 8);
             if byte_idx < bitfield.len() && (bitfield[byte_idx] >> bit_idx) & 1 == 1 {
-                self.availability[piece as usize] = self.availability[piece as usize].saturating_sub(1);
+                self.availability[piece as usize] =
+                    self.availability[piece as usize].saturating_sub(1);
             }
         }
     }
@@ -711,18 +737,38 @@ impl PiecePicker {
     /// asks several peers for the same piece on purpose, and a second start
     /// used to overwrite the first, throwing away every block received for it.
     /// The joiner is asked only for the blocks still missing.
-    pub fn start_piece(&mut self, piece: u32, piece_size: u32, block_size: u32, owner: Owner) -> Vec<(u32, u32, u32)> {
-        self.start_piece_impl(piece, piece_size, block_size, owner, false).unwrap_or_default()
+    pub fn start_piece(
+        &mut self,
+        piece: u32,
+        piece_size: u32,
+        block_size: u32,
+        owner: Owner,
+    ) -> Vec<(u32, u32, u32)> {
+        self.start_piece_impl(piece, piece_size, block_size, owner, false)
+            .unwrap_or_default()
     }
 
     /// `start_piece`, but a NEW piece is started only if the engine's budget
     /// admits it, the check and the reservation made together. `None`: no room.
     /// Joining a piece already in flight always succeeds.
-    pub fn start_piece_within_budget(&mut self, piece: u32, piece_size: u32, block_size: u32, owner: Owner) -> Option<Vec<(u32, u32, u32)>> {
+    pub fn start_piece_within_budget(
+        &mut self,
+        piece: u32,
+        piece_size: u32,
+        block_size: u32,
+        owner: Owner,
+    ) -> Option<Vec<(u32, u32, u32)>> {
         self.start_piece_impl(piece, piece_size, block_size, owner, true)
     }
 
-    fn start_piece_impl(&mut self, piece: u32, piece_size: u32, block_size: u32, owner: Owner, gated: bool) -> Option<Vec<(u32, u32, u32)>> {
+    fn start_piece_impl(
+        &mut self,
+        piece: u32,
+        piece_size: u32,
+        block_size: u32,
+        owner: Owner,
+        gated: bool,
+    ) -> Option<Vec<(u32, u32, u32)>> {
         if let Some(p) = self.pending.get_mut(&piece) {
             if !p.owners.contains(&owner) {
                 p.owners.push(owner);
@@ -769,7 +815,13 @@ impl PiecePicker {
     /// sender is remembered, so a piece that fails can be charged to it. A
     /// block for a piece no longer in flight -- released, completed -- is
     /// refused and costs nothing.
-    pub fn receive_block_from(&mut self, piece: u32, offset: u32, data: &[u8], from: Owner) -> Block {
+    pub fn receive_block_from(
+        &mut self,
+        piece: u32,
+        offset: u32,
+        data: &[u8],
+        from: Owner,
+    ) -> Block {
         if !self.holds(piece, from) {
             return Block::Refused;
         }
@@ -888,7 +940,9 @@ impl PiecePicker {
 
     /// Does `owner` hold a reservation on this piece?
     pub fn holds(&self, piece: u32, owner: Owner) -> bool {
-        self.pending.get(&piece).is_some_and(|p| p.owners.contains(&owner))
+        self.pending
+            .get(&piece)
+            .is_some_and(|p| p.owners.contains(&owner))
     }
 
     #[cfg(test)]
@@ -937,9 +991,7 @@ impl PiecePicker {
     /// only be extended forwards, so starting in the middle truncates it.
     /// Walking from the front keeps every run as long as the torrent allows.
     pub fn first_missing(&self) -> Option<u32> {
-        (0..self.num_pieces).find(|&i| {
-            !self.have[i as usize] && !self.pending.contains_key(&i)
-        })
+        (0..self.num_pieces).find(|&i| !self.have[i as usize] && !self.pending.contains_key(&i))
     }
 
     /// Is this piece already reserved by someone?
@@ -1072,16 +1124,29 @@ mod receive_block_tests {
         let piece: Vec<u8> = (0..40_000u32).map(|i| (i * 7 + 3) as u8).collect();
         let mut p = PiecePicker::new(1);
         let reqs = p.start_piece(0, piece.len() as u32, 16384, 1);
-        assert_eq!(reqs, vec![(0, 0, 16384), (0, 16384, 16384), (0, 32768, 40_000 - 32768)]);
+        assert_eq!(
+            reqs,
+            vec![(0, 0, 16384), (0, 16384, 16384), (0, 32768, 40_000 - 32768)]
+        );
         assert!(p.take_piece_data(0).is_none(), "nothing to hand over yet");
         assert_eq!(p.receive_block(0, 32768, &piece[32768..]), Block::Stored);
         assert_eq!(p.receive_block(0, 0, &piece[..16384]), Block::Stored);
-        assert!(p.take_piece_data(0).is_none(), "a hole is never handed to the disk");
+        assert!(
+            p.take_piece_data(0).is_none(),
+            "a hole is never handed to the disk"
+        );
         assert_eq!(p.receive_block(0, 0, &piece[..16384]), Block::Duplicate);
-        assert_eq!(p.receive_block(0, 16384, &piece[16384..32768]), Block::Complete);
+        assert_eq!(
+            p.receive_block(0, 16384, &piece[16384..32768]),
+            Block::Complete
+        );
         assert_eq!(p.take_piece_data(0).as_deref(), Some(&piece[..]));
         assert_eq!(p.in_flight(), (0, 0));
-        assert_eq!(p.receive_block(0, 0, &piece[..16384]), Block::Refused, "gone once taken");
+        assert_eq!(
+            p.receive_block(0, 0, &piece[..16384]),
+            Block::Refused,
+            "gone once taken"
+        );
     }
 
     /// ⭐ Endgame: a second peer joins the piece instead of resetting it, is
@@ -1093,11 +1158,19 @@ mod receive_block_tests {
         assert_eq!(p.receive_block(0, 0, &[1u8; 16384]), Block::Stored);
         let second = p.start_piece(0, 32768, 16384, 2);
         assert_eq!(second, vec![(0, 16384, 16384)], "only the missing block");
-        assert_eq!(p.in_flight(), (1, 16384), "the first block survived the join");
+        assert_eq!(
+            p.in_flight(),
+            (1, 16384),
+            "the first block survived the join"
+        );
         assert!(!p.wants_block(0, 0, 2), "already in");
         assert!(p.wants_block(0, 16384, 2));
         assert_eq!(p.receive_block(0, 16384, &[2u8; 16384]), Block::Complete);
-        assert_eq!(p.receive_block(0, 16384, &[2u8; 16384]), Block::Duplicate, "the other peer's copy");
+        assert_eq!(
+            p.receive_block(0, 16384, &[2u8; 16384]),
+            Block::Duplicate,
+            "the other peer's copy"
+        );
         assert!(p.take_piece_data(0).is_some());
         assert!(p.take_piece_data(0).is_none(), "one piece, one hand-over");
         p.release(0, 1);
@@ -1119,7 +1192,10 @@ mod receive_block_tests {
         assert_eq!(p.in_flight(), (0, 0));
         p.start_piece(0, 32768, 16384, 3);
         p.release(0, 1);
-        assert!(p.holds(0, 3), "owner 1 let go long ago; 3's reservation stands");
+        assert!(
+            p.holds(0, 3),
+            "owner 1 let go long ago; 3's reservation stands"
+        );
     }
 
     /// A torrent dropped with pieces in flight takes them out of the engine's
@@ -1168,7 +1244,11 @@ mod receive_block_tests {
         let mut p = PiecePicker::new(4);
         p.attach_mem(mem.clone());
         p.start_piece(0, 32768, 16384, 1);
-        assert_eq!(mem.committed(), 32768, "its full size, before a byte arrived");
+        assert_eq!(
+            mem.committed(),
+            32768,
+            "its full size, before a byte arrived"
+        );
         assert!(p.may_start(32768), "a second one fits");
         p.start_piece(1, 32768, 16384, 2);
         assert!(!p.may_start(32768), "a third one does not");
@@ -1177,7 +1257,11 @@ mod receive_block_tests {
         p.receive_block(0, 16384, &[1u8; 16384]);
         let data = p.take_piece_data(0).unwrap();
         let hold = p.mem().unwrap().hold_write(data.len() as u64);
-        assert_eq!(mem.committed(), 2 * 32768, "taken for its write, still counted");
+        assert_eq!(
+            mem.committed(),
+            2 * 32768,
+            "taken for its write, still counted"
+        );
         assert!(!p.may_start(32768), "a slow disk keeps the budget spent");
         drop(hold);
         assert_eq!(mem.committed(), 32768);
@@ -1220,7 +1304,11 @@ mod order_tests {
     use std::path::PathBuf;
 
     fn file(offset: u64, length: u64) -> FileEntry {
-        FileEntry { path: PathBuf::from(format!("f{offset}")), offset, length }
+        FileEntry {
+            path: PathBuf::from(format!("f{offset}")),
+            offset,
+            length,
+        }
     }
 
     /// A peer that has every piece.
@@ -1251,7 +1339,10 @@ mod order_tests {
     fn default_order_picks_exactly_as_before() {
         let files = [file(0, 8 * 16)];
         assert!(PickOrder::build(&DownloadOrder::default(), &files, 16, 8).is_none());
-        let explicit_normal = DownloadOrder { file_prio: vec![PRIO_NORMAL], ..Default::default() };
+        let explicit_normal = DownloadOrder {
+            file_prio: vec![PRIO_NORMAL],
+            ..Default::default()
+        };
         assert!(explicit_normal.is_default());
         assert!(PickOrder::build(&explicit_normal, &files, 16, 8).is_none());
 
@@ -1276,11 +1367,18 @@ mod order_tests {
         let files = [file(0, 40 * 16)];
         let mut p = picker_with_avail(&[5; 40]);
         p.add_have(30); // rarest-first would pick anything but 30
-        let o = DownloadOrder { sequential: true, ..Default::default() };
+        let o = DownloadOrder {
+            sequential: true,
+            ..Default::default()
+        };
         ordered(&mut p, &o, &files, 16);
         assert_eq!(p.pick_piece(&all(40)), Some(0));
         p.begin_piece_for_test(0, 16, 16);
-        assert_eq!(p.pick_piece(&all(40)), Some(1), "the next one, while 0 is in flight");
+        assert_eq!(
+            p.pick_piece(&all(40)),
+            Some(1),
+            "the next one, while 0 is in flight"
+        );
         p.begin_piece_for_test(1, 16, 16);
         p.set_have(2);
         assert_eq!(p.pick_piece(&all(40)), Some(3));
@@ -1297,7 +1395,15 @@ mod order_tests {
         for i in 0..18 {
             p.set_have(i);
         }
-        ordered(&mut p, &DownloadOrder { sequential: true, ..Default::default() }, &files, 16);
+        ordered(
+            &mut p,
+            &DownloadOrder {
+                sequential: true,
+                ..Default::default()
+            },
+            &files,
+            16,
+        );
         p.begin_piece_for_test(18, 16, 16);
         p.begin_piece_for_test(19, 16, 16);
         // Two left, both reserved: endgame lets another peer race for them.
@@ -1352,7 +1458,10 @@ mod order_tests {
             }
         }
         let mut p = picker_with_avail(&avail);
-        let o = DownloadOrder { first_last: true, ..Default::default() };
+        let o = DownloadOrder {
+            first_last: true,
+            ..Default::default()
+        };
         ordered(&mut p, &o, &files, 16);
         let mut got = Vec::new();
         for _ in 0..4 {
@@ -1364,7 +1473,16 @@ mod order_tests {
         assert_eq!(got, vec![0, 9, 10, 19]);
         // With sequential, the ends first, then in order.
         let mut q = PiecePicker::new(20);
-        ordered(&mut q, &DownloadOrder { sequential: true, first_last: true, ..Default::default() }, &files, 16);
+        ordered(
+            &mut q,
+            &DownloadOrder {
+                sequential: true,
+                first_last: true,
+                ..Default::default()
+            },
+            &files,
+            16,
+        );
         let mut seq = Vec::new();
         for _ in 0..6 {
             let pick = q.pick_piece(&all(20)).unwrap();
@@ -1382,7 +1500,10 @@ mod order_tests {
         assert!(o.is_default());
         o.set_file_priority(1, 2, PRIO_HIGH);
         o.set_file_priority(1, 2, PRIO_NORMAL);
-        assert!(o.file_prio.is_empty(), "back to all-normal is back to nothing stored");
+        assert!(
+            o.file_prio.is_empty(),
+            "back to all-normal is back to nothing stored"
+        );
     }
 }
 
@@ -1395,14 +1516,18 @@ mod ceiling_tests {
 
     /// A fake / with a 64 GiB machine and the given cgroup files.
     fn fake_root(tag: &str, self_cgroup: &str, files: &[(&str, &str)]) -> PathBuf {
-        let root = std::env::temp_dir().join(format!("typhon-ceiling-{tag}-{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("typhon-ceiling-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let put = |rel: &str, body: &str| {
             let p = root.join(rel);
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
             std::fs::write(p, body).unwrap();
         };
-        put("proc/meminfo", "MemTotal:       67108864 kB\nMemFree:  1024 kB\n");
+        put(
+            "proc/meminfo",
+            "MemTotal:       67108864 kB\nMemFree:  1024 kB\n",
+        );
         put("proc/self/cgroup", self_cgroup);
         for (rel, body) in files {
             put(rel, body);
@@ -1423,7 +1548,10 @@ mod ceiling_tests {
             "0::/system.slice/hydranos.service\n",
             &[
                 ("sys/fs/cgroup/system.slice/memory.max", "max\n"),
-                ("sys/fs/cgroup/system.slice/hydranos.service/memory.max", "2147483648\n"),
+                (
+                    "sys/fs/cgroup/system.slice/hydranos.service/memory.max",
+                    "2147483648\n",
+                ),
             ],
         );
         assert_eq!(memory_ceiling_at(&root), Some(2 * GIB));
@@ -1448,14 +1576,22 @@ mod ceiling_tests {
     fn a_container_without_a_limit_falls_back_to_the_machine() {
         // Docker with its own cgroup namespace: the container is "/", and an
         // unset limit reads "max".
-        let root = fake_root("nolimit", "0::/\n", &[("sys/fs/cgroup/memory.max", "max\n")]);
+        let root = fake_root(
+            "nolimit",
+            "0::/\n",
+            &[("sys/fs/cgroup/memory.max", "max\n")],
+        );
         assert_eq!(memory_ceiling_at(&root), Some(64 * GIB));
         done(&root);
     }
 
     #[test]
     fn a_container_limit_still_counts() {
-        let root = fake_root("box", "0::/\n", &[("sys/fs/cgroup/memory.max", "4294967296\n")]);
+        let root = fake_root(
+            "box",
+            "0::/\n",
+            &[("sys/fs/cgroup/memory.max", "4294967296\n")],
+        );
         assert_eq!(memory_ceiling_at(&root), Some(4 * GIB));
         done(&root);
     }

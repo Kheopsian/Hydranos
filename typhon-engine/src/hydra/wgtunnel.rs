@@ -155,7 +155,10 @@ pub fn wanted(mode: &str, engines: &[crate::config::LocalEngine]) -> Vec<Want> {
     engines
         .iter()
         .enumerate()
-        .filter(|(_, e)| e.session.wireguard_enabled == Some(true) && !e.session.wireguard_config.trim().is_empty())
+        .filter(|(_, e)| {
+            e.session.wireguard_enabled == Some(true)
+                && !e.session.wireguard_config.trim().is_empty()
+        })
         .map(|(slot, e)| Want {
             engine: e.id.clone(),
             device: device_name(&e.id),
@@ -164,7 +167,10 @@ pub fn wanted(mode: &str, engines: &[crate::config::LocalEngine]) -> Vec<Want> {
             config_file: e.session.wireguard_config.trim().to_string(),
             provider: e.session.wireguard_provider.trim().to_string(),
             manual_port: e.session.wireguard_port,
-            port_forward: port_forward_of(&e.session.wireguard_provider, &e.session.wireguard_port_forward),
+            port_forward: port_forward_of(
+                &e.session.wireguard_provider,
+                &e.session.wireguard_port_forward,
+            ),
         })
         .collect()
 }
@@ -216,7 +222,13 @@ pub struct Step {
 }
 
 fn step(argv: &[&str], on_fail: OnFail) -> Step {
-    Step { argv: argv.iter().map(|s| s.to_string()).collect(), stdin: None, on_fail, v6: false, repeat: false }
+    Step {
+        argv: argv.iter().map(|s| s.to_string()).collect(),
+        stdin: None,
+        on_fail,
+        v6: false,
+        repeat: false,
+    }
 }
 
 fn is_v6(cidr: &str) -> bool {
@@ -232,7 +244,11 @@ pub fn teardown_plan(device: &str) -> Vec<Step> {
     v4.repeat = true;
     let mut v6 = step(&["ip", "-6", "rule", "del", "oif", device], OnFail::Ignore);
     v6.repeat = true;
-    vec![v4, v6, step(&["ip", "link", "del", "dev", device], OnFail::Ignore)]
+    vec![
+        v4,
+        v6,
+        step(&["ip", "link", "del", "dev", device], OnFail::Ignore),
+    ]
 }
 
 /// Remove every rule into a tunnel's table, the `from` rules of
@@ -269,47 +285,86 @@ pub fn up_plan(w: &Want, conf: &Conf) -> Result<Vec<Step>, String> {
     let has_v4 = conf.addresses.iter().any(|a| !is_v6(a));
     let has_v6 = conf.addresses.iter().any(|a| is_v6(a));
     if !has_v4 && !has_v6 {
-        return Err(format!("{}: no Address in [Interface], the tunnel would have no source address", w.config_file));
+        return Err(format!(
+            "{}: no Address in [Interface], the tunnel would have no source address",
+            w.config_file
+        ));
     }
     let table = w.table.to_string();
     let pref = w.pref.to_string();
     let mut plan = teardown_plan(dev);
     plan.extend(table_teardown(w.table));
-    plan.push(step(&["ip", "link", "add", "dev", dev, "type", "wireguard"], OnFail::Abort));
+    plan.push(step(
+        &["ip", "link", "add", "dev", dev, "type", "wireguard"],
+        OnFail::Abort,
+    ));
     let mut setconf = step(&["wg", "setconf", dev, "/dev/stdin"], OnFail::Abort);
     setconf.stdin = Some(wgtun::setconf_text(conf));
     plan.push(setconf);
     for a in &conf.addresses {
         if is_v6(a) {
-            let mut s = step(&["ip", "-6", "address", "add", a, "dev", dev], OnFail::DropV6);
+            let mut s = step(
+                &["ip", "-6", "address", "add", a, "dev", dev],
+                OnFail::DropV6,
+            );
             s.v6 = true;
             plan.push(s);
         } else {
-            plan.push(step(&["ip", "-4", "address", "add", a, "dev", dev], OnFail::Abort));
+            plan.push(step(
+                &["ip", "-4", "address", "add", a, "dev", dev],
+                OnFail::Abort,
+            ));
         }
     }
     let mtu = if conf.mtu > 0 { conf.mtu } else { DEFAULT_MTU }.to_string();
-    plan.push(step(&["ip", "link", "set", "dev", dev, "mtu", &mtu, "up"], OnFail::Abort));
+    plan.push(step(
+        &["ip", "link", "set", "dev", dev, "mtu", &mtu, "up"],
+        OnFail::Abort,
+    ));
     // The peers' AllowedIPs, into the tunnel's table only. `replace`, not
     // `add`: two peers may list the same range.
-    let mut routes: Vec<&str> = conf.peers.iter().flat_map(|p| p.allowed_ips.iter().map(String::as_str)).collect();
+    let mut routes: Vec<&str> = conf
+        .peers
+        .iter()
+        .flat_map(|p| p.allowed_ips.iter().map(String::as_str))
+        .collect();
     routes.dedup();
     for r in routes {
         if is_v6(r) {
             if has_v6 {
-                let mut s = step(&["ip", "-6", "route", "replace", r, "dev", dev, "table", &table], OnFail::DropV6);
+                let mut s = step(
+                    &[
+                        "ip", "-6", "route", "replace", r, "dev", dev, "table", &table,
+                    ],
+                    OnFail::DropV6,
+                );
                 s.v6 = true;
                 plan.push(s);
             }
         } else if has_v4 {
-            plan.push(step(&["ip", "-4", "route", "replace", r, "dev", dev, "table", &table], OnFail::Abort));
+            plan.push(step(
+                &[
+                    "ip", "-4", "route", "replace", r, "dev", dev, "table", &table,
+                ],
+                OnFail::Abort,
+            ));
         }
     }
     if has_v4 {
-        plan.push(step(&["ip", "-4", "rule", "add", "oif", dev, "lookup", &table, "pref", &pref], OnFail::Abort));
+        plan.push(step(
+            &[
+                "ip", "-4", "rule", "add", "oif", dev, "lookup", &table, "pref", &pref,
+            ],
+            OnFail::Abort,
+        ));
     }
     if has_v6 {
-        let mut s = step(&["ip", "-6", "rule", "add", "oif", dev, "lookup", &table, "pref", &pref], OnFail::DropV6);
+        let mut s = step(
+            &[
+                "ip", "-6", "rule", "add", "oif", dev, "lookup", &table, "pref", &pref,
+            ],
+            OnFail::DropV6,
+        );
         s.v6 = true;
         plan.push(s);
     }
@@ -351,8 +406,17 @@ pub fn source_steps(w: &Want, conf: &Conf) -> Vec<Step> {
         del.repeat = true;
         out.push(del);
         for a in addrs {
-            let on_fail = if fam == "-6" { OnFail::DropV6 } else { OnFail::Abort };
-            let mut s = step(&["ip", fam, "rule", "add", "from", a, "lookup", &table, "pref", &pref], on_fail);
+            let on_fail = if fam == "-6" {
+                OnFail::DropV6
+            } else {
+                OnFail::Abort
+            };
+            let mut s = step(
+                &[
+                    "ip", fam, "rule", "add", "from", a, "lookup", &table, "pref", &pref,
+                ],
+                on_fail,
+            );
             s.v6 = fam == "-6";
             out.push(s);
         }
@@ -417,7 +481,9 @@ pub fn execute(runner: &mut dyn Runner, plan: &[Step]) -> Result<Outcome, String
             Ok(_) => {}
             Err(e) => match s.on_fail {
                 OnFail::Ignore => {}
-                OnFail::DropV6 => out.degraded = Some(format!("{V6_FIX} ({}: {e})", s.argv.join(" "))),
+                OnFail::DropV6 => {
+                    out.degraded = Some(format!("{V6_FIX} ({}: {e})", s.argv.join(" ")))
+                }
                 OnFail::Abort => return Err(format!("{}: {e}", s.argv.join(" "))),
             },
         }
@@ -436,21 +502,31 @@ impl Runner for System {
 
 impl System {
     /// `run`, with the deadline given so a test does not wait twenty seconds.
-    fn run_within(&mut self, argv: &[String], stdin: Option<&str>, deadline: std::time::Duration) -> Result<String, String> {
+    fn run_within(
+        &mut self,
+        argv: &[String],
+        stdin: Option<&str>,
+        deadline: std::time::Duration,
+    ) -> Result<String, String> {
         use std::io::Write;
         use std::process::{Command, Stdio};
         let (prog, args) = argv.split_first().ok_or("empty command")?;
         let mut child = Command::new(prog)
             .args(args)
             .env("LC_ALL", "C")
-            .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
+            .stdin(if stdin.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| format!("cannot run {prog}: {e}"))?;
         if let Some(text) = stdin {
             if let Some(mut pipe) = child.stdin.take() {
-                pipe.write_all(text.as_bytes()).map_err(|e| format!("{prog}: {e}"))?;
+                pipe.write_all(text.as_bytes())
+                    .map_err(|e| format!("{prog}: {e}"))?;
             }
         }
         // Bounded: these run on the way out as well, after the state is
@@ -461,7 +537,10 @@ impl System {
         // ended, with a short grace for the last bytes: a child the command
         // left behind keeps the pipe open, and waiting for its end of file
         // waited for that child.
-        type Collected = (std::sync::Arc<Mutex<Vec<u8>>>, std::sync::Arc<std::sync::atomic::AtomicBool>);
+        type Collected = (
+            std::sync::Arc<Mutex<Vec<u8>>>,
+            std::sync::Arc<std::sync::atomic::AtomicBool>,
+        );
         let drain = |pipe: Option<Box<dyn std::io::Read + Send>>| -> Collected {
             let buf = std::sync::Arc::new(Mutex::new(Vec::new()));
             let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -473,7 +552,9 @@ impl System {
                         if n == 0 {
                             break;
                         }
-                        b.lock().unwrap_or_else(|e| e.into_inner()).extend_from_slice(&chunk[..n]);
+                        b.lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .extend_from_slice(&chunk[..n]);
                     }
                 }
                 d.store(true, std::sync::atomic::Ordering::Release);
@@ -482,15 +563,27 @@ impl System {
         };
         let collect = |(buf, done): Collected| -> Vec<u8> {
             let until = std::time::Instant::now() + PIPE_GRACE;
-            while !done.load(std::sync::atomic::Ordering::Acquire) && std::time::Instant::now() < until {
+            while !done.load(std::sync::atomic::Ordering::Acquire)
+                && std::time::Instant::now() < until
+            {
                 std::thread::sleep(std::time::Duration::from_millis(5));
             }
             let out = buf.lock().unwrap_or_else(|e| e.into_inner()).clone();
             out
         };
         use std::io::Read;
-        let stdout = drain(child.stdout.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
-        let stderr = drain(child.stderr.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
+        let stdout = drain(
+            child
+                .stdout
+                .take()
+                .map(|p| Box::new(p) as Box<dyn Read + Send>),
+        );
+        let stderr = drain(
+            child
+                .stderr
+                .take()
+                .map(|p| Box::new(p) as Box<dyn Read + Send>),
+        );
         let started = std::time::Instant::now();
         let status = loop {
             match child.try_wait().map_err(|e| format!("{prog}: {e}"))? {
@@ -504,10 +597,15 @@ impl System {
                     // is not reaped by a kill, and waiting for it is the wait
                     // this deadline exists to end.
                     let gone_by = std::time::Instant::now() + std::time::Duration::from_secs(2);
-                    while !matches!(child.try_wait(), Ok(Some(_)) | Err(_)) && std::time::Instant::now() < gone_by {
+                    while !matches!(child.try_wait(), Ok(Some(_)) | Err(_))
+                        && std::time::Instant::now() < gone_by
+                    {
                         std::thread::sleep(std::time::Duration::from_millis(20));
                     }
-                    return Err(format!("{prog}: no answer after {}s, stopped", deadline.as_secs()));
+                    return Err(format!(
+                        "{prog}: no answer after {}s, stopped",
+                        deadline.as_secs()
+                    ));
                 }
             }
         };
@@ -517,7 +615,11 @@ impl System {
             Ok(String::from_utf8_lossy(&out).into_owned())
         } else {
             let err = String::from_utf8_lossy(&err).trim().to_string();
-            Err(if err.is_empty() { format!("exit {status}") } else { err })
+            Err(if err.is_empty() {
+                format!("exit {status}")
+            } else {
+                err
+            })
         }
     }
 }
@@ -539,7 +641,10 @@ pub const DOWN_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
 /// Whether `CapEff` in a `/proc/<pid>/status` text carries CAP_NET_ADMIN.
 pub fn net_admin_in(status: &str) -> Option<bool> {
     const CAP_NET_ADMIN: u32 = 12;
-    let hex = status.lines().find_map(|l| l.strip_prefix("CapEff:"))?.trim();
+    let hex = status
+        .lines()
+        .find_map(|l| l.strip_prefix("CapEff:"))?
+        .trim();
     let caps = u64::from_str_radix(hex, 16).ok()?;
     Some(caps & (1 << CAP_NET_ADMIN) != 0)
 }
@@ -553,7 +658,11 @@ pub const NEEDS_TOOLS: &str =
 
 /// Why this process cannot manage tunnels, from what it can see. Pure, so
 /// each refusal can be tested on a machine that has every privilege.
-pub fn support_from(linux: bool, status: Option<&str>, has_tool: &dyn Fn(&str) -> bool) -> Result<(), &'static str> {
+pub fn support_from(
+    linux: bool,
+    status: Option<&str>,
+    has_tool: &dyn Fn(&str) -> bool,
+) -> Result<(), &'static str> {
     if !linux {
         return Err(NEEDS_LINUX);
     }
@@ -610,9 +719,13 @@ pub fn conf_dir(data_dir: &str) -> PathBuf {
 pub fn valid_conf_name(name: &str) -> Result<String, String> {
     let name = name.trim();
     let base = name.rsplit(['/', '\\']).next().unwrap_or(name);
-    let ok_chars = base.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'));
+    let ok_chars = base
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'));
     if base.is_empty() || base.starts_with('.') || !ok_chars || base.len() > 96 {
-        return Err(format!("{name:?} is not a usable file name: letters, digits, '.', '-' and '_' only"));
+        return Err(format!(
+            "{name:?} is not a usable file name: letters, digits, '.', '-' and '_' only"
+        ));
     }
     if !base.to_ascii_lowercase().ends_with(".conf") {
         return Err(format!("{name:?} is not a .conf file"));
@@ -630,7 +743,9 @@ pub fn store_conf(dir: &Path, name: &str, bytes: &[u8]) -> Result<(String, Conf)
     let text = std::str::from_utf8(bytes).map_err(|_| format!("{name} is not a text file"))?;
     let conf = wgtun::parse(text).map_err(|e| format!("{name}: {e}"))?;
     if conf.addresses.is_empty() {
-        return Err(format!("{name}: no Address in [Interface], the tunnel would have no source address"));
+        return Err(format!(
+            "{name}: no Address in [Interface], the tunnel would have no source address"
+        ));
     }
     if conf.peers.is_empty() {
         return Err(format!("{name}: no [Peer], the tunnel would lead nowhere"));
@@ -666,15 +781,19 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
         use std::os::unix::fs::OpenOptionsExt;
         opts.mode(0o600);
     }
-    let mut f = opts.open(path).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    let mut f = opts
+        .open(path)
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         // A file left by an earlier, laxer write keeps its old mode on open.
         let _ = f.set_permissions(std::fs::Permissions::from_mode(0o600));
     }
-    f.write_all(bytes).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
-    f.sync_all().map_err(|e| format!("cannot write {}: {e}", path.display()))
+    f.write_all(bytes)
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    f.sync_all()
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))
 }
 
 pub fn load_conf(dir: &Path, name: &str) -> Result<Conf, String> {
@@ -698,7 +817,9 @@ pub fn delete_conf(dir: &Path, name: &str) -> Result<bool, String> {
 /// Built from `wgtun::redacted`, so a field added to the listing later
 /// cannot carry a secret by accident.
 pub fn list_confs(dir: &Path) -> Vec<serde_json::Value> {
-    let Ok(rd) = std::fs::read_dir(dir) else { return Vec::new() };
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
     let mut names: Vec<String> = rd
         .flatten()
         .filter_map(|e| e.file_name().into_string().ok())
@@ -809,7 +930,10 @@ pub struct Tunnel {
 /// The `.conf`'s DNS servers that are addresses. A search domain may sit on
 /// the same line (`DNS = 10.2.0.1, example.lan`) and is not a server.
 pub fn dns_servers(conf: &Conf) -> Vec<std::net::IpAddr> {
-    conf.dns.iter().filter_map(|d| d.trim().parse().ok()).collect()
+    conf.dns
+        .iter()
+        .filter_map(|d| d.trim().parse().ok())
+        .collect()
 }
 
 /// The tunnels of this process, by engine.
@@ -820,26 +944,45 @@ pub struct Registry {
 
 impl Registry {
     pub fn set(&self, t: Tunnel) {
-        self.tunnels.lock().unwrap_or_else(|p| p.into_inner()).insert(t.engine.clone(), t);
+        self.tunnels
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(t.engine.clone(), t);
     }
 
     pub fn update(&self, engine: &str, f: impl FnOnce(&mut Tunnel)) {
-        if let Some(t) = self.tunnels.lock().unwrap_or_else(|p| p.into_inner()).get_mut(engine) {
+        if let Some(t) = self
+            .tunnels
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get_mut(engine)
+        {
             f(t);
         }
     }
 
     pub fn get(&self, engine: &str) -> Option<Tunnel> {
-        self.tunnels.lock().unwrap_or_else(|p| p.into_inner()).get(engine).cloned()
+        self.tunnels
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(engine)
+            .cloned()
     }
 
     pub fn all(&self) -> Vec<Tunnel> {
-        self.tunnels.lock().unwrap_or_else(|p| p.into_inner()).values().cloned().collect()
+        self.tunnels
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .values()
+            .cloned()
+            .collect()
     }
 
     /// Forget every tunnel, handing back what was there to take down.
     pub fn drain(&self) -> Vec<Tunnel> {
-        std::mem::take(&mut *self.tunnels.lock().unwrap_or_else(|p| p.into_inner())).into_values().collect()
+        std::mem::take(&mut *self.tunnels.lock().unwrap_or_else(|p| p.into_inner()))
+            .into_values()
+            .collect()
     }
 }
 
@@ -851,8 +994,21 @@ impl Registry {
 /// up in an API answer.
 pub fn live(runner: &mut dyn Runner, device: &str) -> Option<(Option<u64>, String)> {
     let dev = device.to_string();
-    let hs = runner.run(&["wg".into(), "show".into(), dev.clone(), "latest-handshakes".into()], None).ok()?;
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let hs = runner
+        .run(
+            &[
+                "wg".into(),
+                "show".into(),
+                dev.clone(),
+                "latest-handshakes".into(),
+            ],
+            None,
+        )
+        .ok()?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
     let newest = hs
         .lines()
         .filter_map(|l| l.split_whitespace().nth(1)?.parse::<u64>().ok())
@@ -862,7 +1018,10 @@ pub fn live(runner: &mut dyn Runner, device: &str) -> Option<(Option<u64>, Strin
     let endpoint = runner
         .run(&["wg".into(), "show".into(), dev, "endpoints".into()], None)
         .ok()
-        .and_then(|t| t.lines().find_map(|l| l.split_whitespace().nth(1).map(String::from)))
+        .and_then(|t| {
+            t.lines()
+                .find_map(|l| l.split_whitespace().nth(1).map(String::from))
+        })
         .filter(|e| e != "(none)")
         .unwrap_or_default();
     Some((newest, endpoint))
@@ -902,13 +1061,22 @@ pub fn reconcile(runner: &mut dyn Runner, dir: &Path, wants: &[Want], registry: 
                 PortForward::None => "none",
             }
             .into(),
-            forwarded_port: if w.port_forward == PortForward::Manual { w.manual_port } else { 0 },
+            forwarded_port: if w.port_forward == PortForward::Manual {
+                w.manual_port
+            } else {
+                0
+            },
             ..Default::default()
         };
-        let conf = supported.map_err(String::from).and_then(|()| load_conf(dir, &w.config_file));
+        let conf = supported
+            .map_err(String::from)
+            .and_then(|()| load_conf(dir, &w.config_file));
         let dns = conf.as_ref().map(dns_servers).unwrap_or_default();
         let foreign = runner
-            .run(&["ip".into(), "-o".into(), "addr".into(), "show".into()], None)
+            .run(
+                &["ip".into(), "-o".into(), "addr".into(), "show".into()],
+                None,
+            )
             .map(|o| foreign_addresses(&o))
             .unwrap_or_default();
         let result = conf
@@ -1043,12 +1211,27 @@ Endpoint = 192.0.2.10:51820
     fn the_tunnel_address_is_routed_back_through_the_tunnel() {
         let w = want("race");
         let conf = wgtun::parse(CONF).unwrap();
-        let lines: Vec<String> = source_steps(&w, &conf).iter().map(|s| s.argv.join(" ")).collect();
+        let lines: Vec<String> = source_steps(&w, &conf)
+            .iter()
+            .map(|s| s.argv.join(" "))
+            .collect();
         let pref = SRC_PREF_BASE + (w.pref - PREF_BASE);
         assert!(pref < 32766, "before main");
         assert_eq!(lines[0], format!("ip -4 rule del pref {pref}"));
-        assert!(lines.contains(&format!("ip -4 rule add from 10.2.0.2 lookup {} pref {pref}", w.table)), "{lines:#?}");
-        assert!(lines.contains(&format!("ip -6 rule add from fd00::2 lookup {} pref {pref}", w.table)), "{lines:#?}");
+        assert!(
+            lines.contains(&format!(
+                "ip -4 rule add from 10.2.0.2 lookup {} pref {pref}",
+                w.table
+            )),
+            "{lines:#?}"
+        );
+        assert!(
+            lines.contains(&format!(
+                "ip -6 rule add from fd00::2 lookup {} pref {pref}",
+                w.table
+            )),
+            "{lines:#?}"
+        );
     }
 
     /// Only interfaces this module did not create count as a clash.
@@ -1059,8 +1242,15 @@ Endpoint = 192.0.2.10:51820
                    9: wg-race    inet 10.2.0.2/32 scope global wg-race\\       valid_lft forever\n\
                    2: eth0    inet6 fe80::1/64 scope link \\       valid_lft forever\n";
         let f = foreign_addresses(out);
-        assert!(f.contains(&"10.2.0.2".to_string()), "the host's own wg0: {f:?}");
-        assert_eq!(f.iter().filter(|a| *a == "10.2.0.2").count(), 1, "our own wg-race is not foreign: {f:?}");
+        assert!(
+            f.contains(&"10.2.0.2".to_string()),
+            "the host's own wg0: {f:?}"
+        );
+        assert_eq!(
+            f.iter().filter(|a| *a == "10.2.0.2").count(),
+            1,
+            "our own wg-race is not foreign: {f:?}"
+        );
         assert!(f.contains(&"fe80::1".to_string()));
     }
 
@@ -1086,7 +1276,11 @@ Endpoint = 192.0.2.10:51820
 
     impl Fake {
         fn new(fail: impl Fn(&str) -> Option<String> + 'static) -> Self {
-            Fake { ran: Vec::new(), stdin: Vec::new(), fail: Box::new(fail) }
+            Fake {
+                ran: Vec::new(),
+                stdin: Vec::new(),
+                fail: Box::new(fail),
+            }
         }
     }
 
@@ -1115,7 +1309,12 @@ Endpoint = 192.0.2.10:51820
         let reg = Registry::default();
         let mut w = want("dnstest");
         store_conf(&dir, "p.conf", CONF.as_bytes()).expect("stored");
-        reconcile(&mut Fake::new(|_| None), &dir, std::slice::from_ref(&w), &reg);
+        reconcile(
+            &mut Fake::new(|_| None),
+            &dir,
+            std::slice::from_ref(&w),
+            &reg,
+        );
         let t = reg.get("dnstest").unwrap();
         assert!(t.created && !t.dns_leak, "{t:?}");
         assert_eq!(t.dns, vec!["10.2.0.1".to_string()]);
@@ -1127,13 +1326,22 @@ Endpoint = 192.0.2.10:51820
         let no_dns = CONF.replace("DNS = 10.2.0.1\n", "");
         store_conf(&dir, "nodns.conf", no_dns.as_bytes()).expect("stored");
         w.config_file = "nodns.conf".into();
-        reconcile(&mut Fake::new(|_| None), &dir, std::slice::from_ref(&w), &reg);
+        reconcile(
+            &mut Fake::new(|_| None),
+            &dir,
+            std::slice::from_ref(&w),
+            &reg,
+        );
         let t = reg.get("dnstest").unwrap();
         assert!(t.dns_leak && t.dns.is_empty(), "{t:?}");
         assert_eq!(typhon_engine::tunneldns::servers(&w.device), Some(vec![]));
 
         down_all(&mut Fake::new(|_| None), &dir, &reg);
-        assert_eq!(typhon_engine::tunneldns::servers(&w.device), None, "a tunnel taken down is forgotten");
+        assert_eq!(
+            typhon_engine::tunneldns::servers(&w.device),
+            None,
+            "a tunnel taken down is forgotten"
+        );
         force_support(None);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1148,15 +1356,30 @@ Endpoint = 192.0.2.10:51820
         let _ = std::fs::remove_dir_all(&dir);
         let reg = Registry::default();
         let w = want("faileddns"); // no file stored: the tunnel cannot come up
-        reconcile(&mut Fake::new(|_| None), &dir, std::slice::from_ref(&w), &reg);
+        reconcile(
+            &mut Fake::new(|_| None),
+            &dir,
+            std::slice::from_ref(&w),
+            &reg,
+        );
         let t = reg.get("faileddns").unwrap();
         assert!(!t.created && !t.last_error.is_empty(), "{t:?}");
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         // `localhost` is what the host's resolver answers without any network.
         let got = rt.block_on(typhon_engine::tunneldns::resolve(&w.device, "localhost"));
-        assert!(got.is_err(), "resolved by the host through a tunnel that is down: {got:?}");
+        assert!(
+            got.is_err(),
+            "resolved by the host through a tunnel that is down: {got:?}"
+        );
         down_all(&mut Fake::new(|_| None), &dir, &reg);
-        assert_eq!(typhon_engine::tunneldns::servers(&w.device), None, "taken down means forgotten");
+        assert_eq!(
+            typhon_engine::tunneldns::servers(&w.device),
+            None,
+            "taken down means forgotten"
+        );
         force_support(None);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1168,11 +1391,21 @@ Endpoint = 192.0.2.10:51820
         let long = device_name("a-very-long-engine-name");
         assert!(long.len() <= 15 && long.starts_with("wg-"), "{long}");
         // Two long ids sharing their start are still two devices.
-        assert_ne!(device_name("tunnel-number-one"), device_name("tunnel-number-two"));
+        assert_ne!(
+            device_name("tunnel-number-one"),
+            device_name("tunnel-number-two")
+        );
         // A character no interface name may carry never reaches `ip`.
         let odd = device_name("vpn/1 x");
-        assert!(odd.len() <= 15 && !odd.contains('/') && !odd.contains(' '), "{odd}");
-        assert_ne!(device_name("vpn_1"), device_name("vpn/1"), "cleaning alone would merge them");
+        assert!(
+            odd.len() <= 15 && !odd.contains('/') && !odd.contains(' '),
+            "{odd}"
+        );
+        assert_ne!(
+            device_name("vpn_1"),
+            device_name("vpn/1"),
+            "cleaning alone would merge them"
+        );
     }
 
     /// ⭐ The plan never touches the main table, never adds a default route
@@ -1184,22 +1417,43 @@ Endpoint = 192.0.2.10:51820
         let lines: Vec<String> = plan.iter().map(|s| s.argv.join(" ")).collect();
         let table = TABLE_BASE.to_string();
         for l in &lines {
-            assert!(!l.contains("aPrivateKeyValue"), "the key is on a command line: {l}");
+            assert!(
+                !l.contains("aPrivateKeyValue"),
+                "the key is on a command line: {l}"
+            );
             if l.contains(" route ") && !l.contains(" del") {
-                assert!(l.ends_with(&format!("table {table}")), "a route outside the tunnel's table: {l}");
+                assert!(
+                    l.ends_with(&format!("table {table}")),
+                    "a route outside the tunnel's table: {l}"
+                );
             }
             if l.contains(" rule add") {
-                assert!(l.contains("oif wg-race"), "a rule that matches more than this engine: {l}");
+                assert!(
+                    l.contains("oif wg-race"),
+                    "a rule that matches more than this engine: {l}"
+                );
             }
         }
-        assert!(lines.contains(&format!("ip -4 route replace 0.0.0.0/0 dev wg-race table {table}")));
-        assert!(lines.contains(&format!("ip -6 route replace ::/0 dev wg-race table {table}")));
-        assert!(lines.contains(&format!("ip -4 rule add oif wg-race lookup {table} pref {PREF_BASE}")));
-        assert!(lines.contains(&"ip link set dev wg-race mtu 1420 up".to_string()), "{lines:#?}");
+        assert!(lines.contains(&format!(
+            "ip -4 route replace 0.0.0.0/0 dev wg-race table {table}"
+        )));
+        assert!(lines.contains(&format!(
+            "ip -6 route replace ::/0 dev wg-race table {table}"
+        )));
+        assert!(lines.contains(&format!(
+            "ip -4 rule add oif wg-race lookup {table} pref {PREF_BASE}"
+        )));
+        assert!(
+            lines.contains(&"ip link set dev wg-race mtu 1420 up".to_string()),
+            "{lines:#?}"
+        );
         let setconf = plan.iter().find(|s| s.argv[0] == "wg").unwrap();
         assert_eq!(setconf.argv, ["wg", "setconf", "wg-race", "/dev/stdin"]);
         let fed = setconf.stdin.as_deref().unwrap();
-        assert!(fed.contains("PrivateKey = aPrivateKeyValue=") && !fed.contains("Address"), "{fed}");
+        assert!(
+            fed.contains("PrivateKey = aPrivateKeyValue=") && !fed.contains("Address"),
+            "{fed}"
+        );
     }
 
     /// ⭐ Idempotent: the plan starts by removing whatever an earlier run, a
@@ -1208,14 +1462,25 @@ Endpoint = 192.0.2.10:51820
     fn a_device_left_from_before_is_rebuilt_not_reused() {
         let conf = wgtun::parse(CONF).unwrap();
         let plan = up_plan(&want("race"), &conf).unwrap();
-        let first_add = plan.iter().position(|s| s.argv.join(" ").starts_with("ip link add")).unwrap();
+        let first_add = plan
+            .iter()
+            .position(|s| s.argv.join(" ").starts_with("ip link add"))
+            .unwrap();
         let before: Vec<String> = plan[..first_add].iter().map(|s| s.argv.join(" ")).collect();
         let table = want("race").table;
-        assert_eq!(before, [
-            "ip -4 rule del oif wg-race".to_string(), "ip -6 rule del oif wg-race".into(), "ip link del dev wg-race".into(),
-            format!("ip -4 rule del table {table}"), format!("ip -6 rule del table {table}"),
-        ]);
-        assert!(plan[..first_add].iter().all(|s| s.on_fail == OnFail::Ignore));
+        assert_eq!(
+            before,
+            [
+                "ip -4 rule del oif wg-race".to_string(),
+                "ip -6 rule del oif wg-race".into(),
+                "ip link del dev wg-race".into(),
+                format!("ip -4 rule del table {table}"),
+                format!("ip -6 rule del table {table}"),
+            ]
+        );
+        assert!(plan[..first_add]
+            .iter()
+            .all(|s| s.on_fail == OnFail::Ignore));
 
         // "Cannot find device" on a first run is not a failure; a rule del
         // repeats until there is nothing left to delete, and no further.
@@ -1223,8 +1488,15 @@ Endpoint = 192.0.2.10:51820
             (l == "ip link del dev wg-race").then(|| "Cannot find device \"wg-race\"".into())
         });
         execute(&mut fake, &plan).expect("a first run comes up");
-        let dels = fake.ran.iter().filter(|l| *l == "ip -4 rule del oif wg-race").count();
-        assert!(dels > 1 && dels <= 32, "repeated, and bounded even when it never fails: {dels}");
+        let dels = fake
+            .ran
+            .iter()
+            .filter(|l| *l == "ip -4 rule del oif wg-race")
+            .count();
+        assert!(
+            dels > 1 && dels <= 32,
+            "repeated, and bounded even when it never fails: {dels}"
+        );
     }
 
     /// A host that defaults IPv6 off on new devices keeps the v4 half, and
@@ -1233,10 +1505,26 @@ Endpoint = 192.0.2.10:51820
     fn a_refused_v6_address_keeps_the_v4_tunnel_and_says_so() {
         let conf = wgtun::parse(CONF).unwrap();
         let plan = up_plan(&want("race"), &conf).unwrap();
-        let mut fake = Fake::new(|l| l.starts_with("ip -6 address add").then(|| "Permission denied".into()));
+        let mut fake = Fake::new(|l| {
+            l.starts_with("ip -6 address add")
+                .then(|| "Permission denied".into())
+        });
         let out = execute(&mut fake, &plan).expect("v4 still comes up");
-        assert!(out.degraded.as_deref().unwrap_or("").contains("disable_ipv6=0"), "{out:?}");
-        assert!(!fake.ran.iter().any(|l| l.starts_with("ip -6 route") || l.starts_with("ip -6 rule add")), "{:#?}", fake.ran);
+        assert!(
+            out.degraded
+                .as_deref()
+                .unwrap_or("")
+                .contains("disable_ipv6=0"),
+            "{out:?}"
+        );
+        assert!(
+            !fake
+                .ran
+                .iter()
+                .any(|l| l.starts_with("ip -6 route") || l.starts_with("ip -6 rule add")),
+            "{:#?}",
+            fake.ran
+        );
         assert!(fake.ran.iter().any(|l| l.starts_with("ip -4 rule add")));
     }
 
@@ -1244,10 +1532,19 @@ Endpoint = 192.0.2.10:51820
     fn a_failed_step_stops_the_plan_with_the_command_and_the_reason() {
         let conf = wgtun::parse(CONF).unwrap();
         let plan = up_plan(&want("race"), &conf).unwrap();
-        let mut fake = Fake::new(|l| l.starts_with("ip link add").then(|| "Operation not supported".into()));
+        let mut fake = Fake::new(|l| {
+            l.starts_with("ip link add")
+                .then(|| "Operation not supported".into())
+        });
         let err = execute(&mut fake, &plan).unwrap_err();
-        assert!(err.contains("ip link add dev wg-race type wireguard") && err.contains("not supported"), "{err}");
-        assert!(!fake.ran.iter().any(|l| l.starts_with("wg setconf")), "nothing runs after the failure");
+        assert!(
+            err.contains("ip link add dev wg-race type wireguard") && err.contains("not supported"),
+            "{err}"
+        );
+        assert!(
+            !fake.ran.iter().any(|l| l.starts_with("wg setconf")),
+            "nothing runs after the failure"
+        );
     }
 
     /// ⭐ Each refusal names its fix; none of them is silent.
@@ -1257,10 +1554,20 @@ Endpoint = 192.0.2.10:51820
         let root = "Name:\thydranos\nCapEff:\t000001ffffffffff\n";
         let no_admin = "Name:\thydranos\nCapEff:\t00000000a80425fb\n";
         assert_eq!(support_from(true, Some(root), &all), Ok(()));
-        assert_eq!(support_from(true, Some(no_admin), &all), Err(NEEDS_NET_ADMIN));
-        assert_eq!(support_from(true, None, &all), Err(NEEDS_NET_ADMIN), "unknown is not yes");
+        assert_eq!(
+            support_from(true, Some(no_admin), &all),
+            Err(NEEDS_NET_ADMIN)
+        );
+        assert_eq!(
+            support_from(true, None, &all),
+            Err(NEEDS_NET_ADMIN),
+            "unknown is not yes"
+        );
         assert_eq!(support_from(false, Some(root), &all), Err(NEEDS_LINUX));
-        assert_eq!(support_from(true, Some(root), &|p: &str| p != "wg"), Err(NEEDS_TOOLS));
+        assert_eq!(
+            support_from(true, Some(root), &|p: &str| p != "wg"),
+            Err(NEEDS_TOOLS)
+        );
         assert!(NEEDS_NET_ADMIN.contains("NET_ADMIN") && NEEDS_NET_ADMIN.contains("cap_add"));
         // Docker's default set: no NET_ADMIN (bit 12).
         assert_eq!(net_admin_in("CapEff:\t00000000a80425fb"), Some(false));
@@ -1276,18 +1583,41 @@ Endpoint = 192.0.2.10:51820
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(dir.join(&name)).unwrap().permissions().mode() & 0o777;
+            let mode = std::fs::metadata(dir.join(&name))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
             assert_eq!(mode, 0o600);
         }
         let listed = serde_json::to_string(&list_confs(&dir)).unwrap();
         assert!(!listed.contains("aPrivateKeyValue"), "{listed}");
-        assert!(listed.contains("10.2.0.2/32") && listed.contains("192.0.2.10:51820"), "{listed}");
+        assert!(
+            listed.contains("10.2.0.2/32") && listed.contains("192.0.2.10:51820"),
+            "{listed}"
+        );
 
-        assert!(store_conf(&dir, "../escape.conf", CONF.as_bytes()).map(|(n, _)| n == "escape.conf").unwrap_or(true));
-        assert!(store_conf(&dir, "x.txt", CONF.as_bytes()).is_err(), "not a .conf");
-        assert!(store_conf(&dir, "bad.conf", b"[Interface]\nAddress = 10.0.0.2/32\n").is_err(), "no key");
-        assert!(store_conf(&dir, "nopeer.conf", b"[Interface]\nPrivateKey = k\nAddress = 10.0.0.2/32\n").is_err());
-        assert!(!dir.join("bad.conf").exists(), "a refused file is not written");
+        assert!(store_conf(&dir, "../escape.conf", CONF.as_bytes())
+            .map(|(n, _)| n == "escape.conf")
+            .unwrap_or(true));
+        assert!(
+            store_conf(&dir, "x.txt", CONF.as_bytes()).is_err(),
+            "not a .conf"
+        );
+        assert!(
+            store_conf(&dir, "bad.conf", b"[Interface]\nAddress = 10.0.0.2/32\n").is_err(),
+            "no key"
+        );
+        assert!(store_conf(
+            &dir,
+            "nopeer.conf",
+            b"[Interface]\nPrivateKey = k\nAddress = 10.0.0.2/32\n"
+        )
+        .is_err());
+        assert!(
+            !dir.join("bad.conf").exists(),
+            "a refused file is not written"
+        );
 
         assert_eq!(delete_conf(&dir, "proton-ch.conf"), Ok(true));
         assert_eq!(delete_conf(&dir, "proton-ch.conf"), Ok(false));
@@ -1309,12 +1639,24 @@ Endpoint = 192.0.2.10:51820
                     [hoard]\nlisten_port = 16172\nbind_interface = \"eth9\"\n";
         let e = engines(text);
         assert_eq!(e[0].session.bind_interface, "wg-race");
-        assert_eq!(e[1].session.bind_interface, "eth9", "an engine without a tunnel keeps its own");
+        assert_eq!(
+            e[1].session.bind_interface, "eth9",
+            "an engine without a tunnel keeps its own"
+        );
         let direct = engines(&text.replace("mode = \"wireguard\"", "mode = \"direct\""));
-        assert_eq!(direct[0].session.bind_interface, "", "another mode brings no tunnel up");
+        assert_eq!(
+            direct[0].session.bind_interface, "",
+            "another mode brings no tunnel up"
+        );
 
-        let manual = engines(&text.replace("wireguard_provider = \"proton\"", "wireguard_provider = \"airvpn\"\nwireguard_port = 40123"));
-        assert_eq!(manual[0].session.listen_port, 40123, "the provider's port is the listen port");
+        let manual = engines(&text.replace(
+            "wireguard_provider = \"proton\"",
+            "wireguard_provider = \"airvpn\"\nwireguard_port = 40123",
+        ));
+        assert_eq!(
+            manual[0].session.listen_port, 40123,
+            "the provider's port is the listen port"
+        );
     }
 
     /// An extra engine inherits its role's way out, but not its tunnel: two
@@ -1328,7 +1670,10 @@ Endpoint = 192.0.2.10:51820
              [[engine]]\nengine_id = \"vpn1\"\nrole = \"race\"\n[engine.session]\nlisten_port = 26991\n",
         );
         let vpn1 = e.iter().find(|e| e.id == "vpn1").unwrap();
-        assert_eq!(vpn1.session.wireguard_enabled, None, "an extra engine arrives unassigned");
+        assert_eq!(
+            vpn1.session.wireguard_enabled, None,
+            "an extra engine arrives unassigned"
+        );
         assert_eq!(vpn1.session.bind_interface, "");
         let w = wanted("wireguard", &e);
         assert_eq!(w.len(), 1);
@@ -1343,8 +1688,15 @@ Endpoint = 192.0.2.10:51820
         assert_eq!(port_forward_of("proton", "off"), PortForward::None);
         assert_eq!(port_forward_of("unknown", ""), PortForward::None);
         let conf = wgtun::parse(CONF).unwrap();
-        assert_eq!(natpmp_gateway("proton", &conf), Some("10.2.0.1".parse().unwrap()));
-        assert_eq!(natpmp_gateway("natpmp", &conf), Some("10.2.0.1".parse().unwrap()), "from DNS");
+        assert_eq!(
+            natpmp_gateway("proton", &conf),
+            Some("10.2.0.1".parse().unwrap())
+        );
+        assert_eq!(
+            natpmp_gateway("natpmp", &conf),
+            Some("10.2.0.1".parse().unwrap()),
+            "from DNS"
+        );
     }
 
     /// A device we did not make is never touched; one we made and no longer
@@ -1357,9 +1709,18 @@ Endpoint = 192.0.2.10:51820
         let mut fake = Fake::new(|_| None);
         let reg = Registry::default();
         reconcile(&mut fake, &dir, &[], &reg);
-        assert!(fake.ran.contains(&"ip link del dev wg-old".to_string()), "{:#?}", fake.ran);
+        assert!(
+            fake.ran.contains(&"ip link del dev wg-old".to_string()),
+            "{:#?}",
+            fake.ran
+        );
         // Its `from` rule names no device: it goes by the table.
-        assert!(fake.ran.contains(&format!("ip -4 rule del table {}", TABLE_BASE + 3)), "{:#?}", fake.ran);
+        assert!(
+            fake.ran
+                .contains(&format!("ip -4 rule del table {}", TABLE_BASE + 3)),
+            "{:#?}",
+            fake.ran
+        );
         assert!(!fake.ran.iter().any(|l| l.contains("wg-host")));
         assert!(read_managed(&dir).is_empty());
         // A list from before 4.5 (device alone) still reads.
@@ -1372,7 +1733,10 @@ Endpoint = 192.0.2.10:51820
     /// Status text from `wg` is read field by field; no private key passes.
     #[test]
     fn the_live_status_reads_the_handshake_and_endpoint() {
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
         struct Wg(u64);
         impl Runner for Wg {
             fn run(&mut self, argv: &[String], _: Option<&str>) -> Result<String, String> {
@@ -1407,8 +1771,16 @@ mod root {
     use super::*;
 
     fn sh(cmd: &str) -> String {
-        let out = std::process::Command::new("sh").arg("-c").arg(cmd).output().expect("sh");
-        assert!(out.status.success(), "{cmd}: {}", String::from_utf8_lossy(&out.stderr));
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(cmd)
+            .output()
+            .expect("sh");
+        assert!(
+            out.status.success(),
+            "{cmd}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         String::from_utf8_lossy(&out.stdout).into_owned()
     }
 
@@ -1416,7 +1788,8 @@ mod root {
     struct InNs(&'static str);
     impl Runner for InNs {
         fn run(&mut self, argv: &[String], stdin: Option<&str>) -> Result<String, String> {
-            let mut full: Vec<String> = vec!["ip".into(), "netns".into(), "exec".into(), self.0.into()];
+            let mut full: Vec<String> =
+                vec!["ip".into(), "netns".into(), "exec".into(), self.0.into()];
             full.extend(argv.iter().cloned());
             System.run(&full, stdin)
         }
@@ -1426,10 +1799,14 @@ mod root {
     #[ignore = "needs NET_ADMIN and the wireguard module: see the module doc for the command"]
     fn wgtunnel_root_a_tunnel_comes_up_carries_a_pinned_socket_and_goes() {
         if std::env::var("HYDRANOS_WG_ROOT_TEST").as_deref() != Ok("1") {
-            panic!("set HYDRANOS_WG_ROOT_TEST=1: this test creates network namespaces and interfaces");
+            panic!(
+                "set HYDRANOS_WG_ROOT_TEST=1: this test creates network namespaces and interfaces"
+            );
         }
         let (a, b) = ("hy-wgt-a", "hy-wgt-b");
-        let _ = sh(&format!("ip netns del {a} 2>/dev/null; ip netns del {b} 2>/dev/null; true"));
+        let _ = sh(&format!(
+            "ip netns del {a} 2>/dev/null; ip netns del {b} 2>/dev/null; true"
+        ));
         sh(&format!("ip netns add {a} && ip netns add {b}"));
         // The "internet" between them: a veth pair, 192.0.2.0/24 (TEST-NET-1).
         sh(&format!(
@@ -1471,21 +1848,43 @@ mod root {
         execute(&mut InNs(a), &plan).expect("and comes up again over itself");
 
         // The host's own routing did not move.
-        assert_eq!(sh(&format!("ip -n {a} route; ip -n {a} -6 route")), before_route, "the main table changed");
+        assert_eq!(
+            sh(&format!("ip -n {a} route; ip -n {a} -6 route")),
+            before_route,
+            "the main table changed"
+        );
         // A socket pinned to the device (ping -I is SO_BINDTODEVICE) reaches
         // the provider's 10.66.0.1 through the tunnel; an unpinned lookup does
         // not even consider the tunnel.
-        sh(&format!("ip netns exec {a} ping -c 3 -W 2 -I wg-race 10.66.0.1"));
+        sh(&format!(
+            "ip netns exec {a} ping -c 3 -W 2 -I wg-race 10.66.0.1"
+        ));
         let unpinned = sh(&format!("ip -n {a} route get 10.66.0.1"));
-        assert!(!unpinned.contains("wg-race"), "an unpinned socket was routed into the tunnel: {unpinned}");
+        assert!(
+            !unpinned.contains("wg-race"),
+            "an unpinned socket was routed into the tunnel: {unpinned}"
+        );
         let (age, endpoint) = live(&mut InNs(a), "wg-race").expect("the device exists");
-        assert!(age.is_some(), "no handshake: the pinned traffic did not go through WireGuard");
+        assert!(
+            age.is_some(),
+            "no handshake: the pinned traffic did not go through WireGuard"
+        );
         assert_eq!(endpoint, "192.0.2.2:51820");
 
         execute(&mut InNs(a), &teardown_plan("wg-race")).unwrap();
-        assert_eq!(sh(&format!("ip -n {a} route; ip -n {a} -6 route")), before_route);
-        assert_eq!(sh(&format!("ip -n {a} rule; ip -n {a} -6 rule")), before_rule, "a rule was left behind");
-        assert!(live(&mut InNs(a), "wg-race").is_none(), "the device is gone");
+        assert_eq!(
+            sh(&format!("ip -n {a} route; ip -n {a} -6 route")),
+            before_route
+        );
+        assert_eq!(
+            sh(&format!("ip -n {a} rule; ip -n {a} -6 rule")),
+            before_rule,
+            "a rule was left behind"
+        );
+        assert!(
+            live(&mut InNs(a), "wg-race").is_none(),
+            "the device is gone"
+        );
         let _ = sh(&format!("ip netns del {a}; ip netns del {b}"));
     }
 }
@@ -1524,13 +1923,22 @@ mod down_tests {
         let started = Instant::now();
         let out = tokio::time::timeout(
             Duration::from_secs(5),
-            down_all_within(Duration::from_millis(300), Stuck(rx), dir.clone(), std::sync::Arc::new(Registry::default())),
+            down_all_within(
+                Duration::from_millis(300),
+                Stuck(rx),
+                dir.clone(),
+                std::sync::Arc::new(Registry::default()),
+            ),
         )
         .await;
         drop(release);
         let out = out.expect("the teardown held the exit past its budget");
         assert_eq!(out, None, "an unfinished teardown does not claim a count");
-        assert!(started.elapsed() < Duration::from_secs(3), "{:?}", started.elapsed());
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "{:?}",
+            started.elapsed()
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1556,10 +1964,17 @@ mod down_tests {
     #[cfg(unix)]
     #[test]
     fn a_command_whose_child_keeps_the_pipe_open_still_returns() {
-        let argv: Vec<String> = ["sh", "-c", "sleep 4 & echo hi"].iter().map(|s| s.to_string()).collect();
+        let argv: Vec<String> = ["sh", "-c", "sleep 4 & echo hi"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         let started = Instant::now();
         let out = System.run_within(&argv, None, Duration::from_secs(20));
-        assert!(started.elapsed() < Duration::from_secs(2), "waited {:?} for a pipe", started.elapsed());
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "waited {:?} for a pipe",
+            started.elapsed()
+        );
         assert_eq!(out.as_deref(), Ok("hi\n"));
     }
 
@@ -1567,10 +1982,20 @@ mod down_tests {
     #[cfg(unix)]
     #[test]
     fn a_command_past_its_deadline_is_stopped() {
-        let argv: Vec<String> = ["sh", "-c", "sleep 30"].iter().map(|s| s.to_string()).collect();
+        let argv: Vec<String> = ["sh", "-c", "sleep 30"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         let started = Instant::now();
         let out = System.run_within(&argv, None, Duration::from_millis(300));
-        assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
-        assert!(out.unwrap_err().contains("no answer"), "the deadline was not reported");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
+        assert!(
+            out.unwrap_err().contains("no answer"),
+            "the deadline was not reported"
+        );
     }
 }

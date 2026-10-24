@@ -21,7 +21,10 @@ mod key_in_clear {
             "http://tracker.example/announce?x=1&whatever=a1b2c3d4e5f6a7b8c9d0",
             "HTTP://tracker.example/announce?k=a1b2c3d4e5f6a7b8c9d0",
         ] {
-            assert!(carries_key_in_clear(url), "{url} carries a key over plain http");
+            assert!(
+                carries_key_in_clear(url),
+                "{url} carries a key over plain http"
+            );
         }
     }
 
@@ -30,9 +33,16 @@ mod key_in_clear {
     #[test]
     fn only_a_plain_http_url_can_carry_a_key_in_clear() {
         let key = "a1b2c3d4e5f6a7b8c9d0";
-        assert!(!carries_key_in_clear(&format!("https://tracker.example/{key}/announce")));
-        assert!(!carries_key_in_clear(&format!("udp://tracker.example:80/{key}")));
-        assert!(!carries_key_in_clear(&format!("tracker.example/{key}")), "no scheme, no http");
+        assert!(!carries_key_in_clear(&format!(
+            "https://tracker.example/{key}/announce"
+        )));
+        assert!(!carries_key_in_clear(&format!(
+            "udp://tracker.example:80/{key}"
+        )));
+        assert!(
+            !carries_key_in_clear(&format!("tracker.example/{key}")),
+            "no scheme, no http"
+        );
         for url in [
             "http://tracker.example/announce",
             "http://tracker.example/announce.php",
@@ -52,12 +62,30 @@ mod key_in_clear {
     #[test]
     fn a_key_needs_sixteen_characters_a_digit_and_a_letter() {
         let url = |seg: &str| format!("http://tracker.example/{seg}/announce");
-        assert!(carries_key_in_clear(&url("abcdefgh12345678")), "16 characters is a key");
-        assert!(!carries_key_in_clear(&url("abcdefgh1234567")), "15 characters is not");
-        assert!(!carries_key_in_clear(&url("1234567890123456")), "digits only is not a key");
-        assert!(!carries_key_in_clear(&url("abcdefghijklmnop")), "letters only is not a key");
-        assert!(carries_key_in_clear(&url("abcdefgh-234_678")), "dash and underscore belong to a key");
-        assert!(!carries_key_in_clear(&url("abcdefgh.2345678")), "a dot does not");
+        assert!(
+            carries_key_in_clear(&url("abcdefgh12345678")),
+            "16 characters is a key"
+        );
+        assert!(
+            !carries_key_in_clear(&url("abcdefgh1234567")),
+            "15 characters is not"
+        );
+        assert!(
+            !carries_key_in_clear(&url("1234567890123456")),
+            "digits only is not a key"
+        );
+        assert!(
+            !carries_key_in_clear(&url("abcdefghijklmnop")),
+            "letters only is not a key"
+        );
+        assert!(
+            carries_key_in_clear(&url("abcdefgh-234_678")),
+            "dash and underscore belong to a key"
+        );
+        assert!(
+            !carries_key_in_clear(&url("abcdefgh.2345678")),
+            "a dot does not"
+        );
     }
 
     /// The host is not a path segment: a tracker whose name happens to look
@@ -93,7 +121,11 @@ mod dial_binding {
     fn no_binding_gives_the_wildcard_one() {
         let b = pick_binding_for_dial(&[], peer("192.0.2.1", 1));
         assert_eq!((b.id, b.peer_id, b.advertised_port), (0, [0u8; 20], 0));
-        assert!(b.addr.ip().is_unspecified() && b.addr.port() == 0, "{}", b.addr);
+        assert!(
+            b.addr.ip().is_unspecified() && b.addr.port() == 0,
+            "{}",
+            b.addr
+        );
     }
 
     /// One binding is every peer's binding, whatever its address.
@@ -113,7 +145,11 @@ mod dial_binding {
         for ip in ["192.0.2.1", "198.51.100.7", "2001:db8::42"] {
             let first = pick_binding_for_dial(&all, peer(ip, 6881)).id;
             for port in [1, 6881, 51413, 65535] {
-                assert_eq!(pick_binding_for_dial(&all, peer(ip, port)).id, first, "{ip}:{port}");
+                assert_eq!(
+                    pick_binding_for_dial(&all, peer(ip, port)).id,
+                    first,
+                    "{ip}:{port}"
+                );
             }
         }
     }
@@ -146,11 +182,17 @@ mod dial_binding {
         };
         for n in [1u8, 2, 3, 77, 200] {
             let want = fnv(&[192, 0, 2, n]) as usize % 4;
-            assert_eq!(pick_binding_for_dial(&all, peer(&format!("192.0.2.{n}"), 9)).id as usize, want);
+            assert_eq!(
+                pick_binding_for_dial(&all, peer(&format!("192.0.2.{n}"), 9)).id as usize,
+                want
+            );
         }
         let v6: std::net::Ipv6Addr = "2001:db8::42".parse().unwrap();
         let want = fnv(&v6.octets()) as usize % 4;
-        assert_eq!(pick_binding_for_dial(&all, SocketAddr::new(v6.into(), 9)).id as usize, want);
+        assert_eq!(
+            pick_binding_for_dial(&all, SocketAddr::new(v6.into(), 9)).id as usize,
+            want
+        );
     }
 }
 
@@ -187,7 +229,10 @@ mod dial_queue {
     /// fall through to another engine's queue, and the next engine goes on.
     #[tokio::test]
     async fn a_dead_consumer_loses_the_dial_and_nothing_else() {
-        let (dead, other) = (Arc::new(dial_limiter::DialLimiter::default()), Arc::new(dial_limiter::DialLimiter::default()));
+        let (dead, other) = (
+            Arc::new(dial_limiter::DialLimiter::default()),
+            Arc::new(dial_limiter::DialLimiter::default()),
+        );
         let (tx_dead, rx_dead) = tokio::sync::mpsc::channel(4);
         let (tx_other, mut rx_other) = tokio::sync::mpsc::channel(4);
         {
@@ -198,9 +243,16 @@ mod dial_queue {
         drop(rx_dead);
         let peer: SocketAddr = "192.0.2.12:6881".parse().unwrap();
         enqueue_dial(peer, torrent_on(&dead, 32));
-        assert!(rx_other.try_recv().is_err(), "a dial of the dead engine reached another engine's queue");
+        assert!(
+            rx_other.try_recv().is_err(),
+            "a dial of the dead engine reached another engine's queue"
+        );
         enqueue_dial(peer, torrent_on(&other, 33));
-        assert_eq!(rx_other.try_recv().unwrap().1.info_hash, [33u8; 20], "the live engine still dials");
+        assert_eq!(
+            rx_other.try_recv().unwrap().1.info_hash,
+            [33u8; 20],
+            "the live engine still dials"
+        );
     }
 }
 
@@ -210,12 +262,24 @@ mod proxy_helpers {
     /// A proxy URL goes into logs and errors; its credentials never do.
     #[test]
     fn a_proxy_url_loses_its_credentials_when_shown() {
-        assert_eq!(redact_proxy("socks5://user:secret@10.0.0.1:1080"), "socks5://***@10.0.0.1:1080");
-        assert_eq!(redact_proxy("http://tok@proxy.example:3128"), "http://***@proxy.example:3128");
+        assert_eq!(
+            redact_proxy("socks5://user:secret@10.0.0.1:1080"),
+            "socks5://***@10.0.0.1:1080"
+        );
+        assert_eq!(
+            redact_proxy("http://tok@proxy.example:3128"),
+            "http://***@proxy.example:3128"
+        );
         // An '@' inside the password: everything before the LAST one is hidden.
-        assert_eq!(redact_proxy("http://u:p@ss@proxy.example:3128"), "http://***@proxy.example:3128");
+        assert_eq!(
+            redact_proxy("http://u:p@ss@proxy.example:3128"),
+            "http://***@proxy.example:3128"
+        );
         // Nothing to hide, nothing changed.
-        assert_eq!(redact_proxy("http://proxy.example:3128"), "http://proxy.example:3128");
+        assert_eq!(
+            redact_proxy("http://proxy.example:3128"),
+            "http://proxy.example:3128"
+        );
         assert_eq!(redact_proxy("not a url"), "not a url");
     }
 
@@ -223,7 +287,10 @@ mod proxy_helpers {
     /// setting is "not configured" and never becomes an empty proxy URL.
     #[test]
     fn a_configured_proxy_wins_and_is_trimmed() {
-        assert_eq!(effective_proxy("  http://proxy.example:3128 \n").as_deref(), Some("http://proxy.example:3128"));
+        assert_eq!(
+            effective_proxy("  http://proxy.example:3128 \n").as_deref(),
+            Some("http://proxy.example:3128")
+        );
         assert!(announces_proxied("http://proxy.example:3128"));
         // With nothing configured the answer is the environment's, which the
         // test process leaves unset; blank must be treated as nothing.
@@ -236,9 +303,13 @@ mod proxy_helpers {
     /// publish the address the operator set the proxy up to hide.
     #[test]
     fn an_unusable_proxy_is_an_error_not_a_direct_announce() {
-        let err = proxy_for("http://user:hunter2@[::1").expect_err("a broken proxy URL must not become no proxy");
+        let err = proxy_for("http://user:hunter2@[::1")
+            .expect_err("a broken proxy URL must not become no proxy");
         assert!(err.contains("announce proxy"), "{err}");
-        assert!(!err.contains("hunter2"), "the password is in the error: {err}");
+        assert!(
+            !err.contains("hunter2"),
+            "the password is in the error: {err}"
+        );
         assert!(err.contains("***@"), "{err}");
         assert!(proxy_for("http://proxy.example:3128").unwrap().is_some());
     }
@@ -251,10 +322,18 @@ mod char_boundary {
     /// character in two: a non-ASCII character can straddle the offset.
     #[test]
     fn a_non_ascii_url_is_not_udp_and_is_judged_whole() {
-        for u in ["abcde\u{e9}://x", "udp\u{e9}://x", "ud\u{e9}p://x", "\u{e9}\u{e9}\u{e9}\u{e9}"] {
+        for u in [
+            "abcde\u{e9}://x",
+            "udp\u{e9}://x",
+            "ud\u{e9}p://x",
+            "\u{e9}\u{e9}\u{e9}\u{e9}",
+        ] {
             assert!(!is_udp(u), "{u:?}");
         }
-        assert!(is_udp("udp://t.example:80") && is_udp("UDP://t.example:80"), "the ascii cases are unchanged");
+        assert!(
+            is_udp("udp://t.example:80") && is_udp("UDP://t.example:80"),
+            "the ascii cases are unchanged"
+        );
         assert!(!is_udp("udp://"), "the bare scheme is no tracker");
     }
 }

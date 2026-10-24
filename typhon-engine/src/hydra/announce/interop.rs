@@ -63,8 +63,19 @@ fn fixture(tag: &str) -> Fixture {
     ));
     let cfg: typhon_engine::config::EngineConfig = serde_json::from_str("{}").unwrap();
     let peer_id = String::from_utf8(cfg.peer_id().to_vec()).unwrap();
-    let policy = super::policy_from_config(&crate::config::Config::default(), peer_id.clone(), String::new());
-    Fixture { mgr, root, policy, breaker: Breaker::default(), cache: Cache::default(), peer_id }
+    let policy = super::policy_from_config(
+        &crate::config::Config::default(),
+        peer_id.clone(),
+        String::new(),
+    );
+    Fixture {
+        mgr,
+        root,
+        policy,
+        breaker: Breaker::default(),
+        cache: Cache::default(),
+        peer_id,
+    }
 }
 
 /// A one-piece torrent with a name nobody else will have used, so every run
@@ -73,7 +84,10 @@ fn add(fx: &Fixture, name: &str, tracker: &str, seed: bool) -> (String, Arc<Torr
     let unique = format!(
         "{name}-{}-{}",
         std::process::id(),
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     );
     let mut info = Vec::new();
     info.extend_from_slice(format!("d6:lengthi16384e4:name{}:{unique}", unique.len()).as_bytes());
@@ -83,11 +97,18 @@ fn add(fx: &Fixture, name: &str, tracker: &str, seed: bool) -> (String, Arc<Torr
     let mut bytes = format!("d8:announce{}:{tracker}4:info", tracker.len()).into_bytes();
     bytes.extend_from_slice(&info);
     bytes.push(b'e');
-    let (ih, _) = fx.mgr.add_torrent_bytes(&bytes, "/tmp", false, seed).expect("fixture parses");
+    let (ih, _) = fx
+        .mgr
+        .add_torrent_bytes(&bytes, "/tmp", false, seed)
+        .expect("fixture parses");
     let st = fx.mgr.get(&ih).unwrap();
     *st.live_trackers.write() = vec![vec![tracker.to_string()]];
     st.status.store(
-        if seed { TorrentStatus::Seeding } else { TorrentStatus::Downloading } as u8,
+        if seed {
+            TorrentStatus::Seeding
+        } else {
+            TorrentStatus::Downloading
+        } as u8,
         Ordering::Relaxed,
     );
     (typhon_engine::torrent::hex_encode(&ih), st)
@@ -95,8 +116,17 @@ fn add(fx: &Fixture, name: &str, tracker: &str, seed: bool) -> (String, Arc<Torr
 
 async fn announce(fx: &Fixture, hash: &str, mode: Mode) {
     announce_one(
-        &fx.mgr, &fx.policy, &fx.breaker, &fx.cache, 16371, mode,
-        Job { info_hash: hash.to_string(), first: false, forced: false },
+        &fx.mgr,
+        &fx.policy,
+        &fx.breaker,
+        &fx.cache,
+        16371,
+        mode,
+        Job {
+            info_hash: hash.to_string(),
+            first: false,
+            forced: false,
+        },
     )
     .await;
 }
@@ -107,8 +137,10 @@ fn finish(st: &TorrentState) {
     if let Some(p) = st.picker.get() {
         p.lock().unwrap().set_have(0);
     }
-    st.status.store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
-    st.pending_announce_event.fetch_or(ANNOUNCE_EVENT_COMPLETED, Ordering::Relaxed);
+    st.status
+        .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+    st.pending_announce_event
+        .fetch_or(ANNOUNCE_EVENT_COMPLETED, Ordering::Relaxed);
 }
 
 /// Time passing, as far as the floor is concerned. The tests would otherwise
@@ -136,8 +168,17 @@ fn raw_hash(hex: &str) -> String {
 /// dictionaries key on UTF-8 text: the scrape's `files` dictionary is keyed by
 /// the raw 20-byte hash. One torrent per scrape, so each count appears once.
 async fn scrape(announce_url: &str, hash: &str) -> (i64, i64, i64) {
-    let url = format!("{}?info_hash={}", announce_url.replace("/announce", "/scrape"), raw_hash(hash));
-    let body = reqwest::get(&url).await.expect("scrape answered").bytes().await.unwrap();
+    let url = format!(
+        "{}?info_hash={}",
+        announce_url.replace("/announce", "/scrape"),
+        raw_hash(hash)
+    );
+    let body = reqwest::get(&url)
+        .await
+        .expect("scrape answered")
+        .bytes()
+        .await
+        .unwrap();
     let text = String::from_utf8_lossy(&body);
     let n = |key: &str| -> i64 {
         let tag = format!("{}:{}i", key.len(), key);
@@ -161,19 +202,39 @@ async fn interop_opentracker_records_arrival_snatch_departure_and_return() {
     let (hash, st) = add(&fx, "ot-life", &url, false);
 
     announce(&fx, &hash, Mode::Race).await;
-    assert_eq!(scrape(&url, &hash).await, (0, 1, 0), "one leecher after `started`");
+    assert_eq!(
+        scrape(&url, &hash).await,
+        (0, 1, 0),
+        "one leecher after `started`"
+    );
 
     finish(&st);
     announce(&fx, &hash, Mode::Race).await;
-    assert_eq!(scrape(&url, &hash).await, (1, 0, 1), "a seed, and one snatch, after `completed`");
+    assert_eq!(
+        scrape(&url, &hash).await,
+        (1, 0, 1),
+        "a seed, and one snatch, after `completed`"
+    );
 
-    fx.mgr.stop_torrent(&typhon_engine::torrent::hex_decode(&hash).unwrap()).unwrap();
+    fx.mgr
+        .stop_torrent(&typhon_engine::torrent::hex_decode(&hash).unwrap())
+        .unwrap();
     announce(&fx, &hash, Mode::Race).await;
-    assert_eq!(scrape(&url, &hash).await, (0, 0, 1), "gone after `stopped`; the snatch stays");
+    assert_eq!(
+        scrape(&url, &hash).await,
+        (0, 0, 1),
+        "gone after `stopped`; the snatch stays"
+    );
 
-    fx.mgr.start_torrent(&typhon_engine::torrent::hex_decode(&hash).unwrap()).unwrap();
+    fx.mgr
+        .start_torrent(&typhon_engine::torrent::hex_decode(&hash).unwrap())
+        .unwrap();
     announce(&fx, &hash, Mode::Race).await;
-    assert_eq!(scrape(&url, &hash).await, (1, 0, 1), "back as a seed, and no second snatch");
+    assert_eq!(
+        scrape(&url, &hash).await,
+        (1, 0, 1),
+        "back as a seed, and no second snatch"
+    );
 }
 
 /// ⭐⭐ The same life over BEP 15. Announced over UDP, read back through the
@@ -187,19 +248,39 @@ async fn interop_opentracker_over_udp_records_arrival_snatch_departure_and_retur
     let (hash, st) = add(&fx, "ot-udp-life", &udp, false);
 
     announce(&fx, &hash, Mode::Race).await;
-    assert_eq!(scrape(&http, &hash).await, (0, 1, 0), "one leecher after `started`");
+    assert_eq!(
+        scrape(&http, &hash).await,
+        (0, 1, 0),
+        "one leecher after `started`"
+    );
 
     finish(&st);
     announce(&fx, &hash, Mode::Race).await;
-    assert_eq!(scrape(&http, &hash).await, (1, 0, 1), "a seed, and one snatch, after `completed`");
+    assert_eq!(
+        scrape(&http, &hash).await,
+        (1, 0, 1),
+        "a seed, and one snatch, after `completed`"
+    );
 
-    fx.mgr.stop_torrent(&typhon_engine::torrent::hex_decode(&hash).unwrap()).unwrap();
+    fx.mgr
+        .stop_torrent(&typhon_engine::torrent::hex_decode(&hash).unwrap())
+        .unwrap();
     announce(&fx, &hash, Mode::Race).await;
-    assert_eq!(scrape(&http, &hash).await, (0, 0, 1), "gone after `stopped`; the snatch stays");
+    assert_eq!(
+        scrape(&http, &hash).await,
+        (0, 0, 1),
+        "gone after `stopped`; the snatch stays"
+    );
 
-    fx.mgr.start_torrent(&typhon_engine::torrent::hex_decode(&hash).unwrap()).unwrap();
+    fx.mgr
+        .start_torrent(&typhon_engine::torrent::hex_decode(&hash).unwrap())
+        .unwrap();
     announce(&fx, &hash, Mode::Race).await;
-    assert_eq!(scrape(&http, &hash).await, (1, 0, 1), "back as a seed, and no second snatch");
+    assert_eq!(
+        scrape(&http, &hash).await,
+        (1, 0, 1),
+        "back as a seed, and no second snatch"
+    );
 }
 
 /// A torrent added complete is a seed from its first announce and is never
@@ -225,11 +306,19 @@ async fn interop_opentracker_min_interval_is_honoured() {
     let fx = fixture("ot-floor");
     let (hash, st) = add(&fx, "ot-floor", &url, true);
     announce(&fx, &hash, Mode::Race).await;
-    let floor = st.announce_book.lock().unwrap()[0].not_before - typhon_engine::torrent::meta::now_secs();
-    assert!(floor > 60, "opentracker states a min interval, and we keep it: {floor}s");
+    let floor =
+        st.announce_book.lock().unwrap()[0].not_before - typhon_engine::torrent::meta::now_secs();
+    assert!(
+        floor > 60,
+        "opentracker states a min interval, and we keep it: {floor}s"
+    );
     let before = fx.cache.outcomes();
     announce(&fx, &hash, Mode::Race).await;
-    assert_eq!(fx.cache.outcomes(), before, "no request inside the floor, race or not");
+    assert_eq!(
+        fx.cache.outcomes(),
+        before,
+        "no request inside the floor, race or not"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -254,7 +343,14 @@ impl Torrust {
     /// A fresh user key: the private tracker's passkey.
     async fn key(&self) -> String {
         let url = format!("{}/api/v1/key/3600?token={}", self.api, self.token);
-        let v: serde_json::Value = reqwest::Client::new().post(&url).send().await.unwrap().json().await.unwrap();
+        let v: serde_json::Value = reqwest::Client::new()
+            .post(&url)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
         v["key"].as_str().expect("a key").to_string()
     }
 
@@ -306,20 +402,43 @@ async fn interop_torrust_private_tracker_stores_exactly_what_we_report() {
     let stamp = v["peers"][0]["updated"].clone();
 
     announce(&fx, &hash, Mode::Race).await;
-    assert_eq!(t.torrent(&hash).await["peers"][0]["updated"], stamp, "inside min interval, the tracker hears nothing");
+    assert_eq!(
+        t.torrent(&hash).await["peers"][0]["updated"],
+        stamp,
+        "inside min interval, the tracker hears nothing"
+    );
 
     // A person's forced re-announce crosses it, as qBittorrent's does.
     announce_one(
-        &fx.mgr, &fx.policy, &fx.breaker, &fx.cache, 16371, Mode::Hoard,
-        Job { info_hash: hash.clone(), first: false, forced: true },
+        &fx.mgr,
+        &fx.policy,
+        &fx.breaker,
+        &fx.cache,
+        16371,
+        Mode::Hoard,
+        Job {
+            info_hash: hash.clone(),
+            first: false,
+            forced: true,
+        },
     )
     .await;
-    assert_ne!(t.torrent(&hash).await["peers"][0]["updated"], stamp, "forced: the tracker hears it");
+    assert_ne!(
+        t.torrent(&hash).await["peers"][0]["updated"],
+        stamp,
+        "forced: the tracker hears it"
+    );
 
-    fx.mgr.stop_torrent(&typhon_engine::torrent::hex_decode(&hash).unwrap()).unwrap();
+    fx.mgr
+        .stop_torrent(&typhon_engine::torrent::hex_decode(&hash).unwrap())
+        .unwrap();
     announce(&fx, &hash, Mode::Hoard).await;
     let v = t.torrent(&hash).await;
-    assert_eq!(v["peers"].as_array().map(|a| a.len()).unwrap_or(0), 0, "gone after stopped: {v}");
+    assert_eq!(
+        v["peers"].as_array().map(|a| a.len()).unwrap_or(0),
+        0,
+        "gone after stopped: {v}"
+    );
 }
 
 /// A download completed on a private tracker is counted once -- the snatch
@@ -334,7 +453,10 @@ async fn interop_torrust_counts_the_snatch_once() {
 
     announce(&fx, &hash, Mode::Race).await;
     let v = t.torrent(&hash).await;
-    assert_eq!(v["peers"][0]["left"], 16384, "a leecher reports what it needs: {v}");
+    assert_eq!(
+        v["peers"][0]["left"], 16384,
+        "a leecher reports what it needs: {v}"
+    );
 
     st.total_downloaded.fetch_add(16384, Ordering::Relaxed);
     finish(&st);
@@ -346,7 +468,11 @@ async fn interop_torrust_counts_the_snatch_once() {
 
     let_the_interval_pass(&st);
     announce(&fx, &hash, Mode::Race).await;
-    assert_eq!(t.torrent(&hash).await["completed"], 1, "said once, counted once");
+    assert_eq!(
+        t.torrent(&hash).await["completed"],
+        1,
+        "said once, counted once"
+    );
 }
 
 /// Without a valid key a private tracker refuses us, we say so to the
@@ -360,6 +486,15 @@ async fn interop_torrust_refuses_an_announce_without_a_key_and_we_report_it() {
     announce(&fx, &hash, Mode::Hoard).await;
     assert!(!st.last_announce_ok.load(Ordering::Relaxed));
     let err = st.last_announce_error.lock().unwrap().clone();
-    assert!(err.to_ascii_lowercase().contains("authentication"), "the tracker's own words reach the operator: {err}");
-    assert_eq!(t.torrent(&hash).await["peers"].as_array().map(|a| a.len()).unwrap_or(0), 0);
+    assert!(
+        err.to_ascii_lowercase().contains("authentication"),
+        "the tracker's own words reach the operator: {err}"
+    );
+    assert_eq!(
+        t.torrent(&hash).await["peers"]
+            .as_array()
+            .map(|a| a.len())
+            .unwrap_or(0),
+        0
+    );
 }

@@ -110,9 +110,9 @@ pub fn link_count(p: &Path) -> u64 {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Storage::FileSystem::{
-        CreateFileW, GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
-        FILE_ATTRIBUTE_NORMAL, FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_DELETE, FILE_SHARE_READ,
-        FILE_SHARE_WRITE, OPEN_EXISTING,
+        CreateFileW, GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_NORMAL,
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        OPEN_EXISTING,
     };
 
     let mut wide: Vec<u16> = p.as_os_str().encode_wide().collect();
@@ -347,13 +347,18 @@ pub fn local_date() -> String {
         .unwrap_or(0);
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
     unsafe { libc::localtime_r(&now as *const i64, &mut tm) };
-    format!("{:04}-{:02}-{:02}", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday)
+    format!(
+        "{:04}-{:02}-{:02}",
+        tm.tm_year + 1900,
+        tm.tm_mon + 1,
+        tm.tm_mday
+    )
 }
 
 #[cfg(windows)]
 pub fn local_date() -> String {
-    use windows_sys::Win32::System::SystemInformation::GetLocalTime;
     use windows_sys::Win32::Foundation::SYSTEMTIME;
+    use windows_sys::Win32::System::SystemInformation::GetLocalTime;
     let mut st: SYSTEMTIME = unsafe { std::mem::zeroed() };
     unsafe { GetLocalTime(&mut st) };
     format!("{:04}-{:02}-{:02}", st.wYear, st.wMonth, st.wDay)
@@ -442,7 +447,11 @@ pub fn trim(mount: &Path) -> std::io::Result<u64> {
     }
     const FITRIM: u32 = 0xC018_5879;
     let dir = std::fs::File::open(mount)?;
-    let mut range = FstrimRange { start: 0, len: u64::MAX, minlen: 0 };
+    let mut range = FstrimRange {
+        start: 0,
+        len: u64::MAX,
+        minlen: 0,
+    };
     // `as _`: the request is a c_ulong on glibc and a c_int on musl.
     if unsafe { libc::ioctl(dir.as_raw_fd(), FITRIM as _, &mut range) } != 0 {
         return Err(std::io::Error::last_os_error());

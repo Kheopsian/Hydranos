@@ -49,7 +49,13 @@ impl Default for Ring {
 
 impl Ring {
     fn with_floor(floor: f64) -> Self {
-        Self { inner: Mutex::new(Inner { events: VecDeque::new(), cap: 16384, floor }) }
+        Self {
+            inner: Mutex::new(Inner {
+                events: VecDeque::new(),
+                cap: 16384,
+                floor,
+            }),
+        }
     }
 }
 
@@ -74,7 +80,11 @@ impl Ring {
             return;
         }
         let mut inner = self.inner.lock().unwrap();
-        inner.events.push_back(Event { hash: hash.to_string(), at, added });
+        inner.events.push_back(Event {
+            hash: hash.to_string(),
+            at,
+            added,
+        });
         while inner.events.len() > inner.cap {
             // Everything up to the dropped event is no longer guaranteed: a
             // client whose cursor predates it must be told to reload in full.
@@ -139,7 +149,9 @@ mod tests {
         let r = Ring::with_floor(100.0);
         r.record_at("aaa", true, 110.0);
         r.record_at("bbb", false, 120.0);
-        let (added, removed) = r.changes_since(105.0).expect("the window covers this cursor");
+        let (added, removed) = r
+            .changes_since(105.0)
+            .expect("the window covers this cursor");
         assert_eq!(added, ["aaa"]);
         assert_eq!(removed, ["bbb"]);
     }
@@ -187,9 +199,15 @@ mod tests {
             ("local-hoard".to_string(), true),
             ("local-race-2".to_string(), true),
         ];
-        assert!(delta_allowed(&local_only), "our own engines are not a reason to give up");
+        assert!(
+            delta_allowed(&local_only),
+            "our own engines are not a reason to give up"
+        );
 
-        let with_remote = vec![("local-race".to_string(), true), ("far-node".to_string(), false)];
+        let with_remote = vec![
+            ("local-race".to_string(), true),
+            ("far-node".to_string(), false),
+        ];
         assert!(
             !delta_allowed(&with_remote),
             "a dialled agent holds rows this process cannot speak for"

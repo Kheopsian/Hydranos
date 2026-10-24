@@ -85,8 +85,14 @@ mod tests {
 
     #[test]
     fn a_host_is_read_from_a_url_a_pair_or_a_bare_name() {
-        assert_eq!(override_host("https://Tracker.tracker-x3.net/announce/abc"), "tracker.tracker-x3.net");
-        assert_eq!(override_host("udp://tracker.tracker-x2.net:6969/announce"), "tracker.tracker-x2.net");
+        assert_eq!(
+            override_host("https://Tracker.tracker-x3.net/announce/abc"),
+            "tracker.tracker-x3.net"
+        );
+        assert_eq!(
+            override_host("udp://tracker.tracker-x2.net:6969/announce"),
+            "tracker.tracker-x2.net"
+        );
         assert_eq!(override_host("tracker.tracker-x2.net:6969"), "tracker.tracker-x2.net");
         assert_eq!(override_host("Tracker.tracker-x2.NET"), "tracker.tracker-x2.net");
         assert_eq!(override_host("[2a01:e0a::1]:6969"), "2a01:e0a::1");
@@ -98,11 +104,26 @@ mod tests {
     /// may be picked for them.
     #[test]
     fn the_host_is_the_one_the_request_goes_to() {
-        assert_eq!(override_host("https://evil.example\\@tracker.example/announce/k"), "evil.example");
-        assert_eq!(override_host("https://evil.example\\.tracker.example/announce/k"), "evil.example");
-        assert_eq!(override_host("https://user:pw@tracker.example:8443/announce"), "tracker.example");
-        assert_eq!(override_host("http://[2a01:e0a::1]:6969/announce"), "2a01:e0a::1");
-        assert!(!host_key_matches(&override_host("https://evil.example\\@tracker.example/a"), "tracker.example"));
+        assert_eq!(
+            override_host("https://evil.example\\@tracker.example/announce/k"),
+            "evil.example"
+        );
+        assert_eq!(
+            override_host("https://evil.example\\.tracker.example/announce/k"),
+            "evil.example"
+        );
+        assert_eq!(
+            override_host("https://user:pw@tracker.example:8443/announce"),
+            "tracker.example"
+        );
+        assert_eq!(
+            override_host("http://[2a01:e0a::1]:6969/announce"),
+            "2a01:e0a::1"
+        );
+        assert!(!host_key_matches(
+            &override_host("https://evil.example\\@tracker.example/a"),
+            "tracker.example"
+        ));
     }
 
     /// ⭐ The bug this rule exists for. A key that is a prefix of another
@@ -122,11 +143,20 @@ mod tests {
     #[test]
     fn the_most_specific_key_wins_whatever_the_order() {
         let keys = ["tracker-x3.net", "tk.tracker-x3.net"];
-        assert_eq!(longest_override_key("tk.tracker-x3.net", keys), Some("tk.tracker-x3.net"));
+        assert_eq!(
+            longest_override_key("tk.tracker-x3.net", keys),
+            Some("tk.tracker-x3.net")
+        );
         // Reversed input, same answer: the old map-order dependency is gone.
         let reversed = ["tk.tracker-x3.net", "tracker-x3.net"];
-        assert_eq!(longest_override_key("tk.tracker-x3.net", reversed), Some("tk.tracker-x3.net"));
-        assert_eq!(longest_override_key("other.tracker-x3.net", keys), Some("tracker-x3.net"));
+        assert_eq!(
+            longest_override_key("tk.tracker-x3.net", reversed),
+            Some("tk.tracker-x3.net")
+        );
+        assert_eq!(
+            longest_override_key("other.tracker-x3.net", keys),
+            Some("tracker-x3.net")
+        );
         assert_eq!(longest_override_key("elsewhere.net", keys), None);
     }
 }

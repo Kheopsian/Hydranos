@@ -106,7 +106,11 @@ impl DialLimiter {
     /// a finite positive number means "no limit", so a caller cannot wedge the
     /// pacer with a NaN and stop every dial in the engine.
     pub fn set_max_dials_per_sec(&self, per_sec: f64) {
-        let v = if per_sec.is_finite() && per_sec > 0.0 { per_sec } else { 0.0 };
+        let v = if per_sec.is_finite() && per_sec > 0.0 {
+            per_sec
+        } else {
+            0.0
+        };
         self.max_dials_per_sec.store(v.to_bits(), Ordering::Relaxed);
     }
 

@@ -1,5 +1,5 @@
+use serde::{Deserialize, Serialize};
 use std::path::Path;
-use serde::{Serialize, Deserialize};
 use tracing::{info, warn};
 
 use super::meta::InfoHash;
@@ -131,15 +131,13 @@ pub fn load_all_reporting(resume_dir: &str) -> (Vec<ResumeData>, Vec<String>) {
             .unwrap_or_default()
             .to_lowercase();
         match std::fs::read_to_string(&path) {
-            Ok(json) => {
-                match serde_json::from_str::<ResumeData>(&json) {
-                    Ok(data) => results.push(data),
-                    Err(e) => {
-                        warn!("[resume] bad JSON in {:?}: {}", path, e);
-                        unreadable.push(name);
-                    }
+            Ok(json) => match serde_json::from_str::<ResumeData>(&json) {
+                Ok(data) => results.push(data),
+                Err(e) => {
+                    warn!("[resume] bad JSON in {:?}: {}", path, e);
+                    unreadable.push(name);
                 }
-            }
+            },
             Err(e) => {
                 warn!("[resume] read {:?}: {}", path, e);
                 unreadable.push(name);

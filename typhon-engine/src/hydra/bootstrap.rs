@@ -83,7 +83,10 @@ pub(crate) fn set_setup_code_for_test(code: &str) {
 
 #[cfg(test)]
 pub(crate) fn setup_code_pending() -> bool {
-    SETUP_CODE.lock().unwrap_or_else(|e| e.into_inner()).is_some()
+    SETUP_CODE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .is_some()
 }
 
 fn fresh_setup_code() -> String {
@@ -209,7 +212,10 @@ pub async fn setup_password(
             "username".to_string(),
             crate::tomledit::quote_toml_key(&username),
         ),
-        ("password_hash".to_string(), crate::tomledit::quote_toml_key(&hash)),
+        (
+            "password_hash".to_string(),
+            crate::tomledit::quote_toml_key(&hash),
+        ),
     ];
     let written = crate::api::edit_config(&state, move |doc| {
         crate::tomledit::set_toml_table(doc, "auth", &pairs)
@@ -230,8 +236,7 @@ pub async fn setup_password(
     // answers exactly once, then 409s forever.
     let key = state.cfg().daemon.api_key.clone();
     tracing::info!(username = %crate::session::loggable(&username), "first-run setup completed, admin account created");
-    Json(serde_json::json!({"status": "ok", "username": username, "api_key": key}))
-        .into_response()
+    Json(serde_json::json!({"status": "ok", "username": username, "api_key": key})).into_response()
 }
 
 /// Exchange credentials for the API key.
@@ -253,7 +258,10 @@ pub async fn login(
         password: String,
     }
     let Ok(req) = serde_json::from_str::<Creds>(&body) else {
-        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "invalid body"})))
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "invalid body"})),
+        )
             .into_response();
     };
     if cfg.auth.password_hash.is_empty() {
@@ -331,7 +339,12 @@ pub async fn startup(State(state): State<AppState>) -> Response {
             serde_json::json!({"id": e.id, "restored": n, "total": n})
         })
         .collect();
-    let total: usize = state.engines.engines().iter().map(|e| e.manager.len()).sum();
+    let total: usize = state
+        .engines
+        .engines()
+        .iter()
+        .map(|e| e.manager.len())
+        .sum();
     Json(serde_json::json!({
         "ready": true,
         "phase": crate::startup::Phase::Ready.name(),
@@ -347,7 +360,14 @@ pub async fn startup(State(state): State<AppState>) -> Response {
 /// (see `obs`), never a walk of the catalogue per scrape.
 pub async fn metrics(State(state): State<AppState>) -> Response {
     let out = crate::obs::metrics(&state);
-    ([(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4")], out).into_response()
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4",
+        )],
+        out,
+    )
+        .into_response()
 }
 
 /// Whether the caller is on loopback or a private network.
@@ -369,7 +389,9 @@ fn is_local_request(peer: std::net::IpAddr, headers: &HeaderMap) -> bool {
     if !is_private(&peer.to_canonical().to_string()) {
         return false;
     }
-    forwarded_hops(headers).iter().all(|hop| is_private_hop(hop))
+    forwarded_hops(headers)
+        .iter()
+        .all(|hop| is_private_hop(hop))
 }
 
 /// Every client address the forwarding headers name, in no particular order.
@@ -445,8 +467,14 @@ mod tests {
     fn a_forwarded_public_address_is_refused_even_over_a_proxy() {
         let proxy: std::net::IpAddr = "192.168.99.1".parse().unwrap();
         let mut h = HeaderMap::new();
-        h.insert("x-forwarded-for", "203.0.113.9, 192.168.99.1".parse().unwrap());
-        assert!(!is_local_request(proxy, &h), "a public hop anywhere in the chain is refused");
+        h.insert(
+            "x-forwarded-for",
+            "203.0.113.9, 192.168.99.1".parse().unwrap(),
+        );
+        assert!(
+            !is_local_request(proxy, &h),
+            "a public hop anywhere in the chain is refused"
+        );
         h.insert("x-forwarded-for", "192.168.99.50".parse().unwrap());
         assert!(is_local_request(proxy, &h));
     }
@@ -480,7 +508,10 @@ mod tests {
 
         // A chain that stays on the LAN is still a local caller.
         let mut h = HeaderMap::new();
-        h.insert("x-forwarded-for", "192.168.1.5, 10.0.0.2:8080, [fd00::7]".parse().unwrap());
+        h.insert(
+            "x-forwarded-for",
+            "192.168.1.5, 10.0.0.2:8080, [fd00::7]".parse().unwrap(),
+        );
         h.insert("x-real-ip", "192.168.1.5".parse().unwrap());
         h.insert("forwarded", "for=192.168.1.5;proto=http".parse().unwrap());
         assert!(is_local_request(proxy, &h));
@@ -494,21 +525,37 @@ mod tests {
         assert!(!is_local_request(public, &HeaderMap::new()));
         let mut h = HeaderMap::new();
         h.insert("x-forwarded-for", "127.0.0.1".parse().unwrap());
-        assert!(!is_local_request(public, &h), "a forged header does not make a public peer local");
+        assert!(
+            !is_local_request(public, &h),
+            "a forged header does not make a public peer local"
+        );
         let mapped: std::net::IpAddr = "::ffff:192.168.1.20".parse().unwrap();
-        assert!(is_local_request(mapped, &HeaderMap::new()), "an IPv4-mapped LAN peer is local");
+        assert!(
+            is_local_request(mapped, &HeaderMap::new()),
+            "an IPv4-mapped LAN peer is local"
+        );
     }
 
     #[test]
     fn the_setup_code_is_typeable_and_matched_loosely_but_never_when_absent() {
         let a = fresh_setup_code();
         assert_eq!(a.len(), 11);
-        assert!(a.chars().all(|c| c == '-' || SETUP_CODE_ALPHABET.contains(&(c as u8))), "{a}");
+        assert!(
+            a.chars()
+                .all(|c| c == '-' || SETUP_CODE_ALPHABET.contains(&(c as u8))),
+            "{a}"
+        );
         assert_ne!(a, fresh_setup_code());
-        assert!(setup_code_matches(Some(&a), &a.to_lowercase().replace('-', " ")));
+        assert!(setup_code_matches(
+            Some(&a),
+            &a.to_lowercase().replace('-', " ")
+        ));
         assert!(!setup_code_matches(Some(&a), ""));
         assert!(!setup_code_matches(Some("ABCDE-FGH23"), "ABCDE-FGH24"));
-        assert!(!setup_code_matches(None, ""), "no code drawn means no setup by code");
+        assert!(
+            !setup_code_matches(None, ""),
+            "no code drawn means no setup by code"
+        );
         assert!(!setup_code_matches(None, "ABCDE-FGH23"));
     }
 

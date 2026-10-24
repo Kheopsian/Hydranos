@@ -23,7 +23,10 @@ pub fn routes() -> axum::Router<AppState> {
     axum::Router::new()
         .route("/api/rss", get(overview))
         .route("/api/rss/feeds", get(list_feeds).post(create_feed))
-        .route("/api/rss/feeds/:id", axum::routing::patch(edit_feed).delete(delete_feed))
+        .route(
+            "/api/rss/feeds/:id",
+            axum::routing::patch(edit_feed).delete(delete_feed),
+        )
         .route("/api/rss/feeds/:id/refresh", post(refresh_one))
         .route("/api/rss/feeds/:id/articles", get(articles))
         .route("/api/rss/feeds/:id/read", post(read))
@@ -51,7 +54,11 @@ pub fn routes() -> axum::Router<AppState> {
 }
 
 fn unauthorised() -> Response {
-    (StatusCode::UNAUTHORIZED, Json(json!({"error": "Invalid or missing API key"}))).into_response()
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(json!({"error": "Invalid or missing API key"})),
+    )
+        .into_response()
 }
 
 macro_rules! guard {
@@ -96,7 +103,9 @@ fn body_json(body: &str) -> Result<Value, Response> {
 
 fn taken_json(t: &Option<RssTaken>) -> Value {
     match t {
-        Some(t) => json!({"rule": t.rule, "at": t.at, "info_hash": t.info_hash, "outcome": t.outcome}),
+        Some(t) => {
+            json!({"rule": t.rule, "at": t.at, "info_hash": t.info_hash, "outcome": t.outcome})
+        }
         None => Value::Null,
     }
 }
@@ -122,7 +131,12 @@ fn feeds_json(state: &AppState) -> Vec<Value> {
     if feeds.is_empty() {
         return Vec::new();
     }
-    let counts = state.store.lock().ok().and_then(|s| s.rss_article_counts().ok()).unwrap_or_default();
+    let counts = state
+        .store
+        .lock()
+        .ok()
+        .and_then(|s| s.rss_article_counts().ok())
+        .unwrap_or_default();
     let rules = super::load_rules(state);
     let exits = super::Exits::new(state);
     feeds
@@ -163,7 +177,11 @@ fn rule_json(r: &Rule) -> Value {
     v
 }
 
-async fn overview(State(state): State<AppState>, RawQuery(query): RawQuery, headers: HeaderMap) -> Response {
+async fn overview(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
     let s = super::settings(&state.cfg());
@@ -179,7 +197,11 @@ async fn overview(State(state): State<AppState>, RawQuery(query): RawQuery, head
     .into_response()
 }
 
-async fn list_feeds(State(state): State<AppState>, RawQuery(query): RawQuery, headers: HeaderMap) -> Response {
+async fn list_feeds(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
     Json(feeds_json(&state)).into_response()
@@ -189,17 +211,40 @@ fn feed_by_id(state: &AppState, id: i64) -> Option<Value> {
     feeds_json(state).into_iter().find(|f| f["id"] == id)
 }
 
-async fn create_feed(State(state): State<AppState>, RawQuery(query): RawQuery, headers: HeaderMap, body: String) -> Response {
+async fn create_feed(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
     let v = match body_json(&body) {
         Ok(v) => v,
         Err(r) => return r,
     };
-    let s = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
-    let path = if s("path").is_empty() { s("name") } else { s("path") };
-    match super::add_feed(&state, &s("url"), &path, v.get("refresh_secs").and_then(Value::as_i64)) {
-        Ok(f) => (StatusCode::CREATED, Json(feed_by_id(&state, f.id).unwrap_or(Value::Null))).into_response(),
+    let s = |k: &str| {
+        v.get(k)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    let path = if s("path").is_empty() {
+        s("name")
+    } else {
+        s("path")
+    };
+    match super::add_feed(
+        &state,
+        &s("url"),
+        &path,
+        v.get("refresh_secs").and_then(Value::as_i64),
+    ) {
+        Ok(f) => (
+            StatusCode::CREATED,
+            Json(feed_by_id(&state, f.id).unwrap_or(Value::Null)),
+        )
+            .into_response(),
         Err(r) => refuse(r),
     }
 }
@@ -217,14 +262,28 @@ async fn edit_feed(
         Ok(v) => v,
         Err(r) => return r,
     };
-    let path = v.get("path").or_else(|| v.get("name")).and_then(Value::as_str);
-    match super::update_feed(&state, id, path, v.get("url").and_then(Value::as_str), v.get("refresh_secs").and_then(Value::as_i64)) {
+    let path = v
+        .get("path")
+        .or_else(|| v.get("name"))
+        .and_then(Value::as_str);
+    match super::update_feed(
+        &state,
+        id,
+        path,
+        v.get("url").and_then(Value::as_str),
+        v.get("refresh_secs").and_then(Value::as_i64),
+    ) {
         Ok(_) => Json(feed_by_id(&state, id).unwrap_or(Value::Null)).into_response(),
         Err(r) => refuse(r),
     }
 }
 
-async fn delete_feed(State(state): State<AppState>, Path(id): Path<i64>, RawQuery(query): RawQuery, headers: HeaderMap) -> Response {
+async fn delete_feed(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
     let Some(f) = super::feeds(&state).into_iter().find(|f| f.id == id) else {
@@ -237,7 +296,12 @@ async fn delete_feed(State(state): State<AppState>, Path(id): Path<i64>, RawQuer
 }
 
 /// Fetch one feed now and answer once it is done: the row says how it went.
-async fn refresh_one(State(state): State<AppState>, Path(id): Path<i64>, RawQuery(query): RawQuery, headers: HeaderMap) -> Response {
+async fn refresh_one(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
     match super::refresh_feed(&state, id).await {
@@ -246,7 +310,11 @@ async fn refresh_one(State(state): State<AppState>, Path(id): Path<i64>, RawQuer
     }
 }
 
-async fn refresh_all(State(state): State<AppState>, RawQuery(query): RawQuery, headers: HeaderMap) -> Response {
+async fn refresh_all(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
     let ids: Vec<i64> = super::feeds(&state).iter().map(|f| f.id).collect();
@@ -255,7 +323,12 @@ async fn refresh_all(State(state): State<AppState>, RawQuery(query): RawQuery, h
     (StatusCode::ACCEPTED, Json(json!({"refreshing": n}))).into_response()
 }
 
-async fn articles(State(state): State<AppState>, Path(id): Path<i64>, RawQuery(query): RawQuery, headers: HeaderMap) -> Response {
+async fn articles(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
     if !super::feeds(&state).iter().any(|f| f.id == id) {
@@ -278,7 +351,13 @@ async fn articles(State(state): State<AppState>, Path(id): Path<i64>, RawQuery(q
     Json(out).into_response()
 }
 
-async fn read(State(state): State<AppState>, Path(id): Path<i64>, RawQuery(query): RawQuery, headers: HeaderMap, body: String) -> Response {
+async fn read(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
     let v = match body_json(&body) {
@@ -308,7 +387,13 @@ async fn download_one(
         Ok(v) => v,
         Err(r) => return r,
     };
-    let s = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or_default().trim().to_string();
+    let s = |k: &str| {
+        v.get(k)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_string()
+    };
     let guid = s("guid");
     if guid.is_empty() {
         return refuse(Refusal::Bad("guid is required".into()));
@@ -320,28 +405,52 @@ async fn download_one(
     }
     match super::download(&state, id, &guid, &s("category"), &s("save_path"), paused).await {
         Ok(a) => Json(json!({"info_hash": a.info_hash, "already": a.already})).into_response(),
-        Err(super::AddError::Transient(e)) => (StatusCode::BAD_GATEWAY, Json(json!({"error": e}))).into_response(),
+        Err(super::AddError::Transient(e)) => {
+            (StatusCode::BAD_GATEWAY, Json(json!({"error": e}))).into_response()
+        }
         Err(super::AddError::Refused(e)) => refuse(Refusal::Bad(e)),
     }
 }
 
-async fn create_folder(State(state): State<AppState>, RawQuery(query): RawQuery, headers: HeaderMap, body: String) -> Response {
+async fn create_folder(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
     let v = match body_json(&body) {
         Ok(v) => v,
         Err(r) => return r,
     };
-    match super::add_folder(&state, v.get("path").and_then(Value::as_str).unwrap_or_default()) {
-        Ok(()) => (StatusCode::CREATED, Json(json!({"folders": super::folders(&state)}))).into_response(),
+    match super::add_folder(
+        &state,
+        v.get("path").and_then(Value::as_str).unwrap_or_default(),
+    ) {
+        Ok(()) => (
+            StatusCode::CREATED,
+            Json(json!({"folders": super::folders(&state)})),
+        )
+            .into_response(),
         Err(r) => refuse(r),
     }
 }
 
-async fn list_rules(State(state): State<AppState>, RawQuery(query): RawQuery, headers: HeaderMap) -> Response {
+async fn list_rules(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    Json(super::load_rules(&state).iter().map(rule_json).collect::<Vec<_>>()).into_response()
+    Json(
+        super::load_rules(&state)
+            .iter()
+            .map(rule_json)
+            .collect::<Vec<_>>(),
+    )
+    .into_response()
 }
 
 async fn save_rule(
@@ -363,7 +472,12 @@ async fn save_rule(
     }
 }
 
-async fn delete_rule(State(state): State<AppState>, Path(name): Path<String>, RawQuery(query): RawQuery, headers: HeaderMap) -> Response {
+async fn delete_rule(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
     match super::remove_rule(&state, &name) {
@@ -385,7 +499,11 @@ async fn rename_rule(
         Ok(v) => v,
         Err(r) => return r,
     };
-    let new = v.get("name").or_else(|| v.get("new_name")).and_then(Value::as_str).unwrap_or_default();
+    let new = v
+        .get("name")
+        .or_else(|| v.get("new_name"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     match super::rename_rule(&state, &name, new) {
         Ok(()) => Json(json!({"name": new.trim()})).into_response(),
         Err(r) => refuse(r),
@@ -395,7 +513,11 @@ async fn rename_rule(
 fn matching_json(state: &AppState, rule: &Rule) -> Value {
     let found = super::matching(state, rule);
     let count: usize = found.iter().map(|(_, a)| a.len()).sum();
-    let would: usize = found.iter().flat_map(|(_, a)| a).filter(|(a, t)| t.is_none() && !a.is_read).count();
+    let would: usize = found
+        .iter()
+        .flat_map(|(_, a)| a)
+        .filter(|(a, t)| t.is_none() && !a.is_read)
+        .count();
     json!({
         "count": count,
         "would_add": would,
@@ -409,24 +531,40 @@ fn matching_json(state: &AppState, rule: &Rule) -> Value {
 }
 
 /// What a saved rule would take. Nothing is added.
-async fn rule_matching(State(state): State<AppState>, Path(name): Path<String>, RawQuery(query): RawQuery, headers: HeaderMap) -> Response {
+async fn rule_matching(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    match super::load_rules(&state).into_iter().find(|r| r.name == name) {
+    match super::load_rules(&state)
+        .into_iter()
+        .find(|r| r.name == name)
+    {
         Some(r) => Json(matching_json(&state, &r)).into_response(),
         None => refuse(Refusal::NotFound(format!("no rule {name:?}"))),
     }
 }
 
 /// What a draft rule (the editor's, unsaved) would take. Nothing is added.
-async fn preview(State(state): State<AppState>, RawQuery(query): RawQuery, headers: HeaderMap, body: String) -> Response {
+async fn preview(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
     let v = match body_json(&body) {
         Ok(v) => v,
         Err(r) => return r,
     };
-    match Rule::from_json(v.get("name").and_then(Value::as_str).unwrap_or("preview"), &v) {
+    match Rule::from_json(
+        v.get("name").and_then(Value::as_str).unwrap_or("preview"),
+        &v,
+    ) {
         Ok(r) => Json(matching_json(&state, &r)).into_response(),
         Err(e) => refuse(Refusal::Bad(e)),
     }
@@ -441,13 +579,21 @@ fn qb_ok() -> Response {
 }
 
 fn qb_missing(what: &str) -> Response {
-    (StatusCode::BAD_REQUEST, format!("Missing parameter: {what}")).into_response()
+    (
+        StatusCode::BAD_REQUEST,
+        format!("Missing parameter: {what}"),
+    )
+        .into_response()
 }
 
 /// qBittorrent answers 409 with the reason for every refusal of an item or a
 /// rule; a malformed value is a 400.
 fn qb_refuse(r: Refusal) -> Response {
-    let code = if matches!(r, Refusal::Bad(_)) { StatusCode::BAD_REQUEST } else { StatusCode::CONFLICT };
+    let code = if matches!(r, Refusal::Bad(_)) {
+        StatusCode::BAD_REQUEST
+    } else {
+        StatusCode::CONFLICT
+    };
     (code, r.message().to_string()).into_response()
 }
 
@@ -458,50 +604,98 @@ fn qb_done<T>(r: Result<T, Refusal>) -> Response {
     }
 }
 
-async fn qb_add_folder(State(state): State<AppState>, RawQuery(query): RawQuery, headers: HeaderMap, body: String) -> Response {
+async fn qb_add_folder(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    let Some(path) = param(&query, &body, "path") else { return qb_missing("path") };
+    let Some(path) = param(&query, &body, "path") else {
+        return qb_missing("path");
+    };
     qb_done(super::add_folder(&state, &path))
 }
 
-async fn qb_add_feed(State(state): State<AppState>, RawQuery(query): RawQuery, headers: HeaderMap, body: String) -> Response {
+async fn qb_add_feed(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    let Some(url) = param(&query, &body, "url") else { return qb_missing("url") };
+    let Some(url) = param(&query, &body, "url") else {
+        return qb_missing("url");
+    };
     let path = param(&query, &body, "path").unwrap_or_default();
     // 5.x's optional refresh interval, in seconds.
-    let every = param(&query, &body, "refreshInterval").and_then(|v| v.trim().parse::<i64>().ok()).filter(|v| *v > 0);
+    let every = param(&query, &body, "refreshInterval")
+        .and_then(|v| v.trim().parse::<i64>().ok())
+        .filter(|v| *v > 0);
     qb_done(super::add_feed(&state, &url, &path, every))
 }
 
-async fn qb_set_feed_url(State(state): State<AppState>, RawQuery(query): RawQuery, headers: HeaderMap, body: String) -> Response {
+async fn qb_set_feed_url(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    let Some(path) = param(&query, &body, "path") else { return qb_missing("path") };
-    let Some(url) = param(&query, &body, "url") else { return qb_missing("url") };
+    let Some(path) = param(&query, &body, "path") else {
+        return qb_missing("path");
+    };
+    let Some(url) = param(&query, &body, "url") else {
+        return qb_missing("url");
+    };
     qb_done(super::set_feed_url(&state, &path, &url))
 }
 
-async fn qb_remove_item(State(state): State<AppState>, RawQuery(query): RawQuery, headers: HeaderMap, body: String) -> Response {
+async fn qb_remove_item(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    let Some(path) = param(&query, &body, "path") else { return qb_missing("path") };
+    let Some(path) = param(&query, &body, "path") else {
+        return qb_missing("path");
+    };
     qb_done(super::remove_item(&state, &path))
 }
 
-async fn qb_move_item(State(state): State<AppState>, RawQuery(query): RawQuery, headers: HeaderMap, body: String) -> Response {
+async fn qb_move_item(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    let Some(from) = param(&query, &body, "itemPath") else { return qb_missing("itemPath") };
-    let Some(to) = param(&query, &body, "destPath") else { return qb_missing("destPath") };
+    let Some(from) = param(&query, &body, "itemPath") else {
+        return qb_missing("itemPath");
+    };
+    let Some(to) = param(&query, &body, "destPath") else {
+        return qb_missing("destPath");
+    };
     qb_done(super::move_item(&state, &from, &to))
 }
 
-async fn qb_refresh_item(State(state): State<AppState>, RawQuery(query): RawQuery, headers: HeaderMap, body: String) -> Response {
+async fn qb_refresh_item(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    let Some(path) = param(&query, &body, "itemPath") else { return qb_missing("itemPath") };
+    let Some(path) = param(&query, &body, "itemPath") else {
+        return qb_missing("itemPath");
+    };
     match super::feeds_at(&state, &path) {
         Ok(feeds) => {
             super::refresh_soon(&state, feeds.iter().map(|f| f.id).collect());
@@ -511,10 +705,17 @@ async fn qb_refresh_item(State(state): State<AppState>, RawQuery(query): RawQuer
     }
 }
 
-async fn qb_mark_as_read(State(state): State<AppState>, RawQuery(query): RawQuery, headers: HeaderMap, body: String) -> Response {
+async fn qb_mark_as_read(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    let Some(path) = param(&query, &body, "itemPath") else { return qb_missing("itemPath") };
+    let Some(path) = param(&query, &body, "itemPath") else {
+        return qb_missing("itemPath");
+    };
     let article = param(&query, &body, "articleId");
     qb_done(super::mark_read(&state, &path, article.as_deref()))
 }
@@ -536,9 +737,18 @@ fn qb_article(a: &RssArticleRow) -> Value {
 fn qb_feed(state: &AppState, f: &RssFeedRow, with_data: bool) -> Value {
     let mut v = json!({"uid": f.uid, "url": f.url});
     if with_data {
-        let arts = state.store.lock().ok().and_then(|s| s.rss_articles(f.id).ok()).unwrap_or_default();
+        let arts = state
+            .store
+            .lock()
+            .ok()
+            .and_then(|s| s.rss_articles(f.id).ok())
+            .unwrap_or_default();
         v["title"] = Value::String(f.title.clone());
-        v["lastBuildDate"] = Value::String(if f.last_refresh > 0 { rfc2822(f.last_refresh) } else { String::new() });
+        v["lastBuildDate"] = Value::String(if f.last_refresh > 0 {
+            rfc2822(f.last_refresh)
+        } else {
+            String::new()
+        });
         v["isLoading"] = Value::Bool(super::is_loading(state, f.id));
         v["hasError"] = Value::Bool(!f.last_error.is_empty());
         v["refreshInterval"] = json!(f.refresh_secs);
@@ -556,7 +766,9 @@ fn insert_at(root: &mut Map<String, Value>, path: &str, leaf: Value) {
             node.entry(part.to_string()).or_insert(leaf);
             return;
         }
-        let next = node.entry(part.to_string()).or_insert_with(|| Value::Object(Map::new()));
+        let next = node
+            .entry(part.to_string())
+            .or_insert_with(|| Value::Object(Map::new()));
         if !next.is_object() {
             return;
         }
@@ -564,7 +776,12 @@ fn insert_at(root: &mut Map<String, Value>, path: &str, leaf: Value) {
     }
 }
 
-async fn qb_items(State(state): State<AppState>, RawQuery(query): RawQuery, headers: HeaderMap, body: String) -> Response {
+async fn qb_items(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
     let with_data = param(&query, &body, "withData").is_some_and(|v| v == "true" || v == "1");
@@ -578,44 +795,86 @@ async fn qb_items(State(state): State<AppState>, RawQuery(query): RawQuery, head
     Json(Value::Object(root)).into_response()
 }
 
-async fn qb_set_rule(State(state): State<AppState>, RawQuery(query): RawQuery, headers: HeaderMap, body: String) -> Response {
+async fn qb_set_rule(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    let Some(name) = param(&query, &body, "ruleName") else { return qb_missing("ruleName") };
-    let Some(def) = param(&query, &body, "ruleDef") else { return qb_missing("ruleDef") };
+    let Some(name) = param(&query, &body, "ruleName") else {
+        return qb_missing("ruleName");
+    };
+    let Some(def) = param(&query, &body, "ruleDef") else {
+        return qb_missing("ruleDef");
+    };
     let Ok(def) = serde_json::from_str::<Value>(&def) else {
         return (StatusCode::BAD_REQUEST, "ruleDef is not JSON").into_response();
     };
     qb_done(super::put_rule(&state, &name, &def))
 }
 
-async fn qb_rename_rule(State(state): State<AppState>, RawQuery(query): RawQuery, headers: HeaderMap, body: String) -> Response {
+async fn qb_rename_rule(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    let Some(name) = param(&query, &body, "ruleName") else { return qb_missing("ruleName") };
-    let Some(new) = param(&query, &body, "newRuleName") else { return qb_missing("newRuleName") };
+    let Some(name) = param(&query, &body, "ruleName") else {
+        return qb_missing("ruleName");
+    };
+    let Some(new) = param(&query, &body, "newRuleName") else {
+        return qb_missing("newRuleName");
+    };
     qb_done(super::rename_rule(&state, &name, &new))
 }
 
-async fn qb_remove_rule(State(state): State<AppState>, RawQuery(query): RawQuery, headers: HeaderMap, body: String) -> Response {
+async fn qb_remove_rule(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    let Some(name) = param(&query, &body, "ruleName") else { return qb_missing("ruleName") };
+    let Some(name) = param(&query, &body, "ruleName") else {
+        return qb_missing("ruleName");
+    };
     qb_done(super::remove_rule(&state, &name))
 }
 
-async fn qb_rules(State(state): State<AppState>, RawQuery(query): RawQuery, headers: HeaderMap) -> Response {
+async fn qb_rules(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    let out: Map<String, Value> = super::load_rules(&state).iter().map(|r| (r.name.clone(), r.to_json())).collect();
+    let out: Map<String, Value> = super::load_rules(&state)
+        .iter()
+        .map(|r| (r.name.clone(), r.to_json()))
+        .collect();
     Json(Value::Object(out)).into_response()
 }
 
-async fn qb_matching(State(state): State<AppState>, RawQuery(query): RawQuery, headers: HeaderMap, body: String) -> Response {
+async fn qb_matching(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    let Some(name) = param(&query, &body, "ruleName") else { return qb_missing("ruleName") };
-    let Some(rule) = super::load_rules(&state).into_iter().find(|r| r.name == name) else {
+    let Some(name) = param(&query, &body, "ruleName") else {
+        return qb_missing("ruleName");
+    };
+    let Some(rule) = super::load_rules(&state)
+        .into_iter()
+        .find(|r| r.name == name)
+    else {
         // qBittorrent answers an empty object for a rule it does not have.
         return Json(json!({})).into_response();
     };
@@ -624,7 +883,11 @@ async fn qb_matching(State(state): State<AppState>, RawQuery(query): RawQuery, h
         if !arts.is_empty() {
             out.insert(
                 super::name_of(&f.path).to_string(),
-                Value::Array(arts.iter().map(|(a, _)| Value::String(a.title.clone())).collect()),
+                Value::Array(
+                    arts.iter()
+                        .map(|(a, _)| Value::String(a.title.clone()))
+                        .collect(),
+                ),
             );
         }
     }

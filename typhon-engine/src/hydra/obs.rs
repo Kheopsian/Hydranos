@@ -15,7 +15,14 @@ use typhon_engine::torrent::{STATUS_PAUSED, STATUS_SLOTS};
 
 /// The names of the per-state slots, in `TorrentManager::status_counts`
 /// order. `error` is a torrent whose data is gone (a read hit ENOENT).
-pub const STATE_NAMES: [&str; STATUS_SLOTS] = ["stopped", "checking", "downloading", "seeding", "error", "paused"];
+pub const STATE_NAMES: [&str; STATUS_SLOTS] = [
+    "stopped",
+    "checking",
+    "downloading",
+    "seeding",
+    "error",
+    "paused",
+];
 
 /// One engine, as observed now.
 #[derive(Debug, Clone, Default, serde::Serialize)]
@@ -67,7 +74,10 @@ pub struct EngineStats {
 
 pub fn engine_stats(host: &EngineHost) -> Vec<EngineStats> {
     let trackers = crate::benchsampler::latest_trackers();
-    host.engines().iter().map(|e| one(e, trackers.as_deref())).collect()
+    host.engines()
+        .iter()
+        .map(|e| one(e, trackers.as_deref()))
+        .collect()
 }
 
 fn one(e: &Engine, trackers: Option<&[crate::benchsampler::TrackerRow]>) -> EngineStats {
@@ -94,7 +104,12 @@ fn one(e: &Engine, trackers: Option<&[crate::benchsampler::TrackerRow]>) -> Engi
         lifetime_downloaded: ld,
         session_uploaded: su,
         session_downloaded: sd,
-        seed_size: trackers.map(|rows| rows.iter().filter(|r| r.engine == e.id).map(|r| r.seed_size).sum()),
+        seed_size: trackers.map(|rows| {
+            rows.iter()
+                .filter(|r| r.engine == e.id)
+                .map(|r| r.seed_size)
+                .sum()
+        }),
         announces_ok: ok,
         announces_failed: failed,
         announce_in_flight: a.in_flight.load(Relaxed),
@@ -217,7 +232,12 @@ pub fn health(state: &AppState) -> (bool, serde_json::Value) {
             })
         })
         .collect();
-    let on: Vec<&Engine> = state.engines.engines().iter().filter(|e| expects_listener(e)).collect();
+    let on: Vec<&Engine> = state
+        .engines
+        .engines()
+        .iter()
+        .filter(|e| expects_listener(e))
+        .collect();
     if !on.is_empty() && on.iter().all(|e| !e.listening.load(Relaxed)) {
         fatal = true;
         problems.push(serde_json::json!({
@@ -279,7 +299,8 @@ const VOLUME_FAULT_MIN_TORRENTS: usize = 2;
 pub fn volume_faults(engines: &EngineHost) -> Vec<(String, String)> {
     use typhon_engine::torrent::meta::TorrentStatus;
     // save path -> (active, in error)
-    let mut by_path: std::collections::HashMap<std::path::PathBuf, (usize, usize)> = Default::default();
+    let mut by_path: std::collections::HashMap<std::path::PathBuf, (usize, usize)> =
+        Default::default();
     for e in engines.engines() {
         e.manager.for_each(|t| {
             let status = t.status.load(Relaxed);
@@ -297,9 +318,12 @@ pub fn volume_faults(engines: &EngineHost) -> Vec<(String, String)> {
         });
     }
     // dev -> (sample path, active, in error)
-    let mut by_dev: std::collections::HashMap<u64, (std::path::PathBuf, usize, usize)> = Default::default();
+    let mut by_dev: std::collections::HashMap<u64, (std::path::PathBuf, usize, usize)> =
+        Default::default();
     for (path, (active, errored)) in by_path {
-        let Some(dev) = crate::volumes::device_of_nearest(&path) else { continue };
+        let Some(dev) = crate::volumes::device_of_nearest(&path) else {
+            continue;
+        };
         let entry = by_dev.entry(dev).or_insert((path, 0, 0));
         entry.1 += active;
         entry.2 += errored;
@@ -358,12 +382,16 @@ pub fn anomalies(state: &AppState) -> serde_json::Value {
     ];
     let mut counts = serde_json::Map::new();
     for k in kinds {
-        let n = last.as_ref().and_then(|r| r.2.counts.get(k).copied()).unwrap_or(0);
+        let n = last
+            .as_ref()
+            .and_then(|r| r.2.counts.get(k).copied())
+            .unwrap_or(0);
         counts.insert(k.to_string(), n.into());
     }
 
     // Trackers failing now: distinct hosts by the Trackers tab's own rule.
-    let mut failing: std::collections::BTreeMap<String, (&'static str, Vec<String>)> = Default::default();
+    let mut failing: std::collections::BTreeMap<String, (&'static str, Vec<String>)> =
+        Default::default();
     for e in state.engines.engines() {
         let vers = e.announce_cache.verifications();
         for (host, classes) in e.announce_cache.error_breakdown() {
@@ -391,7 +419,11 @@ pub fn anomalies(state: &AppState) -> serde_json::Value {
     // Announces behind schedule, and engines holding theirs.
     let stats = engine_stats(&state.engines);
     let late: u64 = stats.iter().map(|s| s.announce_late).sum();
-    let held: Vec<&str> = stats.iter().filter(|s| s.held).map(|s| s.id.as_str()).collect();
+    let held: Vec<&str> = stats
+        .iter()
+        .filter(|s| s.held)
+        .map(|s| s.id.as_str())
+        .collect();
     counts.insert("announces_late".into(), late.into());
     counts.insert("engines_held".into(), held.len().into());
 
@@ -405,12 +437,20 @@ pub fn anomalies(state: &AppState) -> serde_json::Value {
     let mut disks = Vec::new();
     let mut low = 0usize;
     for p in paths {
-        let Some(dev) = crate::volumes::device_of_nearest(&p) else { continue };
+        let Some(dev) = crate::volumes::device_of_nearest(&p) else {
+            continue;
+        };
         if !seen_dev.insert(dev) {
             continue;
         }
-        let Some((_used, total, free)) = crate::platform::usage(&p) else { continue };
-        let pct = if total > 0 { free as f64 * 100.0 / total as f64 } else { 0.0 };
+        let Some((_used, total, free)) = crate::platform::usage(&p) else {
+            continue;
+        };
+        let pct = if total > 0 {
+            free as f64 * 100.0 / total as f64
+        } else {
+            0.0
+        };
         let is_low = total > 0 && (free < DISK_LOW_BYTES || pct < DISK_LOW_PCT);
         low += is_low as usize;
         disks.push(serde_json::json!({
@@ -425,9 +465,15 @@ pub fn anomalies(state: &AppState) -> serde_json::Value {
 
     let engines: serde_json::Map<String, serde_json::Value> = stats
         .iter()
-        .map(|s| (s.id.clone(), serde_json::json!({"torrents": s.torrents, "states": s.states})))
+        .map(|s| {
+            (
+                s.id.clone(),
+                serde_json::json!({"torrents": s.torrents, "states": s.states}),
+            )
+        })
         .collect();
-    let (generated_at, took, listed, truncated, wasted, eff, redl_n, redl_b, scanned) = match &last {
+    let (generated_at, took, listed, truncated, wasted, eff, redl_n, redl_b, scanned) = match &last
+    {
         Some(r) => {
             let (at, ms, rep) = (&r.0, &r.1, &r.2);
             (
@@ -484,7 +530,9 @@ pub fn anomalies(state: &AppState) -> serde_json::Value {
 
 /// A Prometheus label value: backslash, quote and newline escaped.
 fn label(v: &str) -> String {
-    v.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n")
+    v.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
 }
 
 /// Prometheus text, exposition format 0.0.4.
@@ -494,19 +542,31 @@ pub struct Exposition {
 
 impl Exposition {
     pub fn new() -> Self {
-        Exposition { out: String::with_capacity(8 << 10) }
+        Exposition {
+            out: String::with_capacity(8 << 10),
+        }
     }
 
     /// `# HELP` and `# TYPE` for a family, then its samples.
-    pub fn family(&mut self, name: &str, kind: &str, help: &str, samples: &[(Vec<(&str, String)>, f64)]) {
+    pub fn family(
+        &mut self,
+        name: &str,
+        kind: &str,
+        help: &str,
+        samples: &[(Vec<(&str, String)>, f64)],
+    ) {
         if samples.is_empty() {
             return;
         }
-        self.out.push_str(&format!("# HELP {name} {help}\n# TYPE {name} {kind}\n"));
+        self.out
+            .push_str(&format!("# HELP {name} {help}\n# TYPE {name} {kind}\n"));
         for (labels, v) in samples {
             self.out.push_str(name);
             if !labels.is_empty() {
-                let l: Vec<String> = labels.iter().map(|(k, v)| format!("{k}=\"{}\"", label(v))).collect();
+                let l: Vec<String> = labels
+                    .iter()
+                    .map(|(k, v)| format!("{k}=\"{}\"", label(v)))
+                    .collect();
                 self.out.push('{');
                 self.out.push_str(&l.join(","));
                 self.out.push('}');
@@ -528,12 +588,20 @@ impl Exposition {
 pub fn metrics(state: &AppState) -> String {
     let stats = engine_stats(&state.engines);
     let mut x = Exposition::new();
-    x.family("hydra_up", "gauge", "1 while the process answers.", &[(vec![], 1.0)]);
+    x.family(
+        "hydra_up",
+        "gauge",
+        "1 while the process answers.",
+        &[(vec![], 1.0)],
+    );
     x.family(
         "hydra_build_info",
         "gauge",
         "The running version, as a label.",
-        &[(vec![("version", crate::api::HYDRANOS_VERSION.to_string())], 1.0)],
+        &[(
+            vec![("version", crate::api::HYDRANOS_VERSION.to_string())],
+            1.0,
+        )],
     );
     x.family(
         "hydra_uptime_seconds",
@@ -544,16 +612,27 @@ pub fn metrics(state: &AppState) -> String {
 
     // One family per figure, one sample per engine.
     let per = |f: &dyn Fn(&EngineStats) -> f64| -> Vec<(Vec<(&str, String)>, f64)> {
-        stats.iter().map(|s| (vec![("engine", s.id.clone())], f(s))).collect()
+        stats
+            .iter()
+            .map(|s| (vec![("engine", s.id.clone())], f(s)))
+            .collect()
     };
-    x.family("hydra_torrents", "gauge", "Torrents loaded in the engine.", &per(&|s| s.torrents as f64));
+    x.family(
+        "hydra_torrents",
+        "gauge",
+        "Torrents loaded in the engine.",
+        &per(&|s| s.torrents as f64),
+    );
     let mut by_state = Vec::new();
     for s in &stats {
         for (name, n) in &s.states {
             if *name == STATE_NAMES[STATUS_PAUSED] {
                 continue;
             }
-            by_state.push((vec![("engine", s.id.clone()), ("state", name.to_string())], *n as f64));
+            by_state.push((
+                vec![("engine", s.id.clone()), ("state", name.to_string())],
+                *n as f64,
+            ));
         }
     }
     x.family(
@@ -568,8 +647,18 @@ pub fn metrics(state: &AppState) -> String {
         "Torrents stopped by the operator (also counted under their state).",
         &per(&|s| s.states.get("paused").copied().unwrap_or(0) as f64),
     );
-    x.family("hydra_upload_rate_bytes", "gauge", "Upload rate, bytes per second.", &per(&|s| s.upload_rate as f64));
-    x.family("hydra_download_rate_bytes", "gauge", "Download rate, bytes per second.", &per(&|s| s.download_rate as f64));
+    x.family(
+        "hydra_upload_rate_bytes",
+        "gauge",
+        "Upload rate, bytes per second.",
+        &per(&|s| s.upload_rate as f64),
+    );
+    x.family(
+        "hydra_download_rate_bytes",
+        "gauge",
+        "Download rate, bytes per second.",
+        &per(&|s| s.download_rate as f64),
+    );
     x.family(
         "hydra_session_uploaded_bytes_total",
         "counter",
@@ -594,12 +683,30 @@ pub fn metrics(state: &AppState) -> String {
         "Lifetime download of the torrents loaded now; falls when one is removed.",
         &per(&|s| s.lifetime_downloaded as f64),
     );
-    x.family("hydra_peers", "gauge", "Connected peers.", &per(&|s| s.peers as f64));
-    x.family("hydra_torrents_with_peers", "gauge", "Torrents with at least one peer.", &per(&|s| s.with_peers as f64));
-    x.family("hydra_torrents_uploading", "gauge", "Torrents uploading now.", &per(&|s| s.uploading as f64));
+    x.family(
+        "hydra_peers",
+        "gauge",
+        "Connected peers.",
+        &per(&|s| s.peers as f64),
+    );
+    x.family(
+        "hydra_torrents_with_peers",
+        "gauge",
+        "Torrents with at least one peer.",
+        &per(&|s| s.with_peers as f64),
+    );
+    x.family(
+        "hydra_torrents_uploading",
+        "gauge",
+        "Torrents uploading now.",
+        &per(&|s| s.uploading as f64),
+    );
     let with_seed: Vec<_> = stats
         .iter()
-        .filter_map(|s| s.seed_size.map(|v| (vec![("engine", s.id.clone())], v as f64)))
+        .filter_map(|s| {
+            s.seed_size
+                .map(|v| (vec![("engine", s.id.clone())], v as f64))
+        })
         .collect();
     x.family(
         "hydra_seed_size_bytes",
@@ -609,22 +716,54 @@ pub fn metrics(state: &AppState) -> String {
     );
     let mut announces = Vec::new();
     for s in &stats {
-        announces.push((vec![("engine", s.id.clone()), ("result", "ok".into())], s.announces_ok as f64));
-        announces.push((vec![("engine", s.id.clone()), ("result", "failed".into())], s.announces_failed as f64));
+        announces.push((
+            vec![("engine", s.id.clone()), ("result", "ok".into())],
+            s.announces_ok as f64,
+        ));
+        announces.push((
+            vec![("engine", s.id.clone()), ("result", "failed".into())],
+            s.announces_failed as f64,
+        ));
     }
-    x.family("hydra_announces_total", "counter", "Announces since the process started.", &announces);
+    x.family(
+        "hydra_announces_total",
+        "counter",
+        "Announces since the process started.",
+        &announces,
+    );
     let mut per_tracker = Vec::new();
     let mut errors = Vec::new();
     for e in state.engines.engines() {
         for (host, ok, failed) in e.announce_cache.host_outcomes() {
-            per_tracker.push((vec![("engine", e.id.clone()), ("tracker", host.clone()), ("result", "ok".into())], ok as f64));
-            per_tracker.push((vec![("engine", e.id.clone()), ("tracker", host), ("result", "failed".into())], failed as f64));
+            per_tracker.push((
+                vec![
+                    ("engine", e.id.clone()),
+                    ("tracker", host.clone()),
+                    ("result", "ok".into()),
+                ],
+                ok as f64,
+            ));
+            per_tracker.push((
+                vec![
+                    ("engine", e.id.clone()),
+                    ("tracker", host),
+                    ("result", "failed".into()),
+                ],
+                failed as f64,
+            ));
         }
         let mut breakdown: Vec<_> = e.announce_cache.error_breakdown().into_iter().collect();
         breakdown.sort();
         for (host, classes) in breakdown {
             for (class, n) in classes {
-                errors.push((vec![("engine", e.id.clone()), ("tracker", host.clone()), ("class", class)], n as f64));
+                errors.push((
+                    vec![
+                        ("engine", e.id.clone()),
+                        ("tracker", host.clone()),
+                        ("class", class),
+                    ],
+                    n as f64,
+                ));
             }
         }
     }
@@ -666,12 +805,24 @@ pub fn metrics(state: &AppState) -> String {
     );
     let mut limits = Vec::new();
     for s in &stats {
-        limits.push((vec![("engine", s.id.clone()), ("direction", "up".into())], s.upload_limit as f64));
-        limits.push((vec![("engine", s.id.clone()), ("direction", "down".into())], s.download_limit as f64));
+        limits.push((
+            vec![("engine", s.id.clone()), ("direction", "up".into())],
+            s.upload_limit as f64,
+        ));
+        limits.push((
+            vec![("engine", s.id.clone()), ("direction", "down".into())],
+            s.download_limit as f64,
+        ));
     }
     let client = state.engines.client_rates();
-    limits.push((vec![("engine", "client".into()), ("direction", "up".into())], client.up.rate() as f64));
-    limits.push((vec![("engine", "client".into()), ("direction", "down".into())], client.down.rate() as f64));
+    limits.push((
+        vec![("engine", "client".into()), ("direction", "up".into())],
+        client.up.rate() as f64,
+    ));
+    limits.push((
+        vec![("engine", "client".into()), ("direction", "down".into())],
+        client.down.rate() as f64,
+    ));
     x.family(
         "hydra_rate_limit_bytes",
         "gauge",
@@ -686,10 +837,23 @@ pub fn metrics(state: &AppState) -> String {
     );
     let slots: Vec<_> = stats
         .iter()
-        .filter_map(|s| s.unchoke_slots.map(|n| (vec![("engine", s.id.clone())], n as f64)))
+        .filter_map(|s| {
+            s.unchoke_slots
+                .map(|n| (vec![("engine", s.id.clone())], n as f64))
+        })
         .collect();
-    x.family("hydra_unchoke_slots", "gauge", "Upload slots per torrent while the choker is on.", &slots);
-    x.family("hydra_listening", "gauge", "1 when the engine's peer listener is bound.", &per(&|s| s.listening as u8 as f64));
+    x.family(
+        "hydra_unchoke_slots",
+        "gauge",
+        "Upload slots per torrent while the choker is on.",
+        &slots,
+    );
+    x.family(
+        "hydra_listening",
+        "gauge",
+        "1 when the engine's peer listener is bound.",
+        &per(&|s| s.listening as u8 as f64),
+    );
     x.family(
         "hydra_held",
         "gauge",
@@ -779,8 +943,17 @@ mod tests {
         let save = data.to_string_lossy().into_owned();
         for (engine, name) in [("race", "alpha"), ("hoard", "bravo"), ("vpn7", "charlie")] {
             std::fs::write(data.join(name), vec![0u8; 16384]).unwrap();
-            let (h, _) = crate::api::add_torrent_bytes(&s.state, &torrent_bytes(name), "", &save, "", false, true, engine)
-                .unwrap_or_else(|e| panic!("add to {engine}: {e}"));
+            let (h, _) = crate::api::add_torrent_bytes(
+                &s.state,
+                &torrent_bytes(name),
+                "",
+                &save,
+                "",
+                false,
+                true,
+                engine,
+            )
+            .unwrap_or_else(|e| panic!("add to {engine}: {e}"));
             hashes.push(h);
         }
         // The per-state counts come from the once-a-second walk.
@@ -792,11 +965,19 @@ mod tests {
 
     async fn get(s: &TestState, path: &str) -> (StatusCode, String) {
         let resp = crate::api::router(s.state.clone())
-            .oneshot(Request::builder().uri(path).header("X-Api-Key", KEY).body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri(path)
+                    .header("X-Api-Key", KEY)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         let status = resp.status();
-        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         (status, String::from_utf8_lossy(&bytes).into_owned())
     }
 
@@ -805,9 +986,14 @@ mod tests {
         if let Some(k) = key {
             req = req.header("X-Api-Key", k);
         }
-        let resp = crate::api::router(s.state.clone()).oneshot(req.body(Body::empty()).unwrap()).await.unwrap();
+        let resp = crate::api::router(s.state.clone())
+            .oneshot(req.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
         let status = resp.status();
-        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         (status, String::from_utf8_lossy(&bytes).into_owned())
     }
 
@@ -832,13 +1018,22 @@ mod tests {
         assert_eq!(st, StatusCode::OK, "{body}");
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(v["status"], "healthy");
-        assert!(v["version"].is_string(), "the installer reads the version here: {v}");
-        assert!(v.get("checks").is_none() && v.get("problems").is_none() && v.get("uptime").is_none(), "{v}");
+        assert!(
+            v["version"].is_string(),
+            "the installer reads the version here: {v}"
+        );
+        assert!(
+            v.get("checks").is_none() && v.get("problems").is_none() && v.get("uptime").is_none(),
+            "{v}"
+        );
 
         let (st, body) = get_with(&s, "/health", Some(KEY)).await;
         assert_eq!(st, StatusCode::OK, "{body}");
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert!(v["checks"]["engines"].is_array(), "the key brings the detail back: {v}");
+        assert!(
+            v["checks"]["engines"].is_array(),
+            "the key brings the detail back: {v}"
+        );
     }
 
     /// `metrics_require_key`: `/metrics` answers 401 without a key. Off (the
@@ -854,8 +1049,15 @@ mod tests {
         assert_eq!(st, StatusCode::UNAUTHORIZED, "{body}");
         assert!(!body.contains("hydra_up"), "{body}");
         let (st, _) = get_with(&s, &format!("/metrics?apikey={KEY}"), None).await;
-        assert_eq!(st, StatusCode::UNAUTHORIZED, "the key in the address is refused by default");
-        let q = with_daemon_options("obs-metrics-query", "metrics_require_key = true\napi_key_in_query = true");
+        assert_eq!(
+            st,
+            StatusCode::UNAUTHORIZED,
+            "the key in the address is refused by default"
+        );
+        let q = with_daemon_options(
+            "obs-metrics-query",
+            "metrics_require_key = true\napi_key_in_query = true",
+        );
         let (st, body) = get_with(&q, &format!("/metrics?apikey={KEY}"), None).await;
         assert_eq!(st, StatusCode::OK, "{body}");
         let (st, body) = get_with(&s, "/metrics", Some(KEY)).await;
@@ -868,7 +1070,12 @@ mod tests {
     #[tokio::test]
     async fn metrics_have_per_engine_series_for_every_engine() {
         let (s, _) = three_engines("obs-metrics");
-        s.state.engines.get("vpn7").unwrap().announce_cache.count_ok("tracker.example");
+        s.state
+            .engines
+            .get("vpn7")
+            .unwrap()
+            .announce_cache
+            .count_ok("tracker.example");
         let (st, text) = get(&s, "/metrics").await;
         assert_eq!(st, StatusCode::OK);
         for line in [
@@ -887,7 +1094,10 @@ mod tests {
             assert!(text.contains(line), "missing {line:?} in:\n{text}");
         }
         #[cfg(unix)]
-        assert!(text.contains("hydra_memory_resident_bytes "), "jemalloc figures on Unix");
+        assert!(
+            text.contains("hydra_memory_resident_bytes "),
+            "jemalloc figures on Unix"
+        );
     }
 
     /// The pieces in flight are read from the engine's counters, which the
@@ -897,24 +1107,46 @@ mod tests {
         use typhon_engine::torrent::piece_picker::PiecePicker;
         let (s, _) = three_engines("obs-pieces");
         let (_, text) = get(&s, "/metrics").await;
-        assert!(text.contains("# TYPE hydra_pieces_in_flight gauge"), "{text}");
-        assert!(text.contains("hydra_piece_buffer_bytes{engine=\"hoard\"} 0"), "{text}");
+        assert!(
+            text.contains("# TYPE hydra_pieces_in_flight gauge"),
+            "{text}"
+        );
+        assert!(
+            text.contains("hydra_piece_buffer_bytes{engine=\"hoard\"} 0"),
+            "{text}"
+        );
 
-        let mem = s.state.engines.get("hoard").unwrap().manager.piece_mem().clone();
+        let mem = s
+            .state
+            .engines
+            .get("hoard")
+            .unwrap()
+            .manager
+            .piece_mem()
+            .clone();
         let mut p = PiecePicker::new(4);
         p.attach_mem(mem);
         p.start_piece(2, 4 << 20, 16384, 1);
         p.receive_block(2, 0, &[7u8; 16384]);
         let (_, text) = get(&s, "/metrics").await;
-        assert!(text.contains("hydra_pieces_in_flight{engine=\"hoard\"} 1"), "{text}");
+        assert!(
+            text.contains("hydra_pieces_in_flight{engine=\"hoard\"} 1"),
+            "{text}"
+        );
         assert!(
             text.contains("hydra_piece_buffer_bytes{engine=\"hoard\"} 16384"),
             "one block held, not the 4 MiB piece: {text}"
         );
-        assert!(text.contains("hydra_pieces_in_flight{engine=\"race\"} 0"), "{text}");
+        assert!(
+            text.contains("hydra_pieces_in_flight{engine=\"race\"} 0"),
+            "{text}"
+        );
         drop(p);
         let (_, text) = get(&s, "/metrics").await;
-        assert!(text.contains("hydra_piece_buffer_bytes{engine=\"hoard\"} 0"), "{text}");
+        assert!(
+            text.contains("hydra_piece_buffer_bytes{engine=\"hoard\"} 0"),
+            "{text}"
+        );
     }
 
     /// #87: /health looks. An offline test host is healthy (nothing was
@@ -928,7 +1160,10 @@ mod tests {
         assert_eq!(v["status"], "healthy");
         assert_eq!(v["checks"]["store"], "ok");
         assert_eq!(v["checks"]["engines"].as_array().unwrap().len(), 3);
-        assert!(v["version"].is_string(), "the page reads its version labels here");
+        assert!(
+            v["version"].is_string(),
+            "the page reads its version labels here"
+        );
     }
 
     /// A file-backed store, writer and reader, in place of the in-memory one.
@@ -938,7 +1173,8 @@ mod tests {
         let path = dir.join("hydra.db");
         let writer = crate::store::Store::open(&path, false).unwrap();
         let reader = crate::store::Store::open(&path, true).unwrap();
-        s.state.store = std::sync::Arc::new(crate::store::StoreLock::with_reader(writer, Some(reader)));
+        s.state.store =
+            std::sync::Arc::new(crate::store::StoreLock::with_reader(writer, Some(reader)));
         path
     }
 
@@ -947,9 +1183,17 @@ mod tests {
     /// closes and reopens them by itself, and `/health` says so.
     #[tokio::test]
     async fn the_store_reopens_its_connections_when_they_break() {
-        let mut s = state_from("obs-store-heal", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+        let mut s = state_from(
+            "obs-store-heal",
+            &format!("[daemon]\napi_key = \"{KEY}\"\n"),
+        );
         file_store(&mut s, "heal");
-        s.state.store.lock().unwrap().put_meta("k", "before").unwrap();
+        s.state
+            .store
+            .lock()
+            .unwrap()
+            .put_meta("k", "before")
+            .unwrap();
         let (st, body) = get(&s, "/health").await;
         assert_eq!(st, StatusCode::OK, "{body}");
 
@@ -967,13 +1211,27 @@ mod tests {
             }
             tokio::time::sleep(std::time::Duration::from_millis(250)).await;
         }
-        assert_eq!(last.0, StatusCode::OK, "the store stayed broken: {}", last.1);
+        assert_eq!(
+            last.0,
+            StatusCode::OK,
+            "the store stayed broken: {}",
+            last.1
+        );
         let v: serde_json::Value = serde_json::from_str(&last.1).unwrap();
         assert_eq!(v["checks"]["store"], "ok", "{v:#}");
         let doc = s.state.store.lock().unwrap().meta_doc("k");
         assert_eq!(doc.as_deref(), Some("before"), "the writer reads again");
-        s.state.store.lock().unwrap().put_meta("k", "after").unwrap();
-        assert_eq!(s.state.store.read().unwrap().meta_doc("k").as_deref(), Some("after"), "the reader sees it");
+        s.state
+            .store
+            .lock()
+            .unwrap()
+            .put_meta("k", "after")
+            .unwrap();
+        assert_eq!(
+            s.state.store.read().unwrap().meta_doc("k").as_deref(),
+            Some("after"),
+            "the reader sees it"
+        );
     }
 
     /// A request that holds the store for seconds (a query stuck on a hung
@@ -982,7 +1240,10 @@ mod tests {
     /// `store: unavailable` and how long the store has been held.
     #[tokio::test]
     async fn health_does_not_wait_for_a_store_held_for_seconds() {
-        let s = state_from("obs-store-held", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+        let s = state_from(
+            "obs-store-held",
+            &format!("[daemon]\napi_key = \"{KEY}\"\n"),
+        );
         let store = s.state.store.clone();
         let holder = std::thread::spawn(move || {
             let guard = store.lock().unwrap();
@@ -992,18 +1253,37 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         let t = std::time::Instant::now();
         let (st, body) = get(&s, "/health").await;
-        assert!(t.elapsed() < std::time::Duration::from_secs(2), "/health waited for the store");
-        assert_eq!(st, StatusCode::OK, "held for half a second is busy, not broken: {body}");
+        assert!(
+            t.elapsed() < std::time::Duration::from_secs(2),
+            "/health waited for the store"
+        );
+        assert_eq!(
+            st,
+            StatusCode::OK,
+            "held for half a second is busy, not broken: {body}"
+        );
 
         tokio::time::sleep(std::time::Duration::from_millis(5500)).await;
         let t = std::time::Instant::now();
         let (st, body) = get(&s, "/health").await;
-        assert!(t.elapsed() < std::time::Duration::from_secs(2), "/health waited for the store");
+        assert!(
+            t.elapsed() < std::time::Duration::from_secs(2),
+            "/health waited for the store"
+        );
         assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{body}");
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(v["checks"]["store"], "unavailable", "{v:#}");
-        assert!(v["checks"]["store_blocked_secs"].as_u64().unwrap_or(0) >= 5, "{v:#}");
-        assert!(v["problems"][0]["detail"].as_str().unwrap_or("").contains("held"), "{v:#}");
+        assert!(
+            v["checks"]["store_blocked_secs"].as_u64().unwrap_or(0) >= 5,
+            "{v:#}"
+        );
+        assert!(
+            v["problems"][0]["detail"]
+                .as_str()
+                .unwrap_or("")
+                .contains("held"),
+            "{v:#}"
+        );
 
         holder.join().unwrap();
         let (st, body) = get(&s, "/health").await;
@@ -1015,7 +1295,10 @@ mod tests {
     /// else ran -- not `/health`, not a request that never touches the store.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn requests_waiting_for_a_held_store_leave_the_runtime_free() {
-        let s = state_from("obs-store-runtime", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+        let s = state_from(
+            "obs-store-runtime",
+            &format!("[daemon]\napi_key = \"{KEY}\"\n"),
+        );
         let store = s.state.store.clone();
         let holder = std::thread::spawn(move || {
             let guard = store.lock().unwrap();
@@ -1055,7 +1338,10 @@ mod tests {
     /// "busy" for ever and the log says nothing.
     #[tokio::test]
     async fn a_ping_stuck_on_the_store_is_seen_as_a_hold() {
-        let s = state_from("obs-store-ping-stuck", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+        let s = state_from(
+            "obs-store-ping-stuck",
+            &format!("[daemon]\napi_key = \"{KEY}\"\n"),
+        );
         let store = s.state.store.clone();
         let stuck = std::thread::spawn(move || {
             crate::store::PING_STALL_MS.with(|c| c.set(8000));
@@ -1064,8 +1350,15 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(6000)).await;
         let t = std::time::Instant::now();
         let (st, body) = get(&s, "/health").await;
-        assert!(t.elapsed() < std::time::Duration::from_secs(2), "/health waited for the store");
-        assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "a ping held for 6 s is the store held: {body}");
+        assert!(
+            t.elapsed() < std::time::Duration::from_secs(2),
+            "/health waited for the store"
+        );
+        assert_eq!(
+            st,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "a ping held for 6 s is the store held: {body}"
+        );
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(v["checks"]["store"], "unavailable", "{v:#}");
         assert_eq!(
@@ -1080,11 +1373,19 @@ mod tests {
 
     async fn get_owned(state: AppState, path: &str) -> (StatusCode, String) {
         let resp = crate::api::router(state)
-            .oneshot(Request::builder().uri(path).header("X-Api-Key", KEY).body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri(path)
+                    .header("X-Api-Key", KEY)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         let status = resp.status();
-        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         (status, String::from_utf8_lossy(&bytes).into_owned())
     }
 
@@ -1095,7 +1396,10 @@ mod tests {
     /// once it has lasted 5 s.
     #[tokio::test]
     async fn health_does_not_ping_the_store_on_its_own_path() {
-        let s = state_from("obs-store-health-ping", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+        let s = state_from(
+            "obs-store-health-ping",
+            &format!("[daemon]\napi_key = \"{KEY}\"\n"),
+        );
         s.state.store.stall_pings_for_tests(8000);
         let frozen = std::time::Instant::now();
         loop {
@@ -1109,7 +1413,11 @@ mod tests {
                 frozen.elapsed()
             );
             if frozen.elapsed() < std::time::Duration::from_secs(4) {
-                assert_eq!(st, StatusCode::OK, "frozen for under 4 s is busy, not broken: {body}");
+                assert_eq!(
+                    st,
+                    StatusCode::OK,
+                    "frozen for under 4 s is busy, not broken: {body}"
+                );
             }
             if frozen.elapsed() >= std::time::Duration::from_millis(5600) {
                 assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{body}");
@@ -1129,14 +1437,22 @@ mod tests {
             }
             tokio::time::sleep(std::time::Duration::from_millis(250)).await;
         }
-        assert_eq!(last.0, StatusCode::OK, "released, healthy again: {}", last.1);
+        assert_eq!(
+            last.0,
+            StatusCode::OK,
+            "released, healthy again: {}",
+            last.1
+        );
     }
 
     /// Several `/health` at once while the ping is frozen, on a runtime with
     /// two workers: none of them takes a worker down with the ping.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn parallel_health_requests_all_answer_while_the_store_ping_is_frozen() {
-        let s = state_from("obs-store-health-par", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+        let s = state_from(
+            "obs-store-health-par",
+            &format!("[daemon]\napi_key = \"{KEY}\"\n"),
+        );
         s.state.store.stall_pings_for_tests(8000);
         for round in 0..3 {
             let asked: Vec<_> = (0..6)
@@ -1165,7 +1481,10 @@ mod tests {
     /// `/health`, and its file is never touched.
     #[tokio::test]
     async fn a_store_that_stays_unreadable_stays_an_error_and_its_file_is_left_alone() {
-        let mut s = state_from("obs-store-stays", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+        let mut s = state_from(
+            "obs-store-stays",
+            &format!("[daemon]\napi_key = \"{KEY}\"\n"),
+        );
         let path = file_store(&mut s, "stays");
         s.state.store.break_connections_for_tests();
         let junk = vec![0x5Au8; 8192];
@@ -1176,7 +1495,11 @@ mod tests {
             let v: serde_json::Value = serde_json::from_str(&body).unwrap();
             assert_eq!(v["checks"]["store"], "error", "{v:#}");
         }
-        assert_eq!(std::fs::read(&path).unwrap(), junk, "the file is never repaired or rewritten");
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            junk,
+            "the file is never repaired or rewritten"
+        );
     }
 
     /// A mount that drops can leave an empty folder where the database was.
@@ -1186,24 +1509,48 @@ mod tests {
     /// error, and nothing is created.
     #[tokio::test]
     async fn a_store_whose_file_is_gone_is_not_recreated_by_the_reopening() {
-        let mut s = state_from("obs-store-gone", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+        let mut s = state_from(
+            "obs-store-gone",
+            &format!("[daemon]\napi_key = \"{KEY}\"\n"),
+        );
         let path = file_store(&mut s, "gone");
-        s.state.store.lock().unwrap().put_meta("k", "before").unwrap();
+        s.state
+            .store
+            .lock()
+            .unwrap()
+            .put_meta("k", "before")
+            .unwrap();
         s.state.store.break_connections_for_tests();
         for ext in ["", "-wal", "-shm", "-journal"] {
             let _ = std::fs::remove_file(format!("{}{ext}", path.display()));
         }
         for _ in 0..3 {
             let (st, body) = get(&s, "/health").await;
-            assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "an empty folder is not a healthy store: {body}");
+            assert_eq!(
+                st,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "an empty folder is not a healthy store: {body}"
+            );
             tokio::time::sleep(std::time::Duration::from_millis(250)).await;
         }
-        assert!(s.state.store.heal_now() == false, "a reopening with no file to open has failed");
-        assert!(!path.exists(), "no database is created where the old one was");
+        assert!(
+            s.state.store.heal_now() == false,
+            "a reopening with no file to open has failed"
+        );
+        assert!(
+            !path.exists(),
+            "no database is created where the old one was"
+        );
 
         // An empty SQLite file left there is not the store either.
-        rusqlite::Connection::open(&path).unwrap().execute_batch("CREATE TABLE other(x)").unwrap();
-        assert!(!s.state.store.heal_now(), "a database without the store's tables is not reopened as the store");
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute_batch("CREATE TABLE other(x)")
+            .unwrap();
+        assert!(
+            !s.state.store.heal_now(),
+            "a database without the store's tables is not reopened as the store"
+        );
         let (st, body) = get(&s, "/health").await;
         assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{body}");
     }
@@ -1239,7 +1586,12 @@ mod tests {
         assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{body}");
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(v["status"], "unhealthy", "{v:#}");
-        let p = v["problems"].as_array().unwrap().iter().find(|p| p["check"] == "volume").expect("a volume problem");
+        let p = v["problems"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["check"] == "volume")
+            .expect("a volume problem");
         assert_eq!(p["severity"], "fail");
         assert!(p["volume"].as_str().unwrap().starts_with('/'), "{v:#}");
         assert!(p["detail"].as_str().unwrap().contains("3 of 3"), "{v:#}");
@@ -1248,7 +1600,10 @@ mod tests {
             let ih = typhon_engine::torrent::hex_decode(h).unwrap();
             let t = s.state.engines.get(e).unwrap().manager.get(&ih).unwrap();
             t.clear_error();
-            t.status.store(typhon_engine::torrent::meta::TorrentStatus::Seeding as u8, Relaxed);
+            t.status.store(
+                typhon_engine::torrent::meta::TorrentStatus::Seeding as u8,
+                Relaxed,
+            );
         }
         refresh_volume_faults(&s.state.engines);
         let (st, body) = get(&s, "/health").await;
@@ -1297,8 +1652,17 @@ mod tests {
         assert_eq!(v["status"], "degraded", "{v:#}");
         let p = &v["problems"][0];
         assert_eq!(p["engine"], "vpn7");
-        assert!(p["detail"].as_str().unwrap().contains("kill switch"), "{v:#}");
-        let e = v["checks"]["engines"].as_array().unwrap().iter().find(|e| e["id"] == "vpn7").unwrap().clone();
+        assert!(
+            p["detail"].as_str().unwrap().contains("kill switch"),
+            "{v:#}"
+        );
+        let e = v["checks"]["engines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["id"] == "vpn7")
+            .unwrap()
+            .clone();
         assert_eq!(e["blocked"], "not assigned to a tunnel");
         assert_eq!(e["online"], false, "never put on the network");
     }
@@ -1316,7 +1680,10 @@ mod tests {
         let vpn = s.state.engines.get("vpn7").unwrap();
         let ih = typhon_engine::torrent::hex_decode(&hashes[2]).unwrap();
         let t = vpn.manager.get(&ih).unwrap();
-        t.status.store(typhon_engine::torrent::meta::TorrentStatus::Error as u8, Relaxed);
+        t.status.store(
+            typhon_engine::torrent::meta::TorrentStatus::Error as u8,
+            Relaxed,
+        );
         crate::workers::health_pass(&s.state.engines);
 
         let (st, body) = get(&s, "/api/health/anomalies").await;
@@ -1325,14 +1692,34 @@ mod tests {
         assert_eq!(v["scan"], "done");
         assert!(v["counts"]["files_missing"].as_i64().unwrap() >= 1, "{v}");
         assert!(
-            v["anomalies"].as_array().unwrap().iter().any(|a| a["info_hash"] == hashes[2] && a["type"] == "files_missing"),
+            v["anomalies"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|a| a["info_hash"] == hashes[2] && a["type"] == "files_missing"),
             "{v}"
         );
-        for gone in ["persistent_counters", "goroutines", "gc_cpu_pct", "orphan_files", "ghost_files", "errors"] {
-            assert!(v.get(gone).is_none(), "{gone} was a constant and is removed");
+        for gone in [
+            "persistent_counters",
+            "goroutines",
+            "gc_cpu_pct",
+            "orphan_files",
+            "ghost_files",
+            "errors",
+        ] {
+            assert!(
+                v.get(gone).is_none(),
+                "{gone} was a constant and is removed"
+            );
         }
-        assert!(v["engines"]["vpn7"]["states"].is_object(), "every engine, the extra one included");
-        assert!(v["disks"].as_array().is_some_and(|d| !d.is_empty()), "data_dir's filesystem at least");
+        assert!(
+            v["engines"]["vpn7"]["states"].is_object(),
+            "every engine, the extra one included"
+        );
+        assert!(
+            v["disks"].as_array().is_some_and(|d| !d.is_empty()),
+            "data_dir's filesystem at least"
+        );
     }
 
     /// ⭐ A torrent whose record the engine could not bring back at startup
@@ -1344,16 +1731,24 @@ mod tests {
         let (s, hashes) = three_engines("obs-skipped");
         let vpn = s.state.engines.get("vpn7").unwrap();
         // The store has lost the metainfo the record points at.
-        vpn.manager.set_blob_source(std::sync::Arc::new(|_: &str| None));
+        vpn.manager
+            .set_blob_source(std::sync::Arc::new(|_: &str| None));
         vpn.manager.load_resume_data();
         crate::workers::health_pass(&s.state.engines);
 
         let (st, body) = get(&s, "/api/health/anomalies").await;
         assert_eq!(st, StatusCode::OK);
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-        let found = v["anomalies"].as_array().unwrap().iter().find(|a| a["info_hash"] == hashes[2]);
+        let found = v["anomalies"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["info_hash"] == hashes[2]);
         let found = found.unwrap_or_else(|| panic!("the skipped record is not reported: {v}"));
-        assert!(found["detail"].as_str().unwrap().contains("no metainfo"), "{found}");
+        assert!(
+            found["detail"].as_str().unwrap().contains("no metainfo"),
+            "{found}"
+        );
         assert!(v["counts"]["startup_skipped"].as_i64().unwrap() >= 1, "{v}");
     }
 
@@ -1363,17 +1758,33 @@ mod tests {
     async fn announce_health_covers_extra_engines_and_counts_trackers_once() {
         let (s, _) = three_engines("obs-trackers");
         for id in ["race", "vpn7"] {
-            s.state.engines.get(id).unwrap().announce_cache.count_failed_kind("tracker.example", "timeout");
+            s.state
+                .engines
+                .get(id)
+                .unwrap()
+                .announce_cache
+                .count_failed_kind("tracker.example", "timeout");
         }
         let (st, body) = get(&s, "/api/announce/health").await;
         assert_eq!(st, StatusCode::OK);
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert!(v["vpn7"]["hosts"]["tracker.example"].is_object(), "the extra engine is in: {v}");
-        assert_eq!(v["badges"]["trackers_amber"], 1, "one tracker, not one per engine");
+        assert!(
+            v["vpn7"]["hosts"]["tracker.example"].is_object(),
+            "the extra engine is in: {v}"
+        );
+        assert_eq!(
+            v["badges"]["trackers_amber"], 1,
+            "one tracker, not one per engine"
+        );
 
         let (_, body) = get(&s, "/api/announce/errors?host=tracker.example").await;
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-        let engines: Vec<&str> = v["engines"].as_array().unwrap().iter().filter_map(|e| e["engine"].as_str()).collect();
+        let engines: Vec<&str> = v["engines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|e| e["engine"].as_str())
+            .collect();
         assert!(engines.contains(&"vpn7"), "{v}");
     }
 
@@ -1384,13 +1795,24 @@ mod tests {
         let (s, _) = three_engines("obs-engines");
         let (_, body) = get(&s, "/api/engines").await;
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-        let vpn = v.as_array().unwrap().iter().find(|e| e["id"] == "vpn7").expect("vpn7 listed").clone();
+        let vpn = v
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["id"] == "vpn7")
+            .expect("vpn7 listed")
+            .clone();
         assert_eq!(vpn["stats"]["torrents"], 1);
         assert_eq!(vpn["stats"]["states"]["seeding"], 1);
 
         let (_, body) = get(&s, "/api/benchmark/current").await;
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-        let ids: Vec<&str> = v["engines"].as_array().unwrap().iter().filter_map(|e| e["id"].as_str()).collect();
+        let ids: Vec<&str> = v["engines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|e| e["id"].as_str())
+            .collect();
         assert_eq!(ids, ["race", "hoard", "vpn7"]);
     }
 
@@ -1399,7 +1821,10 @@ mod tests {
     #[tokio::test]
     async fn the_logs_route_filters() {
         let (s, _) = three_engines("obs-logs");
-        for (level, module, msg) in [("INFO", "hydranos::store", "store open"), ("ERROR", "hydranos::announce::runner", "boom")] {
+        for (level, module, msg) in [
+            ("INFO", "hydranos::store", "store open"),
+            ("ERROR", "hydranos::announce::runner", "boom"),
+        ] {
             s.state.logs.push(crate::logbuf::Entry {
                 ts: String::new(),
                 source: "rust".into(),
@@ -1412,9 +1837,18 @@ mod tests {
         }
         let (_, body) = get(&s, "/api/logs?level=ERROR").await;
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-        let msgs: Vec<&str> = v["entries"].as_array().unwrap().iter().filter_map(|e| e["msg"].as_str()).collect();
+        let msgs: Vec<&str> = v["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|e| e["msg"].as_str())
+            .collect();
         assert_eq!(msgs, ["boom"]);
-        assert!(v["modules"].as_array().unwrap().iter().any(|m| m == "hydranos::store"));
+        assert!(v["modules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m == "hydranos::store"));
         assert_eq!(v["last_seq"], 2);
 
         let (_, body) = get(&s, "/api/logs?module=store&q=OPEN").await;
@@ -1434,9 +1868,17 @@ mod tests {
     #[test]
     fn a_family_has_help_type_and_samples() {
         let mut x = Exposition::new();
-        x.family("m", "gauge", "Help.", &[(vec![("engine", "race".into())], 3.0), (vec![], 0.5)]);
+        x.family(
+            "m",
+            "gauge",
+            "Help.",
+            &[(vec![("engine", "race".into())], 3.0), (vec![], 0.5)],
+        );
         x.family("empty", "gauge", "Never printed.", &[]);
         let out = x.finish();
-        assert_eq!(out, "# HELP m Help.\n# TYPE m gauge\nm{engine=\"race\"} 3\nm 0.5\n");
+        assert_eq!(
+            out,
+            "# HELP m Help.\n# TYPE m gauge\nm{engine=\"race\"} 3\nm 0.5\n"
+        );
     }
 }

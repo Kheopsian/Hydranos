@@ -20,9 +20,7 @@ use tokio_util::codec::Framed;
 
 use typhon_engine::crypto::stream::CryptoStream;
 use typhon_engine::netpin::Egress;
-use typhon_engine::peer::extension::{
-    self, PeerPolicy, METADATA_BLOCK, OUR_UT_METADATA_ID,
-};
+use typhon_engine::peer::extension::{self, PeerPolicy, METADATA_BLOCK, OUR_UT_METADATA_ID};
 use typhon_engine::peer::handshake::{build_handshake, incoming, outgoing};
 use typhon_engine::peer::message::Message;
 use typhon_engine::peer::metadata::{self, MAX_METADATA_SIZE};
@@ -34,7 +32,9 @@ const THEIRS: [u8; 20] = *b"-qB5220-bbbbbbbbbbbb";
 const HASH: [u8; 20] = [0x5A; 20];
 
 async fn pair() -> (TcpStream, TcpStream) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind loopback");
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback");
     let addr = listener.local_addr().unwrap();
     let dial = tokio::spawn(async move { TcpStream::connect(addr).await.expect("connect") });
     let (server, _) = listener.accept().await.expect("accept");
@@ -52,13 +52,25 @@ async fn an_outgoing_handshake_sends_the_sixty_eight_bytes_and_reads_the_answer(
     let peer = tokio::spawn(async move {
         let mut got = [0u8; 68];
         theirs.read_exact(&mut got).await.unwrap();
-        theirs.write_all(&build_handshake(&HASH, &THEIRS)).await.unwrap();
+        theirs
+            .write_all(&build_handshake(&HASH, &THEIRS))
+            .await
+            .unwrap();
         got
     });
-    let r = outgoing(&mut ours, &HASH, &OURS).await.expect("a well-formed answer is accepted");
-    assert_eq!(peer.await.unwrap(), build_handshake(&HASH, &OURS), "what we sent");
+    let r = outgoing(&mut ours, &HASH, &OURS)
+        .await
+        .expect("a well-formed answer is accepted");
+    assert_eq!(
+        peer.await.unwrap(),
+        build_handshake(&HASH, &OURS),
+        "what we sent"
+    );
     assert_eq!((r.peer_id, r.info_hash), (THEIRS, HASH));
-    assert!(r.fast_extension && r.extended_protocol, "the answer claimed both extensions");
+    assert!(
+        r.fast_extension && r.extended_protocol,
+        "the answer claimed both extensions"
+    );
 }
 
 /// A peer that answers about another torrent is not the peer we dialled for.
@@ -69,10 +81,16 @@ async fn an_outgoing_handshake_refuses_an_answer_about_another_torrent() {
     tokio::spawn(async move {
         let mut got = [0u8; 68];
         theirs.read_exact(&mut got).await.unwrap();
-        theirs.write_all(&build_handshake(&[0x77; 20], &THEIRS)).await.unwrap();
+        theirs
+            .write_all(&build_handshake(&[0x77; 20], &THEIRS))
+            .await
+            .unwrap();
         theirs
     });
-    let err = outgoing(&mut ours, &HASH, &OURS).await.err().expect("must be refused");
+    let err = outgoing(&mut ours, &HASH, &OURS)
+        .await
+        .err()
+        .expect("must be refused");
     assert_eq!(err, "info_hash mismatch");
 }
 
@@ -86,10 +104,16 @@ async fn an_outgoing_handshake_refuses_to_talk_to_itself() {
     tokio::spawn(async move {
         let mut got = [0u8; 68];
         theirs.read_exact(&mut got).await.unwrap();
-        theirs.write_all(&build_handshake(&HASH, &OURS)).await.unwrap();
+        theirs
+            .write_all(&build_handshake(&HASH, &OURS))
+            .await
+            .unwrap();
         theirs
     });
-    let err = outgoing(&mut ours, &HASH, &OURS).await.err().expect("must be refused");
+    let err = outgoing(&mut ours, &HASH, &OURS)
+        .await
+        .err()
+        .expect("must be refused");
     assert!(err.starts_with("self-connection"), "{err}");
 }
 
@@ -100,13 +124,23 @@ async fn an_outgoing_handshake_refuses_to_talk_to_itself() {
 async fn an_incoming_handshake_for_an_unknown_torrent_is_closed_unanswered() {
     let (ours, mut theirs) = pair().await;
     let mut ours = PeerTransport::Tcp(ours);
-    theirs.write_all(&build_handshake(&HASH, &THEIRS)).await.unwrap();
-    let err = incoming(&mut ours, &OURS, |_| false).await.err().expect("unknown torrent");
+    theirs
+        .write_all(&build_handshake(&HASH, &THEIRS))
+        .await
+        .unwrap();
+    let err = incoming(&mut ours, &OURS, |_| false)
+        .await
+        .err()
+        .expect("unknown torrent");
     assert_eq!(err, "unknown info_hash");
     drop(ours);
     let mut rest = Vec::new();
     theirs.read_to_end(&mut rest).await.unwrap();
-    assert!(rest.is_empty(), "{} bytes were sent to a stranger", rest.len());
+    assert!(
+        rest.is_empty(),
+        "{} bytes were sent to a stranger",
+        rest.len()
+    );
 }
 
 /// For a torrent it has, it asks the lookup about the hash the peer named,
@@ -115,7 +149,10 @@ async fn an_incoming_handshake_for_an_unknown_torrent_is_closed_unanswered() {
 async fn an_incoming_handshake_for_a_known_torrent_is_answered_with_our_id() {
     let (ours, mut theirs) = pair().await;
     let mut ours = PeerTransport::Tcp(ours);
-    theirs.write_all(&build_handshake(&HASH, &THEIRS)).await.unwrap();
+    theirs
+        .write_all(&build_handshake(&HASH, &THEIRS))
+        .await
+        .unwrap();
     let asked = std::sync::Mutex::new(Vec::new());
     let r = incoming(&mut ours, &OURS, |ih| {
         asked.lock().unwrap().push(*ih);
@@ -124,7 +161,11 @@ async fn an_incoming_handshake_for_a_known_torrent_is_answered_with_our_id() {
     .await
     .expect("known torrent");
     assert_eq!((r.peer_id, r.info_hash), (THEIRS, HASH));
-    assert_eq!(*asked.lock().unwrap(), vec![HASH], "the lookup was asked about the peer's hash");
+    assert_eq!(
+        *asked.lock().unwrap(),
+        vec![HASH],
+        "the lookup was asked about the peer's hash"
+    );
     let mut answer = [0u8; 68];
     theirs.read_exact(&mut answer).await.unwrap();
     assert_eq!(answer, build_handshake(&HASH, &OURS));
@@ -170,7 +211,9 @@ fn sha1_of(b: &[u8]) -> [u8; 20] {
 
 async fn serve(listener: TcpListener, ih: [u8; 20], dict: Vec<u8>, mode: Mode) {
     loop {
-        let Ok((s, _)) = listener.accept().await else { return };
+        let Ok((s, _)) = listener.accept().await else {
+            return;
+        };
         tokio::spawn(peer(s, ih, dict.clone(), mode));
     }
 }
@@ -188,23 +231,37 @@ async fn peer(mut s: TcpStream, ih: [u8; 20], dict: Vec<u8>, mode: Mode) {
         return;
     }
     let mut f = Framed::new(CryptoStream::plain(PeerTransport::Tcp(s)), BtCodec::new());
-    let size = if mode == Mode::TooBig { MAX_METADATA_SIZE + 1 } else { dict.len() };
+    let size = if mode == Mode::TooBig {
+        MAX_METADATA_SIZE + 1
+    } else {
+        dict.len()
+    };
     loop {
         // An idle peer hangs up, so a client that asked the wrong way fails
         // with "connection ended" instead of waiting its thirty seconds.
-        let Ok(Some(Ok(msg))) = tokio::time::timeout(Duration::from_millis(1500), f.next()).await else {
+        let Ok(Some(Ok(msg))) = tokio::time::timeout(Duration::from_millis(1500), f.next()).await
+        else {
             return;
         };
-        let Message::Extended { ext_id, payload } = msg else { continue };
+        let Message::Extended { ext_id, payload } = msg else {
+            continue;
+        };
         if ext_id == 0 {
             let hs = match mode {
                 Mode::NoMetadata => "d1:md6:ut_pexi1eee".to_string(),
                 Mode::NoSize => format!("d1:md11:ut_metadatai{THEIR_UT_METADATA}eee"),
                 _ => format!("d1:md11:ut_metadatai{THEIR_UT_METADATA}ee13:metadata_sizei{size}ee"),
             };
-            let _ = f.send(Message::Extended { ext_id: 0, payload: Bytes::from(hs.into_bytes()) }).await;
+            let _ = f
+                .send(Message::Extended {
+                    ext_id: 0,
+                    payload: Bytes::from(hs.into_bytes()),
+                })
+                .await;
         } else if ext_id == THEIR_UT_METADATA {
-            let Some(req) = extension::parse_metadata_message(&payload) else { return };
+            let Some(req) = extension::parse_metadata_message(&payload) else {
+                return;
+            };
             let start = req.piece as usize * METADATA_BLOCK;
             let end = (start + METADATA_BLOCK).min(dict.len());
             let mut block = dict[start..end].to_vec();
@@ -222,12 +279,22 @@ async fn peer(mut s: TcpStream, ih: [u8; 20], dict: Vec<u8>, mode: Mode) {
                 Mode::Noisy => {
                     out.push(extension::build_metadata_data(99, size, &block));
                     out.push(extension::build_metadata_data(req.piece, size, &block));
-                    out.push(extension::build_metadata_data(req.piece, size, &vec![0xEE; block.len()]));
+                    out.push(extension::build_metadata_data(
+                        req.piece,
+                        size,
+                        &vec![0xEE; block.len()],
+                    ));
                 }
                 _ => out.push(extension::build_metadata_data(req.piece, size, &block)),
             }
             for p in out {
-                if f.send(Message::Extended { ext_id: OUR_UT_METADATA_ID, payload: Bytes::from(p) }).await.is_err() {
+                if f.send(Message::Extended {
+                    ext_id: OUR_UT_METADATA_ID,
+                    payload: Bytes::from(p),
+                })
+                .await
+                .is_err()
+                {
                     return;
                 }
             }
@@ -245,7 +312,15 @@ async fn peer_in_mode(dict: &[u8], mode: Mode) -> SocketAddr {
 async fn ask(addr: SocketAddr, ih: [u8; 20]) -> Result<Vec<u8>, String> {
     tokio::time::timeout(
         Duration::from_secs(10),
-        metadata::fetch_from_peer(addr, ih, OURS, None, 6881, Egress::default(), Arc::new(PeerPolicy::default())),
+        metadata::fetch_from_peer(
+            addr,
+            ih,
+            OURS,
+            None,
+            6881,
+            Egress::default(),
+            Arc::new(PeerPolicy::default()),
+        ),
     )
     .await
     .expect("fetch_from_peer hung")
@@ -258,9 +333,14 @@ async fn ask(addr: SocketAddr, ih: [u8; 20]) -> Result<Vec<u8>, String> {
 async fn a_dict_of_several_blocks_is_assembled_and_verified() {
     let dict = dict_of(2 * METADATA_BLOCK + 1234);
     let addr = peer_in_mode(&dict, Mode::Good).await;
-    let got = ask(addr, sha1_of(&dict)).await.expect("a good peer serves the dict");
+    let got = ask(addr, sha1_of(&dict))
+        .await
+        .expect("a good peer serves the dict");
     assert_eq!(got.len(), dict.len());
-    assert!(got == dict, "the assembled dict differs from the served one");
+    assert!(
+        got == dict,
+        "the assembled dict differs from the served one"
+    );
 }
 
 /// Bytes that do not hash to the info hash are worthless -- a broken or
@@ -269,7 +349,10 @@ async fn a_dict_of_several_blocks_is_assembled_and_verified() {
 async fn a_dict_that_does_not_hash_to_the_info_hash_is_refused() {
     let dict = dict_of(20_000);
     let addr = peer_in_mode(&dict, Mode::Tampered).await;
-    let err = ask(addr, sha1_of(&dict)).await.err().expect("tampered bytes must not pass");
+    let err = ask(addr, sha1_of(&dict))
+        .await
+        .err()
+        .expect("tampered bytes must not pass");
     assert!(err.contains("does not hash"), "{err}");
 }
 
@@ -279,7 +362,10 @@ async fn a_dict_that_does_not_hash_to_the_info_hash_is_refused() {
 async fn a_genuine_dict_of_another_torrent_is_refused() {
     let dict = dict_of(20_000);
     let addr = peer_in_mode(&dict, Mode::Good).await;
-    let err = ask(addr, [0x11; 20]).await.err().expect("another torrent's dict");
+    let err = ask(addr, [0x11; 20])
+        .await
+        .err()
+        .expect("another torrent's dict");
     // The fake peer's handshake answers with the hash it was built for; the
     // dial fails on the mismatch before any metadata moves.
     assert_eq!(err, "no connection");
@@ -291,7 +377,10 @@ async fn a_genuine_dict_of_another_torrent_is_refused() {
 async fn a_block_of_the_wrong_length_is_an_error() {
     let dict = dict_of(METADATA_BLOCK + 500);
     let addr = peer_in_mode(&dict, Mode::ShortBlock).await;
-    let err = ask(addr, sha1_of(&dict)).await.err().expect("a short last block");
+    let err = ask(addr, sha1_of(&dict))
+        .await
+        .err()
+        .expect("a short last block");
     assert_eq!(err, "block 1 is 499 bytes, expected 500");
 }
 
@@ -314,7 +403,10 @@ async fn a_peer_that_cannot_serve_metadata_says_why() {
         (Mode::NoExtensionProtocol, "peer does not speak BEP 10"),
     ] {
         let addr = peer_in_mode(&dict, mode).await;
-        let err = ask(addr, sha1_of(&dict)).await.err().unwrap_or_else(|| panic!("{mode:?} must fail"));
+        let err = ask(addr, sha1_of(&dict))
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("{mode:?} must fail"));
         assert_eq!(err, want, "{mode:?}");
     }
 }
@@ -327,7 +419,14 @@ async fn a_claimed_size_over_the_cap_is_refused_before_allocating() {
     let dict = dict_of(20_000);
     let addr = peer_in_mode(&dict, Mode::TooBig).await;
     let err = ask(addr, sha1_of(&dict)).await.err().expect("over the cap");
-    assert_eq!(err, format!("metadata_size {} over the {} cap", MAX_METADATA_SIZE + 1, MAX_METADATA_SIZE));
+    assert_eq!(
+        err,
+        format!(
+            "metadata_size {} over the {} cap",
+            MAX_METADATA_SIZE + 1,
+            MAX_METADATA_SIZE
+        )
+    );
 }
 
 /// A block for a piece that does not exist is ignored, and so is a second copy
@@ -337,7 +436,9 @@ async fn a_claimed_size_over_the_cap_is_refused_before_allocating() {
 async fn a_repeated_or_out_of_range_block_changes_nothing() {
     let dict = dict_of(2 * METADATA_BLOCK + 10);
     let addr = peer_in_mode(&dict, Mode::Noisy).await;
-    let got = ask(addr, sha1_of(&dict)).await.expect("the noise is ignored");
+    let got = ask(addr, sha1_of(&dict))
+        .await
+        .expect("the noise is ignored");
     assert!(got == dict, "a repeated block overwrote a good one");
 }
 
@@ -354,7 +455,16 @@ async fn the_race_skips_a_dead_peer_and_takes_the_next_that_serves() {
     for width in [0, 1, 8] {
         let got = tokio::time::timeout(
             Duration::from_secs(20),
-            metadata::fetch(&[dead, good], sha1_of(&dict), OURS, None, 6881, Egress::default(), Arc::new(PeerPolicy::default()), width),
+            metadata::fetch(
+                &[dead, good],
+                sha1_of(&dict),
+                OURS,
+                None,
+                6881,
+                Egress::default(),
+                Arc::new(PeerPolicy::default()),
+                width,
+            ),
         )
         .await
         .expect("fetch hung")
@@ -366,11 +476,31 @@ async fn the_race_skips_a_dead_peer_and_takes_the_next_that_serves() {
 #[tokio::test]
 async fn a_race_with_no_peer_that_serves_says_so() {
     let policy = Arc::new(PeerPolicy::default());
-    let none = metadata::fetch(&[], HASH, OURS, None, 6881, Egress::default(), policy.clone(), 8).await;
+    let none = metadata::fetch(
+        &[],
+        HASH,
+        OURS,
+        None,
+        6881,
+        Egress::default(),
+        policy.clone(),
+        8,
+    )
+    .await;
     assert_eq!(none.err().as_deref(), Some("no peers to ask"));
 
     let dict = dict_of(20_000);
     let bad = peer_in_mode(&dict, Mode::Reject).await;
-    let lost = metadata::fetch(&[bad], sha1_of(&dict), OURS, None, 6881, Egress::default(), policy, 8).await;
+    let lost = metadata::fetch(
+        &[bad],
+        sha1_of(&dict),
+        OURS,
+        None,
+        6881,
+        Egress::default(),
+        policy,
+        8,
+    )
+    .await;
     assert_eq!(lost.err().as_deref(), Some("no peer served the metadata"));
 }

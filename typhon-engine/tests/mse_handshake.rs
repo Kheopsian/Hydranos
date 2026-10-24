@@ -67,7 +67,11 @@ async fn both_ends_of_an_mse_handshake_agree_on_the_keys() {
     let mut got = vec![0u8; plaintext.len()];
     receiver.read_exact(&mut got).await.unwrap();
     dec_b.process(&mut got);
-    assert_eq!(&got[..], &plaintext[..], "the two ends derived the same key");
+    assert_eq!(
+        &got[..],
+        &plaintext[..],
+        "the two ends derived the same key"
+    );
 }
 
 /// ⭐ The receiver looks the info hash up: an encrypted dial for a torrent this
@@ -108,7 +112,10 @@ async fn an_encrypted_dial_for_an_unknown_torrent_is_refused() {
     .await
     .expect("refusing an unknown torrent must not hang the connection");
 
-    assert!(incoming.is_err(), "an unknown torrent must not complete a handshake");
+    assert!(
+        incoming.is_err(),
+        "an unknown torrent must not complete a handshake"
+    );
 
     // The initiator is left waiting for an answer that will never come; drop
     // it rather than awaiting it, or this test waits with it.
@@ -131,7 +138,10 @@ async fn a_silent_peer_does_not_complete_a_handshake() {
         b"-TY0001-initiator000",
     )
     .await;
-    assert!(r.is_err(), "a dead peer is an error, not a completed handshake");
+    assert!(
+        r.is_err(),
+        "a dead peer is an error, not a completed handshake"
+    );
     let _ = initiator.write_all(b"x").await;
 }
 
@@ -150,7 +160,10 @@ fn sha1_combine_is_a_plain_concatenation() {
     expected.update(data);
     let expected: [u8; 20] = expected.finalize().into();
 
-    assert_eq!(typhon_engine::crypto::mse::sha1_combine(prefix, &data), expected);
+    assert_eq!(
+        typhon_engine::crypto::mse::sha1_combine(prefix, &data),
+        expected
+    );
 }
 
 #[test]

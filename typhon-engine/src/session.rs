@@ -32,7 +32,8 @@ pub async fn start(
     mgr.policy().set_ipv6(config.enable_ipv6);
     mgr.policy().set_idle_timeout_secs(config.peer_timeout);
     mgr.policy().set_encryption(&config.peer_encryption);
-    mgr.policy().set_unknown_hash_limit(config.max_unknown_infohash_per_ip);
+    mgr.policy()
+        .set_unknown_hash_limit(config.max_unknown_infohash_per_ip);
     // Engine-wide byte-rate caps, bytes/s (0 = none). Read by nobody until
     // 4.4; the RPC and the binary move them live afterwards.
     mgr.rates().engine.up.set_rate(config.upload_limit);
@@ -85,7 +86,10 @@ pub async fn start(
             info!("[engine] DHT disabled by config: no bootstrap, no get_peers, no peer discovery outside the trackers");
         }
         crate::dht::Discovery::Off(why) => {
-            warn!("[engine] DHT {}; PEX stays on (it rides the proxied peer connections)", why);
+            warn!(
+                "[engine] DHT {}; PEX stays on (it rides the proxied peer connections)",
+                why
+            );
         }
     }
     // Local Service Discovery (BEP 14), only if `dht::lsd_policy` says so: it
@@ -135,16 +139,30 @@ pub async fn start(
     let trusted: Vec<std::net::IpAddr> = config
         .proxy_v2_trusted_sources
         .iter()
-        .filter_map(|s| match s.trim().trim_start_matches('[').trim_end_matches(']').parse() {
-            Ok(ip) => Some(ip),
-            Err(_) => {
-                warn!("[engine] proxy_v2_trusted_sources: {:?} is not an IP address, ignored", s);
-                None
+        .filter_map(|s| {
+            match s
+                .trim()
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .parse()
+            {
+                Ok(ip) => Some(ip),
+                Err(_) => {
+                    warn!(
+                        "[engine] proxy_v2_trusted_sources: {:?} is not an IP address, ignored",
+                        s
+                    );
+                    None
+                }
             }
         })
         .collect();
     if !trusted.is_empty() {
-        info!("[engine] trusting {} extra PROXY v2 source(s): {:?}", trusted.len(), trusted);
+        info!(
+            "[engine] trusting {} extra PROXY v2 source(s): {:?}",
+            trusted.len(),
+            trusted
+        );
         mgr.set_trusted_proxy_sources(trusted);
     }
     // TYPHON_DISABLE_UTP=1 skips uTP entirely, incoming included. An engine
@@ -157,7 +175,10 @@ pub async fn start(
     if no_listen {
         info!("[engine] listen_when_proxied = false: behind the SOCKS5 proxy no port is opened for incoming peers (TCP, uTP, PROXY v2)");
     }
-    let utp = if std::env::var("TYPHON_DISABLE_UTP").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false) {
+    let utp = if std::env::var("TYPHON_DISABLE_UTP")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+    {
         info!("[engine] uTP disabled via TYPHON_DISABLE_UTP — TCP-only dial+listen");
         crate::peer::UtpHandle::off()
     } else if unpinnable || no_listen {
@@ -199,19 +220,26 @@ pub async fn start(
     let bindings_for_listen = resolved_bindings.clone();
     let listening_for_listen = listening.clone();
     if !no_listen {
-    tokio::spawn(async move {
-        let flag = listening_for_listen.clone();
-        if let Err(e) =
-            crate::peer::listen(bindings_for_listen, listen_port, tm, dm, utp_for_listen, flag).await
-        {
-            // Lower it again: the engine is up, holds its catalogue and answers
-            // the API, and accepts no peer at all. That state has a name now
-            // instead of being a line of ERROR under two lines of INFO saying
-            // the opposite.
-            listening_for_listen.store(false, std::sync::atomic::Ordering::Relaxed);
-            error!("[engine] peer listener failed: {}", e);
-        }
-    });
+        tokio::spawn(async move {
+            let flag = listening_for_listen.clone();
+            if let Err(e) = crate::peer::listen(
+                bindings_for_listen,
+                listen_port,
+                tm,
+                dm,
+                utp_for_listen,
+                flag,
+            )
+            .await
+            {
+                // Lower it again: the engine is up, holds its catalogue and answers
+                // the API, and accepts no peer at all. That state has a name now
+                // instead of being a line of ERROR under two lines of INFO saying
+                // the opposite.
+                listening_for_listen.store(false, std::sync::atomic::Ordering::Relaxed);
+                error!("[engine] peer listener failed: {}", e);
+            }
+        });
     }
 
     // Optional PROXY v2 listener: a relay (haproxy on a VPS, say) forwards
@@ -220,9 +248,11 @@ pub async fn start(
     // peer reached us through the same engine the tracker lists, so it must
     // see the same identity, and the replies must take the same tunnel.
     // `config.peer_id()` was right only for an engine without bindings.
-    if let (false, Some(pv2_port), Some(first)) =
-        (no_listen, config.listen_port_proxy_v2.filter(|p| *p != 0), resolved_bindings.first())
-    {
+    if let (false, Some(pv2_port), Some(first)) = (
+        no_listen,
+        config.listen_port_proxy_v2.filter(|p| *p != 0),
+        resolved_bindings.first(),
+    ) {
         let tm = mgr.clone();
         let dm = disk.clone();
         let pid = first.peer_id;
@@ -230,7 +260,9 @@ pub async fn start(
         let u = utp_socket.clone();
         let bind_addr = config.listen_addr_proxy_v2.clone().unwrap_or_default();
         tokio::spawn(async move {
-            if let Err(e) = crate::peer::listen_proxy_v2(bind_addr, pv2_port, tm, dm, pid, pv2_egress, u).await {
+            if let Err(e) =
+                crate::peer::listen_proxy_v2(bind_addr, pv2_port, tm, dm, pid, pv2_egress, u).await
+            {
                 error!("[engine] proxy-v2 listener failed: {}", e);
             }
         });
@@ -247,7 +279,8 @@ pub async fn start(
     // so an existing install may already carry a value that has never taken
     // effect -- it starts biting at this upgrade.
     mgr.limiter().set_max_connections(config.max_connections);
-    mgr.limiter().set_max_dials_per_sec(config.max_dials_per_sec);
+    mgr.limiter()
+        .set_max_dials_per_sec(config.max_dials_per_sec);
     let budget = match config.piece_memory_mb {
         0 => crate::torrent::piece_picker::default_budget(),
         // Saturating: a figure past what a u64 of bytes holds is "as much as
@@ -256,7 +289,14 @@ pub async fn start(
     };
     mgr.piece_mem().set_budget(budget);
     tracing::info!(budget_mb = budget >> 20, "download memory budget");
-    crate::tracker::start_announce_loop(dm2, resolved_bindings.clone(), utp.clone(), config.max_dials_per_sec, mgr.limiter().clone(), mgr.clone());
+    crate::tracker::start_announce_loop(
+        dm2,
+        resolved_bindings.clone(),
+        utp.clone(),
+        config.max_dials_per_sec,
+        mgr.limiter().clone(),
+        mgr.clone(),
+    );
 
     // The choker: spawned always, OFF unless `choking = true`. It was removed
     // outright in 2.4.13-typhon -- ticking every 10 s and choking all but the
@@ -264,7 +304,8 @@ pub async fn start(
     // peers into a ~300 ceiling instead of ~11k sustained -- and is back as
     // an opt-in, read live each tick (see `choking::choking_loop`).
     mgr.policy().set_choking(config.choking);
-    mgr.policy().set_unchoke_slots(config.max_uploads_per_torrent as i64);
+    mgr.policy()
+        .set_unchoke_slots(config.max_uploads_per_torrent as i64);
     tokio::spawn(crate::peer::choking::choking_loop(mgr.clone()));
 
     info!(
@@ -326,11 +367,16 @@ pub async fn start(
                 if moved {
                     // Live progress so the UI's progress column streams (0..1);
                     // seeders / seed-mode (no picker) are complete by definition.
-                    let progress: f32 = if st == crate::torrent::meta::TorrentStatus::Seeding as u8 {
+                    let progress: f32 = if st == crate::torrent::meta::TorrentStatus::Seeding as u8
+                    {
                         1.0
                     } else if let Some(pk) = t.picker.get() {
                         let np = t.meta.num_pieces();
-                        if np > 0 { pk.lock().unwrap().num_have() as f32 / np as f32 } else { 0.0 }
+                        if np > 0 {
+                            pk.lock().unwrap().num_have() as f32 / np as f32
+                        } else {
+                            0.0
+                        }
                     } else {
                         1.0
                     };
@@ -352,7 +398,9 @@ pub async fn start(
                 last.retain(|_, e| e.5 == tick);
             }
             if !changed.is_empty() {
-                tm_stats.bus().publish(crate::rpc::events::Event::StatsSnapshot { torrents: changed });
+                tm_stats
+                    .bus()
+                    .publish(crate::rpc::events::Event::StatsSnapshot { torrents: changed });
             }
         }
     });
@@ -398,7 +446,10 @@ pub fn spawn_resume_sweeps(mgr: Arc<TorrentManager>, fast_secs: u64) {
         let tm = mgr.clone();
         tokio::spawn(async move {
             loop {
-                if !crate::stop::global().sleep(std::time::Duration::from_secs(fast_secs)).await {
+                if !crate::stop::global()
+                    .sleep(std::time::Duration::from_secs(fast_secs))
+                    .await
+                {
                     return;
                 }
                 let tm = tm.clone();
@@ -411,7 +462,10 @@ pub fn spawn_resume_sweeps(mgr: Arc<TorrentManager>, fast_secs: u64) {
         loop {
             // A sweep that has started runs to its end; none starts once the
             // stop has begun, so the final flush is the only writer.
-            if !crate::stop::global().sleep(std::time::Duration::from_secs(300)).await {
+            if !crate::stop::global()
+                .sleep(std::time::Duration::from_secs(300))
+                .await
+            {
                 return;
             }
             // Syncs the files written since the last sweep, then commits:

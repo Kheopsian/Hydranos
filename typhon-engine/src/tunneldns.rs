@@ -58,7 +58,8 @@ fn registry() -> &'static RwLock<HashMap<String, Arc<Entry>>> {
 type CacheKey = (String, String);
 
 fn cache() -> &'static std::sync::Mutex<HashMap<CacheKey, (Vec<IpAddr>, Instant)>> {
-    static C: OnceLock<std::sync::Mutex<HashMap<CacheKey, (Vec<IpAddr>, Instant)>>> = OnceLock::new();
+    static C: OnceLock<std::sync::Mutex<HashMap<CacheKey, (Vec<IpAddr>, Instant)>>> =
+        OnceLock::new();
     C.get_or_init(Default::default)
 }
 
@@ -75,8 +76,14 @@ pub fn set_servers(device: &str, servers: &[IpAddr]) {
         leak_logged: AtomicBool::new(false),
         down: false,
     });
-    registry().write().unwrap_or_else(|p| p.into_inner()).insert(device.to_string(), entry);
-    cache().lock().unwrap_or_else(|p| p.into_inner()).retain(|(d, _), _| d != device);
+    registry()
+        .write()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(device.to_string(), entry);
+    cache()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .retain(|(d, _), _| d != device);
 }
 
 /// Record a tunnel that was asked for and did not come up. Its engine stays
@@ -87,26 +94,50 @@ pub fn set_unavailable(device: &str) {
     if device.is_empty() {
         return;
     }
-    let entry = Arc::new(Entry { servers: Vec::new(), leak_logged: AtomicBool::new(false), down: true });
-    registry().write().unwrap_or_else(|p| p.into_inner()).insert(device.to_string(), entry);
-    cache().lock().unwrap_or_else(|p| p.into_inner()).retain(|(d, _), _| d != device);
+    let entry = Arc::new(Entry {
+        servers: Vec::new(),
+        leak_logged: AtomicBool::new(false),
+        down: true,
+    });
+    registry()
+        .write()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(device.to_string(), entry);
+    cache()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .retain(|(d, _), _| d != device);
 }
 
 /// Forget a tunnel that was taken down.
 pub fn forget(device: &str) {
-    registry().write().unwrap_or_else(|p| p.into_inner()).remove(device.trim());
-    cache().lock().unwrap_or_else(|p| p.into_inner()).retain(|(d, _), _| d != device.trim());
+    registry()
+        .write()
+        .unwrap_or_else(|p| p.into_inner())
+        .remove(device.trim());
+    cache()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .retain(|(d, _), _| d != device.trim());
 }
 
 /// The servers a device resolves through: `None` when the device is not a
 /// managed tunnel, `Some(empty)` when it is one whose `.conf` named none.
 pub fn servers(device: &str) -> Option<Vec<SocketAddr>> {
-    registry().read().unwrap_or_else(|p| p.into_inner()).get(device.trim()).map(|e| e.servers.clone())
+    registry()
+        .read()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(device.trim())
+        .map(|e| e.servers.clone())
 }
 
 /// Whether a request pinned to this device needs the tunnel resolver at all.
 pub fn is_tunnel(device: &str) -> bool {
-    !device.trim().is_empty() && registry().read().unwrap_or_else(|p| p.into_inner()).contains_key(device.trim())
+    !device.trim().is_empty()
+        && registry()
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .contains_key(device.trim())
 }
 
 #[cfg(test)]
@@ -157,7 +188,11 @@ async fn resolve_with(device: &str, host: &str, refuse_host: bool) -> Result<Vec
     let entry = if device.is_empty() {
         None
     } else {
-        registry().read().unwrap_or_else(|p| p.into_inner()).get(device).cloned()
+        registry()
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(device)
+            .cloned()
     };
     let refusal = || {
         format!(
@@ -172,7 +207,9 @@ async fn resolve_with(device: &str, host: &str, refuse_host: bool) -> Result<Vec
         return host_lookup(host).await;
     };
     if entry.down {
-        return Err(format!("dns lookup of {host} refused: the tunnel {device} is not up"));
+        return Err(format!(
+            "dns lookup of {host} refused: the tunnel {device} is not up"
+        ));
     }
     if entry.servers.is_empty() {
         if refuse_host {
@@ -221,18 +258,28 @@ async fn resolve_with(device: &str, host: &str, refuse_host: bool) -> Result<Vec
 
 /// A UDP socket pinned to the device, connected to the server.
 fn pinned_socket(device: &str, server: SocketAddr) -> Result<tokio::net::UdpSocket, String> {
-    let bind: SocketAddr = if server.is_ipv6() { "[::]:0".parse().unwrap() } else { "0.0.0.0:0".parse().unwrap() };
+    let bind: SocketAddr = if server.is_ipv6() {
+        "[::]:0".parse().unwrap()
+    } else {
+        "0.0.0.0:0".parse().unwrap()
+    };
     let std = std::net::UdpSocket::bind(bind).map_err(|e| format!("bind: {e}"))?;
     // Pinned or not opened at all: an unpinned query would leave by the
     // default route, which is the leak this module exists to close.
     #[cfg(target_os = "linux")]
     {
         use std::os::unix::io::AsRawFd;
-        let egress = crate::netpin::Egress { device: device.to_string(), ..Default::default() };
-        crate::netpin::pin_fd(std.as_raw_fd(), &egress).map_err(|e| format!("pin to {device}: {e}"))?;
+        let egress = crate::netpin::Egress {
+            device: device.to_string(),
+            ..Default::default()
+        };
+        crate::netpin::pin_fd(std.as_raw_fd(), &egress)
+            .map_err(|e| format!("pin to {device}: {e}"))?;
     }
     #[cfg(not(target_os = "linux"))]
-    return Err(format!("a DNS query cannot be pinned to {device:?} on this platform"));
+    return Err(format!(
+        "a DNS query cannot be pinned to {device:?} on this platform"
+    ));
     #[allow(unreachable_code)]
     {
         std.connect(server).map_err(|e| format!("{server}: {e}"))?;
@@ -242,7 +289,11 @@ fn pinned_socket(device: &str, server: SocketAddr) -> Result<tokio::net::UdpSock
 }
 
 /// Ask one server for A and AAAA at once; the addresses and the smallest TTL.
-async fn query(device: &str, server: SocketAddr, host: &str) -> Result<(Vec<IpAddr>, Duration), String> {
+async fn query(
+    device: &str,
+    server: SocketAddr,
+    host: &str,
+) -> Result<(Vec<IpAddr>, Duration), String> {
     let sock = pinned_socket(device, server)?;
     let base: u16 = rand::random();
     let ids = [base, base.wrapping_add(1)];
@@ -262,7 +313,10 @@ async fn query(device: &str, server: SocketAddr, host: &str) -> Result<(Vec<IpAd
             Err(_) if answered.iter().any(|a| *a) => break,
             Err(_) => return Err(format!("{server} did not answer")),
         };
-        let Some(slot) = buf.get(..2).and_then(|b| ids.iter().position(|id| id.to_be_bytes() == b)) else {
+        let Some(slot) = buf
+            .get(..2)
+            .and_then(|b| ids.iter().position(|id| id.to_be_bytes() == b))
+        else {
             continue;
         };
         if answered[slot] {
@@ -365,14 +419,20 @@ pub struct Resolver {
 
 impl Resolver {
     pub fn new(device: &str) -> Arc<Self> {
-        Arc::new(Resolver { device: device.trim().to_string(), refuse_host: None })
+        Arc::new(Resolver {
+            device: device.trim().to_string(),
+            refuse_host: None,
+        })
     }
 
     /// A resolver whose refusal of the host's resolver is fixed rather than
     /// read from the process-wide switch (a caller that must not depend on
     /// what another thread set, a test among them).
     pub fn with_host_refusal(device: &str, refuse_host: bool) -> Arc<Self> {
-        Arc::new(Resolver { device: device.trim().to_string(), refuse_host: Some(refuse_host) })
+        Arc::new(Resolver {
+            device: device.trim().to_string(),
+            refuse_host: Some(refuse_host),
+        })
     }
 }
 
@@ -387,7 +447,8 @@ impl reqwest::dns::Resolve for Resolver {
                 None => resolve(&device, &host).await,
             }
             .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
-            let addrs: reqwest::dns::Addrs = Box::new(ips.into_iter().map(|ip| SocketAddr::new(ip, 0)));
+            let addrs: reqwest::dns::Addrs =
+                Box::new(ips.into_iter().map(|ip| SocketAddr::new(ip, 0)));
             Ok(addrs)
         })
     }
@@ -399,7 +460,9 @@ pub(crate) mod tests {
 
     /// A DNS server on loopback that answers every A query with `answer` and
     /// counts what it was asked.
-    pub(crate) async fn fake_server(answer: [u8; 4]) -> (SocketAddr, Arc<std::sync::Mutex<Vec<String>>>) {
+    pub(crate) async fn fake_server(
+        answer: [u8; 4],
+    ) -> (SocketAddr, Arc<std::sync::Mutex<Vec<String>>>) {
         let sock = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let addr = sock.local_addr().unwrap();
         let asked = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -407,7 +470,9 @@ pub(crate) mod tests {
         tokio::spawn(async move {
             let mut buf = [0u8; 1500];
             loop {
-                let Ok((n, from)) = sock.recv_from(&mut buf).await else { return };
+                let Ok((n, from)) = sock.recv_from(&mut buf).await else {
+                    return;
+                };
                 let q = &buf[..n];
                 let end = skip_name(q, 12).unwrap();
                 let qtype = u16::from_be_bytes([q[end], q[end + 1]]);
@@ -437,8 +502,15 @@ pub(crate) mod tests {
     /// `.conf`'s addresses and assumes 53, the test needs another one.
     pub(crate) fn register(device: &str, server: SocketAddr) {
         cache().lock().unwrap().retain(|(d, _), _| d != device);
-        let entry = Arc::new(Entry { servers: vec![server], leak_logged: AtomicBool::new(false), down: false });
-        registry().write().unwrap().insert(device.to_string(), entry);
+        let entry = Arc::new(Entry {
+            servers: vec![server],
+            leak_logged: AtomicBool::new(false),
+            down: false,
+        });
+        registry()
+            .write()
+            .unwrap()
+            .insert(device.to_string(), entry);
     }
 
     /// The tests that register `lo` take turns: the registry is keyed
@@ -455,9 +527,14 @@ pub(crate) mod tests {
         // A name the host resolver cannot know: answered at all, it was
         // answered by the tunnel server.
         let name = "tracker.tunnel-only.invalid";
-        let ips = resolve("lo", name).await.expect("the tunnel server answers");
+        let ips = resolve("lo", name)
+            .await
+            .expect("the tunnel server answers");
         assert_eq!(ips, vec![IpAddr::from([192, 0, 2, 7])]);
-        assert!(asked.lock().unwrap().iter().any(|n| n == name), "the tunnel server was asked");
+        assert!(
+            asked.lock().unwrap().iter().any(|n| n == name),
+            "the tunnel server was asked"
+        );
         assert!(
             !host_lookups().lock().unwrap().iter().any(|n| n == name),
             "the host resolver must never see a tunnel engine's tracker name"
@@ -465,7 +542,11 @@ pub(crate) mod tests {
         // Cached: a second lookup does not ask again.
         let before = asked.lock().unwrap().len();
         resolve("lo", name).await.unwrap();
-        assert_eq!(asked.lock().unwrap().len(), before, "a short cache absorbs repeated announces");
+        assert_eq!(
+            asked.lock().unwrap().len(),
+            before,
+            "a short cache absorbs repeated announces"
+        );
         forget("lo");
     }
 
@@ -476,7 +557,9 @@ pub(crate) mod tests {
         let mute = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
         register("lo", mute.local_addr().unwrap());
         let name = "silent.tunnel-only.invalid";
-        let err = resolve("lo", name).await.expect_err("no answer is a failed lookup");
+        let err = resolve("lo", name)
+            .await
+            .expect_err("no answer is a failed lookup");
         assert!(err.contains("did not answer"), "{err}");
         assert!(
             !host_lookups().lock().unwrap().iter().any(|n| n == name),
@@ -490,12 +573,19 @@ pub(crate) mod tests {
         set_servers("wg-nodns", &[]);
         assert_eq!(servers("wg-nodns"), Some(vec![]));
         let _ = resolve("wg-nodns", "nodns.example.invalid").await;
-        assert!(host_lookups().lock().unwrap().iter().any(|n| n == "nodns.example.invalid"));
+        assert!(host_lookups()
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|n| n == "nodns.example.invalid"));
         forget("wg-nodns");
         assert_eq!(servers("wg-nodns"), None);
         assert!(!is_tunnel("wg-nodns"));
         // Literals never reach any resolver.
-        assert_eq!(resolve("wg-nodns", "[2001:db8::1]").await.unwrap(), vec!["2001:db8::1".parse::<IpAddr>().unwrap()]);
+        assert_eq!(
+            resolve("wg-nodns", "[2001:db8::1]").await.unwrap(),
+            vec!["2001:db8::1".parse::<IpAddr>().unwrap()]
+        );
     }
 
     /// `dns_no_host_fallback` while armed: a pinned device with no tunnel DNS
@@ -506,12 +596,23 @@ pub(crate) mod tests {
     async fn a_host_fallback_is_refused_when_asked() {
         set_servers("wg-refuse-nodns", &[]);
         let before = host_lookups().lock().unwrap().len();
-        let e = resolve_with("wg-refuse-nodns", "refused-a.example.invalid", true).await.unwrap_err();
-        assert!(e.contains("refused") && e.contains("dns_no_host_fallback"), "{e}");
-        let e = resolve_with("wg-refuse-unmanaged", "refused-b.example.invalid", true).await.unwrap_err();
+        let e = resolve_with("wg-refuse-nodns", "refused-a.example.invalid", true)
+            .await
+            .unwrap_err();
+        assert!(
+            e.contains("refused") && e.contains("dns_no_host_fallback"),
+            "{e}"
+        );
+        let e = resolve_with("wg-refuse-unmanaged", "refused-b.example.invalid", true)
+            .await
+            .unwrap_err();
         assert!(e.contains("refused"), "{e}");
         assert!(
-            !host_lookups().lock().unwrap().iter().any(|n| n.starts_with("refused-")),
+            !host_lookups()
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|n| n.starts_with("refused-")),
             "the host's resolver was not asked ({before} lookups before)"
         );
         // Off: the same names still go to the host, as before.
@@ -521,10 +622,15 @@ pub(crate) mod tests {
         let _ = resolve_with("", "allowed-c.example.invalid", true).await;
         let seen = host_lookups().lock().unwrap().clone();
         for n in ["allowed-a", "allowed-b", "allowed-c"] {
-            assert!(seen.iter().any(|h| h.starts_with(n)), "{n} reached the host's resolver: {seen:?}");
+            assert!(
+                seen.iter().any(|h| h.starts_with(n)),
+                "{n} reached the host's resolver: {seen:?}"
+            );
         }
         // A literal never reaches any resolver.
-        assert!(resolve_with("wg-refuse-nodns", "203.0.113.4", true).await.is_ok());
+        assert!(resolve_with("wg-refuse-nodns", "203.0.113.4", true)
+            .await
+            .is_ok());
         forget("wg-refuse-nodns");
     }
 
@@ -533,7 +639,11 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn a_pinned_unmanaged_device_resolves_by_the_host_by_default() {
         let _ = resolve("wg-default-unmanaged", "default-host.example.invalid").await;
-        assert!(host_lookups().lock().unwrap().iter().any(|n| n == "default-host.example.invalid"));
+        assert!(host_lookups()
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|n| n == "default-host.example.invalid"));
     }
 
     #[tokio::test]
@@ -541,15 +651,23 @@ pub(crate) mod tests {
         set_unavailable("wg-down-test");
         assert!(is_tunnel("wg-down-test"));
         for refuse in [false, true] {
-            let e = resolve_with("wg-down-test", "down.example.invalid", refuse).await.unwrap_err();
+            let e = resolve_with("wg-down-test", "down.example.invalid", refuse)
+                .await
+                .unwrap_err();
             assert!(e.contains("not up"), "{e}");
         }
         assert!(
-            !host_lookups().lock().unwrap().iter().any(|n| n == "down.example.invalid"),
+            !host_lookups()
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|n| n == "down.example.invalid"),
             "the host's resolver was not asked"
         );
         // Literals still need no resolver, and a later success replaces the entry.
-        assert!(resolve_with("wg-down-test", "203.0.113.4", false).await.is_ok());
+        assert!(resolve_with("wg-down-test", "203.0.113.4", false)
+            .await
+            .is_ok());
         set_servers("wg-down-test", &[]);
         assert_eq!(servers("wg-down-test"), Some(vec![]));
         forget("wg-down-test");

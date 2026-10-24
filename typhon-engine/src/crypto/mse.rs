@@ -15,13 +15,13 @@
 //!   4. Recv: req1_hash + req2_xor + RC4(VC + crypto_provide + padC + IA)
 //!   5. Send: RC4(VC + crypto_select + padD)
 
-use sha1::{Sha1, Digest};
 use num_bigint::BigUint;
 use num_traits::One;
+use sha1::{Digest, Sha1};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::peer::transport::PeerTransport;
 use super::rc4::Rc4;
+use crate::peer::transport::PeerTransport;
 
 /// The 768-bit MSE/PE prime, the same value libtorrent ships as its dh_prime.
 /// NOT RFC 2409 / Oakley group 1: the two share a long prefix and differ only in
@@ -173,11 +173,17 @@ pub(crate) async fn handshake_outgoing_keyed(
     // Step 1: Send Ya + PadA (0-512 random bytes), in one write.
     let mut first = ya_bytes.clone();
     first.extend_from_slice(&random_pad());
-    stream.write_all(&first).await.map_err(|e| format!("step1 write Ya+PadA: {}", e))?;
+    stream
+        .write_all(&first)
+        .await
+        .map_err(|e| format!("step1 write Ya+PadA: {}", e))?;
 
     // Step 2: Read Yb (96 bytes) — may be followed by PadB which we read later
     let mut yb_bytes = [0u8; 96];
-    stream.read_exact(&mut yb_bytes).await.map_err(|e| format!("step2 read Yb: {}", e))?;
+    stream
+        .read_exact(&mut yb_bytes)
+        .await
+        .map_err(|e| format!("step2 read Yb: {}", e))?;
 
     // Step 3: Compute shared secret — offload modpow to blocking pool.
     let s = {
@@ -191,7 +197,10 @@ pub(crate) async fn handshake_outgoing_keyed(
 
     // Step 4: Send HASH('req1', S)
     let req1 = sha1_combine(b"req1", &s);
-    stream.write_all(&req1).await.map_err(|e| format!("step4 write req1: {}", e))?;
+    stream
+        .write_all(&req1)
+        .await
+        .map_err(|e| format!("step4 write req1: {}", e))?;
 
     // Send HASH('req2', SKEY) XOR HASH('req3', S)
     let req2 = sha1_combine(b"req2", skey);
@@ -200,7 +209,10 @@ pub(crate) async fn handshake_outgoing_keyed(
     for i in 0..20 {
         req2_xor[i] = req2[i] ^ req3[i];
     }
-    stream.write_all(&req2_xor).await.map_err(|e| format!("step4 write req2: {}", e))?;
+    stream
+        .write_all(&req2_xor)
+        .await
+        .map_err(|e| format!("step4 write req2: {}", e))?;
 
     // Create RC4 keys
     // Initiator encrypts with key: SHA1('keyA', S, SKEY)
@@ -213,17 +225,24 @@ pub(crate) async fn handshake_outgoing_keyed(
     let bt_handshake = build_bt_handshake(info_hash, peer_id);
 
     let mut payload = Vec::new();
-    payload.extend_from_slice(&VC);                         // 8 bytes VC
-    let provide = if rc4_only { CRYPTO_RC4 } else { CRYPTO_RC4 | CRYPTO_PLAIN };
+    payload.extend_from_slice(&VC); // 8 bytes VC
+    let provide = if rc4_only {
+        CRYPTO_RC4
+    } else {
+        CRYPTO_RC4 | CRYPTO_PLAIN
+    };
     payload.extend_from_slice(&provide.to_be_bytes()); // 4 bytes crypto_provide
     let pad_c = random_pad();
     payload.extend_from_slice(&(pad_c.len() as u16).to_be_bytes()); // 2 bytes len(padC)
-    payload.extend_from_slice(&pad_c);                      // padC, 0-512 random bytes
+    payload.extend_from_slice(&pad_c); // padC, 0-512 random bytes
     payload.extend_from_slice(&(bt_handshake.len() as u16).to_be_bytes()); // 2 bytes len(IA)
-    payload.extend_from_slice(&bt_handshake);               // 68 bytes IA
+    payload.extend_from_slice(&bt_handshake); // 68 bytes IA
 
     enc.process(&mut payload);
-    stream.write_all(&payload).await.map_err(|e| format!("step4 write payload: {}", e))?;
+    stream
+        .write_all(&payload)
+        .await
+        .map_err(|e| format!("step4 write payload: {}", e))?;
 
     // Step 5: Resynchronise on ENCRYPT(VC), then read crypto_select + len(padD) + padD.
     //
@@ -248,16 +267,25 @@ pub(crate) async fn handshake_outgoing_keyed(
         buf
     };
     let mut window = [0u8; 8];
-    stream.read_exact(&mut window).await.map_err(|e| format!("step5 VC sync init: {}", e))?;
+    stream
+        .read_exact(&mut window)
+        .await
+        .map_err(|e| format!("step5 VC sync init: {}", e))?;
     let mut slid = 0usize;
     while window != expected_vc {
         if slid >= MAX_PAD_B {
             // Spec caps PadB at 512; past that the peer is not speaking MSE at
             // us and reading further would hang on a hostile or desynced stream.
-            return Err(format!("VC not found after sliding {} bytes (PadB overrun)", slid));
+            return Err(format!(
+                "VC not found after sliding {} bytes (PadB overrun)",
+                slid
+            ));
         }
         window.rotate_left(1);
-        stream.read_exact(&mut window[7..8]).await.map_err(|e| format!("step5 VC slide: {}", e))?;
+        stream
+            .read_exact(&mut window[7..8])
+            .await
+            .map_err(|e| format!("step5 VC slide: {}", e))?;
         slid += 1;
     }
     // Synced. VC itself consumed eight bytes of keystream — burn them on the
@@ -267,7 +295,10 @@ pub(crate) async fn handshake_outgoing_keyed(
 
     // Read crypto_select (4 bytes)
     let mut cs_buf = [0u8; 4];
-    stream.read_exact(&mut cs_buf).await.map_err(|e| format!("step5 crypto_select: {}", e))?;
+    stream
+        .read_exact(&mut cs_buf)
+        .await
+        .map_err(|e| format!("step5 crypto_select: {}", e))?;
     dec.process(&mut cs_buf);
     let crypto_select = u32::from_be_bytes(cs_buf);
     if rc4_only && crypto_select & CRYPTO_RC4 == 0 {
@@ -276,20 +307,29 @@ pub(crate) async fn handshake_outgoing_keyed(
 
     // Read len(padD) (2 bytes)
     let mut pad_len_buf = [0u8; 2];
-    stream.read_exact(&mut pad_len_buf).await.map_err(|e| format!("step5 len(padD): {}", e))?;
+    stream
+        .read_exact(&mut pad_len_buf)
+        .await
+        .map_err(|e| format!("step5 len(padD): {}", e))?;
     dec.process(&mut pad_len_buf);
     let pad_d_len = u16::from_be_bytes(pad_len_buf) as usize;
 
     // Read and discard padD
     if pad_d_len > 0 {
         let mut pad_d = vec![0u8; pad_d_len];
-        stream.read_exact(&mut pad_d).await.map_err(|e| format!("step5 padD: {}", e))?;
+        stream
+            .read_exact(&mut pad_d)
+            .await
+            .map_err(|e| format!("step5 padD: {}", e))?;
         dec.process(&mut pad_d);
     }
 
     // Now read the BT handshake response (should come encrypted)
     let mut hs_buf = [0u8; 68];
-    stream.read_exact(&mut hs_buf).await.map_err(|e| format!("step6 read BT handshake: {}", e))?;
+    stream
+        .read_exact(&mut hs_buf)
+        .await
+        .map_err(|e| format!("step6 read BT handshake: {}", e))?;
     if crypto_select & CRYPTO_RC4 != 0 {
         dec.process(&mut hs_buf);
     }
@@ -311,12 +351,16 @@ pub(crate) async fn handshake_outgoing_keyed(
         // since we'll check is_encrypted
     }
 
-    Ok((enc, dec, MseHandshakeResult {
-        peer_id: remote_peer_id,
-        info_hash: *info_hash,
-        fast_extension: fast_ext,
-        extended_protocol: ext_proto,
-    }))
+    Ok((
+        enc,
+        dec,
+        MseHandshakeResult {
+            peer_id: remote_peer_id,
+            info_hash: *info_hash,
+            fast_extension: fast_ext,
+            extended_protocol: ext_proto,
+        },
+    ))
 }
 
 /// Perform MSE handshake as receiver (incoming connection).
@@ -328,7 +372,15 @@ pub async fn handshake_incoming(
     our_peer_id: &[u8; 20],
     info_hash_lookup: impl Fn(&[u8; 20]) -> Option<[u8; 20]>,
 ) -> Result<(Rc4, Rc4, MseHandshakeResult), String> {
-    handshake_incoming_with(stream, first_byte, remaining_ya, our_peer_id, info_hash_lookup, false).await
+    handshake_incoming_with(
+        stream,
+        first_byte,
+        remaining_ya,
+        our_peer_id,
+        info_hash_lookup,
+        false,
+    )
+    .await
 }
 
 /// `handshake_incoming`, optionally refusing a peer that does not offer RC4
@@ -350,7 +402,10 @@ pub async fn handshake_incoming_with(
     ya_bytes.extend_from_slice(remaining_ya);
     if ya_bytes.len() < 96 {
         let mut more = vec![0u8; 96 - ya_bytes.len()];
-        stream.read_exact(&mut more).await.map_err(|e| e.to_string())?;
+        stream
+            .read_exact(&mut more)
+            .await
+            .map_err(|e| e.to_string())?;
         ya_bytes.extend_from_slice(&more);
     }
 
@@ -383,7 +438,10 @@ pub async fn handshake_incoming_with(
     let mut attempts = 0;
     while attempts < 600 {
         let mut byte = [0u8; 1];
-        stream.read_exact(&mut byte).await.map_err(|e| e.to_string())?;
+        stream
+            .read_exact(&mut byte)
+            .await
+            .map_err(|e| e.to_string())?;
         scan_buf.push(byte[0]);
         attempts += 1;
 
@@ -402,7 +460,10 @@ pub async fn handshake_incoming_with(
 
     // Read HASH('req2', SKEY) XOR HASH('req3', S) — 20 bytes
     let mut req2_xor_buf = [0u8; 20];
-    stream.read_exact(&mut req2_xor_buf).await.map_err(|e| e.to_string())?;
+    stream
+        .read_exact(&mut req2_xor_buf)
+        .await
+        .map_err(|e| e.to_string())?;
 
     // Compute req3 and recover HASH('req2', SKEY)
     let req3 = sha1_combine(b"req3", &s);
@@ -412,8 +473,7 @@ pub async fn handshake_incoming_with(
     }
 
     // Find matching SKEY (info_hash) by checking against known torrents
-    let skey = info_hash_lookup(&req2_hash)
-        .ok_or("no matching info_hash for MSE SKEY")?;
+    let skey = info_hash_lookup(&req2_hash).ok_or("no matching info_hash for MSE SKEY")?;
 
     // Create RC4 keys (reverse of initiator)
     // Receiver decrypts with key: SHA1('keyA', S, SKEY)
@@ -423,7 +483,10 @@ pub async fn handshake_incoming_with(
 
     // Read encrypted payload: VC + crypto_provide + len(padC) + padC + len(IA) + IA
     let mut vc_buf = [0u8; 8];
-    stream.read_exact(&mut vc_buf).await.map_err(|e| e.to_string())?;
+    stream
+        .read_exact(&mut vc_buf)
+        .await
+        .map_err(|e| e.to_string())?;
     dec.process(&mut vc_buf);
     // VC should be all zeros
     if vc_buf != VC {
@@ -431,12 +494,18 @@ pub async fn handshake_incoming_with(
     }
 
     let mut cp_buf = [0u8; 4];
-    stream.read_exact(&mut cp_buf).await.map_err(|e| e.to_string())?;
+    stream
+        .read_exact(&mut cp_buf)
+        .await
+        .map_err(|e| e.to_string())?;
     dec.process(&mut cp_buf);
     let crypto_provide = u32::from_be_bytes(cp_buf);
 
     let mut pad_c_len_buf = [0u8; 2];
-    stream.read_exact(&mut pad_c_len_buf).await.map_err(|e| e.to_string())?;
+    stream
+        .read_exact(&mut pad_c_len_buf)
+        .await
+        .map_err(|e| e.to_string())?;
     dec.process(&mut pad_c_len_buf);
     let pad_c_len = u16::from_be_bytes(pad_c_len_buf) as usize;
     // The spec bounds PadC at 512 bytes. A longer one is refused before it is
@@ -447,12 +516,18 @@ pub async fn handshake_incoming_with(
 
     if pad_c_len > 0 {
         let mut pad_c = vec![0u8; pad_c_len];
-        stream.read_exact(&mut pad_c).await.map_err(|e| e.to_string())?;
+        stream
+            .read_exact(&mut pad_c)
+            .await
+            .map_err(|e| e.to_string())?;
         dec.process(&mut pad_c);
     }
 
     let mut ia_len_buf = [0u8; 2];
-    stream.read_exact(&mut ia_len_buf).await.map_err(|e| e.to_string())?;
+    stream
+        .read_exact(&mut ia_len_buf)
+        .await
+        .map_err(|e| e.to_string())?;
     dec.process(&mut ia_len_buf);
     let ia_len = u16::from_be_bytes(ia_len_buf) as usize;
     // IA is the peer's BitTorrent handshake, 68 bytes; at most 512 is read.
@@ -463,7 +538,10 @@ pub async fn handshake_incoming_with(
     // Read IA (Initial Application data = BT handshake)
     let mut ia = vec![0u8; ia_len];
     if ia_len > 0 {
-        stream.read_exact(&mut ia).await.map_err(|e| e.to_string())?;
+        stream
+            .read_exact(&mut ia)
+            .await
+            .map_err(|e| e.to_string())?;
         dec.process(&mut ia);
     }
 
@@ -485,7 +563,10 @@ pub async fn handshake_incoming_with(
     response.extend_from_slice(&(pad_d.len() as u16).to_be_bytes());
     response.extend_from_slice(&pad_d); // padD, 0-512 random bytes
     enc.process(&mut response);
-    stream.write_all(&response).await.map_err(|e| e.to_string())?;
+    stream
+        .write_all(&response)
+        .await
+        .map_err(|e| e.to_string())?;
 
     // Send our BT handshake (encrypted)
     let bt_hs = build_bt_handshake(&skey, our_peer_id);
@@ -493,7 +574,10 @@ pub async fn handshake_incoming_with(
     if crypto_select == CRYPTO_RC4 {
         enc.process(&mut bt_hs_enc);
     }
-    stream.write_all(&bt_hs_enc).await.map_err(|e| e.to_string())?;
+    stream
+        .write_all(&bt_hs_enc)
+        .await
+        .map_err(|e| e.to_string())?;
 
     // Parse IA as BT handshake
     let mut peer_id_out = [0u8; 20];
@@ -506,12 +590,16 @@ pub async fn handshake_incoming_with(
         peer_id_out.copy_from_slice(&ia[48..68]);
     }
 
-    Ok((enc, dec, MseHandshakeResult {
-        peer_id: peer_id_out,
-        info_hash: info_hash_out,
-        fast_extension: fast_ext,
-        extended_protocol: ext_proto,
-    }))
+    Ok((
+        enc,
+        dec,
+        MseHandshakeResult {
+            peer_id: peer_id_out,
+            info_hash: info_hash_out,
+            fast_extension: fast_ext,
+            extended_protocol: ext_proto,
+        },
+    ))
 }
 
 fn build_bt_handshake(info_hash: &[u8; 20], peer_id: &[u8; 20]) -> Vec<u8> {
@@ -570,7 +658,11 @@ mod crypto_tests {
         let (xa, ya) = gen_keypair();
         let (xb, _yb) = gen_keypair();
         let s = compute_secret(&ya, &xb);
-        assert_eq!(s.len(), 96, "S is padded like Y, or the RC4 keys differ by a byte");
+        assert_eq!(
+            s.len(),
+            96,
+            "S is padded like Y, or the RC4 keys differ by a byte"
+        );
         let _ = xa;
     }
 
@@ -612,7 +704,11 @@ mod crypto_tests {
         assert_eq!(hs.len(), 68);
         assert_eq!(hs[0], 19, "the pstrlen");
         assert_eq!(&hs[1..20], b"BitTorrent protocol");
-        assert_eq!(&hs[28..48], &ih, "the info hash sits after the 8 reserved bytes");
+        assert_eq!(
+            &hs[28..48],
+            &ih,
+            "the info hash sits after the 8 reserved bytes"
+        );
         assert_eq!(&hs[48..68], &pid);
     }
 
@@ -622,7 +718,11 @@ mod crypto_tests {
     #[test]
     fn the_reserved_bytes_advertise_our_extensions() {
         let hs = build_bt_handshake(&[0u8; 20], &[0u8; 20]);
-        assert_ne!(&hs[20..28], &[0u8; 8], "we advertise at least one extension");
+        assert_ne!(
+            &hs[20..28],
+            &[0u8; 8],
+            "we advertise at least one extension"
+        );
     }
 
     /// RC4 is a stream cipher: encrypting twice with the same key returns the
@@ -704,17 +804,25 @@ mod crypto_tests {
             let mut n = 0usize;
             let mut buf = [0u8; 2048];
             // The dialer then waits for Yb, so the volley ends at the first lull.
-            while let Ok(Ok(k)) = tokio::time::timeout(Duration::from_millis(150), s.read(&mut buf)).await {
+            while let Ok(Ok(k)) =
+                tokio::time::timeout(Duration::from_millis(150), s.read(&mut buf)).await
+            {
                 if k == 0 {
                     break;
                 }
                 n += k;
             }
             dial.abort();
-            assert!((96..=96 + MAX_PAD_C).contains(&n), "Ya + PadA is 96..=608 bytes, got {n}");
+            assert!(
+                (96..=96 + MAX_PAD_C).contains(&n),
+                "Ya + PadA is 96..=608 bytes, got {n}"
+            );
             lens.insert(n);
         }
-        assert!(lens.len() > 1, "the first volley had the same length every time: {lens:?}");
+        assert!(
+            lens.len() > 1,
+            "the first volley had the same length every time: {lens:?}"
+        );
     }
 }
 
@@ -758,7 +866,9 @@ mod incoming_bounds_tests {
         t.read_exact(&mut rest).await.unwrap();
         let out = tokio::time::timeout(
             std::time::Duration::from_secs(3),
-            handshake_incoming(&mut t, first[0], &rest, &[7u8; 20], |h| (*h == sha1_combine(b"req2", &skey)).then_some(skey)),
+            handshake_incoming(&mut t, first[0], &rest, &[7u8; 20], |h| {
+                (*h == sha1_combine(b"req2", &skey)).then_some(skey)
+            }),
         )
         .await;
         client.abort();

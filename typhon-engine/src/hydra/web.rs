@@ -149,7 +149,11 @@ mod tests {
     fn the_engine_only_block_is_kept_on_a_node_that_runs_engines() {
         let t = "before{{if not .FrontOnly}}ENGINES{{end}}after";
         assert_eq!(render(t, false), "beforeENGINESafter");
-        assert_eq!(render(t, true), "beforeafter", "a controller shows no engine panel");
+        assert_eq!(
+            render(t, true),
+            "beforeafter",
+            "a controller shows no engine panel"
+        );
     }
 
     #[test]
@@ -157,14 +161,23 @@ mod tests {
         assert_eq!(render("plain page", false), "plain page");
         // An unclosed conditional is a changed page, not a reason to serve
         // nothing.
-        assert_eq!(render("a{{if not .FrontOnly}}b", false), "a{{if not .FrontOnly}}b");
+        assert_eq!(
+            render("a{{if not .FrontOnly}}b", false),
+            "a{{if not .FrontOnly}}b"
+        );
     }
 
     #[test]
     fn the_real_page_is_baked_in_and_renders() {
-        assert!(INDEX_HTML.len() > 10_000, "the interface is embedded, not a stub");
+        assert!(
+            INDEX_HTML.len() > 10_000,
+            "the interface is embedded, not a stub"
+        );
         let rendered = render(INDEX_HTML, false);
-        assert!(!rendered.contains("{{if not .FrontOnly}}"), "the construct is resolved");
+        assert!(
+            !rendered.contains("{{if not .FrontOnly}}"),
+            "the construct is resolved"
+        );
         assert!(rendered.contains("<html") || rendered.contains("<!DOCTYPE"));
     }
 
@@ -174,12 +187,26 @@ mod tests {
     /// routing field comes back here together with the code that honours it.
     #[test]
     fn the_category_form_offers_no_routing_the_engine_ignores() {
-        for dead in ["cat-strategy", "cat-min-free", "cat-placement", "least_torrents", "fill_then_next"] {
-            assert!(!INDEX_HTML.contains(dead), "index.html offers `{dead}` again");
+        for dead in [
+            "cat-strategy",
+            "cat-min-free",
+            "cat-placement",
+            "least_torrents",
+            "fill_then_next",
+        ] {
+            assert!(
+                !INDEX_HTML.contains(dead),
+                "index.html offers `{dead}` again"
+            );
         }
         let (js, _) = lookup("app.js").expect("app.js");
         let js = String::from_utf8_lossy(&js);
-        for dead in ["cat-strategy", "cat-min-free", ".cat-agent-cb", "_renderCatPlacement"] {
+        for dead in [
+            "cat-strategy",
+            "cat-min-free",
+            ".cat-agent-cb",
+            "_renderCatPlacement",
+        ] {
             assert!(!js.contains(dead), "app.js reads `{dead}` again");
         }
     }
@@ -196,7 +223,10 @@ mod tests {
             !js.to_ascii_lowercase().contains("apikey="),
             "app.js builds an address carrying the key"
         );
-        assert!(!js.contains("\"apikey\""), "app.js sets a `apikey` query parameter");
+        assert!(
+            !js.contains("\"apikey\""),
+            "app.js sets a `apikey` query parameter"
+        );
     }
 
     #[test]
@@ -231,8 +261,15 @@ mod security_header_tests {
             .unwrap_or_else(|| panic!("{what}: no Content-Security-Policy"))
             .to_str()
             .expect("the policy is text");
-        for directive in ["frame-ancestors 'none'", "object-src 'none'", "base-uri 'self'"] {
-            assert!(csp.contains(directive), "{what}: policy lacks `{directive}`: {csp}");
+        for directive in [
+            "frame-ancestors 'none'",
+            "object-src 'none'",
+            "base-uri 'self'",
+        ] {
+            assert!(
+                csp.contains(directive),
+                "{what}: policy lacks `{directive}`: {csp}"
+            );
         }
         // Scripts from this origin only, with the inline handlers the page is
         // built on still allowed: a policy that cut those would blank the UI.
@@ -241,7 +278,10 @@ mod security_header_tests {
             .map(str::trim)
             .find(|d| d.starts_with("script-src"))
             .unwrap_or_else(|| panic!("{what}: policy has no script-src: {csp}"));
-        assert!(script_src.contains("'self'"), "{what}: script-src lacks 'self': {script_src}");
+        assert!(
+            script_src.contains("'self'"),
+            "{what}: script-src lacks 'self': {script_src}"
+        );
         assert!(
             script_src.contains("'unsafe-inline'"),
             "{what}: script-src would block the page's inline handlers: {script_src}"
@@ -259,7 +299,11 @@ mod security_header_tests {
     #[tokio::test]
     async fn the_interface_page_forbids_framing_and_plugins() {
         for front_only in [false, true] {
-            let early = Early { front_only, needs_setup: false, network_storage: "" };
+            let early = Early {
+                front_only,
+                needs_setup: false,
+                network_storage: "",
+            };
             let router = gate(Arc::new(OnceLock::new()), early);
             let resp = router
                 .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
@@ -268,7 +312,9 @@ mod security_header_tests {
             assert_eq!(resp.status(), StatusCode::OK);
             assert_page_is_locked_down(resp.headers(), &format!("GET / (front_only={front_only})"));
             assert_eq!(
-                resp.headers().get(header::CONTENT_TYPE).map(|v| v.to_str().unwrap()),
+                resp.headers()
+                    .get(header::CONTENT_TYPE)
+                    .map(|v| v.to_str().unwrap()),
                 Some("text/html; charset=utf-8"),
                 "the page keeps its content type"
             );

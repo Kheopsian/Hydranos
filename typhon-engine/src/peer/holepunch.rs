@@ -260,7 +260,15 @@ mod tests {
     /// it is judged by the IPv4 rules.
     #[test]
     fn a_mapped_address_is_judged_as_its_ipv4_form() {
-        for private in ["192.168.0.1", "10.1.2.3", "172.16.0.9", "127.0.0.1", "169.254.1.1", "0.0.0.0", "224.0.0.1"] {
+        for private in [
+            "192.168.0.1",
+            "10.1.2.3",
+            "172.16.0.9",
+            "127.0.0.1",
+            "169.254.1.1",
+            "0.0.0.0",
+            "224.0.0.1",
+        ] {
             let plain = v4(&format!("{private}:6881"));
             let mapped = v4(&format!("[::ffff:{private}]:6881"));
             assert!(!is_punchable(&plain), "{plain}");
@@ -285,7 +293,8 @@ mod tests {
 
     #[test]
     fn an_ipv6_message_carries_sixteen_bytes_of_address() {
-        let m = Punch::Connect("[2606:2800:220:1:248:1893:25c8:1946]:6881".parse().unwrap()).encode();
+        let m =
+            Punch::Connect("[2606:2800:220:1:248:1893:25c8:1946]:6881".parse().unwrap()).encode();
         assert_eq!(m[0], MSG_CONNECT);
         assert_eq!(m[1], ADDR_V6);
         assert_eq!(m.len(), 20);
@@ -359,7 +368,9 @@ mod tests {
             assert!(!is_punchable(&a.parse().unwrap()), "{a} must be refused");
         }
         assert!(is_punchable(&v4("93.184.216.34:6881")));
-        assert!(is_punchable(&"[2606:2800:220:1:248:1893:25c8:1946]:6881".parse().unwrap()));
+        assert!(is_punchable(
+            &"[2606:2800:220:1:248:1893:25c8:1946]:6881".parse().unwrap()
+        ));
     }
 
     /// Port zero is not a peer.

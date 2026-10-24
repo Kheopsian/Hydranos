@@ -27,16 +27,16 @@
 
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use librqbit_dualstack_sockets::{BindDevice, MulticastUdpSocket};
 use tracing::{debug, info, warn};
 
-use crate::torrent::TorrentManager;
 use crate::torrent::meta::{InfoHash, TorrentState};
+use crate::torrent::TorrentManager;
 
 /// The port BEP 14 multicasts on.
 pub const LSD_PORT: u16 = 6771;
@@ -79,7 +79,9 @@ pub struct Announce {
 /// `[ff15::efc0:988f]:6771`, which is `SocketAddr`'s own form.
 fn host_header(group: SocketAddr) -> String {
     match group {
-        SocketAddr::V6(v6) => SocketAddr::V6(SocketAddrV6::new(*v6.ip(), v6.port(), 0, 0)).to_string(),
+        SocketAddr::V6(v6) => {
+            SocketAddr::V6(SocketAddrV6::new(*v6.ip(), v6.port(), 0, 0)).to_string()
+        }
         v4 => v4.to_string(),
     }
 }
@@ -88,7 +90,11 @@ fn host_header(group: SocketAddr) -> String {
 /// empty lines included: libtorrent parses it as HTTP and wants the blank
 /// line.
 pub fn build(group: SocketAddr, port: u16, info_hashes: &[InfoHash], cookie: &str) -> String {
-    let mut msg = format!("BT-SEARCH * HTTP/1.1\r\nHost: {}\r\nPort: {}\r\n", host_header(group), port);
+    let mut msg = format!(
+        "BT-SEARCH * HTTP/1.1\r\nHost: {}\r\nPort: {}\r\n",
+        host_header(group),
+        port
+    );
     for ih in info_hashes {
         msg.push_str("Infohash: ");
         msg.push_str(&crate::torrent::hex_encode(ih));
@@ -142,7 +148,11 @@ pub fn parse(buf: &[u8]) -> Option<Announce> {
     if info_hashes.is_empty() {
         return None;
     }
-    Some(Announce { port: port?, info_hashes, cookie })
+    Some(Announce {
+        port: port?,
+        info_hashes,
+        cookie,
+    })
 }
 
 /// Whether a torrent may take part in LSD at all: never a private one, and
@@ -194,11 +204,18 @@ impl Schedule {
         due.sort_by_key(|(c, last)| (!c.downloading, *last));
 
         let room = MAX_MESSAGES_PER_ROUND * HASHES_PER_MESSAGE;
-        let chosen: Vec<InfoHash> = due.into_iter().take(room).map(|(c, _)| c.info_hash).collect();
+        let chosen: Vec<InfoHash> = due
+            .into_iter()
+            .take(room)
+            .map(|(c, _)| c.info_hash)
+            .collect();
         for ih in &chosen {
             self.last.insert(*ih, now);
         }
-        chosen.chunks(HASHES_PER_MESSAGE).map(|c| c.to_vec()).collect()
+        chosen
+            .chunks(HASHES_PER_MESSAGE)
+            .map(|c| c.to_vec())
+            .collect()
     }
 }
 
@@ -218,7 +235,10 @@ pub fn candidates_with(mgr: &TorrentManager, announce_seeds: bool) -> Vec<Candid
     let seen: HashSet<InfoHash> = downloading.iter().copied().collect();
     let mut out: Vec<Candidate> = downloading
         .into_iter()
-        .map(|info_hash| Candidate { info_hash, downloading: true })
+        .map(|info_hash| Candidate {
+            info_hash,
+            downloading: true,
+        })
         .collect();
     if !announce_seeds {
         return out;
@@ -226,7 +246,10 @@ pub fn candidates_with(mgr: &TorrentManager, announce_seeds: bool) -> Vec<Candid
     let with_peers = mgr.collect_torrents(usize::MAX, |t| {
         !t.connected_addrs.is_empty() && may_use_lsd(t) && !seen.contains(&t.info_hash)
     });
-    out.extend(with_peers.into_iter().map(|info_hash| Candidate { info_hash, downloading: false }));
+    out.extend(with_peers.into_iter().map(|info_hash| Candidate {
+        info_hash,
+        downloading: false,
+    }));
     out
 }
 
@@ -300,10 +323,13 @@ impl LsdSession {
         }
         let cookie = self.cookie.clone();
         self.sock
-            .try_send_mcast_everywhere(&|opts| Some(build(opts.mcast_addr(), listen_port, info_hashes, &cookie)))
+            .try_send_mcast_everywhere(&|opts| {
+                Some(build(opts.mcast_addr(), listen_port, info_hashes, &cookie))
+            })
             .await;
         self.messages_sent.fetch_add(1, Ordering::Relaxed);
-        self.hashes_announced.fetch_add(info_hashes.len() as u64, Ordering::Relaxed);
+        self.hashes_announced
+            .fetch_add(info_hashes.len() as u64, Ordering::Relaxed);
     }
 
     /// The next message from someone else. Our own (same cookie) and anything
@@ -327,7 +353,10 @@ impl LsdSession {
     /// them. Returns how many peers were offered to the dial queue.
     pub fn offer(&self, mgr: &TorrentManager, from: SocketAddr, msg: &Announce) -> usize {
         let ip = match from.ip() {
-            IpAddr::V6(v6) => v6.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(IpAddr::V6(v6)),
+            IpAddr::V6(v6) => v6
+                .to_ipv4_mapped()
+                .map(IpAddr::V4)
+                .unwrap_or(IpAddr::V6(v6)),
             v4 => v4,
         };
         // Local discovery is for the LAN. A datagram from anywhere else -- a
@@ -381,7 +410,10 @@ fn is_local_source(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
             let o = v4.octets();
-            v4.is_loopback() || v4.is_private() || v4.is_link_local() || (o[0] == 100 && (o[1] & 0xc0) == 64)
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || (o[0] == 100 && (o[1] & 0xc0) == 64)
         }
         IpAddr::V6(v6) => {
             let s0 = v6.segments()[0];
@@ -392,7 +424,10 @@ fn is_local_source(ip: IpAddr) -> bool {
 
 /// Start LSD for one engine, if `dht::lsd_policy` allows it. Returns the
 /// session it attached to the manager.
-pub async fn start(mgr: Arc<TorrentManager>, config: &crate::config::EngineConfig) -> Option<Arc<LsdSession>> {
+pub async fn start(
+    mgr: Arc<TorrentManager>,
+    config: &crate::config::EngineConfig,
+) -> Option<Arc<LsdSession>> {
     match crate::dht::lsd_policy(config) {
         crate::dht::Discovery::On => {}
         crate::dht::Discovery::Off(why) if why == crate::dht::OFF_BY_CONFIG => {
@@ -409,13 +444,23 @@ pub async fn start(mgr: Arc<TorrentManager>, config: &crate::config::EngineConfi
         Ok(s) => s,
         Err(e) => {
             // Not fatal: trackers, DHT and PEX are untouched.
-            warn!("[lsd] not started ({}): no multicast on {}", e, device.unwrap_or("any interface"));
+            warn!(
+                "[lsd] not started ({}): no multicast on {}",
+                e,
+                device.unwrap_or("any interface")
+            );
             return None;
         }
     };
     match device {
-        Some(d) => info!("[lsd] listening on {}:{} and [{}]:{}, pinned to device {}", LSD_V4, LSD_PORT, LSD_V6, LSD_PORT, d),
-        None => info!("[lsd] listening on {}:{} and [{}]:{}", LSD_V4, LSD_PORT, LSD_V6, LSD_PORT),
+        Some(d) => info!(
+            "[lsd] listening on {}:{} and [{}]:{}, pinned to device {}",
+            LSD_V4, LSD_PORT, LSD_V6, LSD_PORT, d
+        ),
+        None => info!(
+            "[lsd] listening on {}:{} and [{}]:{}",
+            LSD_V4, LSD_PORT, LSD_V6, LSD_PORT
+        ),
     }
     mgr.set_lsd(session.clone());
 
@@ -490,9 +535,20 @@ mod tests {
              cookie: c00k1e\r\n\
              \r\n\r\n"
         );
-        let v6 = build(SocketAddr::V6(SocketAddrV6::new(LSD_V6, LSD_PORT, 0, 3)), 1, &[ih(1)], "");
-        assert!(v6.starts_with("BT-SEARCH * HTTP/1.1\r\nHost: [ff15::efc0:988f]:6771\r\n"), "{v6}");
-        assert!(!v6.contains("cookie"), "no cookie header when there is none");
+        let v6 = build(
+            SocketAddr::V6(SocketAddrV6::new(LSD_V6, LSD_PORT, 0, 3)),
+            1,
+            &[ih(1)],
+            "",
+        );
+        assert!(
+            v6.starts_with("BT-SEARCH * HTTP/1.1\r\nHost: [ff15::efc0:988f]:6771\r\n"),
+            "{v6}"
+        );
+        assert!(
+            !v6.contains("cookie"),
+            "no cookie header when there is none"
+        );
     }
 
     /// 40 bytes of header value, but not 40 hex digits: a datagram from the
@@ -516,7 +572,11 @@ mod tests {
         let msg = build(v4_group(), 51413, &[ih(7), ih(9)], "abc");
         assert_eq!(
             parse(msg.as_bytes()),
-            Some(Announce { port: 51413, info_hashes: vec![ih(7), ih(9)], cookie: Some("abc".into()) })
+            Some(Announce {
+                port: 51413,
+                info_hashes: vec![ih(7), ih(9)],
+                cookie: Some("abc".into())
+            })
         );
     }
 
@@ -533,7 +593,10 @@ mod tests {
         assert_eq!(parse(b"M-SEARCH * HTTP/1.1\r\nPort: 1\r\nInfohash: abababababababababababababababababababab\r\n\r\n"), None);
         assert_eq!(parse(b"BT-SEARCH * HTTP/1.1\r\nInfohash: abababababababababababababababababababab\r\n\r\n"), None);
         assert_eq!(parse(b"BT-SEARCH * HTTP/1.1\r\nPort: 0\r\nInfohash: abababababababababababababababababababab\r\n\r\n"), None);
-        let v2 = format!("BT-SEARCH * HTTP/1.1\r\nPort: 1\r\nInfohash: {}\r\n\r\n", "ab".repeat(32));
+        let v2 = format!(
+            "BT-SEARCH * HTTP/1.1\r\nPort: 1\r\nInfohash: {}\r\n\r\n",
+            "ab".repeat(32)
+        );
         assert_eq!(parse(v2.as_bytes()), None);
     }
 
@@ -547,7 +610,10 @@ mod tests {
             .map(|i| {
                 let mut h = [0u8; 20];
                 h[..4].copy_from_slice(&i.to_be_bytes());
-                Candidate { info_hash: h, downloading: false }
+                Candidate {
+                    info_hash: h,
+                    downloading: false,
+                }
             })
             .collect();
         cands[999_999].downloading = true;
@@ -555,7 +621,10 @@ mod tests {
         let plan = s.plan(&cands, t0);
         assert_eq!(plan.len(), MAX_MESSAGES_PER_ROUND);
         assert!(plan.iter().all(|m| m.len() <= HASHES_PER_MESSAGE));
-        assert_eq!(plan[0][0], cands[999_999].info_hash, "the download goes first");
+        assert_eq!(
+            plan[0][0], cands[999_999].info_hash,
+            "the download goes first"
+        );
 
         // The next round announces others, not the same ones again.
         let first: HashSet<InfoHash> = plan.iter().flatten().copied().collect();
@@ -567,7 +636,10 @@ mod tests {
         let mut s = Schedule::default();
         let few = &cands[..3];
         assert_eq!(s.plan(few, t0).concat().len(), 3);
-        assert!(s.plan(few, t0 + ROUND).is_empty(), "not due before 5 minutes");
+        assert!(
+            s.plan(few, t0 + ROUND).is_empty(),
+            "not due before 5 minutes"
+        );
         assert_eq!(s.plan(few, t0 + REANNOUNCE).concat().len(), 3);
     }
 
@@ -585,7 +657,11 @@ mod tests {
     }
 
     fn torrent_bytes(name: &str, private: bool) -> Vec<u8> {
-        let mut info = format!("d6:lengthi16384e4:name{}:{name}12:piece lengthi16384e6:pieces20:", name.len()).into_bytes();
+        let mut info = format!(
+            "d6:lengthi16384e4:name{}:{name}12:piece lengthi16384e6:pieces20:",
+            name.len()
+        )
+        .into_bytes();
         let mut piece = [0xCDu8; 20];
         piece[..name.len().min(20)].copy_from_slice(&name.as_bytes()[..name.len().min(20)]);
         info.extend_from_slice(&piece);
@@ -604,10 +680,19 @@ mod tests {
     #[test]
     fn a_private_torrent_is_never_announced_nor_fed() {
         let (mgr, root) = manager("private");
-        let (public, _) = mgr.add_torrent_bytes(&torrent_bytes("public", false), "/tmp", false, false).unwrap();
-        let (private, _) = mgr.add_torrent_bytes(&torrent_bytes("private", true), "/tmp", false, false).unwrap();
-        let (stopped, _) = mgr.add_torrent_bytes(&torrent_bytes("stopped", false), "/tmp", true, false).unwrap();
-        assert!(mgr.get(&private).unwrap().meta.private, "the fixture must really be private");
+        let (public, _) = mgr
+            .add_torrent_bytes(&torrent_bytes("public", false), "/tmp", false, false)
+            .unwrap();
+        let (private, _) = mgr
+            .add_torrent_bytes(&torrent_bytes("private", true), "/tmp", false, false)
+            .unwrap();
+        let (stopped, _) = mgr
+            .add_torrent_bytes(&torrent_bytes("stopped", false), "/tmp", true, false)
+            .unwrap();
+        assert!(
+            mgr.get(&private).unwrap().meta.private,
+            "the fixture must really be private"
+        );
         // Downloading and with a peer: everything that would make it a
         // candidate if it were public.
         let p = mgr.get(&private).unwrap();
@@ -631,8 +716,13 @@ mod tests {
     #[test]
     fn a_seed_with_a_peer_is_announced_by_default() {
         let (mgr, root) = manager("seeddefault");
-        let (seed, _) = mgr.add_torrent_bytes(&torrent_bytes("seeddef", false), "/tmp", false, true).unwrap();
-        mgr.get(&seed).unwrap().connected_addrs.insert("192.0.2.1:1".parse().unwrap(), ());
+        let (seed, _) = mgr
+            .add_torrent_bytes(&torrent_bytes("seeddef", false), "/tmp", false, true)
+            .unwrap();
+        mgr.get(&seed)
+            .unwrap()
+            .connected_addrs
+            .insert("192.0.2.1:1".parse().unwrap(), ());
         let got = candidates(&mgr);
         assert_eq!(got.len(), 1);
         assert_eq!((got[0].info_hash, got[0].downloading), (seed, false));
@@ -646,17 +736,38 @@ mod tests {
     #[test]
     fn seeds_are_announced_only_when_the_option_says_so() {
         let (mgr, root) = manager("seedopt");
-        let (down, _) = mgr.add_torrent_bytes(&torrent_bytes("down", false), "/tmp", false, false).unwrap();
-        let (seed, _) = mgr.add_torrent_bytes(&torrent_bytes("seed", false), "/tmp", false, true).unwrap();
-        mgr.get(&seed).unwrap().connected_addrs.insert("192.0.2.1:1".parse().unwrap(), ());
+        let (down, _) = mgr
+            .add_torrent_bytes(&torrent_bytes("down", false), "/tmp", false, false)
+            .unwrap();
+        let (seed, _) = mgr
+            .add_torrent_bytes(&torrent_bytes("seed", false), "/tmp", false, true)
+            .unwrap();
+        mgr.get(&seed)
+            .unwrap()
+            .connected_addrs
+            .insert("192.0.2.1:1".parse().unwrap(), ());
         let sorted = |mut v: Vec<InfoHash>| {
             v.sort();
             v
         };
-        let got = |seeds| sorted(candidates_with(&mgr, seeds).iter().map(|c| c.info_hash).collect());
-        assert_eq!(got(true), sorted(vec![down, seed]), "default: the seed with a peer is announced");
+        let got = |seeds| {
+            sorted(
+                candidates_with(&mgr, seeds)
+                    .iter()
+                    .map(|c| c.info_hash)
+                    .collect(),
+            )
+        };
+        assert_eq!(
+            got(true),
+            sorted(vec![down, seed]),
+            "default: the seed with a peer is announced"
+        );
         assert_eq!(got(false), vec![down], "option off: only the download");
-        assert_eq!(sorted(candidates(&mgr).iter().map(|c| c.info_hash).collect()), got(true));
+        assert_eq!(
+            sorted(candidates(&mgr).iter().map(|c| c.info_hash).collect()),
+            got(true)
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -666,10 +777,12 @@ mod tests {
     async fn a_proxied_engine_opens_no_lsd_socket() {
         let (mgr, root) = manager("socks");
         let cfg: crate::config::EngineConfig =
-            serde_json::from_str(r#"{"lsd_enabled":true,"socks5_outbound_host":"127.0.0.1"}"#).unwrap();
+            serde_json::from_str(r#"{"lsd_enabled":true,"socks5_outbound_host":"127.0.0.1"}"#)
+                .unwrap();
         assert!(start(mgr.clone(), &cfg).await.is_none());
         assert!(mgr.lsd().is_none());
-        let off: crate::config::EngineConfig = serde_json::from_str(r#"{"lsd_enabled":false}"#).unwrap();
+        let off: crate::config::EngineConfig =
+            serde_json::from_str(r#"{"lsd_enabled":false}"#).unwrap();
         assert!(start(mgr.clone(), &off).await.is_none());
         let _ = std::fs::remove_dir_all(root);
     }
@@ -679,27 +792,61 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn an_lsd_pinned_to_a_missing_device_does_not_start() {
-        assert!(LsdSession::bind(Some("hy-nodev0"), free_udp_port()).await.is_err());
+        assert!(LsdSession::bind(Some("hy-nodev0"), free_udp_port())
+            .await
+            .is_err());
     }
 
     fn free_udp_port() -> u16 {
-        std::net::UdpSocket::bind("0.0.0.0:0").unwrap().local_addr().unwrap().port()
+        std::net::UdpSocket::bind("0.0.0.0:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
     }
 
     /// ⭐ An announce from an address that cannot be on the LAN is not turned
     /// into a dial; the same announce from a LAN address is.
     #[tokio::test]
     async fn an_announce_from_outside_the_lan_is_ignored() {
-        let session = LsdSession::bind(None, free_udp_port()).await.expect("an LSD socket");
+        let session = LsdSession::bind(None, free_udp_port())
+            .await
+            .expect("an LSD socket");
         let (mgr, root) = manager("foreign");
-        let (h, _) = mgr.add_torrent_bytes(&torrent_bytes("foreign", false), "/tmp", false, false).unwrap();
-        let msg = Announce { port: 6881, info_hashes: vec![h], cookie: Some("other".into()) };
-        assert_eq!(session.offer(&mgr, "93.184.216.34:6771".parse().unwrap(), &msg), 0, "a public source is ignored");
-        assert_eq!(session.offer(&mgr, "[2606:2800:220:1::1]:6771".parse().unwrap(), &msg), 0, "public v6 too");
-        assert_eq!(session.offer(&mgr, "192.168.99.20:6771".parse().unwrap(), &msg), 1, "a LAN source is offered");
+        let (h, _) = mgr
+            .add_torrent_bytes(&torrent_bytes("foreign", false), "/tmp", false, false)
+            .unwrap();
+        let msg = Announce {
+            port: 6881,
+            info_hashes: vec![h],
+            cookie: Some("other".into()),
+        };
+        assert_eq!(
+            session.offer(&mgr, "93.184.216.34:6771".parse().unwrap(), &msg),
+            0,
+            "a public source is ignored"
+        );
+        assert_eq!(
+            session.offer(&mgr, "[2606:2800:220:1::1]:6771".parse().unwrap(), &msg),
+            0,
+            "public v6 too"
+        );
+        assert_eq!(
+            session.offer(&mgr, "192.168.99.20:6771".parse().unwrap(), &msg),
+            1,
+            "a LAN source is offered"
+        );
         // The socket is dual-stack: a LAN peer's IPv4 arrives v4-mapped.
-        assert_eq!(session.offer(&mgr, "[::ffff:192.168.0.7]:6771".parse().unwrap(), &msg), 1, "v4-mapped LAN too");
-        assert_eq!(session.offer(&mgr, "[::ffff:93.184.216.34]:6771".parse().unwrap(), &msg), 0, "v4-mapped public is not");
+        assert_eq!(
+            session.offer(&mgr, "[::ffff:192.168.0.7]:6771".parse().unwrap(), &msg),
+            1,
+            "v4-mapped LAN too"
+        );
+        assert_eq!(
+            session.offer(&mgr, "[::ffff:93.184.216.34]:6771".parse().unwrap(), &msg),
+            0,
+            "v4-mapped public is not"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -710,7 +857,10 @@ mod tests {
     #[tokio::test]
     async fn two_engines_discover_each_other_and_ignore_themselves() {
         let port = free_udp_port();
-        let (a, b) = match (LsdSession::bind(None, port).await, LsdSession::bind(None, port).await) {
+        let (a, b) = match (
+            LsdSession::bind(None, port).await,
+            LsdSession::bind(None, port).await,
+        ) {
             (Ok(a), Ok(b)) => (a, b),
             (Err(e), _) | (_, Err(e)) => {
                 eprintln!("no multicast here ({e}): skipped");
@@ -721,18 +871,29 @@ mod tests {
         let wait = Duration::from_secs(3);
 
         a.announce(16171, &[ih(0x42)]).await;
-        let (from, msg) = tokio::time::timeout(wait, b.recv()).await.expect("b hears a").unwrap();
+        let (from, msg) = tokio::time::timeout(wait, b.recv())
+            .await
+            .expect("b hears a")
+            .unwrap();
         assert_eq!(msg.port, 16171);
         assert_eq!(msg.info_hashes, vec![ih(0x42)]);
         assert_eq!(msg.cookie.as_deref(), Some(a.cookie()));
         assert!(from.port() == port, "from a's LSD socket: {from}");
 
         // a got its own message back and dropped it: nothing for a to read.
-        assert!(tokio::time::timeout(Duration::from_millis(500), a.recv()).await.is_err());
-        assert!(a.stats()["own_ignored"].as_u64().unwrap() >= 1, "a saw its own announce and skipped it");
+        assert!(tokio::time::timeout(Duration::from_millis(500), a.recv())
+            .await
+            .is_err());
+        assert!(
+            a.stats()["own_ignored"].as_u64().unwrap() >= 1,
+            "a saw its own announce and skipped it"
+        );
 
         b.announce(16172, &[ih(0x43)]).await;
-        let (_, msg) = tokio::time::timeout(wait, a.recv()).await.expect("a hears b").unwrap();
+        let (_, msg) = tokio::time::timeout(wait, a.recv())
+            .await
+            .expect("a hears b")
+            .unwrap();
         assert_eq!((msg.port, msg.info_hashes), (16172, vec![ih(0x43)]));
     }
 }

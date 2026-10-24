@@ -71,7 +71,10 @@ pub struct MagnetJobs {
 impl MagnetJobs {
     /// Jobs whose peer dials follow `policy` (the engine's).
     pub fn with_policy(policy: Arc<crate::peer::extension::PeerPolicy>) -> Self {
-        Self { map: Mutex::new(HashMap::new()), policy }
+        Self {
+            map: Mutex::new(HashMap::new()),
+            policy,
+        }
     }
 
     fn set_state(&self, info_hash: [u8; 20], state: JobState) {
@@ -82,139 +85,182 @@ impl MagnetJobs {
         }
     }
 
-/// Current state of a resolution, if we know about one.
-pub fn state_of(&self, info_hash: &[u8; 20]) -> Option<JobState> {
-    let map = self.map.lock().ok()?;
-    let job = map.get(info_hash)?;
-    // A job that blew its ceiling reports as failed rather than resolving
-    // forever; the caller can start a fresh one.
-    if matches!(job.state, JobState::Resolving) && job.started.elapsed() > JOB_TIMEOUT {
-        return Some(JobState::Failed("resolution timed out".into()));
-    }
-    Some(job.state.clone())
-}
-
-/// Forget a job, so its dict stops occupying memory once collected.
-pub fn forget(&self, info_hash: &[u8; 20]) {
-    if let Ok(mut map) = self.map.lock() {
-        map.remove(info_hash);
-    }
-}
-
-/// Start resolving, unless a job for this info hash is already alive.
-/// Returns false when one was already running (or finished and uncollected).
-pub fn start(
-    self: &Arc<Self>,
-    info_hash: [u8; 20],
-    trackers: Vec<String>,
-    seed_peers: Vec<SocketAddr>,
-    config: &EngineConfig,
-    binding_id: Option<u32>,
-    // The engine's DHT node, if it has one. Passed in rather than read from a
-    // global: with two engines in one process, a magnet must be resolved
-    // through the node of the engine it was added to.
-    dht: Option<librqbit_dht::Dht>,
-) -> bool {
-    {
-        let mut map = match self.map.lock() {
-            Ok(m) => m,
-            Err(_) => return false,
-        };
-        if let Some(existing) = map.get(&info_hash) {
-            if !matches!(existing.state, JobState::Resolving)
-                || existing.started.elapsed() <= JOB_TIMEOUT
-            {
-                return false;
-            }
+    /// Current state of a resolution, if we know about one.
+    pub fn state_of(&self, info_hash: &[u8; 20]) -> Option<JobState> {
+        let map = self.map.lock().ok()?;
+        let job = map.get(info_hash)?;
+        // A job that blew its ceiling reports as failed rather than resolving
+        // forever; the caller can start a fresh one.
+        if matches!(job.state, JobState::Resolving) && job.started.elapsed() > JOB_TIMEOUT {
+            return Some(JobState::Failed("resolution timed out".into()));
         }
-        map.insert(info_hash, Job { state: JobState::Resolving, started: Instant::now() });
+        Some(job.state.clone())
     }
 
-    // Pick the binding this resolution goes out on, so its peer dials carry
-    // the engine's egress -- `bind_device` and the outbound SOCKS5 -- like the
-    // torrent's own: dialling with none would leave by the default route and
-    // show our real address to the whole swarm. By default the same binding
-    // the torrent will land on. (Its fwmark is not applied to peer dials, and
-    // Hydranos never sets one: see `Binding::fwmark`.)
-    let bindings = config.resolved_bindings();
-    let binding = match binding_id {
-        Some(want) => bindings.iter().find(|b| b.id == want).or_else(|| bindings.first()),
-        None => bindings.first(),
-    };
-    let (peer_id, egress, port) = match binding {
-        Some(b) => (b.peer_id, b.egress.clone(), b.advertised_port),
-        None => {
-            self.set_state(info_hash, JobState::Failed("no usable network binding".into()));
-            return true;
+    /// Forget a job, so its dict stops occupying memory once collected.
+    pub fn forget(&self, info_hash: &[u8; 20]) {
+        if let Ok(mut map) = self.map.lock() {
+            map.remove(info_hash);
         }
-    };
+    }
 
-    // The magnet's announces go where the engine's do: through its proxy
-    // when it has one. A magnet announced directly would hand the tracker
-    // this host's address before the torrent even exists.
-    let http_proxy = config.http_proxy();
-    let ip_mode = announce_ip_mode(config.enable_ipv6);
-    let refuse_cleartext_key = config.announce_cleartext_passkey.trim().eq_ignore_ascii_case("refuse");
-    let jobs = self.clone();
-    let policy = self.policy.clone();
-    tokio::spawn(async move {
-        // Rounds until the budget runs out, not one. A peer that is still
-        // checking the torrent refuses the connection (libtorrent does, for
-        // seconds after an add), a tracker answers late, the DHT fills in
-        // slowly: one round made each of those a failure, and the magnet
-        // waited a minute for its next chance.
-        let started = Instant::now();
-        let mut last = String::from("no peers found");
-        let mut round = 0u32;
-        // Peers found so far. Asked again every round; the trackers and the
-        // DHT only every DISCOVERY_EVERY -- each tracker ask is an announce,
-        // and a magnet must not announce `started` to a tracker every three
-        // seconds.
-        let mut peers: Vec<SocketAddr> = seed_peers.clone();
-        let mut discovered_at: Option<Instant> = None;
-        while started.elapsed() < RESOLVE_BUDGET {
-            round += 1;
-            if discovered_at.map_or(true, |t| t.elapsed() >= DISCOVERY_EVERY) {
-                discovered_at = Some(Instant::now());
-                for p in discover(info_hash, &trackers, seed_peers.clone(), &peer_id, port, dht.clone(), &egress.device, &http_proxy, ip_mode, refuse_cleartext_key).await {
-                    if !peers.contains(&p) {
-                        peers.push(p);
-                    }
-                }
-            }
-            if peers.is_empty() {
-                last = "no peers found".into();
-            } else {
-                debug!("[magnet] round {} for {}: {} candidate peers", round, hex(&info_hash), peers.len());
-                match crate::peer::metadata::fetch(
-                    &peers,
-                    info_hash,
-                    peer_id,
-                    // uTP is skipped for resolution: it is a short, one-shot
-                    // exchange and the TCP legs cover it.
-                    None,
-                    port,
-                    egress.clone(),
-                    policy.clone(),
-                    crate::peer::metadata::DEFAULT_CONCURRENCY,
-                )
-                .await
+    /// Start resolving, unless a job for this info hash is already alive.
+    /// Returns false when one was already running (or finished and uncollected).
+    pub fn start(
+        self: &Arc<Self>,
+        info_hash: [u8; 20],
+        trackers: Vec<String>,
+        seed_peers: Vec<SocketAddr>,
+        config: &EngineConfig,
+        binding_id: Option<u32>,
+        // The engine's DHT node, if it has one. Passed in rather than read from a
+        // global: with two engines in one process, a magnet must be resolved
+        // through the node of the engine it was added to.
+        dht: Option<librqbit_dht::Dht>,
+    ) -> bool {
+        {
+            let mut map = match self.map.lock() {
+                Ok(m) => m,
+                Err(_) => return false,
+            };
+            if let Some(existing) = map.get(&info_hash) {
+                if !matches!(existing.state, JobState::Resolving)
+                    || existing.started.elapsed() <= JOB_TIMEOUT
                 {
-                    Ok(dict) => {
-                        info!("[magnet] resolved {} ({} bytes, round {})", hex(&info_hash), dict.len(), round);
-                        jobs.set_state(info_hash, JobState::Done(dict));
-                        return;
-                    }
-                    Err(e) => last = e,
+                    return false;
                 }
             }
-            tokio::time::sleep(ROUND_PAUSE).await;
+            map.insert(
+                info_hash,
+                Job {
+                    state: JobState::Resolving,
+                    started: Instant::now(),
+                },
+            );
         }
-        warn!("[magnet] {} failed after {} rounds: {}", hex(&info_hash), round, last);
-        jobs.set_state(info_hash, JobState::Failed(last));
-    });
-    true
-}
+
+        // Pick the binding this resolution goes out on, so its peer dials carry
+        // the engine's egress -- `bind_device` and the outbound SOCKS5 -- like the
+        // torrent's own: dialling with none would leave by the default route and
+        // show our real address to the whole swarm. By default the same binding
+        // the torrent will land on. (Its fwmark is not applied to peer dials, and
+        // Hydranos never sets one: see `Binding::fwmark`.)
+        let bindings = config.resolved_bindings();
+        let binding = match binding_id {
+            Some(want) => bindings
+                .iter()
+                .find(|b| b.id == want)
+                .or_else(|| bindings.first()),
+            None => bindings.first(),
+        };
+        let (peer_id, egress, port) = match binding {
+            Some(b) => (b.peer_id, b.egress.clone(), b.advertised_port),
+            None => {
+                self.set_state(
+                    info_hash,
+                    JobState::Failed("no usable network binding".into()),
+                );
+                return true;
+            }
+        };
+
+        // The magnet's announces go where the engine's do: through its proxy
+        // when it has one. A magnet announced directly would hand the tracker
+        // this host's address before the torrent even exists.
+        let http_proxy = config.http_proxy();
+        let ip_mode = announce_ip_mode(config.enable_ipv6);
+        let refuse_cleartext_key = config
+            .announce_cleartext_passkey
+            .trim()
+            .eq_ignore_ascii_case("refuse");
+        let jobs = self.clone();
+        let policy = self.policy.clone();
+        tokio::spawn(async move {
+            // Rounds until the budget runs out, not one. A peer that is still
+            // checking the torrent refuses the connection (libtorrent does, for
+            // seconds after an add), a tracker answers late, the DHT fills in
+            // slowly: one round made each of those a failure, and the magnet
+            // waited a minute for its next chance.
+            let started = Instant::now();
+            let mut last = String::from("no peers found");
+            let mut round = 0u32;
+            // Peers found so far. Asked again every round; the trackers and the
+            // DHT only every DISCOVERY_EVERY -- each tracker ask is an announce,
+            // and a magnet must not announce `started` to a tracker every three
+            // seconds.
+            let mut peers: Vec<SocketAddr> = seed_peers.clone();
+            let mut discovered_at: Option<Instant> = None;
+            while started.elapsed() < RESOLVE_BUDGET {
+                round += 1;
+                if discovered_at.map_or(true, |t| t.elapsed() >= DISCOVERY_EVERY) {
+                    discovered_at = Some(Instant::now());
+                    for p in discover(
+                        info_hash,
+                        &trackers,
+                        seed_peers.clone(),
+                        &peer_id,
+                        port,
+                        dht.clone(),
+                        &egress.device,
+                        &http_proxy,
+                        ip_mode,
+                        refuse_cleartext_key,
+                    )
+                    .await
+                    {
+                        if !peers.contains(&p) {
+                            peers.push(p);
+                        }
+                    }
+                }
+                if peers.is_empty() {
+                    last = "no peers found".into();
+                } else {
+                    debug!(
+                        "[magnet] round {} for {}: {} candidate peers",
+                        round,
+                        hex(&info_hash),
+                        peers.len()
+                    );
+                    match crate::peer::metadata::fetch(
+                        &peers,
+                        info_hash,
+                        peer_id,
+                        // uTP is skipped for resolution: it is a short, one-shot
+                        // exchange and the TCP legs cover it.
+                        None,
+                        port,
+                        egress.clone(),
+                        policy.clone(),
+                        crate::peer::metadata::DEFAULT_CONCURRENCY,
+                    )
+                    .await
+                    {
+                        Ok(dict) => {
+                            info!(
+                                "[magnet] resolved {} ({} bytes, round {})",
+                                hex(&info_hash),
+                                dict.len(),
+                                round
+                            );
+                            jobs.set_state(info_hash, JobState::Done(dict));
+                            return;
+                        }
+                        Err(e) => last = e,
+                    }
+                }
+                tokio::time::sleep(ROUND_PAUSE).await;
+            }
+            warn!(
+                "[magnet] {} failed after {} rounds: {}",
+                hex(&info_hash),
+                round,
+                last
+            );
+            jobs.set_state(info_hash, JobState::Failed(last));
+        });
+        true
+    }
 }
 
 /// The address family a magnet's announces use: both only when the engine
@@ -257,7 +303,10 @@ async fn discover(
 
     for url in trackers {
         if refuse_cleartext_key && crate::tracker::carries_key_in_clear(url) {
-            debug!("[magnet] tracker {} skipped: its URL carries a key over plain http://", log_host(url));
+            debug!(
+                "[magnet] tracker {} skipped: its URL carries a key over plain http://",
+                log_host(url)
+            );
             continue;
         }
         let asked = if crate::tracker::udp::is_udp(url) {
@@ -271,13 +320,30 @@ async fn discover(
                 uploaded: 0,
                 event: crate::tracker::udp::event_code("started"),
                 ip: 0,
-                key: u32::from_str_radix(&crate::tracker::http::announce_key(peer_id, &info_hash), 16).unwrap_or(0),
+                key: u32::from_str_radix(
+                    &crate::tracker::http::announce_key(peer_id, &info_hash),
+                    16,
+                )
+                .unwrap_or(0),
                 num_want: 200,
                 port,
             };
             crate::tracker::udp::send_announce_on(&a, ip_mode, device, proxy).await
         } else if url.starts_with("http://") || url.starts_with("https://") {
-            crate::tracker::http::announce_on_mode(url, &info_hash, peer_id, port, 0, 0, UNKNOWN_LEFT, "started", device, proxy, ip_mode).await
+            crate::tracker::http::announce_on_mode(
+                url,
+                &info_hash,
+                peer_id,
+                port,
+                0,
+                0,
+                UNKNOWN_LEFT,
+                "started",
+                device,
+                proxy,
+                ip_mode,
+            )
+            .await
         } else {
             continue;
         };
@@ -374,7 +440,10 @@ mod tests {
         let jobs = Arc::new(MagnetJobs::default());
         jobs.map.lock().unwrap().insert(
             ih(1),
-            Job { state, started: Instant::now() - age },
+            Job {
+                state,
+                started: Instant::now() - age,
+            },
         );
         jobs
     }
@@ -427,7 +496,10 @@ mod tests {
         let jobs = jobs_with(JobState::Done(vec![0u8; 64]), Duration::from_secs(0));
         assert!(jobs.state_of(&ih(1)).is_some());
         jobs.forget(&ih(1));
-        assert!(jobs.state_of(&ih(1)).is_none(), "a collected job stops occupying memory");
+        assert!(
+            jobs.state_of(&ih(1)).is_none(),
+            "a collected job stops occupying memory"
+        );
     }
 
     #[test]
@@ -485,10 +557,16 @@ mod tests {
         if !cfg.resolved_bindings().is_empty() {
             return; // a default config that has a binding cannot exercise this
         }
-        assert!(jobs.start(ih(2), vec![], vec![], &cfg, None, None), "the job was accepted");
+        assert!(
+            jobs.start(ih(2), vec![], vec![], &cfg, None, None),
+            "the job was accepted"
+        );
         match jobs.state_of(&ih(2)) {
             Some(JobState::Failed(msg)) => {
-                assert!(msg.contains("binding"), "the reason names the binding: {msg}")
+                assert!(
+                    msg.contains("binding"),
+                    "the reason names the binding: {msg}"
+                )
             }
             other => panic!("expected a binding failure, got {other:?}"),
         }
@@ -504,7 +582,9 @@ mod tests {
         let flag = asked.clone();
         tokio::spawn(async move {
             loop {
-                let Ok((mut c, _)) = l.accept().await else { return };
+                let Ok((mut c, _)) = l.accept().await else {
+                    return;
+                };
                 flag.store(true, std::sync::atomic::Ordering::SeqCst);
                 let mut buf = [0u8; 2048];
                 let _ = c.read(&mut buf).await;
@@ -528,19 +608,31 @@ mod tests {
                 format!("http://127.0.0.1:{plain_port}/announce"),
             ];
             let cfg: crate::config::EngineConfig =
-                toml::from_str(&format!("announce_cleartext_passkey = \"{mode}\"")).expect("config");
-            assert!(!cfg.resolved_bindings().is_empty(), "the job needs a binding to run");
+                toml::from_str(&format!("announce_cleartext_passkey = \"{mode}\""))
+                    .expect("config");
+            assert!(
+                !cfg.resolved_bindings().is_empty(),
+                "the job needs a binding to run"
+            );
             let jobs = Arc::new(MagnetJobs::default());
             assert!(jobs.start(ih(7), trackers, vec![], &cfg, None, None));
-            let seen = |f: &std::sync::atomic::AtomicBool| f.load(std::sync::atomic::Ordering::SeqCst);
+            let seen =
+                |f: &std::sync::atomic::AtomicBool| f.load(std::sync::atomic::Ordering::SeqCst);
             for _ in 0..50 {
                 if seen(&plain) {
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
-            assert!(seen(&plain), "mode {mode:?}: a tracker without a key is announced to");
-            assert_eq!(seen(&keyed), keyed_is_contacted, "mode {mode:?}: the keyed http:// tracker");
+            assert!(
+                seen(&plain),
+                "mode {mode:?}: a tracker without a key is announced to"
+            );
+            assert_eq!(
+                seen(&keyed),
+                keyed_is_contacted,
+                "mode {mode:?}: the keyed http:// tracker"
+            );
             jobs.forget(&ih(7));
         }
     }
@@ -554,17 +646,22 @@ mod tests {
         let log = seen.clone();
         tokio::spawn(async move {
             loop {
-                let Ok((mut s, _)) = tcp.accept().await else { return };
+                let Ok((mut s, _)) = tcp.accept().await else {
+                    return;
+                };
                 let log = log.clone();
                 tokio::spawn(async move {
                     use tokio::io::AsyncReadExt;
                     let mut buf = [0u8; 20];
                     let n = tokio::time::timeout(Duration::from_secs(2), s.read(&mut buf)).await;
-                    log.lock().unwrap().push(matches!(n, Ok(Ok(20))) && buf == *b"\x13BitTorrent protocol");
+                    log.lock()
+                        .unwrap()
+                        .push(matches!(n, Ok(Ok(20))) && buf == *b"\x13BitTorrent protocol");
                 });
             }
         });
-        let root = std::env::temp_dir().join(format!("typhon-magnet-enc-{mode}-{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("typhon-magnet-enc-{mode}-{}", std::process::id()));
         let (data, resume) = (root.join("data"), root.join("resume"));
         std::fs::create_dir_all(&data).unwrap();
         std::fs::create_dir_all(&resume).unwrap();
@@ -574,7 +671,9 @@ mod tests {
             Arc::new(crate::disk::DiskManager::new(16)),
         ));
         mgr.policy().set_encryption(mode);
-        assert!(mgr.magnet().start(ih(9), vec![], vec![peer], &test_config(), None, None));
+        assert!(mgr
+            .magnet()
+            .start(ih(9), vec![], vec![peer], &test_config(), None, None));
         // The first round dials at once; the fake peer drops every connection
         // after reading it, so the legs follow one another quickly.
         for _ in 0..100 {
@@ -595,7 +694,10 @@ mod tests {
     async fn magnet_metadata_fetch_never_dials_plaintext_under_require() {
         let seen = magnet_openings("require").await;
         assert!(!seen.is_empty(), "the fetch dialled the peer");
-        assert!(!seen.contains(&true), "a plaintext handshake went out: {seen:?}");
+        assert!(
+            !seen.contains(&true),
+            "a plaintext handshake went out: {seen:?}"
+        );
     }
 
     /// Control: the default mode still opens in the clear first.

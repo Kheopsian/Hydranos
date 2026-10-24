@@ -61,7 +61,10 @@ pub fn write_edit(path: &Path, contents: &str) -> std::io::Result<()> {
     let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     if let Ok(old) = std::fs::read_to_string(&target) {
         if torrent_roots_changed(&old, contents) {
-            return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, ROOTS_REFUSED));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                ROOTS_REFUSED,
+            ));
         }
     }
     write_atomic(path, contents)
@@ -97,7 +100,10 @@ thread_local! {
 }
 
 fn temp_beside(target: &Path) -> PathBuf {
-    let mut name = target.file_name().map(|n| n.to_os_string()).unwrap_or_default();
+    let mut name = target
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_default();
     name.push(format!(".tmp-{}", std::process::id()));
     target.with_file_name(name)
 }
@@ -115,7 +121,11 @@ fn replace(target: &Path, contents: &str) -> Result<(), Failed> {
         // Born private when the old file was or will be, so there is no
         // moment at a wider mode; a new file otherwise gets what
         // `fs::write` would give it (0666 under the umask).
-        opts.mode(if existing.is_some() || crate::privfiles::enabled() { 0o600 } else { 0o666 });
+        opts.mode(if existing.is_some() || crate::privfiles::enabled() {
+            0o600
+        } else {
+            0o666
+        });
         let file = opts.open(&tmp).map_err(Failed::NoAtomic)?;
         // The file keeps its owner, as an in-place write kept it: a rewrite by
         // root of the user's file must not leave it root's, unreadable to the
@@ -126,7 +136,8 @@ fn replace(target: &Path, contents: &str) -> Result<(), Failed> {
             let owner = (old.uid(), old.gid());
             let differs = mine.map(|m| (m.uid(), m.gid()) != owner);
             let moved = match differs {
-                Ok(true) => std::os::unix::fs::fchown(&file, Some(owner.0), Some(owner.1)).map_err(Failed::NoAtomic),
+                Ok(true) => std::os::unix::fs::fchown(&file, Some(owner.0), Some(owner.1))
+                    .map_err(Failed::NoAtomic),
                 Ok(false) => Ok(()),
                 Err(e) => Err(e),
             };
@@ -192,7 +203,10 @@ mod tests {
         std::fs::write(&p, "old").unwrap();
         write_atomic(&p, "new").unwrap();
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "new");
-        let names: Vec<_> = std::fs::read_dir(&d).unwrap().map(|e| e.unwrap().file_name()).collect();
+        let names: Vec<_> = std::fs::read_dir(&d)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
         assert_eq!(names.len(), 1, "{names:?}");
         let _ = std::fs::remove_dir_all(&d);
     }
@@ -207,7 +221,10 @@ mod tests {
             std::fs::write(&p, "old").unwrap();
             std::fs::set_permissions(&p, std::fs::Permissions::from_mode(mode)).unwrap();
             write_atomic(&p, "new").unwrap();
-            assert_eq!(std::fs::metadata(&p).unwrap().permissions().mode() & 0o777, mode);
+            assert_eq!(
+                std::fs::metadata(&p).unwrap().permissions().mode() & 0o777,
+                mode
+            );
         }
         let _ = std::fs::remove_dir_all(&d);
     }
@@ -221,7 +238,10 @@ mod tests {
         std::fs::write(&real, "old").unwrap();
         std::os::unix::fs::symlink(&real, &link).unwrap();
         write_atomic(&link, "new").unwrap();
-        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert!(std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
         assert_eq!(std::fs::read_to_string(&real).unwrap(), "new");
         let _ = std::fs::remove_dir_all(&d);
     }
@@ -238,7 +258,10 @@ mod tests {
         FAIL_TEMP_WRITE.with(|c| c.set(false));
         assert!(r.is_err(), "the failure is reported");
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "old");
-        let names: Vec<_> = std::fs::read_dir(&d).unwrap().map(|e| e.unwrap().file_name()).collect();
+        let names: Vec<_> = std::fs::read_dir(&d)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
         assert_eq!(names.len(), 1, "{names:?}");
         let _ = std::fs::remove_dir_all(&d);
     }

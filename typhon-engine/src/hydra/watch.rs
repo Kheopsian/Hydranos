@@ -109,18 +109,35 @@ pub enum Outcome {
 
 /// Add one file, then move it where its outcome says.
 pub fn take(state: &AppState, f: &Folder, file: &Path) -> Outcome {
-    let name = file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let name = file
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let is_magnet = name.to_ascii_lowercase().ends_with(".magnet");
     let result = match std::fs::read(file) {
         Err(e) => Err(format!("cannot read: {e}")),
         Ok(bytes) if is_magnet => {
             let text = String::from_utf8_lossy(&bytes);
-            let link = text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("").to_string();
-            crate::magnets::request(state, &link, &f.category, "", "", f.paused, &f.engine).map(|_| ())
+            let link = text
+                .lines()
+                .map(str::trim)
+                .find(|l| !l.is_empty())
+                .unwrap_or("")
+                .to_string();
+            crate::magnets::request(state, &link, &f.category, "", "", f.paused, &f.engine)
+                .map(|_| ())
         }
-        Ok(bytes) => {
-            crate::api::add_torrent_bytes(state, &bytes, &f.category, "", "", f.paused, false, &f.engine).map(|_| ())
-        }
+        Ok(bytes) => crate::api::add_torrent_bytes(
+            state,
+            &bytes,
+            &f.category,
+            "",
+            "",
+            f.paused,
+            false,
+            &f.engine,
+        )
+        .map(|_| ()),
     };
     let outcome = match result {
         Ok(()) => Outcome::Added,
@@ -139,7 +156,10 @@ pub fn take(state: &AppState, f: &Folder, file: &Path) -> Outcome {
         Outcome::Refused(why) => {
             let bad = free_name(dir, &format!("{name}.invalid"));
             let _ = std::fs::rename(file, &bad);
-            let _ = std::fs::write(PathBuf::from(format!("{}.txt", bad.display())), format!("{why}\n"));
+            let _ = std::fs::write(
+                PathBuf::from(format!("{}.txt", bad.display())),
+                format!("{why}\n"),
+            );
         }
     }
     outcome
@@ -171,15 +191,23 @@ fn scan_one(state: &AppState, f: &Folder) {
         st.last_scan = now;
         scan_folder(state, f, &seen, &mut seen_next, &mut st);
         if let Ok(mut g) = SEEN.lock() {
-            g.get_or_insert_with(HashMap::new).insert(f.path.clone(), seen_next);
+            g.get_or_insert_with(HashMap::new)
+                .insert(f.path.clone(), seen_next);
         }
         if let Ok(mut g) = STATUS.lock() {
-            g.get_or_insert_with(HashMap::new).insert(f.path.clone(), st);
+            g.get_or_insert_with(HashMap::new)
+                .insert(f.path.clone(), st);
         }
     }
 }
 
-fn scan_folder(state: &AppState, f: &Folder, seen: &Seen, seen_next: &mut Seen, st: &mut FolderStatus) {
+fn scan_folder(
+    state: &AppState,
+    f: &Folder,
+    seen: &Seen,
+    seen_next: &mut Seen,
+    st: &mut FolderStatus,
+) {
     let entries = match std::fs::read_dir(&f.path) {
         Ok(e) => {
             st.error.clear();
@@ -194,7 +222,10 @@ fn scan_folder(state: &AppState, f: &Folder, seen: &Seen, seen_next: &mut Seen, 
     st.files_seen = 0;
     for entry in entries.flatten() {
         let path = entry.path();
-        let lower = path.file_name().map(|n| n.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+        let lower = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_default();
         if !(lower.ends_with(".torrent") || lower.ends_with(".magnet")) {
             continue;
         }
@@ -203,7 +234,10 @@ fn scan_folder(state: &AppState, f: &Folder, seen: &Seen, seen_next: &mut Seen, 
             continue;
         }
         st.files_seen += 1;
-        let sig = (meta.len(), meta.modified().unwrap_or(SystemTime::UNIX_EPOCH));
+        let sig = (
+            meta.len(),
+            meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+        );
         // New, or changed since the last scan: still being written.
         if seen.get(&path) != Some(&sig) {
             seen_next.insert(path, sig);
@@ -226,10 +260,19 @@ fn scan_folder(state: &AppState, f: &Folder, seen: &Seen, seen_next: &mut Seen, 
 }
 
 fn take_refused(file: &Path, why: &str) -> std::io::Result<()> {
-    let name = file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    let bad = free_name(file.parent().unwrap_or(Path::new(".")), &format!("{name}.invalid"));
+    let name = file
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let bad = free_name(
+        file.parent().unwrap_or(Path::new(".")),
+        &format!("{name}.invalid"),
+    );
     std::fs::rename(file, &bad)?;
-    std::fs::write(PathBuf::from(format!("{}.txt", bad.display())), format!("{why}\n"))
+    std::fs::write(
+        PathBuf::from(format!("{}.txt", bad.display())),
+        format!("{why}\n"),
+    )
 }
 
 /// Folders whose scan has not returned yet, and since when.
@@ -266,7 +309,10 @@ pub fn spawn(state: AppState) {
                 if let Some(since) = busy_since {
                     if since.elapsed() >= STUCK_AFTER {
                         if let Ok(mut g) = STATUS.lock() {
-                            let st = g.get_or_insert_with(HashMap::new).entry(f.path.clone()).or_default();
+                            let st = g
+                                .get_or_insert_with(HashMap::new)
+                                .entry(f.path.clone())
+                                .or_default();
                             st.error = format!(
                                 "no answer from this folder for {} s -- a network share that stopped responding? The other folders are still scanned",
                                 since.elapsed().as_secs()
@@ -294,11 +340,19 @@ pub fn spawn(state: AppState) {
 // ---------------------------------------------------------------------------
 
 fn unauthorised() -> Response {
-    (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "Invalid or missing API key"}))).into_response()
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(serde_json::json!({"error": "Invalid or missing API key"})),
+    )
+        .into_response()
 }
 
 fn listing(state: &AppState) -> serde_json::Value {
-    let status = STATUS.lock().ok().and_then(|g| g.clone()).unwrap_or_default();
+    let status = STATUS
+        .lock()
+        .ok()
+        .and_then(|g| g.clone())
+        .unwrap_or_default();
     let rows: Vec<serde_json::Value> = folders(state)
         .into_iter()
         .map(|f| {
@@ -309,7 +363,11 @@ fn listing(state: &AppState) -> serde_json::Value {
     serde_json::json!({"folders": rows, "scan_every_secs": SCAN_EVERY.as_secs()})
 }
 
-async fn get_route(State(state): State<AppState>, RawQuery(q): RawQuery, headers: HeaderMap) -> Response {
+async fn get_route(
+    State(state): State<AppState>,
+    RawQuery(q): RawQuery,
+    headers: HeaderMap,
+) -> Response {
     if !crate::api::authorised(&state, &headers, &q.unwrap_or_default()) {
         return unauthorised();
     }
@@ -319,11 +377,22 @@ async fn get_route(State(state): State<AppState>, RawQuery(q): RawQuery, headers
 /// Replace the whole list. Each folder is checked now -- an absolute path,
 /// a directory that exists, a category that exists -- so a typo is told at
 /// once rather than found as a folder that never picks anything up.
-async fn put_route(State(state): State<AppState>, RawQuery(q): RawQuery, headers: HeaderMap, body: String) -> Response {
+async fn put_route(
+    State(state): State<AppState>,
+    RawQuery(q): RawQuery,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
     if !crate::api::authorised(&state, &headers, &q.unwrap_or_default()) {
         return unauthorised();
     }
-    let bad = |m: String| (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": m}))).into_response();
+    let bad = |m: String| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": m})),
+        )
+            .into_response()
+    };
     let list: Vec<Folder> = match serde_json::from_str(&body) {
         Ok(l) => l,
         Err(e) => return bad(e.to_string()),
@@ -340,14 +409,25 @@ async fn put_route(State(state): State<AppState>, RawQuery(q): RawQuery, headers
             return bad(format!("{:?} is not a folder this node can see", f.path));
         }
         if f.category.is_empty() || !cats.iter().any(|c| *c == f.category) {
-            return bad(format!("{:?}: pick an existing category -- it decides the engine and the save path", f.category));
+            return bad(format!(
+                "{:?}: pick an existing category -- it decides the engine and the save path",
+                f.category
+            ));
         }
         if !f.engine.is_empty() && state.engines.get(&f.engine).is_none() {
             return bad(format!("no engine {:?}", f.engine));
         }
     }
     let json = serde_json::to_string(&list).unwrap_or_default();
-    if let Err(e) = state.store.lock().map_err(|_| "store lock".to_string()).and_then(|s| s.put_setting(SETTINGS_KEY, &json).map_err(|e| e.to_string())) {
+    if let Err(e) = state
+        .store
+        .lock()
+        .map_err(|_| "store lock".to_string())
+        .and_then(|s| {
+            s.put_setting(SETTINGS_KEY, &json)
+                .map_err(|e| e.to_string())
+        })
+    {
         return bad(e);
     }
     Json(listing(&state)).into_response()
@@ -370,7 +450,11 @@ mod tests {
     }
 
     fn torrent(name: &str) -> Vec<u8> {
-        let mut info = format!("d6:lengthi16384e4:name{}:{name}12:piece lengthi16384e6:pieces20:", name.len()).into_bytes();
+        let mut info = format!(
+            "d6:lengthi16384e4:name{}:{name}12:piece lengthi16384e6:pieces20:",
+            name.len()
+        )
+        .into_bytes();
         let mut piece = [0xEEu8; 20];
         piece[0] = name.as_bytes()[0];
         piece[1] = name.len() as u8;
@@ -393,8 +477,19 @@ mod tests {
     fn folder(s: &TestState, name: &str, category: &str) -> PathBuf {
         let dir = s.dir.join(name);
         std::fs::create_dir_all(&dir).unwrap();
-        let list = vec![Folder { path: dir.to_string_lossy().into(), category: category.into(), engine: String::new(), paused: true, enabled: true }];
-        s.state.store.lock().unwrap().put_setting(SETTINGS_KEY, &serde_json::to_string(&list).unwrap()).unwrap();
+        let list = vec![Folder {
+            path: dir.to_string_lossy().into(),
+            category: category.into(),
+            engine: String::new(),
+            paused: true,
+            enabled: true,
+        }];
+        s.state
+            .store
+            .lock()
+            .unwrap()
+            .put_setting(SETTINGS_KEY, &serde_json::to_string(&list).unwrap())
+            .unwrap();
         dir
     }
 
@@ -409,19 +504,31 @@ mod tests {
         std::fs::write(dir.join("one.torrent"), torrent("one")).unwrap();
 
         scan(&s.state);
-        assert!(dir.join("one.torrent").exists(), "seen once: not touched yet");
+        assert!(
+            dir.join("one.torrent").exists(),
+            "seen once: not touched yet"
+        );
         // Counted while it waits: "0 seen" is how an empty mountpoint shows.
-        let seen = STATUS.lock().unwrap().as_ref().unwrap()[&dir.to_string_lossy().to_string()].files_seen;
+        let seen =
+            STATUS.lock().unwrap().as_ref().unwrap()[&dir.to_string_lossy().to_string()].files_seen;
         assert_eq!(seen, 1, "the waiting file is counted");
         scan(&s.state);
         assert!(!dir.join("one.torrent").exists());
-        assert!(dir.join("added/one.torrent").exists(), "moved aside, not deleted");
+        assert!(
+            dir.join("added/one.torrent").exists(),
+            "moved aside, not deleted"
+        );
         let hash = typhon_engine::torrent::hex_encode(
-            &typhon_engine::torrent::metainfo::parse_torrent_bytes(&torrent("one")).unwrap().info_hash,
+            &typhon_engine::torrent::metainfo::parse_torrent_bytes(&torrent("one"))
+                .unwrap()
+                .info_hash,
         );
         let (engine, t) = crate::api::find_torrent(&s.state, &hash).expect("added");
         assert_eq!(engine, "hoard", "the category's engine");
-        assert!(t.is_paused.load(std::sync::atomic::Ordering::Relaxed), "paused, as the folder says");
+        assert!(
+            t.is_paused.load(std::sync::atomic::Ordering::Relaxed),
+            "paused, as the folder says"
+        );
     }
 
     /// A file still growing between two scans is not read.
@@ -460,7 +567,10 @@ mod tests {
         std::fs::write(dir.join("b.torrent"), torrent("dup")).unwrap();
         scan(&s.state);
         scan(&s.state);
-        assert!(dir.join("added/b.torrent").exists(), "already in the client: filed as added");
+        assert!(
+            dir.join("added/b.torrent").exists(),
+            "already in the client: filed as added"
+        );
         let st = STATUS.lock().unwrap().clone().unwrap();
         let fs = st.get(&dir.to_string_lossy().to_string()).unwrap();
         assert_eq!((fs.added, fs.refused), (2, 1));
@@ -477,7 +587,13 @@ mod tests {
         scan(&s.state);
         scan(&s.state);
         assert!(dir.join("added/x.magnet").exists());
-        let m = s.state.store.lock().unwrap().magnet("c9e15763f722f23e98a29decdfae341b98d53056").unwrap();
+        let m = s
+            .state
+            .store
+            .lock()
+            .unwrap()
+            .magnet("c9e15763f722f23e98a29decdfae341b98d53056")
+            .unwrap();
         assert_eq!(m.map(|m| m.category), Some("books".into()));
     }
 
@@ -500,7 +616,14 @@ mod tests {
         with_category(&s, "books");
         let dir = s.dir.join("real");
         std::fs::create_dir_all(&dir).unwrap();
-        let put = |body: serde_json::Value| put_route(State(s.state.clone()), RawQuery(None), keyed(KEY), body.to_string());
+        let put = |body: serde_json::Value| {
+            put_route(
+                State(s.state.clone()),
+                RawQuery(None),
+                keyed(KEY),
+                body.to_string(),
+            )
+        };
         let r = put(serde_json::json!([{"path": "relative", "category": "books"}])).await;
         assert_eq!(r.status(), StatusCode::BAD_REQUEST);
         let r = put(serde_json::json!([{"path": "/no/such/folder", "category": "books"}])).await;
@@ -510,6 +633,9 @@ mod tests {
         let r = put(serde_json::json!([{"path": dir, "category": "books"}])).await;
         assert!(r.status().is_success());
         let v = body_json(r).await;
-        assert_eq!(v["folders"][0]["folder"]["enabled"], true, "enabled unless said otherwise");
+        assert_eq!(
+            v["folders"][0]["folder"]["enabled"], true,
+            "enabled unless said otherwise"
+        );
     }
 }

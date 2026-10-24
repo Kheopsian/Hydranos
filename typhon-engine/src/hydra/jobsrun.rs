@@ -28,7 +28,17 @@ pub fn queue_graduation(
     save_path: &str,
     total_bytes: i64,
 ) -> Option<String> {
-    queue_graduation_allowing(state, hash, name, from_engine, to_engine, to_category, save_path, false, total_bytes)
+    queue_graduation_allowing(
+        state,
+        hash,
+        name,
+        from_engine,
+        to_engine,
+        to_category,
+        save_path,
+        false,
+        total_bytes,
+    )
 }
 
 /// `queue_graduation`, for an operator who agreed to break hardlinks.
@@ -63,7 +73,9 @@ pub fn queue_graduation_allowing(
     if store.job_pending_for("graduate", hash) || store.job_pending_for("move_data", hash) {
         return None;
     }
-    store.create_job("graduate", hash, &params, total_bytes).ok()
+    store
+        .create_job("graduate", hash, &params, total_bytes)
+        .ok()
 }
 
 pub fn spawn(state: AppState) {
@@ -75,7 +87,10 @@ pub fn spawn(state: AppState) {
             };
             let n = store.requeue_running_jobs();
             if n > 0 {
-                tracing::warn!(count = n, "jobs were running when the process last stopped; queued again");
+                tracing::warn!(
+                    count = n,
+                    "jobs were running when the process last stopped; queued again"
+                );
             }
         }
         loop {
@@ -144,7 +159,12 @@ fn graduation_files(
     // Below the save path, wherever each file was put.
     meta.disk_rels()
         .into_iter()
-        .map(|rel| (old_root.join(&rel), std::path::Path::new(dest_root).join(&rel)))
+        .map(|rel| {
+            (
+                old_root.join(&rel),
+                std::path::Path::new(dest_root).join(&rel),
+            )
+        })
         .collect()
 }
 
@@ -166,11 +186,30 @@ thread_local! {
 /// case: the whole point is to get the bytes off the race disk.
 fn graduate(state: &AppState, job: &crate::store::Job) -> Result<(), String> {
     let p: serde_json::Value = serde_json::from_str(&job.params).map_err(|e| e.to_string())?;
-    let from = p.get("from_engine").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let to = p.get("to_engine").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let category = p.get("to_category").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let dest_root = p.get("save_path").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let allow = p.get("allow_breaking_hardlinks").and_then(|v| v.as_bool()).unwrap_or(false);
+    let from = p
+        .get("from_engine")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let to = p
+        .get("to_engine")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let category = p
+        .get("to_category")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let dest_root = p
+        .get("save_path")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let allow = p
+        .get("allow_breaking_hardlinks")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     if to.is_empty() || dest_root.is_empty() {
         return Err("graduation needs a target engine and a save path".into());
     }
@@ -197,14 +236,19 @@ fn graduate(state: &AppState, job: &crate::store::Job) -> Result<(), String> {
     // with the files split over two disks and the record gone. The record now
     // rides in the job, written before the torrent leaves, and a job run again
     // finishes the move from it.
-    let carried: Option<typhon_engine::torrent::fastresume::ResumeData> =
-        p.get("record").and_then(|v| serde_json::from_value(v.clone()).ok());
+    let carried: Option<typhon_engine::torrent::fastresume::ResumeData> = p
+        .get("record")
+        .and_then(|v| serde_json::from_value(v.clone()).ok());
     let (original, old_root, files, resumed) = match src.manager.get(&ih) {
         Some(t) => {
             // A target that already holds this torrent can only refuse it at
             // the end, after every file was copied over and then copied back;
             // the drain queued it again each tick. Asked before anything stops.
-            if state.engines.get(&to).is_some_and(|d| d.manager.get(&ih).is_some()) {
+            if state
+                .engines
+                .get(&to)
+                .is_some_and(|d| d.manager.get(&ih).is_some())
+            {
                 return Err(format!("{to} already holds it; nothing was moved"));
             }
             // The same checks a move inside an engine makes, before anything
@@ -246,7 +290,9 @@ fn graduate(state: &AppState, job: &crate::store::Job) -> Result<(), String> {
                 };
                 store
                     .set_job_params(&job.id, &carrying.to_string())
-                    .map_err(|e| format!("cannot write down the torrent's record: {e}; nothing was moved"))?;
+                    .map_err(|e| {
+                        format!("cannot write down the torrent's record: {e}; nothing was moved")
+                    })?;
             }
             (original, old_root, files, false)
         }
@@ -291,9 +337,17 @@ fn graduate(state: &AppState, job: &crate::store::Job) -> Result<(), String> {
             }
         }
         match src.manager.import_state_bytes(&original, &metainfo) {
-            Ok(_) if problems.is_empty() => format!("{why}; rolled back, the torrent is in {from} as before"),
-            Ok(_) => format!("{why}; back in {from}, but these files did not move back: {}", problems.join("; ")),
-            Err(e) => format!("{why}; ROLLBACK FAILED, re-add it by hand at {}: {e}", old_root.display()),
+            Ok(_) if problems.is_empty() => {
+                format!("{why}; rolled back, the torrent is in {from} as before")
+            }
+            Ok(_) => format!(
+                "{why}; back in {from}, but these files did not move back: {}",
+                problems.join("; ")
+            ),
+            Err(e) => format!(
+                "{why}; ROLLBACK FAILED, re-add it by hand at {}: {e}",
+                old_root.display()
+            ),
         }
     };
 
@@ -313,7 +367,10 @@ fn graduate(state: &AppState, job: &crate::store::Job) -> Result<(), String> {
         // A graduation copies in place after the torrent left its engine,
         // so a copy of ours can be cut short: a prefix of the original.
         if resumed && to_path.exists() && !is_our_copy(from_path, to_path, false) {
-            return Err(put_back(&moved, format!("{} already holds another file", to_path.display())));
+            return Err(put_back(
+                &moved,
+                format!("{} already holds another file", to_path.display()),
+            ));
         }
         let size = std::fs::metadata(from_path).map(|m| m.len()).unwrap_or(0) as i64;
         // A cancel is honoured between two files, and undone like a failure.
@@ -328,7 +385,10 @@ fn graduate(state: &AppState, job: &crate::store::Job) -> Result<(), String> {
             return Err(put_back(&moved, "cancelled".to_string()));
         }
         if let Err(e) = crate::jobs::run_move_allowing(from_path, to_path, allow) {
-            return Err(put_back(&moved, format!("moving {}: {e}", from_path.display())));
+            return Err(put_back(
+                &moved,
+                format!("moving {}: {e}", from_path.display()),
+            ));
         }
         moved.push((from_path.clone(), to_path.clone()));
         done += size;
@@ -346,14 +406,23 @@ fn graduate(state: &AppState, job: &crate::store::Job) -> Result<(), String> {
     if !adopted {
         #[cfg(test)]
         if REFUSE_ADOPTION.with(|c| c.replace(false)) {
-            return Err(put_back(&moved, "the target engine refused it: refused by the test".into()));
+            return Err(put_back(
+                &moved,
+                "the target engine refused it: refused by the test".into(),
+            ));
         }
         if let Err(e) = dst.manager.import_state_bytes(&record, &metainfo) {
-            return Err(put_back(&moved, format!("the target engine refused it: {e}")));
+            return Err(put_back(
+                &moved,
+                format!("the target engine refused it: {e}"),
+            ));
         }
     }
     if dst.manager.get(&ih).is_none() {
-        return Err(put_back(&moved, "the target engine accepted it and does not hold it".into()));
+        return Err(put_back(
+            &moved,
+            "the target engine accepted it and does not hold it".into(),
+        ));
     }
     {
         let store = match state.store.lock() {
@@ -388,7 +457,10 @@ fn graduate(state: &AppState, job: &crate::store::Job) -> Result<(), String> {
             Ok(s) => s,
             Err(e) => e.into_inner(),
         };
-        crate::store::log_store("set_job_params", store.set_job_params(&job.id, &finished.to_string()));
+        crate::store::log_store(
+            "set_job_params",
+            store.set_job_params(&job.id, &finished.to_string()),
+        );
     }
     tracing::info!(hash = %hash, from = %from, to = %to, moved_bytes = done, seed_secs = seeded,
                    "graduated");
@@ -439,7 +511,10 @@ impl MovePlan {
     /// Why this move must not run at all, whatever the operator agrees to.
     pub fn refusal(&self) -> Option<(&'static str, String)> {
         if let Some(p) = &self.unsafe_path {
-            return Some(("unsafe_path", format!("the torrent names a file outside its folder ({p}); refusing to move it")));
+            return Some((
+                "unsafe_path",
+                format!("the torrent names a file outside its folder ({p}); refusing to move it"),
+            ));
         }
         if !self.shared_with.is_empty() {
             return Some(("shared", format!(
@@ -515,7 +590,8 @@ fn top_entry(t: &typhon_engine::torrent::meta::TorrentState) -> Option<std::ffi:
 /// Only plain names: no `..`, no root, no prefix, no `.`.
 fn is_plain_relative(p: &std::path::Path) -> bool {
     p.components().count() > 0
-        && p.components().all(|c| matches!(c, std::path::Component::Normal(_)))
+        && p.components()
+            .all(|c| matches!(c, std::path::Component::Normal(_)))
 }
 
 /// Plan moving `t`'s files to `new_root`, and find the torrents of any engine
@@ -592,8 +668,10 @@ fn scan_shared(
     // Compared by `path_key` (case-folded on Windows), answered with the
     // caller's own spelling of each path: the caller looks its files up in
     // what comes back.
-    let by_key: std::collections::HashMap<std::path::PathBuf, &std::path::PathBuf> =
-        mine.iter().map(|p| (crate::pathclaim::path_key(p), p)).collect();
+    let by_key: std::collections::HashMap<std::path::PathBuf, &std::path::PathBuf> = mine
+        .iter()
+        .map(|p| (crate::pathclaim::path_key(p), p))
+        .collect();
     let keys: std::collections::HashSet<std::path::PathBuf> = by_key.keys().cloned().collect();
     let mut hashes: Vec<String> = Vec::new();
     let mut files: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
@@ -603,10 +681,11 @@ fn scan_shared(
         if !hashes.contains(&h) {
             hashes.push(h);
         }
-        files.extend(
-            hit.into_iter()
-                .filter_map(|(p, _)| by_key.get(&crate::pathclaim::path_key(&p)).map(|m| (*m).clone())),
-        );
+        files.extend(hit.into_iter().filter_map(|(p, _)| {
+            by_key
+                .get(&crate::pathclaim::path_key(&p))
+                .map(|m| (*m).clone())
+        }));
     }
     (hashes, files)
 }
@@ -635,18 +714,28 @@ pub fn scan_claims(
     my_top: Option<&std::ffi::OsStr>,
     mine: &std::collections::HashSet<std::path::PathBuf>,
     skip: &(dyn Fn(&typhon_engine::torrent::meta::TorrentState) -> bool + Sync),
-) -> Vec<(Arc<typhon_engine::torrent::meta::TorrentState>, Vec<(std::path::PathBuf, u64)>)> {
+) -> Vec<(
+    Arc<typhon_engine::torrent::meta::TorrentState>,
+    Vec<(std::path::PathBuf, u64)>,
+)> {
     let my_root = match my_top {
         Some(t) => root.join(t),
         None => root.to_path_buf(),
     };
-    let exact: Vec<String> = my_root.ancestors().map(|a| a.to_string_lossy().into_owned()).collect();
+    let exact: Vec<String> = my_root
+        .ancestors()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
     let rows = {
         let store = match state.store.lock() {
             Ok(s) => s,
             Err(e) => e.into_inner(),
         };
-        store.rows_by_save_path(&exact, &my_root.to_string_lossy(), std::path::MAIN_SEPARATOR)
+        store.rows_by_save_path(
+            &exact,
+            &my_root.to_string_lossy(),
+            std::path::MAIN_SEPARATOR,
+        )
     };
     let rows = match rows {
         Ok(r) => r,
@@ -660,9 +749,15 @@ pub fn scan_claims(
     let mut out = Vec::new();
     let mut seen: std::collections::HashSet<(String, [u8; 20])> = std::collections::HashSet::new();
     for (hash, session) in rows {
-        let Some(engine) = state.engines.get(&session) else { continue };
-        let Some(ih) = crate::store::hex20(&hash) else { continue };
-        let Some(other) = engine.manager.get(&ih) else { continue };
+        let Some(engine) = state.engines.get(&session) else {
+            continue;
+        };
+        let Some(ih) = crate::store::hex20(&hash) else {
+            continue;
+        };
+        let Some(other) = engine.manager.get(&ih) else {
+            continue;
+        };
         if !seen.insert((session, ih)) {
             continue;
         }
@@ -711,7 +806,11 @@ fn claim_of(
         .map(|(p, len)| (r.join(p), len))
         .filter(|(p, _)| mine.contains(&crate::pathclaim::path_key(p)))
         .collect();
-    if hit.is_empty() { None } else { Some(hit) }
+    if hit.is_empty() {
+        None
+    } else {
+        Some(hit)
+    }
 }
 
 /// `scan_claims` by walking every torrent of every engine: the reference the
@@ -723,7 +822,10 @@ pub fn scan_claims_full(
     my_top: Option<&std::ffi::OsStr>,
     mine: &std::collections::HashSet<std::path::PathBuf>,
     skip: &(dyn Fn(&typhon_engine::torrent::meta::TorrentState) -> bool + Sync),
-) -> Vec<(Arc<typhon_engine::torrent::meta::TorrentState>, Vec<(std::path::PathBuf, u64)>)> {
+) -> Vec<(
+    Arc<typhon_engine::torrent::meta::TorrentState>,
+    Vec<(std::path::PathBuf, u64)>,
+)> {
     scan_claims_walk(state, root, my_top, mine, skip)
 }
 
@@ -735,12 +837,20 @@ fn scan_claims_walk(
     my_top: Option<&std::ffi::OsStr>,
     mine: &std::collections::HashSet<std::path::PathBuf>,
     skip: &(dyn Fn(&typhon_engine::torrent::meta::TorrentState) -> bool + Sync),
-) -> Vec<(Arc<typhon_engine::torrent::meta::TorrentState>, Vec<(std::path::PathBuf, u64)>)> {
-    let shared_by = |other: &typhon_engine::torrent::meta::TorrentState| claim_of(other, root, my_top, mine, skip);
+) -> Vec<(
+    Arc<typhon_engine::torrent::meta::TorrentState>,
+    Vec<(std::path::PathBuf, u64)>,
+)> {
+    let shared_by = |other: &typhon_engine::torrent::meta::TorrentState| {
+        claim_of(other, root, my_top, mine, skip)
+    };
     let pair = |o: &std::sync::Arc<typhon_engine::torrent::meta::TorrentState>| {
         shared_by(o).map(|files| (o.clone(), files))
     };
-    let mut out: Vec<(Arc<typhon_engine::torrent::meta::TorrentState>, Vec<(std::path::PathBuf, u64)>)> = Vec::new();
+    let mut out: Vec<(
+        Arc<typhon_engine::torrent::meta::TorrentState>,
+        Vec<(std::path::PathBuf, u64)>,
+    )> = Vec::new();
     // Over every torrent of every engine, in slices on their own threads: the
     // prefix test alone is a second per move at a million torrents, and a
     // move of a hundred torrents runs it a hundred times.
@@ -750,7 +860,12 @@ fn scan_claims_walk(
             .map(|n| n.get())
             .unwrap_or(1)
             .clamp(1, 16);
-        let found: Vec<Vec<(Arc<typhon_engine::torrent::meta::TorrentState>, Vec<(std::path::PathBuf, u64)>)>> = if threads == 1 || all.len() < SHARED_SCAN_PARALLEL_FROM {
+        let found: Vec<
+            Vec<(
+                Arc<typhon_engine::torrent::meta::TorrentState>,
+                Vec<(std::path::PathBuf, u64)>,
+            )>,
+        > = if threads == 1 || all.len() < SHARED_SCAN_PARALLEL_FROM {
             vec![all.iter().filter_map(pair).collect()]
         } else {
             let per = all.len().div_ceil(threads).max(1);
@@ -758,9 +873,14 @@ fn scan_claims_walk(
                 let pair = &pair;
                 let handles: Vec<_> = all
                     .chunks(per)
-                    .map(|slice| sc.spawn(move || slice.iter().filter_map(pair).collect::<Vec<_>>()))
+                    .map(|slice| {
+                        sc.spawn(move || slice.iter().filter_map(pair).collect::<Vec<_>>())
+                    })
                     .collect();
-                handles.into_iter().map(|h| h.join().expect("shared-file scan slice")).collect()
+                handles
+                    .into_iter()
+                    .map(|h| h.join().expect("shared-file scan slice"))
+                    .collect()
             })
         };
         out.extend(found.into_iter().flatten());
@@ -806,7 +926,14 @@ pub fn plan_move(
         .filter(|f| f.present && f.from != f.to && f.to.exists() && !same_file(&f.from, &f.to))
         .map(|f| f.to.display().to_string())
         .collect();
-    MovePlan { old_root, new_root: new_root.to_path_buf(), files, unsafe_path, shared_with: Vec::new(), occupied }
+    MovePlan {
+        old_root,
+        new_root: new_root.to_path_buf(),
+        files,
+        unsafe_path,
+        shared_with: Vec::new(),
+        occupied,
+    }
 }
 
 /// Two names of one file: renaming one onto the other loses nothing.
@@ -854,7 +981,9 @@ pub fn queue_move(
     if store.job_pending_for("move_data", hash) || store.job_pending_for("graduate", hash) {
         return None;
     }
-    store.create_job("move_data", hash, &params, total_bytes).ok()
+    store
+        .create_job("move_data", hash, &params, total_bytes)
+        .ok()
 }
 
 /// Put a torrent back where it was after a move that could not finish.
@@ -880,7 +1009,10 @@ fn roll_back(
         let _ = std::fs::remove_file(c);
     }
     if let Err(e) = engine.manager.import_state_bytes(original, metainfo) {
-        problems.push(format!("could not re-add it at {}: {e}", old_root.display()));
+        problems.push(format!(
+            "could not re-add it at {}: {e}",
+            old_root.display()
+        ));
     }
     if problems.is_empty() {
         "rolled back: the torrent is where it was".into()
@@ -912,7 +1044,10 @@ fn move_data(state: &AppState, job: &crate::store::Job) -> Result<(), String> {
     let p: serde_json::Value = serde_json::from_str(&job.params).map_err(|e| e.to_string())?;
     let s = |k: &str| p.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
     let (engine_id, category, save_path) = (s("engine"), s("category"), s("save_path"));
-    let allow = p.get("allow_breaking_hardlinks").and_then(|v| v.as_bool()).unwrap_or(false);
+    let allow = p
+        .get("allow_breaking_hardlinks")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     if engine_id.is_empty() || save_path.is_empty() {
         return Err("a move needs an engine and a save path".into());
     }
@@ -933,7 +1068,9 @@ fn move_data(state: &AppState, job: &crate::store::Job) -> Result<(), String> {
             Err(e) => e.into_inner(),
         };
         if let Some(r) = root {
-            store.set_save_path(&hash, r).map_err(|e| format!("the store refused the new save path: {e}"))?;
+            store
+                .set_save_path(&hash, r)
+                .map_err(|e| format!("the store refused the new save path: {e}"))?;
         }
         if !category.is_empty() {
             store
@@ -960,7 +1097,9 @@ fn move_data(state: &AppState, job: &crate::store::Job) -> Result<(), String> {
     let need = plan.copy_bytes();
     if let Some(free) = crate::jobs::free_space_near(&plan.new_root) {
         if free < need {
-            return Err(format!("{need} bytes to copy, {free} free on the target; nothing was moved"));
+            return Err(format!(
+                "{need} bytes to copy, {free} free on the target; nothing was moved"
+            ));
         }
     }
     // Without the metainfo nothing could re-add the torrent: find out now,
@@ -991,7 +1130,10 @@ fn move_data(state: &AppState, job: &crate::store::Job) -> Result<(), String> {
                 let _ = std::fs::remove_file(c);
             }
             let _ = std::fs::remove_file(&f.to);
-            return Err(format!("copying {}: {e}; the copies were removed, nothing moved", f.from.display()));
+            return Err(format!(
+                "copying {}: {e}; the copies were removed, nothing moved",
+                f.from.display()
+            ));
         }
         copied.push(f.to.clone());
         done += f.size as i64;
@@ -1007,7 +1149,9 @@ fn move_data(state: &AppState, job: &crate::store::Job) -> Result<(), String> {
             for c in &copied {
                 let _ = std::fs::remove_file(c);
             }
-            return Err("the engine no longer holds it; the copies were removed, nothing moved".into());
+            return Err(
+                "the engine no longer holds it; the copies were removed, nothing moved".into(),
+            );
         }
     };
     // Written down before it leaves the engine: a process stopped between
@@ -1017,13 +1161,17 @@ fn move_data(state: &AppState, job: &crate::store::Job) -> Result<(), String> {
         for c in &copied {
             let _ = std::fs::remove_file(c);
         }
-        return Err(format!("cannot write down the torrent's record: {e}; the copies were removed, nothing moved"));
+        return Err(format!(
+            "cannot write down the torrent's record: {e}; the copies were removed, nothing moved"
+        ));
     }
     if let Err(e) = engine.manager.remove_torrent(&ih, true) {
         for c in &copied {
             let _ = std::fs::remove_file(c);
         }
-        return Err(format!("the engine refused to release it: {e}; nothing moved"));
+        return Err(format!(
+            "the engine refused to release it: {e}; nothing moved"
+        ));
     }
     engine.announce_cache.forget(&hash);
     #[cfg(test)]
@@ -1033,12 +1181,11 @@ fn move_data(state: &AppState, job: &crate::store::Job) -> Result<(), String> {
 
     let mut renamed: Vec<(std::path::PathBuf, std::path::PathBuf)> = Vec::new();
     for f in plan.files.iter().filter(|f| f.present && f.rename) {
-        let r = f
-            .to
-            .parent()
-            .map(std::fs::create_dir_all)
-            .unwrap_or(Ok(()))
-            .and_then(|_| std::fs::rename(&f.from, &f.to));
+        let r =
+            f.to.parent()
+                .map(std::fs::create_dir_all)
+                .unwrap_or(Ok(()))
+                .and_then(|_| std::fs::rename(&f.from, &f.to));
         if let Err(e) = r {
             let undo = roll_back(engine, &metainfo, &original, &renamed, &copied);
             return Err(format!("renaming {}: {e}; {undo}", f.from.display()));
@@ -1072,7 +1219,9 @@ fn move_data(state: &AppState, job: &crate::store::Job) -> Result<(), String> {
     prune_empty_dirs(&plan);
     let _ = set_carried_record(state, job, &p, None);
     if let Err(why) = labels {
-        return Err(format!("{why}; the torrent is at {new_root} in the engine, run the job again to record it"));
+        return Err(format!(
+            "{why}; the torrent is at {new_root} in the engine, run the job again to record it"
+        ));
     }
     tracing::info!(hash = %hash, engine = %engine_id, from = %plan.old_root.display(),
                    to = %new_root, copied_bytes = need, "moved");
@@ -1092,7 +1241,10 @@ fn set_carried_record(
     };
     match record {
         Some(rd) => {
-            m.insert("record".into(), serde_json::to_value(rd).map_err(|e| e.to_string())?);
+            m.insert(
+                "record".into(),
+                serde_json::to_value(rd).map_err(|e| e.to_string())?,
+            );
         }
         None => {
             m.remove("record");
@@ -1102,7 +1254,9 @@ fn set_carried_record(
         Ok(s) => s,
         Err(e) => e.into_inner(),
     };
-    store.set_job_params(&job.id, &params.to_string()).map_err(|e| e.to_string())
+    store
+        .set_job_params(&job.id, &params.to_string())
+        .map_err(|e| e.to_string())
 }
 
 /// A move stopped after its torrent left the engine: put each file where
@@ -1143,21 +1297,31 @@ fn finish_interrupted_move(
     // is somebody else's, and so is any other content. Only a whole copy lets
     // the original go; anything else gives the move up, with every file back
     // where it was and the torrent back in its engine there.
-    if let Some((_, to)) = files
-        .iter()
-        .find(|(from, to)| from != to && from.exists() && to.exists() && !is_our_copy(from, to, true))
-    {
+    if let Some((_, to)) = files.iter().find(|(from, to)| {
+        from != to && from.exists() && to.exists() && !is_our_copy(from, to, true)
+    }) {
         let undo = undo_interrupted_move(engine, &files, &original, &metainfo);
-        return Err(format!("{} already holds another file; {undo}", to.display()));
+        return Err(format!(
+            "{} already holds another file; {undo}",
+            to.display()
+        ));
     }
     // ⭐ A file at neither place is skipped only if the torrent never had
     // data in it -- not downloaded, or not selected. One the record says held
     // data has been lost while the job was stopped: finishing would hand the
     // engine a torrent short of it with nothing said. The move is given up,
     // nothing deleted, so the loss is seen where it happened.
-    if let Some((_, (_, (from, to)))) = meta.files.iter().zip(&files).enumerate().find(|(i, (f, (from, to)))| {
-        !from.exists() && !to.exists() && record_had_data(&original, meta.piece_length, meta.total_size, *i, f)
-    }) {
+    if let Some((_, (_, (from, to)))) =
+        meta.files
+            .iter()
+            .zip(&files)
+            .enumerate()
+            .find(|(i, (f, (from, to)))| {
+                !from.exists()
+                    && !to.exists()
+                    && record_had_data(&original, meta.piece_length, meta.total_size, *i, f)
+            })
+    {
         let undo = undo_interrupted_move(engine, &files, &original, &metainfo);
         return Err(format!(
             "{} is lost: the torrent had data in it, and it is neither there nor at {}; {undo}",
@@ -1191,7 +1355,9 @@ fn finish_interrupted_move(
             Ok(s) => s,
             Err(e) => e.into_inner(),
         };
-        store.set_save_path(&hash, save_path).map_err(|e| format!("the store refused the new save path: {e}"))?;
+        store
+            .set_save_path(&hash, save_path)
+            .map_err(|e| format!("the store refused the new save path: {e}"))?;
         if !category.is_empty() {
             store
                 .set_category_in(&hash, &engine.id, category)
@@ -1232,13 +1398,24 @@ fn record_had_data(
     if hex.len() % 2 != 0 || !hex.iter().all(u8::is_ascii_hexdigit) {
         return false;
     }
-    let selected = record.download_order.as_ref().is_none_or(|o| o.file_priority(index) != 0);
+    let selected = record
+        .download_order
+        .as_ref()
+        .is_none_or(|o| o.file_priority(index) != 0);
     let pl = u64::from(piece_length);
     let end = file.offset + file.length;
     // The pieces that overlap the file, or only those wholly inside it; the
     // torrent's last piece is short and ends where the stream does.
-    let first = if selected { file.offset / pl } else { file.offset.div_ceil(pl) };
-    let past = if selected || end == total_size { end.div_ceil(pl) } else { end / pl };
+    let first = if selected {
+        file.offset / pl
+    } else {
+        file.offset.div_ceil(pl)
+    };
+    let past = if selected || end == total_size {
+        end.div_ceil(pl)
+    } else {
+        end / pl
+    };
     // One hex digit is four pieces, the first in its high bit.
     (first..past).any(|i| {
         record.seed_mode
@@ -1270,7 +1447,10 @@ fn is_our_copy(from: &std::path::Path, to: &std::path::Path, whole: bool) -> boo
     let (mut ba, mut bb) = (vec![0u8; 1 << 20], vec![0u8; 1 << 20]);
     while left > 0 {
         let n = left.min(ba.len() as u64) as usize;
-        if fa.read_exact(&mut ba[..n]).is_err() || fb.read_exact(&mut bb[..n]).is_err() || ba[..n] != bb[..n] {
+        if fa.read_exact(&mut ba[..n]).is_err()
+            || fb.read_exact(&mut bb[..n]).is_err()
+            || ba[..n] != bb[..n]
+        {
             return false;
         }
         left -= n as u64;
@@ -1295,15 +1475,25 @@ fn undo_interrupted_move(
             if let Err(e) = crate::jobs::run_move_allowing(to, from, true) {
                 problems.push(format!("could not put {} back: {e}", from.display()));
             }
-        } else if from.exists() && to.exists() && is_our_copy(from, to, true) && !same_file(from, to) {
+        } else if from.exists()
+            && to.exists()
+            && is_our_copy(from, to, true)
+            && !same_file(from, to)
+        {
             let _ = std::fs::remove_file(to);
         }
     }
     if let Err(e) = engine.manager.import_state_bytes(original, metainfo) {
-        problems.push(format!("could not re-add it at {}: {e}", original.save_path));
+        problems.push(format!(
+            "could not re-add it at {}: {e}",
+            original.save_path
+        ));
     }
     if problems.is_empty() {
-        format!("the move was given up; the torrent is back at {}", original.save_path)
+        format!(
+            "the move was given up; the torrent is back at {}",
+            original.save_path
+        )
     } else {
         format!("ROLLBACK INCOMPLETE: {}", problems.join("; "))
     }
@@ -1353,7 +1543,14 @@ mod graduate_tests {
         std::fs::create_dir_all(&src).unwrap();
         std::fs::write(src.join("grad"), vec![7u8; 16384]).unwrap();
         let (hash, _) = crate::api::add_torrent_bytes(
-            &s.state, &torrent_bytes("grad"), "", &src.display().to_string(), "", true, true, "race",
+            &s.state,
+            &torrent_bytes("grad"),
+            "",
+            &src.display().to_string(),
+            "",
+            true,
+            true,
+            "race",
         )
         .expect("added");
         (s, hash, src, dst)
@@ -1403,14 +1600,29 @@ mod graduate_tests {
         let (s, hash, src, dst) = setup("grad-ok");
         let ih = typhon_engine::torrent::hex_decode(&hash).unwrap();
         let race = s.state.engines.get("race").unwrap();
-        race.manager.set_trackers(&ih, vec![vec!["https://edited.example/announce".into()]]).unwrap();
+        race.manager
+            .set_trackers(&ih, vec![vec!["https://edited.example/announce".into()]])
+            .unwrap();
 
         graduate(&s.state, &job(&hash, &dst)).expect("graduated");
 
         assert!(race.manager.get(&ih).is_none());
-        let t = s.state.engines.get("hoard").unwrap().manager.get(&ih).expect("in hoard");
-        assert_eq!(*t.live_trackers.read(), vec![vec!["https://edited.example/announce".to_string()]]);
-        assert!(t.is_paused.load(std::sync::atomic::Ordering::Relaxed), "a stopped torrent stays stopped");
+        let t = s
+            .state
+            .engines
+            .get("hoard")
+            .unwrap()
+            .manager
+            .get(&ih)
+            .expect("in hoard");
+        assert_eq!(
+            *t.live_trackers.read(),
+            vec![vec!["https://edited.example/announce".to_string()]]
+        );
+        assert!(
+            t.is_paused.load(std::sync::atomic::Ordering::Relaxed),
+            "a stopped torrent stays stopped"
+        );
         assert!(dst.join("grad").exists() && !src.join("grad").exists());
     }
 
@@ -1429,10 +1641,20 @@ mod graduate_tests {
         let blob = torrent_bytes("grad");
         let root = src.display().to_string();
         let race = s.state.engines.get("race").unwrap();
-        let (ih, _) = race.manager.add_torrent_bytes(&blob, &root, true, false).expect("added");
+        let (ih, _) = race
+            .manager
+            .add_torrent_bytes(&blob, &root, true, false)
+            .expect("added");
         let hash = typhon_engine::torrent::hex_encode(&ih);
-        s.state.store.lock().unwrap().insert_torrent(&hash, "race", &blob, &root, "", 0.0, true, "").unwrap();
-        race.manager.set_trackers(&ih, vec![vec!["https://edited.example/announce".into()]]).unwrap();
+        s.state
+            .store
+            .lock()
+            .unwrap()
+            .insert_torrent(&hash, "race", &blob, &root, "", 0.0, true, "")
+            .unwrap();
+        race.manager
+            .set_trackers(&ih, vec![vec!["https://edited.example/announce".into()]])
+            .unwrap();
         race.manager.get(&ih).unwrap().restore_lifetime(5_000, 700);
 
         let mut j = job(&hash, &dst);
@@ -1444,10 +1666,22 @@ mod graduate_tests {
         move_data(&s.state, &j).expect("moved");
 
         let t = race.manager.get(&ih).expect("still in race");
-        assert!(!t.seed_mode, "an incomplete torrent is not made a seed by moving it");
-        assert_eq!(*t.live_trackers.read(), vec![vec!["https://edited.example/announce".to_string()]]);
-        assert!(t.is_paused.load(std::sync::atomic::Ordering::Relaxed), "a stopped torrent stays stopped");
-        assert_eq!(t.total_uploaded.load(std::sync::atomic::Ordering::Relaxed), 5_000);
+        assert!(
+            !t.seed_mode,
+            "an incomplete torrent is not made a seed by moving it"
+        );
+        assert_eq!(
+            *t.live_trackers.read(),
+            vec![vec!["https://edited.example/announce".to_string()]]
+        );
+        assert!(
+            t.is_paused.load(std::sync::atomic::Ordering::Relaxed),
+            "a stopped torrent stays stopped"
+        );
+        assert_eq!(
+            t.total_uploaded.load(std::sync::atomic::Ordering::Relaxed),
+            5_000
+        );
         assert_eq!(*t.save_path.read(), dst);
         assert!(dst.join("grad").exists() && !src.join("grad").exists());
     }
@@ -1465,7 +1699,10 @@ mod graduate_tests {
         let blob = torrent_bytes("grad");
         let root = src.display().to_string();
         let race = s.state.engines.get("race").unwrap();
-        let (ih, _) = race.manager.add_torrent_bytes(&blob, &root, true, false).expect("added");
+        let (ih, _) = race
+            .manager
+            .add_torrent_bytes(&blob, &root, true, false)
+            .expect("added");
         let hash = typhon_engine::torrent::hex_encode(&ih);
         race.manager.get(&ih).unwrap().restore_lifetime(5_000, 700);
         let params = serde_json::json!({
@@ -1474,8 +1711,12 @@ mod graduate_tests {
         .to_string();
         let running = {
             let store = s.state.store.lock().unwrap();
-            store.insert_torrent(&hash, "race", &blob, &root, "", 0.0, true, "").unwrap();
-            store.create_job("move_data", &hash, &params, 16384).unwrap();
+            store
+                .insert_torrent(&hash, "race", &blob, &root, "", 0.0, true, "")
+                .unwrap();
+            store
+                .create_job("move_data", &hash, &params, 16384)
+                .unwrap();
             store.claim_next_job().expect("claimed")
         };
         STOP_AFTER_LEAVING_SOURCE.with(|c| c.set(true));
@@ -1490,7 +1731,10 @@ mod graduate_tests {
         move_data(&s.state, &again).expect("finished");
         let t = race.manager.get(&ih).expect("back in race");
         assert_eq!(*t.save_path.read(), dst);
-        assert_eq!(t.total_uploaded.load(std::sync::atomic::Ordering::Relaxed), 5_000);
+        assert_eq!(
+            t.total_uploaded.load(std::sync::atomic::Ordering::Relaxed),
+            5_000
+        );
         assert!(dst.join("grad").exists() && !src.join("grad").exists());
     }
 
@@ -1509,7 +1753,10 @@ mod graduate_tests {
         let blob = torrent_bytes("grad");
         let root = src.display().to_string();
         let race = s.state.engines.get("race").unwrap();
-        let (ih, _) = race.manager.add_torrent_bytes(&blob, &root, true, false).expect("added");
+        let (ih, _) = race
+            .manager
+            .add_torrent_bytes(&blob, &root, true, false)
+            .expect("added");
         let hash = typhon_engine::torrent::hex_encode(&ih);
         let params = serde_json::json!({
             "engine": "race", "category": "", "save_path": dst.display().to_string(),
@@ -1517,8 +1764,12 @@ mod graduate_tests {
         .to_string();
         let running = {
             let store = s.state.store.lock().unwrap();
-            store.insert_torrent(&hash, "race", &blob, &root, "", 0.0, true, "").unwrap();
-            store.create_job("move_data", &hash, &params, 16384).unwrap();
+            store
+                .insert_torrent(&hash, "race", &blob, &root, "", 0.0, true, "")
+                .unwrap();
+            store
+                .create_job("move_data", &hash, &params, 16384)
+                .unwrap();
             store.claim_next_job().expect("claimed")
         };
         s.state.store.lock().unwrap().execute_batch_for_tests(
@@ -1529,10 +1780,17 @@ mod graduate_tests {
         let err = move_data(&s.state, &running).expect_err("the store refused the new place");
         let t = race.manager.get(&ih).expect("the engine still holds it");
         assert_eq!(*t.save_path.read(), dst, "{err}");
-        assert!(dst.join("grad").exists(), "the place the engine serves keeps its data: {err}");
+        assert!(
+            dst.join("grad").exists(),
+            "the place the engine serves keeps its data: {err}"
+        );
         assert!(err.contains("store"), "{err}");
 
-        s.state.store.lock().unwrap().execute_batch_for_tests("DROP TRIGGER refuse_move;");
+        s.state
+            .store
+            .lock()
+            .unwrap()
+            .execute_batch_for_tests("DROP TRIGGER refuse_move;");
         let again = {
             let store = s.state.store.lock().unwrap();
             store.requeue_running_jobs();
@@ -1561,7 +1819,10 @@ mod graduate_tests {
             let blob = torrent_bytes("grad");
             let root = src.display().to_string();
             let race = s.state.engines.get("race").unwrap();
-            let (ih, _) = race.manager.add_torrent_bytes(&blob, &root, true, false).expect("added");
+            let (ih, _) = race
+                .manager
+                .add_torrent_bytes(&blob, &root, true, false)
+                .expect("added");
             let hash = typhon_engine::torrent::hex_encode(&ih);
             let params = serde_json::json!({
                 "engine": "race", "category": asked, "save_path": dst.display().to_string(),
@@ -1569,8 +1830,12 @@ mod graduate_tests {
             .to_string();
             let running = {
                 let store = s.state.store.lock().unwrap();
-                store.insert_torrent(&hash, "race", &blob, &root, "old", 0.0, true, "").unwrap();
-                store.create_job("move_data", &hash, &params, 16384).unwrap();
+                store
+                    .insert_torrent(&hash, "race", &blob, &root, "old", 0.0, true, "")
+                    .unwrap();
+                store
+                    .create_job("move_data", &hash, &params, 16384)
+                    .unwrap();
                 store.claim_next_job().expect("claimed")
             };
             STOP_AFTER_LEAVING_SOURCE.with(|c| c.set(true));
@@ -1589,7 +1854,10 @@ mod graduate_tests {
                 Some(expected),
                 "category after a resumed move asking for {asked:?}"
             );
-            assert_eq!(store.save_path_of(&hash).as_deref(), Some(dst.display().to_string().as_str()));
+            assert_eq!(
+                store.save_path_of(&hash).as_deref(),
+                Some(dst.display().to_string().as_str())
+            );
         }
     }
 
@@ -1604,10 +1872,20 @@ mod graduate_tests {
 
         let err = graduate(&s.state, &again).expect_err("given up");
         assert!(err.contains("already holds another file"), "{err}");
-        assert_eq!(std::fs::read(dst.join("grad")).unwrap(), b"somebody else's grad");
+        assert_eq!(
+            std::fs::read(dst.join("grad")).unwrap(),
+            b"somebody else's grad"
+        );
         assert_eq!(std::fs::read(src.join("grad")).unwrap(), vec![7u8; 16384]);
         let ih = typhon_engine::torrent::hex_decode(&hash).unwrap();
-        let back = s.state.engines.get("race").unwrap().manager.get(&ih).expect("back in race");
+        let back = s
+            .state
+            .engines
+            .get("race")
+            .unwrap()
+            .manager
+            .get(&ih)
+            .expect("back in race");
         assert_eq!(*back.save_path.read(), src);
     }
 
@@ -1636,7 +1914,10 @@ mod graduate_tests {
         let blob = torrent_bytes("grad");
         let root = src.display().to_string();
         let race = s.state.engines.get("race").unwrap();
-        let (ih, _) = race.manager.add_torrent_bytes(&blob, &root, true, false).expect("added");
+        let (ih, _) = race
+            .manager
+            .add_torrent_bytes(&blob, &root, true, false)
+            .expect("added");
         let hash = typhon_engine::torrent::hex_encode(&ih);
         let params = serde_json::json!({
             "engine": "race", "category": "", "save_path": dst.display().to_string(),
@@ -1644,8 +1925,12 @@ mod graduate_tests {
         .to_string();
         let running = {
             let store = s.state.store.lock().unwrap();
-            store.insert_torrent(&hash, "race", &blob, &root, "", 0.0, true, "").unwrap();
-            store.create_job("move_data", &hash, &params, 16384).unwrap();
+            store
+                .insert_torrent(&hash, "race", &blob, &root, "", 0.0, true, "")
+                .unwrap();
+            store
+                .create_job("move_data", &hash, &params, 16384)
+                .unwrap();
             store.claim_next_job().expect("claimed")
         };
         STOP_AFTER_LEAVING_SOURCE.with(|c| c.set(true));
@@ -1660,8 +1945,16 @@ mod graduate_tests {
 
         let err = move_data(&s.state, &again).expect_err("given up");
         assert!(err.contains("already holds another file"), "{err}");
-        assert_eq!(std::fs::read(src.join("grad")).unwrap(), vec![7u8; 16384], "the original is kept");
-        assert_eq!(std::fs::read(dst.join("grad")).unwrap(), foreign, "and so is the other file");
+        assert_eq!(
+            std::fs::read(src.join("grad")).unwrap(),
+            vec![7u8; 16384],
+            "the original is kept"
+        );
+        assert_eq!(
+            std::fs::read(dst.join("grad")).unwrap(),
+            foreign,
+            "and so is the other file"
+        );
         let t = race.manager.get(&ih).expect("back in race");
         assert_eq!(*t.save_path.read(), src);
     }
@@ -1676,15 +1969,35 @@ mod graduate_tests {
 
         let err = graduate(&s.state, &job(&hash, &dst)).expect_err("refused");
         assert!(err.contains("already exist"), "{err}");
-        assert_eq!(std::fs::read(dst.join("grad")).unwrap(), b"somebody else's grad");
+        assert_eq!(
+            std::fs::read(dst.join("grad")).unwrap(),
+            b"somebody else's grad"
+        );
         assert!(src.join("grad").exists());
         let ih = typhon_engine::torrent::hex_decode(&hash).unwrap();
-        assert!(s.state.engines.get("race").unwrap().manager.get(&ih).is_some(), "still in race");
+        assert!(
+            s.state
+                .engines
+                .get("race")
+                .unwrap()
+                .manager
+                .get(&ih)
+                .is_some(),
+            "still in race"
+        );
     }
 
     /// A graduation stopped right after its torrent left the source engine,
     /// then the process back up: its job is queued again and claimed.
-    fn interrupted(tag: &str) -> (TestState, String, std::path::PathBuf, std::path::PathBuf, crate::store::Job) {
+    fn interrupted(
+        tag: &str,
+    ) -> (
+        TestState,
+        String,
+        std::path::PathBuf,
+        std::path::PathBuf,
+        crate::store::Job,
+    ) {
         let (s, hash, src, dst) = setup(tag);
         let params = job(&hash, &dst).params;
         let running = {
@@ -1696,23 +2009,56 @@ mod graduate_tests {
         graduate(&s.state, &running).expect_err("stopped where a crash would");
         let again = {
             let store = s.state.store.lock().unwrap();
-            assert_eq!(store.requeue_running_jobs(), 1, "the restart queues it again");
+            assert_eq!(
+                store.requeue_running_jobs(),
+                1,
+                "the restart queues it again"
+            );
             store.claim_next_job().expect("claimed again")
         };
         let ih = typhon_engine::torrent::hex_decode(&hash).unwrap();
-        assert!(s.state.engines.get("race").unwrap().manager.get(&ih).is_none());
-        assert!(s.state.engines.get("hoard").unwrap().manager.get(&ih).is_none(), "in neither engine");
+        assert!(s
+            .state
+            .engines
+            .get("race")
+            .unwrap()
+            .manager
+            .get(&ih)
+            .is_none());
+        assert!(
+            s.state
+                .engines
+                .get("hoard")
+                .unwrap()
+                .manager
+                .get(&ih)
+                .is_none(),
+            "in neither engine"
+        );
         (s, hash, src, dst, again)
     }
 
     fn graduated_to_hoard(s: &TestState, hash: &str, dst: &std::path::Path) {
         let ih = typhon_engine::torrent::hex_decode(hash).unwrap();
-        let t = s.state.engines.get("hoard").unwrap().manager.get(&ih).expect("in hoard");
+        let t = s
+            .state
+            .engines
+            .get("hoard")
+            .unwrap()
+            .manager
+            .get(&ih)
+            .expect("in hoard");
         assert_eq!(*t.save_path.read(), dst);
-        assert!(t.is_paused.load(std::sync::atomic::Ordering::Relaxed), "a stopped torrent stays stopped");
+        assert!(
+            t.is_paused.load(std::sync::atomic::Ordering::Relaxed),
+            "a stopped torrent stays stopped"
+        );
         let store = s.state.store.lock().unwrap();
         assert_eq!(store.sessions_of(hash), vec!["hoard".to_string()]);
-        assert!(store.torrent_blob(hash).unwrap().is_some(), "with its metainfo");
+        assert!(
+            store.torrent_blob(hash).unwrap().is_some(),
+            "with its metainfo"
+        );
     }
 
     /// The data of a renamed file sits under its new name: a graduation
@@ -1724,7 +2070,9 @@ mod graduate_tests {
         let ih = typhon_engine::torrent::hex_decode(&hash).unwrap();
         let race = s.state.engines.get("race").unwrap();
         std::fs::rename(src.join("grad"), src.join("renamed")).unwrap();
-        race.manager.rename_file(&ih, "grad", "renamed").expect("renamed");
+        race.manager
+            .rename_file(&ih, "grad", "renamed")
+            .expect("renamed");
         let params = job(&hash, &dst).params;
         let running = {
             let store = s.state.store.lock().unwrap();
@@ -1739,10 +2087,24 @@ mod graduate_tests {
             store.claim_next_job().expect("claimed again")
         };
         graduate(&s.state, &again).expect("finished");
-        assert!(dst.join("renamed").exists(), "the renamed file went with the torrent");
+        assert!(
+            dst.join("renamed").exists(),
+            "the renamed file went with the torrent"
+        );
         assert!(!src.join("renamed").exists());
-        let t = s.state.engines.get("hoard").unwrap().manager.get(&ih).expect("in hoard");
-        assert_eq!(t.meta.disk_rel(0), std::path::PathBuf::from("renamed"), "and the torrent still reads it by that name");
+        let t = s
+            .state
+            .engines
+            .get("hoard")
+            .unwrap()
+            .manager
+            .get(&ih)
+            .expect("in hoard");
+        assert_eq!(
+            t.meta.disk_rel(0),
+            std::path::PathBuf::from("renamed"),
+            "and the torrent still reads it by that name"
+        );
     }
 
     /// ⭐ Stopped between leaving its engine and reaching the other -- a kill,
@@ -1781,9 +2143,23 @@ mod graduate_tests {
         assert!(err.contains("rolled back"), "{err}");
         assert!(src.join("grad").exists(), "the file came back");
         assert!(!dst.join("grad").exists());
-        let back = s.state.engines.get("race").unwrap().manager.get(&ih).expect("back in race");
+        let back = s
+            .state
+            .engines
+            .get("race")
+            .unwrap()
+            .manager
+            .get(&ih)
+            .expect("back in race");
         assert_eq!(*back.save_path.read(), src);
-        assert!(s.state.engines.get("hoard").unwrap().manager.get(&ih).is_none());
+        assert!(s
+            .state
+            .engines
+            .get("hoard")
+            .unwrap()
+            .manager
+            .get(&ih)
+            .is_none());
     }
 
     /// A target engine whose state store refuses the record refuses the
@@ -1802,9 +2178,23 @@ mod graduate_tests {
         assert!(err.contains("rolled back"), "{err}");
         assert!(src.join("grad").exists(), "the file came back");
         assert!(!dst.join("grad").exists());
-        let back = s.state.engines.get("race").unwrap().manager.get(&ih).expect("back in race");
+        let back = s
+            .state
+            .engines
+            .get("race")
+            .unwrap()
+            .manager
+            .get(&ih)
+            .expect("back in race");
         assert_eq!(*back.save_path.read(), src);
-        assert!(s.state.engines.get("hoard").unwrap().manager.get(&ih).is_none());
+        assert!(s
+            .state
+            .engines
+            .get("hoard")
+            .unwrap()
+            .manager
+            .get(&ih)
+            .is_none());
     }
 
     /// ⭐ A target that already holds the very torrent (it sits in both
@@ -1818,15 +2208,40 @@ mod graduate_tests {
         let hoard = s.state.engines.get("hoard").unwrap();
         let other = s.dir.join("elsewhere");
         std::fs::create_dir_all(&other).unwrap();
-        hoard.manager.add_torrent_bytes(&torrent_bytes("grad"), &other.display().to_string(), true, true).unwrap();
+        hoard
+            .manager
+            .add_torrent_bytes(
+                &torrent_bytes("grad"),
+                &other.display().to_string(),
+                true,
+                true,
+            )
+            .unwrap();
 
         let err = graduate(&s.state, &job(&hash, &dst)).expect_err("refused");
-        assert!(err.contains("already holds it") && err.contains("nothing was moved"), "{err}");
-        assert_eq!(std::fs::read(src.join("grad")).unwrap(), vec![7u8; 16384], "the source is untouched");
+        assert!(
+            err.contains("already holds it") && err.contains("nothing was moved"),
+            "{err}"
+        );
+        assert_eq!(
+            std::fs::read(src.join("grad")).unwrap(),
+            vec![7u8; 16384],
+            "the source is untouched"
+        );
         assert!(!dst.exists(), "nothing was created at the destination");
-        let kept = s.state.engines.get("race").unwrap().manager.get(&ih).expect("it never left race");
+        let kept = s
+            .state
+            .engines
+            .get("race")
+            .unwrap()
+            .manager
+            .get(&ih)
+            .expect("it never left race");
         assert_eq!(*kept.save_path.read(), src);
-        assert!(hoard.manager.get(&ih).is_some(), "and hoard still holds its own");
+        assert!(
+            hoard.manager.get(&ih).is_some(),
+            "and hoard still holds its own"
+        );
     }
 
     /// Puts the thread back to the one filesystem tests run on.
@@ -1858,15 +2273,38 @@ mod graduate_tests {
 
         let err = graduate(&s.state, &job(&hash, &dst)).expect_err("the disk is full");
         assert!(err.contains("no space"), "{err}");
-        assert!(!dst.join("grad").exists(), "a partial file was left on the destination");
-        assert_eq!(std::fs::read(src.join("grad")).unwrap(), vec![7u8; 16384], "the source is intact");
-        assert!(s.state.engines.get("race").unwrap().manager.get(&ih).is_some(), "back in race");
+        assert!(
+            !dst.join("grad").exists(),
+            "a partial file was left on the destination"
+        );
+        assert_eq!(
+            std::fs::read(src.join("grad")).unwrap(),
+            vec![7u8; 16384],
+            "the source is intact"
+        );
+        assert!(
+            s.state
+                .engines
+                .get("race")
+                .unwrap()
+                .manager
+                .get(&ih)
+                .is_some(),
+            "back in race"
+        );
 
         // Space came back: the same graduation goes through.
         crate::jobs::COPY_FULL_AFTER.with(|c| c.set(None));
         graduate(&s.state, &job(&hash, &dst)).expect("the retry is not blocked");
         assert_eq!(std::fs::read(dst.join("grad")).unwrap(), vec![7u8; 16384]);
-        assert!(s.state.engines.get("hoard").unwrap().manager.get(&ih).is_some());
+        assert!(s
+            .state
+            .engines
+            .get("hoard")
+            .unwrap()
+            .manager
+            .get(&ih)
+            .is_some());
     }
 
     /// ⭐ The room for the whole torrent is asked before anything is copied:
@@ -1880,19 +2318,38 @@ mod graduate_tests {
         std::fs::write(src.join("pair").join("a"), vec![1u8; 16384]).unwrap();
         std::fs::write(src.join("pair").join("b"), vec![2u8; 16384]).unwrap();
         let (hash, _) = crate::api::add_torrent_bytes(
-            &s.state, &files_torrent_bytes(&[("a", 16384), ("b", 16384)]), "",
-            &src.display().to_string(), "", true, true, "race",
+            &s.state,
+            &files_torrent_bytes(&[("a", 16384), ("b", 16384)]),
+            "",
+            &src.display().to_string(),
+            "",
+            true,
+            true,
+            "race",
         )
         .expect("added");
         let ih = typhon_engine::torrent::hex_decode(&hash).unwrap();
         let _full = FullDisk::copying();
         crate::jobs::FREE_SPACE.with(|c| c.set(Some(20000)));
 
-        let err = graduate(&s.state, &job(&hash, &dst)).expect_err("32768 bytes do not fit in 20000");
+        let err =
+            graduate(&s.state, &job(&hash, &dst)).expect_err("32768 bytes do not fit in 20000");
         assert!(err.contains("nothing was moved"), "{err}");
         assert!(src.join("pair").join("a").exists() && src.join("pair").join("b").exists());
-        assert!(!dst.join("pair").exists(), "nothing was copied before the refusal");
-        assert!(s.state.engines.get("race").unwrap().manager.get(&ih).is_some(), "still in race");
+        assert!(
+            !dst.join("pair").exists(),
+            "nothing was copied before the refusal"
+        );
+        assert!(
+            s.state
+                .engines
+                .get("race")
+                .unwrap()
+                .manager
+                .get(&ih)
+                .is_some(),
+            "still in race"
+        );
     }
 
     /// A move interrupted after its torrent left the engine, with the job's
@@ -1900,19 +2357,34 @@ mod graduate_tests {
     fn interrupted_move(
         tag: &str,
         dest_is_source: bool,
-    ) -> (TestState, typhon_engine::torrent::meta::InfoHash, std::path::PathBuf, std::path::PathBuf, crate::store::Job) {
+    ) -> (
+        TestState,
+        typhon_engine::torrent::meta::InfoHash,
+        std::path::PathBuf,
+        std::path::PathBuf,
+        crate::store::Job,
+    ) {
         let s = state_from(tag, "");
         let src = s.dir.join("race-data");
-        let dst = if dest_is_source { src.clone() } else { s.dir.join("elsewhere") };
+        let dst = if dest_is_source {
+            src.clone()
+        } else {
+            s.dir.join("elsewhere")
+        };
         std::fs::create_dir_all(&src).unwrap();
         std::fs::write(src.join("grad"), vec![7u8; 16384]).unwrap();
         let blob = torrent_bytes("grad");
         let root = src.display().to_string();
         let race = s.state.engines.get("race").unwrap();
-        let (ih, _) = race.manager.add_torrent_bytes(&blob, &root, true, false).expect("added");
+        let (ih, _) = race
+            .manager
+            .add_torrent_bytes(&blob, &root, true, false)
+            .expect("added");
         let hash = typhon_engine::torrent::hex_encode(&ih);
         let original = race.manager.export_state(&ih).expect("exported");
-        race.manager.remove_torrent(&ih, true).expect("out of its engine");
+        race.manager
+            .remove_torrent(&ih, true)
+            .expect("out of its engine");
         let params = serde_json::json!({
             "engine": "race", "category": "", "save_path": dst.display().to_string(),
             "record": serde_json::to_value(&original).unwrap(),
@@ -1920,8 +2392,12 @@ mod graduate_tests {
         .to_string();
         let again = {
             let store = s.state.store.lock().unwrap();
-            store.insert_torrent(&hash, "race", &blob, &root, "", 0.0, true, "").unwrap();
-            store.create_job("move_data", &hash, &params, 16384).unwrap();
+            store
+                .insert_torrent(&hash, "race", &blob, &root, "", 0.0, true, "")
+                .unwrap();
+            store
+                .create_job("move_data", &hash, &params, 16384)
+                .unwrap();
             store.claim_next_job().expect("claimed")
         };
         (s, ih, src, dst, again)
@@ -1936,8 +2412,19 @@ mod graduate_tests {
 
         move_data(&s.state, &again).expect("finished");
 
-        assert_eq!(std::fs::read(src.join("grad")).unwrap(), vec![7u8; 16384], "the only copy stays");
-        let t = s.state.engines.get("race").unwrap().manager.get(&ih).expect("back in race");
+        assert_eq!(
+            std::fs::read(src.join("grad")).unwrap(),
+            vec![7u8; 16384],
+            "the only copy stays"
+        );
+        let t = s
+            .state
+            .engines
+            .get("race")
+            .unwrap()
+            .manager
+            .get(&ih)
+            .expect("back in race");
         assert_eq!(*t.save_path.read(), src);
     }
 
@@ -1953,7 +2440,14 @@ mod graduate_tests {
 
         assert!(!src.join("grad").exists(), "the original is released");
         assert_eq!(std::fs::read(dst.join("grad")).unwrap(), vec![7u8; 16384]);
-        let t = s.state.engines.get("race").unwrap().manager.get(&ih).expect("back in race");
+        let t = s
+            .state
+            .engines
+            .get("race")
+            .unwrap()
+            .manager
+            .get(&ih)
+            .expect("back in race");
         assert_eq!(*t.save_path.read(), dst);
     }
 
@@ -1965,7 +2459,8 @@ mod graduate_tests {
         std::thread::spawn(move || {
             let _ = tx.send(is_our_copy(&from, &to, whole));
         });
-        rx.recv_timeout(std::time::Duration::from_secs(20)).expect("is_our_copy did not return")
+        rx.recv_timeout(std::time::Duration::from_secs(20))
+            .expect("is_our_copy did not return")
     }
 
     fn pattern(len: usize) -> Vec<u8> {
@@ -2061,8 +2556,14 @@ mod graduate_tests {
             f
         };
         let (gone_from, moved_to) = (d.join("gone-from"), put("moved-to", b"moved"));
-        let (ours_from, ours_to) = (put("ours-from", b"same bytes"), put("ours-to", b"same bytes"));
-        let (other_from, other_to) = (put("other-from", b"same bytes"), put("other-to", b"another file"));
+        let (ours_from, ours_to) = (
+            put("ours-from", b"same bytes"),
+            put("ours-to", b"same bytes"),
+        );
+        let (other_from, other_to) = (
+            put("other-from", b"same bytes"),
+            put("other-to", b"another file"),
+        );
         let same = put("same", b"one path");
         let (link_from, link_to) = (put("link-from", b"one inode"), d.join("link-to"));
         std::fs::hard_link(&link_from, &link_to).unwrap();
@@ -2079,18 +2580,41 @@ mod graduate_tests {
         let said = undo_interrupted_move(race, &files, &original, &metainfo);
 
         assert!(said.starts_with("the move was given up"), "{said}");
-        assert_eq!(std::fs::read(&gone_from).expect("what had moved is back at its source"), b"moved", "what had moved goes back");
+        assert_eq!(
+            std::fs::read(&gone_from).expect("what had moved is back at its source"),
+            b"moved",
+            "what had moved goes back"
+        );
         assert!(!moved_to.exists());
-        assert_eq!(std::fs::read(&ours_from).expect("the original stays"), b"same bytes", "the original stays");
+        assert_eq!(
+            std::fs::read(&ours_from).expect("the original stays"),
+            b"same bytes",
+            "the original stays"
+        );
         assert!(!ours_to.exists(), "our copy goes");
         assert_eq!(std::fs::read(&other_from).unwrap(), b"same bytes");
-        assert_eq!(std::fs::read(&other_to).expect("another file stays"), b"another file", "another file stays");
-        assert_eq!(std::fs::read(&same).unwrap(), b"one path", "from == to is left alone");
+        assert_eq!(
+            std::fs::read(&other_to).expect("another file stays"),
+            b"another file",
+            "another file stays"
+        );
+        assert_eq!(
+            std::fs::read(&same).unwrap(),
+            b"one path",
+            "from == to is left alone"
+        );
         assert_eq!(std::fs::read(&link_from).unwrap(), b"one inode");
-        assert_eq!(std::fs::read(&link_to).expect("the other name stays"), b"one inode", "the other name of a file stays");
+        assert_eq!(
+            std::fs::read(&link_to).expect("the other name stays"),
+            b"one inode",
+            "the other name of a file stays"
+        );
         assert_eq!(std::fs::read(&lone_from).unwrap(), b"lone");
         assert!(!lone_to.exists());
-        assert!(race.manager.get(&ih).is_some(), "the torrent is back in its engine");
+        assert!(
+            race.manager.get(&ih).is_some(),
+            "the torrent is back in its engine"
+        );
     }
 
     fn two_file_torrent_bytes() -> Vec<u8> {
@@ -2107,7 +2631,13 @@ mod graduate_tests {
     /// at the source; the caller sets the disk the interruption left.
     fn interrupted_pair_move(
         tag: &str,
-    ) -> (TestState, typhon_engine::torrent::meta::InfoHash, std::path::PathBuf, std::path::PathBuf, crate::store::Job) {
+    ) -> (
+        TestState,
+        typhon_engine::torrent::meta::InfoHash,
+        std::path::PathBuf,
+        std::path::PathBuf,
+        crate::store::Job,
+    ) {
         interrupted_pair_move_with(tag, |_| {})
     }
 
@@ -2117,13 +2647,22 @@ mod graduate_tests {
     fn interrupted_pair_move_with(
         tag: &str,
         edit: impl FnOnce(&mut typhon_engine::torrent::fastresume::ResumeData),
-    ) -> (TestState, typhon_engine::torrent::meta::InfoHash, std::path::PathBuf, std::path::PathBuf, crate::store::Job) {
+    ) -> (
+        TestState,
+        typhon_engine::torrent::meta::InfoHash,
+        std::path::PathBuf,
+        std::path::PathBuf,
+        crate::store::Job,
+    ) {
         interrupted_files_move_with(tag, &[("a", 16384), ("b", 16384)], edit)
     }
 
     /// A torrent named `pair` with these files, in pieces of 16 KiB.
     fn files_torrent_bytes(files: &[(&str, usize)]) -> Vec<u8> {
-        let list: String = files.iter().map(|(p, l)| format!("d6:lengthi{l}e4:pathl{}:{p}ee", p.len())).collect();
+        let list: String = files
+            .iter()
+            .map(|(p, l)| format!("d6:lengthi{l}e4:pathl{}:{p}ee", p.len()))
+            .collect();
         let pieces = files.iter().map(|(_, l)| l).sum::<usize>().div_ceil(16384);
         let info = format!(
             "d5:filesl{list}e4:name4:pair12:piece lengthi16384e6:pieces{}:{}e",
@@ -2140,7 +2679,13 @@ mod graduate_tests {
         tag: &str,
         files: &[(&str, usize)],
         edit: impl FnOnce(&mut typhon_engine::torrent::fastresume::ResumeData),
-    ) -> (TestState, typhon_engine::torrent::meta::InfoHash, std::path::PathBuf, std::path::PathBuf, crate::store::Job) {
+    ) -> (
+        TestState,
+        typhon_engine::torrent::meta::InfoHash,
+        std::path::PathBuf,
+        std::path::PathBuf,
+        crate::store::Job,
+    ) {
         let s = state_from(tag, "");
         let src = s.dir.join("race-data");
         let dst = s.dir.join("elsewhere");
@@ -2151,11 +2696,16 @@ mod graduate_tests {
         let blob = files_torrent_bytes(files);
         let root = src.display().to_string();
         let race = s.state.engines.get("race").unwrap();
-        let (ih, _) = race.manager.add_torrent_bytes(&blob, &root, true, false).expect("added");
+        let (ih, _) = race
+            .manager
+            .add_torrent_bytes(&blob, &root, true, false)
+            .expect("added");
         let hash = typhon_engine::torrent::hex_encode(&ih);
         let mut original = race.manager.export_state(&ih).expect("exported");
         edit(&mut original);
-        race.manager.remove_torrent(&ih, true).expect("out of its engine");
+        race.manager
+            .remove_torrent(&ih, true)
+            .expect("out of its engine");
         let params = serde_json::json!({
             "engine": "race", "category": "", "save_path": dst.display().to_string(),
             "record": serde_json::to_value(&original).unwrap(),
@@ -2163,8 +2713,17 @@ mod graduate_tests {
         .to_string();
         let again = {
             let store = s.state.store.lock().unwrap();
-            store.insert_torrent(&hash, "race", &blob, &root, "", 0.0, true, "").unwrap();
-            store.create_job("move_data", &hash, &params, files.iter().map(|(_, l)| *l as i64).sum()).unwrap();
+            store
+                .insert_torrent(&hash, "race", &blob, &root, "", 0.0, true, "")
+                .unwrap();
+            store
+                .create_job(
+                    "move_data",
+                    &hash,
+                    &params,
+                    files.iter().map(|(_, l)| *l as i64).sum(),
+                )
+                .unwrap();
             store.claim_next_job().expect("claimed")
         };
         (s, ih, src.join("pair"), dst.join("pair"), again)
@@ -2185,8 +2744,18 @@ mod graduate_tests {
 
         assert_eq!(std::fs::read(dst.join("a")).unwrap(), vec![1u8; 16384]);
         assert_eq!(std::fs::read(dst.join("b")).unwrap(), vec![2u8; 16384]);
-        assert!(!src.join("a").exists() && !src.join("b").exists(), "no original is left behind");
-        let t = s.state.engines.get("race").unwrap().manager.get(&ih).expect("back in race");
+        assert!(
+            !src.join("a").exists() && !src.join("b").exists(),
+            "no original is left behind"
+        );
+        let t = s
+            .state
+            .engines
+            .get("race")
+            .unwrap()
+            .manager
+            .get(&ih)
+            .expect("back in race");
         assert_eq!(*t.save_path.read(), dst.parent().unwrap());
     }
 
@@ -2201,8 +2770,18 @@ mod graduate_tests {
 
         assert_eq!(std::fs::read(dst.join("a")).unwrap(), vec![1u8; 16384]);
         assert!(!src.join("a").exists());
-        assert!(!src.join("b").exists() && !dst.join("b").exists(), "nothing was made of the missing file");
-        let t = s.state.engines.get("race").unwrap().manager.get(&ih).expect("back in race");
+        assert!(
+            !src.join("b").exists() && !dst.join("b").exists(),
+            "nothing was made of the missing file"
+        );
+        let t = s
+            .state
+            .engines
+            .get("race")
+            .unwrap()
+            .manager
+            .get(&ih)
+            .expect("back in race");
         assert_eq!(*t.save_path.read(), dst.parent().unwrap());
     }
 
@@ -2210,7 +2789,8 @@ mod graduate_tests {
     /// second's: a file never downloaded is stepped over, the others move.
     #[test]
     fn a_resumed_move_steps_over_a_file_it_never_had() {
-        let (s, ih, src, dst, again) = interrupted_pair_move_with("move-file-never-had", |rd| rd.bitfield = "80".into());
+        let (s, ih, src, dst, again) =
+            interrupted_pair_move_with("move-file-never-had", |rd| rd.bitfield = "80".into());
         std::fs::remove_file(src.join("b")).unwrap();
 
         move_data(&s.state, &again).expect("finished");
@@ -2218,7 +2798,14 @@ mod graduate_tests {
         assert_eq!(std::fs::read(dst.join("a")).unwrap(), vec![1u8; 16384]);
         assert!(!src.join("a").exists());
         assert!(!src.join("b").exists() && !dst.join("b").exists());
-        let t = s.state.engines.get("race").unwrap().manager.get(&ih).expect("back in race");
+        let t = s
+            .state
+            .engines
+            .get("race")
+            .unwrap()
+            .manager
+            .get(&ih)
+            .expect("back in race");
         assert_eq!(*t.save_path.read(), dst.parent().unwrap());
     }
 
@@ -2228,21 +2815,42 @@ mod graduate_tests {
     /// and the torrent is back in its engine where it was.
     #[test]
     fn a_resumed_move_stops_on_a_file_it_had_and_that_is_nowhere() {
-        let (s, ih, src, dst, again) = interrupted_pair_move_with("move-file-lost", |rd| rd.bitfield = "c0".into());
+        let (s, ih, src, dst, again) =
+            interrupted_pair_move_with("move-file-lost", |rd| rd.bitfield = "c0".into());
         std::fs::create_dir_all(&dst).unwrap();
         std::fs::rename(src.join("a"), dst.join("a")).unwrap();
         std::fs::remove_file(src.join("b")).unwrap();
 
         let err = move_data(&s.state, &again).expect_err("a file it had is lost");
 
-        assert!(err.contains(&src.join("b").display().to_string()), "the lost file is named: {err}");
+        assert!(
+            err.contains(&src.join("b").display().to_string()),
+            "the lost file is named: {err}"
+        );
         assert!(err.contains("lost"), "{err}");
         assert!(err.contains("given up"), "{err}");
-        assert_eq!(std::fs::read(src.join("a")).expect("what had moved is back"), vec![1u8; 16384]);
+        assert_eq!(
+            std::fs::read(src.join("a")).expect("what had moved is back"),
+            vec![1u8; 16384]
+        );
         assert!(!dst.join("a").exists());
-        assert!(!src.join("b").exists() && !dst.join("b").exists(), "nothing was made of the lost file");
-        let t = s.state.engines.get("race").unwrap().manager.get(&ih).expect("back in race");
-        assert_eq!(*t.save_path.read(), src.parent().unwrap(), "at its old save path");
+        assert!(
+            !src.join("b").exists() && !dst.join("b").exists(),
+            "nothing was made of the lost file"
+        );
+        let t = s
+            .state
+            .engines
+            .get("race")
+            .unwrap()
+            .manager
+            .get(&ih)
+            .expect("back in race");
+        assert_eq!(
+            *t.save_path.read(),
+            src.parent().unwrap(),
+            "at its old save path"
+        );
     }
 
     /// A film, a subtitle of 384 bytes and a second film: piece 0 holds the
@@ -2255,18 +2863,43 @@ mod graduate_tests {
     /// any other file the torrent had.
     #[test]
     fn a_resumed_move_stops_on_a_small_file_it_had_in_a_shared_piece() {
-        let (s, ih, src, dst, again) = interrupted_files_move_with("move-sub-lost", &FILM_SUB_FILM, |rd| rd.bitfield = "80".into());
+        let (s, ih, src, dst, again) =
+            interrupted_files_move_with("move-sub-lost", &FILM_SUB_FILM, |rd| {
+                rd.bitfield = "80".into()
+            });
         std::fs::remove_file(src.join("s")).unwrap();
 
         let err = move_data(&s.state, &again).expect_err("the subtitle it had is lost");
 
-        assert!(err.contains(&src.join("s").display().to_string()), "the lost file is named: {err}");
+        assert!(
+            err.contains(&src.join("s").display().to_string()),
+            "the lost file is named: {err}"
+        );
         assert!(err.contains("given up"), "{err}");
-        assert_eq!(std::fs::read(src.join("a")).unwrap(), vec![1u8; 16000], "nothing deleted");
-        assert_eq!(std::fs::read(src.join("b")).unwrap(), vec![3u8; 16384], "nothing deleted");
+        assert_eq!(
+            std::fs::read(src.join("a")).unwrap(),
+            vec![1u8; 16000],
+            "nothing deleted"
+        );
+        assert_eq!(
+            std::fs::read(src.join("b")).unwrap(),
+            vec![3u8; 16384],
+            "nothing deleted"
+        );
         assert!(!dst.join("a").exists() && !dst.join("s").exists() && !dst.join("b").exists());
-        let t = s.state.engines.get("race").unwrap().manager.get(&ih).expect("back in race");
-        assert_eq!(*t.save_path.read(), src.parent().unwrap(), "at its old save path");
+        let t = s
+            .state
+            .engines
+            .get("race")
+            .unwrap()
+            .manager
+            .get(&ih)
+            .expect("back in race");
+        assert_eq!(
+            *t.save_path.read(),
+            src.parent().unwrap(),
+            "at its old save path"
+        );
     }
 
     /// The same subtitle, not selected: the shared piece was had for the film
@@ -2274,13 +2907,14 @@ mod graduate_tests {
     /// Missing, it is stepped over and the move finishes.
     #[test]
     fn a_resumed_move_steps_over_an_unselected_file_in_a_shared_piece() {
-        let (s, ih, src, dst, again) = interrupted_files_move_with("move-sub-unselected", &FILM_SUB_FILM, |rd| {
-            rd.bitfield = "80".into();
-            rd.download_order = Some(typhon_engine::torrent::piece_picker::DownloadOrder {
-                file_prio: vec![1, 0, 1],
-                ..Default::default()
+        let (s, ih, src, dst, again) =
+            interrupted_files_move_with("move-sub-unselected", &FILM_SUB_FILM, |rd| {
+                rd.bitfield = "80".into();
+                rd.download_order = Some(typhon_engine::torrent::piece_picker::DownloadOrder {
+                    file_prio: vec![1, 0, 1],
+                    ..Default::default()
+                });
             });
-        });
         std::fs::remove_file(src.join("s")).unwrap();
 
         move_data(&s.state, &again).expect("finished");
@@ -2288,7 +2922,14 @@ mod graduate_tests {
         assert_eq!(std::fs::read(dst.join("a")).unwrap(), vec![1u8; 16000]);
         assert_eq!(std::fs::read(dst.join("b")).unwrap(), vec![3u8; 16384]);
         assert!(!src.join("s").exists() && !dst.join("s").exists());
-        let t = s.state.engines.get("race").unwrap().manager.get(&ih).expect("back in race");
+        let t = s
+            .state
+            .engines
+            .get("race")
+            .unwrap()
+            .manager
+            .get(&ih)
+            .expect("back in race");
         assert_eq!(*t.save_path.read(), dst.parent().unwrap());
     }
 
@@ -2298,40 +2939,73 @@ mod graduate_tests {
     /// record that cannot say says no.
     #[test]
     fn a_file_had_data_when_a_piece_it_overlaps_was_had() {
-        let rd = |seed_mode: bool, bitfield: &str| -> typhon_engine::torrent::fastresume::ResumeData {
-            serde_json::from_value(serde_json::json!({
+        let rd =
+            |seed_mode: bool, bitfield: &str| -> typhon_engine::torrent::fastresume::ResumeData {
+                serde_json::from_value(serde_json::json!({
                 "info_hash": "", "save_path": "", "seed_mode": seed_mode, "paused": false,
                 "total_uploaded": 0, "total_downloaded": 0, "added_time": 0, "completed_time": 0,
                 "bitfield": bitfield,
             }))
             .unwrap()
+            };
+        let file = |offset: u64, length: u64| typhon_engine::torrent::meta::FileEntry {
+            path: "f".into(),
+            offset,
+            length,
         };
-        let file = |offset: u64, length: u64| typhon_engine::torrent::meta::FileEntry { path: "f".into(), offset, length };
         let had = |seed_mode: bool, bitfield: &str, offset: u64, length: u64| {
-            record_had_data(&rd(seed_mode, bitfield), 100, 1000, 0, &file(offset, length))
+            record_had_data(
+                &rd(seed_mode, bitfield),
+                100,
+                1000,
+                0,
+                &file(offset, length),
+            )
         };
         // File 1 of an order that selects file 0 and not file 1.
-        let order = typhon_engine::torrent::piece_picker::DownloadOrder { file_prio: vec![1, 0], ..Default::default() };
-        let with = |seed_mode: bool, bitfield: &str, total: u64, index: usize, offset: u64, length: u64| {
+        let order = typhon_engine::torrent::piece_picker::DownloadOrder {
+            file_prio: vec![1, 0],
+            ..Default::default()
+        };
+        let with = |seed_mode: bool,
+                    bitfield: &str,
+                    total: u64,
+                    index: usize,
+                    offset: u64,
+                    length: u64| {
             let mut r = rd(seed_mode, bitfield);
             r.download_order = Some(order.clone());
             record_had_data(&r, 100, total, index, &file(offset, length))
         };
-        let unsel = |bitfield: &str, offset: u64, length: u64| with(false, bitfield, 1000, 1, offset, length);
+        let unsel = |bitfield: &str, offset: u64, length: u64| {
+            with(false, bitfield, 1000, 1, offset, length)
+        };
         // Selected by the order: as with no order at all.
         assert!(with(false, "40", 1000, 0, 0, 150), "priority 1 is selected");
         // Not selected: a piece shared with the next file is not its own.
         assert!(!unsel("40", 0, 150) && unsel("80", 0, 150));
         assert!(!unsel("40", 150, 150) && unsel("20", 150, 150));
         assert!(unsel("40", 0, 250), "piece 1 is wholly inside [0, 250)");
-        assert!(!unsel("20", 250, 10) && !unsel("ff", 250, 10), "inside one piece, no piece of its own");
+        assert!(
+            !unsel("20", 250, 10) && !unsel("ff", 250, 10),
+            "inside one piece, no piece of its own"
+        );
         assert!(!with(true, "", 1000, 1, 250, 10), "even complete");
         assert!(with(true, "", 1000, 1, 200, 100));
         // The torrent's last piece is short: [900, 950) holds all of it.
-        assert!(with(false, "0040", 950, 1, 900, 50), "the short last piece is wholly inside");
-        assert!(!with(false, "0040", 1000, 1, 900, 50), "a full piece 9 is not");
+        assert!(
+            with(false, "0040", 950, 1, 900, 50),
+            "the short last piece is wholly inside"
+        );
+        assert!(
+            !with(false, "0040", 1000, 1, 900, 50),
+            "a full piece 9 is not"
+        );
         // a = [0,150) and b = [150,300) share piece 1.
-        assert!(had(false, "40", 0, 150) && had(false, "40", 150, 150), "a shared piece is had by both files");
+        assert!(
+            had(false, "40", 0, 150) && had(false, "40", 150, 150),
+            "a shared piece is had by both files"
+        );
         assert!(had(false, "80", 0, 150) && !had(false, "80", 150, 150));
         assert!(!had(false, "20", 0, 150) && had(false, "20", 150, 150));
         // A piece just past either end of the file is not one of its pieces.
@@ -2369,7 +3043,14 @@ mod graduate_tests {
         std::fs::write(src.join("pair").join("a"), vec![1u8; 16384]).unwrap();
         std::fs::write(src.join("pair").join("b"), vec![2u8; 16384]).unwrap();
         let (hash, _) = crate::api::add_torrent_bytes(
-            &s.state, &two_file_torrent_bytes(), "", &src.display().to_string(), "", true, true, "race",
+            &s.state,
+            &two_file_torrent_bytes(),
+            "",
+            &src.display().to_string(),
+            "",
+            true,
+            true,
+            "race",
         )
         .expect("added");
         let params = job(&hash, &dst).params;
@@ -2401,7 +3082,10 @@ mod graduate_tests {
             std::fs::remove_file(from.join("a")).unwrap();
         });
         assert!(err.contains("cancelled"), "{err}");
-        assert!(err.contains("rolled back"), "a clean undo, not a failed carry-back: {err}");
+        assert!(
+            err.contains("rolled back"),
+            "a clean undo, not a failed carry-back: {err}"
+        );
         assert!(!err.contains("did not move back"), "{err}");
         assert!(std::fs::read(src.join("pair").join("b")).is_ok());
         assert!(!dst.join("pair").join("a").exists());
@@ -2419,8 +3103,15 @@ mod graduate_tests {
             std::fs::write(to.join("a"), b"somebody else's a").unwrap();
         });
         assert!(err.contains("cancelled"), "{err}");
-        assert_eq!(std::fs::read(dst.join("pair").join("a")).expect("the file at the destination is still there"), b"somebody else's a");
-        assert!(!src.join("pair").join("a").exists(), "nothing was carried to the source");
+        assert_eq!(
+            std::fs::read(dst.join("pair").join("a"))
+                .expect("the file at the destination is still there"),
+            b"somebody else's a"
+        );
+        assert!(
+            !src.join("pair").join("a").exists(),
+            "nothing was carried to the source"
+        );
         assert!(src.join("pair").join("b").exists());
         let _ = s;
     }

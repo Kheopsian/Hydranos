@@ -110,7 +110,8 @@ pub fn spawn_download_slots(
         // Seeds THIS loop stopped. Only those are ever started again by it: a
         // seed stopped by anything else (an operator, `start_paused`) is not
         // the queue's to resume.
-        let mut parked: std::collections::HashSet<typhon_engine::torrent::meta::InfoHash> = Default::default();
+        let mut parked: std::collections::HashSet<typhon_engine::torrent::meta::InfoHash> =
+            Default::default();
         // Since when each running torrent has been under its slow threshold.
         let mut slow_since: SlowClock = Default::default();
         loop {
@@ -132,10 +133,23 @@ pub fn spawn_download_slots(
                 Err(_) => Default::default(),
             };
             let forced: std::collections::HashSet<String> = match store.read() {
-                Ok(store) => store.pinned(&engine_id).unwrap_or_default().into_iter().collect(),
+                Ok(store) => store
+                    .pinned(&engine_id)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .collect(),
                 Err(_) => Default::default(),
             };
-            enforce_queue(&manager, &cache, &limits, &paused, &forced, &mut parked, &mut slow_since, std::time::Instant::now());
+            enforce_queue(
+                &manager,
+                &cache,
+                &limits,
+                &paused,
+                &forced,
+                &mut parked,
+                &mut slow_since,
+                std::time::Instant::now(),
+            );
         }
     });
 }
@@ -163,7 +177,8 @@ pub struct SlowRule {
 /// Since when each running torrent has been under its threshold. Rebuilt on
 /// every pass from the torrents still under it, so it holds the slow running
 /// set and nothing else.
-pub type SlowClock = std::collections::HashMap<typhon_engine::torrent::meta::InfoHash, std::time::Instant>;
+pub type SlowClock =
+    std::collections::HashMap<typhon_engine::torrent::meta::InfoHash, std::time::Instant>;
 
 impl QueueLimits {
     /// `active_downloads` as it always was: > 0 is a ceiling, anything else
@@ -177,13 +192,26 @@ impl QueueLimits {
         let kib = |v: Option<i64>| v.unwrap_or(2).max(0) as u64 * 1024;
         QueueLimits {
             downloads: cap(s.active_downloads),
-            seeds: if queueing { s.active_seeds.and_then(cap) } else { None },
-            total: if queueing { s.active_limit.and_then(cap) } else { None },
-            slow: s.dont_count_slow_torrents.unwrap_or(false).then(|| SlowRule {
-                dl_bps: kib(s.slow_torrent_dl_rate_threshold),
-                ul_bps: kib(s.slow_torrent_ul_rate_threshold),
-                after: Duration::from_secs(s.slow_torrent_inactive_timer.unwrap_or(60).max(0) as u64),
-            }),
+            seeds: if queueing {
+                s.active_seeds.and_then(cap)
+            } else {
+                None
+            },
+            total: if queueing {
+                s.active_limit.and_then(cap)
+            } else {
+                None
+            },
+            slow: s
+                .dont_count_slow_torrents
+                .unwrap_or(false)
+                .then(|| SlowRule {
+                    dl_bps: kib(s.slow_torrent_dl_rate_threshold),
+                    ul_bps: kib(s.slow_torrent_ul_rate_threshold),
+                    after: Duration::from_secs(
+                        s.slow_torrent_inactive_timer.unwrap_or(60).max(0) as u64
+                    ),
+                }),
         }
     }
 
@@ -276,7 +304,8 @@ fn enforce_queue(
     }
     let mut still_slow = SlowClock::new();
 
-    let mut incomplete: Vec<(Arc<typhon_engine::torrent::meta::TorrentState>, i64, bool)> = Vec::new();
+    let mut incomplete: Vec<(Arc<typhon_engine::torrent::meta::TorrentState>, i64, bool)> =
+        Vec::new();
     let mut seeds: Vec<(Arc<typhon_engine::torrent::meta::TorrentState>, bool)> = Vec::new();
     for t in manager.all() {
         let status = t.status.load(Ordering::Relaxed);
@@ -332,11 +361,22 @@ fn enforce_queue(
         // Most seeders first: the torrent likeliest to finish gets the slot, so a
         // slot is held for the shortest time and freed for the next one.
         incomplete.sort_by(|a, b| b.1.cmp(&a.1));
-        let ceiling = limits.downloads.unwrap_or(usize::MAX).min(limits.total.unwrap_or(usize::MAX));
+        let ceiling = limits
+            .downloads
+            .unwrap_or(usize::MAX)
+            .min(limits.total.unwrap_or(usize::MAX));
         for (torrent, _, active) in &incomplete {
             if let Some(rule) = limits.slow.filter(|_| *active) {
                 let rate = torrent.download_rate.get();
-                if slow_long_enough(rule.after, rule.dl_bps, rate, &torrent.info_hash, slow_since, &mut still_slow, now) {
+                if slow_long_enough(
+                    rule.after,
+                    rule.dl_bps,
+                    rate,
+                    &torrent.info_hash,
+                    slow_since,
+                    &mut still_slow,
+                    now,
+                ) {
                     continue;
                 }
             }
@@ -355,15 +395,25 @@ fn enforce_queue(
 
     if manage_seeds {
         seeds.sort_by_key(|(t, _)| t.added_time);
-        let ceiling = limits
-            .seeds
-            .unwrap_or(usize::MAX)
-            .min(limits.total.unwrap_or(usize::MAX).saturating_sub(running_downloads));
+        let ceiling = limits.seeds.unwrap_or(usize::MAX).min(
+            limits
+                .total
+                .unwrap_or(usize::MAX)
+                .saturating_sub(running_downloads),
+        );
         let (mut started, mut stopped, mut counted) = (0usize, 0usize, 0usize);
         for (torrent, running) in seeds.iter() {
             if let Some(rule) = limits.slow.filter(|_| *running) {
                 let rate = torrent.upload_rate.get();
-                if slow_long_enough(rule.after, rule.ul_bps, rate, &torrent.info_hash, slow_since, &mut still_slow, now) {
+                if slow_long_enough(
+                    rule.after,
+                    rule.ul_bps,
+                    rate,
+                    &torrent.info_hash,
+                    slow_since,
+                    &mut still_slow,
+                    now,
+                ) {
                     continue;
                 }
             }
@@ -383,7 +433,13 @@ fn enforce_queue(
         // A parked seed that left the catalogue is not ours to remember.
         parked.retain(|ih| manager.get(ih).is_some());
         if started + stopped > 0 {
-            tracing::info!(started, stopped, queued = parked.len(), ceiling, "queue: seeds");
+            tracing::info!(
+                started,
+                stopped,
+                queued = parked.len(),
+                ceiling,
+                "queue: seeds"
+            );
         }
     }
     *slow_since = still_slow;
@@ -449,11 +505,23 @@ pub fn spawn_share_limits(
                 Ok(g) => g.clone(),
                 Err(e) => e.into_inner().clone(),
             };
-            let (st, mgr, id, book2) = (state.clone(), manager.clone(), engine_id.clone(), book.clone());
+            let (st, mgr, id, book2) = (
+                state.clone(),
+                manager.clone(),
+                engine_id.clone(),
+                book.clone(),
+            );
             // Blocking: a removal unlinks files.
             let _ = tokio::task::spawn_blocking(move || {
                 let mut b = book2.lock().unwrap_or_else(|p| p.into_inner());
-                share_limits_pass(&st, &mgr, &cfg, &id, typhon_engine::torrent::meta::now_secs(), &mut b)
+                share_limits_pass(
+                    &st,
+                    &mgr,
+                    &cfg,
+                    &id,
+                    typhon_engine::torrent::meta::now_secs(),
+                    &mut b,
+                )
             })
             .await;
             if !crate::shutdown::sleep(SHARE_LIMIT_INTERVAL).await {
@@ -545,7 +613,12 @@ pub fn share_limits_pass(
         } else {
             None
         };
-        let Some(why) = reached(&eff, || crate::row::torrent_ratio(&t), t.seed_time_now(now), idle) else {
+        let Some(why) = reached(
+            &eff,
+            || crate::row::torrent_ratio(&t),
+            t.seed_time_now(now),
+            idle,
+        ) else {
             continue;
         };
         let (met, host, hours) = seed_obligation_met(&t, cfg, now);
@@ -579,7 +652,13 @@ pub fn share_limits_pass(
                 let with_files = engine.action == Action::RemoveWithFiles;
                 // The API's own path: the trackers hear `stopped`, the store
                 // row goes, and the files only with the last copy.
-                match crate::api::remove_one_torrent(state, &hash, &[engine_id.to_string()], engine_id, with_files) {
+                match crate::api::remove_one_torrent(
+                    state,
+                    &hash,
+                    &[engine_id.to_string()],
+                    engine_id,
+                    with_files,
+                ) {
                     Ok(_) => {
                         out.removed += 1;
                         tracing::info!(engine = %engine_id, name = %t.meta.name, reason = %why, with_files,
@@ -632,9 +711,7 @@ mod seed_obligation_tests {
     /// nothing to do with the test.
     fn torrent_bytes(name: &str) -> Vec<u8> {
         let mut info = Vec::new();
-        info.extend_from_slice(
-            format!("d6:lengthi16384e4:name{}:{name}", name.len()).as_bytes(),
-        );
+        info.extend_from_slice(format!("d6:lengthi16384e4:name{}:{name}", name.len()).as_bytes());
         info.extend_from_slice(b"12:piece lengthi16384e6:pieces20:");
         info.extend_from_slice(&[0xAB; 20]);
         info.push(b'e');
@@ -688,7 +765,12 @@ mod seed_obligation_tests {
     #[test]
     fn an_undeclared_tracker_is_protected_not_free_to_drop() {
         let (mgr, root) = manager("undeclared");
-        let t = torrent(&mgr, "a", Some("https://tracker.example/announce"), 10_000_000);
+        let t = torrent(
+            &mgr,
+            "a",
+            Some("https://tracker.example/announce"),
+            10_000_000,
+        );
         let (met, host, hours) = seed_obligation_met(&t, &config(&[]), NOW);
         assert!(!met, "an undeclared tracker never counts as satisfied");
         assert_eq!(host, "tracker.example");
@@ -735,7 +817,12 @@ mod seed_obligation_tests {
     #[test]
     fn seeding_past_the_declared_hours_is_met() {
         let (mgr, root) = manager("long");
-        let t = torrent(&mgr, "e", Some("https://tracker.example/announce"), 2 * 3600);
+        let t = torrent(
+            &mgr,
+            "e",
+            Some("https://tracker.example/announce"),
+            2 * 3600,
+        );
         let (met, _, hours) = seed_obligation_met(&t, &config(&[("tracker.example", "2")]), NOW);
         assert!(met, "exactly the declared time counts as served");
         assert_eq!(hours, 2);
@@ -748,7 +835,12 @@ mod seed_obligation_tests {
     #[test]
     fn an_unparseable_declaration_protects_rather_than_frees() {
         let (mgr, root) = manager("garbage");
-        let t = torrent(&mgr, "f", Some("https://tracker.example/announce"), 10_000_000);
+        let t = torrent(
+            &mgr,
+            "f",
+            Some("https://tracker.example/announce"),
+            10_000_000,
+        );
         for bad in ["abc", "", "2h", "-1"] {
             let (met, _, hours) =
                 seed_obligation_met(&t, &config(&[("tracker.example", bad)]), NOW);
@@ -763,7 +855,12 @@ mod seed_obligation_tests {
     #[test]
     fn a_declaration_for_another_tracker_does_not_apply() {
         let (mgr, root) = manager("otherhost");
-        let t = torrent(&mgr, "g", Some("https://tracker.example/announce"), 10_000_000);
+        let t = torrent(
+            &mgr,
+            "g",
+            Some("https://tracker.example/announce"),
+            10_000_000,
+        );
         let (met, _, hours) =
             seed_obligation_met(&t, &config(&[("other-tracker.example", "0")]), NOW);
         assert!(!met, "this host is still undeclared");
@@ -791,8 +888,8 @@ mod disk_usage_tests {
     /// as used would trigger a drain on a disk that is not full.
     #[test]
     fn reserved_blocks_count_as_neither_used_nor_free() {
-        let (used, total) = super::disk_usage(std::path::Path::new("/tmp"))
-            .expect("/tmp is on a filesystem");
+        let (used, total) =
+            super::disk_usage(std::path::Path::new("/tmp")).expect("/tmp is on a filesystem");
         assert!(total > 0);
         assert!(used <= total);
     }
@@ -842,7 +939,9 @@ pub fn spawn_volume_fault_scan(engines: Arc<crate::engines::EngineHost>) {
                 return;
             }
             let engines = engines.clone();
-            let _ = tokio::task::spawn_blocking(move || crate::obs::refresh_volume_faults(&engines)).await;
+            let _ =
+                tokio::task::spawn_blocking(move || crate::obs::refresh_volume_faults(&engines))
+                    .await;
         }
     });
 }
@@ -1298,7 +1397,10 @@ pub fn drain_once(
             // Checked here as well as in the job, and only the cheap half (the
             // destination, no scan of the other torrents): a refusal is a
             // property of the disk, and it would come back every tick.
-            if crate::jobsrun::plan_move(&torrent, std::path::Path::new(&save_path)).refusal().is_some() {
+            if crate::jobsrun::plan_move(&torrent, std::path::Path::new(&save_path))
+                .refusal()
+                .is_some()
+            {
                 *stuck_dest_taken
                     .entry(crate::api::category_of_hash(state, &hash, engine_id))
                     .or_insert(0usize) += 1;
@@ -1309,7 +1411,11 @@ pub fn drain_once(
             // before moving a file, so queueing it only fails every tick.
             // Counted as stuck so "cannot free" is said; nothing is removed
             // from either engine here.
-            if state.engines.get(&to_engine).is_some_and(|d| d.manager.get(&torrent.info_hash).is_some()) {
+            if state
+                .engines
+                .get(&to_engine)
+                .is_some_and(|d| d.manager.get(&torrent.info_hash).is_some())
+            {
                 *stuck_held_by_target
                     .entry(crate::api::category_of_hash(state, &hash, engine_id))
                     .or_insert(0usize) += 1;
@@ -1352,7 +1458,13 @@ pub fn drain_once(
         // flag (`keep_data`), and this is the position where the two are easy
         // to confuse: passing false would free nothing and the next tick would
         // drain again forever.
-        match crate::api::remove_one_torrent(state, &hash, &[engine_id.to_string()], engine_id, true) {
+        match crate::api::remove_one_torrent(
+            state,
+            &hash,
+            &[engine_id.to_string()],
+            engine_id,
+            true,
+        ) {
             Ok(_) => {
                 to_free -= size;
                 deleted += 1;
@@ -1426,7 +1538,8 @@ pub fn drain_once(
     // `after_drain` keeps the after-percentage on the same basis the trigger
     // used (the quota, when there is one) while freed stays the disk delta.
     let (freed, after) = volume.after_drain(
-        crate::volumes::usage(std::path::Path::new(&volume.id)).map(|(used, total, _)| (used, total)),
+        crate::volumes::usage(std::path::Path::new(&volume.id))
+            .map(|(used, total, _)| (used, total)),
     );
     if deleted > 0 || graduated > 0 || stuck > 0 {
         let store = match state.store.lock() {
@@ -1512,7 +1625,10 @@ fn watch_memory(limit_bytes: u64, mut read: impl FnMut() -> Option<u64> + Send +
                 );
             } else if rss <= limit_bytes && over {
                 over = false;
-                tracing::info!(rss_mib = rss / (1 << 20), "resident memory back under the ceiling");
+                tracing::info!(
+                    rss_mib = rss / (1 << 20),
+                    "resident memory back under the ceiling"
+                );
             }
         }
     });
@@ -1625,8 +1741,12 @@ mod reconcile_tests {
     use super::rows_to_drop;
     use std::collections::HashSet;
 
-    fn set(v: &[&str]) -> HashSet<String> { v.iter().map(|s| s.to_string()).collect() }
-    fn many(n: usize) -> Vec<String> { (0..n).map(|i| format!("h{i:06}")).collect() }
+    fn set(v: &[&str]) -> HashSet<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+    fn many(n: usize) -> Vec<String> {
+        (0..n).map(|i| format!("h{i:06}")).collect()
+    }
 
     /// A row whose torrent is simply gone is still collected.
     #[test]
@@ -1761,7 +1881,10 @@ fn reconcile_pass(engines: &crate::engines::EngineHost, store: &crate::store::St
                 // This engine's row only: `all_hashes` listed this
                 // engine's half, and 4.3's delete by info hash took
                 // another engine's copy of the same torrent with it.
-                if store.delete_settled_copy(&hash, &engine.id, RECONCILE_GRACE).unwrap_or(false) {
+                if store
+                    .delete_settled_copy(&hash, &engine.id, RECONCILE_GRACE)
+                    .unwrap_or(false)
+                {
                     dropped += 1;
                 }
             }
@@ -1800,7 +1923,12 @@ mod drain_tests {
             0,
             0,
             0,
-            Policy { enabled, high, low, inherited: true },
+            Policy {
+                enabled,
+                high,
+                low,
+                inherited: true,
+            },
         )
     }
 
@@ -1902,7 +2030,10 @@ mod drain_tests {
     #[test]
     fn an_empty_outcome_is_zero_everywhere() {
         let o = DrainOutcome::default();
-        assert_eq!((o.deleted, o.graduated, o.stuck, o.freed_bytes), (0, 0, 0, 0));
+        assert_eq!(
+            (o.deleted, o.graduated, o.stuck, o.freed_bytes),
+            (0, 0, 0, 0)
+        );
     }
 
     /// ⭐ A ceiling of zero or less means "no ceiling", not "nothing may run".
@@ -1916,7 +2047,16 @@ mod drain_tests {
         // Must not panic, and must not stop anything on an empty library.
         let zero = QueueLimits::from_session(&toml::from_str("active_downloads = 0").unwrap());
         assert!(zero.is_empty());
-        enforce_queue(&mgr, &cache, &zero, &paused, &Default::default(), &mut Default::default(), &mut SlowClock::new(), std::time::Instant::now());
+        enforce_queue(
+            &mgr,
+            &cache,
+            &zero,
+            &paused,
+            &Default::default(),
+            &mut Default::default(),
+            &mut SlowClock::new(),
+            std::time::Instant::now(),
+        );
         assert_eq!(mgr.count(), 0);
     }
 
@@ -1926,8 +2066,20 @@ mod drain_tests {
         let mgr = race_manager(&s);
         let cache = Cache::default();
         let paused = std::collections::HashSet::new();
-        let five = QueueLimits { downloads: Some(5), ..Default::default() };
-        enforce_queue(&mgr, &cache, &five, &paused, &Default::default(), &mut Default::default(), &mut SlowClock::new(), std::time::Instant::now());
+        let five = QueueLimits {
+            downloads: Some(5),
+            ..Default::default()
+        };
+        enforce_queue(
+            &mgr,
+            &cache,
+            &five,
+            &paused,
+            &Default::default(),
+            &mut Default::default(),
+            &mut SlowClock::new(),
+            std::time::Instant::now(),
+        );
         assert!(mgr.all().is_empty());
     }
 }
@@ -1968,7 +2120,12 @@ mod drain_policy_gate_tests {
             0,
             0,
             1,
-            Policy { enabled, high, low, inherited: true },
+            Policy {
+                enabled,
+                high,
+                low,
+                inherited: true,
+            },
         )
     }
 
@@ -1982,7 +2139,10 @@ mod drain_policy_gate_tests {
     ) -> crate::api::testing::TestState {
         let s = crate::api::testing::state_from(tag, toml_src);
         let engines = s.engines.engines();
-        let engine = engines.iter().find(|e| e.id == "race").expect("a race engine");
+        let engine = engines
+            .iter()
+            .find(|e| e.id == "race")
+            .expect("a race engine");
         for i in 0..n {
             let name = format!("t{i}");
             let (ih, _) = engine
@@ -1995,7 +2155,8 @@ mod drain_policy_gate_tests {
                 live.clear();
                 live.push(vec!["https://tracker.example/announce".to_string()]);
             }
-            t.seed_secs.store(seeded_secs, std::sync::atomic::Ordering::Relaxed);
+            t.seed_secs
+                .store(seeded_secs, std::sync::atomic::Ordering::Relaxed);
             t.seed_since.store(0, std::sync::atomic::Ordering::Relaxed);
         }
         s
@@ -2174,9 +2335,12 @@ mod queue_tests {
         ["a", "b", "c"]
             .iter()
             .map(|n| {
-                let (ih, _) = mgr.add_torrent_bytes(&torrent_bytes(n), "/tmp", false, true).unwrap();
+                let (ih, _) = mgr
+                    .add_torrent_bytes(&torrent_bytes(n), "/tmp", false, true)
+                    .unwrap();
                 let t = mgr.get(&ih).unwrap();
-                t.status.store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+                t.status
+                    .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
                 t.is_paused.store(false, Ordering::Relaxed);
                 t
             })
@@ -2195,7 +2359,11 @@ mod queue_tests {
         assert!(limits("active_seeds = 1\nactive_limit = 1").is_empty());
         assert!(limits("").is_empty());
         assert!(limits("queueing = true\nactive_seeds = -1\nactive_limit = -1").is_empty());
-        assert_eq!(limits("active_downloads = 10").downloads, Some(10), "active_downloads works as before");
+        assert_eq!(
+            limits("active_downloads = 10").downloads,
+            Some(10),
+            "active_downloads works as before"
+        );
     }
 
     #[test]
@@ -2207,9 +2375,19 @@ mod queue_tests {
         let t = &all[0];
         mgr.start_torrent(&t.info_hash).unwrap();
         assert!(!t.is_paused.load(Ordering::Relaxed), "fixture: running");
-        let stopped_by_user: HashSet<String> = [typhon_engine::torrent::hex_encode(&t.info_hash)].into();
+        let stopped_by_user: HashSet<String> =
+            [typhon_engine::torrent::hex_encode(&t.info_hash)].into();
         let mut parked = HashSet::new();
-        enforce_queue(&mgr, &Cache::default(), &limits("queueing = true\nactive_seeds = 5"), &stopped_by_user, &Default::default(), &mut parked, &mut SlowClock::new(), std::time::Instant::now());
+        enforce_queue(
+            &mgr,
+            &Cache::default(),
+            &limits("queueing = true\nactive_seeds = 5"),
+            &stopped_by_user,
+            &Default::default(),
+            &mut parked,
+            &mut SlowClock::new(),
+            std::time::Instant::now(),
+        );
         assert!(t.is_paused.load(Ordering::Relaxed), "the user's stop holds");
         assert!(parked.is_empty(), "a user stop is not the queue's to undo");
         let _ = std::fs::remove_dir_all(root);
@@ -2221,13 +2399,39 @@ mod queue_tests {
         let all = seeds(&mgr);
         let cache = Cache::default();
         let mut parked = HashSet::new();
-        enforce_queue(&mgr, &cache, &limits("queueing = true\nactive_seeds = 1"), &HashSet::new(), &Default::default(), &mut parked, &mut SlowClock::new(), std::time::Instant::now());
-        let running: Vec<bool> = all.iter().map(|t| !t.is_paused.load(Ordering::Relaxed)).collect();
+        enforce_queue(
+            &mgr,
+            &cache,
+            &limits("queueing = true\nactive_seeds = 1"),
+            &HashSet::new(),
+            &Default::default(),
+            &mut parked,
+            &mut SlowClock::new(),
+            std::time::Instant::now(),
+        );
+        let running: Vec<bool> = all
+            .iter()
+            .map(|t| !t.is_paused.load(Ordering::Relaxed))
+            .collect();
         assert_eq!(running.iter().filter(|r| **r).count(), 1, "one seed slot");
         assert_eq!(parked.len(), 2);
         // Stable: a second pass moves nothing.
-        enforce_queue(&mgr, &cache, &limits("queueing = true\nactive_seeds = 1"), &HashSet::new(), &Default::default(), &mut parked, &mut SlowClock::new(), std::time::Instant::now());
-        assert_eq!(all.iter().filter(|t| !t.is_paused.load(Ordering::Relaxed)).count(), 1);
+        enforce_queue(
+            &mgr,
+            &cache,
+            &limits("queueing = true\nactive_seeds = 1"),
+            &HashSet::new(),
+            &Default::default(),
+            &mut parked,
+            &mut SlowClock::new(),
+            std::time::Instant::now(),
+        );
+        assert_eq!(
+            all.iter()
+                .filter(|t| !t.is_paused.load(Ordering::Relaxed))
+                .count(),
+            1
+        );
         // A parked seed the operator then stops stays stopped when the
         // ceiling is lifted; the others come back.
         let operator: HashSet<String> = all
@@ -2236,9 +2440,23 @@ mod queue_tests {
             .take(1)
             .map(|t| typhon_engine::torrent::hex_encode(&t.info_hash))
             .collect();
-        enforce_queue(&mgr, &cache, &QueueLimits::default(), &operator, &Default::default(), &mut parked, &mut SlowClock::new(), std::time::Instant::now());
+        enforce_queue(
+            &mgr,
+            &cache,
+            &QueueLimits::default(),
+            &operator,
+            &Default::default(),
+            &mut parked,
+            &mut SlowClock::new(),
+            std::time::Instant::now(),
+        );
         assert!(parked.is_empty());
-        assert_eq!(all.iter().filter(|t| !t.is_paused.load(Ordering::Relaxed)).count(), 2);
+        assert_eq!(
+            all.iter()
+                .filter(|t| !t.is_paused.load(Ordering::Relaxed))
+                .count(),
+            2
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -2248,19 +2466,38 @@ mod queue_tests {
         let (mgr, root) = manager("total");
         let all = seeds(&mgr);
         let mut parked = HashSet::new();
-        enforce_queue(&mgr, &Cache::default(), &limits("queueing = true\nactive_limit = 2"), &HashSet::new(), &Default::default(), &mut parked, &mut SlowClock::new(), std::time::Instant::now());
-        assert_eq!(all.iter().filter(|t| !t.is_paused.load(Ordering::Relaxed)).count(), 2);
+        enforce_queue(
+            &mgr,
+            &Cache::default(),
+            &limits("queueing = true\nactive_limit = 2"),
+            &HashSet::new(),
+            &Default::default(),
+            &mut parked,
+            &mut SlowClock::new(),
+            std::time::Instant::now(),
+        );
+        assert_eq!(
+            all.iter()
+                .filter(|t| !t.is_paused.load(Ordering::Relaxed))
+                .count(),
+            2
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
     /// Three incomplete torrents, stopped, waiting for a download slot.
-    fn queued_downloads(mgr: &Arc<TorrentManager>) -> Vec<Arc<typhon_engine::torrent::meta::TorrentState>> {
+    fn queued_downloads(
+        mgr: &Arc<TorrentManager>,
+    ) -> Vec<Arc<typhon_engine::torrent::meta::TorrentState>> {
         ["d", "e", "f"]
             .iter()
             .map(|n| {
-                let (ih, _) = mgr.add_torrent_bytes(&torrent_bytes(n), "/tmp", false, true).unwrap();
+                let (ih, _) = mgr
+                    .add_torrent_bytes(&torrent_bytes(n), "/tmp", false, true)
+                    .unwrap();
                 let t = mgr.get(&ih).unwrap();
-                t.status.store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+                t.status
+                    .store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
                 t.is_paused.store(true, Ordering::Relaxed);
                 t
             })
@@ -2269,18 +2506,35 @@ mod queue_tests {
 
     /// Run passes at `t0 + secs` and count the running downloads after each.
     /// A torrent the pass started is set downloading, as the engine would.
-    fn passes(mgr: &Arc<TorrentManager>, all: &[Arc<typhon_engine::torrent::meta::TorrentState>], l: &QueueLimits, at: &[u64]) -> Vec<usize> {
+    fn passes(
+        mgr: &Arc<TorrentManager>,
+        all: &[Arc<typhon_engine::torrent::meta::TorrentState>],
+        l: &QueueLimits,
+        at: &[u64],
+    ) -> Vec<usize> {
         let t0 = std::time::Instant::now();
         let (mut parked, mut clock) = (HashSet::new(), SlowClock::new());
         at.iter()
             .map(|secs| {
-                enforce_queue(mgr, &Cache::default(), l, &HashSet::new(), &Default::default(), &mut parked, &mut clock, t0 + Duration::from_secs(*secs));
+                enforce_queue(
+                    mgr,
+                    &Cache::default(),
+                    l,
+                    &HashSet::new(),
+                    &Default::default(),
+                    &mut parked,
+                    &mut clock,
+                    t0 + Duration::from_secs(*secs),
+                );
                 for t in all {
                     if !t.is_paused.load(Ordering::Relaxed) {
-                        t.status.store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+                        t.status
+                            .store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
                     }
                 }
-                all.iter().filter(|t| !t.is_paused.load(Ordering::Relaxed)).count()
+                all.iter()
+                    .filter(|t| !t.is_paused.load(Ordering::Relaxed))
+                    .count()
             })
             .collect()
     }
@@ -2293,8 +2547,15 @@ mod queue_tests {
         let (mgr, root) = manager("slow-dl");
         let all = queued_downloads(&mgr);
         let l = limits("active_downloads = 1\ndont_count_slow_torrents = true\nslow_torrent_inactive_timer = 60");
-        assert_eq!(l.slow.map(|r| (r.dl_bps, r.ul_bps)), Some((2048, 2048)), "qBittorrent's 2 KiB/s by default");
-        assert_eq!(passes(&mgr, &all, &l, &[0, 30, 60, 100, 130, 200]), vec![1, 1, 1, 2, 2, 3]);
+        assert_eq!(
+            l.slow.map(|r| (r.dl_bps, r.ul_bps)),
+            Some((2048, 2048)),
+            "qBittorrent's 2 KiB/s by default"
+        );
+        assert_eq!(
+            passes(&mgr, &all, &l, &[0, 30, 60, 100, 130, 200]),
+            vec![1, 1, 1, 2, 2, 3]
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -2305,7 +2566,15 @@ mod queue_tests {
         let (mgr, root) = manager("slow-off");
         let all = queued_downloads(&mgr);
         assert!(limits("active_downloads = 1").slow.is_none());
-        assert_eq!(passes(&mgr, &all, &limits("active_downloads = 1"), &[0, 100, 200, 300]), vec![1, 1, 1, 1]);
+        assert_eq!(
+            passes(
+                &mgr,
+                &all,
+                &limits("active_downloads = 1"),
+                &[0, 100, 200, 300]
+            ),
+            vec![1, 1, 1, 1]
+        );
         let zero = limits("active_downloads = 1\ndont_count_slow_torrents = true\nslow_torrent_dl_rate_threshold = 0");
         assert_eq!(passes(&mgr, &all, &zero, &[400, 500, 600]), vec![1, 1, 1]);
         let _ = std::fs::remove_dir_all(root);
@@ -2321,13 +2590,28 @@ mod queue_tests {
         let t0 = std::time::Instant::now();
         let (mut parked, mut clock) = (HashSet::new(), SlowClock::new());
         let mut run = |secs: u64| {
-            enforce_queue(&mgr, &Cache::default(), &l, &HashSet::new(), &Default::default(), &mut parked, &mut clock, t0 + Duration::from_secs(secs));
-            all.iter().filter(|t| !t.is_paused.load(Ordering::Relaxed)).count()
+            enforce_queue(
+                &mgr,
+                &Cache::default(),
+                &l,
+                &HashSet::new(),
+                &Default::default(),
+                &mut parked,
+                &mut clock,
+                t0 + Duration::from_secs(secs),
+            );
+            all.iter()
+                .filter(|t| !t.is_paused.load(Ordering::Relaxed))
+                .count()
         };
         // First pass: three running seeds, none slow long enough yet.
         assert_eq!(run(0), 1);
         assert_eq!(run(30), 1);
-        assert_eq!(run(70), 2, "the oldest is idle 70 s: it keeps running, a parked seed starts");
+        assert_eq!(
+            run(70),
+            2,
+            "the oldest is idle 70 s: it keeps running, a parked seed starts"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -2339,14 +2623,31 @@ mod queue_tests {
         let (mgr, root) = manager("forced");
         let mut ts = Vec::new();
         for n in ["a", "b"] {
-            let (ih, _) = mgr.add_torrent_bytes(&torrent_bytes(n), "/tmp", true, false).unwrap();
+            let (ih, _) = mgr
+                .add_torrent_bytes(&torrent_bytes(n), "/tmp", true, false)
+                .unwrap();
             ts.push(mgr.get(&ih).unwrap());
         }
         let forced: HashSet<String> = [typhon_engine::torrent::hex_encode(&ts[0].info_hash)].into();
         let mut parked = HashSet::new();
-        enforce_queue(&mgr, &Cache::default(), &limits("active_downloads = 1"), &HashSet::new(), &forced, &mut parked, &mut SlowClock::new(), std::time::Instant::now());
-        assert!(!ts[0].is_paused.load(Ordering::Relaxed), "the forced one waits its turn");
-        assert!(!ts[1].is_paused.load(Ordering::Relaxed), "the forced one took the only slot");
+        enforce_queue(
+            &mgr,
+            &Cache::default(),
+            &limits("active_downloads = 1"),
+            &HashSet::new(),
+            &forced,
+            &mut parked,
+            &mut SlowClock::new(),
+            std::time::Instant::now(),
+        );
+        assert!(
+            !ts[0].is_paused.load(Ordering::Relaxed),
+            "the forced one waits its turn"
+        );
+        assert!(
+            !ts[1].is_paused.load(Ordering::Relaxed),
+            "the forced one took the only slot"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -2356,7 +2657,16 @@ mod queue_tests {
         let (mgr, root) = manager("dl-only");
         let all = seeds(&mgr);
         let mut parked = HashSet::new();
-        enforce_queue(&mgr, &Cache::default(), &limits("active_downloads = 1"), &HashSet::new(), &Default::default(), &mut parked, &mut SlowClock::new(), std::time::Instant::now());
+        enforce_queue(
+            &mgr,
+            &Cache::default(),
+            &limits("active_downloads = 1"),
+            &HashSet::new(),
+            &Default::default(),
+            &mut parked,
+            &mut SlowClock::new(),
+            std::time::Instant::now(),
+        );
         assert!(all.iter().all(|t| !t.is_paused.load(Ordering::Relaxed)));
         assert!(parked.is_empty());
         let _ = std::fs::remove_dir_all(root);
@@ -2401,7 +2711,13 @@ mod decision_tests {
     }
 
     fn engine_manager(s: &TestState, id: &str) -> Arc<TorrentManager> {
-        s.engines.engines().iter().find(|e| e.id == id).expect("engine").manager.clone()
+        s.engines
+            .engines()
+            .iter()
+            .find(|e| e.id == id)
+            .expect("engine")
+            .manager
+            .clone()
     }
 
     /// A seed on `engine`, with its file on disk and a row in the store:
@@ -2429,13 +2745,16 @@ mod decision_tests {
             engine,
         )
         .expect("added");
-        let t = engine_manager(s, engine).get(&typhon_engine::torrent::hex_decode(&hash).unwrap()).expect("held");
+        let t = engine_manager(s, engine)
+            .get(&typhon_engine::torrent::hex_decode(&hash).unwrap())
+            .expect("held");
         {
             let mut live = t.live_trackers.write();
             live.clear();
             live.push(vec![tracker.to_string()]);
         }
-        t.status.store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+        t.status
+            .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
         t.is_paused.store(false, Ordering::Relaxed);
         t.seed_secs.store(seeded_secs, Ordering::Relaxed);
         t.seed_since.store(0, Ordering::Relaxed);
@@ -2444,7 +2763,13 @@ mod decision_tests {
 
     const TRACKER: &str = "https://tracker.example/announce";
 
-    fn volume_on(s: &TestState, id: &str, total: u64, used: u64, low: i64) -> crate::volumes::Volume {
+    fn volume_on(
+        s: &TestState,
+        id: &str,
+        total: u64,
+        used: u64,
+        low: i64,
+    ) -> crate::volumes::Volume {
         let dev = crate::volumes::device_of_nearest(&s.dir).expect("the test dir is on a device");
         crate::volumes::Volume::measure(
             id.into(),
@@ -2454,7 +2779,12 @@ mod decision_tests {
             0,
             0,
             3,
-            crate::volumes::Policy { enabled: true, high: 90, low, inherited: true },
+            crate::volumes::Policy {
+                enabled: true,
+                high: 90,
+                low,
+                inherited: true,
+            },
         )
     }
 
@@ -2463,8 +2793,20 @@ mod decision_tests {
     const NO_SUCH_MOUNT: &str = "/nonexistent-mount-for-the-drain-tests";
 
     fn in_store(s: &TestState, hash: &str) -> bool {
-        s.store.read().unwrap().all_hashes("race").unwrap().iter().any(|h| h == hash)
-            || s.store.read().unwrap().all_hashes("hoard").unwrap().iter().any(|h| h == hash)
+        s.store
+            .read()
+            .unwrap()
+            .all_hashes("race")
+            .unwrap()
+            .iter()
+            .any(|h| h == hash)
+            || s.store
+                .read()
+                .unwrap()
+                .all_hashes("hoard")
+                .unwrap()
+                .iter()
+                .any(|h| h == hash)
     }
 
     fn history(s: &TestState) -> Vec<serde_json::Value> {
@@ -2472,7 +2814,11 @@ mod decision_tests {
     }
 
     fn write_categories(s: &TestState, doc: serde_json::Value) {
-        s.store.lock().unwrap().put_meta("categories", &doc.to_string()).unwrap();
+        s.store
+            .lock()
+            .unwrap()
+            .put_meta("categories", &doc.to_string())
+            .unwrap();
     }
 
     // ---- the drain: what it frees, in what order, and what it will not touch ----
@@ -2482,26 +2828,55 @@ mod decision_tests {
     /// -- data, store row and engine copy together.
     #[test]
     fn the_drain_removes_only_what_the_gap_to_the_low_watermark_needs() {
-        let s = st("dec-drain-gap", "\n[announce_min_seed_hours]\n\"tracker.example\" = \"0\"\n");
+        let s = st(
+            "dec-drain-gap",
+            "\n[announce_min_seed_hours]\n\"tracker.example\" = \"0\"\n",
+        );
         let mgr = engine_manager(&s, "race");
-        let all: Vec<_> = ["da", "db", "dc"].iter().map(|n| put(&s, "race", n, "", TRACKER, 100)).collect();
+        let all: Vec<_> = ["da", "db", "dc"]
+            .iter()
+            .map(|n| put(&s, "race", n, "", TRACKER, 100))
+            .collect();
         // 90 000 of 100 000 used, low = 80: 10 000 to free, a torrent is 16 384.
         let v = volume_on(&s, NO_SUCH_MOUNT, 100_000, 90_000, 80);
         let out = drain_once(&s.state, &mgr, &v, &s.cfg(), "race");
         assert_eq!((out.deleted, out.graduated, out.stuck), (1, 0, 0));
-        assert_eq!(out.freed_bytes, 0, "the disk delta is measured, not assumed: this id is no mount");
+        assert_eq!(
+            out.freed_bytes, 0,
+            "the disk delta is measured, not assumed: this id is no mount"
+        );
         assert_eq!(mgr.all().len(), 2);
-        let gone: Vec<_> = all.iter().filter(|(h, _, _)| mgr.get(&typhon_engine::torrent::hex_decode(h).unwrap()).is_none()).collect();
+        let gone: Vec<_> = all
+            .iter()
+            .filter(|(h, _, _)| {
+                mgr.get(&typhon_engine::torrent::hex_decode(h).unwrap())
+                    .is_none()
+            })
+            .collect();
         assert_eq!(gone.len(), 1);
         let (hash, _, file) = gone[0];
         assert!(!in_store(&s, hash), "the store row went with the torrent");
-        assert!(!file.exists(), "and its payload, since this was its last copy");
+        assert!(
+            !file.exists(),
+            "and its payload, since this was its last copy"
+        );
         for (h, _, f) in all.iter().filter(|(h, _, _)| h != hash) {
             assert!(f.exists() && in_store(&s, h), "the others are untouched");
         }
         let hist = history(&s);
         assert_eq!(hist.len(), 1);
-        assert_eq!((hist[0]["deleted"].clone(), hist[0]["graduated"].clone(), hist[0]["stuck"].clone()), (serde_json::json!(1), serde_json::json!(0), serde_json::json!(0)));
+        assert_eq!(
+            (
+                hist[0]["deleted"].clone(),
+                hist[0]["graduated"].clone(),
+                hist[0]["stuck"].clone()
+            ),
+            (
+                serde_json::json!(1),
+                serde_json::json!(0),
+                serde_json::json!(0)
+            )
+        );
         assert_eq!(hist[0]["volume"], NO_SUCH_MOUNT);
     }
 
@@ -2509,13 +2884,22 @@ mod decision_tests {
     /// three do.
     #[test]
     fn a_bigger_gap_takes_more_torrents() {
-        let s = st("dec-drain-big", "\n[announce_min_seed_hours]\n\"tracker.example\" = \"0\"\n");
+        let s = st(
+            "dec-drain-big",
+            "\n[announce_min_seed_hours]\n\"tracker.example\" = \"0\"\n",
+        );
         let mgr = engine_manager(&s, "race");
         for n in ["ea", "eb", "ec"] {
             put(&s, "race", n, "", TRACKER, 100);
         }
         // 40 000 to free: two torrents (32 768) are not enough, three are.
-        let out = drain_once(&s.state, &mgr, &volume_on(&s, NO_SUCH_MOUNT, 100_000, 80_000, 40), &s.cfg(), "race");
+        let out = drain_once(
+            &s.state,
+            &mgr,
+            &volume_on(&s, NO_SUCH_MOUNT, 100_000, 80_000, 40),
+            &s.cfg(),
+            "race",
+        );
         assert_eq!(out.deleted, 3);
         assert!(mgr.all().is_empty());
     }
@@ -2524,7 +2908,10 @@ mod decision_tests {
     /// one is.
     #[test]
     fn a_torrent_on_another_device_is_not_a_candidate() {
-        let s = st("dec-drain-dev", "\n[announce_min_seed_hours]\n\"tracker.example\" = \"0\"\n");
+        let s = st(
+            "dec-drain-dev",
+            "\n[announce_min_seed_hours]\n\"tracker.example\" = \"0\"\n",
+        );
         let mgr = engine_manager(&s, "race");
         let (hash, _, file) = put(&s, "race", "fa", "", TRACKER, 100);
         let mut v = volume_on(&s, NO_SUCH_MOUNT, 100_000, 99_000, 80);
@@ -2532,7 +2919,10 @@ mod decision_tests {
         let out = drain_once(&s.state, &mgr, &v, &s.cfg(), "race");
         assert_eq!((out.deleted, out.graduated, out.stuck), (0, 0, 0));
         assert!(file.exists() && in_store(&s, &hash));
-        assert!(history(&s).is_empty(), "a pass that did nothing writes no history");
+        assert!(
+            history(&s).is_empty(),
+            "a pass that did nothing writes no history"
+        );
     }
 
     /// A torrent that still owes seeding time AND has nowhere to go is
@@ -2540,17 +2930,32 @@ mod decision_tests {
     /// says so.
     #[test]
     fn a_torrent_owing_time_with_no_graduation_target_is_stuck_not_deleted() {
-        let s = st("dec-drain-stuck", "\n[announce_min_seed_hours]\n\"tracker.example\" = \"72\"\n");
+        let s = st(
+            "dec-drain-stuck",
+            "\n[announce_min_seed_hours]\n\"tracker.example\" = \"72\"\n",
+        );
         let mgr = engine_manager(&s, "race");
         let (hash, _, file) = put(&s, "race", "ga", "", TRACKER, 3600);
-        let out = drain_once(&s.state, &mgr, &volume_on(&s, NO_SUCH_MOUNT, 100_000, 99_000, 80), &s.cfg(), "race");
+        let out = drain_once(
+            &s.state,
+            &mgr,
+            &volume_on(&s, NO_SUCH_MOUNT, 100_000, 99_000, 80),
+            &s.cfg(),
+            "race",
+        );
         assert_eq!((out.deleted, out.graduated, out.stuck), (0, 0, 1));
-        assert!(file.exists() && in_store(&s, &hash), "never deleted for want of somewhere to put it");
+        assert!(
+            file.exists() && in_store(&s, &hash),
+            "never deleted for want of somewhere to put it"
+        );
         assert_eq!(history(&s)[0]["stuck"], 1);
     }
 
     fn graduation_state(tag: &str, hours: &str, to_mode: &str) -> TestState {
-        let s = st(tag, &format!("\n[announce_min_seed_hours]\n\"tracker.example\" = \"{hours}\"\n"));
+        let s = st(
+            tag,
+            &format!("\n[announce_min_seed_hours]\n\"tracker.example\" = \"{hours}\"\n"),
+        );
         let pool = s.dir.join("pool");
         std::fs::create_dir_all(&pool).unwrap();
         write_categories(
@@ -2575,18 +2980,31 @@ mod decision_tests {
         let v = volume_on(&s, NO_SUCH_MOUNT, 100_000, 99_000, 80);
         let out = drain_once(&s.state, &mgr, &v, &s.cfg(), "race");
         assert_eq!((out.deleted, out.graduated, out.stuck), (0, 1, 0));
-        assert!(file.exists() && in_store(&s, &hash), "nothing is deleted by a graduation");
-        assert!(s.store.read().unwrap().job_pending_for("graduate", &hash), "the move is queued");
+        assert!(
+            file.exists() && in_store(&s, &hash),
+            "nothing is deleted by a graduation"
+        );
+        assert!(
+            s.store.read().unwrap().job_pending_for("graduate", &hash),
+            "the move is queued"
+        );
         let jobs = s.store.read().unwrap().list_jobs(10).unwrap();
         let job = jobs.iter().find(|j| j.info_hash == hash).expect("the job");
         let params: serde_json::Value = serde_json::from_str(&job.params).unwrap();
-        assert_eq!((job.kind.as_str(), job.total_bytes), ("graduate", SIZE as i64));
+        assert_eq!(
+            (job.kind.as_str(), job.total_bytes),
+            ("graduate", SIZE as i64)
+        );
         assert_eq!(params["to_engine"], "hoard");
         assert_eq!(params["to_category"], "pool");
         assert_eq!(params["from_engine"], "race");
 
         let again = drain_once(&s.state, &mgr, &v, &s.cfg(), "race");
-        assert_eq!((again.graduated, again.deleted), (0, 0), "a duplicate is refused, not queued again");
+        assert_eq!(
+            (again.graduated, again.deleted),
+            (0, 0),
+            "a duplicate is refused, not queued again"
+        );
         assert_eq!(history(&s)[0]["graduated"], 1);
     }
 
@@ -2597,7 +3015,13 @@ mod decision_tests {
         let s = graduation_state("dec-drain-same", "72", "race");
         let mgr = engine_manager(&s, "race");
         let (hash, _, _) = put(&s, "race", "ia", "ssd", TRACKER, 3600);
-        let out = drain_once(&s.state, &mgr, &volume_on(&s, NO_SUCH_MOUNT, 100_000, 99_000, 80), &s.cfg(), "race");
+        let out = drain_once(
+            &s.state,
+            &mgr,
+            &volume_on(&s, NO_SUCH_MOUNT, 100_000, 99_000, 80),
+            &s.cfg(),
+            "race",
+        );
         assert_eq!((out.graduated, out.stuck, out.deleted), (0, 1, 0));
         assert!(!s.store.read().unwrap().job_pending_for("graduate", &hash));
     }
@@ -2610,11 +3034,20 @@ mod decision_tests {
         let mgr = engine_manager(&s, "race");
         let (hash, _, file) = put(&s, "race", "ja", "ssd", TRACKER, 3600);
         std::fs::write(s.dir.join("pool").join("ja"), b"someone else's bytes").unwrap();
-        let out = drain_once(&s.state, &mgr, &volume_on(&s, NO_SUCH_MOUNT, 100_000, 99_000, 80), &s.cfg(), "race");
+        let out = drain_once(
+            &s.state,
+            &mgr,
+            &volume_on(&s, NO_SUCH_MOUNT, 100_000, 99_000, 80),
+            &s.cfg(),
+            "race",
+        );
         assert_eq!((out.graduated, out.stuck, out.deleted), (0, 1, 0));
         assert!(!s.store.read().unwrap().job_pending_for("graduate", &hash));
         assert!(file.exists());
-        assert_eq!(std::fs::read(s.dir.join("pool").join("ja")).unwrap(), b"someone else's bytes");
+        assert_eq!(
+            std::fs::read(s.dir.join("pool").join("ja")).unwrap(),
+            b"someone else's bytes"
+        );
     }
 
     /// The target engine already holds the very torrent (it sits in both): the
@@ -2629,7 +3062,14 @@ mod decision_tests {
         let elsewhere = s.dir.join("elsewhere");
         std::fs::create_dir_all(&elsewhere).unwrap();
         let hoard = engine_manager(&s, "hoard");
-        hoard.add_torrent_bytes(&torrent_bytes("la"), elsewhere.to_str().unwrap(), true, true).unwrap();
+        hoard
+            .add_torrent_bytes(
+                &torrent_bytes("la"),
+                elsewhere.to_str().unwrap(),
+                true,
+                true,
+            )
+            .unwrap();
         let ih = typhon_engine::torrent::hex_decode(&hash).unwrap();
         assert!(hoard.get(&ih).is_some(), "the target holds it");
 
@@ -2652,7 +3092,13 @@ mod decision_tests {
         let mgr = engine_manager(&s, "race");
         let (paid, _, paid_file) = put(&s, "race", "ka", "ssd", TRACKER, 7200);
         let (owing, _, owing_file) = put(&s, "race", "kb", "ssd", TRACKER, 60);
-        let out = drain_once(&s.state, &mgr, &volume_on(&s, NO_SUCH_MOUNT, 100_000, 99_000, 0), &s.cfg(), "race");
+        let out = drain_once(
+            &s.state,
+            &mgr,
+            &volume_on(&s, NO_SUCH_MOUNT, 100_000, 99_000, 0),
+            &s.cfg(),
+            "race",
+        );
         assert_eq!((out.deleted, out.graduated, out.stuck), (1, 1, 0));
         assert!(!in_store(&s, &paid) && !paid_file.exists());
         assert!(in_store(&s, &owing) && owing_file.exists());
@@ -2686,16 +3132,21 @@ mod decision_tests {
     }
 
     fn alive_tasks() -> usize {
-        tokio::runtime::Handle::current().metrics().num_alive_tasks()
+        tokio::runtime::Handle::current()
+            .metrics()
+            .num_alive_tasks()
     }
 
     fn queued_downloads(mgr: &Arc<TorrentManager>, names: &[&str]) -> Vec<Arc<TorrentState>> {
         names
             .iter()
             .map(|n| {
-                let (ih, _) = mgr.add_torrent_bytes(&torrent_bytes(n), "/tmp", true, false).unwrap();
+                let (ih, _) = mgr
+                    .add_torrent_bytes(&torrent_bytes(n), "/tmp", true, false)
+                    .unwrap();
                 let t = mgr.get(&ih).unwrap();
-                t.status.store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+                t.status
+                    .store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
                 t.is_paused.store(true, Ordering::Relaxed);
                 t
             })
@@ -2703,7 +3154,9 @@ mod decision_tests {
     }
 
     fn running(ts: &[Arc<TorrentState>]) -> usize {
-        ts.iter().filter(|t| !t.is_paused.load(Ordering::Relaxed)).count()
+        ts.iter()
+            .filter(|t| !t.is_paused.load(Ordering::Relaxed))
+            .count()
     }
 
     /// ⭐ The slot manager waits for the engine to settle, then enforces the
@@ -2711,18 +3164,29 @@ mod decision_tests {
     /// applies on the next pass.
     #[tokio::test(start_paused = true)]
     async fn the_slot_manager_enforces_the_live_ceiling_every_pass() {
-        let s = st("dec-slots", "\n[race]\nlisten_port = 16171\nactive_downloads = 1\n");
+        let s = st(
+            "dec-slots",
+            "\n[race]\nlisten_port = 16171\nactive_downloads = 1\n",
+        );
         let mgr = engine_manager(&s, "race");
         let ts = queued_downloads(&mgr, &["sa", "sb", "sc"]);
-        spawn_download_slots(mgr.clone(), Arc::new(Cache::default()), s.config.clone(), s.store.clone(), "race".into());
+        spawn_download_slots(
+            mgr.clone(),
+            Arc::new(Cache::default()),
+            s.config.clone(),
+            s.store.clone(),
+            "race".into(),
+        );
         after(29).await;
         assert_eq!(running(&ts), 0, "nothing moves while the engine settles");
         after(2).await; // 31 s: settled, the loop's first sleep started
         after(30).await; // the first pass
         assert_eq!(running(&ts), 1, "one slot");
 
-        let raised: crate::config::Config =
-            toml::from_str(&format!("[daemon]\napi_key = \"{KEY}\"\n[race]\nlisten_port = 16171\nactive_downloads = 3\n")).unwrap();
+        let raised: crate::config::Config = toml::from_str(&format!(
+            "[daemon]\napi_key = \"{KEY}\"\n[race]\nlisten_port = 16171\nactive_downloads = 3\n"
+        ))
+        .unwrap();
         *s.config.write().unwrap() = Arc::new(raised);
         after(30).await;
         assert_eq!(running(&ts), 3, "the next pass reads the new ceiling");
@@ -2731,13 +3195,30 @@ mod decision_tests {
     /// An operator's stop is not the queue's to undo, pass after pass.
     #[tokio::test(start_paused = true)]
     async fn the_slot_manager_never_starts_what_the_operator_stopped() {
-        let s = st("dec-slots-paused", "\n[race]\nlisten_port = 16171\nactive_downloads = 2\n");
+        let s = st(
+            "dec-slots-paused",
+            "\n[race]\nlisten_port = 16171\nactive_downloads = 2\n",
+        );
         let mgr = engine_manager(&s, "race");
         let ts = queued_downloads(&mgr, &["pa", "pb", "pc"]);
         let stopped = typhon_engine::torrent::hex_encode(&ts[0].info_hash);
-        s.store.lock().unwrap().insert_torrent(&stopped, "race", b"x", "/tmp", "", 0.0, true, "").unwrap();
-        s.store.lock().unwrap().set_paused(&stopped, "race", true).unwrap();
-        spawn_download_slots(mgr.clone(), Arc::new(Cache::default()), s.config.clone(), s.store.clone(), "race".into());
+        s.store
+            .lock()
+            .unwrap()
+            .insert_torrent(&stopped, "race", b"x", "/tmp", "", 0.0, true, "")
+            .unwrap();
+        s.store
+            .lock()
+            .unwrap()
+            .set_paused(&stopped, "race", true)
+            .unwrap();
+        spawn_download_slots(
+            mgr.clone(),
+            Arc::new(Cache::default()),
+            s.config.clone(),
+            s.store.clone(),
+            "race".into(),
+        );
         after(31).await;
         after(30).await;
         after(30).await;
@@ -2751,7 +3232,13 @@ mod decision_tests {
         let s = st("dec-slots-none", "");
         let mgr = engine_manager(&s, "race");
         let ts = queued_downloads(&mgr, &["na", "nb"]);
-        spawn_download_slots(mgr.clone(), Arc::new(Cache::default()), s.config.clone(), s.store.clone(), "race".into());
+        spawn_download_slots(
+            mgr.clone(),
+            Arc::new(Cache::default()),
+            s.config.clone(),
+            s.store.clone(),
+            "race".into(),
+        );
         after(31).await;
         after(30).await;
         after(30).await;
@@ -2779,17 +3266,32 @@ mod decision_tests {
                 root,
             )
         };
-        let (ih_stopped, _) = mgr.add_torrent_bytes(&torrent_bytes("stopped"), "/tmp", true, false).unwrap();
-        let (ih_a, _) = mgr.add_torrent_bytes(&torrent_bytes("wa"), "/tmp", false, false).unwrap();
-        let (ih_b, _) = mgr.add_torrent_bytes(&torrent_bytes("wb"), "/tmp", false, false).unwrap();
+        let (ih_stopped, _) = mgr
+            .add_torrent_bytes(&torrent_bytes("stopped"), "/tmp", true, false)
+            .unwrap();
+        let (ih_a, _) = mgr
+            .add_torrent_bytes(&torrent_bytes("wa"), "/tmp", false, false)
+            .unwrap();
+        let (ih_b, _) = mgr
+            .add_torrent_bytes(&torrent_bytes("wb"), "/tmp", false, false)
+            .unwrap();
         for ih in [&ih_a, &ih_b] {
-            mgr.get(ih).unwrap().is_paused.store(false, Ordering::Relaxed);
+            mgr.get(ih)
+                .unwrap()
+                .is_paused
+                .store(false, Ordering::Relaxed);
         }
         spawn_stagger_start(mgr.clone());
         for _ in 0..20 {
             tokio::task::yield_now().await;
         }
-        assert!(mgr.get(&ih_stopped).unwrap().is_paused.load(Ordering::Relaxed), "the operator's stop survives a restart");
+        assert!(
+            mgr.get(&ih_stopped)
+                .unwrap()
+                .is_paused
+                .load(Ordering::Relaxed),
+            "the operator's stop survives a restart"
+        );
         for ih in [&ih_a, &ih_b] {
             assert!(!mgr.get(ih).unwrap().is_paused.load(Ordering::Relaxed));
         }
@@ -2820,16 +3322,28 @@ mod decision_tests {
         after(10).await;
         assert_eq!(alive_tasks(), base, "nothing was checking: it stopped");
 
-        let (ih, _) = mgr.add_torrent_bytes(&torrent_bytes("checking"), "/tmp", true, false).unwrap();
-        mgr.get(&ih).unwrap().status.store(TorrentStatus::Checking as u8, Ordering::Relaxed);
+        let (ih, _) = mgr
+            .add_torrent_bytes(&torrent_bytes("checking"), "/tmp", true, false)
+            .unwrap();
+        mgr.get(&ih)
+            .unwrap()
+            .status
+            .store(TorrentStatus::Checking as u8, Ordering::Relaxed);
         spawn_verify_throttle(mgr.clone());
         after(0).await;
         after(5).await;
         for _ in 0..3 {
             after(10).await;
         }
-        assert_eq!(alive_tasks(), base + 1, "a torrent is still checking: it keeps watching");
-        mgr.get(&ih).unwrap().status.store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+        assert_eq!(
+            alive_tasks(),
+            base + 1,
+            "a torrent is still checking: it keeps watching"
+        );
+        mgr.get(&ih)
+            .unwrap()
+            .status
+            .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
         after(10).await;
         assert_eq!(alive_tasks(), base);
     }
@@ -2842,8 +3356,13 @@ mod decision_tests {
     async fn a_background_loop_ends_when_the_stop_begins() {
         let s = st("dec-verify-stop", "");
         let mgr = engine_manager(&s, "race");
-        let (ih, _) = mgr.add_torrent_bytes(&torrent_bytes("checking-stop"), "/tmp", true, false).unwrap();
-        mgr.get(&ih).unwrap().status.store(TorrentStatus::Checking as u8, Ordering::Relaxed);
+        let (ih, _) = mgr
+            .add_torrent_bytes(&torrent_bytes("checking-stop"), "/tmp", true, false)
+            .unwrap();
+        mgr.get(&ih)
+            .unwrap()
+            .status
+            .store(TorrentStatus::Checking as u8, Ordering::Relaxed);
         let base = alive_tasks();
         let stop = typhon_engine::stop::Stop::new();
 
@@ -2853,7 +3372,11 @@ mod decision_tests {
         assert_eq!(alive_tasks(), base + 1);
         stop.begin();
         after(0).await;
-        assert_eq!(alive_tasks(), base, "the loop outlived the stop in its first wait");
+        assert_eq!(
+            alive_tasks(),
+            base,
+            "the loop outlived the stop in its first wait"
+        );
 
         // And in the wait between two passes, with a torrent still checking.
         let stop = typhon_engine::stop::Stop::new();
@@ -2861,10 +3384,18 @@ mod decision_tests {
         after(0).await;
         after(5).await;
         after(10).await;
-        assert_eq!(alive_tasks(), base + 1, "a torrent is still checking: it keeps watching");
+        assert_eq!(
+            alive_tasks(),
+            base + 1,
+            "a torrent is still checking: it keeps watching"
+        );
         stop.begin();
         after(0).await;
-        assert_eq!(alive_tasks(), base, "the loop outlived the stop between two passes");
+        assert_eq!(
+            alive_tasks(),
+            base,
+            "the loop outlived the stop between two passes"
+        );
     }
 
     /// No ceiling, no watcher.
@@ -2890,14 +3421,20 @@ mod decision_tests {
         assert_eq!(alive_tasks(), base, "no ceiling, no watcher");
         let off = lines(&log, "memory alert");
         assert_eq!(off.len(), 1, "{off:?}");
-        assert!(off[0].starts_with("INFO") && off[0].contains("off"), "{off:?}");
+        assert!(
+            off[0].starts_with("INFO") && off[0].contains("off"),
+            "{off:?}"
+        );
 
         assert!(start_memory_watch(1536 << 20));
         tokio::task::yield_now().await;
         assert_eq!(alive_tasks(), base + 1, "a ceiling starts the watcher");
         let on = lines(&log, "memory alert");
         assert_eq!(on.len(), 2, "{on:?}");
-        assert!(on[1].starts_with("INFO") && on[1].contains("1536 MiB"), "{on:?}");
+        assert!(
+            on[1].starts_with("INFO") && on[1].contains("1536 MiB"),
+            "{on:?}"
+        );
     }
 
     /// ⭐ The daily sync copies the engine's seeding time into the store's
@@ -2908,7 +3445,15 @@ mod decision_tests {
         let mgr = engine_manager(&s, "race");
         let (a, ta, _) = put(&s, "race", "ya", "", TRACKER, 1234);
         let (b, _, _) = put(&s, "race", "yb", "", TRACKER, 99);
-        let seeded = |h: &str| s.store.read().unwrap().workflow_facts_of("race", h).unwrap().unwrap().seeding_time;
+        let seeded = |h: &str| {
+            s.store
+                .read()
+                .unwrap()
+                .workflow_facts_of("race", h)
+                .unwrap()
+                .unwrap()
+                .seeding_time
+        };
         assert_eq!((seeded(&a), seeded(&b)), (0, 0));
         spawn_seed_time_sync(mgr.clone(), s.store.clone(), "race".into());
         after(3599).await;
@@ -2933,7 +3478,10 @@ mod decision_tests {
     /// undeclared tracker, and one in an ordinary library category stay.
     #[tokio::test(start_paused = true)]
     async fn the_transit_sweep_deletes_only_paid_torrents_in_a_transit_category() {
-        let s = st("dec-transit", "\n[announce_min_seed_hours]\n\"tracker.example\" = \"1\"\n");
+        let s = st(
+            "dec-transit",
+            "\n[announce_min_seed_hours]\n\"tracker.example\" = \"1\"\n",
+        );
         let mgr = engine_manager(&s, "hoard");
         write_categories(
             &s,
@@ -2945,15 +3493,36 @@ mod decision_tests {
         );
         let (paid, _, paid_file) = put(&s, "hoard", "ta", "transit", TRACKER, 7200);
         let (owing, _, owing_file) = put(&s, "hoard", "tb", "transit", TRACKER, 60);
-        let (undeclared, _, undeclared_file) = put(&s, "hoard", "tc", "transit", "https://other.example/announce", 999_999);
+        let (undeclared, _, undeclared_file) = put(
+            &s,
+            "hoard",
+            "tc",
+            "transit",
+            "https://other.example/announce",
+            999_999,
+        );
         let (library, _, library_file) = put(&s, "hoard", "td", "library", TRACKER, 999_999);
-        spawn_transit_sweep(s.state.clone(), mgr.clone(), s.config.clone(), "hoard".into());
+        spawn_transit_sweep(
+            s.state.clone(),
+            mgr.clone(),
+            s.config.clone(),
+            "hoard".into(),
+        );
         after(89).await;
         assert!(in_store(&s, &paid), "not before its first delay");
         after(2).await;
-        assert!(!in_store(&s, &paid) && !paid_file.exists(), "paid and in transit: gone, files too");
-        assert!(mgr.get(&typhon_engine::torrent::hex_decode(&paid).unwrap()).is_none());
-        for (h, f) in [(&owing, &owing_file), (&undeclared, &undeclared_file), (&library, &library_file)] {
+        assert!(
+            !in_store(&s, &paid) && !paid_file.exists(),
+            "paid and in transit: gone, files too"
+        );
+        assert!(mgr
+            .get(&typhon_engine::torrent::hex_decode(&paid).unwrap())
+            .is_none());
+        for (h, f) in [
+            (&owing, &owing_file),
+            (&undeclared, &undeclared_file),
+            (&library, &library_file),
+        ] {
             assert!(in_store(&s, h) && f.exists(), "{h} must stay");
         }
     }
@@ -2961,7 +3530,10 @@ mod decision_tests {
     /// With no transit category nothing is even looked at.
     #[tokio::test(start_paused = true)]
     async fn the_transit_sweep_does_nothing_without_a_transit_category() {
-        let s = st("dec-transit-none", "\n[announce_min_seed_hours]\n\"tracker.example\" = \"0\"\n");
+        let s = st(
+            "dec-transit-none",
+            "\n[announce_min_seed_hours]\n\"tracker.example\" = \"0\"\n",
+        );
         let mgr = engine_manager(&s, "hoard");
         let (h, _, f) = put(&s, "hoard", "ua", "", TRACKER, 999_999);
         spawn_transit_sweep(s.state.clone(), mgr, s.config.clone(), "hoard".into());
@@ -2981,17 +3553,37 @@ mod decision_tests {
         );
         let mgr = engine_manager(&s, "race");
         let (h, _, f) = put(&s, "race", "va", "", TRACKER, 100);
-        let mount = crate::volumes::mount_point_of(&s.dir).to_string_lossy().to_string();
-        let off = crate::volumes::Policy { enabled: false, high: 0, low: 0, inherited: false };
+        let mount = crate::volumes::mount_point_of(&s.dir)
+            .to_string_lossy()
+            .to_string();
+        let off = crate::volumes::Policy {
+            enabled: false,
+            high: 0,
+            low: 0,
+            inherited: false,
+        };
         crate::volumes::save_policy(&s.state, &mount, &off).unwrap();
-        spawn_race_drain(s.state.clone(), mgr.clone(), s.config.clone(), "race".into());
+        spawn_race_drain(
+            s.state.clone(),
+            mgr.clone(),
+            s.config.clone(),
+            "race".into(),
+        );
         after(11).await;
         after(60).await;
         std::thread::sleep(Duration::from_millis(200));
         after(0).await;
-        assert!(in_store(&s, &h) && f.exists(), "a disabled volume is never drained");
+        assert!(
+            in_store(&s, &h) && f.exists(),
+            "a disabled volume is never drained"
+        );
 
-        let on = crate::volumes::Policy { enabled: true, high: 0, low: 0, inherited: false };
+        let on = crate::volumes::Policy {
+            enabled: true,
+            high: 0,
+            low: 0,
+            inherited: false,
+        };
         crate::volumes::save_policy(&s.state, &mount, &on).unwrap();
         after(60).await;
         eventually("the drain removed the torrent", || {
@@ -3001,7 +3593,13 @@ mod decision_tests {
         .await;
         assert!(!in_store(&s, &h));
         assert!(!f.exists());
-        assert!(history(&s).iter().any(|r| r["deleted"] == 1 && r["volume"] == mount.as_str()), "{:?}", history(&s));
+        assert!(
+            history(&s)
+                .iter()
+                .any(|r| r["deleted"] == 1 && r["volume"] == mount.as_str()),
+            "{:?}",
+            history(&s)
+        );
     }
 
     /// ⭐ The share-limit worker, on its timer: after its delay it stops a
@@ -3017,13 +3615,32 @@ mod decision_tests {
         let (_, t_under, _) = put(&s, "race", "wb", "", TRACKER, 0);
         t_over.total_uploaded.store(3 * SIZE, Ordering::Relaxed);
         t_under.total_uploaded.store(SIZE, Ordering::Relaxed);
-        spawn_share_limits(s.state.clone(), mgr.clone(), s.config.clone(), "race".into());
+        spawn_share_limits(
+            s.state.clone(),
+            mgr.clone(),
+            s.config.clone(),
+            "race".into(),
+        );
         after(89).await;
-        assert!(!t_over.is_paused.load(Ordering::Relaxed), "not before SETTLE + 60 s");
+        assert!(
+            !t_over.is_paused.load(Ordering::Relaxed),
+            "not before SETTLE + 60 s"
+        );
         after(2).await;
-        eventually("the pass stopped the seed over its ratio", || t_over.is_paused.load(Ordering::Relaxed)).await;
+        eventually("the pass stopped the seed over its ratio", || {
+            t_over.is_paused.load(Ordering::Relaxed)
+        })
+        .await;
         assert!(!t_under.is_paused.load(Ordering::Relaxed));
-        assert!(s.store.read().unwrap().paused_hashes("race").unwrap().contains(&over), "as the operator's own stop");
+        assert!(
+            s.store
+                .read()
+                .unwrap()
+                .paused_hashes("race")
+                .unwrap()
+                .contains(&over),
+            "as the operator's own stop"
+        );
     }
 
     // ---- the store reconcile ----------------------------------------------------
@@ -3042,7 +3659,9 @@ mod decision_tests {
 
     fn live_one(s: &TestState, engine: &str, name: &str) -> String {
         let mgr = engine_manager(s, engine);
-        let (ih, _) = mgr.add_torrent_bytes(&torrent_bytes(name), "/tmp", true, true).unwrap();
+        let (ih, _) = mgr
+            .add_torrent_bytes(&torrent_bytes(name), "/tmp", true, true)
+            .unwrap();
         typhon_engine::torrent::hex_encode(&ih)
     }
 
@@ -3055,12 +3674,24 @@ mod decision_tests {
     fn the_reconcile_drops_rows_without_a_torrent_but_never_for_an_empty_engine() {
         let s = st("dec-recon", "");
         let live = live_one(&s, "race", "ra");
-        s.store.lock().unwrap().insert_torrent(&live, "race", b"x", "/tmp", "", 0.0, false, "").unwrap();
+        s.store
+            .lock()
+            .unwrap()
+            .insert_torrent(&live, "race", b"x", "/tmp", "", 0.0, false, "")
+            .unwrap();
         orphan(&s, "race", O1);
         orphan(&s, "hoard", O2);
         reconcile_pass(&s.engines, &s.store);
-        assert_eq!(rows(&s, "race"), vec![live.clone()], "the orphan went, the live row stayed");
-        assert_eq!(rows(&s, "hoard"), vec![O2.to_string()], "the hoard holds no torrent: nothing may be concluded");
+        assert_eq!(
+            rows(&s, "race"),
+            vec![live.clone()],
+            "the orphan went, the live row stayed"
+        );
+        assert_eq!(
+            rows(&s, "hoard"),
+            vec![O2.to_string()],
+            "the hoard holds no torrent: nothing may be concluded"
+        );
     }
 
     /// A row this process wrote moments ago may be an add still on its way to
@@ -3069,7 +3700,11 @@ mod decision_tests {
     fn a_row_written_a_moment_ago_is_spared() {
         let s = st("dec-recon-fresh", "");
         live_one(&s, "race", "rb");
-        s.store.lock().unwrap().insert_torrent(O1, "race", b"x", "/tmp", "", 0.0, false, "").unwrap();
+        s.store
+            .lock()
+            .unwrap()
+            .insert_torrent(O1, "race", b"x", "/tmp", "", 0.0, false, "")
+            .unwrap();
         orphan(&s, "race", O2);
         reconcile_pass(&s.engines, &s.store);
         let left = rows(&s, "race");
@@ -3085,7 +3720,11 @@ mod decision_tests {
         live_one(&s, "race", "rc");
         orphan(&s, "race", O1);
         orphan(&s, "race", O2);
-        s.store.lock().unwrap().create_job("graduate", O1, "{}", 1).unwrap();
+        s.store
+            .lock()
+            .unwrap()
+            .create_job("graduate", O1, "{}", 1)
+            .unwrap();
         reconcile_pass(&s.engines, &s.store);
         let left = rows(&s, "race");
         assert!(left.contains(&O1.to_string()), "being moved");
@@ -3104,7 +3743,11 @@ mod decision_tests {
             orphan(&s, "race", h);
         }
         reconcile_pass(&s.engines, &s.store);
-        assert_eq!(rows(&s, "race").len(), 60, "60 of 60 orphans is over the ceiling of 50: all kept");
+        assert_eq!(
+            rows(&s, "race").len(),
+            60,
+            "60 of 60 orphans is over the ceiling of 50: all kept"
+        );
         // Under the ceiling they go.
         let s2 = st("dec-recon-few", "");
         live_one(&s2, "race", "re");
@@ -3122,7 +3765,10 @@ mod decision_tests {
         live_one(&s, "race", "rf");
         orphan(&s, "race", O1);
         spawn_store_reconcile(s.engines.clone(), s.store.clone());
-        eventually("the first tick dropped the orphan", || rows(&s, "race").is_empty()).await;
+        eventually("the first tick dropped the orphan", || {
+            rows(&s, "race").is_empty()
+        })
+        .await;
     }
 
     // ---- the queue: the branches the happy paths do not reach -----------------------
@@ -3160,9 +3806,26 @@ mod decision_tests {
             t.is_paused.store(false, Ordering::Relaxed);
             seeders(&cache, t, n);
         }
-        enforce_queue(&mgr, &cache, &lim("active_downloads = 2"), &HashSet::new(), &HashSet::new(), &mut HashSet::new(), &mut SlowClock::new(), now());
-        assert_eq!(ts.iter().map(|t| t.is_paused.load(Ordering::Relaxed)).collect::<Vec<_>>(), vec![false, false, true]);
-        assert_eq!(ts[2].status.load(Ordering::Relaxed), TorrentStatus::Stopped as u8);
+        enforce_queue(
+            &mgr,
+            &cache,
+            &lim("active_downloads = 2"),
+            &HashSet::new(),
+            &HashSet::new(),
+            &mut HashSet::new(),
+            &mut SlowClock::new(),
+            now(),
+        );
+        assert_eq!(
+            ts.iter()
+                .map(|t| t.is_paused.load(Ordering::Relaxed))
+                .collect::<Vec<_>>(),
+            vec![false, false, true]
+        );
+        assert_eq!(
+            ts[2].status.load(Ordering::Relaxed),
+            TorrentStatus::Stopped as u8
+        );
     }
 
     /// And the free slot goes to the best-seeded waiting torrent.
@@ -3175,8 +3838,22 @@ mod decision_tests {
         for (t, n) in ts.iter().zip([2, 40, 7]) {
             seeders(&cache, t, n);
         }
-        enforce_queue(&mgr, &cache, &lim("active_downloads = 1"), &HashSet::new(), &HashSet::new(), &mut HashSet::new(), &mut SlowClock::new(), now());
-        assert_eq!(ts.iter().map(|t| !t.is_paused.load(Ordering::Relaxed)).collect::<Vec<_>>(), vec![false, true, false]);
+        enforce_queue(
+            &mgr,
+            &cache,
+            &lim("active_downloads = 1"),
+            &HashSet::new(),
+            &HashSet::new(),
+            &mut HashSet::new(),
+            &mut SlowClock::new(),
+            now(),
+        );
+        assert_eq!(
+            ts.iter()
+                .map(|t| !t.is_paused.load(Ordering::Relaxed))
+                .collect::<Vec<_>>(),
+            vec![false, true, false]
+        );
     }
 
     /// A torrent in error is out of the queue: it takes no slot and is not
@@ -3186,12 +3863,29 @@ mod decision_tests {
         let s = st("dec-queue-err", "");
         let mgr = engine_manager(&s, "race");
         let ts = queued_downloads(&mgr, &["qg", "qh"]);
-        ts[0].status.store(TorrentStatus::Error as u8, Ordering::Relaxed);
+        ts[0]
+            .status
+            .store(TorrentStatus::Error as u8, Ordering::Relaxed);
         let cache = Cache::default();
         seeders(&cache, &ts[0], 1000);
-        enforce_queue(&mgr, &cache, &lim("active_downloads = 1"), &HashSet::new(), &HashSet::new(), &mut HashSet::new(), &mut SlowClock::new(), now());
-        assert!(ts[0].is_paused.load(Ordering::Relaxed), "the errored one stays as it was");
-        assert!(!ts[1].is_paused.load(Ordering::Relaxed), "the slot went to the healthy one");
+        enforce_queue(
+            &mgr,
+            &cache,
+            &lim("active_downloads = 1"),
+            &HashSet::new(),
+            &HashSet::new(),
+            &mut HashSet::new(),
+            &mut SlowClock::new(),
+            now(),
+        );
+        assert!(
+            ts[0].is_paused.load(Ordering::Relaxed),
+            "the errored one stays as it was"
+        );
+        assert!(
+            !ts[1].is_paused.load(Ordering::Relaxed),
+            "the slot went to the healthy one"
+        );
     }
 
     /// `active_limit` is shared: downloads take their slots first and the
@@ -3205,19 +3899,41 @@ mod decision_tests {
         let seeds: Vec<_> = ["qj", "qk"]
             .iter()
             .map(|n| {
-                let (ih, _) = mgr.add_torrent_bytes(&torrent_bytes(n), "/tmp", false, true).unwrap();
+                let (ih, _) = mgr
+                    .add_torrent_bytes(&torrent_bytes(n), "/tmp", false, true)
+                    .unwrap();
                 let t = mgr.get(&ih).unwrap();
-                t.status.store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+                t.status
+                    .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
                 t.is_paused.store(false, Ordering::Relaxed);
                 t
             })
             .collect();
         let mut parked = HashSet::new();
-        enforce_queue(&mgr, &Cache::default(), &lim("queueing = true\nactive_limit = 2"), &HashSet::new(), &HashSet::new(), &mut parked, &mut SlowClock::new(), now());
-        assert!(!dl[0].is_paused.load(Ordering::Relaxed), "the download keeps its slot");
+        enforce_queue(
+            &mgr,
+            &Cache::default(),
+            &lim("queueing = true\nactive_limit = 2"),
+            &HashSet::new(),
+            &HashSet::new(),
+            &mut parked,
+            &mut SlowClock::new(),
+            now(),
+        );
+        assert!(
+            !dl[0].is_paused.load(Ordering::Relaxed),
+            "the download keeps its slot"
+        );
         assert_eq!(running(&seeds), 1, "one slot left for the seeds");
-        assert_eq!(parked.len(), 1, "and the other is parked by the queue, to be resumed by it");
-        let stopped = seeds.iter().find(|t| t.is_paused.load(Ordering::Relaxed)).unwrap();
+        assert_eq!(
+            parked.len(),
+            1,
+            "and the other is parked by the queue, to be resumed by it"
+        );
+        let stopped = seeds
+            .iter()
+            .find(|t| t.is_paused.load(Ordering::Relaxed))
+            .unwrap();
         assert!(parked.contains(&stopped.info_hash));
     }
 
@@ -3231,23 +3947,48 @@ mod decision_tests {
             .iter()
             .map(|n| {
                 // In the test's own directory: the removal below deletes files.
-                let (ih, _) = mgr.add_torrent_bytes(&torrent_bytes(n), s.dir.to_str().unwrap(), false, true).unwrap();
+                let (ih, _) = mgr
+                    .add_torrent_bytes(&torrent_bytes(n), s.dir.to_str().unwrap(), false, true)
+                    .unwrap();
                 let t = mgr.get(&ih).unwrap();
-                t.status.store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+                t.status
+                    .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
                 t.is_paused.store(false, Ordering::Relaxed);
                 t
             })
             .collect();
         let mut parked = HashSet::new();
         let l = lim("queueing = true\nactive_seeds = 1");
-        enforce_queue(&mgr, &Cache::default(), &l, &HashSet::new(), &HashSet::new(), &mut parked, &mut SlowClock::new(), now());
+        enforce_queue(
+            &mgr,
+            &Cache::default(),
+            &l,
+            &HashSet::new(),
+            &HashSet::new(),
+            &mut parked,
+            &mut SlowClock::new(),
+            now(),
+        );
         assert_eq!(parked.len(), 2);
         let gone = *parked.iter().next().unwrap();
         mgr.remove_torrent(&gone, true).unwrap();
-        enforce_queue(&mgr, &Cache::default(), &l, &HashSet::new(), &HashSet::new(), &mut parked, &mut SlowClock::new(), now());
+        enforce_queue(
+            &mgr,
+            &Cache::default(),
+            &l,
+            &HashSet::new(),
+            &HashSet::new(),
+            &mut parked,
+            &mut SlowClock::new(),
+            now(),
+        );
         assert_eq!(parked.len(), 1);
         assert!(!parked.contains(&gone));
-        assert_eq!(running(&seeds) + 1, 2, "the removed one is no longer counted");
+        assert_eq!(
+            running(&seeds) + 1,
+            2,
+            "the removed one is no longer counted"
+        );
     }
 
     /// A forced torrent that was parked is started and is no longer the
@@ -3256,12 +3997,24 @@ mod decision_tests {
     fn forcing_a_parked_seed_starts_it_and_forgets_it() {
         let s = st("dec-queue-force", "");
         let mgr = engine_manager(&s, "race");
-        let (ih, _) = mgr.add_torrent_bytes(&torrent_bytes("qo"), "/tmp", true, true).unwrap();
+        let (ih, _) = mgr
+            .add_torrent_bytes(&torrent_bytes("qo"), "/tmp", true, true)
+            .unwrap();
         let t = mgr.get(&ih).unwrap();
-        t.status.store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+        t.status
+            .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
         let mut parked: HashSet<InfoHash> = [ih].into();
         let forced: HashSet<String> = [typhon_engine::torrent::hex_encode(&ih)].into();
-        enforce_queue(&mgr, &Cache::default(), &lim("queueing = true\nactive_seeds = 1"), &HashSet::new(), &forced, &mut parked, &mut SlowClock::new(), now());
+        enforce_queue(
+            &mgr,
+            &Cache::default(),
+            &lim("queueing = true\nactive_seeds = 1"),
+            &HashSet::new(),
+            &forced,
+            &mut parked,
+            &mut SlowClock::new(),
+            now(),
+        );
         assert!(!t.is_paused.load(Ordering::Relaxed));
         assert!(parked.is_empty());
     }
@@ -3278,30 +4031,77 @@ mod decision_tests {
         let after = Duration::from_secs(60);
         let mut next = SlowClock::new();
         // First sight under the threshold: noted, not slow yet.
-        assert!(!slow_long_enough(after, 2048, 100, &ih, &SlowClock::new(), &mut next, t0));
+        assert!(!slow_long_enough(
+            after,
+            2048,
+            100,
+            &ih,
+            &SlowClock::new(),
+            &mut next,
+            t0
+        ));
         assert_eq!(next.get(&ih), Some(&t0));
         // Under it since t0: 59 s is not enough, 60 s is.
         let prev = next.clone();
         let mut n2 = SlowClock::new();
-        assert!(!slow_long_enough(after, 2048, 100, &ih, &prev, &mut n2, t0 + Duration::from_secs(59)));
+        assert!(!slow_long_enough(
+            after,
+            2048,
+            100,
+            &ih,
+            &prev,
+            &mut n2,
+            t0 + Duration::from_secs(59)
+        ));
         assert_eq!(n2.get(&ih), Some(&t0), "the clock keeps its start");
-        assert!(slow_long_enough(after, 2048, 100, &ih, &prev, &mut n2, t0 + Duration::from_secs(60)));
+        assert!(slow_long_enough(
+            after,
+            2048,
+            100,
+            &ih,
+            &prev,
+            &mut n2,
+            t0 + Duration::from_secs(60)
+        ));
         // At or over the threshold: not slow, and not carried forward.
         let mut n3 = SlowClock::new();
-        assert!(!slow_long_enough(after, 2048, 2048, &ih, &prev, &mut n3, t0 + Duration::from_secs(600)));
+        assert!(!slow_long_enough(
+            after,
+            2048,
+            2048,
+            &ih,
+            &prev,
+            &mut n3,
+            t0 + Duration::from_secs(600)
+        ));
         assert!(n3.is_empty());
         // A zero timer makes it slow at first sight.
-        assert!(slow_long_enough(Duration::ZERO, 2048, 0, &ih, &SlowClock::new(), &mut SlowClock::new(), t0));
+        assert!(slow_long_enough(
+            Duration::ZERO,
+            2048,
+            0,
+            &ih,
+            &SlowClock::new(),
+            &mut SlowClock::new(),
+            t0
+        ));
     }
 
     #[test]
     fn the_slow_rule_reads_its_thresholds_in_kib_and_defaults_the_timer() {
         let l = lim("dont_count_slow_torrents = true");
         let rule = l.slow.expect("on");
-        assert_eq!((rule.dl_bps, rule.ul_bps, rule.after), (2048, 2048, Duration::from_secs(60)));
+        assert_eq!(
+            (rule.dl_bps, rule.ul_bps, rule.after),
+            (2048, 2048, Duration::from_secs(60))
+        );
         let l = lim("dont_count_slow_torrents = true\nslow_torrent_dl_rate_threshold = 10\nslow_torrent_ul_rate_threshold = -5\nslow_torrent_inactive_timer = -1");
         let rule = l.slow.unwrap();
-        assert_eq!((rule.dl_bps, rule.ul_bps, rule.after), (10 * 1024, 0, Duration::ZERO), "a negative figure is none");
+        assert_eq!(
+            (rule.dl_bps, rule.ul_bps, rule.after),
+            (10 * 1024, 0, Duration::ZERO),
+            "a negative figure is none"
+        );
         assert!(lim("dont_count_slow_torrents = false").slow.is_none());
         // Slow torrents do not make a ceiling: only the three caps decide is_empty.
         assert!(lim("dont_count_slow_torrents = true").is_empty());
@@ -3313,14 +4113,19 @@ mod decision_tests {
     fn a_torrent_holds_everything_by_status_then_by_its_picker() {
         let s = st("dec-holds", "");
         let mgr = engine_manager(&s, "race");
-        let (ih, _) = mgr.add_torrent_bytes(&torrent_bytes("hold"), "/tmp", true, true).unwrap();
+        let (ih, _) = mgr
+            .add_torrent_bytes(&torrent_bytes("hold"), "/tmp", true, true)
+            .unwrap();
         let t = mgr.get(&ih).unwrap();
-        t.status.store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+        t.status
+            .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
         assert!(holds_everything(&t), "seeding says so");
-        t.status.store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+        t.status
+            .store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
         assert!(!holds_everything(&t), "downloading says not");
         // Added in seed mode: no picker, its data trusted whole.
-        t.status.store(TorrentStatus::Stopped as u8, Ordering::Relaxed);
+        t.status
+            .store(TorrentStatus::Stopped as u8, Ordering::Relaxed);
         assert!(t.picker.get().is_none());
         assert!(holds_everything(&t));
     }
@@ -3335,14 +4140,31 @@ mod decision_tests {
         let s = st("kill-queue-checked", "");
         let mgr = engine_manager(&s, "race");
         let ts = queued_downloads(&mgr, &["xa", "xb"]);
-        ts[0].status.store(TorrentStatus::Checking as u8, Ordering::Relaxed);
+        ts[0]
+            .status
+            .store(TorrentStatus::Checking as u8, Ordering::Relaxed);
         ts[0].total_downloaded.store(SIZE, Ordering::Relaxed);
         let cache = Cache::default();
         seeders(&cache, &ts[0], 50);
         seeders(&cache, &ts[1], 1);
-        enforce_queue(&mgr, &cache, &lim("active_downloads = 1"), &HashSet::new(), &HashSet::new(), &mut HashSet::new(), &mut SlowClock::new(), now());
-        assert!(ts[0].is_paused.load(Ordering::Relaxed), "the finished check was not started in a download slot");
-        assert!(!ts[1].is_paused.load(Ordering::Relaxed), "the slot went to the download that still needs it");
+        enforce_queue(
+            &mgr,
+            &cache,
+            &lim("active_downloads = 1"),
+            &HashSet::new(),
+            &HashSet::new(),
+            &mut HashSet::new(),
+            &mut SlowClock::new(),
+            now(),
+        );
+        assert!(
+            ts[0].is_paused.load(Ordering::Relaxed),
+            "the finished check was not started in a download slot"
+        );
+        assert!(
+            !ts[1].is_paused.load(Ordering::Relaxed),
+            "the slot went to the download that still needs it"
+        );
     }
 
     /// A seed that is being checked is not a candidate of the seed queue: it
@@ -3352,20 +4174,40 @@ mod decision_tests {
         let s = st("kill-queue-checked-seed", "");
         let mgr = engine_manager(&s, "race");
         let add = |n: &str| {
-            let (ih, _) = mgr.add_torrent_bytes(&torrent_bytes(n), "/tmp", false, true).unwrap();
+            let (ih, _) = mgr
+                .add_torrent_bytes(&torrent_bytes(n), "/tmp", false, true)
+                .unwrap();
             mgr.get(&ih).unwrap()
         };
         let (seed, checked) = (add("xc"), add("xd"));
-        seed.status.store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
-        checked.status.store(TorrentStatus::Checking as u8, Ordering::Relaxed);
+        seed.status
+            .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+        checked
+            .status
+            .store(TorrentStatus::Checking as u8, Ordering::Relaxed);
         checked.total_downloaded.store(SIZE, Ordering::Relaxed);
         for t in [&seed, &checked] {
             t.is_paused.store(false, Ordering::Relaxed);
         }
         let mut parked = HashSet::new();
-        enforce_queue(&mgr, &Cache::default(), &lim("queueing = true\nactive_seeds = 1"), &HashSet::new(), &HashSet::new(), &mut parked, &mut SlowClock::new(), now());
-        assert!(!seed.is_paused.load(Ordering::Relaxed), "the seed has the one seed slot");
-        assert!(!checked.is_paused.load(Ordering::Relaxed), "the check was not counted, so not stopped");
+        enforce_queue(
+            &mgr,
+            &Cache::default(),
+            &lim("queueing = true\nactive_seeds = 1"),
+            &HashSet::new(),
+            &HashSet::new(),
+            &mut parked,
+            &mut SlowClock::new(),
+            now(),
+        );
+        assert!(
+            !seed.is_paused.load(Ordering::Relaxed),
+            "the seed has the one seed slot"
+        );
+        assert!(
+            !checked.is_paused.load(Ordering::Relaxed),
+            "the check was not counted, so not stopped"
+        );
         assert!(parked.is_empty());
     }
 
@@ -3376,7 +4218,10 @@ mod decision_tests {
     /// only an UNdeclared tracker (below zero) waits.
     #[tokio::test(start_paused = true)]
     async fn the_transit_sweep_removes_a_torrent_whose_tracker_declares_zero_hours() {
-        let s = st("kill-transit-zero", "\n[announce_min_seed_hours]\n\"tracker.example\" = \"0\"\n");
+        let s = st(
+            "kill-transit-zero",
+            "\n[announce_min_seed_hours]\n\"tracker.example\" = \"0\"\n",
+        );
         let mgr = engine_manager(&s, "hoard");
         write_categories(
             &s,
@@ -3387,32 +4232,82 @@ mod decision_tests {
         );
         let (zero, _, zero_file) = put(&s, "hoard", "tz", "transit", TRACKER, 0);
         let (second, _, second_file) = put(&s, "hoard", "tw", "transit", TRACKER, 0);
-        let (undeclared, _, undeclared_file) = put(&s, "hoard", "ty", "transit", "https://other.example/announce", 0);
+        let (undeclared, _, undeclared_file) = put(
+            &s,
+            "hoard",
+            "ty",
+            "transit",
+            "https://other.example/announce",
+            0,
+        );
         let log = capture();
-        spawn_transit_sweep(s.state.clone(), mgr.clone(), s.config.clone(), "hoard".into());
+        spawn_transit_sweep(
+            s.state.clone(),
+            mgr.clone(),
+            s.config.clone(),
+            "hoard".into(),
+        );
         after(91).await;
         for (h, f) in [(&zero, &zero_file), (&second, &second_file)] {
-            assert!(!in_store(&s, h) && !f.exists(), "0 hours declared, 0 seeded: the obligation is met");
+            assert!(
+                !in_store(&s, h) && !f.exists(),
+                "0 hours declared, 0 seeded: the obligation is met"
+            );
         }
-        assert!(in_store(&s, &undeclared) && undeclared_file.exists(), "nothing declared: it waits");
-        assert_eq!(lines(&log, "transit: seeding time served, removed").len(), 2, "one line per torrent");
+        assert!(
+            in_store(&s, &undeclared) && undeclared_file.exists(),
+            "nothing declared: it waits"
+        );
+        assert_eq!(
+            lines(&log, "transit: seeding time served, removed").len(),
+            2,
+            "one line per torrent"
+        );
         let summary = lines(&log, "transit sweep");
         assert_eq!(summary.len(), 1, "{summary:?}");
-        assert!(summary[0].starts_with("INFO") && summary[0].contains("removed=2"), "{summary:?}");
+        assert!(
+            summary[0].starts_with("INFO") && summary[0].contains("removed=2"),
+            "{summary:?}"
+        );
         // The next pass finds nothing to remove and says nothing.
         after(300).await;
-        assert_eq!(lines(&log, "transit sweep").len(), 1, "a pass that removed nothing is silent");
+        assert_eq!(
+            lines(&log, "transit sweep").len(),
+            1,
+            "a pass that removed nothing is silent"
+        );
     }
 
     /// One torrent on a volume whose declared capacity is `quota`, with the
     /// drain on and its high watermark at `high`.
-    fn race_drain_setup(tag: &str, extra: &str, quota: u64, high: i64) -> (TestState, Arc<TorrentManager>, String, std::path::PathBuf, String) {
-        let s = st(tag, &format!("\n[announce_min_seed_hours]\n\"tracker.example\" = \"0\"\n{extra}"));
+    fn race_drain_setup(
+        tag: &str,
+        extra: &str,
+        quota: u64,
+        high: i64,
+    ) -> (
+        TestState,
+        Arc<TorrentManager>,
+        String,
+        std::path::PathBuf,
+        String,
+    ) {
+        let s = st(
+            tag,
+            &format!("\n[announce_min_seed_hours]\n\"tracker.example\" = \"0\"\n{extra}"),
+        );
         let mgr = engine_manager(&s, "race");
         let (h, _, f) = put(&s, "race", "va", "", TRACKER, 100);
-        let mount = crate::volumes::mount_point_of(&s.dir).to_string_lossy().to_string();
+        let mount = crate::volumes::mount_point_of(&s.dir)
+            .to_string_lossy()
+            .to_string();
         crate::volumes::save_quota(&s.state, &mount, Some(quota)).unwrap();
-        let on = crate::volumes::Policy { enabled: true, high, low: 0, inherited: false };
+        let on = crate::volumes::Policy {
+            enabled: true,
+            high,
+            low: 0,
+            inherited: false,
+        };
         crate::volumes::save_policy(&s.state, &mount, &on).unwrap();
         (s, mgr, h, f, mount)
     }
@@ -3422,17 +4317,28 @@ mod decision_tests {
     #[tokio::test(start_paused = true)]
     async fn the_race_drain_defaults_to_one_pass_every_five_minutes() {
         let (s, mgr, h, f, _) = race_drain_setup("kill-drain-default", "", SIZE, 100);
-        spawn_race_drain(s.state.clone(), mgr.clone(), s.config.clone(), "race".into());
+        spawn_race_drain(
+            s.state.clone(),
+            mgr.clone(),
+            s.config.clone(),
+            "race".into(),
+        );
         after(11).await;
         after(280).await;
         std::thread::sleep(Duration::from_millis(300));
         after(0).await;
-        assert!(in_store(&s, &h) && f.exists() && mgr.all().len() == 1, "291 s in: no pass yet");
+        assert!(
+            in_store(&s, &h) && f.exists() && mgr.all().len() == 1,
+            "291 s in: no pass yet"
+        );
         after(25).await;
-        eventually("the first pass, five minutes after the start, drained it", || {
-            std::thread::sleep(Duration::from_millis(10));
-            mgr.all().is_empty()
-        })
+        eventually(
+            "the first pass, five minutes after the start, drained it",
+            || {
+                std::thread::sleep(Duration::from_millis(10));
+                mgr.all().is_empty()
+            },
+        )
         .await;
         assert!(!in_store(&s, &h) && !f.exists());
     }
@@ -3442,21 +4348,37 @@ mod decision_tests {
     /// 100 is drained.
     #[tokio::test(start_paused = true)]
     async fn the_race_drain_starts_at_the_high_watermark_exactly() {
-        let (s, mgr, h, f, mount) = race_drain_setup("kill-drain-high", "[race_drain]\ncheck_interval_seconds = 60\n", 2 * SIZE, 100);
-        spawn_race_drain(s.state.clone(), mgr.clone(), s.config.clone(), "race".into());
+        let (s, mgr, h, f, mount) = race_drain_setup(
+            "kill-drain-high",
+            "[race_drain]\ncheck_interval_seconds = 60\n",
+            2 * SIZE,
+            100,
+        );
+        spawn_race_drain(
+            s.state.clone(),
+            mgr.clone(),
+            s.config.clone(),
+            "race".into(),
+        );
         after(11).await;
         after(60).await;
         after(60).await;
         std::thread::sleep(Duration::from_millis(300));
         after(0).await;
-        assert!(in_store(&s, &h) && f.exists(), "50% allocated against a high of 100: left alone");
+        assert!(
+            in_store(&s, &h) && f.exists(),
+            "50% allocated against a high of 100: left alone"
+        );
 
         crate::volumes::save_quota(&s.state, &mount, Some(SIZE)).unwrap();
         after(60).await;
-        eventually("exactly at its high watermark the volume is drained", || {
-            std::thread::sleep(Duration::from_millis(10));
-            mgr.all().is_empty()
-        })
+        eventually(
+            "exactly at its high watermark the volume is drained",
+            || {
+                std::thread::sleep(Duration::from_millis(10));
+                mgr.all().is_empty()
+            },
+        )
         .await;
         assert!(!in_store(&s, &h) && !f.exists());
     }
@@ -3467,12 +4389,27 @@ mod decision_tests {
     fn a_graduation_that_covers_the_gap_ends_the_pass() {
         let s = graduation_state("kill-drain-budget", "72", "hoard");
         let mgr = engine_manager(&s, "race");
-        let owing: Vec<_> = ["ma", "mb", "mc"].iter().map(|n| put(&s, "race", n, "ssd", TRACKER, 3600).0).collect();
+        let owing: Vec<_> = ["ma", "mb", "mc"]
+            .iter()
+            .map(|n| put(&s, "race", n, "ssd", TRACKER, 3600).0)
+            .collect();
         // 10 000 to free, a torrent is 16 384.
-        let out = drain_once(&s.state, &mgr, &volume_on(&s, NO_SUCH_MOUNT, 100_000, 90_000, 80), &s.cfg(), "race");
+        let out = drain_once(
+            &s.state,
+            &mgr,
+            &volume_on(&s, NO_SUCH_MOUNT, 100_000, 90_000, 80),
+            &s.cfg(),
+            "race",
+        );
         assert_eq!((out.deleted, out.graduated, out.stuck), (0, 1, 0));
-        let queued = owing.iter().filter(|h| s.store.read().unwrap().job_pending_for("graduate", h)).count();
-        assert_eq!(queued, 1, "one job covers the gap; the rest wait for the next pass");
+        let queued = owing
+            .iter()
+            .filter(|h| s.store.read().unwrap().job_pending_for("graduate", h))
+            .count();
+        assert_eq!(
+            queued, 1,
+            "one job covers the gap; the rest wait for the next pass"
+        );
     }
 
     /// A volume under `id` that has already given space back, so the disk
@@ -3499,33 +4436,69 @@ mod decision_tests {
     async fn a_volume_is_trimmed_only_after_a_drain_that_deleted_and_freed() {
         let tag = "kill-drain-trim";
         // Deleted, and the disk gave space back.
-        let s = st(tag, "\n[announce_min_seed_hours]\n\"tracker.example\" = \"0\"\n");
+        let s = st(
+            tag,
+            "\n[announce_min_seed_hours]\n\"tracker.example\" = \"0\"\n",
+        );
         let id = s.dir.to_string_lossy().to_string();
         put(&s, "race", "pa", "", TRACKER, 100);
         crate::volumes::save_trim(&s.state, &id, true).unwrap();
-        let out = drain_once(&s.state, &engine_manager(&s, "race"), &volume_that_freed(&s, &id), &s.cfg(), "race");
+        let out = drain_once(
+            &s.state,
+            &engine_manager(&s, "race"),
+            &volume_that_freed(&s, &id),
+            &s.cfg(),
+            "race",
+        );
         assert_eq!(out.deleted, 1);
         assert!(out.freed_bytes > 0);
-        assert!(trimmed_within_a_moment(&s, &id).await, "deleted and freed: trimmed");
+        assert!(
+            trimmed_within_a_moment(&s, &id).await,
+            "deleted and freed: trimmed"
+        );
 
         // Deleted, but this id is no mount: nothing measured, nothing freed.
-        let s = st(&format!("{tag}-nofree"), "\n[announce_min_seed_hours]\n\"tracker.example\" = \"0\"\n");
+        let s = st(
+            &format!("{tag}-nofree"),
+            "\n[announce_min_seed_hours]\n\"tracker.example\" = \"0\"\n",
+        );
         let id = "/nonexistent-trim-no-bytes".to_string();
         put(&s, "race", "pb", "", TRACKER, 100);
         crate::volumes::save_trim(&s.state, &id, true).unwrap();
-        let out = drain_once(&s.state, &engine_manager(&s, "race"), &volume_that_freed(&s, &id), &s.cfg(), "race");
+        let out = drain_once(
+            &s.state,
+            &engine_manager(&s, "race"),
+            &volume_that_freed(&s, &id),
+            &s.cfg(),
+            "race",
+        );
         assert_eq!((out.deleted, out.freed_bytes), (1, 0));
-        assert!(!trimmed_within_a_moment(&s, &id).await, "nothing came back: no trim");
+        assert!(
+            !trimmed_within_a_moment(&s, &id).await,
+            "nothing came back: no trim"
+        );
 
         // Space was measured, but only a graduation was queued: nothing deleted.
         let s = graduation_state(&format!("{tag}-grad"), "72", "hoard");
         let id = s.dir.to_string_lossy().to_string();
         put(&s, "race", "pc", "ssd", TRACKER, 3600);
         crate::volumes::save_trim(&s.state, &id, true).unwrap();
-        let out = drain_once(&s.state, &engine_manager(&s, "race"), &volume_that_freed(&s, &id), &s.cfg(), "race");
+        let out = drain_once(
+            &s.state,
+            &engine_manager(&s, "race"),
+            &volume_that_freed(&s, &id),
+            &s.cfg(),
+            "race",
+        );
         assert_eq!((out.deleted, out.graduated), (0, 1));
-        assert!(out.freed_bytes > 0, "the disk figure alone would have asked for a trim");
-        assert!(!trimmed_within_a_moment(&s, &id).await, "a graduation frees nothing yet: no trim");
+        assert!(
+            out.freed_bytes > 0,
+            "the disk figure alone would have asked for a trim"
+        );
+        assert!(
+            !trimmed_within_a_moment(&s, &id).await,
+            "a graduation frees nothing yet: no trim"
+        );
     }
 
     /// The stagger start brings a batch of 2000 torrents up, pauses, and goes
@@ -3533,7 +4506,8 @@ mod decision_tests {
     /// for nothing.
     #[tokio::test(start_paused = true)]
     async fn the_stagger_start_brings_up_two_thousand_then_pauses_before_the_next() {
-        let root = std::env::temp_dir().join(format!("hydra-stagger-batches-{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("hydra-stagger-batches-{}", std::process::id()));
         let (data, resume) = (root.join("data"), root.join("resume"));
         std::fs::create_dir_all(&data).unwrap();
         std::fs::create_dir_all(&resume).unwrap();
@@ -3543,13 +4517,20 @@ mod decision_tests {
             Arc::new(typhon_engine::disk::DiskManager::new(16)),
         ));
         for i in 0..4000 {
-            mgr.add_torrent_bytes(&torrent_bytes(&format!("{i:06}")), "/tmp", true, false).unwrap();
+            mgr.add_torrent_bytes(&torrent_bytes(&format!("{i:06}")), "/tmp", true, false)
+                .unwrap();
         }
         for t in mgr.all() {
             t.is_paused.store(false, Ordering::Relaxed);
-            t.status.store(TorrentStatus::Stopped as u8, Ordering::Relaxed);
+            t.status
+                .store(TorrentStatus::Stopped as u8, Ordering::Relaxed);
         }
-        let started = || mgr.all().iter().filter(|t| t.status.load(Ordering::Relaxed) != TorrentStatus::Stopped as u8).count();
+        let started = || {
+            mgr.all()
+                .iter()
+                .filter(|t| t.status.load(Ordering::Relaxed) != TorrentStatus::Stopped as u8)
+                .count()
+        };
         let base = alive_tasks();
         spawn_stagger_start(mgr.clone());
         for _ in 0..20 {
@@ -3564,7 +4545,11 @@ mod decision_tests {
             tokio::task::yield_now().await;
         }
         assert_eq!(started(), 4000, "the second batch");
-        assert_eq!(alive_tasks(), base, "and nothing to wait for after the last one");
+        assert_eq!(
+            alive_tasks(),
+            base,
+            "and nothing to wait for after the last one"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -3575,14 +4560,23 @@ mod decision_tests {
         live_one(&s, "race", "rg");
         orphan(&s, "race", O1);
         spawn_store_reconcile(s.engines.clone(), s.store.clone());
-        eventually("the first tick dropped the first orphan", || rows(&s, "race").iter().all(|h| h != O1)).await;
+        eventually("the first tick dropped the first orphan", || {
+            rows(&s, "race").iter().all(|h| h != O1)
+        })
+        .await;
         orphan(&s, "race", O2);
         after(299).await;
         std::thread::sleep(Duration::from_millis(300));
         after(0).await;
-        assert!(rows(&s, "race").contains(&O2.to_string()), "299 s later: no second pass yet");
+        assert!(
+            rows(&s, "race").contains(&O2.to_string()),
+            "299 s later: no second pass yet"
+        );
         after(2).await;
-        eventually("the second pass, five minutes after the first", || rows(&s, "race").iter().all(|h| h != O2)).await;
+        eventually("the second pass, five minutes after the first", || {
+            rows(&s, "race").iter().all(|h| h != O2)
+        })
+        .await;
     }
 
     // ---- what the workers tell the Logs tab ------------------------------------------------
@@ -3593,7 +4587,8 @@ mod decision_tests {
 
     /// Every tracing event of the test binary, with the thread that made it:
     /// the tests run in parallel and each reads back only its own thread's.
-    static EVENTS: std::sync::Mutex<Vec<(std::thread::ThreadId, String, String)>> = std::sync::Mutex::new(Vec::new());
+    static EVENTS: std::sync::Mutex<Vec<(std::thread::ThreadId, String, String)>> =
+        std::sync::Mutex::new(Vec::new());
 
     /// Copies each event into `EVENTS`, message first and fields after, the
     /// way the Logs tab prints them.
@@ -3610,19 +4605,25 @@ mod decision_tests {
             if field.name() == "message" {
                 self.message = format!("{value:?}");
             } else {
-                self.fields.push_str(&format!(" {}={:?}", field.name(), value));
+                self.fields
+                    .push_str(&format!(" {}={:?}", field.name(), value));
             }
         }
     }
 
     impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Record {
-        fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _: tracing_subscriber::layer::Context<'_, S>,
+        ) {
             let mut said = Said::default();
             event.record(&mut said);
-            EVENTS
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .push((std::thread::current().id(), event.metadata().level().to_string(), said.message + &said.fields));
+            EVENTS.lock().unwrap_or_else(|p| p.into_inner()).push((
+                std::thread::current().id(),
+                event.metadata().level().to_string(),
+                said.message + &said.fields,
+            ));
         }
     }
 
@@ -3641,9 +4642,14 @@ mod decision_tests {
         use tracing_subscriber::layer::SubscriberExt;
         static ONCE: std::sync::Once = std::sync::Once::new();
         ONCE.call_once(|| {
-            let _ = tracing::subscriber::set_global_default(tracing_subscriber::registry().with(Record));
+            let _ = tracing::subscriber::set_global_default(
+                tracing_subscriber::registry().with(Record),
+            );
         });
-        Capture { thread: std::thread::current().id(), from: EVENTS.lock().unwrap_or_else(|p| p.into_inner()).len() }
+        Capture {
+            thread: std::thread::current().id(),
+            from: EVENTS.lock().unwrap_or_else(|p| p.into_inner()).len(),
+        }
     }
 
     /// The lines whose text contains `needle`, as `LEVEL message fields`.
@@ -3666,15 +4672,30 @@ mod decision_tests {
         for n in ["la", "lb"] {
             put(&s, "race", n, "ssd", TRACKER, 3600);
         }
-        let out = drain_once(&s.state, &engine_manager(&s, "race"), &volume_on(&s, NO_SUCH_MOUNT, 100_000, 99_000, 80), &s.cfg(), "race");
+        let out = drain_once(
+            &s.state,
+            &engine_manager(&s, "race"),
+            &volume_on(&s, NO_SUCH_MOUNT, 100_000, 99_000, 80),
+            &s.cfg(),
+            "race",
+        );
         assert_eq!((out.deleted, out.graduated, out.stuck), (0, 0, 2));
         let back = lines(&log, "graduate_to points back at this engine");
         assert_eq!(back.len(), 1, "{back:?}");
-        assert!(back[0].starts_with("WARN") && back[0].contains("categories=ssd x2"), "{back:?}");
-        assert!(lines(&log, "files of the same name already sit").is_empty(), "the other cause is not blamed");
+        assert!(
+            back[0].starts_with("WARN") && back[0].contains("categories=ssd x2"),
+            "{back:?}"
+        );
+        assert!(
+            lines(&log, "files of the same name already sit").is_empty(),
+            "the other cause is not blamed"
+        );
         let short = lines(&log, "race drain could not free enough");
         assert_eq!(short.len(), 1, "{short:?}");
-        assert!(short[0].contains("stuck=2") && short[0].contains("deleted=0"), "{short:?}");
+        assert!(
+            short[0].contains("stuck=2") && short[0].contains("deleted=0"),
+            "{short:?}"
+        );
 
         // Files of the same name already at the destination.
         let s = graduation_state("kill-log-taken", "72", "hoard");
@@ -3682,12 +4703,25 @@ mod decision_tests {
             put(&s, "race", n, "ssd", TRACKER, 3600);
             std::fs::write(s.dir.join("pool").join(n), b"someone else's bytes").unwrap();
         }
-        let out = drain_once(&s.state, &engine_manager(&s, "race"), &volume_on(&s, NO_SUCH_MOUNT, 100_000, 99_000, 80), &s.cfg(), "race");
+        let out = drain_once(
+            &s.state,
+            &engine_manager(&s, "race"),
+            &volume_on(&s, NO_SUCH_MOUNT, 100_000, 99_000, 80),
+            &s.cfg(),
+            "race",
+        );
         assert_eq!((out.graduated, out.stuck), (0, 2));
         let taken = lines(&log, "files of the same name already sit");
         assert_eq!(taken.len(), 1, "{taken:?}");
-        assert!(taken[0].starts_with("WARN") && taken[0].contains("categories=ssd x2"), "{taken:?}");
-        assert_eq!(lines(&log, "graduate_to points back at this engine").len(), 1, "still only the first pass's line");
+        assert!(
+            taken[0].starts_with("WARN") && taken[0].contains("categories=ssd x2"),
+            "{taken:?}"
+        );
+        assert_eq!(
+            lines(&log, "graduate_to points back at this engine").len(),
+            1,
+            "still only the first pass's line"
+        );
     }
 
     /// A drain that frees what it needs is silent about it -- whether it
@@ -3696,15 +4730,32 @@ mod decision_tests {
     fn a_drain_that_freed_enough_does_not_say_it_could_not() {
         for (tag, used) in [("kill-log-exact", 96_384), ("kill-log-over", 90_000)] {
             let log = capture();
-            let s = st(tag, "\n[announce_min_seed_hours]\n\"tracker.example\" = \"0\"\n");
+            let s = st(
+                tag,
+                "\n[announce_min_seed_hours]\n\"tracker.example\" = \"0\"\n",
+            );
             for n in ["lm", "ln", "lo"] {
                 put(&s, "race", n, "", TRACKER, 100);
             }
             // 16 384 to free exactly, or 10 000: a torrent is 16 384.
-            let out = drain_once(&s.state, &engine_manager(&s, "race"), &volume_on(&s, NO_SUCH_MOUNT, 100_000, used, 80), &s.cfg(), "race");
+            let out = drain_once(
+                &s.state,
+                &engine_manager(&s, "race"),
+                &volume_on(&s, NO_SUCH_MOUNT, 100_000, used, 80),
+                &s.cfg(),
+                "race",
+            );
             assert_eq!((out.deleted, out.stuck), (1, 0), "{tag}");
-            assert!(lines(&log, "could not free enough").is_empty(), "{tag}: {:?}", lines(&log, "could not free"));
-            assert!(lines(&log, "graduate_to points back").is_empty() && lines(&log, "files of the same name").is_empty(), "{tag}");
+            assert!(
+                lines(&log, "could not free enough").is_empty(),
+                "{tag}: {:?}",
+                lines(&log, "could not free")
+            );
+            assert!(
+                lines(&log, "graduate_to points back").is_empty()
+                    && lines(&log, "files of the same name").is_empty(),
+                "{tag}"
+            );
             assert_eq!(lines(&log, "drained").len(), 1, "{tag}");
         }
     }
@@ -3713,9 +4764,12 @@ mod decision_tests {
         names
             .iter()
             .map(|n| {
-                let (ih, _) = mgr.add_torrent_bytes(&torrent_bytes(n), "/tmp", false, true).unwrap();
+                let (ih, _) = mgr
+                    .add_torrent_bytes(&torrent_bytes(n), "/tmp", false, true)
+                    .unwrap();
                 let t = mgr.get(&ih).unwrap();
-                t.status.store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+                t.status
+                    .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
                 t.is_paused.store(false, Ordering::Relaxed);
                 t
             })
@@ -3732,21 +4786,59 @@ mod decision_tests {
         let seeds = running_seeds(&mgr, &["lq", "lr", "ls"]);
         let mut parked = HashSet::new();
         let one = lim("queueing = true\nactive_seeds = 1");
-        enforce_queue(&mgr, &Cache::default(), &one, &HashSet::new(), &HashSet::new(), &mut parked, &mut SlowClock::new(), now());
+        enforce_queue(
+            &mgr,
+            &Cache::default(),
+            &one,
+            &HashSet::new(),
+            &HashSet::new(),
+            &mut parked,
+            &mut SlowClock::new(),
+            now(),
+        );
         assert_eq!(running(&seeds), 1);
         let said = lines(&log, "queue: seeds");
         assert_eq!(said.len(), 1, "{said:?}");
-        assert!(said[0].starts_with("INFO") && said[0].contains("started=0 stopped=2 queued=2 ceiling=1"), "{said:?}");
+        assert!(
+            said[0].starts_with("INFO")
+                && said[0].contains("started=0 stopped=2 queued=2 ceiling=1"),
+            "{said:?}"
+        );
 
-        enforce_queue(&mgr, &Cache::default(), &one, &HashSet::new(), &HashSet::new(), &mut parked, &mut SlowClock::new(), now());
-        assert_eq!(lines(&log, "queue: seeds").len(), 1, "a pass that changed nothing says nothing");
+        enforce_queue(
+            &mgr,
+            &Cache::default(),
+            &one,
+            &HashSet::new(),
+            &HashSet::new(),
+            &mut parked,
+            &mut SlowClock::new(),
+            now(),
+        );
+        assert_eq!(
+            lines(&log, "queue: seeds").len(),
+            1,
+            "a pass that changed nothing says nothing"
+        );
 
         let three = lim("queueing = true\nactive_seeds = 3");
-        enforce_queue(&mgr, &Cache::default(), &three, &HashSet::new(), &HashSet::new(), &mut parked, &mut SlowClock::new(), now());
+        enforce_queue(
+            &mgr,
+            &Cache::default(),
+            &three,
+            &HashSet::new(),
+            &HashSet::new(),
+            &mut parked,
+            &mut SlowClock::new(),
+            now(),
+        );
         assert_eq!(running(&seeds), 3);
         let said = lines(&log, "queue: seeds");
         assert_eq!(said.len(), 2, "{said:?}");
-        assert!(said[1].contains("started=2 stopped=0 queued=0 ceiling=3"), "{said:?}");
+        assert!(
+            said[1].contains("started=2 stopped=0 queued=0 ceiling=3"),
+            "{said:?}"
+        );
     }
 
     /// The slot manager announces itself once the engine has settled -- when
@@ -3754,10 +4846,22 @@ mod decision_tests {
     #[tokio::test(start_paused = true)]
     async fn the_slot_manager_announces_itself_only_when_a_ceiling_is_set() {
         let log = capture();
-        let s = st("kill-log-slots", "\n[race]\nlisten_port = 16171\nactive_downloads = 2\n");
-        spawn_download_slots(engine_manager(&s, "race"), Arc::new(Cache::default()), s.config.clone(), s.store.clone(), "race".into());
+        let s = st(
+            "kill-log-slots",
+            "\n[race]\nlisten_port = 16171\nactive_downloads = 2\n",
+        );
+        spawn_download_slots(
+            engine_manager(&s, "race"),
+            Arc::new(Cache::default()),
+            s.config.clone(),
+            s.store.clone(),
+            "race".into(),
+        );
         after(0).await;
-        assert!(lines(&log, "queue manager started").is_empty(), "not before the engine has settled");
+        assert!(
+            lines(&log, "queue manager started").is_empty(),
+            "not before the engine has settled"
+        );
         after(31).await;
         let said = lines(&log, "queue manager started");
         assert_eq!(said.len(), 1, "{said:?}");
@@ -3766,11 +4870,20 @@ mod decision_tests {
 
         let log = capture();
         let s = st("kill-log-slots-none", "");
-        spawn_download_slots(engine_manager(&s, "race"), Arc::new(Cache::default()), s.config.clone(), s.store.clone(), "race".into());
+        spawn_download_slots(
+            engine_manager(&s, "race"),
+            Arc::new(Cache::default()),
+            s.config.clone(),
+            s.store.clone(),
+            "race".into(),
+        );
         after(0).await;
         after(31).await;
         assert_eq!(lines(&log, "no ceiling configured").len(), 1);
-        assert!(lines(&log, "queue manager started").is_empty(), "nothing to announce without a ceiling");
+        assert!(
+            lines(&log, "queue manager started").is_empty(),
+            "nothing to announce without a ceiling"
+        );
     }
 
     /// The daily seed-time sync reports how many rows it wrote, and only when
@@ -3791,7 +4904,10 @@ mod decision_tests {
         }
         let said = lines(&log, "seed time synced");
         assert_eq!(said.len(), 1, "{said:?}");
-        assert!(said[0].starts_with("INFO") && said[0].contains("rows=2"), "{said:?}");
+        assert!(
+            said[0].starts_with("INFO") && said[0].contains("rows=2"),
+            "{said:?}"
+        );
 
         ta.seed_secs.store(5000, Ordering::Relaxed);
         after(24 * 3600).await;
@@ -3822,11 +4938,23 @@ mod decision_tests {
         reconcile_pass(&s.engines, &s.store);
         let said = lines(&log, "rows without a torrent removed");
         assert_eq!(said.len(), 1, "{said:?}");
-        assert!(said[0].starts_with("INFO") && said[0].contains("dropped=2") && said[0].contains("engine=race"), "{said:?}");
+        assert!(
+            said[0].starts_with("INFO")
+                && said[0].contains("dropped=2")
+                && said[0].contains("engine=race"),
+            "{said:?}"
+        );
 
         reconcile_pass(&s.engines, &s.store);
-        assert_eq!(lines(&log, "rows without a torrent removed").len(), 1, "nothing was dropped the second time");
-        assert!(lines(&log, "rows kept for records the loader refused").is_empty(), "no record was refused");
+        assert_eq!(
+            lines(&log, "rows without a torrent removed").len(),
+            1,
+            "nothing was dropped the second time"
+        );
+        assert!(
+            lines(&log, "rows kept for records the loader refused").is_empty(),
+            "no record was refused"
+        );
     }
 
     /// The stagger start reports its progress per batch and its total.
@@ -3843,7 +4971,8 @@ mod decision_tests {
             Arc::new(typhon_engine::disk::DiskManager::new(16)),
         ));
         for n in ["ua1", "ub1", "uc1"] {
-            mgr.add_torrent_bytes(&torrent_bytes(n), "/tmp", true, false).unwrap();
+            mgr.add_torrent_bytes(&torrent_bytes(n), "/tmp", true, false)
+                .unwrap();
         }
         let mut all = mgr.all();
         all.sort_by_key(|t| t.meta.name.clone());
@@ -3857,7 +4986,10 @@ mod decision_tests {
         }
         let done = lines(&log, "stagger start done");
         assert_eq!(done.len(), 1, "{done:?}");
-        assert!(done[0].contains("started=2") && done[0].contains("total=3"), "a stopped torrent is not counted as started: {done:?}");
+        assert!(
+            done[0].contains("started=2") && done[0].contains("total=3"),
+            "a stopped torrent is not counted as started: {done:?}"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -3878,11 +5010,17 @@ mod decision_tests {
             v => Some(v),
         });
         after(31).await;
-        assert!(lines(&log, "resident memory").is_empty(), "under the ceiling: nothing to say");
+        assert!(
+            lines(&log, "resident memory").is_empty(),
+            "under the ceiling: nothing to say"
+        );
 
         rss.store(LIMIT, Ordering::SeqCst);
         after(30).await;
-        assert!(lines(&log, "resident memory").is_empty(), "at the ceiling exactly: not over it");
+        assert!(
+            lines(&log, "resident memory").is_empty(),
+            "at the ceiling exactly: not over it"
+        );
 
         rss.store(LIMIT + 1, Ordering::SeqCst);
         after(30).await;
@@ -3892,13 +5030,22 @@ mod decision_tests {
         after(30).await;
         rss.store(u64::MAX, Ordering::SeqCst);
         after(30).await;
-        assert_eq!(lines(&log, "resident memory over").len(), 1, "edge-triggered, and a missing reading changes nothing");
+        assert_eq!(
+            lines(&log, "resident memory over").len(),
+            1,
+            "edge-triggered, and a missing reading changes nothing"
+        );
         assert!(lines(&log, "back under").is_empty());
 
         rss.store(LIMIT, Ordering::SeqCst);
         after(30).await;
         let back = lines(&log, "resident memory back under the ceiling");
-        assert_eq!(back.len(), 1, "back at the ceiling is back under it: {:?}", lines(&log, "resident memory"));
+        assert_eq!(
+            back.len(),
+            1,
+            "back at the ceiling is back under it: {:?}",
+            lines(&log, "resident memory")
+        );
         assert!(back[0].starts_with("INFO"));
         after(30).await;
         assert_eq!(lines(&log, "back under").len(), 1, "and only once");

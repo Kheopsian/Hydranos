@@ -162,7 +162,9 @@ fn version(code: &str, raw: &str) -> String {
             .map(|i| digit(b[i], 10).map(|v| v.to_string()))
             .collect::<Option<Vec<_>>>(),
     };
-    let Some(mut parts) = out else { return raw.to_string() };
+    let Some(mut parts) = out else {
+        return raw.to_string();
+    };
     // Trailing zeros carry no information: 5.2.2.0 is 5.2.2. // leak-ok: a version, not an address
     while parts.len() > 2 && parts.last().map(|s| s == "0").unwrap_or(false) {
         parts.pop();
@@ -283,7 +285,11 @@ mod tests {
             id[1..4].copy_from_slice(b"123");
             id[4..7].copy_from_slice(b"---");
             let got = identify(&id);
-            assert!(got.starts_with(name), "{}: {name} came out as {got:?}", *letter as char);
+            assert!(
+                got.starts_with(name),
+                "{}: {name} came out as {got:?}",
+                *letter as char
+            );
         }
     }
 
