@@ -14645,6 +14645,46 @@ async fn get_health_anomalies(
 // Fully ported
 // ---------------------------------------------------------------------------
 
+/// The route: `old_password` is optional. When it is there it must be the
+/// current admin password, or nothing changes; a wrong one counts as a failed
+/// login against the caller, in the limit the two login routes share, and a
+/// blocked caller is refused before anything is checked. Left out, the change
+/// is what it always was: the key is enough.
+async fn post_password_route(
+    State(state): State<AppState>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let q = query.clone().unwrap_or_default();
+    guard!(state, headers, q);
+    let old = serde_json::from_str::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|v| v.get("old_password").and_then(|p| p.as_str()).map(str::to_string));
+    if let Some(old) = old {
+        let who = crate::session::Caller::of(peer.ip());
+        let throttle = &state.sessions.throttle;
+        if let Some(left) = throttle.blocked_for(who) {
+            return crate::bootstrap::too_many_attempts(left);
+        }
+        let hash = state.cfg().auth.password_hash.clone();
+        match crate::session::verify_password(&old, &hash).await {
+            Ok(true) => throttle.succeeded(who),
+            Ok(false) => {
+                throttle.failed(who);
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(serde_json::json!({"error": "the old password is wrong"})),
+                )
+                    .into_response();
+            }
+            Err(crate::session::Busy) => return crate::bootstrap::busy(),
+        }
+    }
+    post_password(State(state), RawQuery(query), headers, body).await
+}
+
 /// Change the admin password. Same floor as first-run setup: eight characters.
 async fn post_password(
     State(state): State<AppState>,
@@ -16562,7 +16602,7 @@ fn router_with(state: AppState, extra: Router<AppState>) -> Router {
         .route("/api/agents", axum::routing::any(agents_gone))
         .route("/api/agents/*rest", axum::routing::any(agents_gone))
         .route("/api/engines/:id", axum::routing::delete(delete_engine))
-        .route("/api/auth/password", axum::routing::post(post_password))
+        .route("/api/auth/password", axum::routing::post(post_password_route))
         .route("/api/import/qbit/preview", axum::routing::post(post_qbit_import_preview))
         .route("/api/jobs/move-remote", axum::routing::any(move_remote_gone))
         .route("/api/jobs/:id", get(get_job).delete(delete_job))
