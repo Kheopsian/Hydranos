@@ -172,6 +172,8 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          components: rustfmt, clippy
       # jemalloc and aws-lc build C: the hosted image ships cmake, but naming
       # the dependency here means a runner image that drops it fails on this
       # line instead of somewhere inside a five-minute compile.
@@ -195,11 +197,24 @@ jobs:
       # Same cfg release.yml builds with: the engine uses tokio's unstable
       # runtime metrics, and without it the code behind that cfg is never
       # compiled here -- so CI would miss exactly what ships.
+      # Default rustfmt options, no rustfmt.toml: the whole crate is formatted,
+      # so a diff that is not is the author's to fix with `cargo fmt`.
+      - name: Format
+        working-directory: typhon-engine
+        run: cargo fmt --check
       - name: Check
         working-directory: typhon-engine
         env:
           RUSTFLAGS: "--cfg tokio_unstable"
         run: cargo check --locked --all-targets
+      # Same cfg and same targets as Check, so the code behind tokio_unstable and
+      # the tests are linted too. A lint that is wrong for one line gets a local
+      # #[allow(...)] with its reason, not a crate-wide one.
+      - name: Clippy
+        working-directory: typhon-engine
+        env:
+          RUSTFLAGS: "--cfg tokio_unstable"
+        run: cargo clippy --locked --all-targets -- -D warnings
       - name: Test
         working-directory: typhon-engine
         env:
@@ -274,9 +289,3 @@ jobs:
           if pct >= floor + 2:
               print(f"::notice::coverage is {pct:.2f}%, comfortably above {floor:.2f}% -- raise .coverage-floor")
           PY
-
-      # No cargo fmt check: rustfmt disagrees with 35 of the crate's files as
-      # they stand, so gating on it would mean reformatting the whole engine in
-      # the same commit that adds CI -- a diff that buries every git blame in
-      # the crate and conflicts with every branch in flight. Worth doing, worth
-      # doing on its own.
