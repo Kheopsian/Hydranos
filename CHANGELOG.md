@@ -65,7 +65,9 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   slept the thread it ran on); its budget and its completeness are unchanged.
 - The process leaves 10 s at most after the final flush for blocking work still
   running (a file move that takes minutes held the exit past the supervisor's
-  stop period). A move job cut short is queued again at the next start.
+  stop period). A move job cut short is queued again at the next start. When
+  that delay runs out on work still running, the log says so (and that the work
+  is resumed at the next start); nothing is logged when everything ended in time.
 - `POST /api/auth/password` takes an optional `old_password`. When it is
   given and wrong, nothing changes (403) and the failure counts in the
   failed-login limit; a blocked caller gets 429. Left out, the change is what
