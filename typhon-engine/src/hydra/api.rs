@@ -174,6 +174,10 @@ pub struct AppState {
     /// Imports in flight, by job id. An import outlives the request that
     /// started it, so its progress lives where the later polls can find it.
     pub imports: Arc<std::sync::Mutex<std::collections::HashMap<String, Arc<crate::importer::Progress>>>>,
+    /// The folders the agent endpoint may read a `.torrent` from, as the config
+    /// FILE said at startup. Never the live configuration: a settings edit
+    /// that changes `data_dir` must not move what a caller may read.
+    pub boot_roots: Arc<crate::pathroots::BootRoots>,
     /// The live configuration.
     ///
     /// Swappable because the settings endpoints edit default.toml and the
@@ -2256,6 +2260,15 @@ pub(crate) fn category_names(state: &AppState) -> Vec<String> {
     categories_map(state).into_keys().collect()
 }
 
+/// Every folder a category names: where its files go, and where they graduate to.
+pub(crate) fn category_save_paths(state: &AppState) -> Vec<String> {
+    categories_map(state)
+        .into_values()
+        .flat_map(|c| [c.save_path, c.graduate_to])
+        .filter(|p| !p.is_empty())
+        .collect()
+}
+
 fn categories_map(state: &AppState) -> std::collections::BTreeMap<String, Category> {
     let cfg = state.cfg();
     let raw = {
@@ -2675,7 +2688,7 @@ async fn post_dedup_config(
         return (StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({"error": "edited config no longer parses"}))).into_response();
     }
-    if crate::cfgfile::write_atomic(&state.config_path, &doc).is_err() {
+    if crate::cfgfile::write_edit(&state.config_path, &doc).is_err() {
         return (StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({"error": "cannot write the config"}))).into_response();
     }
@@ -8150,7 +8163,10 @@ where
         tracing::error!("refusing a config edit that would not parse");
         return false;
     }
-    if crate::cfgfile::write_atomic(&state.config_path, &edited).is_err() {
+    if let Err(e) = crate::cfgfile::write_edit(&state.config_path, &edited) {
+        if e.kind() == std::io::ErrorKind::PermissionDenied {
+            tracing::error!("refusing a config edit: {}", crate::cfgfile::ROOTS_REFUSED);
+        }
         return false;
     }
     if let Ok(reloaded) = toml::from_str::<Config>(&edited) {
@@ -10578,7 +10594,10 @@ async fn post_settings(
         )
             .into_response();
     }
-    if crate::cfgfile::write_atomic(&state.config_path, &doc).is_err() {
+    if let Err(e) = crate::cfgfile::write_edit(&state.config_path, &doc) {
+        if e.kind() == std::io::ErrorKind::PermissionDenied {
+            return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": crate::cfgfile::ROOTS_REFUSED}))).into_response();
+        }
         return (StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({"error": "cannot write the config"}))).into_response();
     }
@@ -13890,6 +13909,21 @@ async fn post_settings_reset(
             kept.push(format!("{section}.{key}"));
         }
     }
+    // The folders the operator wrote for the agent endpoint are carried over
+    // too: a reset is no way to change that list (see `cfgfile::write_edit`).
+    let roots: Vec<&str> = live
+        .get("mcp")
+        .and_then(|m| m.get("torrent_roots"))
+        .and_then(|r| r.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+    if !roots.is_empty() {
+        let list = roots.iter().map(|r| crate::tomledit::quote_toml_key(r)).collect::<Vec<_>>().join(", ");
+        if let Ok(next) = crate::tomledit::set_toml_table(&doc, "mcp", &[("torrent_roots".to_string(), format!("[{list}]"))]) {
+            doc = next;
+            kept.push("mcp.torrent_roots".to_string());
+        }
+    }
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -13900,7 +13934,7 @@ async fn post_settings_reset(
         return (StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({"error": "cannot write the backup"}))).into_response();
     }
-    if crate::cfgfile::write_atomic(&state.config_path, &doc).is_err() {
+    if crate::cfgfile::write_edit(&state.config_path, &doc).is_err() {
         return (StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({"error": "cannot write the config"}))).into_response();
     }
@@ -17100,6 +17134,7 @@ mod tests {
         cfg.auth.username = "admin".into();
         AppState {
             imports: Default::default(),
+            boot_roots: Arc::new(crate::pathroots::BootRoots::from_config(&cfg)),
             config: Arc::new(std::sync::RwLock::new(Arc::new(cfg))),
             config_path: std::path::PathBuf::from("/nonexistent.toml"),
             update_check: Arc::new(tokio::sync::Mutex::new(None)),
@@ -17615,6 +17650,7 @@ pub(crate) mod testing {
 
         let state = AppState {
             imports: Default::default(),
+            boot_roots: Arc::new(crate::pathroots::BootRoots::from_config(&config)),
             config: Arc::new(std::sync::RwLock::new(Arc::new(config))),
             config_path,
             update_check: Arc::new(tokio::sync::Mutex::new(None)),

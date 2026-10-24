@@ -182,6 +182,10 @@ pub struct TorrentManager {
     /// torrents. A counter that only adds what moved has no fall to read.
     moved_uploaded: std::sync::atomic::AtomicU64,
     moved_downloaded: std::sync::atomic::AtomicU64,
+    /// Save path -> how many torrents are saved there, kept as torrents come,
+    /// go and move, so "which folders does this engine use" is a few dozen
+    /// keys and never a walk of the catalogue.
+    save_path_counts: std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, usize>>,
     // O(1) MSE inbound resolution: SHA1("req2"+info_hash) -> info_hash.
     // Avoids the O(N) SHA1 scan over all torrents per inbound handshake.
     skey_index: DashMap<[u8; 20], InfoHash>,
@@ -604,6 +608,7 @@ impl TorrentManager {
             totals_ready: std::sync::atomic::AtomicBool::new(false),
             moved_uploaded: std::sync::atomic::AtomicU64::new(0),
             moved_downloaded: std::sync::atomic::AtomicU64::new(0),
+            save_path_counts: std::sync::Mutex::new(std::collections::HashMap::new()),
             skey_index: DashMap::new(),
             incomplete: DashSet::new(),
             dht: std::sync::OnceLock::new(),
@@ -778,6 +783,55 @@ impl TorrentManager {
     /// Exposed so the figure can be watched rather than assumed.
     pub fn incomplete_len(&self) -> usize {
         self.incomplete.len()
+    }
+
+    fn counts(&self) -> std::sync::MutexGuard<'_, std::collections::HashMap<std::path::PathBuf, usize>> {
+        self.save_path_counts.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    fn count_save_path(&self, path: &std::path::Path) {
+        let mut m = self.counts();
+        if let Some(n) = m.get_mut(path) {
+            *n += 1;
+        } else {
+            m.insert(path.to_path_buf(), 1);
+        }
+    }
+
+    fn uncount_save_path(&self, path: &std::path::Path) {
+        let mut m = self.counts();
+        if let Some(n) = m.get_mut(path) {
+            if *n <= 1 {
+                m.remove(path);
+            } else {
+                *n -= 1;
+            }
+        }
+    }
+
+    /// Put a torrent in the map and in the save path counts; a torrent it
+    /// replaces leaves the counts.
+    fn insert_counted(&self, ih: InfoHash, state: Arc<TorrentState>) {
+        let path = state.save_path.read().clone();
+        self.count_save_path(&path);
+        if let Some(old) = self.torrents.insert(ih, state) {
+            let was = old.save_path.read().clone();
+            self.uncount_save_path(&was);
+        }
+    }
+
+    /// Insert a torrent the caller built, with no resume record, store row or
+    /// event: for a benchmark that needs a catalogue of a size nothing could
+    /// add one torrent at a time.
+    #[doc(hidden)]
+    pub fn insert_prebuilt(&self, state: Arc<TorrentState>) {
+        self.insert_counted(state.meta.info_hash, state);
+    }
+
+    /// The folders at least one torrent is saved in. A few dozen at a million
+    /// torrents; read under a lock, no walk.
+    pub fn save_paths(&self) -> Vec<std::path::PathBuf> {
+        self.counts().keys().cloned().collect()
     }
 
     pub fn all(&self) -> Vec<Arc<TorrentState>> {
@@ -976,7 +1030,7 @@ impl TorrentManager {
         if !state_arc.seed_mode {
             self.incomplete.insert(ih);
         }
-        self.torrents.insert(ih, state_arc.clone());
+        self.insert_counted(ih, state_arc.clone());
         // Track in DHT (no-op for private torrents, see dht::track_torrent).
         self.track_in_dht(state_arc);
         // Push event to subscribers (Go hydra cache). Silent if no subscribers.
@@ -1071,6 +1125,10 @@ impl TorrentManager {
         self.skey_index.remove(&crate::crypto::mse::sha1_combine(b"req2", info_hash));
         self.incomplete.remove(info_hash);
         let removed = self.torrents.remove(info_hash);
+        if let Some((_, t)) = &removed {
+            let was = t.save_path.read().clone();
+            self.uncount_save_path(&was);
+        }
         tm.map_remove = stage.elapsed();
         let result = match removed {
             Some((_, t)) => {
@@ -1644,7 +1702,7 @@ impl TorrentManager {
             // first sweep after a start writes only what has moved since --
             // otherwise every start would rewrite the whole table once.
             self.last_saved.insert(ih, fingerprint_of(&state));
-            self.torrents.insert(ih, state);
+            self.insert_counted(ih, state);
             loaded += 1;
         }
         info!(
@@ -2117,7 +2175,21 @@ impl TorrentManager {
     pub fn set_save_path(&self, info_hash: &InfoHash, new_path: &str) -> Result<(), String> {
         let t = self.get(info_hash).ok_or("torrent not found")?;
         let old = data_files(&t);
-        *t.save_path.write() = new_path.into();
+        {
+            // Under the counts lock, so a reader never sees the torrent in
+            // neither folder.
+            let mut m = self.counts();
+            let new: std::path::PathBuf = new_path.into();
+            let was = std::mem::replace(&mut *t.save_path.write(), new.clone());
+            if let Some(n) = m.get_mut(&was) {
+                if *n <= 1 {
+                    m.remove(&was);
+                } else {
+                    *n -= 1;
+                }
+            }
+            *m.entry(new).or_insert(0) += 1;
+        }
         // The old paths are no longer this torrent's: keeping their cached
         // descriptors would pin the files a move is about to unlink.
         crate::disk::evict_fds(&old);
@@ -2265,7 +2337,7 @@ impl TorrentManager {
         if !state.seed_mode {
             self.incomplete.insert(ih);
         }
-        self.torrents.insert(ih, state.clone());
+        self.insert_counted(ih, state.clone());
         self.track_in_dht(state);
         // Durable here before the source is told to let go, so a crash in the
         // middle leaves the torrent in both engines rather than in neither.

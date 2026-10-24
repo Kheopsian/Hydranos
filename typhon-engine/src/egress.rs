@@ -398,14 +398,80 @@ pub fn client_for(route: &Route) -> Result<reqwest::Client, String> {
     b.build().map_err(|e| format!("http client: {e}"))
 }
 
-/// `client_for` with the caller's own settings on the builder first (a
-/// redirect policy, a fixed name resolution in a test). Not cached.
-pub fn client_tweaked(
+/// The resolver of a client built by [`client_resolving`]: the route's own
+/// way to resolve (a tunnel's DNS server when the client is pinned to one),
+/// names fixed by the caller first (a test pins a name to a local server), and
+/// the guard of where the fetch began.
+struct FetchResolver {
+    tunnel: Option<Arc<dyn reqwest::dns::Resolve>>,
+    fixed: std::collections::HashMap<String, Vec<std::net::IpAddr>>,
+    /// `None` behind a proxy: the proxy resolves the target, not us.
+    guard: Option<(Arc<crate::webseed::StartGuard>, fn(std::net::IpAddr) -> bool)>,
+}
+
+impl reqwest::dns::Resolve for FetchResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let host = name.as_str().to_ascii_lowercase();
+        let fixed = self.fixed.get(&host).cloned();
+        let tunnel = self.tunnel.clone();
+        let guard = self.guard.clone();
+        Box::pin(async move {
+            let mut addrs: Vec<std::net::SocketAddr> = if let Some(ips) = fixed {
+                ips.into_iter().map(|ip| std::net::SocketAddr::new(ip, 0)).collect()
+            } else if let Some(t) = tunnel {
+                t.resolve(name).await?.collect()
+            } else {
+                tokio::net::lookup_host((host.as_str(), 0)).await?.collect()
+            };
+            if let Some((start, is_internal)) = guard {
+                // The first name resolved is the host the fetch began on:
+                // internal when every address it has is.
+                if start.is_undecided() {
+                    start.decide(!addrs.is_empty() && addrs.iter().all(|a| is_internal(a.ip())));
+                }
+                if !start.began_internal() {
+                    // A fetch that began on a public host: only public
+                    // addresses are kept, for it and for every redirect.
+                    addrs.retain(|a| !is_internal(a.ip()));
+                    if addrs.is_empty() {
+                        let e: Box<dyn std::error::Error + Send + Sync> = "the name resolves to an internal address".into();
+                        return Err(e);
+                    }
+                }
+            }
+            let it: reqwest::dns::Addrs = Box::new(addrs.into_iter());
+            Ok(it)
+        })
+    }
+}
+
+/// A one-shot client for a fetch the operator pointed at one URL: the route's
+/// settings, its own resolver, and the redirect policy of `guard`.
+///
+/// `fixed` names are resolved to the given addresses without asking DNS (the
+/// seam a test uses to give a name a local address). The fetch is judged by
+/// where it began (`guard`, see `webseed::StartGuard`): one that began on an
+/// internal host may go anywhere; one that began on a public host is refused
+/// any address `is_internal` holds for, on the first request and on every
+/// redirect, whatever the name. Behind a proxy (which resolves the name, not
+/// us) only an address written in a redirect can be judged.
+pub fn client_resolving(
     route: &Route,
-    tweak: impl FnOnce(reqwest::ClientBuilder) -> reqwest::ClientBuilder,
+    fixed: &[(&str, std::net::IpAddr)],
+    guard: Arc<crate::webseed::StartGuard>,
+    is_internal: fn(std::net::IpAddr) -> bool,
 ) -> Result<reqwest::Client, String> {
     route.preflight()?;
-    let b = apply_route!(tweak(reqwest::Client::builder()), route);
+    let tunnel: Option<Arc<dyn reqwest::dns::Resolve>> = (route.proxy.is_empty() && !route.interface.is_empty())
+        .then(|| crate::tunneldns::Resolver::new(&route.interface) as Arc<dyn reqwest::dns::Resolve>);
+    let mut map: std::collections::HashMap<String, Vec<std::net::IpAddr>> = std::collections::HashMap::new();
+    for (name, ip) in fixed {
+        map.entry(name.to_ascii_lowercase()).or_default().push(*ip);
+    }
+    let redirect = crate::webseed::redirect_policy_from_start(guard.clone());
+    let guard = route.proxy.is_empty().then_some((guard, is_internal));
+    let resolver = Arc::new(FetchResolver { tunnel, fixed: map, guard });
+    let b = apply_route!(reqwest::Client::builder().redirect(redirect), route).dns_resolver(resolver);
     b.build().map_err(|e| format!("http client: {e}"))
 }
 

@@ -516,6 +516,13 @@ pub struct Mcp {
     /// by mistake.
     #[serde(default)]
     pub allow_destructive: bool,
+    /// Folders, besides `[daemon] data_dir`, the agent endpoint may read a
+    /// `.torrent` from (`add_torrent`'s `torrent_path`). Empty by default.
+    ///
+    /// Written in this file by hand only: no route of the API changes it, so
+    /// a caller of the API cannot widen what it may read.
+    #[serde(default)]
+    pub torrent_roots: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
