@@ -180,6 +180,21 @@ mod tests {
         }
     }
 
+    /// The page authenticates its streams, its export and its node link with
+    /// the session cookie. A key in an address lands in the browser history, a
+    /// proxy's access log and the Referer; the daemon still accepts it for
+    /// callers that cannot do better, but the page itself never sends it.
+    #[test]
+    fn the_page_never_puts_the_api_key_in_an_address() {
+        let (js, _) = lookup("app.js").expect("app.js");
+        let js = String::from_utf8_lossy(&js);
+        assert!(
+            !js.to_ascii_lowercase().contains("apikey="),
+            "app.js builds an address carrying the key"
+        );
+        assert!(!js.contains("\"apikey\""), "app.js sets a `apikey` query parameter");
+    }
+
     #[test]
     fn every_asset_the_page_needs_is_present() {
         for name in ["app.js", "i18n.js", "style.css"] {
