@@ -37,6 +37,9 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 - A web seed starts a piece only when the engine's download memory budget
   admits it, as a peer does; with the budget spent it waits instead of
   reserving a run of pieces past it.
+- A resume JSON file that cannot be read is listed among the startup issues and
+  kept out of the store reconcile, as a damaged state row already was, instead
+  of leaving a single warn line.
 
 ### Security
 

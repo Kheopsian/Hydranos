@@ -121,8 +121,8 @@ pub const STATUS_PAUSED: usize = 5;
 pub struct StartupIssue {
     /// The torrent's info hash; empty when the issue is the store itself.
     pub info_hash: String,
-    /// `resume_skipped`, `resume_refused`, `state_row_unreadable` or
-    /// `state_db_unavailable`.
+    /// `resume_skipped`, `resume_refused`, `state_row_unreadable`,
+    /// `resume_unreadable` or `state_db_unavailable`.
     pub kind: &'static str,
     pub detail: String,
 }
@@ -1240,14 +1240,19 @@ impl TorrentManager {
     fn load_state_records(&self) -> Vec<fastresume::ResumeData> {
         let db = match &self.state_db {
             Some(db) => db,
-            None => return fastresume::load_all(&self.resume_dir),
+            None => {
+                let (records, unreadable) = fastresume::load_all_reporting(&self.resume_dir);
+                self.refuse_unreadable_files(&unreadable);
+                return records;
+            }
         };
         // Only a table KNOWN to be empty is a first start. One that cannot
         // be counted is a database in trouble, and importing a stale
         // directory over it is the resurrection the paragraph above forbids.
         match db.try_count() {
             Ok(0) => {
-                let imported = db.import_legacy(&self.resume_dir);
+                let (imported, unreadable) = db.import_legacy(&self.resume_dir);
+                self.refuse_unreadable_files(&unreadable);
                 if imported > 0 {
                     info!("[statedb] first start on SQLite state: {} records carried over", imported);
                 }
@@ -1273,6 +1278,27 @@ impl TorrentManager {
             }
         }
         records
+    }
+
+    /// Resume files that could not be read are refused, as damaged state rows
+    /// are: listed among the startup issues, and kept out of any reconcile
+    /// that would take their absence for a removal.
+    fn refuse_unreadable_files(&self, unreadable: &[String]) {
+        if unreadable.is_empty() {
+            return;
+        }
+        if let Ok(mut refused) = self.refused_records.lock() {
+            refused.extend(unreadable.iter().cloned());
+        }
+        for h in unreadable {
+            self.note_startup_issue(
+                h,
+                "resume_unreadable",
+                "the resume file could not be read (damaged or truncated); the torrent is not loaded \
+                 and the file is left where it is"
+                    .into(),
+            );
+        }
     }
 
     /// Point the manager at the store's metainfo blobs. Set once at startup,
@@ -4219,6 +4245,60 @@ mod unreadable_state_tests {
         ));
         mgr.load_resume_data();
         assert!(mgr.refused_records().contains(&hash), "its row must be kept");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn unreadable_json_root(tag: &str) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf, String) {
+        let root = std::env::temp_dir().join(format!("typhon-unreadable-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (data, resume) = (root.join("data"), root.join("resume"));
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::create_dir_all(&resume).unwrap();
+        let hash = "cd".repeat(20);
+        std::fs::write(resume.join(format!("{hash}.json")), "{ \"info_hash\": ").unwrap();
+        (root, data, resume, hash)
+    }
+
+    fn assert_reported(mgr: &TorrentManager, hash: &str) {
+        assert!(mgr.refused_records().contains(hash), "its record must be kept, not forgotten");
+        let (n, issues) = mgr.startup_issues();
+        assert!(n >= 1);
+        assert!(
+            issues.iter().any(|i| i.info_hash == hash && i.kind == "resume_unreadable"),
+            "and listed among the startup issues: {issues:?}"
+        );
+    }
+
+    /// ⭐ A resume JSON that cannot be read is listed and refused, as a damaged
+    /// state row is -- here on the first start on the state database, which
+    /// imports the directory. It used to be a warn line and nothing else.
+    #[test]
+    fn an_unreadable_resume_file_is_listed_on_the_first_start_on_the_database() {
+        let (root, data, resume, hash) = unreadable_json_root("import");
+        let mgr = Arc::new(TorrentManager::new(
+            data.to_string_lossy().into_owned(),
+            resume.to_string_lossy().into_owned(),
+            Arc::new(crate::disk::DiskManager::new(16)),
+        ));
+        mgr.load_resume_data();
+        assert_reported(&mgr, &hash);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// ⭐ Same, on an engine running on the JSON files alone (its state
+    /// database could not be opened).
+    #[test]
+    fn an_unreadable_resume_file_is_listed_when_the_engine_runs_on_json() {
+        let (root, data, resume, hash) = unreadable_json_root("json-only");
+        // A directory where the database should be: it cannot be opened.
+        std::fs::create_dir_all(root.join("state.db")).unwrap();
+        let mgr = Arc::new(TorrentManager::new(
+            data.to_string_lossy().into_owned(),
+            resume.to_string_lossy().into_owned(),
+            Arc::new(crate::disk::DiskManager::new(16)),
+        ));
+        mgr.load_resume_data();
+        assert_reported(&mgr, &hash);
         let _ = std::fs::remove_dir_all(&root);
     }
 }
