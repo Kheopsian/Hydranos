@@ -47,6 +47,8 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   command (`ip`, `wg`) that exits but leaves a child holding its output is no
   longer waited for: an `ip` that never comes back cannot hold the exit until
   the supervisor's kill.
+- The final flush waits for its threads without holding a runtime worker (it
+  slept the thread it ran on); its budget and its completeness are unchanged.
 - `POST /api/auth/password` takes an optional `old_password`. When it is
   given and wrong, nothing changes (403) and the failure counts in the
   failed-login limit; a blocked caller gets 429. Left out, the change is what
