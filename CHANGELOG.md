@@ -23,6 +23,10 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 
 ## Unreleased -- a graduated torrent's history is not throughput
 
+### Added
+
+- `GET /api/fs/list?path=` and the shim's `app/getDirectoryContent` list a folder for a tool that cannot see this host's disk, limited to the download folders Hydranos knows (default save path, categories, torrents' folders), never the data folder; anything outside them, by `..` or a symbolic link too, is a 403.
+
 ### Fixed
 
 - The cross-origin check on a cookie write also takes the authority of the

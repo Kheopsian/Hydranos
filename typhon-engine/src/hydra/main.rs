@@ -89,6 +89,7 @@ mod rules;
 mod rulesrun;
 mod rulesapi;
 mod magnets;
+mod fslist;
 mod rss;
 mod ipfilter;
 mod watch;

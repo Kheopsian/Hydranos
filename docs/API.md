@@ -331,6 +331,7 @@ What works and what does not on the Network tab: [Networking](https://github.com
 | `/api/settings/reset` | POST | Reset to defaults (keeps login, key, data dir). | ✓ |
 | `/api/settings/restart`, `/api/restart` | POST | Answer, then stop cleanly (the same path as SIGTERM: `stopped` to trackers, resume data flushed) and exit with code **75** for the supervisor to restart (systemd `Restart=on-failure` included). | ✓ |
 | `/api/fs/browse?path=` | GET | List folders on the Hydranos host. | ✓ |
+| `/api/fs/list?path=` | GET | List a download folder: `{"path","entries":[{"name","dir"}]}` sorted by name (`dir` is true for a real folder; a symbolic link is `false`), at most 100 000 entries (`"truncated":true` beyond). Only the download folders Hydranos knows (the default save path, each category's folder and graduation folder, the folder of every torrent) and what lies below them, never the data folder (config, database) even when one of those covers it, compared after symbolic links and `..` are resolved. 400 `{"error"}`: empty, relative or not a folder; 403: outside those folders (whether or not it exists); 404: missing inside them. | ✓ |
 | `/api/update-check` | GET | New release available. | ✓ |
 
 A forgotten password is reset on the host with `hydranos reset-password <password> [config]`: [Security and Access](https://github.com/Kheopsian/Hydranos/wiki/Security-and-Access).
@@ -380,6 +381,8 @@ Documented on [qBittorrent Shim and Automation](https://github.com/Kheopsian/Hyd
 - `torrents/categories` and `torrents/tags` answer POST as well as GET.
 - `torrents/export` serves the stored `.torrent` of `hash`.
 - `torrents/info` lists every engine, each torrent once, with `tracker` filled; `hashes=all` means every torrent on the write endpoints; `torrents/files` gives real piece ranges and progress, with the torrent's folder in multi-file names.
+
+- **`app/getDirectoryContent`** (GET or POST): `dirPath` and `mode` (`all` by default, `dirs`, `files`) → a JSON array of full paths (`dirPath` joined to each name). Same bounds as `/api/fs/list`: 403 outside the download folders, 400 `text/plain` for an empty, relative, missing-inside-the-folders or non-folder path or an unknown `mode`; a folder of more than 100 000 entries is a 400 rather than a partial list, since a name missing from the array would read as free.
 
 Changes in 4.4:
 
