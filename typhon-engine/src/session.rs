@@ -16,6 +16,8 @@ use crate::torrent::TorrentManager;
 /// Start listening, announcing and discovering for one engine.
 ///
 /// Returns once everything is spawned; the tasks outlive the call.
+// A one-off shape; naming it would add an alias that nothing else uses.
+#[allow(clippy::type_complexity)]
 pub async fn start(
     mgr: Arc<TorrentManager>,
     disk: Arc<DiskManager>,

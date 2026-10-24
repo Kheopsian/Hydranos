@@ -274,6 +274,8 @@ fn announce_ip_mode(enable_ipv6: bool) -> crate::tracker::http::IpMode {
 }
 
 /// Collect peer candidates from the magnet's trackers and the DHT.
+// Every argument is a distinct input the caller already holds; a parameter struct would only move the list.
+#[allow(clippy::too_many_arguments)]
 async fn discover(
     info_hash: [u8; 20],
     trackers: &[String],

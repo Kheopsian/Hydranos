@@ -164,6 +164,8 @@ pub fn gather_one(
 
 /// One torrent's facts, from the engine's live state and the store's row.
 /// The single place a `Facts` is built, so a pass and an event read the same.
+// Every argument is a distinct input the caller already holds; a parameter struct would only move the list.
+#[allow(clippy::too_many_arguments)]
 fn facts_of(
     t: &std::sync::Arc<typhon_engine::torrent::meta::TorrentState>,
     hash: String,
@@ -953,6 +955,10 @@ pub fn log(store: &Store, w: &Workflow, m: &Match, action: &str, outcome: &str, 
 ///
 /// Takes the store lock per action rather than for the pass: a workflow
 /// touching five hundred torrents must not hold the database while it does.
+// Every argument is a distinct input the caller already holds; a parameter struct would only move the list.
+#[allow(clippy::too_many_arguments)]
+// A one-off shape; naming it would add an alias that nothing else uses.
+#[allow(clippy::type_complexity)]
 pub fn apply(
     host: &EngineHost,
     store: &Arc<crate::store::StoreLock>,

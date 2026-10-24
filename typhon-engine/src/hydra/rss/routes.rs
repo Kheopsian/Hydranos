@@ -90,6 +90,8 @@ fn param(query: &str, body: &str, name: &str) -> Option<String> {
     None
 }
 
+// The error is an axum Response returned as it is; boxing it would touch every caller.
+#[allow(clippy::result_large_err)]
 fn body_json(body: &str) -> Result<Value, Response> {
     if body.trim().is_empty() {
         return Ok(json!({}));

@@ -354,6 +354,8 @@ pub fn scan_dual_seed(
 /// `scan_dual_seed` over live engines, by lookup instead of a map of every
 /// hash: at a million torrents that map was a hundred MB built and thrown
 /// away every pass, to find the handful held twice.
+// A one-off shape; naming it would add an alias that nothing else uses.
+#[allow(clippy::type_complexity)]
 pub fn scan_dual_seed_live(
     engines: &[(
         String,

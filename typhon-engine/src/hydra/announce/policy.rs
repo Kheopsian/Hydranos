@@ -188,6 +188,8 @@ pub fn announced_peer_id(policy: &Policy, _trackers: &[Vec<String>]) -> [u8; 20]
     out
 }
 
+// Every argument is a distinct input the caller already holds; a parameter struct would only move the list.
+#[allow(clippy::too_many_arguments)]
 pub fn prepare(
     policy: &Policy,
     tracker_url: &str,

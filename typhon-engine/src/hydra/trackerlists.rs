@@ -20,6 +20,8 @@ const MAX_URLS: usize = 500;
 /// Nor is a body past this.
 const MAX_BYTES: usize = 1 << 20;
 
+// A one-off shape; naming it would add an alias that nothing else uses.
+#[allow(clippy::type_complexity)]
 static CACHE: Mutex<Option<HashMap<String, (Instant, Vec<String>)>>> = Mutex::new(None);
 
 /// Is this an announce URL a torrent can carry? `http(s)://` or `udp://`,
