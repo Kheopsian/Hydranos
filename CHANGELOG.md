@@ -75,6 +75,12 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   link authenticate with the session cookie the page opens when it loads; the
   key travels in a header or a request body only. The daemon still accepts
   `?apikey=` from scripts that need it.
+- A peer's client name is shown as text. The peers panel of the timeline put
+  it into the page as markup, and the name is partly made of bytes the remote
+  peer picks; the panel now escapes it, and a client code or version taken
+  from the peer's bytes that holds anything but letters, digits and
+  ` . _ - + !` leaves the peer unidentified. Names from the client table are
+  never filtered.
 
 ### Security
 

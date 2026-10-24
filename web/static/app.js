@@ -2235,7 +2235,7 @@ function renderTimelinePeers(snapshot, t0) {
                 : `${(p.progress * 100).toFixed(0)}%`;
             return `<tr>
                 <td class="mono" style="font-size:10px">${incoIP(p.ip)}</td>
-                <td style="font-size:10px">${p.client || "?"}</td>
+                <td style="font-size:10px">${esc(p.client || "?")}</td>
                 <td>${formatBytes(p.dl_speed || 0)}/s</td>
                 <td>${prog}</td>
                 <td style="color:#3fb950;font-size:10px">${p.flags || ""}</td>
