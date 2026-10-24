@@ -170,9 +170,22 @@ fn version(code: &str, raw: &str) -> String {
     parts.join(".")
 }
 
+/// Only what a version or a short client code is made of. Applied to the parts
+/// of a name taken from the peer's own bytes, never to a table's name.
+fn plain(s: &str) -> bool {
+    s.chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '.' | '_' | '-' | '+' | '!'))
+}
+
 /// Best-effort identification. Empty when the peer id follows no convention we
 /// know -- which is a real answer, not a failure: a client is free to send 20
 /// random bytes, and many do.
+///
+/// The name is shown in the interface and handed to API clients. What comes
+/// from our tables is safe by construction; what comes from the bytes the
+/// remote peer chose (an unknown two-letter code, a version that is not
+/// digits) is kept only if it is plain, and otherwise the id is treated as
+/// following no convention at all.
 pub fn identify(pid: &[u8; 20]) -> String {
     // Azureus: -XX1234-
     if pid[0] == b'-' && pid[7] == b'-' {
@@ -180,12 +193,16 @@ pub fn identify(pid: &[u8; 20]) -> String {
             std::str::from_utf8(&pid[1..3]),
             std::str::from_utf8(&pid[3..7]),
         ) {
-            let name = AZUREUS
-                .iter()
-                .find(|(c, _)| *c == code)
-                .map(|(_, n)| *n)
-                .unwrap_or(code);
-            return format!("{} {}", name, version(code, raw));
+            let name = match AZUREUS.iter().find(|(c, _)| *c == code) {
+                Some((_, n)) => *n,
+                None if plain(code) => code,
+                None => return String::new(),
+            };
+            let ver = version(code, raw);
+            if !plain(&ver) {
+                return String::new();
+            }
+            return format!("{} {}", name, ver);
         }
     }
     // Shadow: one letter, three version characters, then dashes.
@@ -205,7 +222,7 @@ pub fn identify(pid: &[u8; 20]) -> String {
     if pid[0] == b'M' && pid[2] == b'-' {
         if let Ok(s) = std::str::from_utf8(&pid[1..8]) {
             let ver: Vec<&str> = s.split('-').filter(|p| !p.is_empty()).collect();
-            if !ver.is_empty() {
+            if !ver.is_empty() && ver.iter().all(|p| plain(p)) {
                 return format!("Mainline {}", ver.join("."));
             }
         }
@@ -239,6 +256,35 @@ mod tests {
         let b = s.as_bytes();
         out[..b.len().min(20)].copy_from_slice(&b[..b.len().min(20)]);
         out
+    }
+
+    /// An id built to put markup in the name is no convention we know: the
+    /// name comes back empty rather than carrying the peer's bytes.
+    #[test]
+    fn a_name_made_of_the_peers_own_bytes_is_not_passed_on() {
+        assert_eq!(identify(&pid("-<s>123-abcdefghijkl")), "");
+        assert_eq!(identify(&pid("-qB<>12-abcdefghijkl")), "");
+        assert_eq!(identify(&pid("M4-<b>-2-abcdefghijkl")), "");
+        // Unknown but plain stays what it was.
+        assert_eq!(identify(&pid("-ZZ1234-abcdefghijkl")), "ZZ 1.2.3.4");
+    }
+
+    /// Every client the tables name still comes out named: the filter on what
+    /// the peer's bytes contribute must not touch a name we wrote ourselves.
+    #[test]
+    fn no_client_in_the_tables_comes_out_empty() {
+        for (code, name) in AZUREUS {
+            let got = identify(&pid(&format!("-{code}1234-abcdefghijkl")));
+            assert!(got.starts_with(name), "{code}: {name} came out as {got:?}");
+        }
+        for (letter, name) in SHADOW {
+            let mut id = pid("abcdefghijklmnopqrst");
+            id[0] = *letter;
+            id[1..4].copy_from_slice(b"123");
+            id[4..7].copy_from_slice(b"---");
+            let got = identify(&id);
+            assert!(got.starts_with(name), "{}: {name} came out as {got:?}", *letter as char);
+        }
     }
 
     /// The six the old table knew, still right.
