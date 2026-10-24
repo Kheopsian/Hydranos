@@ -213,6 +213,10 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   qBittorrent's `403`. The API key still logs a qBittorrent client in while
   blocked. A login that waits more than 2 s for a password check gets `503`.
 
+### Tests
+
+- CI now fails a change that is not `cargo fmt`-formatted or that makes `cargo clippy --all-targets -- -D warnings` complain.
+
 ## v4.5.4 -- a write the store did not keep is never acknowledged
 
 ### Added
