@@ -860,12 +860,14 @@ fn scan_claims_walk(
             .map(|n| n.get())
             .unwrap_or(1)
             .clamp(1, 16);
+        // `!(FROM..).contains(&n)` is `n < FROM`, written so it stays a real test when
+        // FROM is 0 (under test) instead of a comparison clippy sees as always false.
         let found: Vec<
             Vec<(
                 Arc<typhon_engine::torrent::meta::TorrentState>,
                 Vec<(std::path::PathBuf, u64)>,
             )>,
-        > = if threads == 1 || all.len() < SHARED_SCAN_PARALLEL_FROM {
+        > = if threads == 1 || !(SHARED_SCAN_PARALLEL_FROM..).contains(&all.len()) {
             vec![all.iter().filter_map(pair).collect()]
         } else {
             let per = all.len().div_ceil(threads).max(1);

@@ -3862,7 +3862,9 @@ pub(crate) async fn engine_page_value(
         .map(|n| n.get())
         .unwrap_or(1)
         .clamp(1, LIST_SCAN_THREADS);
-    let slices: Vec<Slice> = if threads == 1 || total < LIST_SCAN_PARALLEL_FROM {
+    // `!(FROM..).contains(&n)` is `n < FROM`, written so it stays a real test when
+    // FROM is 0 (under test) instead of a comparison clippy sees as always false.
+    let slices: Vec<Slice> = if threads == 1 || !(LIST_SCAN_PARALLEL_FROM..).contains(&total) {
         vec![scan(0..total)]
     } else {
         let per = total.div_ceil(threads);
