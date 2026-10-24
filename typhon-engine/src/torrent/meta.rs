@@ -597,6 +597,8 @@ pub fn tracker_key(url: &str) -> u64 {
     h
 }
 
+// A one-off shape; naming it would add an alias that nothing else uses.
+#[allow(clippy::type_complexity)]
 pub struct TorrentState {
     /// Parsed straight from the .torrent. `meta.trackers` is the SEED for
     /// `live_trackers` and nothing else reads it: the operator can edit the
@@ -1714,6 +1716,8 @@ mod tests {
     ///
     /// This is how a metainfo goes missing now: not by deleting a file, but by
     /// the store no longer answering for that hash.
+    // A one-off shape; naming it would add an alias that nothing else uses.
+    #[allow(clippy::type_complexity)]
     fn state_with_store(n: usize) -> (TorrentState, Vec<[u8; 20]>, Arc<Mutex<Option<Vec<u8>>>>) {
         let (bytes, hashes) = torrent_bytes(n);
         let meta = crate::torrent::metainfo::parse_torrent_bytes(&bytes).unwrap();

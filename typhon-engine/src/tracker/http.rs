@@ -175,6 +175,8 @@ fn key_with_salt(salt: u64, peer_id: &[u8], info_hash: &[u8; 20]) -> String {
 }
 
 /// Perform an HTTP tracker announce.
+// Every argument is a distinct input the caller already holds; a parameter struct would only move the list.
+#[allow(clippy::too_many_arguments)]
 pub async fn announce(
     tracker_url: &str,
     info_hash: &[u8; 20],
@@ -615,6 +617,8 @@ impl IpMode {
 /// different ways, and a client cached for one must never carry the other's
 /// announces -- a direct engine's client handed to a proxied one is the
 /// home address published by a cache hit.
+// A one-off shape; naming it would add an alias that nothing else uses.
+#[allow(clippy::type_complexity)]
 static ANNOUNCE_CLIENTS: OnceLock<
     std::sync::Mutex<std::collections::HashMap<(String, String, bool), reqwest::Client>>,
 > = OnceLock::new();

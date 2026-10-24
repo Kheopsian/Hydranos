@@ -573,6 +573,8 @@ pub struct AddPlan {
 
 /// Check an incoming torrent against every torrent already held, before the
 /// store or the engine hear of it.
+// Every argument is a distinct input the caller already holds; a parameter struct would only move the list.
+#[allow(clippy::too_many_arguments)]
 pub fn check_add(
     state: &AppState,
     bytes: &[u8],
@@ -1586,6 +1588,8 @@ mod tests {
     /// deep, an unrelated one, one whose store row spells its root rather than
     /// its save path (the Internet Archive layout) -- and after a move.
     #[tokio::test(flavor = "multi_thread")]
+    // A one-off shape; naming it would add an alias that nothing else uses.
+    #[allow(clippy::type_complexity)]
     async fn the_store_lookup_finds_what_the_full_walk_finds() {
         let s = crate::api::testing::state_from(
             "pathclaim-index",

@@ -2670,6 +2670,8 @@ fn race_admission(
     Ok(())
 }
 
+// Every argument is a distinct input the caller already holds; a parameter struct would only move the list.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn add_torrent_bytes(
     state: &AppState,
     bytes: &[u8],
@@ -2699,6 +2701,8 @@ pub(crate) fn add_torrent_bytes(
 
 /// `add_torrent_bytes` without the "on add" event: for a torrent that is not
 /// new, only changing client (the import wizard).
+// Every argument is a distinct input the caller already holds; a parameter struct would only move the list.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn add_torrent_bytes_as(
     state: &AppState,
     bytes: &[u8],
@@ -5115,6 +5119,8 @@ async fn get_drain_graduations(
 /// torrents wearing them do: how many, the engine role most of them run in,
 /// and the save path most of them use -- what "Adopt" fills the form from.
 /// 4.3 answered an empty list, so the Categories tab never showed one.
+// A one-off shape; naming it would add an alias that nothing else uses.
+#[allow(clippy::type_complexity)]
 async fn get_categories_orphans(
     State(state): State<AppState>,
     RawQuery(query): RawQuery,
@@ -7366,6 +7372,8 @@ async fn post_wireguard_config_upload(
 /// the other modes, as saving a mode always does. Refused, with the reason,
 /// on a host that cannot bring a tunnel up: answering 200 there would leave
 /// an engine pinned to a device that will never exist.
+// A one-off shape; naming it would add an alias that nothing else uses.
+#[allow(clippy::type_complexity)]
 async fn post_wireguard_engines(
     State(state): State<AppState>,
     RawQuery(query): RawQuery,
@@ -8039,6 +8047,8 @@ use axum::extract::Path;
 /// The message differs per route and that is not cosmetic: "torrent not found"
 /// and "torrent not in hoard: X" tell an operator two different things, and the
 /// UI shows the string.
+// The error is an axum Response returned as it is; boxing it would touch every caller.
+#[allow(clippy::result_large_err)]
 fn resolve_in_hoard(
     state: &AppState,
     engine: &str,
@@ -8198,6 +8208,8 @@ enum CategoryChange {
 /// The target engine: the one holding the torrent when its ROLE is what the
 /// category's mode asks for -- a torrent in a VPN-bound hoard engine stays in
 /// it -- and otherwise the engine the category places new torrents in.
+// The error is an axum Response returned as it is; boxing it would touch every caller.
+#[allow(clippy::result_large_err)]
 fn category_change(
     state: &AppState,
     engine: &str,
@@ -8354,6 +8366,8 @@ fn queue_data_move(
     }
 }
 
+// Every argument is a distinct input the caller already holds; a parameter struct would only move the list.
+#[allow(clippy::too_many_arguments)]
 fn queue_data_move_core(
     state: &AppState,
     hash: &str,
@@ -10572,6 +10586,8 @@ fn torrent_files_json(
 ///
 /// The 409s are the engine's (`RenameError::Conflict`); `Err` carries the
 /// status and the sentence.
+// A one-off shape; naming it would add an alias that nothing else uses.
+#[allow(clippy::type_complexity)]
 fn rename_file_on_copies(
     state: &AppState,
     hash: &str,
@@ -11534,6 +11550,8 @@ pub(crate) fn add_trackers_to(
         .map_err(|(_, m)| m)
 }
 
+// A one-off shape; naming it would add an alias that nothing else uses.
+#[allow(clippy::type_complexity)]
 fn edit_trackers_core(
     state: &AppState,
     info_hash: &str,
@@ -15756,6 +15774,8 @@ fn latest_import(state: &AppState) -> Option<(String, Arc<crate::importer::Progr
 
 /// Register a new job, or refuse while one is still running: two imports
 /// walking the same library would race each other on every add.
+// The error is an axum Response returned as it is; boxing it would touch every caller.
+#[allow(clippy::result_large_err)]
 fn import_begin(state: &AppState) -> Result<(String, Arc<crate::importer::Progress>), Response> {
     if let Some((id, p)) = latest_import(state) {
         if p.running() {
@@ -15903,6 +15923,8 @@ pub(crate) fn record_provenance(
 
 /// Log in to qBittorrent and list its library: the shared first half of the
 /// preview and the start, so both refuse the same things the same way.
+// The error is an axum Response returned as it is; boxing it would touch every caller.
+#[allow(clippy::result_large_err)]
 async fn qbit_library(
     body: &str,
 ) -> Result<(crate::importer::Qbit, Vec<crate::importer::Candidate>), Response> {
@@ -16073,6 +16095,8 @@ fn default_true() -> bool {
 
 /// Read a Transmission config folder, off the async workers: it is one
 /// `.torrent` and one `.resume` read per torrent.
+// The error is an axum Response returned as it is; boxing it would touch every caller.
+#[allow(clippy::result_large_err)]
 async fn transmission_library(body: &str) -> Result<crate::importer::TransmissionScan, Response> {
     let req: TransmissionReq =
         serde_json::from_str(body).map_err(|_| bad_request("invalid body: dir"))?;
@@ -18536,6 +18560,8 @@ async fn get_engine_torrents(
 /// `/api/engines/vpn1/page` is indistinguishable from "that page does not
 /// exist", and an operator who mistyped a tunnel name would have nothing to go
 /// on. Same wording as `engine_pause_bulk`, which got there first.
+// The error is an axum Response returned as it is; boxing it would touch every caller.
+#[allow(clippy::result_large_err)]
 fn engine_or_refusal(state: &AppState, sel: &str) -> Result<String, Response> {
     resolve_engine(state, sel).ok_or_else(|| {
         (

@@ -263,6 +263,8 @@ pub(crate) fn parse_announce(buf: &[u8], tx: u32, v6: bool) -> Result<AnnounceRe
 }
 
 /// One family's socket, and who is waiting for what on it.
+// A one-off shape; naming it would add an alias that nothing else uses.
+#[allow(clippy::type_complexity)]
 struct Family {
     sock: Arc<UdpSocket>,
     pending: Arc<DashMap<u32, (SocketAddr, oneshot::Sender<Vec<u8>>)>>,
@@ -286,6 +288,8 @@ impl Drop for AliveGuard {
 }
 
 impl Family {
+    // A one-off shape; naming it would add an alias that nothing else uses.
+    #[allow(clippy::type_complexity)]
     fn open(v6: bool, device: &str) -> Result<Family, String> {
         let bind = if v6 {
             SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0)
