@@ -25,6 +25,8 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 
 ### Fixed
 
+- The user name typed at a login is written to the log escaped and cut to 64
+  characters: a line break in it no longer makes a line of its own.
 - An engine's upload and download rates count the bytes it moved, not the sum
   of its torrents' lifetime counters. A torrent graduating from race to hoard
   carries its lifetime in, and the next tick read all of it as throughput:
