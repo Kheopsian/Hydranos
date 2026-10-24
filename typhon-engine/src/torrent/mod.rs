@@ -2150,7 +2150,7 @@ impl TorrentManager {
     /// The caller is responsible for having already moved (or decided not to
     /// move) the payload files, and for removing the torrent from the source
     /// engine afterwards: this end only adopts.
-    pub fn import_state(&self, rd: &fastresume::ResumeData) -> Result<(InfoHash, String), String> {
+    pub fn import_state(self: &Arc<Self>, rd: &fastresume::ResumeData) -> Result<(InfoHash, String), String> {
         let meta = self
             .metainfo_for(rd)
             .map_err(|e| format!("import: {}: {}", rd.info_hash, e))?;
@@ -2160,7 +2160,7 @@ impl TorrentManager {
     /// `import_state` with the metainfo in hand, for a caller that already
     /// read it (a move between engines of one process reads it once).
     pub fn import_state_bytes(
-        &self,
+        self: &Arc<Self>,
         rd: &fastresume::ResumeData,
         metainfo: &[u8],
     ) -> Result<(InfoHash, String), String> {
@@ -2173,7 +2173,7 @@ impl TorrentManager {
     }
 
     fn import_state_with(
-        &self,
+        self: &Arc<Self>,
         rd: &fastresume::ResumeData,
         meta: meta::TorrentMeta,
     ) -> Result<(InfoHash, String), String> {
@@ -2184,6 +2184,10 @@ impl TorrentManager {
         }
 
         let resume_bits = hex_decode_bytes(&rd.bitfield);
+        // As at startup: a bitfield that is there and cannot be used is not
+        // "nothing downloaded". The torrent is adopted, and the disk says what
+        // it holds (queued at the end, once it is in the catalogue).
+        let bitfield_unusable = !rd.bitfield.is_empty() && resume_bits.is_empty() && !rd.seed_mode;
         let already_complete = bitfield_is_complete(&resume_bits, meta.num_pieces());
         let state = TorrentState::new_with_times(
             meta,
@@ -2255,6 +2259,22 @@ impl TorrentManager {
             private,
             seed_mode: rd.seed_mode,
         });
+        if bitfield_unusable {
+            self.note_startup_issue(
+                &rd.info_hash,
+                "bitfield_discarded",
+                "the bitfield handed over with this torrent could not be used; it is adopted and \
+                 rechecked against the disk"
+                    .into(),
+            );
+            if tokio::runtime::Handle::try_current().is_ok() {
+                if let Err(e) = self.recheck(&ih) {
+                    warn!("[import] recheck of {} not started: {}", &hex_encode(&ih)[..8], e);
+                }
+            } else {
+                warn!("[import] {} has an unusable bitfield and no runtime to recheck it", &hex_encode(&ih)[..8]);
+            }
+        }
         Ok((ih, name))
     }
 }
@@ -4205,6 +4225,54 @@ mod manager_tests {
         assert!(dst.upload_rate.get() < 100_000_000, "and is the traffic, not the history");
         assert!(dst.download_rate.get() > 0, "real download still registers");
         assert!(dst.download_rate.get() < 100_000_000);
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(root2);
+    }
+
+    /// ⭐ A torrent handed over with a bitfield that cannot be used is not
+    /// "nothing downloaded": as at startup it is adopted and checked against
+    /// the disk, and the issue is listed. It used to start as an empty
+    /// download over data that may be complete.
+    #[tokio::test]
+    async fn an_adopted_torrent_with_an_unusable_bitfield_is_rechecked() {
+        let (src, root) = manager("import-badbits-src");
+        let (dst, root2) = manager("import-badbits-dst");
+        let blob = torrent_bytes("alpha", &["https://tracker.example/announce"]);
+        dst.set_blob_source(Arc::new(move |_hash: &str| Some(blob.clone())));
+        let ih = add(&src, "alpha");
+        let mut rd = src.export_state(&ih).expect("exported");
+        rd.seed_mode = false;
+        rd.paused = false;
+        rd.bitfield = fastresume::BITFIELD_DISCARDED.to_string();
+
+        dst.import_state(&rd).expect("imported");
+        assert_eq!(
+            dst.get(&ih).unwrap().status.load(Ordering::Relaxed),
+            TorrentStatus::Checking as u8,
+            "the disk is asked, the torrent does not start empty"
+        );
+        let (_, issues) = dst.startup_issues();
+        assert!(issues.iter().any(|i| i.info_hash == rd.info_hash && i.kind == "bitfield_discarded"), "{issues:?}");
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(root2);
+    }
+
+    /// A usable bitfield, or none at all, is taken as it was: no recheck.
+    #[tokio::test]
+    async fn an_adopted_torrent_with_a_usable_bitfield_is_not_rechecked() {
+        let (src, root) = manager("import-goodbits-src");
+        let (dst, root2) = manager("import-goodbits-dst");
+        let blob = torrent_bytes("alpha", &["https://tracker.example/announce"]);
+        dst.set_blob_source(Arc::new(move |_hash: &str| Some(blob.clone())));
+        let ih = add(&src, "alpha");
+        let mut rd = src.export_state(&ih).expect("exported");
+        rd.seed_mode = false;
+        rd.paused = false;
+        rd.bitfield = String::new();
+
+        dst.import_state(&rd).expect("imported");
+        assert_ne!(dst.get(&ih).unwrap().status.load(Ordering::Relaxed), TorrentStatus::Checking as u8);
+        assert!(dst.startup_issues().1.is_empty());
         let _ = std::fs::remove_dir_all(root);
         let _ = std::fs::remove_dir_all(root2);
     }
