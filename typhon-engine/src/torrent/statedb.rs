@@ -78,7 +78,8 @@ CREATE TABLE IF NOT EXISTS torrent_state (
     up_limit         INTEGER NOT NULL DEFAULT 0,
     down_limit       INTEGER NOT NULL DEFAULT 0,
     download_order   TEXT NOT NULL DEFAULT '',
-    bitfield_sum     TEXT NOT NULL DEFAULT ''
+    bitfield_sum     TEXT NOT NULL DEFAULT '',
+    file_renames     TEXT NOT NULL DEFAULT ''
 );
 ";
 
@@ -124,6 +125,9 @@ impl StateDb {
         // bitfield without a sum, and the sum it leaves behind would no
         // longer match.
         let _ = conn.execute("ALTER TABLE torrent_state ADD COLUMN bitfield_sum TEXT NOT NULL DEFAULT ''", []);
+        // Files renamed after the add, as JSON {index: path}, '' for none.
+        // Same migration, same rollback story: an older build ignores it.
+        let _ = conn.execute("ALTER TABLE torrent_state ADD COLUMN file_renames TEXT NOT NULL DEFAULT ''", []);
         let _ = conn.execute_batch(
             "CREATE TRIGGER IF NOT EXISTS bitfield_sum_reset
              AFTER UPDATE OF bitfield ON torrent_state
@@ -229,7 +233,7 @@ impl StateDb {
             "SELECT info_hash, save_path, seed_mode, paused,
                     total_uploaded, total_downloaded, added_time, completed_time,
                     bitfield, trackers, seed_secs, up_limit, down_limit, download_order,
-                    bitfield_sum
+                    bitfield_sum, file_renames
              FROM torrent_state",
         ) {
             Ok(s) => s,
@@ -269,6 +273,7 @@ impl StateDb {
                 up_limit: row.get::<_, i64>(11).unwrap_or(0).max(0) as u64,
                 down_limit: row.get::<_, i64>(12).unwrap_or(0).max(0) as u64,
                 download_order: decode_order(&row.get::<_, String>(13).unwrap_or_default()),
+                file_renames: decode_renames(&row.get::<_, String>(15).unwrap_or_default()),
             })
         }
         let rows = match rows {
@@ -345,8 +350,8 @@ fn put_in(conn: &Connection, rd: &ResumeData) -> Result<(), rusqlite::Error> {
             (info_hash, save_path, seed_mode, paused,
              total_uploaded, total_downloaded, added_time, completed_time,
              bitfield, trackers, seed_secs, up_limit, down_limit, download_order,
-             bitfield_sum)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+             bitfield_sum, file_renames)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
          ON CONFLICT(info_hash) DO UPDATE SET
             save_path=excluded.save_path,
             seed_mode=excluded.seed_mode,
@@ -361,7 +366,8 @@ fn put_in(conn: &Connection, rd: &ResumeData) -> Result<(), rusqlite::Error> {
             up_limit=excluded.up_limit,
             down_limit=excluded.down_limit,
             download_order=excluded.download_order,
-            bitfield_sum=excluded.bitfield_sum",
+            bitfield_sum=excluded.bitfield_sum,
+            file_renames=excluded.file_renames",
         params![
             rd.info_hash,
             rd.save_path,
@@ -378,6 +384,7 @@ fn put_in(conn: &Connection, rd: &ResumeData) -> Result<(), rusqlite::Error> {
             rd.down_limit.min(i64::MAX as u64) as i64,
             encode_order(&rd.download_order),
             bitfield_sum(&rd.bitfield),
+            encode_renames(&rd.file_renames),
         ],
     )?;
     Ok(())
@@ -398,6 +405,26 @@ fn decode_order(s: &str) -> Option<super::piece_picker::DownloadOrder> {
         return None;
     }
     serde_json::from_str::<super::piece_picker::DownloadOrder>(s).ok().filter(|o| !o.is_default())
+}
+
+/// '' for no rename, so the column costs nothing on the rows that have none.
+fn encode_renames(r: &std::collections::BTreeMap<usize, String>) -> String {
+    if r.is_empty() {
+        return String::new();
+    }
+    serde_json::to_string(r).unwrap_or_default()
+}
+
+/// A value that does not parse reads as no rename: the torrent then looks for
+/// its files under the names its .torrent gives, which a recheck reports.
+fn decode_renames(s: &str) -> std::collections::BTreeMap<usize, String> {
+    if s.is_empty() {
+        return Default::default();
+    }
+    serde_json::from_str(s).unwrap_or_else(|e| {
+        warn!("[statedb] the renamed files of a row could not be read ({e}); none applied");
+        Default::default()
+    })
 }
 
 fn encode_trackers(t: &[Vec<String>]) -> String {
@@ -438,6 +465,7 @@ mod tests {
                 first_last: false,
                 file_prio: vec![1, 7],
             }),
+            file_renames: [(1usize, "sub/x.mkv".to_string())].into_iter().collect(),
         }
     }
 
@@ -468,6 +496,36 @@ mod tests {
         assert_eq!(r.trackers, vec![vec!["http://t/announce".to_string()]]);
         assert_eq!((r.up_limit, r.down_limit), (51_200, 0), "the rate caps come back");
         assert_eq!(r.download_order, rec("aa", 42).download_order, "the download order comes back");
+        assert_eq!(r.file_renames, rec("aa", 42).file_renames, "the renamed files come back");
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// A database from before the column opens, keeps its rows, and reads
+    /// them as having no renamed file.
+    #[test]
+    fn a_database_from_before_file_renames_opens_without_loss() {
+        let path = tmpdb("renames-old");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE torrent_state (
+                    info_hash TEXT PRIMARY KEY, torrent_path TEXT NOT NULL DEFAULT '',
+                    save_path TEXT NOT NULL DEFAULT '', seed_mode INTEGER NOT NULL DEFAULT 0,
+                    paused INTEGER NOT NULL DEFAULT 0, total_uploaded INTEGER NOT NULL DEFAULT 0,
+                    total_downloaded INTEGER NOT NULL DEFAULT 0, added_time INTEGER NOT NULL DEFAULT 0,
+                    completed_time INTEGER NOT NULL DEFAULT 0, bitfield TEXT NOT NULL DEFAULT '',
+                    trackers TEXT NOT NULL DEFAULT '');
+                 INSERT INTO torrent_state (info_hash, save_path, bitfield) VALUES ('old', '/d', 'f0');",
+            )
+            .unwrap();
+        }
+        let db = StateDb::open(&path).unwrap();
+        let all = db.load_all();
+        assert_eq!(all.len(), 1);
+        assert_eq!((all[0].info_hash.as_str(), all[0].bitfield.as_str()), ("old", "f0"));
+        assert!(all[0].file_renames.is_empty());
+        db.put(&rec("new", 1)).unwrap();
+        assert_eq!(db.load_all().iter().find(|r| r.info_hash == "new").unwrap().file_renames.len(), 1);
         std::fs::remove_file(&path).ok();
     }
 

@@ -65,9 +65,177 @@ pub struct TorrentMeta {
     /// hybrid is `false` -- it is checked through its v1 hashes, which cover
     /// every byte.
     pub v2: bool,
+    /// Where this torrent's files are NOW, for the ones renamed after it was
+    /// added (see `disk_rel`). Empty for nearly every torrent: one word.
+    pub renames: FileRenames,
+}
+
+/// The paths a stopped torrent's files were given in place of the ones its
+/// .torrent names: index into `files` -> path below the SAVE PATH, folder
+/// included (a file may sit under another folder than the .torrent's).
+///
+/// Interior-mutable because `meta` is shared; cloned by value, never shared,
+/// so a copy of a meta cannot rename the original's files.
+#[derive(Default)]
+#[allow(clippy::box_collection)] // boxed: one word on the many torrents with no rename
+pub struct FileRenames(RwLock<Option<Box<std::collections::BTreeMap<usize, PathBuf>>>>);
+
+impl Clone for FileRenames {
+    fn clone(&self) -> Self {
+        Self(RwLock::new(self.0.read().clone()))
+    }
+}
+
+impl std::fmt::Debug for FileRenames {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.read().fmt(f)
+    }
 }
 
 impl TorrentMeta {
+    /// The path file `i` has when nothing was renamed: `name/<path>` for a
+    /// multi-file torrent, the file's own name for a single-file one.
+    fn original_rel(&self, i: usize) -> PathBuf {
+        match self.files.get(i) {
+            Some(f) if self.multi_file => PathBuf::from(&self.name).join(&f.path),
+            Some(f) => f.path.clone(),
+            None => PathBuf::new(),
+        }
+    }
+
+    /// Where file `i` is, below the save path: the path it was renamed to,
+    /// else the one the .torrent gives. EVERYTHING that touches a torrent's
+    /// files on disk asks here (or `disk_path`); the .torrent's own path
+    /// (`files[i].path`) stays what web seeds and the exported metainfo are
+    /// built from.
+    pub fn disk_rel(&self, i: usize) -> PathBuf {
+        if let Some(map) = self.renames.0.read().as_deref() {
+            if let Some(p) = map.get(&i) {
+                return p.clone();
+            }
+        }
+        self.original_rel(i)
+    }
+
+    /// `disk_rel` of every file, in order.
+    pub fn disk_rels(&self) -> Vec<PathBuf> {
+        (0..self.files.len()).map(|i| self.disk_rel(i)).collect()
+    }
+
+    /// The first component every file's path starts with: the folder of a
+    /// multi-file torrent, the file of a single-file one. `None` when the
+    /// files no longer share one.
+    pub fn common_root(&self) -> Option<std::ffi::OsString> {
+        let mut root: Option<std::ffi::OsString> = None;
+        for i in 0..self.files.len() {
+            let first = self.disk_rel(i).components().next()?.as_os_str().to_os_string();
+            match &root {
+                None => root = Some(first),
+                Some(r) if *r == first => {}
+                Some(_) => return None,
+            }
+        }
+        root
+    }
+
+    /// Point file `i` at `to` (below the save path). Naming its original path
+    /// again undoes it.
+    pub fn set_disk_rel(&self, i: usize, to: PathBuf) {
+        if i >= self.files.len() {
+            return;
+        }
+        let original = self.original_rel(i);
+        let mut slot = self.renames.0.write();
+        let map = slot.get_or_insert_with(Default::default);
+        if to == original {
+            map.remove(&i);
+        } else {
+            map.insert(i, to);
+        }
+        if map.is_empty() {
+            *slot = None;
+        }
+    }
+
+    /// The renames as the resume record keeps them (`/`-joined), empty when
+    /// no file was renamed.
+    pub fn renamed_files(&self) -> std::collections::BTreeMap<usize, String> {
+        match self.renames.0.read().as_deref() {
+            Some(map) => map
+                .iter()
+                .map(|(i, p)| (*i, p.components().map(|c| c.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/")))
+                .collect(),
+            None => Default::default(),
+        }
+    }
+
+    /// Put back the renames of a resume record. An index this torrent does not
+    /// have is ignored: a stray value must not point a file nowhere.
+    ///
+    /// Each path goes through the check the routes make: one that is not a
+    /// relative path of plain names (`..`, absolute, an empty segment, `C:`)
+    /// is ignored and journaled, never applied -- the record may come from a
+    /// file or a database someone edited.
+    pub fn restore_renamed_files(&self, saved: &std::collections::BTreeMap<usize, String>) {
+        for (i, p) in saved {
+            if *i >= self.files.len() {
+                continue;
+            }
+            match super::clean_relative(p) {
+                Some(path) if !self.multi_file || path.components().count() >= 2 => self.set_disk_rel(*i, path),
+                _ => tracing::warn!(torrent = %self.name, file = *i, "a saved renamed path is not usable and was ignored"),
+            }
+        }
+    }
+
+    /// File `i` as (folder, path below it). For a multi-file torrent the folder
+    /// is the .torrent's name, whole (it may hold a `/`), while the file sits
+    /// under it, else the first component of where it was put; a single-file
+    /// torrent has none.
+    pub fn folder_split(&self, i: usize) -> (Option<PathBuf>, PathBuf) {
+        let rel = self.disk_rel(i);
+        if !self.multi_file {
+            return (None, rel);
+        }
+        let name = std::path::Path::new(&self.name);
+        if let Ok(rest) = rel.strip_prefix(name) {
+            if rest.components().next().is_some() {
+                return (Some(name.to_path_buf()), rest.to_path_buf());
+            }
+        }
+        let mut comps = rel.components();
+        let folder = comps.next().map(|c| PathBuf::from(c.as_os_str()));
+        (folder, comps.as_path().to_path_buf())
+    }
+
+    /// Where file `i` is on disk below `save_path`.
+    pub fn disk_path(&self, save_path: &std::path::Path, i: usize) -> PathBuf {
+        save_path.join(self.disk_rel(i))
+    }
+
+    /// What `save_path/<this>` holds the content under: the folder every file
+    /// shares (the .torrent's name until files are moved to another one), or
+    /// the file's own path for a single-file torrent; the .torrent's name when
+    /// the files are split between folders.
+    pub fn content_name(&self) -> String {
+        if !self.multi_file && self.files.len() == 1 {
+            return self.disk_rel(0).components().map(|c| c.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/");
+        }
+        let mut shared: Option<PathBuf> = None;
+        for i in 0..self.files.len() {
+            let Some(folder) = self.folder_split(i).0 else { return self.name.clone() };
+            match &shared {
+                None => shared = Some(folder),
+                Some(s) if *s == folder => {}
+                Some(_) => return self.name.clone(),
+            }
+        }
+        match shared {
+            Some(f) => f.components().map(|c| c.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/"),
+            None => self.name.clone(),
+        }
+    }
+
     pub fn num_pieces(&self) -> u32 {
         self.num_pieces
     }
@@ -89,7 +257,7 @@ impl TorrentMeta {
         let mut pos = abs_offset;
         let mut ops = Vec::new();
 
-        for f in &self.files {
+        for (i, f) in self.files.iter().enumerate() {
             if pos >= f.offset + f.length || remaining == 0 {
                 continue;
             }
@@ -106,7 +274,7 @@ impl TorrentMeta {
             let available = f.length - file_start;
             let to_read = remaining.min(available);
             ops.push(FileOp {
-                path: f.path.clone(),
+                path: self.disk_rel(i),
                 file_offset: file_start,
                 length: to_read as u32,
                 pad: false,
@@ -1222,15 +1390,11 @@ impl TorrentState {
         let plen = self.meta.piece_length as u64;
         let mut lost: Vec<u32> = Vec::new();
         let mut short: Vec<String> = Vec::new();
-        for f in &self.meta.files {
+        for (i, f) in self.meta.files.iter().enumerate() {
             if f.length == 0 {
                 continue;
             }
-            let path = if self.meta.multi_file {
-                save.join(&self.meta.name).join(&f.path)
-            } else {
-                save.join(&f.path)
-            };
+            let path = self.meta.disk_path(&save, i);
             let actual = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
             if actual >= f.length {
                 continue;
@@ -1689,6 +1853,7 @@ mod error_recovery_tests {
                 multi_file: false,
                 info_dict_len: 0,
                 v2: false,
+                renames: Default::default(),
             },
             PathBuf::from("/tmp"),
             false,
