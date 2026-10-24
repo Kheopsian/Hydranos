@@ -53,6 +53,7 @@ mod sharelimits;
 mod store;
 mod privfiles;
 mod cfgfile;
+mod pathroots;
 mod tomledit;
 mod trackeredit;
 mod trackerlists;
@@ -917,6 +918,7 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
 
     let state = api::AppState {
         imports: Default::default(),
+        boot_roots: Arc::new(pathroots::BootRoots::from_config(&config)),
         config: Arc::new(std::sync::RwLock::new(Arc::new(config))),
         engines: engine_host,
         store: shared_store.clone(),

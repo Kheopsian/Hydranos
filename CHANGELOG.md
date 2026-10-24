@@ -95,6 +95,35 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   where a temporary cannot be created beside it or renamed over it. The file
   keeps its owner and group: rewritten by root (a `docker exec` without `-u`),
   a file of the user the daemon runs as does not become root's.
+- The MCP `add_torrent` reads a `torrent_path` only from `[daemon] data_dir`
+  or a folder of the new `[mcp] torrent_roots` (empty by default), symbolic
+  links and `..` resolved first, and only a regular `.torrent` no larger than
+  the limit; every other case gets the same answer. Both are the values the
+  config file had when the daemon started: a settings edit that moves
+  `data_dir` changes the live configuration, not where a `.torrent` may be
+  read from. `torrent_roots` is set in the config file by hand: no route of
+  the API writes it: every route that edits the file writes through one
+  guard that refuses a change to it (`/api/settings` answers 403), and the
+  settings reset carries it over instead of wiping it. A category's folder,
+  the default save path and a torrent's save path, all settable through the API, are not roots for it.
+  `/` and a torrent saved one folder below it
+  (`/mnt`) never make a disk known, and the set of torrents' folders is kept as
+  torrents are added, removed and moved, so a refused path costs the same at
+  any library size.
+- A `.torrent` URL that began on a public host is not followed to an internal
+  address (loopback, private, link-local); a link on the local network may
+  still redirect anywhere. The body is read only up to the size limit instead
+  of being held whole first.
+- The same fetch decides where it began from the address of the first host,
+  not from how its name is written. A service name on the local network
+  (`prowlarr`, `jackett`, a tracker on the LAN) that resolves only to local
+  addresses is a local start and downloads as before, through the native add
+  and qBittorrent's `urls=` too, and may be sent on anywhere. A fetch that
+  began on a public host (a name with at least one public address counts as
+  public) is refused any name that resolves to a loopback, private or
+  link-local address, on the first request and on every redirect, as well as
+  an address written out. Behind a SOCKS proxy, which resolves the name
+  itself, only an address written in a redirect can be checked.
 
 ### Security
 

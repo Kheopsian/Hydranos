@@ -46,6 +46,42 @@ pub fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
     }
 }
 
+/// What a refused change to `[mcp] torrent_roots` says.
+pub const ROOTS_REFUSED: &str = "[mcp] torrent_roots is set in the config file only";
+
+/// `write_atomic` for an edit made through a route of the API: refused (with
+/// `PermissionDenied` and [`ROOTS_REFUSED`]) when the new text changes
+/// `[mcp] torrent_roots` from what the file has now.
+///
+/// That list is the folders the agent endpoint may read a `.torrent` from, and
+/// it is set in the config file by hand only: no route may write it, whatever
+/// section and key a request names. Every route that edits the file writes
+/// through here, so this is the one place that holds the rule.
+pub fn write_edit(path: &Path, contents: &str) -> std::io::Result<()> {
+    let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    if let Ok(old) = std::fs::read_to_string(&target) {
+        if torrent_roots_changed(&old, contents) {
+            return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, ROOTS_REFUSED));
+        }
+    }
+    write_atomic(path, contents)
+}
+
+/// Whether `[mcp] torrent_roots` differs between two texts (absent and empty
+/// are the same).
+fn torrent_roots_changed(before: &str, after: &str) -> bool {
+    fn roots(doc: &str) -> Option<Vec<String>> {
+        let v: toml::Value = toml::from_str(doc).ok()?;
+        let a = v.get("mcp")?.get("torrent_roots")?;
+        let list: Vec<String> = match a.as_array() {
+            Some(a) => a.iter().map(|x| x.to_string()).collect(),
+            None => vec![a.to_string()],
+        };
+        (!list.is_empty()).then_some(list)
+    }
+    roots(before) != roots(after)
+}
+
 enum Failed {
     /// The original was not touched and the swap itself is not possible here:
     /// write in place.
