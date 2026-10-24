@@ -243,10 +243,10 @@ pub fn is_self_ip(ip: std::net::IpAddr) -> bool {
             .unwrap_or(std::net::IpAddr::V6(v6)),
         v4 => v4,
     };
-    if SELF_IPS.read().unwrap().iter().any(|ip| *ip == target) {
+    if SELF_IPS.read().unwrap().contains(&target) {
         return true;
     }
-    OWN_IPS.read().unwrap().iter().any(|ip| *ip == target)
+    OWN_IPS.read().unwrap().contains(&target)
 }
 static DIAL_INFLIGHT: std::sync::OnceLock<dashmap::DashSet<([u8; 20], std::net::SocketAddr)>> =
     std::sync::OnceLock::new();

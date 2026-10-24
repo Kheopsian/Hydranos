@@ -147,7 +147,7 @@ impl DownloadState {
     /// Process incoming HaveAll from peer.
     pub fn on_have_all(&mut self) {
         let num_pieces = self.torrent.meta.num_pieces() as usize;
-        let byte_len = (num_pieces + 7) / 8;
+        let byte_len = num_pieces.div_ceil(8);
         let mut all = vec![0xFF; byte_len];
         // Fix trailing bits
         let trailing = num_pieces % 8;

@@ -47,7 +47,7 @@ fn bench_json_13k(c: &mut Criterion) {
     let torrents: Vec<_> = (0..13_000u32).map(make_torrent).collect();
     c.bench_function("torrent_to_json_13k", |b| {
         b.iter(|| {
-            let jsons: Vec<_> = torrents.iter().map(|t| torrent_to_json(t)).collect();
+            let jsons: Vec<_> = torrents.iter().map(torrent_to_json).collect();
             black_box(jsons);
         });
     });
@@ -57,7 +57,7 @@ fn bench_json_13k_serialize(c: &mut Criterion) {
     let torrents: Vec<_> = (0..13_000u32).map(make_torrent).collect();
     c.bench_function("torrent_to_json_13k_plus_serialize", |b| {
         b.iter(|| {
-            let jsons: Vec<_> = torrents.iter().map(|t| torrent_to_json(t)).collect();
+            let jsons: Vec<_> = torrents.iter().map(torrent_to_json).collect();
             let s = serde_json::to_string(&jsons).unwrap();
             black_box(s);
         });

@@ -192,7 +192,7 @@ impl MagnetJobs {
             let mut discovered_at: Option<Instant> = None;
             while started.elapsed() < RESOLVE_BUDGET {
                 round += 1;
-                if discovered_at.map_or(true, |t| t.elapsed() >= DISCOVERY_EVERY) {
+                if discovered_at.is_none_or(|t| t.elapsed() >= DISCOVERY_EVERY) {
                     discovered_at = Some(Instant::now());
                     for p in discover(
                         info_hash,

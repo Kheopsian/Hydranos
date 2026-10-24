@@ -3586,7 +3586,7 @@ mod tests {
                 match pair {
                     "dd" => assert_eq!(
                         o.error.as_deref(),
-                        Some(format!("{}: disk full", &pair.repeat(4)).as_str())
+                        Some(format!("{}: disk full", pair.repeat(4)).as_str())
                     ),
                     "ff" => assert_eq!(o.error.as_deref(), Some("ffffffff: not enough free space")),
                     "ee" => {

@@ -1600,7 +1600,7 @@ impl TorrentState {
 
     pub fn have_bitfield(&self) -> Bytes {
         let n = self.meta.num_pieces() as usize;
-        let byte_len = (n + 7) / 8;
+        let byte_len = n.div_ceil(8);
         if self.status.load(Ordering::Relaxed) == TorrentStatus::Seeding as u8 {
             let mut buf = vec![0xFFu8; byte_len];
             let trailing = n % 8;
@@ -2068,7 +2068,7 @@ mod announce_session_tests {
 
     /// A single-file torrent of `total` bytes. Bencode lengths computed.
     fn meta(total: u64, piece: u32) -> TorrentMeta {
-        let n = ((total + piece as u64 - 1) / piece as u64) as usize;
+        let n = total.div_ceil(piece as u64) as usize;
         let mut info = Vec::new();
         info.extend_from_slice(
             format!(
@@ -2077,7 +2077,7 @@ mod announce_session_tests {
             )
             .as_bytes(),
         );
-        info.extend(std::iter::repeat(0xAB).take(n * 20));
+        info.extend(std::iter::repeat_n(0xAB, n * 20));
         info.push(b'e');
         let mut out = b"d8:announce20:http://t.example/ann4:info".to_vec();
         out.extend_from_slice(&info);

@@ -595,7 +595,7 @@ pub fn set_feed_url(state: &AppState, path: &str, url: &str) -> Result<RssFeedRo
         let Ok(mut r) = Rule::from_json(&name, &v) else {
             continue;
         };
-        if r.affected_feeds.iter().any(|u| *u == old) {
+        if r.affected_feeds.contains(&old) {
             for u in r.affected_feeds.iter_mut().filter(|u| **u == old) {
                 *u = url.to_string();
             }
@@ -979,7 +979,7 @@ pub fn matching(
     let mut out = Vec::new();
     for f in feeds
         .into_iter()
-        .filter(|f| rule.affected_feeds.iter().any(|u| *u == f.url))
+        .filter(|f| rule.affected_feeds.contains(&f.url))
     {
         let arts: Vec<_> = store
             .rss_articles(f.id)
@@ -1244,7 +1244,7 @@ pub async fn run_rules(state: &AppState, only: Option<i64>) -> usize {
     }
     let feeds: Vec<RssFeedRow> = feeds(state)
         .into_iter()
-        .filter(|f| only.map_or(true, |id| f.id == id))
+        .filter(|f| only.is_none_or(|id| f.id == id))
         .collect();
     let exits = Exits::new(state);
     let mut added = 0;

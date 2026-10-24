@@ -102,7 +102,7 @@ pub async fn start(
 
     // BEP 19 webseed. Started after the resume load so the very first scan
     // already sees the whole catalogue.
-    crate::webseed::start(mgr.clone(), &config);
+    crate::webseed::start(mgr.clone(), config);
 
     // One uTP socket on the same UDP port as TCP listen_port (qBittorrent
     // default), for outgoing (dial fallback) and incoming (its accept loop).
@@ -394,7 +394,7 @@ pub async fn start(
                     last.insert(ih, (ul, dl, st, peers, interested, tick));
                 }
             }
-            if tick % 300 == 0 {
+            if tick.is_multiple_of(300) {
                 last.retain(|_, e| e.5 == tick);
             }
             if !changed.is_empty() {

@@ -35,7 +35,7 @@ pub const METADATA_REJECT: i64 = 2;
 
 /// How many 16 KiB blocks an info dict of `size` bytes is split into.
 pub fn metadata_block_count(size: usize) -> u32 {
-    ((size + METADATA_BLOCK - 1) / METADATA_BLOCK) as u32
+    size.div_ceil(METADATA_BLOCK) as u32
 }
 
 /// Per-connection extension state.

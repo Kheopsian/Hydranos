@@ -206,7 +206,7 @@ mod tests {
         let mut codec = BtCodec::new();
         let mut frame = (1u32 + 100_000).to_be_bytes().to_vec();
         frame.push(5); // Bitfield
-        frame.extend(std::iter::repeat(0xAAu8).take(100_000));
+        frame.extend(std::iter::repeat_n(0xAAu8, 100_000));
         let mut buf = BytesMut::new();
         let mut out = None;
         for chunk in frame.chunks(7000) {

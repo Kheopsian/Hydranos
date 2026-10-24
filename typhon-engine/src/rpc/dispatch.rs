@@ -191,7 +191,7 @@ pub fn tracker_host_of(url: &str) -> String {
 /// only look the host up.
 pub fn tracker_host_str(url: &str) -> &str {
     let s = url.split("://").nth(1).unwrap_or(url);
-    s.split(|c| c == '/' || c == ':').next().unwrap_or("")
+    s.split(['/', ':']).next().unwrap_or("")
 }
 
 pub fn torrent_to_json(t: &Arc<crate::torrent::meta::TorrentState>) -> Value {

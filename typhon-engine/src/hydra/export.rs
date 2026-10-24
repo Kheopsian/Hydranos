@@ -189,7 +189,7 @@ fn each_row(
             let guard = store.read().unwrap_or_else(|p| p.into_inner());
             guard
                 .export_rows(chunk)
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?
+                .map_err(|e| io::Error::other(e.to_string()))?
         };
         let by_hash: std::collections::HashMap<&str, &ExportRow> =
             rows.iter().map(|r| (r.info_hash.as_str(), r)).collect();
@@ -610,7 +610,7 @@ fn dos_time(unix: i64) -> (u16, u16) {
     let y = yoe + era * 400 + if m <= 2 { 1 } else { 0 };
     // DOS dates start in 1980 and end in 2107.
     let y = y.clamp(1980, 2107);
-    let time = ((rem / 3600) << 11 | (rem % 3600 / 60) << 5 | (rem % 60) / 2) as u16;
+    let time = ((rem / 3600) << 11 | (rem % 3600 / 60) << 5 | ((rem % 60) / 2)) as u16;
     let date = ((y - 1980) << 9 | m << 5 | d) as u16;
     (time, date)
 }
@@ -841,7 +841,7 @@ mod tests {
     #[test]
     fn a_zip_export_can_leave_the_passkeys_home() {
         let t = torrent("one.mkv", "https://a.example/PASSKEY123/announce");
-        let (store, hashes) = store_with(&[t.clone()]);
+        let (store, hashes) = store_with(std::slice::from_ref(&t));
         let mut out = Vec::new();
         run(&store, &hashes, Format::Zip, true, &mut out).unwrap();
         let mut z = unzip(out);

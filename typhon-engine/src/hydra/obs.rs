@@ -1534,7 +1534,7 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(250)).await;
         }
         assert!(
-            s.state.store.heal_now() == false,
+            !s.state.store.heal_now(),
             "a reopening with no file to open has failed"
         );
         assert!(

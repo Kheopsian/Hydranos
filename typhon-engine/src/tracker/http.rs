@@ -752,7 +752,7 @@ pub async fn send_announce_on(
         send_announce_family(url, user_agent, false, device, proxy),
         send_announce_family(url, user_agent, true, device, proxy),
     );
-    return merge_announce(a, b);
+    merge_announce(a, b)
 }
 
 /// The error for a non-2xx answer.

@@ -406,7 +406,7 @@ pub(crate) fn percent_decode(input: &str) -> String {
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Some(hex) = std::str::from_utf8(&bytes[i + 1..i + 3]).ok() {
+            if let Ok(hex) = std::str::from_utf8(&bytes[i + 1..i + 3]) {
                 if let Ok(byte) = u8::from_str_radix(hex, 16) {
                     out.push(byte);
                     i += 3;
@@ -2809,7 +2809,7 @@ pub(crate) fn add_torrent_bytes_as(
     let (info_hash, name) = engine
         .manager
         .add_torrent_bytes(bytes, &save_path, paused, seed_mode)
-        .map_err(|e| {
+        .inspect_err(|e| {
             // Undo the row ONLY if this call is what put it there.
             //
             // ⚠ The refusal this hits in practice is "already added", and there
@@ -2824,7 +2824,6 @@ pub(crate) fn add_torrent_bytes_as(
                     state.store.lock().unwrap().delete_copy(&hash, &engine_id),
                 );
             }
-            e
         })?;
 
     // Data already on disk (cross-seed, a re-add) is hash-checked rather than
@@ -3695,7 +3694,7 @@ pub(crate) async fn engine_page_value(
             let hash_hex_needed =
                 state_filter == "__pinned__" || (want_facets && !pinned.is_empty());
             let is_pinned = hash_hex_needed
-                && std::str::from_utf8(&hex40(&t.info_hash)).map_or(false, |h| pinned.contains(h));
+                && std::str::from_utf8(&hex40(&t.info_hash)).is_ok_and(|h| pinned.contains(h));
             let m_state = match state_filter.as_str() {
                 "" => true,
                 "__active__" => row_state == "seeding" && upload_rate > 0,
@@ -13241,7 +13240,7 @@ async fn drain_now(
     let want = query
         .split('&')
         .find_map(|kv| kv.strip_prefix("volume="))
-        .map(|v| percent_decode(v))
+        .map(percent_decode)
         .unwrap_or_default();
     let cfg = state.cfg();
     // Off the async runtime: this deletes files and queues copies, and a race
@@ -19579,7 +19578,7 @@ mod fleet_tests {
                 .next()
                 .unwrap_or_default()
                 .rsplit(':')
-                .last()
+                .next_back()
                 .unwrap_or_default()
                 .trim_matches(|c| c == '[' || c == ']')
                 .to_string()
@@ -21624,7 +21623,7 @@ mod pure2_tests {
         let class_of_unreg = crate::errclass::classify("unregistered torrent").to_string();
 
         let mut pages = vec![page(vec![clean.clone(), unregistered.clone()], 2)];
-        enforce_error_class(&mut pages, &[], &[class_of_unreg.clone()], 100);
+        enforce_error_class(&mut pages, &[], std::slice::from_ref(&class_of_unreg), 100);
         let rows = pages[0]["rows"].as_array().unwrap();
         assert_eq!(rows.len(), 1, "the excluded class is gone");
         assert_eq!(rows[0]["tracker_error_msg"], serde_json::json!(""));
@@ -29591,7 +29590,7 @@ mod wireguard_route_tests {
 
         // The old shape: enabled false is direct, as the tick box meant.
         assert_eq!(assign(&s, race_on("a.conf")).await.0, StatusCode::OK);
-        assert_eq!(s.cfg().hoard.allow_direct, true);
+        assert!(s.cfg().hoard.allow_direct);
         let bad = serde_json::json!({"engines": [{"engine_id": "race", "assignment": "maybe"}]});
         assert_eq!(assign(&s, bad).await.0, StatusCode::BAD_REQUEST);
         // The Network tab's answer carries the same verdicts.

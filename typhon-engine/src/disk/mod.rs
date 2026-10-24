@@ -1359,7 +1359,7 @@ mod disk_tests {
     fn four_piece_fixture(tag: &str) -> (Fixture, Vec<Vec<u8>>) {
         let mut content = Vec::new();
         for i in 0..4u8 {
-            content.extend(std::iter::repeat(i + 1).take(4096));
+            content.extend(std::iter::repeat_n(i + 1, 4096));
         }
         let chunks = content.chunks(4096).map(|c| c.to_vec()).collect();
         let f = fixture_in_pieces(tag, &content, 4096);

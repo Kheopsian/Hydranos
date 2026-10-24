@@ -408,7 +408,7 @@ async fn put_route(
         if !Path::new(&f.path).is_dir() {
             return bad(format!("{:?} is not a folder this node can see", f.path));
         }
-        if f.category.is_empty() || !cats.iter().any(|c| *c == f.category) {
+        if f.category.is_empty() || !cats.contains(&f.category) {
             return bad(format!(
                 "{:?}: pick an existing category -- it decides the engine and the save path",
                 f.category

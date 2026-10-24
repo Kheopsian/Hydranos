@@ -792,7 +792,7 @@ impl TorrentManager {
             let finished = t.seed_mode
                 || t.picker
                     .get()
-                    .map_or(true, |p| p.lock().unwrap().is_complete());
+                    .is_none_or(|p| p.lock().unwrap().is_complete());
             if finished {
                 stale.push(ih);
                 continue;
@@ -2121,7 +2121,7 @@ impl TorrentManager {
                     && self
                         .last_saved
                         .get(ih)
-                        .map_or(true, |s| s.value().num_have != p.num_have())
+                        .is_none_or(|s| s.value().num_have != p.num_have())
             })
             .collect();
         if moved.is_empty() {
@@ -2759,7 +2759,7 @@ fn trusted_whole(t: &TorrentState) -> bool {
     t.seed_mode
         && t.picker
             .get()
-            .map_or(true, |p| p.lock().unwrap().is_complete())
+            .is_none_or(|p| p.lock().unwrap().is_complete())
 }
 
 fn fingerprint_of(t: &TorrentState) -> statedb::Fingerprint {
@@ -2860,7 +2860,7 @@ fn bitfield_is_complete(bytes: &[u8], num_pieces: u32) -> bool {
 /// torrent against the disk.
 fn hex_decode_bytes(hex: &str) -> Vec<u8> {
     let raw = hex.as_bytes();
-    if raw.len() % 2 != 0 {
+    if !raw.len().is_multiple_of(2) {
         return Vec::new();
     }
     let digit = |c: u8| (c as char).to_digit(16).map(|d| d as u8);

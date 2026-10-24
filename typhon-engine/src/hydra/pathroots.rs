@@ -276,9 +276,9 @@ mod tests {
         std::fs::create_dir_all(d.join("data-other")).unwrap();
         let root = std::fs::canonicalize(d.join("data")).unwrap();
         let other = std::fs::canonicalize(d.join("data-other")).unwrap();
-        assert!(lies_under(&root.join("x"), &[root.clone()]));
-        assert!(lies_under(&root, &[root.clone()]));
-        assert!(!lies_under(&other.join("x"), &[root.clone()]));
+        assert!(lies_under(&root.join("x"), std::slice::from_ref(&root)));
+        assert!(lies_under(&root, std::slice::from_ref(&root)));
+        assert!(!lies_under(&other.join("x"), std::slice::from_ref(&root)));
         assert!(!lies_under(&root, &[PathBuf::new()]));
         assert!(!lies_under(&root, &[d.join("missing")]));
         assert!(!lies_under(&root, &[PathBuf::from("/")]), "/ is no root");

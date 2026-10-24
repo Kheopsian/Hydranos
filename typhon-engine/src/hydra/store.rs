@@ -1158,7 +1158,7 @@ impl Store {
     /// rollback journal. The mode is stored in the file; `synchronous` is not,
     /// and is set on every open.
     fn prefer_wal(&self, path: &Path) {
-        if path.parent().map_or(false, crate::platform::is_network_fs) {
+        if path.parent().is_some_and(crate::platform::is_network_fs) {
             return;
         }
         match self
@@ -2469,7 +2469,7 @@ impl Store {
         let id = format!(
             "job{}{}",
             now,
-            &info_hash.chars().take(6).collect::<String>()
+            info_hash.chars().take(6).collect::<String>()
         );
         self.conn.execute(
             "INSERT INTO jobs (id, type, state, info_hash, params, progress_bytes,
@@ -2847,8 +2847,7 @@ impl Store {
         // Placeholders rather than an interpolated list: an info hash comes
         // from a torrent file, and a query built by concatenation is one that
         // can be steered by its input.
-        let holes = std::iter::repeat("?")
-            .take(hashes.len())
+        let holes = std::iter::repeat_n("?", hashes.len())
             .collect::<Vec<_>>()
             .join(",");
         let sql = format!(

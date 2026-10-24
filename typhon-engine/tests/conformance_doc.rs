@@ -16,11 +16,11 @@ fn sources(dir: &Path, out: &mut String) {
     {
         let p = entry.path();
         if p.is_dir() {
-            if p.file_name().map_or(false, |n| n == "target") {
+            if p.file_name().is_some_and(|n| n == "target") {
                 continue;
             }
             sources(&p, out);
-        } else if p.extension().map_or(false, |e| e == "rs") {
+        } else if p.extension().is_some_and(|e| e == "rs") {
             out.push_str(&std::fs::read_to_string(&p).unwrap_or_default());
         }
     }
