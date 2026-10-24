@@ -398,6 +398,17 @@ pub fn client_for(route: &Route) -> Result<reqwest::Client, String> {
     b.build().map_err(|e| format!("http client: {e}"))
 }
 
+/// `client_for` with the caller's own settings on the builder first (a
+/// redirect policy, a fixed name resolution in a test). Not cached.
+pub fn client_tweaked(
+    route: &Route,
+    tweak: impl FnOnce(reqwest::ClientBuilder) -> reqwest::ClientBuilder,
+) -> Result<reqwest::Client, String> {
+    route.preflight()?;
+    let b = apply_route!(tweak(reqwest::Client::builder()), route);
+    b.build().map_err(|e| format!("http client: {e}"))
+}
+
 /// The blocking twin, for the callers that run on a plain thread.
 pub fn blocking_client_for(route: &Route) -> Result<reqwest::blocking::Client, String> {
     route.preflight()?;
