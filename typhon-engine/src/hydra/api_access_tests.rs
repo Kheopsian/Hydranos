@@ -136,7 +136,7 @@ fn anonymous(method: &str, uri: &str) -> axum::http::Request<axum::body::Body> {
 /// must still be turned away, and one with the key let in.
 #[tokio::test]
 async fn a_route_that_forgets_its_check_is_refused_anyway() {
-    let s = state_from("forgot", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+    let s = state_from("forgot", &format!("[daemon]\napi_key = \"{KEY}\"\napi_key_in_query = true\n"));
     let extra = Router::new().route("/api/forgotten", get(|| async { "leaked" }));
     let call = |req: axum::http::Request<axum::body::Body>| {
         let peer = std::net::SocketAddr::new("10.0.0.7".parse().unwrap(), 40000);
@@ -385,6 +385,41 @@ async fn a_cookie_write_from_the_proxied_origin_is_accepted() {
     let r = go(proxied_write("hydranos:8080", "https://evil.example", None, &cookie)).await;
     assert_eq!(r.status(), StatusCode::FORBIDDEN);
 }
+
+async fn status_of(s: &AppState, uri: &str, key_header: Option<&str>) -> StatusCode {
+    let mut b = axum::http::Request::builder().method("GET").uri(uri);
+    if let Some(k) = key_header {
+        b = b.header("x-api-key", k);
+    }
+    call(s, "10.0.0.7", b.body(axum::body::Body::empty()).unwrap()).await.status()
+}
+
+/// The key does not travel in an address unless `api_key_in_query` says so: an
+/// address lands in proxy logs, browser history and the Referer.
+#[tokio::test]
+async fn the_key_in_the_address_is_refused_by_default() {
+    let s = state_from("query-default", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+    let by_query = format!("/api/status?apikey={KEY}");
+    assert_eq!(status_of(&s, &by_query, None).await, StatusCode::UNAUTHORIZED);
+    assert_eq!(status_of(&s, &format!("/api/status?x=1&apikey={KEY}"), None).await, StatusCode::UNAUTHORIZED);
+    assert_eq!(status_of(&s, "/api/status", Some(KEY)).await, StatusCode::OK, "the header works");
+    // A header and a query together: the header is what counts.
+    assert_eq!(status_of(&s, &by_query, Some(KEY)).await, StatusCode::OK);
+    assert_eq!(status_of(&s, &by_query, Some("wrong")).await, StatusCode::UNAUTHORIZED);
+}
+
+/// With the option on, the old behaviour is back unchanged.
+#[tokio::test]
+async fn the_option_brings_the_key_in_the_address_back() {
+    let s = state_from(
+        "query-option",
+        &format!("[daemon]\napi_key = \"{KEY}\"\napi_key_in_query = true\n"),
+    );
+    assert_eq!(status_of(&s, &format!("/api/status?apikey={KEY}"), None).await, StatusCode::OK);
+    assert_eq!(status_of(&s, "/api/status?apikey=wrong", None).await, StatusCode::UNAUTHORIZED);
+    assert_eq!(status_of(&s, "/api/status", None).await, StatusCode::UNAUTHORIZED);
+    assert_eq!(status_of(&s, "/api/status", Some(KEY)).await, StatusCode::OK, "the header still works");
+}
 fn rpc_post(
     uri: &str,
     headers: &[(&str, &str)],
@@ -424,7 +459,15 @@ async fn mcp_is_opened_by_the_key_or_a_bearer_and_never_by_the_cookie() {
     assert_eq!(r.status(), StatusCode::OK, "the bearer token");
     let r = go(rpc_post("/mcp", &[("authorization", "Bearer wrong")])).await;
     assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+    let r = go(rpc_post(&format!("/mcp?apikey={KEY}"), &[])).await;
+    assert_eq!(r.status(), StatusCode::UNAUTHORIZED, "the key in the address, option off");
 
+    let s = state_from(
+        "mcp-query",
+        &format!("[daemon]\napi_key = \"{KEY}\"\napi_key_in_query = true\n"),
+    );
+    let r = call(&s.state, "10.0.0.7", rpc_post(&format!("/mcp?apikey={KEY}"), &[])).await;
+    assert_eq!(r.status(), StatusCode::OK, "the key in the address, option on");
 }
 
 /// No open path takes a write on the strength of a session cookie alone,

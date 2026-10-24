@@ -277,9 +277,10 @@ const DEFAULT_API_KEY: &str = "change-me-in-production";
 ///     its whole configuration, to any caller who simply omitted the header.
 ///     Sending a wrong key was refused; sending none succeeded. Failing closed
 ///     here is what makes the absence of a key a refusal instead of a pass.
-///  2. The key may arrive either in the X-Api-Key header or as an `apikey`
-///     query parameter. Dropping the query fallback would break every caller
-///     that cannot set headers.
+///  2. The key arrives in the X-Api-Key header, or as an `apikey` query
+///     parameter when `[daemon] api_key_in_query` is on (off by default: an
+///     address is logged by proxies and kept in browser history). A caller
+///     that cannot set headers turns the option on.
 ///
 /// The comparison is constant-time: the key is a bearer secret, and a plain
 /// `==` returns as soon as two bytes differ, which leaks its prefix to anyone
@@ -316,7 +317,14 @@ pub(crate) fn key_authorised(state: &AppState, headers: &HeaderMap, query: &str)
         .and_then(|v| v.to_str().ok())
         .filter(|v| !v.is_empty())
         .map(|v| v.to_string())
-        .or_else(|| query_param(query, "apikey"))
+        .or_else(|| {
+            // Off unless `[daemon] api_key_in_query`: an address is logged.
+            if cfg.daemon.api_key_in_query {
+                query_param(query, "apikey")
+            } else {
+                None
+            }
+        })
         .unwrap_or_default();
 
     !provided.is_empty() && constant_time_eq(provided.as_bytes(), expected.as_bytes())
@@ -16177,7 +16185,8 @@ async fn get_health_gated(
 
 /// `/metrics` as the router serves it: public unless `[daemon]
 /// metrics_require_key` is on, in which case it wants the key like the rest of
-/// the API (`X-Api-Key`, or `?apikey=` for a scraper that cannot set a header).
+/// the API (`X-Api-Key`; `?apikey=` for a scraper that cannot set a header,
+/// with `[daemon] api_key_in_query`).
 async fn get_metrics_gated(
     State(state): State<AppState>,
     RawQuery(query): RawQuery,
@@ -17127,8 +17136,18 @@ mod tests {
         assert_eq!(boot.day((300, 0), &today), (300, 0));
     }
 
+    /// `state` with the key accepted in the query too (`api_key_in_query`).
+    fn state_q(key: &str, password_hash: &str) -> AppState {
+        state_with(key, password_hash, true)
+    }
+
     fn state(key: &str, password_hash: &str) -> AppState {
+        state_with(key, password_hash, false)
+    }
+
+    fn state_with(key: &str, password_hash: &str, in_query: bool) -> AppState {
         let mut cfg = Config::default();
+        cfg.daemon.api_key_in_query = in_query;
         cfg.daemon.api_key = key.into();
         cfg.auth.password_hash = password_hash.into();
         cfg.auth.username = "admin".into();
@@ -17453,7 +17472,7 @@ mod tests {
 
     #[test]
     fn the_key_may_arrive_as_a_query_parameter() {
-        let s = state("secret", "$2a$hash");
+        let s = state_q("secret", "$2a$hash");
         assert!(authorised(&s, &HeaderMap::new(), "apikey=secret"));
         assert!(authorised(&s, &HeaderMap::new(), "other=1&apikey=secret"));
         assert!(!authorised(&s, &HeaderMap::new(), "apikey=wrong"));
@@ -17583,7 +17602,7 @@ mod tests {
 
     #[test]
     fn percent_encoding_is_decoded_in_the_query_fallback() {
-        let s = state("a b", "$2a$hash");
+        let s = state_q("a b", "$2a$hash");
         assert!(authorised(&s, &HeaderMap::new(), "apikey=a%20b"));
         assert!(authorised(&s, &HeaderMap::new(), "apikey=a+b"));
     }
@@ -17924,6 +17943,10 @@ mod auth_tests {
         state_from(tag, &format!("[daemon]\napi_key = \"{KEY}\"\n"))
     }
 
+    fn with_key_in_query(tag: &str) -> TestState {
+        state_from(tag, &format!("[daemon]\napi_key = \"{KEY}\"\napi_key_in_query = true\n"))
+    }
+
     /// ⚠️ THE regression to keep out. A Docker install that has never been
     /// through setup has no key in default.toml, and an empty expected key
     /// once meant "compare nothing, match everything" -- every `/api` route
@@ -17973,7 +17996,7 @@ mod auth_tests {
     /// header -- a browser opening an SSE stream, mainly.
     #[test]
     fn the_key_may_arrive_in_the_query_instead() {
-        let s = with_key("query");
+        let s = with_key_in_query("query");
         assert!(authorised(&s, &HeaderMap::new(), &format!("apikey={KEY}")));
         assert!(authorised(&s, &HeaderMap::new(), &format!("foo=1&apikey={KEY}&bar=2")));
         assert!(!authorised(&s, &HeaderMap::new(), "apikey=wrong"));
@@ -17984,7 +18007,7 @@ mod auth_tests {
     /// is still a client with the key.
     #[test]
     fn an_empty_header_falls_through_to_the_query() {
-        let s = with_key("fallthrough");
+        let s = with_key_in_query("fallthrough");
         assert!(authorised(&s, &keyed(""), &format!("apikey={KEY}")));
     }
 
@@ -18314,6 +18337,10 @@ mod handler_tests {
         state_from(tag, &format!("[daemon]\napi_key = \"{KEY}\"\n"))
     }
 
+    fn with_key_in_query(tag: &str) -> TestState {
+        state_from(tag, &format!("[daemon]\napi_key = \"{KEY}\"\napi_key_in_query = true\n"))
+    }
+
     /// Every read route, against a fresh install: refused without a key, and
     /// answering JSON with one.
     ///
@@ -18382,7 +18409,7 @@ mod handler_tests {
     /// only the ones a browser happens to open.
     #[tokio::test]
     async fn a_read_route_accepts_the_key_in_the_query() {
-        let s = with_key("route-query");
+        let s = with_key_in_query("route-query");
         let resp = super::get_engines(
             State(s.state.clone()),
             RawQuery(Some(format!("apikey={KEY}"))),

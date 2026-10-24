@@ -57,8 +57,15 @@ create_torrent_folder = false
 # /api/startup does for the startup screen; the option applies once it is up.
 # health_detail_requires_key = false
 # /metrics is public. With this on it wants the API key (X-Api-Key, or ?apikey=
-# for a scraper that cannot set a header): give Prometheus one before enabling it.
+# for a scraper that cannot set a header, with api_key_in_query below): give
+# Prometheus one before enabling it.
 # metrics_require_key = false
+# The API key is read from the X-Api-Key header only. true also accepts it as
+# an ?apikey= parameter, for a client that cannot set a header; an address ends
+# up in reverse-proxy access logs and browser history, and the key is the whole
+# instance. A scraper that cannot send X-Api-Key needs this on, or a proxy in
+# front that adds the header.
+# api_key_in_query = false
 # The address a node being enrolled is told to reach this daemon on (the command
 # the Nodes page prints). Empty = the Host header of the request that asked for
 # it, which is whatever name the browser used. Set it behind a reverse proxy.

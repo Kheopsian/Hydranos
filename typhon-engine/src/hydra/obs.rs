@@ -853,7 +853,10 @@ mod tests {
         let (st, body) = get_with(&s, "/metrics", None).await;
         assert_eq!(st, StatusCode::UNAUTHORIZED, "{body}");
         assert!(!body.contains("hydra_up"), "{body}");
-        let (st, body) = get_with(&s, &format!("/metrics?apikey={KEY}"), None).await;
+        let (st, _) = get_with(&s, &format!("/metrics?apikey={KEY}"), None).await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED, "the key in the address is refused by default");
+        let q = with_daemon_options("obs-metrics-query", "metrics_require_key = true\napi_key_in_query = true");
+        let (st, body) = get_with(&q, &format!("/metrics?apikey={KEY}"), None).await;
         assert_eq!(st, StatusCode::OK, "{body}");
         let (st, body) = get_with(&s, "/metrics", Some(KEY)).await;
         assert_eq!(st, StatusCode::OK, "{body}");

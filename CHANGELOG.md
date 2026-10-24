@@ -30,6 +30,14 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 - `/mcp` is opened by the API key or a bearer token only, no longer by the
   session cookie. The interface never calls it, and a form posted by a page of
   the same site could otherwise have driven its tools with the cookie.
+- **MIGRATION: the API key in the address (`?apikey=`) is refused by default.**
+  A client that sends the key that way (a scraper, a script, a stream that
+  cannot set a header) now gets 401, or 403 on `/api/v2/`. Send it in the
+  `X-Api-Key` header instead, or put `api_key_in_query = true` under
+  `[daemon]` to bring the old behaviour back unchanged. An address is kept by
+  proxy access logs and browser history; the key is the whole instance. The
+  interface, the node-to-node calls, the installer and the packaging already
+  use the header or a session.
 - The cross-origin check on a cookie write also accepts an Origin equal to the
   first `X-Forwarded-Host` or to the authority of `[daemon] public_url`, and
   ignores a default port, so the interface keeps working behind a reverse
@@ -73,8 +81,8 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 - The interface no longer puts the API key in an address. The live streams
   (torrents, logs, qBittorrent import), the selection export and the node
   link authenticate with the session cookie the page opens when it loads; the
-  key travels in a header or a request body only. The daemon still accepts
-  `?apikey=` from scripts that need it.
+  key travels in a header or a request body only. The daemon accepts
+  `?apikey=` from scripts only with `[daemon] api_key_in_query = true`.
 - A peer's client name is shown as text. The peers panel of the timeline put
   it into the page as markup, and the name is partly made of bytes the remote
   peer picks; the panel now escapes it, and a client code or version taken
