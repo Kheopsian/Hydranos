@@ -20,6 +20,7 @@
 //!   - destructive writes (delete, purge), not even LISTED unless
 //!     `[mcp] allow_destructive = true`, and marked destructive so the client
 //!     asks before calling them.
+//!
 //! Every write names its torrents by info_hash. None takes a filter: an agent
 //! must not be able to delete "everything in error" by misreading one.
 //!
@@ -874,7 +875,7 @@ async fn tracker_errors(state: &AppState, args: &Value) -> Result<Value, String>
                 })
                 .unwrap_or_default();
             v.retain(|(_, n)| *n > 0);
-            v.sort_by(|a, b| b.1.cmp(&a.1));
+            v.sort_by_key(|a| std::cmp::Reverse(a.1));
             v
         }
     };

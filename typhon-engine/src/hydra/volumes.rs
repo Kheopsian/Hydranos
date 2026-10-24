@@ -612,11 +612,12 @@ mod tests {
     use super::*;
 
     fn drain(enabled: bool, high: i64, low: i64) -> crate::config::RaceDrain {
-        let mut d = crate::config::RaceDrain::default();
-        d.enabled = enabled;
-        d.high_watermark_pct = high;
-        d.low_watermark_pct = low;
-        d
+        crate::config::RaceDrain {
+            enabled,
+            high_watermark_pct: high,
+            low_watermark_pct: low,
+            ..Default::default()
+        }
     }
 
     const POLICY: Policy = Policy {
@@ -811,7 +812,6 @@ mod tests {
     #[test]
     /// The whole point of the change: a disk that LOOKS half empty can already
     /// be full, and that is the state an add gets refused in.
-    #[test]
     fn allocation_counts_what_is_still_to_be_written() {
         let mut v = vol(1000, 600);
         v.committed = 350;

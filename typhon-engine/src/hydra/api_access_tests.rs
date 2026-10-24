@@ -1042,7 +1042,7 @@ async fn no_open_path_takes_a_write_on_a_cookie_alone() {
             continue;
         }
         for method in ["POST", "PUT", "PATCH", "DELETE"] {
-            let mut b = axum::http::Request::builder()
+            let b = axum::http::Request::builder()
                 .method(method)
                 .uri(path)
                 .header("host", "hydra.lan:8199")

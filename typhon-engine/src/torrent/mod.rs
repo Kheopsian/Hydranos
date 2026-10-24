@@ -1795,12 +1795,10 @@ impl TorrentManager {
                 state
                     .status
                     .store(TorrentStatus::Stopped as u8, Ordering::Relaxed);
-            } else if rd.seed_mode || state.picker.get().is_none() {
-                state
-                    .status
-                    .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
-                state.release_have_tx();
-            } else if state.picker.get().unwrap().lock().unwrap().is_complete() {
+            } else if rd.seed_mode
+                || state.picker.get().is_none()
+                || state.picker.get().unwrap().lock().unwrap().is_complete()
+            {
                 state
                     .status
                     .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
@@ -2682,11 +2680,10 @@ impl TorrentManager {
             state
                 .status
                 .store(TorrentStatus::Stopped as u8, Ordering::Relaxed);
-        } else if rd.seed_mode || state.picker.get().is_none() {
-            state
-                .status
-                .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
-        } else if state.picker.get().unwrap().lock().unwrap().is_complete() {
+        } else if rd.seed_mode
+            || state.picker.get().is_none()
+            || state.picker.get().unwrap().lock().unwrap().is_complete()
+        {
             state
                 .status
                 .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
@@ -2798,7 +2795,7 @@ pub fn hex_decode(hex: &str) -> Result<InfoHash, String> {
     // character panics, and 40 bytes can hold one.
     let digit = |c: u8| (c as char).to_digit(16).map(|d| d as u8);
     let mut hash = [0u8; 20];
-    for (slot, p) in hash.iter_mut().zip(hex.as_bytes().chunks_exact(2)) {
+    for (slot, p) in hash.iter_mut().zip(hex.as_bytes().as_chunks::<2>().0) {
         *slot = digit(p[0])
             .zip(digit(p[1]))
             .map(|(h, l)| h << 4 | l)
@@ -4513,7 +4510,7 @@ mod manager_tests {
             "got {counts:?}"
         );
         assert!(
-            counts.get("tracker.example").is_none(),
+            !counts.contains_key("tracker.example"),
             "the old host is gone: {counts:?}"
         );
         let _ = std::fs::remove_dir_all(root);

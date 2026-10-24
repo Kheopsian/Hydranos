@@ -8,8 +8,8 @@ pub struct Rc4 {
 impl Rc4 {
     pub fn new(key: &[u8]) -> Self {
         let mut s = [0u8; 256];
-        for i in 0..256 {
-            s[i] = i as u8;
+        for (i, v) in s.iter_mut().enumerate() {
+            *v = i as u8;
         }
         let mut j: u8 = 0;
         for i in 0..256 {

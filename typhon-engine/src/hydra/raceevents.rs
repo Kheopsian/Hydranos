@@ -460,15 +460,17 @@ mod tests {
         // look writes its snapshot before it reports a moment.
         let mut seen = (false, false);
         for _ in 0..120 {
-            let db = bench.lock().unwrap();
-            let has = |h: &str| {
-                db.events_for(h)
-                    .unwrap()
-                    .iter()
-                    .any(|e| e.event == "first_peer")
+            // The guard lives in this block, so it is gone before the sleep below.
+            seen = {
+                let db = bench.lock().unwrap();
+                let has = |h: &str| {
+                    db.events_for(h)
+                        .unwrap()
+                        .iter()
+                        .any(|e| e.event == "first_peer")
+                };
+                (has(&done), has(&running))
             };
-            seen = (has(&done), has(&running));
-            drop(db);
             if seen == (true, true) {
                 break;
             }
