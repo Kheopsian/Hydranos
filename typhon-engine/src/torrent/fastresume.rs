@@ -89,12 +89,21 @@ pub fn save(resume_dir: &str, info_hash: &InfoHash, data: &ResumeData) {
 
 /// Load all resume data from a directory.
 pub fn load_all(resume_dir: &str) -> Vec<ResumeData> {
+    load_all_reporting(resume_dir).0
+}
+
+/// `load_all`, plus the name (lower case, without `.json`) of every record
+/// that could not be read. Such a torrent is not loaded, and is not gone
+/// either: the caller says so, as `StateDb::load_all_reporting` lets it for a
+/// damaged row, rather than leave one warn line in a busy log.
+pub fn load_all_reporting(resume_dir: &str) -> (Vec<ResumeData>, Vec<String>) {
     let dir = match std::fs::read_dir(resume_dir) {
         Ok(d) => d,
-        Err(_) => return Vec::new(),
+        Err(_) => return (Vec::new(), Vec::new()),
     };
 
     let mut results = Vec::new();
+    let mut unreadable = Vec::new();
     for entry in dir {
         let entry = match entry {
             Ok(e) => e,
@@ -110,17 +119,28 @@ pub fn load_all(resume_dir: &str) -> Vec<ResumeData> {
             }
             continue;
         }
+        let name = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default()
+            .to_lowercase();
         match std::fs::read_to_string(&path) {
             Ok(json) => {
                 match serde_json::from_str::<ResumeData>(&json) {
                     Ok(data) => results.push(data),
-                    Err(e) => warn!("[resume] bad JSON in {:?}: {}", path, e),
+                    Err(e) => {
+                        warn!("[resume] bad JSON in {:?}: {}", path, e);
+                        unreadable.push(name);
+                    }
                 }
             }
-            Err(e) => warn!("[resume] read {:?}: {}", path, e),
+            Err(e) => {
+                warn!("[resume] read {:?}: {}", path, e);
+                unreadable.push(name);
+            }
         }
     }
-    results
+    (results, unreadable)
 }
 
 /// Remove resume data for a torrent.
