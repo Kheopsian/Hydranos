@@ -399,6 +399,45 @@ fn wants_webseed_in(t: &TorrentState, ws: &WebseedState) -> bool {
     wants_webseed(t)
 }
 
+/// Reserve a contiguous run of pieces for `owner`. The picker chooses the head;
+/// the run then walks forward over pieces we neither hold nor have already
+/// reserved, until the byte target is met or `max_pieces` is reached.
+fn reserve_run(
+    p: &mut crate::torrent::piece_picker::PiecePicker,
+    meta: &TorrentMeta,
+    owner: crate::torrent::piece_picker::Owner,
+    max_pieces: u32,
+) -> Vec<u32> {
+    // NOT pick_piece: rarest-first tie-breaks at random, and every
+    // piece is equally rare on a torrent with no peers. A random start
+    // truncates the run, because a run only grows forwards.
+    let first = match p.first_missing() {
+        Some(i) => i,
+        None => return Vec::new(),
+    };
+    let mut run = Vec::new();
+    let mut bytes = meta.piece_size(first) as u64;
+    p.start_piece(first, meta.piece_size(first), BLOCK_SIZE, owner);
+    run.push(first);
+
+    let mut next = first + 1;
+    while bytes < SPAN_TARGET_BYTES
+        && run.len() < SPAN_MAX_PIECES
+        && (run.len() as u32) < max_pieces
+        && next < meta.num_pieces()
+    {
+        if p.has_piece(next) || p.is_pending(next) {
+            break;
+        }
+        let sz = meta.piece_size(next);
+        p.start_piece(next, sz, BLOCK_SIZE, owner);
+        run.push(next);
+        bytes += sz as u64;
+        next += 1;
+    }
+    run
+}
+
 /// Pull pieces for one torrent until it completes, stalls, or hits the claim
 /// budget. Returns how many pieces were verified and written.
 async fn drive_torrent(
@@ -433,35 +472,11 @@ async fn drive_torrent(
         // download path.
         let run: Vec<u32> = {
             let mut p = picker.lock().unwrap();
-            // NOT pick_piece: rarest-first tie-breaks at random, and every
-            // piece is equally rare on a torrent with no peers. A random start
-            // truncates the run, because a run only grows forwards.
-            let first = match p.first_missing() {
-                Some(i) => i,
-                None => break,
-            };
-            let mut run = Vec::new();
-            let mut bytes = t.meta.piece_size(first) as u64;
-            p.start_piece(first, t.meta.piece_size(first), BLOCK_SIZE, owner);
-            run.push(first);
-
-            let mut next = first + 1;
-            while bytes < SPAN_TARGET_BYTES
-                && run.len() < SPAN_MAX_PIECES
-                && (run.len() as u32) < budget
-                && next < num_pieces
-            {
-                if p.has_piece(next) || p.is_pending(next) {
-                    break;
-                }
-                let sz = t.meta.piece_size(next);
-                p.start_piece(next, sz, BLOCK_SIZE, owner);
-                run.push(next);
-                bytes += sz as u64;
-                next += 1;
-            }
-            run
+            reserve_run(&mut p, &t.meta, owner, budget)
         };
+        if run.is_empty() {
+            break;
+        }
 
         let first = run[0];
         let last = *run.last().unwrap();
