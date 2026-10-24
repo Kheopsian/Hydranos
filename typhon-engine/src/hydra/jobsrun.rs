@@ -1772,6 +1772,27 @@ mod graduate_tests {
         assert!(s.state.engines.get("hoard").unwrap().manager.get(&ih).is_none());
     }
 
+    /// A target engine whose state store refuses the record refuses the
+    /// graduation: the torrent is not adopted, the files come back and the
+    /// source engine holds it again. It used to be adopted in memory only, the
+    /// job reported done, and the next start of the target did not know it.
+    #[test]
+    fn a_graduation_the_target_store_did_not_keep_is_rolled_back() {
+        let (s, hash, src, dst) = setup("grad-store-down");
+        let ih = typhon_engine::torrent::hex_decode(&hash).unwrap();
+        let conn = rusqlite::Connection::open(s.dir.join("hoard").join("state.db")).unwrap();
+        conn.execute("DROP TABLE torrent_state", []).unwrap();
+        drop(conn);
+
+        let err = graduate(&s.state, &job(&hash, &dst)).expect_err("the target store refused it");
+        assert!(err.contains("rolled back"), "{err}");
+        assert!(src.join("grad").exists(), "the file came back");
+        assert!(!dst.join("grad").exists());
+        let back = s.state.engines.get("race").unwrap().manager.get(&ih).expect("back in race");
+        assert_eq!(*back.save_path.read(), src);
+        assert!(s.state.engines.get("hoard").unwrap().manager.get(&ih).is_none());
+    }
+
     /// ⭐ A target that already holds the very torrent (it sits in both
     /// engines) is refused before anything moves. It used to copy every file,
     /// be refused at the end, and copy them all back -- and the drain queued
