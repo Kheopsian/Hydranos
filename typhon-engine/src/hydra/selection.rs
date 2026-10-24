@@ -1221,7 +1221,7 @@ impl SetEdit {
 /// A store-only action on the whole selection: a few transactions, not one
 /// request per torrent. Copies on other nodes go through the agent relay for
 /// a pause, and are reported as not here for the rest, as before.
-async fn set_based(state: &AppState, c: &Caller, job: &Shared, edit: SetEdit, targets: &[Target]) {
+async fn set_based(state: &AppState, _c: &Caller, job: &Shared, edit: SetEdit, targets: &[Target]) {
     let mut local: Vec<(String, String)> = Vec::with_capacity(targets.len());
     for t in targets {
         if !edit.applies(t) {

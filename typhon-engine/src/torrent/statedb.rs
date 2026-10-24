@@ -29,7 +29,7 @@
 use std::path::Path;
 use std::sync::Mutex;
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection};
 use tracing::{info, warn};
 
 use super::fastresume::ResumeData;

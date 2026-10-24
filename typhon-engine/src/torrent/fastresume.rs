@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::path::Path;
-use tracing::{info, warn};
+use tracing::warn;
 
 use super::meta::InfoHash;
 

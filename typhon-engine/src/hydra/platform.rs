@@ -79,6 +79,8 @@ pub fn volume_id_nearest(p: &Path) -> Option<u64> {
 }
 
 /// Are these two paths on the same filesystem?
+// No caller today. Kept, not deleted: clearing lints is not the moment to drop code.
+#[allow(dead_code)]
 pub fn same_volume(a: &Path, b: &Path) -> bool {
     match (volume_id_nearest(a), volume_id_nearest(b)) {
         (Some(x), Some(y)) => x == y,

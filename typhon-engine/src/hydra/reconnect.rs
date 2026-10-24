@@ -15,6 +15,8 @@ use std::sync::Mutex;
 /// One observed change.
 #[derive(Debug, Clone)]
 struct Event {
+    // Part of the recorded event; no code reads it today.
+    #[allow(dead_code)]
     hash: String,
     at: f64,
     /// true = the row must be (re)sent, false = the torrent is gone.
@@ -22,6 +24,8 @@ struct Event {
     /// Not "was added": a row whose category or trackers changed is replayed
     /// as an add, because the delta carries full rows for added hashes and
     /// that is exactly the refresh a returning client needs.
+    // Part of the recorded event; no code reads it today.
+    #[allow(dead_code)]
     added: bool,
 }
 
@@ -106,6 +110,7 @@ impl Ring {
     ///
     /// `None` means the cursor is older than the window: the honest answer is
     /// "reload everything", not a delta that silently omits what was dropped.
+    #[cfg(test)]
     pub fn changes_since(&self, since: f64) -> Option<(Vec<String>, Vec<String>)> {
         let inner = self.inner.lock().unwrap();
         if since < inner.floor {
@@ -136,6 +141,7 @@ impl Ring {
 /// their rows are right here. Counting them as remote is what silently
 /// disabled the delta on every multi-engine node -- the count was never zero
 /// again, so every tab return re-streamed the whole library.
+#[cfg(test)]
 pub fn delta_allowed(agents: &[(String, bool)]) -> bool {
     agents.iter().all(|(_, is_local)| *is_local)
 }

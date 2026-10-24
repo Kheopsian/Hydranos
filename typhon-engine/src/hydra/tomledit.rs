@@ -189,6 +189,7 @@ pub fn delete_toml_key(doc: &str, section: &str, key: &str) -> String {
 
 /// Remove a `[section]` header and every line it owns, up to the next header.
 /// Idempotent, like `delete_toml_key`.
+#[cfg(test)]
 pub fn delete_toml_table(doc: &str, section: &str) -> String {
     if section.trim().is_empty() {
         return doc.to_string();

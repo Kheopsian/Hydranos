@@ -956,7 +956,7 @@ pub fn log(store: &Store, w: &Workflow, m: &Match, action: &str, outcome: &str, 
 pub fn apply(
     host: &EngineHost,
     store: &Arc<crate::store::StoreLock>,
-    w: &Workflow,
+    _w: &Workflow,
     m: &Match,
     pause_hook: &dyn Fn(&str, &str, bool),
     delete_hook: &dyn Fn(&str, &str, bool) -> Result<(), String>,

@@ -1574,6 +1574,7 @@ pub fn drain_once(
 }
 
 /// Bytes used and total on the filesystem holding `path`.
+#[cfg(test)]
 fn disk_usage(path: &std::path::Path) -> Option<(u64, u64)> {
     crate::platform::usage(path).map(|(used, total, _)| (used, total))
 }

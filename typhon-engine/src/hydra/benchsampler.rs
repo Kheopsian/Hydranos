@@ -16,7 +16,6 @@ use std::time::Duration;
 
 use crate::benchdb::Shared;
 use crate::engines::EngineHost;
-use crate::store::Store;
 
 /// How often a sample is taken. Matches what 3.x wrote.
 const INTERVAL: Duration = Duration::from_secs(5);

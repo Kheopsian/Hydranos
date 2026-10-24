@@ -16,6 +16,7 @@ use tracing::{info, warn};
 use crate::disk::DiskManager;
 use futures::StreamExt;
 use meta::{InfoHash, TorrentState, TorrentStatus};
+#[cfg(test)]
 use sha1::{Digest, Sha1};
 use std::sync::OnceLock;
 use tokio::sync::Semaphore;
@@ -132,6 +133,8 @@ pub const MAX_STARTUP_ISSUES: usize = 500;
 
 pub struct TorrentManager {
     torrents: DashMap<InfoHash, Arc<TorrentState>>,
+    // Kept from construction; nothing reads it today.
+    #[allow(dead_code)]
     data_dir: String,
     resume_dir: String,
     disk: Arc<DiskManager>,

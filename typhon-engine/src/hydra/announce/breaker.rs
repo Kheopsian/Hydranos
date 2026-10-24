@@ -71,6 +71,7 @@ impl Breaker {
     }
 
     /// The hosts currently set aside, for the trackers tab.
+    #[cfg(test)]
     pub fn tripped(&self, now: Instant) -> Vec<String> {
         let hosts = self.hosts.lock().unwrap();
         let mut out: Vec<String> = hosts
