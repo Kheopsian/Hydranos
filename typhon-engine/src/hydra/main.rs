@@ -467,11 +467,24 @@ fn main() -> anyhow::Result<()> {
     // load needs and costs 13% of all CPU in work-stealing. See
     // typhon_engine::runtime.
     let workers = typhon_engine::runtime::worker_threads();
-    tokio::runtime::Builder::new_multi_thread()
+    let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(workers)
         .enable_all()
-        .build()?
-        .block_on(async_main(workers))
+        .build()?;
+    let result = runtime.block_on(async_main(workers));
+    finish_runtime(runtime, RUNTIME_GRACE);
+    result
+}
+
+/// How long the process waits for blocking work still running once the
+/// stop sequence is over (the resume state is flushed by then).
+const RUNTIME_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Close the runtime. Dropping it waits for every blocking task, however
+/// long; this is called when `async_main` has returned, so everything that
+/// had to be written has been.
+fn finish_runtime(runtime: tokio::runtime::Runtime, _grace: std::time::Duration) {
+    drop(runtime);
 }
 
 async fn async_main(workers: usize) -> anyhow::Result<()> {
