@@ -52,6 +52,7 @@ mod selection;
 mod sharelimits;
 mod store;
 mod privfiles;
+mod cfgfile;
 mod tomledit;
 mod trackeredit;
 mod trackerlists;
@@ -239,7 +240,7 @@ fn password_command() {
     let pairs = vec![("password_hash".to_string(), tomledit::quote_toml_key(&hash))];
     match tomledit::set_toml_table(&doc, "auth", &pairs) {
         Ok(out) if toml::from_str::<Config>(&out).is_ok() => {
-            if let Err(e) = std::fs::write(&path, out) {
+            if let Err(e) = cfgfile::write_atomic(&path, &out) {
                 eprintln!("hydranos: cannot write {}: {e}", path.display());
                 std::process::exit(1);
             }
@@ -879,7 +880,7 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
             // does nothing. Written only after the pauses are in the store, so
             // an interruption re-runs rather than skips.
             let cleaned = spoofmigration::without_legacy_tables(&config_text);
-            if let Err(e) = std::fs::write(&config_path, cleaned) {
+            if let Err(e) = cfgfile::write_atomic(&config_path, &cleaned) {
                 tracing::error!(error = %e, "could not strip [announce_clients] from the config; \
                                              the migration will run again next boot");
             }

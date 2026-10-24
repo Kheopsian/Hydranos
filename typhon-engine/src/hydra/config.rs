@@ -752,6 +752,7 @@ pub fn ensure_api_key(config: &mut Config, path: &Path) -> bool {
     }
 
     let key = fresh_api_key();
+    let _writer = crate::cfgfile::lock();
     let Ok(doc) = std::fs::read_to_string(path) else {
         tracing::error!(
             path = %path.display(),
@@ -767,7 +768,7 @@ pub fn ensure_api_key(config: &mut Config, path: &Path) -> bool {
             return false;
         }
     };
-    if let Err(e) = std::fs::write(path, &edited) {
+    if let Err(e) = crate::cfgfile::write_atomic(path, &edited) {
         tracing::error!(
             error = %e,
             path = %path.display(),
