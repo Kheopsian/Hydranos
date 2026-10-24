@@ -9,10 +9,10 @@
 //! about all of it within an announce interval.
 
 pub mod book;
-#[cfg(test)]
-mod interop;
 pub mod breaker;
 pub mod cache;
+#[cfg(test)]
+mod interop;
 pub mod overrides;
 pub mod policy;
 pub mod runner;
@@ -44,13 +44,11 @@ pub fn refresh_policies(config: &Config, engines: &[crate::engines::Engine]) -> 
         let Some(handle) = engine.announce_policy.get() else {
             continue; // offline engine: no runner, nothing to refresh
         };
-        let Ok(mut slot) = handle.write() else { continue };
+        let Ok(mut slot) = handle.write() else {
+            continue;
+        };
         let old = slot.clone();
-        let mut next = policy_from_config(
-            config,
-            old.peer_id.clone(),
-            old.public_ip.clone(),
-        );
+        let mut next = policy_from_config(config, old.peer_id.clone(), old.public_ip.clone());
         next.user_agent = old.user_agent.clone();
         // From the engine's section, read at start like its DHT switch.
         next.skip_udp = old.skip_udp;
@@ -112,7 +110,9 @@ mod tests {
         let captured = handle.read().unwrap().clone();
         assert!(captured.passkeys.is_empty());
 
-        config.announce_passkeys.insert("tracker.example".into(), "KEY".into());
+        config
+            .announce_passkeys
+            .insert("tracker.example".into(), "KEY".into());
         {
             let mut slot = handle.write().unwrap();
             let old = slot.clone();
@@ -122,7 +122,10 @@ mod tests {
         }
 
         // Whoever captured early still sees nothing: that IS the old bug.
-        assert!(captured.passkeys.is_empty(), "a captured Arc must not change under us");
+        assert!(
+            captured.passkeys.is_empty(),
+            "a captured Arc must not change under us"
+        );
 
         // Whoever re-reads sees the override. That is the fix.
         let fresh = handle.read().unwrap().clone();
@@ -162,9 +165,14 @@ mod tests {
     #[test]
     fn the_policy_is_read_from_the_same_config_keys_as_3x() {
         let mut config = Config::default();
-        config.announce_passkeys.insert("tr4ker.net".into(), "KEY".into());
+        config
+            .announce_passkeys
+            .insert("tr4ker.net".into(), "KEY".into());
         let p = policy_from_config(&config, "-TY0001-abcdefghijkl".into(), String::new());
-        assert_eq!(p.passkeys.get("tr4ker.net").map(String::as_str), Some("KEY"));
+        assert_eq!(
+            p.passkeys.get("tr4ker.net").map(String::as_str),
+            Some("KEY")
+        );
     }
 
     /// ⭐ One product name on the wire. The announce said `Hydra/<v>` while
@@ -173,7 +181,10 @@ mod tests {
     fn trackers_see_the_same_user_agent_as_everything_else() {
         typhon_engine::config::set_version(crate::api::HYDRANOS_VERSION);
         let p = policy_from_config(&Config::default(), String::new(), String::new());
-        assert_eq!(p.user_agent, format!("Hydranos/{}", crate::api::HYDRANOS_VERSION));
+        assert_eq!(
+            p.user_agent,
+            format!("Hydranos/{}", crate::api::HYDRANOS_VERSION)
+        );
         assert_eq!(p.user_agent, typhon_engine::config::user_agent());
     }
 }

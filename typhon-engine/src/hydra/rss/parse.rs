@@ -60,16 +60,22 @@ impl Node {
     }
 
     fn child(&self, local: &str) -> Option<&Node> {
-        self.children.iter().find(|c| c.local().eq_ignore_ascii_case(local))
+        self.children
+            .iter()
+            .find(|c| c.local().eq_ignore_ascii_case(local))
     }
 
     fn children<'a>(&'a self, local: &'a str) -> impl Iterator<Item = &'a Node> + 'a {
-        self.children.iter().filter(move |c| c.local().eq_ignore_ascii_case(local))
+        self.children
+            .iter()
+            .filter(move |c| c.local().eq_ignore_ascii_case(local))
     }
 
     /// The text of a child, trimmed; empty when there is none.
     fn text_of(&self, local: &str) -> String {
-        self.child(local).map(|c| c.text.trim().to_string()).unwrap_or_default()
+        self.child(local)
+            .map(|c| c.text.trim().to_string())
+            .unwrap_or_default()
     }
 }
 
@@ -85,8 +91,15 @@ pub fn parse(bytes: &[u8]) -> Result<Parsed, String> {
     let top = root
         .children
         .iter()
-        .find(|c| matches!(c.local().to_ascii_lowercase().as_str(), "rss" | "feed" | "rdf"))
-        .ok_or_else(|| "not an RSS or Atom feed (no <rss>, <feed> or <rdf:RDF> element)".to_string())?;
+        .find(|c| {
+            matches!(
+                c.local().to_ascii_lowercase().as_str(),
+                "rss" | "feed" | "rdf"
+            )
+        })
+        .ok_or_else(|| {
+            "not an RSS or Atom feed (no <rss>, <feed> or <rdf:RDF> element)".to_string()
+        })?;
     match top.local().to_ascii_lowercase().as_str() {
         "feed" => Ok(atom(top)),
         _ => Ok(rss(top)),
@@ -111,7 +124,11 @@ fn rss_item(item: &Node) -> Article {
         description: item.text_of("description"),
         author: {
             let au = item.text_of("author");
-            if au.is_empty() { item.text_of("creator") } else { au }
+            if au.is_empty() {
+                item.text_of("creator")
+            } else {
+                au
+            }
         },
         category: item.text_of("category"),
         ..Article::default()
@@ -126,8 +143,13 @@ fn rss_item(item: &Node) -> Article {
         if url.is_empty() {
             continue;
         }
-        let len = e.attr("length").and_then(|l| l.trim().parse::<i64>().ok()).unwrap_or(0);
-        if e.attr("type").is_some_and(|t| t.trim().eq_ignore_ascii_case("application/x-bittorrent")) {
+        let len = e
+            .attr("length")
+            .and_then(|l| l.trim().parse::<i64>().ok())
+            .unwrap_or(0);
+        if e.attr("type")
+            .is_some_and(|t| t.trim().eq_ignore_ascii_case("application/x-bittorrent"))
+        {
             a.torrent_url = url;
             enclosure_len = len;
             break;
@@ -139,7 +161,11 @@ fn rss_item(item: &Node) -> Article {
     }
     let magnet = {
         let m = item.text_of("magnetURI");
-        if m.is_empty() { item.text_of("magneturi") } else { m }
+        if m.is_empty() {
+            item.text_of("magneturi")
+        } else {
+            m
+        }
     };
     if a.torrent_url.is_empty() && link.to_ascii_lowercase().starts_with("magnet:") {
         a.torrent_url = link.clone();
@@ -158,10 +184,18 @@ fn rss_item(item: &Node) -> Article {
     } else {
         a.link = item.text_of("comments");
     }
-    a.size = if enclosure_len > 0 { enclosure_len } else { size_of(item) };
+    a.size = if enclosure_len > 0 {
+        enclosure_len
+    } else {
+        size_of(item)
+    };
     let date = {
         let d = item.text_of("pubDate");
-        if d.is_empty() { item.text_of("date") } else { d }
+        if d.is_empty() {
+            item.text_of("date")
+        } else {
+            d
+        }
     };
     a.date = parse_date(&date).unwrap_or(0);
     let guid = item.text_of("guid");
@@ -173,7 +207,10 @@ fn rss_item(item: &Node) -> Article {
 /// attributes, ezRSS `contentLength`, or a plain `<size>`.
 fn size_of(item: &Node) -> i64 {
     for c in &item.children {
-        if c.local().eq_ignore_ascii_case("attr") && c.attr("name").is_some_and(|n| n.eq_ignore_ascii_case("size")) {
+        if c.local().eq_ignore_ascii_case("attr")
+            && c.attr("name")
+                .is_some_and(|n| n.eq_ignore_ascii_case("size"))
+        {
             if let Some(v) = c.attr("value").and_then(|v| v.trim().parse::<i64>().ok()) {
                 return v;
             }
@@ -189,7 +226,11 @@ fn size_of(item: &Node) -> i64 {
 
 fn atom(top: &Node) -> Parsed {
     let title = top.text_of("title");
-    let articles = top.children("entry").map(atom_entry).filter(|a| !a.guid.is_empty()).collect();
+    let articles = top
+        .children("entry")
+        .map(atom_entry)
+        .filter(|a| !a.guid.is_empty())
+        .collect();
     Parsed { title, articles }
 }
 
@@ -198,10 +239,21 @@ fn atom_entry(e: &Node) -> Article {
         title: e.text_of("title"),
         description: {
             let s = e.text_of("summary");
-            if s.is_empty() { e.text_of("content") } else { s }
+            if s.is_empty() {
+                e.text_of("content")
+            } else {
+                s
+            }
         },
-        author: e.child("author").map(|au| au.text_of("name")).unwrap_or_default(),
-        category: e.child("category").and_then(|c| c.attr("term")).unwrap_or_default().to_string(),
+        author: e
+            .child("author")
+            .map(|au| au.text_of("name"))
+            .unwrap_or_default(),
+        category: e
+            .child("category")
+            .and_then(|c| c.attr("term"))
+            .unwrap_or_default()
+            .to_string(),
         ..Article::default()
     };
     for l in e.children("link") {
@@ -209,11 +261,20 @@ fn atom_entry(e: &Node) -> Article {
         if href.is_empty() {
             continue;
         }
-        let rel = l.attr("rel").unwrap_or("alternate").trim().to_ascii_lowercase();
-        let torrent = l.attr("type").is_some_and(|t| t.trim().eq_ignore_ascii_case("application/x-bittorrent"));
+        let rel = l
+            .attr("rel")
+            .unwrap_or("alternate")
+            .trim()
+            .to_ascii_lowercase();
+        let torrent = l
+            .attr("type")
+            .is_some_and(|t| t.trim().eq_ignore_ascii_case("application/x-bittorrent"));
         if rel == "enclosure" && (torrent || a.torrent_url.is_empty()) {
             a.torrent_url = href;
-            a.size = l.attr("length").and_then(|v| v.trim().parse().ok()).unwrap_or(0);
+            a.size = l
+                .attr("length")
+                .and_then(|v| v.trim().parse().ok())
+                .unwrap_or(0);
         } else if rel == "alternate" && a.link.is_empty() {
             a.link = href;
         }
@@ -226,7 +287,11 @@ fn atom_entry(e: &Node) -> Article {
     }
     let date = {
         let p = e.text_of("published");
-        if p.is_empty() { e.text_of("updated") } else { p }
+        if p.is_empty() {
+            e.text_of("updated")
+        } else {
+            p
+        }
     };
     a.date = parse_date(&date).unwrap_or(0);
     let id = e.text_of("id");
@@ -235,7 +300,10 @@ fn atom_entry(e: &Node) -> Article {
 }
 
 fn first_non_empty(v: &[&str]) -> String {
-    v.iter().find(|s| !s.trim().is_empty()).map(|s| s.trim().to_string()).unwrap_or_default()
+    v.iter()
+        .find(|s| !s.trim().is_empty())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default()
 }
 
 // ---------------------------------------------------------------------------
@@ -302,7 +370,11 @@ fn tree(src: &str) -> Result<Node, String> {
                 continue;
             }
             saw_element = true;
-            let node = Node { name, attrs, ..Node::default() };
+            let node = Node {
+                name,
+                attrs,
+                ..Node::default()
+            };
             if self_closing {
                 stack.last_mut().unwrap().children.push(node);
             } else {
@@ -354,7 +426,9 @@ fn tag_end(rest: &str) -> Option<usize> {
 
 fn read_tag(inner: &str) -> (String, Vec<(String, String)>) {
     let inner = inner.trim();
-    let name_end = inner.find(|c: char| c.is_whitespace()).unwrap_or(inner.len());
+    let name_end = inner
+        .find(|c: char| c.is_whitespace())
+        .unwrap_or(inner.len());
     let name = inner[..name_end].to_string();
     let mut attrs = Vec::new();
     let mut s = inner[name_end..].trim_start();
@@ -405,7 +479,9 @@ fn decode_entities(s: &str) -> String {
             "apos" => Some('\''),
             "nbsp" => Some('\u{a0}'),
             _ if ent.starts_with("#x") || ent.starts_with("#X") => {
-                u32::from_str_radix(&ent[2..], 16).ok().and_then(char::from_u32)
+                u32::from_str_radix(&ent[2..], 16)
+                    .ok()
+                    .and_then(char::from_u32)
             }
             _ if ent.starts_with('#') => ent[1..].parse::<u32>().ok().and_then(char::from_u32),
             _ => None,
@@ -435,7 +511,10 @@ pub fn parse_date(s: &str) -> Option<i64> {
     if s.is_empty() {
         return None;
     }
-    if s.as_bytes().first().is_some_and(u8::is_ascii_digit) && s.len() >= 10 && s.as_bytes()[4] == b'-' {
+    if s.as_bytes().first().is_some_and(u8::is_ascii_digit)
+        && s.len() >= 10
+        && s.as_bytes()[4] == b'-'
+    {
         return parse_rfc3339(s);
     }
     parse_rfc2822(s)
@@ -485,7 +564,9 @@ fn parse_rfc2822(s: &str) -> Option<i64> {
 }
 
 fn month(m: &str) -> Option<u32> {
-    const M: [&str; 12] = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+    const M: [&str; 12] = [
+        "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
+    ];
     let m = m.get(0..3)?.to_ascii_lowercase();
     M.iter().position(|x| *x == m).map(|p| p as u32 + 1)
 }
@@ -534,7 +615,9 @@ fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
 /// article's `date` and a rule's `lastMatch`.
 pub fn rfc2822(ts: i64) -> String {
     const D: [&str; 7] = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"];
-    const M: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    const M: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
     let days = ts.div_euclid(86400);
     let secs = ts.rem_euclid(86400);
     // civil_from_days
@@ -618,18 +701,32 @@ mod tests {
         let a = &p.articles[0];
         assert_eq!(a.title, "Show.Name.S01E05.1080p.WEB <x264>");
         assert_eq!(a.guid, "tracker-42");
-        assert_eq!(a.torrent_url, "https://tracker.example/dl/42.torrent?passkey=SECRET&x=1");
+        assert_eq!(
+            a.torrent_url,
+            "https://tracker.example/dl/42.torrent?passkey=SECRET&x=1"
+        );
         assert_eq!(a.link, "https://tracker.example/details/42");
         assert_eq!(a.size, 1_234_567, "the enclosure's length wins");
         assert_eq!(a.date, 1_791_453_600, "12:00 at +0200 is 10:00 UTC");
         assert_eq!(a.category, "TV");
 
         let m = &p.articles[1];
-        assert!(m.torrent_url.starts_with("magnet:?xt=urn:btih:c9e1"), "{}", m.torrent_url);
+        assert!(
+            m.torrent_url.starts_with("magnet:?xt=urn:btih:c9e1"),
+            "{}",
+            m.torrent_url
+        );
         assert!(m.torrent_url.ends_with("&dn=x"));
-        assert_eq!(m.guid, m.torrent_url, "no guid: the torrent link is the identity");
+        assert_eq!(
+            m.guid, m.torrent_url,
+            "no guid: the torrent link is the identity"
+        );
         assert_eq!(m.size, 2048, "torznab size");
-        assert_eq!(m.date, parse_date("2026-10-07T01:02:03Z").unwrap(), "two-digit year, GMT");
+        assert_eq!(
+            m.date,
+            parse_date("2026-10-07T01:02:03Z").unwrap(),
+            "two-digit year, GMT"
+        );
 
         let n = &p.articles[2];
         assert_eq!(n.title, "No link at all été");
@@ -651,7 +748,10 @@ mod tests {
         assert_eq!(a.description, "A book");
         assert_eq!(a.author, "someone");
         let b = &p.articles[1];
-        assert_eq!(b.torrent_url, "https://atom.example/book/2.torrent", "a plain link is the torrent");
+        assert_eq!(
+            b.torrent_url, "https://atom.example/book/2.torrent",
+            "a plain link is the torrent"
+        );
         assert_eq!(b.date, 1_791_406_800, "23:00 at +02:00, fractions dropped");
     }
 
@@ -661,7 +761,13 @@ mod tests {
         assert!(parse(b"not xml at all").is_err());
         assert!(parse(b"").is_err());
         // An empty channel is a feed with nothing in it.
-        assert_eq!(parse(b"<rss><channel><title>t</title></channel></rss>").unwrap().articles.len(), 0);
+        assert_eq!(
+            parse(b"<rss><channel><title>t</title></channel></rss>")
+                .unwrap()
+                .articles
+                .len(),
+            0
+        );
     }
 
     /// Dropping the tree recurses once per level, so a feed nested a million
@@ -673,7 +779,11 @@ mod tests {
         let deep_then_closed = format!("{}{}", "<a>".repeat(1_000_000), "</a>".repeat(1_000_000));
         assert!(parse(deep_then_closed.as_bytes()).is_err());
         // Real feeds are a handful of levels deep; a generous nesting still reads.
-        let ok = format!("<rss><channel>{}{}</channel></rss>", "<x>".repeat(50), "</x>".repeat(50));
+        let ok = format!(
+            "<rss><channel>{}{}</channel></rss>",
+            "<x>".repeat(50),
+            "</x>".repeat(50)
+        );
         assert!(parse(ok.as_bytes()).is_ok());
     }
 
@@ -681,7 +791,11 @@ mod tests {
     fn dates_round_trip_through_rfc2822() {
         let t = parse_date("Thu, 08 Oct 2026 10:00:00 +0000").unwrap();
         assert_eq!(rfc2822(t), "Thu, 08 Oct 2026 10:00:00 +0000");
-        assert_eq!(parse_date("08 Oct 2026 10:00:00 EST").unwrap(), t + 5 * 3600, "no weekday, named zone");
+        assert_eq!(
+            parse_date("08 Oct 2026 10:00:00 EST").unwrap(),
+            t + 5 * 3600,
+            "no weekday, named zone"
+        );
         assert_eq!(parse_date("2026-10-08").unwrap(), t - 10 * 3600);
         assert_eq!(rfc2822(0), "Thu, 01 Jan 1970 00:00:00 +0000");
         assert!(parse_date("yesterday").is_none());

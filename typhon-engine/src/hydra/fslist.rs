@@ -81,8 +81,14 @@ fn permitted(state: &AppState, raw: &str) -> Result<PathBuf, Refusal> {
             if rest.components().any(|c| c == Component::ParentDir) {
                 return Err(Refusal::Forbidden);
             }
-            let inside = anc.to_str().is_some_and(|a| crate::pathroots::within_download_dirs(state, a).is_ok());
-            return Err(if inside { Refusal::NotFound } else { Refusal::Forbidden });
+            let inside = anc
+                .to_str()
+                .is_some_and(|a| crate::pathroots::within_download_dirs(state, a).is_ok());
+            return Err(if inside {
+                Refusal::NotFound
+            } else {
+                Refusal::Forbidden
+            });
         }
     }
     Err(Refusal::Forbidden)
@@ -132,7 +138,11 @@ pub(crate) async fn get_fs_list(
     let path = query_param(&query, "path").unwrap_or_default();
     match list(&state, path.clone()).await {
         Ok(l) => {
-            let entries: Vec<_> = l.entries.iter().map(|(n, d)| serde_json::json!({"name": n, "dir": d})).collect();
+            let entries: Vec<_> = l
+                .entries
+                .iter()
+                .map(|(n, d)| serde_json::json!({"name": n, "dir": d}))
+                .collect();
             let mut out = serde_json::json!({"path": path, "entries": entries});
             if l.truncated {
                 out["truncated"] = true.into();
@@ -152,7 +162,14 @@ pub(crate) async fn qbit_directory_content(
 ) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    let text = |status: StatusCode, msg: &str| (status, [("content-type", "text/plain; charset=utf-8")], msg.to_string()).into_response();
+    let text = |status: StatusCode, msg: &str| {
+        (
+            status,
+            [("content-type", "text/plain; charset=utf-8")],
+            msg.to_string(),
+        )
+            .into_response()
+    };
     let dir = shim_param(&query, &body, "dirPath").unwrap_or_default();
     let mode = shim_param(&query, &body, "mode").unwrap_or_else(|| "all".to_string());
     if !matches!(mode.as_str(), "all" | "dirs" | "files") {
@@ -214,7 +231,13 @@ mod tests {
         (root, other)
     }
 
-    async fn call(s: &TestState, method: &str, uri: &str, form: &str, key: bool) -> (StatusCode, String, String) {
+    async fn call(
+        s: &TestState,
+        method: &str,
+        uri: &str,
+        form: &str,
+        key: bool,
+    ) -> (StatusCode, String, String) {
         let mut req = axum::http::Request::builder()
             .method(method)
             .uri(uri)
@@ -233,31 +256,57 @@ mod tests {
             .and_then(|v| v.to_str().ok())
             .unwrap_or("")
             .to_string();
-        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         (status, String::from_utf8_lossy(&bytes).into_owned(), ctype)
     }
 
     fn enc(v: &str) -> String {
         v.bytes()
             .map(|b| match b {
-                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => (b as char).to_string(),
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => {
+                    (b as char).to_string()
+                }
                 _ => format!("%{b:02X}"),
             })
             .collect()
     }
 
     async fn native(s: &TestState, path: &str) -> (StatusCode, serde_json::Value) {
-        let (st, body, _) = call(s, "GET", &format!("/api/fs/list?path={}", enc(path)), "", true).await;
-        (st, serde_json::from_str(&body).unwrap_or(serde_json::Value::Null))
+        let (st, body, _) = call(
+            s,
+            "GET",
+            &format!("/api/fs/list?path={}", enc(path)),
+            "",
+            true,
+        )
+        .await;
+        (
+            st,
+            serde_json::from_str(&body).unwrap_or(serde_json::Value::Null),
+        )
     }
 
-    async fn shim(s: &TestState, method: &str, dir: &str, mode: Option<&str>) -> (StatusCode, String, String) {
+    async fn shim(
+        s: &TestState,
+        method: &str,
+        dir: &str,
+        mode: Option<&str>,
+    ) -> (StatusCode, String, String) {
         let mut q = format!("dirPath={}", enc(dir));
         if let Some(m) = mode {
             q.push_str(&format!("&mode={m}"));
         }
         if method == "GET" {
-            call(s, "GET", &format!("/api/v2/app/getDirectoryContent?{q}"), "", true).await
+            call(
+                s,
+                "GET",
+                &format!("/api/v2/app/getDirectoryContent?{q}"),
+                "",
+                true,
+            )
+            .await
         } else {
             call(s, "POST", "/api/v2/app/getDirectoryContent", &q, true).await
         }
@@ -286,21 +335,35 @@ mod tests {
         let s = st("fsl-default");
         let d = s.dir.join("incoming");
         std::fs::create_dir_all(d.join("x")).unwrap();
-        s.state.store.lock().unwrap().put_setting("qbit_default_save_path", d.to_str().unwrap()).unwrap();
+        s.state
+            .store
+            .lock()
+            .unwrap()
+            .put_setting("qbit_default_save_path", d.to_str().unwrap())
+            .unwrap();
         let (code, v) = native(&s, d.to_str().unwrap()).await;
         assert_eq!(code, StatusCode::OK);
-        assert_eq!(v["entries"], serde_json::json!([{"name": "x", "dir": true}]));
+        assert_eq!(
+            v["entries"],
+            serde_json::json!([{"name": "x", "dir": true}])
+        );
     }
 
     #[tokio::test]
     async fn native_refuses_what_is_outside_the_download_folders() {
         let s = st("fsl-403");
         let (root, other) = tree(&s);
-        assert_eq!(native(&s, other.to_str().unwrap()).await.0, StatusCode::FORBIDDEN);
+        assert_eq!(
+            native(&s, other.to_str().unwrap()).await.0,
+            StatusCode::FORBIDDEN
+        );
         assert_eq!(native(&s, "/").await.0, StatusCode::FORBIDDEN);
         // The refusal does not tell a missing folder from a present one.
         let missing = other.join("nope");
-        assert_eq!(native(&s, missing.to_str().unwrap()).await.0, StatusCode::FORBIDDEN);
+        assert_eq!(
+            native(&s, missing.to_str().unwrap()).await.0,
+            StatusCode::FORBIDDEN
+        );
         // A sibling that merely shares the root's name as a prefix is outside it.
         let lookalike = format!("{}-more", root.display());
         std::fs::create_dir_all(&lookalike).unwrap();
@@ -339,7 +402,12 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .map(|e| (e["name"].as_str().unwrap().to_string(), e["dir"].as_bool().unwrap()))
+            .map(|e| {
+                (
+                    e["name"].as_str().unwrap().to_string(),
+                    e["dir"].as_bool().unwrap(),
+                )
+            })
             .collect();
         assert!(kinds.contains(&("leak".to_string(), false)));
         assert!(kinds.contains(&("inner".to_string(), false)));
@@ -352,7 +420,10 @@ mod tests {
     async fn native_404_for_a_missing_path_inside_a_root_and_400_for_the_malformed() {
         let s = st("fsl-404");
         let (root, _) = tree(&s);
-        assert_eq!(native(&s, &format!("{}/nope", root.display())).await.0, StatusCode::NOT_FOUND);
+        assert_eq!(
+            native(&s, &format!("{}/nope", root.display())).await.0,
+            StatusCode::NOT_FOUND
+        );
         assert_eq!(native(&s, "").await.0, StatusCode::BAD_REQUEST);
         assert_eq!(native(&s, "films").await.0, StatusCode::BAD_REQUEST);
         assert_eq!(native(&s, "../etc").await.0, StatusCode::BAD_REQUEST);
@@ -373,20 +444,33 @@ mod tests {
         for i in 0..5 {
             std::fs::write(big.join(format!("f{i}")), b"").unwrap();
         }
-        let l = list_blocking(&s.state, big.to_str().unwrap(), 3).ok().unwrap();
+        let l = list_blocking(&s.state, big.to_str().unwrap(), 3)
+            .ok()
+            .unwrap();
         assert_eq!((l.entries.len(), l.truncated), (3, true));
-        let l = list_blocking(&s.state, big.to_str().unwrap(), 5).ok().unwrap();
+        let l = list_blocking(&s.state, big.to_str().unwrap(), 5)
+            .ok()
+            .unwrap();
         assert_eq!((l.entries.len(), l.truncated), (5, false));
     }
 
     #[test]
     fn the_shim_refuses_a_listing_that_is_not_whole() {
-        let part = || Listing { entries: vec![("a".into(), false), ("d".into(), true)], truncated: true };
+        let part = || Listing {
+            entries: vec![("a".into(), false), ("d".into(), true)],
+            truncated: true,
+        };
         for mode in ["all", "dirs", "files"] {
             assert!(shim_paths(part(), "/dl", mode).is_err(), "{mode}");
         }
-        let whole = Listing { entries: vec![("a".into(), false), ("d".into(), true)], truncated: false };
-        assert_eq!(shim_paths(whole, "/dl/", "all").unwrap(), vec!["/dl/a".to_string(), "/dl/d".to_string()]);
+        let whole = Listing {
+            entries: vec![("a".into(), false), ("d".into(), true)],
+            truncated: false,
+        };
+        assert_eq!(
+            shim_paths(whole, "/dl/", "all").unwrap(),
+            vec!["/dl/a".to_string(), "/dl/d".to_string()]
+        );
     }
 
     #[tokio::test]
@@ -397,8 +481,19 @@ mod tests {
         let data = base.join("dl").join("config");
         std::fs::create_dir_all(&data).unwrap();
         std::fs::write(data.join("default.toml"), b"x").unwrap();
-        let s = state_from("fsl-data", &format!("[daemon]\napi_key = \"{KEY}\"\ndata_dir = \"{}\"\n", data.display()));
-        put_category(&s.state, "films", "hoard", base.join("dl").to_str().unwrap());
+        let s = state_from(
+            "fsl-data",
+            &format!(
+                "[daemon]\napi_key = \"{KEY}\"\ndata_dir = \"{}\"\n",
+                data.display()
+            ),
+        );
+        put_category(
+            &s.state,
+            "films",
+            "hoard",
+            base.join("dl").to_str().unwrap(),
+        );
         let (code, v) = native(&s, base.join("dl").to_str().unwrap()).await;
         assert_eq!(code, StatusCode::OK, "{v}");
         let (code, _) = native(&s, data.to_str().unwrap()).await;
@@ -415,14 +510,33 @@ mod tests {
         let s = st("fsl-auth");
         let (root, _) = tree(&s);
         let dir = format!("{}/films", root.display());
-        let (code, _, _) = call(&s, "GET", &format!("/api/fs/list?path={}", enc(&dir)), "", false).await;
+        let (code, _, _) = call(
+            &s,
+            "GET",
+            &format!("/api/fs/list?path={}", enc(&dir)),
+            "",
+            false,
+        )
+        .await;
         assert_eq!(code, StatusCode::UNAUTHORIZED);
         // The shim answers an unkeyed call 403 "Forbidden." as qBittorrent does.
-        let (code, body, _) =
-            call(&s, "GET", &format!("/api/v2/app/getDirectoryContent?dirPath={}", enc(&dir)), "", false).await;
+        let (code, body, _) = call(
+            &s,
+            "GET",
+            &format!("/api/v2/app/getDirectoryContent?dirPath={}", enc(&dir)),
+            "",
+            false,
+        )
+        .await;
         assert_eq!((code, body.as_str()), (StatusCode::FORBIDDEN, "Forbidden."));
-        let (code, body, _) =
-            call(&s, "POST", "/api/v2/app/getDirectoryContent", &format!("dirPath={}", enc(&dir)), false).await;
+        let (code, body, _) = call(
+            &s,
+            "POST",
+            "/api/v2/app/getDirectoryContent",
+            &format!("dirPath={}", enc(&dir)),
+            false,
+        )
+        .await;
         assert_eq!((code, body.as_str()), (StatusCode::FORBIDDEN, "Forbidden."));
     }
 
@@ -435,12 +549,22 @@ mod tests {
             let (code, body, _) = shim(&s, method, &dir, None).await;
             assert_eq!(code, StatusCode::OK);
             let all: Vec<String> = serde_json::from_str(&body).unwrap();
-            assert_eq!(all, vec![format!("{dir}/a.nfo"), format!("{dir}/b.mkv"), format!("{dir}/sub")]);
+            assert_eq!(
+                all,
+                vec![
+                    format!("{dir}/a.nfo"),
+                    format!("{dir}/b.mkv"),
+                    format!("{dir}/sub")
+                ]
+            );
 
             let (_, body, _) = shim(&s, method, &dir, Some("all")).await;
             assert_eq!(serde_json::from_str::<Vec<String>>(&body).unwrap().len(), 3);
             let (_, body, _) = shim(&s, method, &dir, Some("dirs")).await;
-            assert_eq!(serde_json::from_str::<Vec<String>>(&body).unwrap(), vec![format!("{dir}/sub")]);
+            assert_eq!(
+                serde_json::from_str::<Vec<String>>(&body).unwrap(),
+                vec![format!("{dir}/sub")]
+            );
             let (_, body, _) = shim(&s, method, &dir, Some("files")).await;
             assert_eq!(
                 serde_json::from_str::<Vec<String>>(&body).unwrap(),
@@ -449,7 +573,10 @@ mod tests {
         }
         // A trailing slash does not double up.
         let (_, body, _) = shim(&s, "GET", &format!("{dir}/"), Some("dirs")).await;
-        assert_eq!(serde_json::from_str::<Vec<String>>(&body).unwrap(), vec![format!("{dir}/sub")]);
+        assert_eq!(
+            serde_json::from_str::<Vec<String>>(&body).unwrap(),
+            vec![format!("{dir}/sub")]
+        );
     }
 
     #[tokio::test]
@@ -458,7 +585,13 @@ mod tests {
         let (root, other) = tree(&s);
         let (code, _, _) = shim(&s, "GET", other.to_str().unwrap(), None).await;
         assert_eq!(code, StatusCode::FORBIDDEN);
-        let (code, _, _) = shim(&s, "POST", &format!("{}/films/../../elsewhere", root.display()), None).await;
+        let (code, _, _) = shim(
+            &s,
+            "POST",
+            &format!("{}/films/../../elsewhere", root.display()),
+            None,
+        )
+        .await;
         assert_eq!(code, StatusCode::FORBIDDEN);
         let (code, _, _) = shim(&s, "GET", "/nonexistent-root-dir", None).await;
         assert_eq!(code, StatusCode::FORBIDDEN);

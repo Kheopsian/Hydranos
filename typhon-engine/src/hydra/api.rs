@@ -78,8 +78,8 @@ pub fn refresh_records(path: std::path::PathBuf, cache: Records) {
         }
         let _clear = Clear(cache.clone());
 
-        let computed = crate::benchdb::BenchDb::open_read_only(&path)
-            .and_then(|db| db.records_payload());
+        let computed =
+            crate::benchdb::BenchDb::open_read_only(&path).and_then(|db| db.records_payload());
         match computed {
             Ok(value) => {
                 let mut c = cache.lock().unwrap_or_else(|e| e.into_inner());
@@ -119,7 +119,10 @@ impl Odometer {
     /// The odometer of a process that has moved nothing yet: today starts at
     /// zero, on today's date.
     pub fn at_boot() -> Self {
-        Self { day_baseline: (0, 0), day_date: local_date() }
+        Self {
+            day_baseline: (0, 0),
+            day_date: local_date(),
+        }
     }
 
     /// Today's bytes, given the session total and today's local date. Rolls
@@ -132,7 +135,10 @@ impl Odometer {
             self.day_date = today.to_string();
             self.day_baseline = session;
         }
-        (session.0 - self.day_baseline.0, session.1 - self.day_baseline.1)
+        (
+            session.0 - self.day_baseline.0,
+            session.1 - self.day_baseline.1,
+        )
     }
 }
 
@@ -159,7 +165,11 @@ pub fn session_and_day(state: &AppState) -> ((i64, i64), (i64, i64), (i64, i64))
     let lifetime = state.engines.session_totals();
     let session = state.engines.moved_totals();
     let today = local_date();
-    let day = state.odometer.lock().unwrap_or_else(|e| e.into_inner()).day(session, &today);
+    let day = state
+        .odometer
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .day(session, &today);
     (lifetime, session, day)
 }
 
@@ -173,7 +183,8 @@ pub fn engine_session(state: &AppState, engine_id: &str) -> (i64, i64) {
 pub struct AppState {
     /// Imports in flight, by job id. An import outlives the request that
     /// started it, so its progress lives where the later polls can find it.
-    pub imports: Arc<std::sync::Mutex<std::collections::HashMap<String, Arc<crate::importer::Progress>>>>,
+    pub imports:
+        Arc<std::sync::Mutex<std::collections::HashMap<String, Arc<crate::importer::Progress>>>>,
     /// The folders the agent endpoint may read a `.torrent` from, as the config
     /// FILE said at startup. Never the live configuration: a settings edit
     /// that changes `data_dir` must not move what a caller may read.
@@ -492,10 +503,16 @@ async fn post_node_test(
     let v: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
     let url = v.get("url").and_then(|x| x.as_str()).unwrap_or_default();
     if url.is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "url is required"})))
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "url is required"})),
+        )
             .into_response();
     }
-    let key = v.get("api_key").and_then(|x| x.as_str()).unwrap_or_default();
+    let key = v
+        .get("api_key")
+        .and_then(|x| x.as_str())
+        .unwrap_or_default();
     Json(crate::nodes::probe(url, key).await).into_response()
 }
 
@@ -513,7 +530,12 @@ async fn post_node(
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
     let v: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
-    let name = v.get("name").and_then(|x| x.as_str()).unwrap_or_default().trim().to_string();
+    let name = v
+        .get("name")
+        .and_then(|x| x.as_str())
+        .unwrap_or_default()
+        .trim()
+        .to_string();
     let url = v
         .get("url")
         .and_then(|x| x.as_str())
@@ -521,7 +543,11 @@ async fn post_node(
         .trim()
         .trim_end_matches('/')
         .to_string();
-    let api_key = v.get("api_key").and_then(|x| x.as_str()).unwrap_or_default().to_string();
+    let api_key = v
+        .get("api_key")
+        .and_then(|x| x.as_str())
+        .unwrap_or_default()
+        .to_string();
     if name.is_empty() || url.is_empty() {
         return (
             StatusCode::BAD_REQUEST,
@@ -610,7 +636,10 @@ async fn delete_node(
         store.delete_node(&name).unwrap_or(false)
     };
     if !removed {
-        return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "unknown node"})))
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "unknown node"})),
+        )
             .into_response();
     }
     Json(serde_json::json!({"status": "ok"})).into_response()
@@ -683,7 +712,13 @@ async fn post_node_enrol(
     };
     // `[daemon] public_url`, when set, is the address a new machine is told to
     // come back on; empty, it is the one the caller used (its `Host` header).
-    let configured = state.cfg().daemon.public_url.trim().trim_end_matches('/').to_string();
+    let configured = state
+        .cfg()
+        .daemon
+        .public_url
+        .trim()
+        .trim_end_matches('/')
+        .to_string();
     let base = if configured.is_empty() {
         let host = headers
             .get(axum::http::header::HOST)
@@ -700,7 +735,10 @@ async fn post_node_enrol(
     // check and is never run.
     let sha: String = {
         use sha2::{Digest, Sha256};
-        Sha256::digest(INSTALL_SCRIPT.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
+        Sha256::digest(INSTALL_SCRIPT.as_bytes())
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
     };
     Json(serde_json::json!({
         "token": token,
@@ -736,7 +774,12 @@ async fn post_node_register(
                 .map(String::from)
         })
         .unwrap_or_default();
-    let name = v.get("name").and_then(|x| x.as_str()).unwrap_or_default().trim().to_string();
+    let name = v
+        .get("name")
+        .and_then(|x| x.as_str())
+        .unwrap_or_default()
+        .trim()
+        .to_string();
     let url = v
         .get("url")
         .and_then(|x| x.as_str())
@@ -744,10 +787,18 @@ async fn post_node_register(
         .trim()
         .trim_end_matches('/')
         .to_string();
-    let api_key = v.get("api_key").and_then(|x| x.as_str()).unwrap_or_default().to_string();
+    let api_key = v
+        .get("api_key")
+        .and_then(|x| x.as_str())
+        .unwrap_or_default()
+        .to_string();
 
     let bad = |m: &str| {
-        (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": m}))).into_response()
+        (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": m})),
+        )
+            .into_response()
     };
     if token.is_empty() || name.is_empty() || url.is_empty() {
         return bad("token, name and url are required");
@@ -872,11 +923,23 @@ async fn post_node_handoff(
         .and_then(|x| x.as_str())
         .unwrap_or_default()
         .to_lowercase();
-    let from = v.get("from").and_then(|x| x.as_str()).unwrap_or_default().to_string();
-    let category = v.get("category").and_then(|x| x.as_str()).unwrap_or_default().to_string();
+    let from = v
+        .get("from")
+        .and_then(|x| x.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let category = v
+        .get("category")
+        .and_then(|x| x.as_str())
+        .unwrap_or_default()
+        .to_string();
     // Which engine ON the target. Empty lets its category decide, which is what
     // an operator picking a node rather than an engine is asking for.
-    let engine = v.get("engine").and_then(|x| x.as_str()).unwrap_or_default().to_string();
+    let engine = v
+        .get("engine")
+        .and_then(|x| x.as_str())
+        .unwrap_or_default()
+        .to_string();
 
     if info_hash.is_empty() {
         return (
@@ -926,7 +989,10 @@ async fn post_node_handoff(
         store.node(&name).ok().flatten()
     };
     let Some(node) = node else {
-        return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "unknown node"})))
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "unknown node"})),
+        )
             .into_response();
     };
     let blob = {
@@ -940,7 +1006,11 @@ async fn post_node_handoff(
     // "keep" duplicates, "remove" moves. A move cannot delete now: the target
     // has the metainfo and none of the bytes yet. So it waits for the far side
     // to report complete, and only then drops the local copy.
-    let then = v.get("then").and_then(|x| x.as_str()).unwrap_or("keep").to_string();
+    let then = v
+        .get("then")
+        .and_then(|x| x.as_str())
+        .unwrap_or("keep")
+        .to_string();
     if then != "keep" && then != "remove" {
         return (
             StatusCode::BAD_REQUEST,
@@ -950,7 +1020,13 @@ async fn post_node_handoff(
     }
     // One wait per torrent: a second move of the same hash while the first is
     // pending would race it to the deletion.
-    if then == "remove" && state.store.lock().unwrap().job_pending_for("handoff", &info_hash) {
+    if then == "remove"
+        && state
+            .store
+            .lock()
+            .unwrap()
+            .job_pending_for("handoff", &info_hash)
+    {
         return (
             StatusCode::CONFLICT,
             Json(serde_json::json!({"error": "a move of this torrent to a node is already waiting; see Jobs"})),
@@ -962,7 +1038,13 @@ async fn post_node_handoff(
         .unwrap_or_default();
 
     match crate::nodes::handoff(
-        &node.url, &node.api_key, &info_hash, blob, &from, &category, &engine,
+        &node.url,
+        &node.api_key,
+        &info_hash,
+        blob,
+        &from,
+        &category,
+        &engine,
     )
     .await
     {
@@ -984,7 +1066,11 @@ async fn post_node_handoff(
                     "deadline": now + crate::nodes::HANDOFF_WAIT_SECS,
                 })
                 .to_string();
-                let job = state.store.lock().unwrap().create_waiting_job("handoff", &info_hash, &params, tsize);
+                let job = state
+                    .store
+                    .lock()
+                    .unwrap()
+                    .create_waiting_job("handoff", &info_hash, &params, tsize);
                 match job {
                     Ok(id) => {
                         if let Some(o) = v.as_object_mut() {
@@ -1045,8 +1131,16 @@ pub(crate) async fn handoff_watch_once(state: &AppState) -> usize {
     let mut dropped = 0;
     for job in jobs {
         let p: serde_json::Value = serde_json::from_str(&job.params).unwrap_or_default();
-        let node_name = p.get("node").and_then(|x| x.as_str()).unwrap_or_default().to_string();
-        let engine = p.get("engine").and_then(|x| x.as_str()).unwrap_or_default().to_string();
+        let node_name = p
+            .get("node")
+            .and_then(|x| x.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let engine = p
+            .get("engine")
+            .and_then(|x| x.as_str())
+            .unwrap_or_default()
+            .to_string();
         let deadline = p
             .get("deadline")
             .and_then(|x| x.as_i64())
@@ -1056,13 +1150,20 @@ pub(crate) async fn handoff_watch_once(state: &AppState) -> usize {
             state.store.lock().unwrap().settle_waiting_job(
                 &job.id,
                 "failed",
-                &format!("the node {node_name} was removed before it confirmed; the local copy is kept"),
+                &format!(
+                    "the node {node_name} was removed before it confirmed; the local copy is kept"
+                ),
             );
             continue;
         };
-        match crate::nodes::remote_progress(&node.url, &node.api_key, &job.info_hash, &engine).await {
+        match crate::nodes::remote_progress(&node.url, &node.api_key, &job.info_hash, &engine).await
+        {
             Ok(Some(progress)) if progress >= 1.0 => {
-                let settled = state.store.lock().unwrap().settle_waiting_job(&job.id, "done", "");
+                let settled = state
+                    .store
+                    .lock()
+                    .unwrap()
+                    .settle_waiting_job(&job.id, "done", "");
                 if settled {
                     tracing::info!(hash = %job.info_hash, node = %node_name, "handoff complete, dropping the local copy");
                     crate::store::log_store(
@@ -1070,7 +1171,10 @@ pub(crate) async fn handoff_watch_once(state: &AppState) -> usize {
                         remove_torrent_everywhere(state, &job.info_hash, true),
                     );
                     let store = state.store.lock().unwrap();
-                    crate::store::log_store("job_progress", store.job_progress(&job.id, job.total_bytes));
+                    crate::store::log_store(
+                        "job_progress",
+                        store.job_progress(&job.id, job.total_bytes),
+                    );
                     dropped += 1;
                 }
                 continue;
@@ -1129,15 +1233,28 @@ async fn patch_node(
 ) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    let bad = |m: String| (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": m}))).into_response();
+    let bad = |m: String| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": m})),
+        )
+            .into_response()
+    };
     let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) else {
         return bad("expected a JSON object".into());
     };
     let node = state.store.lock().unwrap().node(&name).ok().flatten();
     let Some(mut node) = node else {
-        return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "unknown node"}))).into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "unknown node"})),
+        )
+            .into_response();
     };
-    let new_name = v.get("name").and_then(|x| x.as_str()).map(|s| s.trim().to_string());
+    let new_name = v
+        .get("name")
+        .and_then(|x| x.as_str())
+        .map(|s| s.trim().to_string());
     let new_url = v
         .get("url")
         .and_then(|x| x.as_str())
@@ -1178,7 +1295,11 @@ async fn patch_node(
     }
     let store = state.store.lock().unwrap();
     if let Err(e) = store.put_node(&node) {
-        return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))).into_response();
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response();
     }
     let mut final_name = name.clone();
     if let Some(n) = new_name.filter(|n| *n != name) {
@@ -1192,7 +1313,10 @@ async fn patch_node(
                     .into_response()
             }
             Err(e) => {
-                return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()})))
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": e.to_string()})),
+                )
                     .into_response()
             }
         }
@@ -1217,11 +1341,21 @@ async fn post_node_rotate_key(
     guard!(state, headers, query);
     let node = state.store.lock().unwrap().node(&name).ok().flatten();
     let Some(mut node) = node else {
-        return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "unknown node"}))).into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "unknown node"})),
+        )
+            .into_response();
     };
     let new_key = match crate::nodes::rotate_key(&node.url, &node.api_key).await {
         Ok(k) => k,
-        Err(e) => return (StatusCode::BAD_GATEWAY, Json(serde_json::json!({"error": e}))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({"error": e})),
+            )
+                .into_response()
+        }
     };
     node.api_key = new_key.clone();
     if let Err(e) = state.store.lock().unwrap().put_node(&node) {
@@ -1236,7 +1370,8 @@ async fn post_node_rotate_key(
             .into_response();
     }
     let health = crate::nodes::probe(&node.url, &new_key).await;
-    Json(serde_json::json!({"status": "ok", "name": name, "api_key": new_key, "health": health})).into_response()
+    Json(serde_json::json!({"status": "ok", "name": name, "api_key": new_key, "health": health}))
+        .into_response()
 }
 
 /// Node side of a rotation, step 1: mint a pending key.
@@ -1275,11 +1410,15 @@ async fn post_api_key_confirm(State(state): State<AppState>, headers: HeaderMap)
         return unauthorised();
     };
     let quoted = crate::tomledit::quote_toml_key(&key);
-    let ok = edit_config(&state, move |doc| crate::tomledit::set_toml_value(doc, "daemon", "api_key", &quoted));
+    let ok = edit_config(&state, move |doc| {
+        crate::tomledit::set_toml_value(doc, "daemon", "api_key", &quoted)
+    });
     if !ok {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": "the config could not be written; the old key stays"})),
+            Json(
+                serde_json::json!({"error": "the config could not be written; the old key stays"}),
+            ),
         )
             .into_response();
     }
@@ -1303,8 +1442,16 @@ async fn post_node_move_engine(
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
     let v: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
-    let info_hash = v.get("info_hash").and_then(|x| x.as_str()).unwrap_or_default().to_lowercase();
-    let engine = v.get("engine").and_then(|x| x.as_str()).unwrap_or_default().to_string();
+    let info_hash = v
+        .get("info_hash")
+        .and_then(|x| x.as_str())
+        .unwrap_or_default()
+        .to_lowercase();
+    let engine = v
+        .get("engine")
+        .and_then(|x| x.as_str())
+        .unwrap_or_default()
+        .to_string();
     if info_hash.is_empty() || engine.is_empty() {
         return (
             StatusCode::BAD_REQUEST,
@@ -1317,7 +1464,10 @@ async fn post_node_move_engine(
         store.node(&name).ok().flatten()
     };
     let Some(node) = node else {
-        return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "unknown node"})))
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "unknown node"})),
+        )
             .into_response();
     };
     let payload = serde_json::json!({ "engine": engine }).to_string();
@@ -1333,10 +1483,17 @@ async fn post_node_move_engine(
         Ok((status, body, _)) => {
             let v: serde_json::Value =
                 serde_json::from_slice(&body).unwrap_or(serde_json::json!({"status": "ok"}));
-            (StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::OK), Json(v))
+            (
+                StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::OK),
+                Json(v),
+            )
                 .into_response()
         }
-        Err(e) => (StatusCode::BAD_GATEWAY, Json(serde_json::json!({"error": e}))).into_response(),
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({"error": e})),
+        )
+            .into_response(),
     }
 }
 
@@ -1356,12 +1513,34 @@ async fn post_node_fetch(
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
     let v: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
-    let info_hash = v.get("info_hash").and_then(|x| x.as_str()).unwrap_or_default().to_lowercase();
-    let engine = v.get("engine").and_then(|x| x.as_str()).unwrap_or_default().to_string();
-    let from_engine = v.get("from_engine").and_then(|x| x.as_str()).unwrap_or("hoard").to_string();
-    let category = v.get("category").and_then(|x| x.as_str()).unwrap_or_default().to_string();
+    let info_hash = v
+        .get("info_hash")
+        .and_then(|x| x.as_str())
+        .unwrap_or_default()
+        .to_lowercase();
+    let engine = v
+        .get("engine")
+        .and_then(|x| x.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let from_engine = v
+        .get("from_engine")
+        .and_then(|x| x.as_str())
+        .unwrap_or("hoard")
+        .to_string();
+    let category = v
+        .get("category")
+        .and_then(|x| x.as_str())
+        .unwrap_or_default()
+        .to_string();
 
-    let bad = |m: String| (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": m}))).into_response();
+    let bad = |m: String| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": m})),
+        )
+            .into_response()
+    };
     if info_hash.is_empty() || engine.is_empty() {
         return bad("info_hash and engine are required".into());
     }
@@ -1381,21 +1560,36 @@ async fn post_node_fetch(
         store.node(&name).ok().flatten()
     };
     let Some(node) = node else {
-        return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "unknown node"})))
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "unknown node"})),
+        )
             .into_response();
     };
 
-    let (blob, port) =
-        match crate::nodes::fetch_metainfo(&node.url, &node.api_key, &info_hash, &from_engine).await
-        {
-            Ok(v) => v,
-            Err(e) => return (StatusCode::BAD_GATEWAY, Json(serde_json::json!({"error": e}))).into_response(),
-        };
-
-    let (hash, tname) = match add_torrent_bytes(&state, &blob, &category, "", "", false, false, &engine) {
+    let (blob, port) = match crate::nodes::fetch_metainfo(
+        &node.url,
+        &node.api_key,
+        &info_hash,
+        &from_engine,
+    )
+    .await
+    {
         Ok(v) => v,
-        Err(e) => return bad(e),
+        Err(e) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({"error": e})),
+            )
+                .into_response()
+        }
     };
+
+    let (hash, tname) =
+        match add_torrent_bytes(&state, &blob, &category, "", "", false, false, &engine) {
+            Ok(v) => v,
+            Err(e) => return bad(e),
+        };
 
     // Where to fetch it from. Unlike a push, no `auto:` is needed: the node's
     // own URL is its address, and the engine list gave us the port.
@@ -1444,7 +1638,10 @@ async fn get_node_open(
         store.node(&name).ok().flatten()
     };
     let Some(node) = node else {
-        return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "unknown node"})))
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "unknown node"})),
+        )
             .into_response();
     };
     let target = format!("{}/#key={}", node.url.trim_end_matches('/'), node.api_key);
@@ -1499,16 +1696,25 @@ async fn set_announce_min_seed(
         clear: bool,
     }
     let Ok(req) = serde_json::from_str::<Req>(&body) else {
-        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "invalid body"})))
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "invalid body"})),
+        )
             .into_response();
     };
     let host = req.host.trim().to_string();
     if host.is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "host is required"})))
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "host is required"})),
+        )
             .into_response();
     }
     if req.hours < 0 {
-        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "hours cannot be negative"})))
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "hours cannot be negative"})),
+        )
             .into_response();
     }
     // ⚠ "0" is STORED, not turned into a blank. Blank means "nothing declared"
@@ -1516,7 +1722,11 @@ async fn set_announce_min_seed(
     // nothing" and releases the torrent. Writing 0 as an empty value made the
     // second state unreachable -- the only way to ever authorise a deletion
     // silently did nothing. Clearing is its own flag.
-    let value = if req.clear { String::new() } else { req.hours.to_string() };
+    let value = if req.clear {
+        String::new()
+    } else {
+        req.hours.to_string()
+    };
     let persisted = set_host_entry(&state, "announce_min_seed_hours", &host, &value);
     Json(serde_json::json!({
         "host": host,
@@ -1556,7 +1766,10 @@ async fn set_announce_hidden(
         hidden: bool,
     }
     let Ok(req) = serde_json::from_str::<Req>(&body) else {
-        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "invalid body"})))
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "invalid body"})),
+        )
             .into_response();
     };
     let mut wanted: Vec<String> = req.hosts.iter().map(|h| h.trim().to_string()).collect();
@@ -1567,7 +1780,10 @@ async fn set_announce_hidden(
     wanted.sort();
     wanted.dedup();
     if wanted.is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "host is required"})))
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "host is required"})),
+        )
             .into_response();
     }
 
@@ -1578,8 +1794,8 @@ async fn set_announce_hidden(
     for host in wanted {
         // Only the batch form protects configured hosts: hiding a single row
         // the operator clicked on is exactly what they asked for.
-        let configured = cfg.announce_passkeys.contains_key(&host)
-            || cfg.announce_ip_modes.contains_key(&host);
+        let configured =
+            cfg.announce_passkeys.contains_key(&host) || cfg.announce_ip_modes.contains_key(&host);
         if req.hidden && configured && req.hosts.len() > 1 {
             skipped.push(host);
             continue;
@@ -1614,12 +1830,18 @@ async fn set_announce_mute(
         muted: bool,
     }
     let Ok(req) = serde_json::from_str::<Req>(&body) else {
-        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "invalid body"})))
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "invalid body"})),
+        )
             .into_response();
     };
     let host = req.host.trim().to_string();
     if host.is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "host is required"})))
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "host is required"})),
+        )
             .into_response();
     }
     let value = if req.muted { "1" } else { "" };
@@ -1784,10 +2006,12 @@ async fn get_announce_health(
             let trackers: Vec<serde_json::Value> = a
                 .trackers
                 .lock()
-                .map(|v| v.iter().map(|t| serde_json::json!({
+                .map(|v| {
+                    v.iter().map(|t| serde_json::json!({
                     "host": t.host, "limit": t.limit, "in_flight": t.in_flight,
                     "waiting": t.waiting, "latency_ms": t.latency_ms, "best_ms": t.best_ms,
-                })).collect())
+                })).collect()
+                })
                 .unwrap_or_default();
             serde_json::json!({
                 "needed_per_s": a.needed_milli.load(Relaxed) as f64 / 1000.0,
@@ -1829,14 +2053,24 @@ async fn get_announce_health(
 ///         `announce_rate_limit = 0.0` is what earns the 429s.
 /// muted / hidden : seen and accepted, kept out of every count.
 /// Torrents the tracker deleted are NOT a fault: nothing to fix.
-pub(crate) fn tracker_severity(hidden: bool, muted: bool, classes: &[&str], verdict: &str) -> &'static str {
+pub(crate) fn tracker_severity(
+    hidden: bool,
+    muted: bool,
+    classes: &[&str],
+    verdict: &str,
+) -> &'static str {
     if hidden {
         "hidden"
     } else if muted {
         "muted"
-    } else if classes.contains(&"invalid_passkey") || matches!(verdict, "v4_missing" | "v6_missing" | "absent") {
+    } else if classes.contains(&"invalid_passkey")
+        || matches!(verdict, "v4_missing" | "v6_missing" | "absent")
+    {
         "red"
-    } else if classes.iter().any(|c| matches!(*c, "rate_limited" | "timeout" | "dns" | "connect")) {
+    } else if classes
+        .iter()
+        .any(|c| matches!(*c, "rate_limited" | "timeout" | "dns" | "connect"))
+    {
         "amber"
     } else {
         "none"
@@ -1853,7 +2087,6 @@ async fn get_ip_modes(
     let cfg = state.cfg();
     Json(&cfg.announce_ip_modes).into_response()
 }
-
 
 // ---------------------------------------------------------------------------
 // Small config-backed reads
@@ -1902,7 +2135,11 @@ async fn get_vpn_speedtest_latest(
     let mut out = state
         .bench
         .as_ref()
-        .and_then(|b| b.lock().unwrap_or_else(|e| e.into_inner()).latest_speedtest())
+        .and_then(|b| {
+            b.lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .latest_speedtest()
+        })
         .and_then(|m| serde_json::to_value(m).ok())
         .unwrap_or_else(|| serde_json::json!({}));
     out["enabled"] = cfg.vpn_speedtest.enabled.into();
@@ -1916,7 +2153,10 @@ async fn get_vpn_speedtest_history(
 ) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    let hours = query_param(&query, "hours").and_then(|v| v.parse::<f64>().ok()).unwrap_or(168.0).max(0.0);
+    let hours = query_param(&query, "hours")
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(168.0)
+        .max(0.0);
     let since = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs_f64())
@@ -1925,7 +2165,12 @@ async fn get_vpn_speedtest_history(
     let rows = state
         .bench
         .as_ref()
-        .and_then(|b| b.lock().unwrap_or_else(|e| e.into_inner()).speedtests_since(since).ok())
+        .and_then(|b| {
+            b.lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .speedtests_since(since)
+                .ok()
+        })
         .unwrap_or_default();
     Json(rows).into_response()
 }
@@ -1995,14 +2240,17 @@ async fn latest_release(state: &AppState) -> (String, String) {
     // Any failure -- no network, rate limit, malformed answer, a kill switch
     // with no way out -- keeps whatever was cached and reports no update. An
     // update check must never be the reason the endpoint fails.
-    let tags: Vec<serde_json::Value> =
-        match fetch_release_tags("https://api.github.com/repos/Kheopsian/Hydranos/tags?per_page=100").await {
-            Ok(body) => match serde_json::from_str(&body) {
-                Ok(v) => v,
-                Err(_) => return (String::new(), String::new()),
-            },
+    let tags: Vec<serde_json::Value> = match fetch_release_tags(
+        "https://api.github.com/repos/Kheopsian/Hydranos/tags?per_page=100",
+    )
+    .await
+    {
+        Ok(body) => match serde_json::from_str(&body) {
+            Ok(v) => v,
             Err(_) => return (String::new(), String::new()),
-        };
+        },
+        Err(_) => return (String::new(), String::new()),
+    };
 
     let mut best = String::new();
     for tag in &tags {
@@ -2029,7 +2277,10 @@ async fn latest_release(state: &AppState) -> (String, String) {
 fn is_semver_tag(name: &str) -> bool {
     let body = name.strip_prefix('v').unwrap_or(name);
     let parts: Vec<&str> = body.split('.').collect();
-    parts.len() == 3 && parts.iter().all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+    parts.len() == 3
+        && parts
+            .iter()
+            .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
 }
 
 /// Compare two versions numerically, ignoring a leading "v" and any suffix.
@@ -2055,7 +2306,6 @@ fn version_less(a: &str, b: &str) -> bool {
     }
     false
 }
-
 
 /// The whole configuration file, as generic JSON.
 ///
@@ -2130,7 +2380,6 @@ fn toml_to_json(value: &toml::Value) -> serde_json::Value {
     }
 }
 
-
 /// Which engines the startup gate is still holding.
 ///
 /// Read from the engines themselves rather than from a flag the front kept in
@@ -2146,7 +2395,6 @@ async fn get_startup_pause(
     let held = state.engines.held_startup_scopes();
     Json(serde_json::json!({"held": held, "holding": !held.is_empty()})).into_response()
 }
-
 
 // ---------------------------------------------------------------------------
 // Store-backed reads
@@ -2291,14 +2539,19 @@ fn categories_map(state: &AppState) -> std::collections::BTreeMap<String, Catego
         let path = std::path::Path::new(&cfg.daemon.data_dir).join("categories.json");
         std::fs::read_to_string(path).ok()
     });
-    raw.and_then(|doc| serde_json::from_str(&doc).ok()).unwrap_or_default()
+    raw.and_then(|doc| serde_json::from_str(&doc).ok())
+        .unwrap_or_default()
 }
 
 /// Which engine a category belongs to, and where it puts its files.
 ///
 /// An unknown category lands on race, which is what 3.x does and what every
 /// downstream client has been configured against.
-pub(crate) fn placement(state: &AppState, category: &str, engine_override: &str) -> (String, String) {
+pub(crate) fn placement(
+    state: &AppState,
+    category: &str,
+    engine_override: &str,
+) -> (String, String) {
     let path = categories_map(state)
         .get(category)
         .map(|c| c.save_path.clone())
@@ -2310,15 +2563,22 @@ pub(crate) fn placement(state: &AppState, category: &str, engine_override: &str)
     // node may host. Without this a torrent could never be placed in `vpn1`,
     // whatever the config said.
     if !engine_override.is_empty()
-        && state.engines.engines().iter().any(|e| e.id == engine_override)
+        && state
+            .engines
+            .engines()
+            .iter()
+            .any(|e| e.id == engine_override)
     {
         return (engine_override.to_string(), path);
     }
 
     match categories_map(state).get(category) {
         Some(cat) => {
-            let engine =
-                if cat.mode.trim().eq_ignore_ascii_case("hoard") { "hoard".to_string() } else { "race".to_string() };
+            let engine = if cat.mode.trim().eq_ignore_ascii_case("hoard") {
+                "hoard".to_string()
+            } else {
+                "race".to_string()
+            };
             (engine, cat.save_path.clone())
         }
         None => ("race".to_string(), String::new()),
@@ -2421,7 +2681,16 @@ pub(crate) fn add_torrent_bytes(
     seed_mode: bool,
     engine_override: &str,
 ) -> Result<(String, String), String> {
-    let added = add_torrent_bytes_as(state, bytes, category, save_path_override, tags, paused, seed_mode, engine_override)?;
+    let added = add_torrent_bytes_as(
+        state,
+        bytes,
+        category,
+        save_path_override,
+        tags,
+        paused,
+        seed_mode,
+        engine_override,
+    )?;
     // The "on add" workflows: after the engine holds it, so the facts they
     // read are the torrent's, not a placeholder's.
     let (engine_id, _) = placement(state, category, engine_override);
@@ -2476,7 +2745,14 @@ pub(crate) fn add_torrent_bytes_as(
     // reservation in `claim` keeps a concurrent add on the same folder out
     // until the engine holds this one. See `pathclaim.rs`.
     let claim = crate::pathclaim::check_add(
-        state, bytes, &meta, &hash, &engine_id, &save_path, seed_mode, cfg.dedup.path_collision,
+        state,
+        bytes,
+        &meta,
+        &hash,
+        &engine_id,
+        &save_path,
+        seed_mode,
+        cfg.dedup.path_collision,
     )?;
     let save_path = claim.save_path.clone();
     // Held paused until `pathclaim::finish` has proven what it shares; the
@@ -2501,7 +2777,9 @@ pub(crate) fn add_torrent_bytes_as(
     let row_is_ours = {
         let store = state.store.lock().unwrap();
         let created = store
-            .insert_torrent(&hash, &engine_id, bytes, &save_path, category, added_time, paused, tags)
+            .insert_torrent(
+                &hash, &engine_id, bytes, &save_path, category, added_time, paused, tags,
+            )
             .map_err(|e| format!("store: {e}"))?;
         // Indexed here rather than at boot: a torrent that is never indexed is
         // a torrent the next add cannot recognise, and the backfill only sees
@@ -2541,7 +2819,10 @@ pub(crate) fn add_torrent_bytes_as(
             // reason one notch down: a torrent seeded from two engines has two
             // rows, and only ours is ours to drop.
             if row_is_ours {
-                crate::store::log_store("undo the row of a refused add", state.store.lock().unwrap().delete_copy(&hash, &engine_id));
+                crate::store::log_store(
+                    "undo the row of a refused add",
+                    state.store.lock().unwrap().delete_copy(&hash, &engine_id),
+                );
             }
             e
         })?;
@@ -2581,7 +2862,6 @@ pub(crate) fn add_torrent_bytes_as(
     Ok((hash, name))
 }
 
-
 /// Link an incoming torrent onto payload we already hold, if we hold it.
 ///
 /// Returns the info_hash of the source it linked from. None means "nothing to
@@ -2615,7 +2895,9 @@ fn try_link_existing(
             tracing::warn!(hash = %hash, source = %src_hash, "content key matched but pieces differ");
             continue;
         }
-        let Some(have) = crate::dedup::layout(&src_bytes) else { continue };
+        let Some(have) = crate::dedup::layout(&src_bytes) else {
+            continue;
+        };
 
         match crate::dedup::plan(&have, &src_save_path, &want, save_path) {
             Ok(p) if p.cross_device => {
@@ -2637,7 +2919,6 @@ fn try_link_existing(
     }
     None
 }
-
 
 #[derive(serde::Deserialize)]
 struct DedupConfigBody {
@@ -2667,8 +2948,11 @@ async fn post_dedup_config(
     guard!(state, headers, query);
 
     let Ok(req) = serde_json::from_str::<DedupConfigBody>(&body) else {
-        return (StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "invalid body"}))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "invalid body"})),
+        )
+            .into_response();
     };
 
     let mut kv = vec![("enabled".to_string(), req.enabled.to_string())];
@@ -2682,26 +2966,38 @@ async fn post_dedup_config(
 
     let writer = crate::cfgfile::lock();
     let Ok(doc) = std::fs::read_to_string(&state.config_path) else {
-        return (StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": "cannot read the config"}))).into_response();
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": "cannot read the config"})),
+        )
+            .into_response();
     };
     let doc = match crate::tomledit::set_toml_table(&doc, "dedup", &kv) {
         Ok(d) => d,
         Err(message) => {
-            return (StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({"error": message}))).into_response()
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": message})),
+            )
+                .into_response()
         }
     };
 
     // Never commit a config the daemon could not load: the document must decode
     // as a Config, not only as TOML.
     if toml::from_str::<Config>(&doc).is_err() {
-        return (StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "edited config no longer parses"}))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "edited config no longer parses"})),
+        )
+            .into_response();
     }
     if crate::cfgfile::write_edit(&state.config_path, &doc).is_err() {
-        return (StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": "cannot write the config"}))).into_response();
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": "cannot write the config"})),
+        )
+            .into_response();
     }
     if let Ok(reloaded) = toml::from_str::<Config>(&doc) {
         state.set_cfg(reloaded);
@@ -2717,7 +3013,6 @@ async fn post_dedup_config(
     }))
     .into_response()
 }
-
 
 /// What the content index knows: how much payload is held more than once.
 async fn get_dedup_stats(
@@ -2887,7 +3182,6 @@ fn job_view(j: &crate::store::Job) -> serde_json::Value {
         }
     }
 }
-
 
 // ---------------------------------------------------------------------------
 // Torrent listings -- where the second copy used to live
@@ -3085,7 +3379,9 @@ const LIST_SCAN_THREADS: usize = 16;
 /// `needle` (lowercase) inside `hay`, ignoring ASCII case. Candidates are
 /// found by their first byte, in either case, and only those are compared.
 fn ascii_contains_folded(hay: &[u8], needle: &[u8]) -> bool {
-    let Some(&first) = needle.first() else { return true };
+    let Some(&first) = needle.first() else {
+        return true;
+    };
     if hay.len() < needle.len() {
         return false;
     }
@@ -3127,7 +3423,10 @@ fn tracker_host_in(url: &str) -> &str {
         Some(i) => &url[i + 3..],
         None => url,
     };
-    let end = rest.bytes().position(|c| c == b'/' || c == b':').unwrap_or(rest.len());
+    let end = rest
+        .bytes()
+        .position(|c| c == b'/' || c == b':')
+        .unwrap_or(rest.len());
     &rest[..end]
 }
 
@@ -3154,19 +3453,25 @@ pub(crate) async fn engine_page_value(
     // torrents, so with every torrent named it was unreachable: pasting a hash
     // returned nothing. Six hex chars is the floor, below which short words
     // like "added" would start matching hashes by accident.
-    let search_is_hex =
-        search_raw.len() >= 6 && search_raw.bytes().all(|b| b.is_ascii_hexdigit());
+    let search_is_hex = search_raw.len() >= 6 && search_raw.bytes().all(|b| b.is_ascii_hexdigit());
     let cat_filter = param("category");
     let tag_filter = param("tag");
     let tracker_filter = param("tracker");
     let state_filter = param("state");
     let sort = {
         let s = param("sort");
-        if s.is_empty() { "added_time".to_string() } else { s }
+        if s.is_empty() {
+            "added_time".to_string()
+        } else {
+            s
+        }
     };
     let asc = param("order") == "asc";
     let offset = param("offset").parse::<usize>().unwrap_or(0);
-    let limit = param("limit").parse::<usize>().unwrap_or(500).clamp(1, 5000);
+    let limit = param("limit")
+        .parse::<usize>()
+        .unwrap_or(500)
+        .clamp(1, 5000);
 
     // Facts are only needed up front when the FILTER depends on them. In every
     // other case the page's own 500 hashes are looked up at the end, which is
@@ -3194,13 +3499,16 @@ pub(crate) async fn engine_page_value(
         (facts, waited)
     };
     let facts_done = started.elapsed();
-    let pinned: std::collections::HashSet<String> =
-        if state_filter == "__pinned__" || want_facets {
-            let store = state.store.read().unwrap();
-            store.pinned(engine_id).unwrap_or_default().into_iter().collect()
-        } else {
-            Default::default()
-        };
+    let pinned: std::collections::HashSet<String> = if state_filter == "__pinned__" || want_facets {
+        let store = state.store.read().unwrap();
+        store
+            .pinned(engine_id)
+            .unwrap_or_default()
+            .into_iter()
+            .collect()
+    } else {
+        Default::default()
+    };
 
     // Each facet family takes a comma-separated list to include and another to
     // exclude: `category=movies,series&category_not=animes`. A single value
@@ -3211,7 +3519,10 @@ pub(crate) async fn engine_page_value(
     // two dead trackers, "everything except those two" is the query that makes
     // the list usable at all, and one exclusion was not enough for it.
     let split = |v: &str| -> Vec<String> {
-        v.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect()
+        v.split(',')
+            .map(|x| x.trim().to_string())
+            .filter(|x| !x.is_empty())
+            .collect()
     };
     let cat_inc = split(&cat_filter);
     let cat_exc = split(&param("category_not"));
@@ -3229,16 +3540,28 @@ pub(crate) async fn engine_page_value(
     // resolved separately from the ids.
     let cat_none_inc = cat_inc.iter().any(|c| c == "__none__");
     let cat_none_exc = cat_exc.iter().any(|c| c == "__none__");
-    let cat_ids_inc: Vec<u16> = cat_inc.iter().filter(|c| c.as_str() != "__none__")
-        .filter_map(|c| facts.category_id(c)).collect();
-    let cat_ids_exc: Vec<u16> = cat_exc.iter().filter(|c| c.as_str() != "__none__")
-        .filter_map(|c| facts.category_id(c)).collect();
+    let cat_ids_inc: Vec<u16> = cat_inc
+        .iter()
+        .filter(|c| c.as_str() != "__none__")
+        .filter_map(|c| facts.category_id(c))
+        .collect();
+    let cat_ids_exc: Vec<u16> = cat_exc
+        .iter()
+        .filter(|c| c.as_str() != "__none__")
+        .filter_map(|c| facts.category_id(c))
+        .collect();
     let tag_none_inc = tag_inc.iter().any(|t| t == "__none__");
     let tag_none_exc = tag_exc.iter().any(|t| t == "__none__");
-    let tag_mask_inc: u64 = tag_inc.iter().filter(|t| t.as_str() != "__none__")
-        .filter_map(|t| facts.tag_bit(t)).fold(0u64, |m, b| m | b);
-    let tag_mask_exc: u64 = tag_exc.iter().filter(|t| t.as_str() != "__none__")
-        .filter_map(|t| facts.tag_bit(t)).fold(0u64, |m, b| m | b);
+    let tag_mask_inc: u64 = tag_inc
+        .iter()
+        .filter(|t| t.as_str() != "__none__")
+        .filter_map(|t| facts.tag_bit(t))
+        .fold(0u64, |m, b| m | b);
+    let tag_mask_exc: u64 = tag_exc
+        .iter()
+        .filter(|t| t.as_str() != "__none__")
+        .filter_map(|t| facts.tag_bit(t))
+        .fold(0u64, |m, b| m | b);
 
     let torrents = engine.manager.all();
     let total = torrents.len();
@@ -3261,7 +3584,10 @@ pub(crate) async fn engine_page_value(
     // (kept in slice order, so the concatenation is the order a single walk
     // gives). Tracker hosts are interned per slice and merged by NAME: a
     // slice's ids mean nothing outside it.
-    let textual = matches!(sort.as_str(), "name" | "state" | "tracker_host" | "category");
+    let textual = matches!(
+        sort.as_str(),
+        "name" | "state" | "tracker_host" | "category"
+    );
     struct Slice {
         tracker_names: Vec<String>,
         f_state: std::collections::BTreeMap<&'static str, i64>,
@@ -3307,7 +3633,12 @@ pub(crate) async fn engine_page_value(
 
             let tracker_id: u16 = {
                 let trackers = t.live_trackers.read();
-                let host = trackers.iter().flatten().next().map(|u| tracker_host_in(u)).unwrap_or("");
+                let host = trackers
+                    .iter()
+                    .flatten()
+                    .next()
+                    .map(|u| tracker_host_in(u))
+                    .unwrap_or("");
                 if host.is_empty() {
                     0
                 } else if let Some(id) = tracker_ids.get(host) {
@@ -3328,7 +3659,11 @@ pub(crate) async fn engine_page_value(
                 .last_announce_error
                 .lock()
                 .map(|s| {
-                    let class = if need_err_class { crate::errclass::classify(&s) } else { "" };
+                    let class = if need_err_class {
+                        crate::errclass::classify(&s)
+                    } else {
+                        ""
+                    };
                     (!s.is_empty(), class)
                 })
                 .unwrap_or((false, ""));
@@ -3342,7 +3677,9 @@ pub(crate) async fn engine_page_value(
                     true
                 } else if t.meta.name.is_empty() {
                     let hex = hex40(&t.info_hash);
-                    search_tokens.iter().all(|tok| ascii_contains_folded(&hex, tok.as_bytes()))
+                    search_tokens
+                        .iter()
+                        .all(|tok| ascii_contains_folded(&hex, tok.as_bytes()))
                 } else {
                     search_tokens
                         .iter()
@@ -3355,7 +3692,8 @@ pub(crate) async fn engine_page_value(
             // included by one -- and an exclusion must not sweep it away either.
             let m_errclass = (err_inc.is_empty() || err_inc.iter().any(|c| c == err_class))
                 && !err_exc.iter().any(|c| c == err_class);
-            let hash_hex_needed = state_filter == "__pinned__" || (want_facets && !pinned.is_empty());
+            let hash_hex_needed =
+                state_filter == "__pinned__" || (want_facets && !pinned.is_empty());
             let is_pinned = hash_hex_needed
                 && std::str::from_utf8(&hex40(&t.info_hash)).map_or(false, |h| pinned.contains(h));
             let m_state = match state_filter.as_str() {
@@ -3370,8 +3708,8 @@ pub(crate) async fn engine_page_value(
                 let inc_ok = cat_inc.is_empty()
                     || (cat_none_inc && f.category_id == 0)
                     || cat_ids_inc.contains(&f.category_id);
-                let exc_hit = (cat_none_exc && f.category_id == 0)
-                    || cat_ids_exc.contains(&f.category_id);
+                let exc_hit =
+                    (cat_none_exc && f.category_id == 0) || cat_ids_exc.contains(&f.category_id);
                 inc_ok && !exc_hit
             };
             let m_tag = {
@@ -3387,13 +3725,25 @@ pub(crate) async fn engine_page_value(
                 if m_search && m_cat && m_tag && m_tracker && m_errclass {
                     n_all += 1;
                     *f_state.entry(row_state).or_insert(0) += 1;
-                    if row_state == "seeding" && upload_rate > 0 { n_active += 1; }
-                    if tracker_error { n_trk_err += 1; }
-                    if torrent_error { n_err += 1; }
-                    if is_pinned { n_pinned += 1; }
+                    if row_state == "seeding" && upload_rate > 0 {
+                        n_active += 1;
+                    }
+                    if tracker_error {
+                        n_trk_err += 1;
+                    }
+                    if torrent_error {
+                        n_err += 1;
+                    }
+                    if is_pinned {
+                        n_pinned += 1;
+                    }
                 }
                 if m_search && m_state && m_tag && m_tracker && m_errclass {
-                    if f.category_id == 0 { n_uncat += 1; } else { *f_cat.entry(f.category_id).or_insert(0) += 1; }
+                    if f.category_id == 0 {
+                        n_uncat += 1;
+                    } else {
+                        *f_cat.entry(f.category_id).or_insert(0) += 1;
+                    }
                 }
                 if m_search && m_state && m_cat && m_tag && m_errclass {
                     if tracker_id == 0 {
@@ -3407,14 +3757,21 @@ pub(crate) async fn engine_page_value(
                         n_untagged += 1;
                     } else {
                         for i in 0..64 {
-                            if f.tag_bits & (1u64 << i) != 0 { f_tag[i] += 1; }
+                            if f.tag_bits & (1u64 << i) != 0 {
+                                f_tag[i] += 1;
+                            }
                         }
                     }
                 }
             }
 
-            if want_facets && !err_class.is_empty()
-                && m_search && m_state && m_cat && m_tag && m_tracker
+            if want_facets
+                && !err_class.is_empty()
+                && m_search
+                && m_state
+                && m_cat
+                && m_tag
+                && m_tracker
             {
                 *f_errclass.entry(err_class).or_insert(0) += 1;
             }
@@ -3430,13 +3787,21 @@ pub(crate) async fn engine_page_value(
                 } else {
                     String::new()
                 };
-                let total_upload = t.total_uploaded.load(std::sync::atomic::Ordering::Relaxed) as i64;
+                let total_upload =
+                    t.total_uploaded.load(std::sync::atomic::Ordering::Relaxed) as i64;
                 let total_download =
-                    t.total_downloaded.load(std::sync::atomic::Ordering::Relaxed) as i64;
+                    t.total_downloaded
+                        .load(std::sync::atomic::Ordering::Relaxed) as i64;
                 let completed = t.completed_time.load(std::sync::atomic::Ordering::Relaxed);
                 let n = match sort.as_str() {
                     "total_size" => t.meta.total_size as f64,
-                    "progress" => if core.state == "seeding" { 1.0 } else { core.progress },
+                    "progress" => {
+                        if core.state == "seeding" {
+                            1.0
+                        } else {
+                            core.progress
+                        }
+                    }
                     // The row's own definition, or a cross-seed sorts as 0
                     // under a cell that reads 3.2 (02/10/2026). `core` is
                     // already in hand, so `total_done` costs nothing here.
@@ -3447,17 +3812,27 @@ pub(crate) async fn engine_page_value(
                     ),
                     "upload_rate" => t.upload_rate.get() as f64,
                     "download_rate" => t.download_rate.get() as f64,
-                    "num_peers" => t.peers_connected.load(std::sync::atomic::Ordering::Relaxed) as f64,
+                    "num_peers" => {
+                        t.peers_connected.load(std::sync::atomic::Ordering::Relaxed) as f64
+                    }
                     "total_upload" => total_upload as f64,
                     "total_download" => total_download as f64,
                     "completed_time" => completed as f64,
-                    "seeding_time" => if completed > 0 { (now_secs() - completed).max(0) as f64 } else { 0.0 },
-                    "external_links" | "link_count" | "links_checked_at" => match link_summary.get(&t.info_hash) {
-                        Some(c) if sort == "external_links" => c.external_links as f64,
-                        Some(c) if sort == "link_count" => c.link_count as f64,
-                        Some(c) => c.measured_at as f64,
-                        None => unmeasured_key(asc),
-                    },
+                    "seeding_time" => {
+                        if completed > 0 {
+                            (now_secs() - completed).max(0) as f64
+                        } else {
+                            0.0
+                        }
+                    }
+                    "external_links" | "link_count" | "links_checked_at" => {
+                        match link_summary.get(&t.info_hash) {
+                            Some(c) if sort == "external_links" => c.external_links as f64,
+                            Some(c) if sort == "link_count" => c.link_count as f64,
+                            Some(c) => c.measured_at as f64,
+                            None => unmeasured_key(asc),
+                        }
+                    }
                     _ => t.added_time as f64,
                 };
                 keyed.push((key, n, t.info_hash, idx as u32));
@@ -3470,7 +3845,16 @@ pub(crate) async fn engine_page_value(
             f_tracker,
             f_tag,
             f_errclass,
-            counts: [n_all, n_active, n_trk_err, n_err, n_pinned, n_uncat, n_untagged, n_no_tracker],
+            counts: [
+                n_all,
+                n_active,
+                n_trk_err,
+                n_err,
+                n_pinned,
+                n_uncat,
+                n_untagged,
+                n_no_tracker,
+            ],
             keyed,
         }
     };
@@ -3491,7 +3875,10 @@ pub(crate) async fn engine_page_value(
                     sc.spawn(move || scan(range))
                 })
                 .collect();
-            handles.into_iter().map(|h| h.join().expect("list scan slice")).collect()
+            handles
+                .into_iter()
+                .map(|h| h.join().expect("list scan slice"))
+                .collect()
         })
     };
 
@@ -3501,17 +3888,28 @@ pub(crate) async fn engine_page_value(
     let mut f_tag: Vec<i64> = vec![0; 64];
     let mut f_errclass: std::collections::BTreeMap<&'static str, i64> = Default::default();
     let mut counts = [0i64; 8];
-    let mut keyed: Vec<ListKey> =
-        Vec::with_capacity(slices.iter().map(|s| s.keyed.len()).sum());
+    let mut keyed: Vec<ListKey> = Vec::with_capacity(slices.iter().map(|s| s.keyed.len()).sum());
     for slice in slices {
-        for (k, n) in slice.f_state { *f_state.entry(k).or_insert(0) += n; }
-        for (k, n) in slice.f_cat { *f_cat.entry(k).or_insert(0) += n; }
-        for (id, n) in slice.f_tracker {
-            *f_tracker.entry(slice.tracker_names[id as usize].clone()).or_insert(0) += n;
+        for (k, n) in slice.f_state {
+            *f_state.entry(k).or_insert(0) += n;
         }
-        for (i, n) in slice.f_tag.iter().enumerate() { f_tag[i] += n; }
-        for (k, n) in slice.f_errclass { *f_errclass.entry(k).or_insert(0) += n; }
-        for (i, n) in slice.counts.iter().enumerate() { counts[i] += n; }
+        for (k, n) in slice.f_cat {
+            *f_cat.entry(k).or_insert(0) += n;
+        }
+        for (id, n) in slice.f_tracker {
+            *f_tracker
+                .entry(slice.tracker_names[id as usize].clone())
+                .or_insert(0) += n;
+        }
+        for (i, n) in slice.f_tag.iter().enumerate() {
+            f_tag[i] += n;
+        }
+        for (k, n) in slice.f_errclass {
+            *f_errclass.entry(k).or_insert(0) += n;
+        }
+        for (i, n) in slice.counts.iter().enumerate() {
+            counts[i] += n;
+        }
         keyed.extend(slice.keyed);
     }
     let [n_all, n_active, n_trk_err, n_err, n_pinned, n_uncat, n_untagged, n_no_tracker] = counts;
@@ -3572,15 +3970,19 @@ pub(crate) async fn engine_page_value(
 
     // Full rows for the page alone, and the only place the rich StoreFacts are
     // read: 500 indexed lookups instead of a walk of the whole session.
-    let page: Vec<&std::sync::Arc<typhon_engine::torrent::meta::TorrentState>> =
-        window[start..].iter().map(|(_, _, _, i)| &torrents[*i as usize]).collect();
+    let page: Vec<&std::sync::Arc<typhon_engine::torrent::meta::TorrentState>> = window[start..]
+        .iter()
+        .map(|(_, _, _, i)| &torrents[*i as usize])
+        .collect();
     let page_hashes: Vec<String> = page
         .iter()
         .map(|t| typhon_engine::torrent::hex_encode(&t.info_hash))
         .collect();
     let rich = {
         let store = state.store.read().unwrap();
-        store.facts_for_hashes(&page_hashes, engine_id).unwrap_or_default()
+        store
+            .facts_for_hashes(&page_hashes, engine_id)
+            .unwrap_or_default()
     };
     let empty_facts = crate::row::StoreFacts::default();
     let agent = local_agent(engine_id);
@@ -3655,7 +4057,9 @@ pub(crate) async fn engine_page_value(
 /// `link_count` is the raw `nlink`, as a workflow condition reads it; the list
 /// shows it minus one ("other names"), which is a display choice, not a fact.
 fn with_link_columns(row: &mut serde_json::Value, cached: Option<crate::linkindex::Cached>) {
-    let Some(obj) = row.as_object_mut() else { return };
+    let Some(obj) = row.as_object_mut() else {
+        return;
+    };
     obj.insert(
         "external_links".into(),
         cached.map_or(serde_json::Value::Null, |c| c.external_links.into()),
@@ -3675,7 +4079,11 @@ fn with_link_columns(row: &mut serde_json::Value, cached: Option<crate::linkinde
 /// and it must not open on a page of torrents nobody has looked at yet.
 /// (Descending reverses the comparison, hence the sign.)
 fn unmeasured_key(asc: bool) -> f64 {
-    if asc { f64::INFINITY } else { f64::NEG_INFINITY }
+    if asc {
+        f64::INFINITY
+    } else {
+        f64::NEG_INFINITY
+    }
 }
 
 /// The sort key of an emitted row, mirroring the one `engine_page_value` builds
@@ -3703,15 +4111,19 @@ fn row_sort_key_dir(row: &serde_json::Value, sort: &str, asc: bool) -> (String, 
         // which is what the local path does when it builds its key.
         "progress" => (
             String::new(),
-            if s("state") == "seeding" { 1.0 } else { n("progress") },
+            if s("state") == "seeding" {
+                1.0
+            } else {
+                n("progress")
+            },
         ),
-        "total_size" | "ratio" | "upload_rate" | "download_rate" | "num_peers"
-        | "total_upload" | "total_download" | "completed_time" | "seeding_time" => {
-            (String::new(), n(sort))
-        }
+        "total_size" | "ratio" | "upload_rate" | "download_rate" | "num_peers" | "total_upload"
+        | "total_download" | "completed_time" | "seeding_time" => (String::new(), n(sort)),
         "external_links" | "link_count" | "links_checked_at" => (
             String::new(),
-            row.get(sort).and_then(|v| v.as_f64()).unwrap_or_else(|| unmeasured_key(asc)),
+            row.get(sort)
+                .and_then(|v| v.as_f64())
+                .unwrap_or_else(|| unmeasured_key(asc)),
         ),
         _ => (String::new(), n("added_time")),
     }
@@ -3740,14 +4152,20 @@ fn enforce_error_class(
         return;
     }
     for page in pages.iter_mut() {
-        let Some(obj) = page.as_object_mut() else { continue };
-        let Some(rows) = obj.get_mut("rows").and_then(|r| r.as_array_mut()) else { continue };
+        let Some(obj) = page.as_object_mut() else {
+            continue;
+        };
+        let Some(rows) = obj.get_mut("rows").and_then(|r| r.as_array_mut()) else {
+            continue;
+        };
         let before = rows.len();
         rows.retain(|r| {
-            let msg = r.get("tracker_error_msg").and_then(|v| v.as_str()).unwrap_or("");
+            let msg = r
+                .get("tracker_error_msg")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let class = crate::errclass::classify(msg);
-            (inc.is_empty() || inc.iter().any(|c| c == class))
-                && !exc.iter().any(|c| c == class)
+            (inc.is_empty() || inc.iter().any(|c| c == class)) && !exc.iter().any(|c| c == class)
         });
         let dropped = (before - rows.len()) as i64;
         if dropped > 0 && before < window {
@@ -3798,14 +4216,19 @@ fn merge_pages(
         // two rows that compare equal could swap between requests and the same
         // torrent would show up on two pages, or on none.
         ord.then_with(|| {
-            let ha = a.get("info_hash").and_then(|v| v.as_str()).unwrap_or_default();
-            let hb = b.get("info_hash").and_then(|v| v.as_str()).unwrap_or_default();
+            let ha = a
+                .get("info_hash")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            let hb = b
+                .get("info_hash")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
             ha.cmp(hb)
         })
     });
 
-    let rows: Vec<serde_json::Value> =
-        all.into_iter().skip(offset).take(limit).collect();
+    let rows: Vec<serde_json::Value> = all.into_iter().skip(offset).take(limit).collect();
     serde_json::json!({
         "total": total,
         "filtered": filtered,
@@ -3838,7 +4261,9 @@ struct FacetSum {
 
 impl FacetSum {
     fn add(&mut self, facets: Option<&serde_json::Value>) {
-        let Some(obj) = facets.and_then(|f| f.as_object()) else { return };
+        let Some(obj) = facets.and_then(|f| f.as_object()) else {
+            return;
+        };
         self.seen = true;
         for (key, value) in obj {
             match value {
@@ -3868,7 +4293,10 @@ impl FacetSum {
             out.insert(k, v.into());
         }
         for (k, v) in self.maps {
-            out.insert(k, serde_json::to_value(v).unwrap_or(serde_json::Value::Null));
+            out.insert(
+                k,
+                serde_json::to_value(v).unwrap_or(serde_json::Value::Null),
+            );
         }
         serde_json::Value::Object(out)
     }
@@ -3894,7 +4322,11 @@ fn with_window(query: &str, offset: usize, limit: usize) -> String {
 ///
 /// With no nodes declared this is exactly the single-node path and costs
 /// nothing extra -- the common case must not pay for a feature it does not use.
-pub(crate) async fn fleet_page(state: &AppState, engine_id: &str, query: &str) -> serde_json::Value {
+pub(crate) async fn fleet_page(
+    state: &AppState,
+    engine_id: &str,
+    query: &str,
+) -> serde_json::Value {
     let nodes: Vec<crate::store::Node> = {
         let store = state.store.lock().unwrap();
         store.nodes().unwrap_or_default()
@@ -3957,7 +4389,8 @@ pub(crate) async fn fleet_page(state: &AppState, engine_id: &str, query: &str) -
             if let Some(hs) = page.get("hashes").and_then(|v| v.as_array()) {
                 for h in hs {
                     if let Some(hs) = h.as_str() {
-                        copies.push(serde_json::json!({"hash": hs, "agent": format!("local-{id}")}));
+                        copies
+                            .push(serde_json::json!({"hash": hs, "agent": format!("local-{id}")}));
                     }
                     hashes.push(h.clone());
                 }
@@ -3972,7 +4405,9 @@ pub(crate) async fn fleet_page(state: &AppState, engine_id: &str, query: &str) -
             let (url, key, name) = (n.url.clone(), n.api_key.clone(), n.name.clone());
             let path = format!("api/{engine_id}/page?{query}");
             async move {
-                match crate::nodes::forward(&url, &key, reqwest::Method::GET, &path, Vec::new()).await {
+                match crate::nodes::forward(&url, &key, reqwest::Method::GET, &path, Vec::new())
+                    .await
+                {
                     Ok((status, body, _)) if status.is_success() => {
                         serde_json::from_slice::<serde_json::Value>(&body)
                             .ok()
@@ -4057,10 +4492,8 @@ pub(crate) async fn fleet_page(state: &AppState, engine_id: &str, query: &str) -
                                 // engine runs. The remote row already names its
                                 // own engine as `local-<engine>`; swapping the
                                 // prefix keeps both halves of the answer.
-                                let here = o
-                                    .get("agent")
-                                    .and_then(|a| a.as_str())
-                                    .unwrap_or("local");
+                                let here =
+                                    o.get("agent").and_then(|a| a.as_str()).unwrap_or("local");
                                 let engine = here.strip_prefix("local-").unwrap_or(here);
                                 let label = if engine == "local" || engine.is_empty() {
                                     name.clone()
@@ -4089,10 +4522,20 @@ pub(crate) async fn fleet_page(state: &AppState, engine_id: &str, query: &str) -
     // Re-applying the filter here costs one pass over the rows already in hand
     // and makes the answer right whatever the fleet is running.
     let err_inc: Vec<String> = query_param(query, "error_class")
-        .map(|v| v.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect())
+        .map(|v| {
+            v.split(',')
+                .map(|x| x.trim().to_string())
+                .filter(|x| !x.is_empty())
+                .collect()
+        })
         .unwrap_or_default();
     let err_exc: Vec<String> = query_param(query, "error_class_not")
-        .map(|v| v.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect())
+        .map(|v| {
+            v.split(',')
+                .map(|x| x.trim().to_string())
+                .filter(|x| !x.is_empty())
+                .collect()
+        })
         .unwrap_or_default();
     enforce_error_class(&mut pages, &err_inc, &err_exc, offset + limit);
     merge_pages(pages, &sort, asc, offset, limit)
@@ -4132,7 +4575,13 @@ async fn get_race_torrents(
     // Every engine with the race role, as the Race tab means: 4.3 listed the
     // engine named "race" only, and an extra race engine's torrents appeared
     // in no list at all.
-    let ids: Vec<String> = state.engines.engines().iter().filter(|e| e.role == "race").map(|e| e.id.clone()).collect();
+    let ids: Vec<String> = state
+        .engines
+        .engines()
+        .iter()
+        .filter(|e| e.role == "race")
+        .map(|e| e.id.clone())
+        .collect();
     let mut rows = Vec::new();
     for id in ids {
         rows.extend(list_rows(&state, &id, &query).await);
@@ -4155,7 +4604,9 @@ fn without_paging(query: &str) -> String {
 /// A list route's rows: the page filters applied when the query has any.
 /// 4.3 ignored every filter on these routes and returned the whole engine.
 async fn list_rows(state: &AppState, engine_id: &str, query: &str) -> Vec<serde_json::Value> {
-    let filtered = crate::selection::FILTER_KEYS.iter().any(|k| query_param(query, k).is_some_and(|v| !v.is_empty()));
+    let filtered = crate::selection::FILTER_KEYS
+        .iter()
+        .any(|k| query_param(query, k).is_some_and(|v| !v.is_empty()));
     if !filtered {
         return engine_rows(state, engine_id);
     }
@@ -4185,7 +4636,6 @@ async fn get_hoard_torrents(
     guard!(state, headers, query);
     Json(list_rows(&state, "hoard", &query).await).into_response()
 }
-
 
 // ---------------------------------------------------------------------------
 // Totals, tags, per-engine settings
@@ -4257,7 +4707,13 @@ async fn get_public_ip(
     guard!(state, headers, query);
     let cfg = state.cfg();
     if query_param(&query, "refresh").as_deref() == Some("1") {
-        crate::netprobe::measure(&state.engines, &state.net_engines, &state.public_ip, &crate::netprobe::Probe::from_config(&cfg)).await;
+        crate::netprobe::measure(
+            &state.engines,
+            &state.net_engines,
+            &state.public_ip,
+            &crate::netprobe::Probe::from_config(&cfg),
+        )
+        .await;
     }
     let cache = state.public_ip.lock().await;
     let mut out = serde_json::json!({"ip": cache.0.clone(), "ip_v6": cache.1.clone()});
@@ -4371,7 +4827,6 @@ async fn get_engines(
         .collect();
     Json(out).into_response()
 }
-
 
 // ---------------------------------------------------------------------------
 // Small listings and per-subsystem status
@@ -4543,7 +4998,10 @@ async fn set_volume_policy(
             && body.high_watermark.is_none()
             && body.low_watermark.is_none()
         {
-            return Json(serde_json::json!({"status": "ok", "quota": quota, "trim_after_drain": trim})).into_response();
+            return Json(
+                serde_json::json!({"status": "ok", "quota": quota, "trim_after_drain": trim}),
+            )
+            .into_response();
         }
     }
     if body.inherit {
@@ -4670,22 +5128,36 @@ async fn get_categories_orphans(
         let store = state.store.lock().unwrap();
         store.category_usage().unwrap_or_default()
     };
-    let roles: std::collections::HashMap<String, String> =
-        state.engines.engines().iter().map(|e| (e.id.clone(), e.role.clone())).collect();
+    let roles: std::collections::HashMap<String, String> = state
+        .engines
+        .engines()
+        .iter()
+        .map(|e| (e.id.clone(), e.role.clone()))
+        .collect();
     // name -> (total, role -> n, save_path -> n)
-    let mut by: std::collections::BTreeMap<String, (i64, std::collections::HashMap<String, i64>, std::collections::HashMap<String, i64>)> =
-        Default::default();
+    let mut by: std::collections::BTreeMap<
+        String,
+        (
+            i64,
+            std::collections::HashMap<String, i64>,
+            std::collections::HashMap<String, i64>,
+        ),
+    > = Default::default();
     for (cat, session, path, n) in usage {
         if configured.contains_key(&cat) {
             continue;
         }
         let e = by.entry(cat).or_default();
         e.0 += n;
-        *e.1.entry(roles.get(&session).cloned().unwrap_or_default()).or_default() += n;
+        *e.1.entry(roles.get(&session).cloned().unwrap_or_default())
+            .or_default() += n;
         *e.2.entry(path).or_default() += n;
     }
     let top = |m: &std::collections::HashMap<String, i64>| {
-        m.iter().max_by_key(|(_, n)| **n).map(|(k, _)| k.clone()).unwrap_or_default()
+        m.iter()
+            .max_by_key(|(_, n)| **n)
+            .map(|(k, _)| k.clone())
+            .unwrap_or_default()
     };
     let out: Vec<serde_json::Value> = by
         .into_iter()
@@ -4708,14 +5180,24 @@ fn stored_category(state: &AppState, name: &str) -> Option<serde_json::Value> {
         store.meta_doc("categories")
     }
     .filter(|doc| !doc.is_empty())
-    .or_else(|| std::fs::read_to_string(std::path::Path::new(&cfg.daemon.data_dir).join("categories.json")).ok())?;
+    .or_else(|| {
+        std::fs::read_to_string(std::path::Path::new(&cfg.daemon.data_dir).join("categories.json"))
+            .ok()
+    })?;
     let doc: serde_json::Value = serde_json::from_str(&raw).ok()?;
     doc.get(name).cloned()
 }
 
 fn checked_category(mut incoming: serde_json::Value) -> Result<serde_json::Value, String> {
-    let obj = incoming.as_object_mut().ok_or("the body must be a JSON object")?;
-    let mode = obj.get("mode").and_then(|m| m.as_str()).unwrap_or("race").trim().to_ascii_lowercase();
+    let obj = incoming
+        .as_object_mut()
+        .ok_or("the body must be a JSON object")?;
+    let mode = obj
+        .get("mode")
+        .and_then(|m| m.as_str())
+        .unwrap_or("race")
+        .trim()
+        .to_ascii_lowercase();
     if mode != "race" && mode != "hoard" {
         return Err(format!("mode must be race or hoard, not {mode:?}"));
     }
@@ -4862,7 +5344,6 @@ async fn qbit_tags(
     };
     Json(tags).into_response()
 }
-
 
 // ---------------------------------------------------------------------------
 // Trackers, network mode, filesystem browsing, benchmark listings
@@ -5041,7 +5522,11 @@ pub(crate) const SECRET_KEYS: &[&str] = &["socks5_outbound_pass", "socks5_pass",
 /// The mask for a set secret, nothing for an empty one: "is one set" stays
 /// readable.
 pub(crate) fn mask_secret(v: &str) -> &'static str {
-    if v.is_empty() { "" } else { SECRET_MASK }
+    if v.is_empty() {
+        ""
+    } else {
+        SECRET_MASK
+    }
 }
 
 /// A posted value that stands for "keep what the file has".
@@ -5051,8 +5536,12 @@ pub(crate) fn is_kept_secret(key: &str, v: &serde_json::Value) -> bool {
 
 /// The per-host passkeys as a GET answers them: the hosts that have one, the
 /// passkey itself replaced by the mask.
-fn masked_passkeys(all: &std::collections::BTreeMap<String, String>) -> std::collections::BTreeMap<String, &'static str> {
-    all.iter().map(|(h, p)| (h.clone(), mask_secret(p))).collect()
+fn masked_passkeys(
+    all: &std::collections::BTreeMap<String, String>,
+) -> std::collections::BTreeMap<String, &'static str> {
+    all.iter()
+        .map(|(h, p)| (h.clone(), mask_secret(p)))
+        .collect()
 }
 
 /// The proxy URL whose password is masked: `announce_proxy` carries one in
@@ -5064,7 +5553,9 @@ const PROXY_URL_KEYS: &[&str] = &["announce_proxy"];
 /// the `@` that ends the authority. None for a URL without one.
 fn proxy_password_span(url: &str) -> Option<std::ops::Range<usize>> {
     let start = url.find("://")? + 3;
-    let end = url[start..].find(['/', '?', '#']).map_or(url.len(), |i| start + i);
+    let end = url[start..]
+        .find(['/', '?', '#'])
+        .map_or(url.len(), |i| start + i);
     let at = start + url[start..end].rfind('@')?;
     let colon = start + url[start..at].find(':')?;
     (colon + 1 < at).then_some(colon + 1..at)
@@ -5155,7 +5646,11 @@ fn network_fields(cfg: &Config) -> NetworkFields<'_> {
     // The engine that follows the gluetun port, read from the file: it was
     // answered as "hoard" whatever the file said, so a race-forwarding setup
     // reopened on hoard and the next save moved the port.
-    let gluetun = if race.gluetun_port_forward && !hoard.gluetun_port_forward { race } else { hoard };
+    let gluetun = if race.gluetun_port_forward && !hoard.gluetun_port_forward {
+        race
+    } else {
+        hoard
+    };
     NetworkFields {
         race_listen_port: race.listen_port,
         hoard_listen_port: hoard.listen_port,
@@ -5173,7 +5668,11 @@ fn network_fields(cfg: &Config) -> NetworkFields<'_> {
         gluetun_port_forward: gluetun.gluetun_port_forward,
         gluetun_url: &gluetun.gluetun_url,
         gluetun_api_key: &gluetun.gluetun_api_key,
-        gluetun_port_engine: if std::ptr::eq(gluetun, race) { "race" } else { "hoard" },
+        gluetun_port_engine: if std::ptr::eq(gluetun, race) {
+            "race"
+        } else {
+            "hoard"
+        },
         announce_proxy: &race.announce_proxy,
         announce_ip: &race.announce_ip,
     }
@@ -5317,9 +5816,15 @@ async fn get_network_mode(
 /// first one: the question is yes or no, and a million-torrent hoard answers
 /// it on the first few torrents.
 fn engine_lists_udp(state: &AppState, engine_id: &str) -> bool {
-    let Some(engine) = state.engines.get(engine_id) else { return false };
+    let Some(engine) = state.engines.get(engine_id) else {
+        return false;
+    };
     engine.manager.all().iter().any(|t| {
-        t.live_trackers.read().iter().flatten().any(|u| typhon_engine::tracker::udp::is_udp(u))
+        t.live_trackers
+            .read()
+            .iter()
+            .flatten()
+            .any(|u| typhon_engine::tracker::udp::is_udp(u))
     })
 }
 
@@ -5538,8 +6043,8 @@ fn interfaces() -> Vec<serde_json::Value> {
     names.sort();
 
     for name in names {
-        let state = std::fs::read_to_string(format!("/sys/class/net/{name}/operstate"))
-            .unwrap_or_default();
+        let state =
+            std::fs::read_to_string(format!("/sys/class/net/{name}/operstate")).unwrap_or_default();
         // Only interfaces that are actually up. A container image can carry
         // tunnel stubs (sit0, tunl0) that are always down; listing them showed
         // two interfaces where 3.x shows one, and would put dead devices in the
@@ -5650,7 +6155,13 @@ async fn get_network_engines(
     // serving the cached pass, which is the only way an operator can confirm a
     // tunnel came back without waiting out the three-minute timer.
     if query_param(&query, "refresh").as_deref() == Some("1") {
-        crate::netprobe::measure(&state.engines, &state.net_engines, &state.public_ip, &crate::netprobe::Probe::from_config(&cfg)).await;
+        crate::netprobe::measure(
+            &state.engines,
+            &state.net_engines,
+            &state.public_ip,
+            &crate::netprobe::Probe::from_config(&cfg),
+        )
+        .await;
     }
 
     let (rows, measured_at) = {
@@ -5685,7 +6196,10 @@ async fn get_network_engines(
             .find(|row| {
                 row.get("local").and_then(|v| v.as_bool()).unwrap_or(false)
                     && row.get("exit_ip").and_then(|v| v.as_str()) == Some(exits[0].as_str())
-                    && row.get("exit_ip_v6").and_then(|v| v.as_str()).is_some_and(|s| !s.is_empty())
+                    && row
+                        .get("exit_ip_v6")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|s| !s.is_empty())
             })
             .and_then(|row| row.get("exit_ip_v6").and_then(|v| v.as_str()))
             .unwrap_or_default()
@@ -5718,7 +6232,10 @@ async fn get_qbit_import_events(
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
     let Some((_, progress)) = latest_import(&state) else {
-        return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "no import job"})))
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "no import job"})),
+        )
             .into_response();
     };
     let stream = async_stream::stream! {
@@ -5805,8 +6322,17 @@ fn status_payload(state: &AppState) -> serde_json::Value {
     // from the link scanner (up to a day old). `null` until each has run once:
     // a zero would read as "nothing seeded".
     let seeded = crate::benchsampler::latest_trackers().map(|rows| {
-        let of = |e: &str| -> i64 { rows.iter().filter(|r| r.engine == e).map(|r| r.seed_size).sum() };
-        (of("hoard"), of("race"), rows.iter().map(|r| r.seed_size).sum::<i64>())
+        let of = |e: &str| -> i64 {
+            rows.iter()
+                .filter(|r| r.engine == e)
+                .map(|r| r.seed_size)
+                .sum()
+        };
+        (
+            of("hoard"),
+            of("race"),
+            rows.iter().map(|r| r.seed_size).sum::<i64>(),
+        )
     });
     let disk = state.engines.catalogue_usage();
 
@@ -5904,7 +6430,6 @@ async fn get_status(
     Json(status_payload(&state)).into_response()
 }
 
-
 // ---------------------------------------------------------------------------
 // Logs, benchmark sampling, port forwarding
 // ---------------------------------------------------------------------------
@@ -5920,7 +6445,13 @@ async fn get_logs(
     // the whole ring whatever they said.
     let filter = match crate::logbuf::Filter::from_query(&query, now_secs()) {
         Ok(f) => f,
-        Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e}))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": e})),
+            )
+                .into_response()
+        }
     };
     let limit = query_param(&query, "limit")
         .and_then(|v| v.parse::<usize>().ok())
@@ -6254,7 +6785,13 @@ async fn stream_logs(
     guard!(state, headers, query);
     let mut filter = match crate::logbuf::Filter::from_query(&query, now_secs()) {
         Ok(f) => f,
-        Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e}))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": e})),
+            )
+                .into_response()
+        }
     };
     // A period means nothing to a tail: every line it sends is new.
     filter.since = None;
@@ -6265,7 +6802,10 @@ async fn stream_logs(
         .get("last-event-id")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.trim().parse::<u64>().ok());
-    let mut cursor = filter.after.or(resume).unwrap_or_else(|| state.logs.last_seq());
+    let mut cursor = filter
+        .after
+        .or(resume)
+        .unwrap_or_else(|| state.logs.last_seq());
 
     let logs = state.logs.clone();
     let stream = async_stream::stream! {
@@ -6411,7 +6951,13 @@ fn arc_stats() -> ArcStats {
     let misses = field("misses");
     let dhits = field("demand_data_hits") + field("demand_metadata_hits");
     let dmisses = field("demand_data_misses") + field("demand_metadata_misses");
-    let pct = |h: f64, m: f64| if h + m > 0.0 { h / (h + m) * 100.0 } else { 0.0 };
+    let pct = |h: f64, m: f64| {
+        if h + m > 0.0 {
+            h / (h + m) * 100.0
+        } else {
+            0.0
+        }
+    };
     ArcStats {
         size_bytes: field("size") as i64,
         hit_rate_pct: pct(hits, misses),
@@ -6504,7 +7050,11 @@ fn port_forward_rows(state: &AppState, cfg: &Config) -> Vec<serde_json::Value> {
                 }
                 Some(st) => {
                     let mut v = serde_json::to_value(&st).unwrap_or_default();
-                    v["by"] = if st.method.is_empty() { "none".into() } else { st.method.clone().into() };
+                    v["by"] = if st.method.is_empty() {
+                        "none".into()
+                    } else {
+                        st.method.clone().into()
+                    };
                     v
                 }
                 None => serde_json::json!({"by": "pending"}),
@@ -6535,16 +7085,33 @@ fn port_forward_rows(state: &AppState, cfg: &Config) -> Vec<serde_json::Value> {
 /// are generated from one list: a metric added to the sampler and forgotten
 /// here is a column that silently stops being comparable.
 const BENCH_METRICS: &[&str] = &[
-    "arc_demand_hit_rate_pct", "arc_demand_miss_per_sec", "arc_ghost_hits_per_sec",
-    "arc_hit_rate_pct", "arc_miss_per_sec", "arc_size_bytes",
-    "global_downloaded", "global_uploaded",
-    "hoard_active", "hoard_announce_fail_rate", "hoard_announce_rate",
-    "hoard_peers", "hoard_session_uploaded", "hoard_upload_rate",
-    "hoard_uploading", "hoard_with_peers",
-    "iowait_pct", "open_fds",
-    "race_announce_fail_rate", "race_announce_rate", "race_avg_share",
-    "race_download_rate", "race_peers", "race_session_uploaded",
-    "race_torrents", "race_upload_rate", "race_uploading",
+    "arc_demand_hit_rate_pct",
+    "arc_demand_miss_per_sec",
+    "arc_ghost_hits_per_sec",
+    "arc_hit_rate_pct",
+    "arc_miss_per_sec",
+    "arc_size_bytes",
+    "global_downloaded",
+    "global_uploaded",
+    "hoard_active",
+    "hoard_announce_fail_rate",
+    "hoard_announce_rate",
+    "hoard_peers",
+    "hoard_session_uploaded",
+    "hoard_upload_rate",
+    "hoard_uploading",
+    "hoard_with_peers",
+    "iowait_pct",
+    "open_fds",
+    "race_announce_fail_rate",
+    "race_announce_rate",
+    "race_avg_share",
+    "race_download_rate",
+    "race_peers",
+    "race_session_uploaded",
+    "race_torrents",
+    "race_upload_rate",
+    "race_uploading",
 ];
 
 async fn get_bench_compare(
@@ -6563,30 +7130,38 @@ async fn get_bench_compare(
         return bad_request("need start < mid < end");
     }
     let Some(bench) = state.bench.as_ref() else {
-        return Json(serde_json::json!({"metrics": null, "p1_count": 0, "p2_count": 0})).into_response();
+        return Json(serde_json::json!({"metrics": null, "p1_count": 0, "p2_count": 0}))
+            .into_response();
     };
     let ((n1, s1), (n2, s2)) = {
         let db = bench.lock().unwrap_or_else(|e| e.into_inner());
-        match (db.period_stats(start, mid, BENCH_METRICS), db.period_stats(mid, end, BENCH_METRICS)) {
+        match (
+            db.period_stats(start, mid, BENCH_METRICS),
+            db.period_stats(mid, end, BENCH_METRICS),
+        ) {
             (Ok(a), Ok(b)) => (a, b),
             (Err(e), _) | (_, Err(e)) => {
                 tracing::warn!("bench compare query failed: {e}");
-                return Json(serde_json::json!({"metrics": null, "p1_count": 0, "p2_count": 0})).into_response();
+                return Json(serde_json::json!({"metrics": null, "p1_count": 0, "p2_count": 0}))
+                    .into_response();
             }
         }
     };
     // No sample on either side: nothing to compare, which the screen says.
     if n1 == 0 || n2 == 0 {
-        return Json(serde_json::json!({"metrics": null, "p1_count": n1, "p2_count": n2})).into_response();
+        return Json(serde_json::json!({"metrics": null, "p1_count": n1, "p2_count": n2}))
+            .into_response();
     }
-    let side = |n: usize, st: &crate::benchdb::PeriodStat| {
-        serde_json::json!({"avg": st.avg, "count": n, "max": st.max, "p95": st.p95})
-    };
+    let side = |n: usize, st: &crate::benchdb::PeriodStat| serde_json::json!({"avg": st.avg, "count": n, "max": st.max, "p95": st.p95});
     let mut metrics = serde_json::Map::new();
     for (i, name) in BENCH_METRICS.iter().enumerate() {
         let (a, b) = (&s1[i], &s2[i]);
         // Relative to P1; a metric at 0 in P1 has no relative change.
-        let delta = if a.avg != 0.0 { (b.avg - a.avg) / a.avg.abs() * 100.0 } else { 0.0 };
+        let delta = if a.avg != 0.0 {
+            (b.avg - a.avg) / a.avg.abs() * 100.0
+        } else {
+            0.0
+        };
         metrics.insert(
             (*name).to_string(),
             serde_json::json!({"delta_avg_pct": delta, "p1": side(n1, a), "p2": side(n2, b)}),
@@ -6599,7 +7174,6 @@ async fn get_bench_compare(
     }))
     .into_response()
 }
-
 
 #[derive(serde::Serialize)]
 struct WireGuardStatus {
@@ -6731,7 +7305,13 @@ async fn post_wireguard_config_upload(
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
     let cfg = state.cfg();
-    let bad = |msg: String| (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": msg}))).into_response();
+    let bad = |msg: String| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": msg})),
+        )
+            .into_response()
+    };
 
     let multipart = headers
         .get(axum::http::header::CONTENT_TYPE)
@@ -6806,10 +7386,16 @@ async fn post_wireguard_engines(
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
     let cfg = state.cfg();
-    let bad = |status: StatusCode, msg: String| (status, Json(serde_json::json!({"error": msg}))).into_response();
+    let bad = |status: StatusCode, msg: String| {
+        (status, Json(serde_json::json!({"error": msg}))).into_response()
+    };
 
     let parsed: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
-    let Some(list) = parsed.get("engines").and_then(|v| v.as_array()).filter(|l| !l.is_empty()) else {
+    let Some(list) = parsed
+        .get("engines")
+        .and_then(|v| v.as_array())
+        .filter(|l| !l.is_empty())
+    else {
         return bad(StatusCode::BAD_REQUEST, "no engines in the request".into());
     };
     let local: Vec<String> = cfg.local_engines().into_iter().map(|e| e.id).collect();
@@ -6821,7 +7407,13 @@ async fn post_wireguard_engines(
     let mut warnings: Vec<String> = Vec::new();
     let q = crate::tomledit::quote_toml_key;
     for e in list {
-        let txt = |k: &str| e.get(k).and_then(|v| v.as_str()).unwrap_or_default().trim().to_string();
+        let txt = |k: &str| {
+            e.get(k)
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .trim()
+                .to_string()
+        };
         let id = txt("engine_id");
         if !local.contains(&id) {
             return bad(StatusCode::BAD_REQUEST, format!("unknown engine {id:?}"));
@@ -6831,9 +7423,20 @@ async fn post_wireguard_engines(
         // predates them sends `enabled` alone, and unticked meant direct.
         let enabled_flag = e.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
         let assignment = match e.get("assignment").and_then(|v| v.as_str()).map(str::trim) {
-            None | Some("") => if enabled_flag { "tunnel" } else { "direct" },
+            None | Some("") => {
+                if enabled_flag {
+                    "tunnel"
+                } else {
+                    "direct"
+                }
+            }
             Some(a @ ("tunnel" | "direct" | "none")) => a,
-            Some(other) => return bad(StatusCode::BAD_REQUEST, format!("{id}: assignment {other:?} is not tunnel, direct or none")),
+            Some(other) => {
+                return bad(
+                    StatusCode::BAD_REQUEST,
+                    format!("{id}: assignment {other:?} is not tunnel, direct or none"),
+                )
+            }
         };
         let enabled = assignment == "tunnel";
         let file = txt("config_file");
@@ -6841,25 +7444,40 @@ async fn post_wireguard_engines(
         let mode = txt("port_forward").to_ascii_lowercase();
         let port = e.get("manual_port").and_then(|v| v.as_i64()).unwrap_or(0);
         if !(0..=65535).contains(&port) {
-            return bad(StatusCode::BAD_REQUEST, format!("the {id} port must be between 1 and 65535"));
+            return bad(
+                StatusCode::BAD_REQUEST,
+                format!("the {id} port must be between 1 and 65535"),
+            );
         }
         if !["", "manual", "off", "none", "natpmp"].contains(&mode.as_str()) {
-            return bad(StatusCode::BAD_REQUEST, format!("unknown port forwarding {mode:?}"));
+            return bad(
+                StatusCode::BAD_REQUEST,
+                format!("unknown port forwarding {mode:?}"),
+            );
         }
         if enabled {
             if file.is_empty() {
-                return bad(StatusCode::BAD_REQUEST, format!("{id}: pick a configuration file"));
+                return bad(
+                    StatusCode::BAD_REQUEST,
+                    format!("{id}: pick a configuration file"),
+                );
             }
             if let Err(err) = crate::wgtunnel::load_conf(&dir, &file) {
                 return bad(StatusCode::BAD_REQUEST, format!("{id}: {err}"));
             }
             if crate::wgtunnel::provider(&provider).is_none() {
-                return bad(StatusCode::BAD_REQUEST, format!("{id}: pick the provider the file comes from"));
+                return bad(
+                    StatusCode::BAD_REQUEST,
+                    format!("{id}: pick the provider the file comes from"),
+                );
             }
             // One file, one tunnel: two engines on one file share an address
             // and a forwarded port, and the provider sees one client twice.
             if files_in_use.contains(&file) {
-                return bad(StatusCode::BAD_REQUEST, format!("{file} is already used by another engine: one file per engine"));
+                return bad(
+                    StatusCode::BAD_REQUEST,
+                    format!("{file} is already used by another engine: one file per engine"),
+                );
             }
             files_in_use.push(file.clone());
             let pf = crate::wgtunnel::port_forward_of(&provider, &mode);
@@ -6901,7 +7519,11 @@ async fn post_wireguard_engines(
         }
     }
 
-    let extra_ids: Vec<String> = local.iter().filter(|id| *id != "race" && *id != "hoard").cloned().collect();
+    let extra_ids: Vec<String> = local
+        .iter()
+        .filter(|id| *id != "race" && *id != "hoard")
+        .cloned()
+        .collect();
     let ok = edit_config(&state, |doc| {
         let mut out = doc.to_string();
         for (id, kv, del) in &rows {
@@ -6934,19 +7556,34 @@ async fn post_wireguard_engines(
                     }
                 }
             }
-            out = crate::tomledit::set_toml_table(&out, "network", &[("mode".to_string(), q("wireguard"))])?;
+            out = crate::tomledit::set_toml_table(
+                &out,
+                "network",
+                &[("mode".to_string(), q("wireguard"))],
+            )?;
         }
         Ok(out)
     });
     if !ok {
-        return bad(StatusCode::INTERNAL_SERVER_ERROR, "the config could not be written".into());
+        return bad(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "the config could not be written".into(),
+        );
     }
     let now = state.cfg();
-    let running: Vec<(String, crate::config::Session)> =
-        state.engines.engines().iter().map(|e| (e.id.clone(), e.session.clone())).collect();
-    let restart_required =
-        crate::netmode::restart_required(&now, &running) || crate::killswitch::blocking_changed(&now, &state.engines);
-    tracing::info!(tunnels = files_in_use.len(), restart_required, "wireguard: tunnel assignments saved");
+    let running: Vec<(String, crate::config::Session)> = state
+        .engines
+        .engines()
+        .iter()
+        .map(|e| (e.id.clone(), e.session.clone()))
+        .collect();
+    let restart_required = crate::netmode::restart_required(&now, &running)
+        || crate::killswitch::blocking_changed(&now, &state.engines);
+    tracing::info!(
+        tunnels = files_in_use.len(),
+        restart_required,
+        "wireguard: tunnel assignments saved"
+    );
     Json(serde_json::json!({
         "status": "ok",
         "restart_required": restart_required,
@@ -6959,7 +7596,6 @@ async fn post_wireguard_engines(
     }))
     .into_response()
 }
-
 
 // ---------------------------------------------------------------------------
 // Writes -- the qBittorrent shim
@@ -7044,8 +7680,7 @@ where
         .meta_doc_checked("categories")?
         .filter(|d| !d.is_empty())
         .or_else(|| {
-            let path = std::path::Path::new(&cfg.daemon.data_dir)
-                .join("categories.json");
+            let path = std::path::Path::new(&cfg.daemon.data_dir).join("categories.json");
             std::fs::read_to_string(path).ok()
         })
         .unwrap_or_else(|| "{}".to_string());
@@ -7061,9 +7696,7 @@ where
     // the entire reason that bench compares the store.
     let typed: std::collections::BTreeMap<String, StoredCategory> = doc
         .into_iter()
-        .map(|(name, body)| {
-            (name, serde_json::from_value(body).unwrap_or_default())
-        })
+        .map(|(name, body)| (name, serde_json::from_value(body).unwrap_or_default()))
         .collect();
     store.put_meta("categories", &indent_two(&typed))?;
     Ok(())
@@ -7132,7 +7765,10 @@ async fn qbit_create_category(
     }
     let save_path = form.get("savePath").cloned().unwrap_or_default();
     if let Err(e) = edit_categories(&state, |doc| {
-        doc.insert(name, serde_json::json!({"save_path": save_path, "mode": "hoard"}));
+        doc.insert(
+            name,
+            serde_json::json!({"save_path": save_path, "mode": "hoard"}),
+        );
     }) {
         return store_refused(&state, "createCategory", e);
     }
@@ -7159,7 +7795,10 @@ async fn qbit_edit_category(
                 fields.insert("save_path".into(), serde_json::Value::String(save_path));
             }
             _ => {
-                doc.insert(name, serde_json::json!({"save_path": save_path, "mode": "hoard"}));
+                doc.insert(
+                    name,
+                    serde_json::json!({"save_path": save_path, "mode": "hoard"}),
+                );
             }
         }
     }) {
@@ -7240,7 +7879,9 @@ async fn qbit_delete_tags(
     // came back in the next listing.
     let written = {
         let store = state.store.lock().unwrap();
-        store.unregister_tags(&tags).and_then(|_| store.strip_tags(&tags).map(|_| ()))
+        store
+            .unregister_tags(&tags)
+            .and_then(|_| store.strip_tags(&tags).map(|_| ()))
     };
     if let Err(e) = written {
         return store_refused(&state, "deleteTags", e);
@@ -7406,7 +8047,6 @@ async fn qbit_resume(
     qbit_ok()
 }
 
-
 // ---------------------------------------------------------------------------
 // Writes -- the native API
 // ---------------------------------------------------------------------------
@@ -7418,7 +8058,12 @@ use axum::extract::Path;
 /// The message differs per route and that is not cosmetic: "torrent not found"
 /// and "torrent not in hoard: X" tell an operator two different things, and the
 /// UI shows the string.
-fn resolve_in_hoard(state: &AppState, engine: &str, prefix: &str, message: &str) -> Result<String, Response> {
+fn resolve_in_hoard(
+    state: &AppState,
+    engine: &str,
+    prefix: &str,
+    message: &str,
+) -> Result<String, Response> {
     let store = state.store.lock().unwrap();
     store.resolve_hash_in(engine, prefix).ok_or_else(|| {
         (
@@ -7440,7 +8085,7 @@ macro_rules! torrent_write {
         ) -> Response {
             let query = query.unwrap_or_default();
             guard!(state, headers, query);
-    let cfg = state.cfg();
+            let cfg = state.cfg();
             // Which copy. `?agent=` carries the row the operator clicked, so a
             // torrent seeded from three engines is paused in the one they
             // pointed at instead of whichever the lookup happened to find.
@@ -7468,29 +8113,51 @@ macro_rules! torrent_write {
     };
 }
 
-torrent_write!(hoard_pause_one, "hoard", "torrent not found", |_ih: &str| serde_json::json!({"status": "ok"}), |state: &AppState, hash: &str, _body: &str, engine: &str| {
-    state.store.lock().unwrap().set_paused(hash, engine, true)?;
-    apply_pause_to_engine(state, engine, hash, true);
-    Ok(())
-});
+torrent_write!(
+    hoard_pause_one,
+    "hoard",
+    "torrent not found",
+    |_ih: &str| serde_json::json!({"status": "ok"}),
+    |state: &AppState, hash: &str, _body: &str, engine: &str| {
+        state.store.lock().unwrap().set_paused(hash, engine, true)?;
+        apply_pause_to_engine(state, engine, hash, true);
+        Ok(())
+    }
+);
 
-torrent_write!(hoard_resume_one, "hoard", "torrent not found", |_ih: &str| serde_json::json!({"status": "ok"}), |state: &AppState, hash: &str, _body: &str, engine: &str| {
-    state.store.lock().unwrap().set_paused(hash, engine, false)?;
-    apply_pause_to_engine(state, engine, hash, false);
-    Ok(())
-});
+torrent_write!(
+    hoard_resume_one,
+    "hoard",
+    "torrent not found",
+    |_ih: &str| serde_json::json!({"status": "ok"}),
+    |state: &AppState, hash: &str, _body: &str, engine: &str| {
+        state
+            .store
+            .lock()
+            .unwrap()
+            .set_paused(hash, engine, false)?;
+        apply_pause_to_engine(state, engine, hash, false);
+        Ok(())
+    }
+);
 
 // Force download starts the torrent too, through the path claim, as
 // qBittorrent's force start does: the pin alone left a stopped one stopped.
-torrent_write!(hoard_pin_one, "hoard", "torrent not in hoard: {}", |ih: &str| serde_json::json!({"info_hash": ih, "pinned": true, "status": "ok"}), |state: &AppState, hash: &str, _body: &str, engine: &str| {
-    {
-        let store = state.store.lock().unwrap();
-        store.set_pinned(hash, engine, true)?;
-        store.set_paused(hash, engine, false)?;
+torrent_write!(
+    hoard_pin_one,
+    "hoard",
+    "torrent not in hoard: {}",
+    |ih: &str| serde_json::json!({"info_hash": ih, "pinned": true, "status": "ok"}),
+    |state: &AppState, hash: &str, _body: &str, engine: &str| {
+        {
+            let store = state.store.lock().unwrap();
+            store.set_pinned(hash, engine, true)?;
+            store.set_paused(hash, engine, false)?;
+        }
+        apply_pause_to_engine(state, engine, hash, false);
+        Ok(())
     }
-    apply_pause_to_engine(state, engine, hash, false);
-    Ok(())
-});
+);
 
 /// Unpin, which unlike pin accepts a torrent from ANY session.
 ///
@@ -7524,7 +8191,6 @@ async fn hoard_unpin_one(
     .into_response()
 }
 
-
 // ---------------------------------------------------------------------------
 // Category, and where the data lives
 // ---------------------------------------------------------------------------
@@ -7534,9 +8200,18 @@ enum CategoryChange {
     /// The data is already where the category wants it: a label write.
     Relabel,
     /// The data moves inside the engine that holds it.
-    Move { plan: crate::jobsrun::MovePlan, name: String, total: i64 },
+    Move {
+        plan: crate::jobsrun::MovePlan,
+        name: String,
+        total: i64,
+    },
     /// The category belongs to another engine: a graduation carries it there.
-    Graduate { to: String, plan: crate::jobsrun::MovePlan, name: String, total: i64 },
+    Graduate {
+        to: String,
+        plan: crate::jobsrun::MovePlan,
+        name: String,
+        total: i64,
+    },
 }
 
 /// Work out a category change for the copy of `hash` held by `engine`.
@@ -7554,7 +8229,10 @@ fn category_change(
         (code, Json(serde_json::json!({"error": msg}))).into_response()
     };
     let Some(cat) = category_entry(state, category) else {
-        return Err(refuse(StatusCode::BAD_REQUEST, format!("unknown category {category:?}")));
+        return Err(refuse(
+            StatusCode::BAD_REQUEST,
+            format!("unknown category {category:?}"),
+        ));
     };
     if cat.save_path.is_empty() {
         return Err(refuse(
@@ -7577,10 +8255,16 @@ fn category_change(
     } else {
         placement(state, category, "").0
     };
-    let plan = crate::jobsrun::plan_move_checked(state, &torrent, std::path::Path::new(&cat.save_path));
+    let plan =
+        crate::jobsrun::plan_move_checked(state, &torrent, std::path::Path::new(&cat.save_path));
     let (name, total) = (torrent.meta.name.clone(), torrent.meta.total_size as i64);
     Ok(if target != engine {
-        CategoryChange::Graduate { to: target, plan, name, total }
+        CategoryChange::Graduate {
+            to: target,
+            plan,
+            name,
+            total,
+        }
     } else if plan.is_noop() {
         CategoryChange::Relabel
     } else {
@@ -7600,19 +8284,39 @@ fn category_change(
 /// relabel with `{"status":"ok"}`, the UI repainted the row as moved, and the
 /// files stayed where they were -- every "Move to category" since the Rust
 /// port. A field the client sends is either honoured or refused, never dropped.
-async fn post_category(state: &AppState, info_hash: &str, query: &str, body: &str, fallback: &str) -> Response {
+async fn post_category(
+    state: &AppState,
+    info_hash: &str,
+    query: &str,
+    body: &str,
+    fallback: &str,
+) -> Response {
     let engine = engine_param(query, fallback);
     let hash = match resolve_in_hoard(state, &engine, info_hash, "torrent not found") {
         Ok(h) => h,
         Err(r) => return r,
     };
     let v: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
-    let category = v.get("category").and_then(|c| c.as_str()).unwrap_or("").to_string();
-    let move_files = v.get("move_files").and_then(|b| b.as_bool()).unwrap_or(false);
-    let allow = v.get("allow_breaking_hardlinks").and_then(|b| b.as_bool()).unwrap_or(false);
+    let category = v
+        .get("category")
+        .and_then(|c| c.as_str())
+        .unwrap_or("")
+        .to_string();
+    let move_files = v
+        .get("move_files")
+        .and_then(|b| b.as_bool())
+        .unwrap_or(false);
+    let allow = v
+        .get("allow_breaking_hardlinks")
+        .and_then(|b| b.as_bool())
+        .unwrap_or(false);
 
     let relabel = |moved: bool| {
-        let written = state.store.lock().unwrap().set_category_in(&hash, &engine, &category);
+        let written = state
+            .store
+            .lock()
+            .unwrap()
+            .set_category_in(&hash, &engine, &category);
         // The engine was already a parameter here, ignored as `_engine`, so the
         // native API relabelled every copy of a torrent it was given one of.
         if let Err(e) = written {
@@ -7637,9 +8341,16 @@ async fn post_category(state: &AppState, info_hash: &str, query: &str, body: &st
     let (plan, name, total, to) = match change {
         CategoryChange::Relabel => return relabel(false),
         CategoryChange::Move { plan, name, total } => (plan, name, total, None),
-        CategoryChange::Graduate { to, plan, name, total } => (plan, name, total, Some(to)),
+        CategoryChange::Graduate {
+            to,
+            plan,
+            name,
+            total,
+        } => (plan, name, total, Some(to)),
     };
-    queue_data_move(state, &hash, &engine, &category, plan, &name, total, to, allow)
+    queue_data_move(
+        state, &hash, &engine, &category, plan, &name, total, to, allow,
+    )
 }
 
 /// Check a planned move and queue it: 202 and a job, or 409 with the reason.
@@ -7678,37 +8389,59 @@ fn queue_data_move_core(
     // Refused whatever the operator agrees to: these are not a cost to accept
     // but a move that would damage something that is not this torrent.
     if let Some((reason, why)) = plan.refusal() {
-        return Err((StatusCode::CONFLICT, serde_json::json!({"error": why, "reason": reason, "plan": plan.summary()})));
+        return Err((
+            StatusCode::CONFLICT,
+            serde_json::json!({"error": why, "reason": reason, "plan": plan.summary()}),
+        ));
     }
     let (hl_files, hl_bytes) = plan.hardlinked();
     if hl_files > 0 && !allow {
-        return Err((StatusCode::CONFLICT, serde_json::json!({
+        return Err((
+            StatusCode::CONFLICT,
+            serde_json::json!({
                 "error": "moving would break hardlinks",
                 "reason": "hardlinks",
                 "hardlinked_files": hl_files,
                 "hardlinked_bytes": hl_bytes,
                 "plan": plan.summary(),
-            })));
+            }),
+        ));
     }
     if let Some(free) = crate::jobs::free_space_near(&plan.new_root) {
         if free < plan.copy_bytes() {
-            return Err((StatusCode::CONFLICT, serde_json::json!({
+            return Err((
+                StatusCode::CONFLICT,
+                serde_json::json!({
                     "error": "not enough free space at the target",
                     "reason": "space",
                     "plan": plan.summary(),
-                })));
+                }),
+            ));
         }
     }
     let save_path = plan.new_root.to_string_lossy().to_string();
     let (kind, queued) = match &to {
-        None => ("move_data", crate::jobsrun::queue_move(
-            state, hash, name, engine, category, &save_path, allow, total)),
-        Some(to) => ("graduate", crate::jobsrun::queue_graduation_allowing(
-            state, hash, name, engine, to, category, &save_path, allow, total)),
+        None => (
+            "move_data",
+            crate::jobsrun::queue_move(
+                state, hash, name, engine, category, &save_path, allow, total,
+            ),
+        ),
+        Some(to) => (
+            "graduate",
+            crate::jobsrun::queue_graduation_allowing(
+                state, hash, name, engine, to, category, &save_path, allow, total,
+            ),
+        ),
     };
     match queued {
-        Some(job) => Ok(serde_json::json!({"status": "moving", "job": job, "kind": kind, "plan": plan.summary()})),
-        None => Err((StatusCode::CONFLICT, serde_json::json!({"error": "a move is already queued or running for this torrent"}))),
+        Some(job) => Ok(
+            serde_json::json!({"status": "moving", "job": job, "kind": kind, "plan": plan.summary()}),
+        ),
+        None => Err((
+            StatusCode::CONFLICT,
+            serde_json::json!({"error": "a move is already queued or running for this torrent"}),
+        )),
     }
 }
 
@@ -7753,7 +8486,10 @@ fn location_path(raw: &str) -> Result<std::path::PathBuf, String> {
         return Err(format!("{raw:?} is not an absolute path"));
     }
     use std::path::Component::*;
-    if !p.components().all(|c| matches!(c, Prefix(_) | RootDir | Normal(_))) {
+    if !p
+        .components()
+        .all(|c| matches!(c, Prefix(_) | RootDir | Normal(_)))
+    {
         return Err(format!("{raw:?} must not contain `.` or `..`"));
     }
     // Rebuilt from its components, which drops a trailing separator: the
@@ -7768,17 +8504,32 @@ fn location_path(raw: &str) -> Result<std::path::PathBuf, String> {
 /// answers: 200 `moved: false` when the data is already there, 202 and a job
 /// when bytes have to move, 409 with `reason` when the move is refused or,
 /// for `hardlinks`, needs `"allow_breaking_hardlinks": true`.
-async fn post_location(state: &AppState, info_hash: &str, query: &str, body: &str, fallback: &str) -> Response {
+async fn post_location(
+    state: &AppState,
+    info_hash: &str,
+    query: &str,
+    body: &str,
+    fallback: &str,
+) -> Response {
     let engine = engine_param(query, fallback);
     let hash = match resolve_in_hoard(state, &engine, info_hash, "torrent not found") {
         Ok(h) => h,
         Err(r) => return r,
     };
     let v: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
-    let allow = v.get("allow_breaking_hardlinks").and_then(|b| b.as_bool()).unwrap_or(false);
+    let allow = v
+        .get("allow_breaking_hardlinks")
+        .and_then(|b| b.as_bool())
+        .unwrap_or(false);
     let location = match location_path(v.get("location").and_then(|c| c.as_str()).unwrap_or("")) {
         Ok(p) => p,
-        Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e}))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": e})),
+            )
+                .into_response()
+        }
     };
     let Some(torrent) = find_copy(state, &engine, &hash) else {
         return not_found();
@@ -7794,7 +8545,13 @@ async fn post_location(state: &AppState, info_hash: &str, query: &str, body: &st
 /// Queue a move of one copy's data to `location`, as "Set location..." does:
 /// the same plan, the same refusals. For a workflow action. Already there,
 /// or already being moved, is not an error -- the next pass sees it settle.
-pub(crate) fn queue_location_move(state: &AppState, engine: &str, hash: &str, location: &str, allow: bool) -> Result<(), String> {
+pub(crate) fn queue_location_move(
+    state: &AppState,
+    engine: &str,
+    hash: &str,
+    location: &str,
+    allow: bool,
+) -> Result<(), String> {
     let location = location_path(location)?;
     let Some(torrent) = find_copy(state, engine, hash) else {
         return Err("torrent not found".into());
@@ -7806,7 +8563,13 @@ pub(crate) fn queue_location_move(state: &AppState, engine: &str, hash: &str, lo
     let (name, total) = (torrent.meta.name.clone(), torrent.meta.total_size as i64);
     match queue_data_move_core(state, hash, engine, "", plan, &name, total, None, allow) {
         Ok(_) => Ok(()),
-        Err((_, v)) if v["error"].as_str().is_some_and(|e| e.contains("already queued")) => Ok(()),
+        Err((_, v))
+            if v["error"]
+                .as_str()
+                .is_some_and(|e| e.contains("already queued")) =>
+        {
+            Ok(())
+        }
         Err((_, v)) => Err(v["error"].as_str().unwrap_or("move refused").to_string()),
     }
 }
@@ -7835,34 +8598,46 @@ async fn set_race_torrent_location(
     post_location(&state, &info_hash, &query, &body, "race").await
 }
 
-torrent_write!(set_torrent_tags, "hoard", "torrent not found", |_ih: &str| serde_json::json!({"status": "ok"}), |state: &AppState, hash: &str, body: &str, _engine: &str| {
-    // {"tags": ["a","b"]} replaces the whole set, which is what "set" means
-    // here: the caller sends the state it wants, not a delta.
-    let tags: Vec<String> = serde_json::from_str::<serde_json::Value>(body)
-        .ok()
-        .and_then(|v| v.get("tags").cloned())
-        .and_then(|v| serde_json::from_value(v).ok())
-        .unwrap_or_default();
-    let store = state.store.lock().unwrap();
-    store.register_tags(&tags)?;
-    store.set_tags(hash, &tags)
-});
+torrent_write!(
+    set_torrent_tags,
+    "hoard",
+    "torrent not found",
+    |_ih: &str| serde_json::json!({"status": "ok"}),
+    |state: &AppState, hash: &str, body: &str, _engine: &str| {
+        // {"tags": ["a","b"]} replaces the whole set, which is what "set" means
+        // here: the caller sends the state it wants, not a delta.
+        let tags: Vec<String> = serde_json::from_str::<serde_json::Value>(body)
+            .ok()
+            .and_then(|v| v.get("tags").cloned())
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_default();
+        let store = state.store.lock().unwrap();
+        store.register_tags(&tags)?;
+        store.set_tags(hash, &tags)
+    }
+);
 
 // The race-side twins of the two label writers. Identical bodies; what
 // differs is the engine they resolve in when the caller names none, which is
 // the engine their route spells.
-torrent_write!(set_race_torrent_tags, "race", "torrent not found", |_ih: &str| serde_json::json!({"status": "ok"}), |state: &AppState, hash: &str, body: &str, _engine: &str| {
-    // {"tags": ["a","b"]} replaces the whole set, which is what "set" means
-    // here: the caller sends the state it wants, not a delta.
-    let tags: Vec<String> = serde_json::from_str::<serde_json::Value>(body)
-        .ok()
-        .and_then(|v| v.get("tags").cloned())
-        .and_then(|v| serde_json::from_value(v).ok())
-        .unwrap_or_default();
-    let store = state.store.lock().unwrap();
-    store.register_tags(&tags)?;
-    store.set_tags(hash, &tags)
-});
+torrent_write!(
+    set_race_torrent_tags,
+    "race",
+    "torrent not found",
+    |_ih: &str| serde_json::json!({"status": "ok"}),
+    |state: &AppState, hash: &str, body: &str, _engine: &str| {
+        // {"tags": ["a","b"]} replaces the whole set, which is what "set" means
+        // here: the caller sends the state it wants, not a delta.
+        let tags: Vec<String> = serde_json::from_str::<serde_json::Value>(body)
+            .ok()
+            .and_then(|v| v.get("tags").cloned())
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_default();
+        let store = state.store.lock().unwrap();
+        store.register_tags(&tags)?;
+        store.set_tags(hash, &tags)
+    }
+);
 
 /// Create a category from the native API.
 async fn category_create(
@@ -7891,7 +8666,13 @@ async fn category_create(
     }
     let incoming = match checked_category(incoming) {
         Ok(v) => v,
-        Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e}))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": e})),
+            )
+                .into_response()
+        }
     };
     if categories_map(&state).contains_key(&name) {
         return (
@@ -7935,7 +8716,13 @@ async fn category_update(
     }
     let incoming = match checked_category(incoming) {
         Ok(v) => v,
-        Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e}))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": e})),
+            )
+                .into_response()
+        }
     };
     // A rename: the body names the category differently from the path. 4.3
     // wrote the body under the OLD name, so a rename changed nothing visible
@@ -7969,15 +8756,27 @@ async fn category_update(
         return store_refused(&state, "update category", e);
     }
     if new_name == name {
-        return Json(serde_json::json!({"status": "ok", "name": new_name, "relabelled": 0})).into_response();
+        return Json(serde_json::json!({"status": "ok", "name": new_name, "relabelled": 0}))
+            .into_response();
     }
-    let relabelled = match state.store.lock().unwrap().relabel_category(&name, &new_name) {
+    let relabelled = match state
+        .store
+        .lock()
+        .unwrap()
+        .relabel_category(&name, &new_name)
+    {
         Ok(n) => n,
         Err(e) => return store_refused(&state, "update category", e),
     };
     let followed = match rename_category_references(&state, &name, &new_name) {
         Ok(v) => v,
-        Err(e) => return store_refused(&state, "update category: renamed, but not everything that names it was followed", e),
+        Err(e) => {
+            return store_refused(
+                &state,
+                "update category: renamed, but not everything that names it was followed",
+                e,
+            )
+        }
     };
     Json(serde_json::json!({"status": "ok", "name": new_name, "relabelled": relabelled, "followed": followed}))
         .into_response()
@@ -7991,7 +8790,11 @@ async fn category_update(
 /// longer existed -- race by default, which the drain purges. A workflow
 /// condition is renamed only where it compares for equality: a `contains` or
 /// a regex is the operator's text, not a reference.
-fn rename_category_references(state: &AppState, old: &str, new: &str) -> Result<serde_json::Value, String> {
+fn rename_category_references(
+    state: &AppState,
+    old: &str,
+    new: &str,
+) -> Result<serde_json::Value, String> {
     let store = state.store.lock().unwrap_or_else(|e| e.into_inner());
     // Every reference is tried; what the store refused is reported at the end.
     let mut refused: Vec<String> = Vec::new();
@@ -7999,15 +8802,20 @@ fn rename_category_references(state: &AppState, old: &str, new: &str) -> Result<
         tracing::error!(what, error = %e, "category rename: the store refused a reference");
         refused.push(format!("{what}: {e}"));
     };
-    let (mut rss, mut watch, mut workflows, mut magnets, mut jobs) = (0usize, 0usize, 0usize, 0usize, 0usize);
+    let (mut rss, mut watch, mut workflows, mut magnets, mut jobs) =
+        (0usize, 0usize, 0usize, 0usize, 0usize);
 
     let rules = store.rss_rules().unwrap_or_else(|e| {
         note("rss rules", e);
         Vec::new()
     });
     for (rule_name, doc) in rules {
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(&doc) else { continue };
-        let Ok(mut r) = crate::rss::matcher::Rule::from_json(&rule_name, &v) else { continue };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&doc) else {
+            continue;
+        };
+        let Ok(mut r) = crate::rss::matcher::Rule::from_json(&rule_name, &v) else {
+            continue;
+        };
         if r.category == old {
             r.category = new.to_string();
             match store.rss_rule_put(&rule_name, &r.to_json().to_string()) {
@@ -8024,15 +8832,18 @@ fn rename_category_references(state: &AppState, old: &str, new: &str) -> Result<
         note("watch folders", e);
         None
     });
-    if let Some(mut list) = watched
-        .and_then(|d| serde_json::from_str::<Vec<crate::watch::Folder>>(&d).ok())
+    if let Some(mut list) =
+        watched.and_then(|d| serde_json::from_str::<Vec<crate::watch::Folder>>(&d).ok())
     {
         for f in list.iter_mut().filter(|f| f.category == old) {
             f.category = new.to_string();
             watch += 1;
         }
         if watch > 0 {
-            if let Err(e) = store.put_setting("watch_folders", &serde_json::to_string(&list).unwrap_or_default()) {
+            if let Err(e) = store.put_setting(
+                "watch_folders",
+                &serde_json::to_string(&list).unwrap_or_default(),
+            ) {
                 note("watch folders", e);
             }
         }
@@ -8043,7 +8854,11 @@ fn rename_category_references(state: &AppState, old: &str, new: &str) -> Result<
         match n {
             Node::All { of } | Node::Any { of } => of.iter_mut().map(|c| walk(c, old, new)).sum(),
             Node::Not { of } => walk(of, old, new),
-            Node::Cond(c) if c.field == "category" && matches!(c.op, Op::Eq | Op::Ne) && c.value.eq_ignore_ascii_case(old) => {
+            Node::Cond(c)
+                if c.field == "category"
+                    && matches!(c.op, Op::Eq | Op::Ne)
+                    && c.value.eq_ignore_ascii_case(old) =>
+            {
                 c.value = new.to_string();
                 1
             }
@@ -8055,7 +8870,9 @@ fn rename_category_references(state: &AppState, old: &str, new: &str) -> Result<
         Vec::new()
     });
     for mut stored in stored_workflows {
-        let Ok(mut w) = serde_json::from_str::<crate::rules::Workflow>(&stored.body) else { continue };
+        let Ok(mut w) = serde_json::from_str::<crate::rules::Workflow>(&stored.body) else {
+            continue;
+        };
         let mut n = walk(&mut w.when, old, new);
         for a in w.then.iter_mut() {
             if let crate::rules::Action::SetCategory { to } = a {
@@ -8096,7 +8913,9 @@ fn rename_category_references(state: &AppState, old: &str, new: &str) -> Result<
         if !matches!(j.state.as_str(), "queued" | "waiting") {
             continue;
         }
-        let Ok(mut p) = serde_json::from_str::<serde_json::Value>(&j.params) else { continue };
+        let Ok(mut p) = serde_json::from_str::<serde_json::Value>(&j.params) else {
+            continue;
+        };
         let mut hit = false;
         for k in ["to_category", "category"] {
             if p.get(k).and_then(|v| v.as_str()) == Some(old) {
@@ -8114,7 +8933,9 @@ fn rename_category_references(state: &AppState, old: &str, new: &str) -> Result<
     if !refused.is_empty() {
         return Err(refused.join("; "));
     }
-    Ok(serde_json::json!({"rss_rules": rss, "watch_folders": watch, "workflows": workflows, "magnets": magnets, "jobs": jobs}))
+    Ok(
+        serde_json::json!({"rss_rules": rss, "watch_folders": watch, "workflows": workflows, "magnets": magnets, "jobs": jobs}),
+    )
 }
 
 async fn category_delete(
@@ -8142,7 +8963,6 @@ async fn category_delete(
     }))
     .into_response()
 }
-
 
 // ---------------------------------------------------------------------------
 // Writes -- the configuration file
@@ -8226,23 +9046,35 @@ async fn set_announce_ip_mode(
     let _ = cfg;
 
     let Ok(req) = serde_json::from_str::<HostValue>(&body) else {
-        return (StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "invalid body"}))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "invalid body"})),
+        )
+            .into_response();
     };
     if req.host.trim().is_empty() {
-        return (StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "host is required"}))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "host is required"})),
+        )
+            .into_response();
     }
     if !matches!(req.mode.as_str(), "auto" | "v4" | "v6" | "") {
-        return (StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "mode must be one of: auto, v4, v6"})))
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "mode must be one of: auto, v4, v6"})),
+        )
             .into_response();
     }
 
     // "auto" is the default, so it is stored as the ABSENCE of an entry rather
     // than as a value: keeping `host = "auto"` would make the file grow one
     // line per tracker anyone ever looked at.
-    let stored = if req.mode == "auto" { "" } else { req.mode.as_str() };
+    let stored = if req.mode == "auto" {
+        ""
+    } else {
+        req.mode.as_str()
+    };
     let persisted = set_host_entry(&state, "announce_ip_modes", req.host.trim(), stored);
 
     // Hand the new tables to the runners before answering, so the
@@ -8272,12 +9104,18 @@ async fn set_announce_passkey(
     let _ = cfg;
 
     let Ok(req) = serde_json::from_str::<HostValue>(&body) else {
-        return (StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "invalid body"}))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "invalid body"})),
+        )
+            .into_response();
     };
     if req.host.trim().is_empty() {
-        return (StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "host is required"}))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "host is required"})),
+        )
+            .into_response();
     }
     // The mask posted back (a form saved as it was) means "unchanged".
     let persisted = if req.passkey == SECRET_MASK {
@@ -8297,7 +9135,6 @@ async fn set_announce_passkey(
     }))
     .into_response()
 }
-
 
 #[derive(serde::Deserialize)]
 struct ClientOverride {
@@ -8389,21 +9226,32 @@ struct PortBody {
 /// provider's, and the next renewal would move it back.
 async fn set_listen_port(state: &AppState, engine: &str, body: &str) -> Response {
     let Ok(req) = serde_json::from_str::<PortBody>(body) else {
-        return (StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "invalid body"}))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "invalid body"})),
+        )
+            .into_response();
     };
     if req.port == 0 {
-        return (StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "port out of range (1-65535)"})))
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "port out of range (1-65535)"})),
+        )
             .into_response();
     }
     let Some(eng) = state.engines.get(engine) else {
-        return (StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({"error": "agent unavailable"}))).into_response();
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": "agent unavailable"})),
+        )
+            .into_response();
     };
     let was = eng.manager.listen_port_now(eng.listen_port);
     let conflict = |error: String| {
-        (StatusCode::CONFLICT, Json(serde_json::json!({"error": error, "engine": engine, "port": was})))
+        (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": error, "engine": engine, "port": was})),
+        )
             .into_response()
     };
     if let Some(follows) = forwarded_port_owner(state, engine) {
@@ -8453,7 +9301,9 @@ fn forwarded_port_owner(state: &AppState, engine: &str) -> Option<&'static str> 
         return Some("gluetun");
     }
     match state.engines.wireguard().get(engine) {
-        Some(t) if t.port_forward == "natpmp" => Some("its WireGuard tunnel's NAT-PMP port forwarding"),
+        Some(t) if t.port_forward == "natpmp" => {
+            Some("its WireGuard tunnel's NAT-PMP port forwarding")
+        }
         Some(t) if t.port_forward == "manual" => Some("its WireGuard tunnel's forwarded port"),
         _ => None,
     }
@@ -8461,7 +9311,11 @@ fn forwarded_port_owner(state: &AppState, engine: &str) -> Option<&'static str> 
 
 /// Write session keys where the engine reads them: `[race]` / `[hoard]`, or
 /// the `session` of its `[[engine]]` block.
-fn write_engine_session(state: &AppState, engine: &str, kv: &[(String, String)]) -> Result<(), String> {
+fn write_engine_session(
+    state: &AppState,
+    engine: &str,
+    kv: &[(String, String)],
+) -> Result<(), String> {
     let ok = edit_config(state, |doc| {
         if engine == "race" || engine == "hoard" {
             return crate::tomledit::set_toml_table(doc, engine, kv);
@@ -8473,7 +9327,11 @@ fn write_engine_session(state: &AppState, engine: &str, kv: &[(String, String)])
         }
         Ok(out)
     });
-    if ok { Ok(()) } else { Err("the config could not be written".into()) }
+    if ok {
+        Ok(())
+    } else {
+        Err("the config could not be written".into())
+    }
 }
 
 async fn set_race_listen_port(
@@ -8507,7 +9365,6 @@ async fn set_hoard_listen_port(
 // unrouted pair that rewrote `[hoard] active_downloads` was never wired. No
 // screen called either. The GET stays; the cap is `active_downloads` in the
 // config, read at boot.
-
 
 #[derive(serde::Deserialize)]
 struct PauseBulk {
@@ -8682,7 +9539,6 @@ async fn race_pause_bulk(
     pause_bulk(&state, "race", &body).await
 }
 
-
 // ---------------------------------------------------------------------------
 // The qBittorrent identity
 // ---------------------------------------------------------------------------
@@ -8749,7 +9605,13 @@ async fn qbit_preferences(
     // The queue as the race engine runs it, once `queueing` is on; until then
     // the figures this page has always answered, which no client acts on.
     let queueing = cfg.race.queueing.unwrap_or(false);
-    let queue_cap = |v: Option<i64>, shown: i64| if queueing { v.filter(|n| *n > 0).unwrap_or(-1) } else { shown };
+    let queue_cap = |v: Option<i64>, shown: i64| {
+        if queueing {
+            v.filter(|n| *n > 0).unwrap_or(-1)
+        } else {
+            shown
+        }
+    };
 
     let mut prefs = serde_json::json!({
         "add_trackers_enabled": false,
@@ -8816,7 +9678,10 @@ async fn qbit_transfer_info(
     let (up, down) = state.engines.moved_totals();
     // The engines' own rates, summed: 4.3 answered 0 for both speeds.
     let (up_speed, down_speed) = state.engines.engines().iter().fold((0u64, 0u64), |acc, e| {
-        (acc.0 + e.manager.upload_rate.get(), acc.1 + e.manager.download_rate.get())
+        (
+            acc.0 + e.manager.upload_rate.get(),
+            acc.1 + e.manager.download_rate.get(),
+        )
     });
     Json(serde_json::json!({
         "connection_status": "connected",
@@ -8831,7 +9696,6 @@ async fn qbit_transfer_info(
     }))
     .into_response()
 }
-
 
 /// Move torrents to a category.
 ///
@@ -8948,7 +9812,11 @@ async fn qbit_login(
                 return (StatusCode::OK, "Fails.").into_response();
             }
             Err(crate::session::Busy) => {
-                return (StatusCode::SERVICE_UNAVAILABLE, [(axum::http::header::RETRY_AFTER, "2")], "")
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    [(axum::http::header::RETRY_AFTER, "2")],
+                    "",
+                )
                     .into_response();
             }
         }
@@ -8960,7 +9828,11 @@ async fn qbit_login(
     // cross-site form should be able to drive the API with it. Deliberately no
     // `Secure`: the *arr stack talks to this over plain HTTP on the LAN, and a
     // cookie marked Secure would simply never come back.
-    let cookie = format!("{}={}; Path=/; HttpOnly; SameSite=Lax", crate::session::COOKIE_NAME, sid);
+    let cookie = format!(
+        "{}={}; Path=/; HttpOnly; SameSite=Lax",
+        crate::session::COOKIE_NAME,
+        sid
+    );
     (
         StatusCode::OK,
         [(axum::http::header::SET_COOKIE, cookie)],
@@ -9013,8 +9885,16 @@ async fn qbit_logout(State(state): State<AppState>, headers: HeaderMap) -> Respo
     if let Some(sid) = session_of(&headers) {
         state.sessions.revoke(&sid);
     }
-    let cookie = format!("{}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0", crate::session::COOKIE_NAME);
-    (StatusCode::OK, [(axum::http::header::SET_COOKIE, cookie)], "").into_response()
+    let cookie = format!(
+        "{}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0",
+        crate::session::COOKIE_NAME
+    );
+    (
+        StatusCode::OK,
+        [(axum::http::header::SET_COOKIE, cookie)],
+        "",
+    )
+        .into_response()
 }
 
 /// Pull one field out of an `application/x-www-form-urlencoded` body.
@@ -9031,7 +9911,6 @@ fn form_field(body: &str, name: &str) -> Option<String> {
     }
     None
 }
-
 
 /// The torrent listing qBittorrent clients poll.
 ///
@@ -9068,10 +9947,9 @@ fn qbit_filter_matches(state: &str, filter: &str) -> bool {
         "stalled_uploading" => state == "stalledUP",
         "stalled_downloading" => state == "stalledDL",
         "errored" => state == "error",
-        "resumed" | "running" => !matches!(
-            state,
-            "pausedDL" | "pausedUP" | "stoppedDL" | "stoppedUP"
-        ),
+        "resumed" | "running" => {
+            !matches!(state, "pausedDL" | "pausedUP" | "stoppedDL" | "stoppedUP")
+        }
         // An unknown filter name lists everything, as qBittorrent does. Hiding
         // every torrent instead would read to a client as "the queue is empty".
         _ => true,
@@ -9135,7 +10013,9 @@ pub(crate) fn engine_qbit_rows(
     if let Some(wanted) = category.filter(|c| *c != engine_id) {
         let facts = {
             let store = state.store.read().unwrap();
-            store.facts_in_category(engine_id, wanted).unwrap_or_default()
+            store
+                .facts_in_category(engine_id, wanted)
+                .unwrap_or_default()
         };
         for (hash, torrent_facts) in facts.iter() {
             if let Some(only) = hashes {
@@ -9143,28 +10023,36 @@ pub(crate) fn engine_qbit_rows(
                     continue;
                 }
             }
-            let Ok(key) = typhon_engine::torrent::hex_decode(hash) else { continue };
+            let Ok(key) = typhon_engine::torrent::hex_decode(hash) else {
+                continue;
+            };
             // The store can name a torrent the engine no longer holds. It is
             // not this endpoint's job to reconcile that -- it reports what is
             // actually running.
-            let Some(torrent) = engine.manager.get(&key) else { continue };
+            let Some(torrent) = engine.manager.get(&key) else {
+                continue;
+            };
             let raw = typhon_engine::rpc::dispatch::torrent_to_json(&torrent);
             let native = crate::row::build(&raw, torrent_facts, &agent);
             let mut row = crate::qbitrow::build(&native, engine_id, now);
-        // The tracker qBittorrent reports: the first one announced to. 4.3
-        // left it empty, so cross-seed and the *arrs could not tell which
-        // tracker a torrent belonged to.
-        if let Some(url) = torrent.live_trackers.read().iter().flatten().next() {
-            row["tracker"] = serde_json::Value::String(url.clone());
-        }
-        let (up_cap, down_cap) = torrent.rate_limits();
-        row["up_limit"] = qbit_limit_field(up_cap).into();
-        row["dl_limit"] = qbit_limit_field(down_cap).into();
-        let (seq_dl, f_l_piece_prio) = torrent.download_order_flags();
-        row["seq_dl"] = seq_dl.into();
-        row["f_l_piece_prio"] = f_l_piece_prio.into();
-        crate::sharelimits::fill_qbit_row(&mut row, share_own.get(hash.as_str()).unwrap_or(&share_follow), &share_engine);
-        rows.push(row);
+            // The tracker qBittorrent reports: the first one announced to. 4.3
+            // left it empty, so cross-seed and the *arrs could not tell which
+            // tracker a torrent belonged to.
+            if let Some(url) = torrent.live_trackers.read().iter().flatten().next() {
+                row["tracker"] = serde_json::Value::String(url.clone());
+            }
+            let (up_cap, down_cap) = torrent.rate_limits();
+            row["up_limit"] = qbit_limit_field(up_cap).into();
+            row["dl_limit"] = qbit_limit_field(down_cap).into();
+            let (seq_dl, f_l_piece_prio) = torrent.download_order_flags();
+            row["seq_dl"] = seq_dl.into();
+            row["f_l_piece_prio"] = f_l_piece_prio.into();
+            crate::sharelimits::fill_qbit_row(
+                &mut row,
+                share_own.get(hash.as_str()).unwrap_or(&share_follow),
+                &share_engine,
+            );
+            rows.push(row);
         }
         return rows;
     }
@@ -9208,7 +10096,11 @@ pub(crate) fn engine_qbit_rows(
         let (seq_dl, f_l_piece_prio) = torrent.download_order_flags();
         row["seq_dl"] = seq_dl.into();
         row["f_l_piece_prio"] = f_l_piece_prio.into();
-        crate::sharelimits::fill_qbit_row(&mut row, share_own.get(hash.as_str()).unwrap_or(&share_follow), &share_engine);
+        crate::sharelimits::fill_qbit_row(
+            &mut row,
+            share_own.get(hash.as_str()).unwrap_or(&share_follow),
+            &share_engine,
+        );
         rows.push(row);
     }
     rows
@@ -9249,14 +10141,12 @@ async fn qbit_torrents_info(
 
     // "all" is qBittorrent's word for "no hash filter"; taken literally it is a
     // hash that matches nothing, which reads to a client as an empty queue.
-    let hashes = param("hashes")
-        .filter(|raw| raw != "all")
-        .map(|raw| {
-            raw.split(['|', ','])
-                .map(|h| h.trim().to_lowercase())
-                .filter(|h| !h.is_empty())
-                .collect::<std::collections::HashSet<String>>()
-        });
+    let hashes = param("hashes").filter(|raw| raw != "all").map(|raw| {
+        raw.split(['|', ','])
+            .map(|h| h.trim().to_lowercase())
+            .filter(|h| !h.is_empty())
+            .collect::<std::collections::HashSet<String>>()
+    });
 
     let now = now_secs();
 
@@ -9269,10 +10159,19 @@ async fn qbit_torrents_info(
     // torrents with one hash. The first engine holding it answers.
     let mut rows: Vec<serde_json::Value> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let ids: Vec<String> = state.engines.engines().iter().map(|e| e.id.clone()).collect();
+    let ids: Vec<String> = state
+        .engines
+        .engines()
+        .iter()
+        .map(|e| e.id.clone())
+        .collect();
     for engine in &ids {
         for row in engine_qbit_rows(&state, engine, now, category.as_deref(), hashes.as_ref()) {
-            let h = row.get("hash").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let h = row
+                .get("hash")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             if seen.insert(h) {
                 rows.push(row);
             }
@@ -9281,7 +10180,10 @@ async fn qbit_torrents_info(
 
     if filter != "all" {
         rows.retain(|row| {
-            let state = row.get("state").and_then(serde_json::Value::as_str).unwrap_or("");
+            let state = row
+                .get("state")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
             qbit_filter_matches(state, &filter)
         });
     }
@@ -9323,7 +10225,6 @@ async fn qbit_torrents_info(
     Json(rows).into_response()
 }
 
-
 // ---------------------------------------------------------------------------
 // Per-torrent detail
 // ---------------------------------------------------------------------------
@@ -9332,7 +10233,10 @@ async fn qbit_torrents_info(
 pub(crate) fn find_torrent(
     state: &AppState,
     info_hash: &str,
-) -> Option<(String, std::sync::Arc<typhon_engine::torrent::meta::TorrentState>)> {
+) -> Option<(
+    String,
+    std::sync::Arc<typhon_engine::torrent::meta::TorrentState>,
+)> {
     // Keyed lookup, not a scan: the map is already indexed by info hash, and
     // the scan this replaced serialized every one of 300k torrents to JSON to
     // compare one string -- seconds of CPU to open a detail panel.
@@ -9398,20 +10302,31 @@ async fn post_torrent_export(
 ) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    let Some(format) = crate::export::Format::parse(form.get("format").map(String::as_str).unwrap_or("")) else {
-        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "format must be zip, txt or csv"})))
+    let Some(format) =
+        crate::export::Format::parse(form.get("format").map(String::as_str).unwrap_or(""))
+    else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "format must be zip, txt or csv"})),
+        )
             .into_response();
     };
     let raw: Vec<String> = match (form.get("selection"), form.get("hashes")) {
         (Some(_), Some(_)) => {
-            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "send `selection` or `hashes`, not both"})))
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "send `selection` or `hashes`, not both"})),
+            )
                 .into_response()
         }
         (Some(sel), None) => {
             let sel: crate::selection::Selection = match serde_json::from_str(sel) {
                 Ok(s) => s,
                 Err(e) => {
-                    return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": format!("selection: {e}")})))
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({"error": format!("selection: {e}")})),
+                    )
                         .into_response()
                 }
             };
@@ -9424,10 +10339,16 @@ async fn post_torrent_export(
     };
     let hashes = crate::export::clean_hashes(&raw);
     if hashes.is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "the selection names no torrent"})))
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "the selection names no torrent"})),
+        )
             .into_response();
     }
-    let strip = matches!(form.get("strip_trackers").map(String::as_str), Some("1" | "true" | "on"));
+    let strip = matches!(
+        form.get("strip_trackers").map(String::as_str),
+        Some("1" | "true" | "on")
+    );
 
     let file_name = format.file_name(hashes.len());
     let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::export::Chunk>(16);
@@ -9438,8 +10359,13 @@ async fn post_torrent_export(
         let mut w = crate::export::ChanWriter::new(tx.clone());
         match crate::export::run(&store, &hashes, format, strip, &mut w) {
             Ok(s) => tracing::info!(
-                ?format, asked, written = s.written, missing = s.missing, strip,
-                secs = started.elapsed().as_secs_f32(), "export complete"
+                ?format,
+                asked,
+                written = s.written,
+                missing = s.missing,
+                strip,
+                secs = started.elapsed().as_secs_f32(),
+                "export complete"
             ),
             Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {
                 tracing::info!(?format, asked, "export abandoned by the client")
@@ -9507,7 +10433,11 @@ async fn post_torrent_peers(
         }
     };
     let v: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
-    let list = v.get("peers").and_then(|p| p.as_array()).cloned().unwrap_or_default();
+    let list = v
+        .get("peers")
+        .and_then(|p| p.as_array())
+        .cloned()
+        .unwrap_or_default();
     if list.is_empty() {
         return (
             StatusCode::BAD_REQUEST,
@@ -9576,7 +10506,10 @@ fn find_selected(
     state: &AppState,
     query: &str,
     info_hash: &str,
-) -> Option<(String, std::sync::Arc<typhon_engine::torrent::meta::TorrentState>)> {
+) -> Option<(
+    String,
+    std::sync::Arc<typhon_engine::torrent::meta::TorrentState>,
+)> {
     let want = engine_param(query, "");
     if want.is_empty() {
         return find_torrent(state, info_hash);
@@ -9591,7 +10524,10 @@ fn find_copy(
     info_hash: &str,
 ) -> Option<std::sync::Arc<typhon_engine::torrent::meta::TorrentState>> {
     let key = typhon_engine::torrent::hex_decode(&info_hash.to_lowercase()).ok()?;
-    state.engines.get(engine_id).and_then(|e| e.manager.get(&key))
+    state
+        .engines
+        .get(engine_id)
+        .and_then(|e| e.manager.get(&key))
 }
 
 fn not_found() -> Response {
@@ -9621,7 +10557,9 @@ async fn get_torrent_files(
 }
 
 /// The native file list of one torrent: what `GET .../files` answers.
-fn torrent_files_json(torrent: &std::sync::Arc<typhon_engine::torrent::meta::TorrentState>) -> serde_json::Value {
+fn torrent_files_json(
+    torrent: &std::sync::Arc<typhon_engine::torrent::meta::TorrentState>,
+) -> serde_json::Value {
     // What each file already has on disk, so the Content tab shows what was
     // downloaded and what is still missing. It listed paths and sizes only.
     let done = file_done_bytes(torrent);
@@ -9682,7 +10620,10 @@ fn rename_file_on_copies(
         let held: Vec<&str> = copies.iter().map(|(id, _)| id.as_str()).collect();
         return Err((
             StatusCode::CONFLICT,
-            format!("the torrent is held by several engines ({}): name one with ?engine=", held.join(", ")),
+            format!(
+                "the torrent is held by several engines ({}): name one with ?engine=",
+                held.join(", ")
+            ),
         ));
     }
     let refused = |e: RenameError| match e {
@@ -9694,13 +10635,21 @@ fn rename_file_on_copies(
     // changes.
     let mut todo = Vec::new();
     for (id, copy) in &copies {
-        let Some(engine) = state.engines.get(id) else { continue };
+        let Some(engine) = state.engines.get(id) else {
+            continue;
+        };
         let (from, to) = paths(&copy.meta).map_err(|m| (StatusCode::BAD_REQUEST, m))?;
-        engine.manager.can_rename_file(&copy.info_hash, &from, &to).map_err(refused)?;
+        engine
+            .manager
+            .can_rename_file(&copy.info_hash, &from, &to)
+            .map_err(refused)?;
         todo.push((engine, copy.info_hash, from, to));
     }
     for (engine, ih, from, to) in todo {
-        engine.manager.rename_file(&ih, &from, &to).map_err(refused)?;
+        engine
+            .manager
+            .rename_file(&ih, &from, &to)
+            .map_err(refused)?;
     }
     Ok(copies[0].1.clone())
 }
@@ -9709,9 +10658,17 @@ fn rename_file_on_copies(
 /// multi-file torrent's folder is the first component of where the file is
 /// (the .torrent's name until the file is renamed into another folder); a
 /// single-file torrent has none.
-fn file_folder_and_path(meta: &typhon_engine::torrent::meta::TorrentMeta, i: usize) -> (Option<String>, String) {
+fn file_folder_and_path(
+    meta: &typhon_engine::torrent::meta::TorrentMeta,
+    i: usize,
+) -> (Option<String>, String) {
     // Joined with `/` whatever the platform's separator is.
-    let join = |p: &std::path::Path| p.components().map(|c| c.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/");
+    let join = |p: &std::path::Path| {
+        p.components()
+            .map(|c| c.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/")
+    };
     let (folder, rest) = meta.folder_split(i);
     (folder.map(|f| join(&f)), join(&rest))
 }
@@ -9753,13 +10710,22 @@ fn native_rename_paths(
     let hits: Vec<usize> = (0..n)
         .filter(|&i| {
             let (folder, path) = file_folder_and_path(meta, i);
-            path == req.from && req.from_folder.as_deref().is_none_or(|f| folder.as_deref() == Some(f))
+            path == req.from
+                && req
+                    .from_folder
+                    .as_deref()
+                    .is_none_or(|f| folder.as_deref() == Some(f))
         })
         .collect();
     let i = match hits.as_slice() {
         [i] => *i,
         [] => return Err(format!("{:?} is not a file of this torrent", req.from)),
-        _ => return Err(format!("{:?} is in several folders: name one with \"from_folder\"", req.from)),
+        _ => {
+            return Err(format!(
+                "{:?} is in several folders: name one with \"from_folder\"",
+                req.from
+            ))
+        }
     };
     let (folder, _) = file_folder_and_path(meta, i);
     let folder = req.folder.clone().or(folder).unwrap_or_default();
@@ -9781,12 +10747,19 @@ async fn post_torrent_file_rename(
 ) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    let refuse = |code: StatusCode, msg: &str| (code, Json(serde_json::json!({"error": msg}))).into_response();
+    let refuse = |code: StatusCode, msg: &str| {
+        (code, Json(serde_json::json!({"error": msg}))).into_response()
+    };
     let Ok(req) = serde_json::from_str::<FileRenameBody>(&body) else {
-        return refuse(StatusCode::BAD_REQUEST, r#"the body is {"from": "<path>", "to": "<new path>"}"#);
+        return refuse(
+            StatusCode::BAD_REQUEST,
+            r#"the body is {"from": "<path>", "to": "<new path>"}"#,
+        );
     };
     let engine = engine_param(&query, "");
-    match rename_file_on_copies(&state, &info_hash, &engine, false, &|meta| native_rename_paths(meta, &req)) {
+    match rename_file_on_copies(&state, &info_hash, &engine, false, &|meta| {
+        native_rename_paths(meta, &req)
+    }) {
         Ok(torrent) => {
             let mut v = torrent_files_json(&torrent);
             v["ok"] = true.into();
@@ -9799,12 +10772,22 @@ async fn post_torrent_file_rename(
 /// `POST /api/v2/torrents/renameFile` (`hash`, `oldPath`, `newPath`): the same
 /// rename, with paths as `torrents/files` names them, folder included, and the
 /// folder may change (a file by file move of a torrent to another folder).
-async fn qbit_rename_file(State(state): State<AppState>, RawQuery(query): RawQuery, headers: HeaderMap, body: String) -> Response {
+async fn qbit_rename_file(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
     let form = shim_form(&query, &body);
-    let (Some(hash), Some(old), Some(new)) = (form.get("hash"), form.get("oldPath"), form.get("newPath")) else {
-        return qbit_refuse(StatusCode::BAD_REQUEST, "hash, oldPath and newPath are required");
+    let (Some(hash), Some(old), Some(new)) =
+        (form.get("hash"), form.get("oldPath"), form.get("newPath"))
+    else {
+        return qbit_refuse(
+            StatusCode::BAD_REQUEST,
+            "hash, oldPath and newPath are required",
+        );
     };
     // The paths are the engine's own: below the save path, folder included
     // (which may change: a file can go to another folder).
@@ -9822,7 +10805,9 @@ async fn qbit_rename_file(State(state): State<AppState>, RawQuery(query): RawQue
 /// small file sharing one piece with a large one to all or nothing. `None`
 /// for every file when the torrent is incomplete and has no piece map to
 /// read: unknown is not zero.
-fn file_done_bytes(torrent: &std::sync::Arc<typhon_engine::torrent::meta::TorrentState>) -> Vec<Option<u64>> {
+fn file_done_bytes(
+    torrent: &std::sync::Arc<typhon_engine::torrent::meta::TorrentState>,
+) -> Vec<Option<u64>> {
     let meta = &torrent.meta;
     // Complete by the same rule as the list's progress column (a seed, or a
     // seed-mode add that carries no piece map): the two must never disagree.
@@ -9840,7 +10825,9 @@ fn file_done_bytes(torrent: &std::sync::Arc<typhon_engine::torrent::meta::Torren
             if f.length == 0 {
                 return Some(0);
             }
-            Some(held_bytes(f.offset, f.length, piece_len, |i| p.has_piece(i as u32)))
+            Some(held_bytes(f.offset, f.length, piece_len, |i| {
+                p.has_piece(i as u32)
+            }))
         })
         .collect()
 }
@@ -9851,7 +10838,10 @@ fn held_bytes(offset: u64, len: u64, piece_len: u64, has: impl Fn(u64) -> bool) 
     let end = offset + len;
     (first..=last)
         .filter(|i| has(*i))
-        .map(|i| end.min((i + 1) * piece_len).saturating_sub(offset.max(i * piece_len)))
+        .map(|i| {
+            end.min((i + 1) * piece_len)
+                .saturating_sub(offset.max(i * piece_len))
+        })
         .sum()
 }
 
@@ -9989,7 +10979,11 @@ async fn qbit_torrent_files(
 /// room in the stream, so a running sum drifts back by every pad before it.
 fn file_piece_range(offset: u64, len: u64, piece_len: u64) -> (u64, u64) {
     let first = offset / piece_len;
-    let last = if len == 0 { first } else { (offset + len - 1) / piece_len };
+    let last = if len == 0 {
+        first
+    } else {
+        (offset + len - 1) / piece_len
+    };
     (first, last)
 }
 
@@ -10024,7 +11018,9 @@ async fn qbit_torrent_export(
 ) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    let hash = shim_param(&query, &body, "hash").unwrap_or_default().to_lowercase();
+    let hash = shim_param(&query, &body, "hash")
+        .unwrap_or_default()
+        .to_lowercase();
     let blob = {
         let store = state.store.lock().unwrap();
         store.torrent_blob(&hash).ok().flatten()
@@ -10073,7 +11069,10 @@ async fn qbit_torrent_properties(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
-    let added = native.get("added_time").and_then(|v| v.as_i64()).unwrap_or(0);
+    let added = native
+        .get("added_time")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
     let save_path = native
         .get("engine_save_path")
         .and_then(|v| v.as_str())
@@ -10087,30 +11086,52 @@ async fn qbit_torrent_properties(
         .read()
         .map(|s| s.share_limits_of(&typhon_engine::torrent::hex_encode(&torrent.info_hash)))
         .unwrap_or_default();
-    let share = crate::sharelimits::qbit_fields(&share_own, &crate::sharelimits::engine_limits(&state, &engine_id));
+    let share = crate::sharelimits::qbit_fields(
+        &share_own,
+        &crate::sharelimits::engine_limits(&state, &engine_id),
+    );
 
     // From the .torrent itself, as qBittorrent reports them. 4.3 sent the
     // addition date as the creation date and empty strings for the rest.
     let blob = {
         let store = state.store.lock().unwrap();
-        store.torrent_blob(&typhon_engine::torrent::hex_encode(&torrent.info_hash)).ok().flatten()
+        store
+            .torrent_blob(&typhon_engine::torrent::hex_encode(&torrent.info_hash))
+            .ok()
+            .flatten()
     };
-    let (created, created_by, comment) =
-        blob.as_deref().map(crate::qbitrow::metainfo_extras).unwrap_or((None, String::new(), String::new()));
+    let (created, created_by, comment) = blob
+        .as_deref()
+        .map(crate::qbitrow::metainfo_extras)
+        .unwrap_or((None, String::new(), String::new()));
     let int = |k: &str| native.get(k).and_then(|v| v.as_i64()).unwrap_or(0);
     let elapsed = (now - added).max(0);
     // qBittorrent's averages: what moved, over the time the torrent has been
     // here. Lifetime bytes over time since added, so a restart does not reset
     // them to the session's.
-    let avg = |bytes: &serde_json::Value| if elapsed > 0 { bytes.as_i64().unwrap_or(0) / elapsed } else { 0 };
+    let avg = |bytes: &serde_json::Value| {
+        if elapsed > 0 {
+            bytes.as_i64().unwrap_or(0) / elapsed
+        } else {
+            0
+        }
+    };
     // Connected peers are one count in this engine (seeds and leechers are not
     // told apart once connected): all of them are `peers`, and `seeds` -- the
     // connected seeds -- is not measured. The swarm totals are the tracker's.
     let connected = int("num_peers");
-    let complete = native.get("progress").and_then(|v| v.as_f64()).unwrap_or(0.0) >= 1.0;
+    let complete = native
+        .get("progress")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0)
+        >= 1.0;
     // Last time a full copy was seen: now when we hold one or the tracker
     // counts a seed, -1 (qBittorrent's "never") otherwise.
-    let last_seen = if complete || int("swarm_seeds") > 0 { now } else { -1 };
+    let last_seen = if complete || int("swarm_seeds") > 0 {
+        now
+    } else {
+        -1
+    };
 
     let mut props = serde_json::json!({
         "addition_date": added,
@@ -10196,16 +11217,15 @@ async fn qbit_torrent_trackers(
             "num_seeds": 0, "status": 2, "tier": "", "url": url,
         })
     };
-    let mut rows = vec![
-        pseudo("** [DHT] **"),
-        pseudo("** [PeX] **"),
-    ];
+    let mut rows = vec![pseudo("** [DHT] **"), pseudo("** [PeX] **")];
 
     // And the real ones. This route used to return the three pseudo rows and
     // nothing else, whatever the torrent: a client asking "who is this
     // announcing to" got an answer that was the same for every torrent in the
     // catalogue, and looked like a torrent with no trackers at all.
-    let hash = shim_param(&query, &body, "hash").unwrap_or_default().to_lowercase();
+    let hash = shim_param(&query, &body, "hash")
+        .unwrap_or_default()
+        .to_lowercase();
     let Some((engine_id, torrent)) = find_torrent(&state, &hash) else {
         // qBit answers an unknown hash with 404, not with an empty list: a
         // 200 here read as "this torrent has no trackers".
@@ -10232,8 +11252,12 @@ async fn qbit_torrent_trackers(
         } else {
             4
         };
-        let seeders = torrent.scrape_seeders.load(std::sync::atomic::Ordering::Relaxed) as i64;
-        let leechers = torrent.scrape_leechers.load(std::sync::atomic::Ordering::Relaxed) as i64;
+        let seeders = torrent
+            .scrape_seeders
+            .load(std::sync::atomic::Ordering::Relaxed) as i64;
+        let leechers = torrent
+            .scrape_leechers
+            .load(std::sync::atomic::Ordering::Relaxed) as i64;
         for (tier, urls) in torrent.live_trackers.read().iter().enumerate() {
             for url in urls {
                 rows.push(serde_json::json!({
@@ -10251,7 +11275,6 @@ async fn qbit_torrent_trackers(
     }
     Json(serde_json::Value::Array(rows)).into_response()
 }
-
 
 /// Pause or resume one race torrent.
 ///
@@ -10498,7 +11521,6 @@ async fn race_bulk(
     bulk_action(&state, "race", &body).await
 }
 
-
 #[derive(serde::Deserialize, Default)]
 struct TrackerEdit {
     #[serde(default)]
@@ -10519,7 +11541,9 @@ struct TrackerEdit {
 /// Edit the tracker list of one torrent.
 fn edit_trackers(state: &AppState, info_hash: &str, req: &TrackerEdit) -> Response {
     match edit_trackers_core(state, info_hash, req) {
-        Ok((next, changed)) => Json(serde_json::json!({"trackers": next, "changed": changed})).into_response(),
+        Ok((next, changed)) => {
+            Json(serde_json::json!({"trackers": next, "changed": changed})).into_response()
+        }
         Err((StatusCode::NOT_FOUND, _)) => not_found(),
         Err((code, message)) => (code, Json(serde_json::json!({"error": message}))).into_response(),
     }
@@ -10527,12 +11551,26 @@ fn edit_trackers(state: &AppState, info_hash: &str, req: &TrackerEdit) -> Respon
 
 /// Add announce URLs to one torrent through the editor's own path. For a
 /// workflow action; answers whether anything changed.
-pub(crate) fn add_trackers_to(state: &AppState, info_hash: &str, urls: &[String]) -> Result<bool, String> {
-    let req = TrackerEdit { op: "add".into(), urls: urls.to_vec(), ..Default::default() };
-    edit_trackers_core(state, info_hash, &req).map(|(_, changed)| changed).map_err(|(_, m)| m)
+pub(crate) fn add_trackers_to(
+    state: &AppState,
+    info_hash: &str,
+    urls: &[String],
+) -> Result<bool, String> {
+    let req = TrackerEdit {
+        op: "add".into(),
+        urls: urls.to_vec(),
+        ..Default::default()
+    };
+    edit_trackers_core(state, info_hash, &req)
+        .map(|(_, changed)| changed)
+        .map_err(|(_, m)| m)
 }
 
-fn edit_trackers_core(state: &AppState, info_hash: &str, req: &TrackerEdit) -> Result<(Vec<Vec<String>>, bool), (StatusCode, String)> {
+fn edit_trackers_core(
+    state: &AppState,
+    info_hash: &str,
+    req: &TrackerEdit,
+) -> Result<(Vec<Vec<String>>, bool), (StatusCode, String)> {
     let Some((engine_id, torrent)) = find_torrent(state, info_hash) else {
         return Err((StatusCode::NOT_FOUND, "torrent not found".into()));
     };
@@ -10544,11 +11582,10 @@ fn edit_trackers_core(state: &AppState, info_hash: &str, req: &TrackerEdit) -> R
 
     let current = torrent.live_trackers.read().clone();
     let outcome = if req.op == "set" && !req.tiers.is_empty() {
-        crate::trackeredit::from_tiers(&req.tiers)
-            .map(|next| {
-                let changed = !crate::trackeredit::same(&current, &next);
-                (next, changed)
-            })
+        crate::trackeredit::from_tiers(&req.tiers).map(|next| {
+            let changed = !crate::trackeredit::same(&current, &next);
+            (next, changed)
+        })
     } else {
         crate::trackeredit::apply(&current, &req.op, &req.urls, &req.from, &req.to)
     };
@@ -10571,8 +11608,12 @@ fn edit_trackers_core(state: &AppState, info_hash: &str, req: &TrackerEdit) -> R
                     // revert at the next restart: the operator would believe a
                     // tracker was added and find out weeks later, when the
                     // credit did not arrive.
-                    return Err((StatusCode::BAD_REQUEST, "this torrent has no stored .torrent yet, so the edit could not be saved. \
-A torrent added moments ago is written to the store on the next state sync; try again shortly".to_string()));
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        "this torrent has no stored .torrent yet, so the edit could not be saved. \
+A torrent added moments ago is written to the store on the next state sync; try again shortly"
+                            .to_string(),
+                    ));
                 }
                 // Through the engine, which writes the resume record now. 4.3
                 // set the live list only, so the edit lived in memory until
@@ -10605,8 +11646,11 @@ async fn post_torrent_trackers(
     let _ = cfg;
 
     let Ok(req) = serde_json::from_str::<TrackerEdit>(&body) else {
-        return (StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "invalid body"}))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "invalid body"})),
+        )
+            .into_response();
     };
     edit_trackers(&state, &info_hash.to_lowercase(), &req)
 }
@@ -10633,13 +11677,19 @@ async fn post_add_tracker(
         .and_then(|v| v.get("url").and_then(|u| u.as_str()).map(str::to_string))
         .unwrap_or_default();
     if url.is_empty() {
-        return (StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "url is required"}))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "url is required"})),
+        )
+            .into_response();
     }
-    let req = TrackerEdit { op: "add".into(), urls: vec![url], ..Default::default() };
+    let req = TrackerEdit {
+        op: "add".into(),
+        urls: vec![url],
+        ..Default::default()
+    };
     edit_trackers(&state, &info_hash.to_lowercase(), &req)
 }
-
 
 #[derive(serde::Deserialize)]
 struct SettingChange {
@@ -10674,18 +11724,27 @@ async fn post_settings(
     let _ = cfg;
 
     let Ok(req) = serde_json::from_str::<SettingsBody>(&body) else {
-        return (StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "invalid body"}))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "invalid body"})),
+        )
+            .into_response();
     };
     if req.changes.is_empty() {
-        return (StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "no changes"}))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "no changes"})),
+        )
+            .into_response();
     }
 
     let writer = crate::cfgfile::lock();
     let Ok(mut doc) = std::fs::read_to_string(&state.config_path) else {
-        return (StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": "cannot read the config"}))).into_response();
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": "cannot read the config"})),
+        )
+            .into_response();
     };
 
     for change in &req.changes {
@@ -10701,7 +11760,10 @@ async fn post_settings(
                 // header, so the first entry of an [[engine]] array.
                 let lookup = || {
                     let t = toml::from_str::<toml::Value>(&doc).ok()?;
-                    let table = change.section.split('.').filter(|s| !s.is_empty())
+                    let table = change
+                        .section
+                        .split('.')
+                        .filter(|s| !s.is_empty())
                         .try_fold(&t, |t, s| {
                             let v = t.get(s)?;
                             v.as_array().map_or(Some(v), |a| a.first())
@@ -10739,19 +11801,23 @@ async fn post_settings(
         // offered in the settings tab all the same (applied at restart).
         let creatable = (change.section == "race" || change.section == "hoard")
             && (LIVE_SESSION_KEYS.contains(&change.key.as_str()) || change.key == "enable_lsd");
-        let edited = match crate::tomledit::set_toml_value(&doc, &change.section, &change.key, &literal) {
-            Err(_) if creatable => crate::tomledit::set_toml_table(
-                &doc,
-                &change.section,
-                &[(change.key.clone(), literal.clone())],
-            ),
-            other => other,
-        };
+        let edited =
+            match crate::tomledit::set_toml_value(&doc, &change.section, &change.key, &literal) {
+                Err(_) if creatable => crate::tomledit::set_toml_table(
+                    &doc,
+                    &change.section,
+                    &[(change.key.clone(), literal.clone())],
+                ),
+                other => other,
+            };
         match edited {
             Ok(next) => doc = next,
             Err(message) => {
-                return (StatusCode::BAD_REQUEST,
-                        Json(serde_json::json!({"error": message}))).into_response()
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": message})),
+                )
+                    .into_response()
             }
         }
     }
@@ -10769,10 +11835,17 @@ async fn post_settings(
     }
     if let Err(e) = crate::cfgfile::write_edit(&state.config_path, &doc) {
         if e.kind() == std::io::ErrorKind::PermissionDenied {
-            return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": crate::cfgfile::ROOTS_REFUSED}))).into_response();
+            return (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"error": crate::cfgfile::ROOTS_REFUSED})),
+            )
+                .into_response();
         }
-        return (StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": "cannot write the config"}))).into_response();
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": "cannot write the config"})),
+        )
+            .into_response();
     }
     if let Ok(reloaded) = toml::from_str::<Config>(&doc) {
         state.set_cfg(reloaded);
@@ -10794,7 +11867,6 @@ async fn post_settings(
     }))
     .into_response()
 }
-
 
 #[derive(serde::Deserialize)]
 struct BaselineBody {
@@ -10823,10 +11895,18 @@ async fn post_baseline(
     let _ = cfg;
 
     let Ok(req) = serde_json::from_str::<BaselineBody>(&body) else {
-        return (StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "invalid body"}))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "invalid body"})),
+        )
+            .into_response();
     };
-    let written = state.store.lock().unwrap().set_counter("global", req.total_uploaded, req.total_downloaded);
+    let written =
+        state
+            .store
+            .lock()
+            .unwrap()
+            .set_counter("global", req.total_uploaded, req.total_downloaded);
     if let Err(e) = written {
         return store_refused(&state, "baseline", e);
     }
@@ -10872,7 +11952,11 @@ async fn qbit_edit_trackers(state: &AppState, form: &Fields, op: &str) -> Respon
         return (StatusCode::BAD_REQUEST, "").into_response();
     }
 
-    let req = TrackerEdit { op: op.to_string(), urls, ..Default::default() };
+    let req = TrackerEdit {
+        op: op.to_string(),
+        urls,
+        ..Default::default()
+    };
     let outcome = edit_trackers(state, &hash, &req);
     match outcome.status() {
         StatusCode::OK => (StatusCode::OK, "").into_response(),
@@ -10895,10 +11979,17 @@ async fn qbit_add_trackers(
     // Announce to the new trackers now, as qBittorrent does when a tracker
     // is added, instead of waiting out the old interval.
     if r.status() == StatusCode::OK {
-        let hash = form.get("hash").map(|h| h.trim().to_lowercase()).unwrap_or_default();
+        let hash = form
+            .get("hash")
+            .map(|h| h.trim().to_lowercase())
+            .unwrap_or_default();
         for (id, _) in copies_of(&state, &hash) {
             if let Some(bump) = state.engines.get(&id).and_then(|e| e.bump.get()) {
-                let _ = bump.try_send(crate::announce::scheduler::BumpReq { info_hash: hash.clone(), reply: None, forced: false });
+                let _ = bump.try_send(crate::announce::scheduler::BumpReq {
+                    info_hash: hash.clone(),
+                    reply: None,
+                    forced: false,
+                });
             }
         }
     }
@@ -10917,7 +12008,6 @@ async fn qbit_remove_trackers(
     let _ = cfg;
     qbit_edit_trackers(&state, &form, "remove").await
 }
-
 
 /// One background job.
 async fn get_job(
@@ -10954,13 +12044,14 @@ const CHANGELOG: &str = include_str!("../../../CHANGELOG.md");
 
 async fn get_changelog() -> Response {
     (
-        [(axum::http::header::CONTENT_TYPE, "text/markdown; charset=utf-8")],
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/markdown; charset=utf-8",
+        )],
         CHANGELOG,
     )
         .into_response()
 }
-
-
 
 #[derive(serde::Deserialize)]
 struct DialLimits {
@@ -10988,26 +12079,54 @@ const CLIENT_RATE_LIMITS_KEY: &str = "client_rate_limits";
 /// the live config on every pass (`workers::spawn_download_slots`,
 /// `workers::spawn_share_limits`), not because `apply_config` carries them.
 const LIVE_SESSION_KEYS: &[&str] = &[
-    "upload_rate_limit", "download_rate_limit", "peer_timeout", "peer_encryption", "max_unknown_infohash_per_ip", "choking", "max_uploads_per_torrent",
-    "active_downloads", "queueing", "active_seeds", "active_limit",
-    "dont_count_slow_torrents", "slow_torrent_dl_rate_threshold", "slow_torrent_ul_rate_threshold",
+    "upload_rate_limit",
+    "download_rate_limit",
+    "peer_timeout",
+    "peer_encryption",
+    "max_unknown_infohash_per_ip",
+    "choking",
+    "max_uploads_per_torrent",
+    "active_downloads",
+    "queueing",
+    "active_seeds",
+    "active_limit",
+    "dont_count_slow_torrents",
+    "slow_torrent_dl_rate_threshold",
+    "slow_torrent_ul_rate_threshold",
     "slow_torrent_inactive_timer",
-    "max_ratio", "max_seeding_time", "max_inactive_seeding_time", "share_limit_action",
+    "max_ratio",
+    "max_seeding_time",
+    "max_inactive_seeding_time",
+    "share_limit_action",
 ];
 
 /// Put the stored client-wide caps back on the engines. Called once at boot.
 pub fn restore_client_rate_limits(state: &AppState) {
-    let stored = state.store.read().ok().and_then(|s| s.setting(CLIENT_RATE_LIMITS_KEY).ok().flatten());
-    let v: serde_json::Value = stored.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+    let stored = state
+        .store
+        .read()
+        .ok()
+        .and_then(|s| s.setting(CLIENT_RATE_LIMITS_KEY).ok().flatten());
+    let v: serde_json::Value = stored
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
     let client = state.engines.client_rates();
-    client.up.set_rate(v.get("up").and_then(|x| x.as_u64()).unwrap_or(0));
-    client.down.set_rate(v.get("down").and_then(|x| x.as_u64()).unwrap_or(0));
+    client
+        .up
+        .set_rate(v.get("up").and_then(|x| x.as_u64()).unwrap_or(0));
+    client
+        .down
+        .set_rate(v.get("down").and_then(|x| x.as_u64()).unwrap_or(0));
 }
 
 /// Set one direction of the client-wide cap (bytes/s, 0 = none) and persist
 /// both. False when the store refused the write: the cap is live, but would
 /// not survive a restart, and the caller says so.
-fn set_client_rate_limit(state: &AppState, dir: typhon_engine::torrent::ratelimit::Dir, bytes: u64) -> bool {
+fn set_client_rate_limit(
+    state: &AppState,
+    dir: typhon_engine::torrent::ratelimit::Dir,
+    bytes: u64,
+) -> bool {
     let client = state.engines.client_rates();
     client.get(dir).set_rate(bytes);
     let doc = serde_json::json!({"up": client.up.rate(), "down": client.down.rate()}).to_string();
@@ -11022,7 +12141,10 @@ fn torrent_copies(
     state: &AppState,
     hash: &str,
     engine: &str,
-) -> Vec<(String, std::sync::Arc<typhon_engine::torrent::meta::TorrentState>)> {
+) -> Vec<(
+    String,
+    std::sync::Arc<typhon_engine::torrent::meta::TorrentState>,
+)> {
     let Ok(key) = typhon_engine::torrent::hex_decode(&hash.to_lowercase()) else {
         return Vec::new();
     };
@@ -11035,7 +12157,10 @@ fn torrent_copies(
         .collect()
 }
 
-fn torrent_limits_json(engine: &str, t: &typhon_engine::torrent::meta::TorrentState) -> serde_json::Value {
+fn torrent_limits_json(
+    engine: &str,
+    t: &typhon_engine::torrent::meta::TorrentState,
+) -> serde_json::Value {
     let (up, down) = t.rate_limits();
     serde_json::json!({
         "engine": engine,
@@ -11066,13 +12191,18 @@ async fn get_torrent_limits(
     guard!(state, headers, query);
     let hash = {
         let store = state.store.read().unwrap_or_else(|p| p.into_inner());
-        store.resolve_hash(&info_hash).unwrap_or_else(|| info_hash.to_lowercase())
+        store
+            .resolve_hash(&info_hash)
+            .unwrap_or_else(|| info_hash.to_lowercase())
     };
     let copies = torrent_copies(&state, &hash, &engine_param(&query, ""));
     if copies.is_empty() {
         return not_found();
     }
-    let list: Vec<_> = copies.iter().map(|(e, t)| torrent_limits_json(e, t)).collect();
+    let list: Vec<_> = copies
+        .iter()
+        .map(|(e, t)| torrent_limits_json(e, t))
+        .collect();
     Json(serde_json::json!({"info_hash": hash, "copies": list})).into_response()
 }
 
@@ -11098,19 +12228,29 @@ async fn post_torrent_limits(
     }
     let hash = {
         let store = state.store.read().unwrap_or_else(|p| p.into_inner());
-        store.resolve_hash(&info_hash).unwrap_or_else(|| info_hash.to_lowercase())
+        store
+            .resolve_hash(&info_hash)
+            .unwrap_or_else(|| info_hash.to_lowercase())
     };
     let copies = torrent_copies(&state, &hash, &engine_param(&query, ""));
     if copies.is_empty() {
         return not_found();
     }
-    let up = req.up_kib.map(typhon_engine::torrent::ratelimit::kib_to_bytes);
-    let down = req.down_kib.map(typhon_engine::torrent::ratelimit::kib_to_bytes);
+    let up = req
+        .up_kib
+        .map(typhon_engine::torrent::ratelimit::kib_to_bytes);
+    let down = req
+        .down_kib
+        .map(typhon_engine::torrent::ratelimit::kib_to_bytes);
     let mut list = Vec::new();
     for (engine, t) in &copies {
         if let Some(e) = state.engines.get(engine) {
             if let Err(msg) = e.manager.set_torrent_rate_limits(&t.info_hash, up, down) {
-                return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": msg}))).into_response();
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": msg})),
+                )
+                    .into_response();
             }
         }
         list.push(torrent_limits_json(engine, t));
@@ -11132,7 +12272,10 @@ const FILE_PRIO_ZERO_REFUSAL: &str = "Hydranos always downloads the whole torren
 /// the edit: nothing to order any more.
 fn edit_download_order(
     state: &AppState,
-    copies: &[(String, std::sync::Arc<typhon_engine::torrent::meta::TorrentState>)],
+    copies: &[(
+        String,
+        std::sync::Arc<typhon_engine::torrent::meta::TorrentState>,
+    )],
     edit: impl Fn(&mut typhon_engine::torrent::piece_picker::DownloadOrder),
 ) -> Result<(), String> {
     let mut failed = Vec::new();
@@ -11144,12 +12287,21 @@ fn edit_download_order(
             }
         }
     }
-    if failed.is_empty() { Ok(()) } else { Err(failed.join("; ")) }
+    if failed.is_empty() {
+        Ok(())
+    } else {
+        Err(failed.join("; "))
+    }
 }
 
-fn download_order_json(engine: &str, t: &typhon_engine::torrent::meta::TorrentState) -> serde_json::Value {
+fn download_order_json(
+    engine: &str,
+    t: &typhon_engine::torrent::meta::TorrentState,
+) -> serde_json::Value {
     let o = t.download_order();
-    let prio: Vec<u8> = (0..t.meta.files.len()).map(|i| o.file_priority(i)).collect();
+    let prio: Vec<u8> = (0..t.meta.files.len())
+        .map(|i| o.file_priority(i))
+        .collect();
     serde_json::json!({
         "engine": engine,
         "sequential": o.sequential,
@@ -11186,13 +12338,18 @@ async fn get_torrent_download_order(
     guard!(state, headers, query);
     let hash = {
         let store = state.store.read().unwrap_or_else(|p| p.into_inner());
-        store.resolve_hash(&info_hash).unwrap_or_else(|| info_hash.to_lowercase())
+        store
+            .resolve_hash(&info_hash)
+            .unwrap_or_else(|| info_hash.to_lowercase())
     };
     let copies = torrent_copies(&state, &hash, &engine_param(&query, ""));
     if copies.is_empty() {
         return not_found();
     }
-    let list: Vec<_> = copies.iter().map(|(e, t)| download_order_json(e, t)).collect();
+    let list: Vec<_> = copies
+        .iter()
+        .map(|(e, t)| download_order_json(e, t))
+        .collect();
     Json(serde_json::json!({"info_hash": hash, "copies": list})).into_response()
 }
 
@@ -11222,16 +12379,25 @@ async fn post_torrent_download_order(
     let prio = match req.priority {
         None => None,
         Some(0) => {
-            return (StatusCode::CONFLICT, Json(serde_json::json!({"error": FILE_PRIO_ZERO_REFUSAL}))).into_response()
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({"error": FILE_PRIO_ZERO_REFUSAL})),
+            )
+                .into_response()
         }
-        Some(p) if (0..=255).contains(&p) && typhon_engine::torrent::piece_picker::is_valid_file_priority(p as u8) => {
+        Some(p)
+            if (0..=255).contains(&p)
+                && typhon_engine::torrent::piece_picker::is_valid_file_priority(p as u8) =>
+        {
             Some(p as u8)
         }
         Some(_) => return bad_request("priority must be 1 (normal), 6 (high) or 7 (maximal)"),
     };
     let hash = {
         let store = state.store.read().unwrap_or_else(|p| p.into_inner());
-        store.resolve_hash(&info_hash).unwrap_or_else(|| info_hash.to_lowercase())
+        store
+            .resolve_hash(&info_hash)
+            .unwrap_or_else(|| info_hash.to_lowercase())
     };
     let copies = torrent_copies(&state, &hash, &engine_param(&query, ""));
     if copies.is_empty() {
@@ -11259,7 +12425,11 @@ async fn post_torrent_download_order(
                 }
             };
             if let Err(msg) = e.manager.update_download_order(&t.info_hash, edit) {
-                return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": msg}))).into_response();
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": msg})),
+                )
+                    .into_response();
             }
         }
         list.push(download_order_json(engine, t));
@@ -11279,7 +12449,12 @@ struct EngineRateLimitsBody {
 fn engine_rate_limits_json(state: &AppState, id: &str) -> Option<serde_json::Value> {
     let e = state.engines.get(id)?;
     let rates = e.manager.rates();
-    let session = state.cfg().local_engines().into_iter().find(|l| l.id == id).map(|l| l.session);
+    let session = state
+        .cfg()
+        .local_engines()
+        .into_iter()
+        .find(|l| l.id == id)
+        .map(|l| l.session);
     Some(serde_json::json!({
         "engine": id,
         // What the config says (bytes/s there), in KiB/s.
@@ -11305,7 +12480,11 @@ async fn get_engine_rate_limits(
     guard!(state, headers, query);
     match engine_rate_limits_json(&state, &id) {
         Some(v) => Json(v).into_response(),
-        None => (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "no such engine"}))).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "no such engine"})),
+        )
+            .into_response(),
     }
 }
 
@@ -11332,14 +12511,24 @@ async fn post_engine_rate_limits(
         return bad_request("need upload_kib and/or download_kib (KiB/s, 0 = unlimited)");
     }
     if state.engines.get(&id).is_none() {
-        return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "no such engine"}))).into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "no such engine"})),
+        )
+            .into_response();
     }
     let mut kv: Vec<(String, String)> = Vec::new();
     if let Some(v) = req.upload_kib {
-        kv.push(("upload_rate_limit".into(), typhon_engine::torrent::ratelimit::kib_to_bytes(v).to_string()));
+        kv.push((
+            "upload_rate_limit".into(),
+            typhon_engine::torrent::ratelimit::kib_to_bytes(v).to_string(),
+        ));
     }
     if let Some(v) = req.download_kib {
-        kv.push(("download_rate_limit".into(), typhon_engine::torrent::ratelimit::kib_to_bytes(v).to_string()));
+        kv.push((
+            "download_rate_limit".into(),
+            typhon_engine::torrent::ratelimit::kib_to_bytes(v).to_string(),
+        ));
     }
     let ok = edit_config(&state, |doc| {
         if id == "race" || id == "hoard" {
@@ -11394,29 +12583,72 @@ fn shim_form(query: &str, body: &str) -> Fields {
 fn shim_limit(form: &Fields) -> Option<u64> {
     let raw = form.get("limit")?;
     let n: f64 = raw.trim().parse().ok()?;
-    Some(if n.is_finite() && n > 0.0 { n as u64 } else { 0 })
+    Some(if n.is_finite() && n > 0.0 {
+        n as u64
+    } else {
+        0
+    })
 }
 
 /// A torrent's own cap as qBit's lists show it: bytes/s, -1 for none.
 pub(crate) fn qbit_limit_field(bytes: u64) -> i64 {
-    if bytes == 0 { -1 } else { bytes.min(i64::MAX as u64) as i64 }
+    if bytes == 0 {
+        -1
+    } else {
+        bytes.min(i64::MAX as u64) as i64
+    }
 }
 
-async fn qbit_transfer_limit_read(state: &AppState, query: &str, headers: &HeaderMap, dir: typhon_engine::torrent::ratelimit::Dir) -> Response {
+async fn qbit_transfer_limit_read(
+    state: &AppState,
+    query: &str,
+    headers: &HeaderMap,
+    dir: typhon_engine::torrent::ratelimit::Dir,
+) -> Response {
     let query = query.to_string();
     guard!(*state, *headers, query);
-    (StatusCode::OK, state.engines.client_rates().get(dir).rate().to_string()).into_response()
+    (
+        StatusCode::OK,
+        state.engines.client_rates().get(dir).rate().to_string(),
+    )
+        .into_response()
 }
 
-async fn qbit_transfer_upload_limit(State(state): State<AppState>, RawQuery(query): RawQuery, headers: HeaderMap) -> Response {
-    qbit_transfer_limit_read(&state, &query.unwrap_or_default(), &headers, typhon_engine::torrent::ratelimit::Dir::Up).await
+async fn qbit_transfer_upload_limit(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+) -> Response {
+    qbit_transfer_limit_read(
+        &state,
+        &query.unwrap_or_default(),
+        &headers,
+        typhon_engine::torrent::ratelimit::Dir::Up,
+    )
+    .await
 }
 
-async fn qbit_transfer_download_limit(State(state): State<AppState>, RawQuery(query): RawQuery, headers: HeaderMap) -> Response {
-    qbit_transfer_limit_read(&state, &query.unwrap_or_default(), &headers, typhon_engine::torrent::ratelimit::Dir::Down).await
+async fn qbit_transfer_download_limit(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+) -> Response {
+    qbit_transfer_limit_read(
+        &state,
+        &query.unwrap_or_default(),
+        &headers,
+        typhon_engine::torrent::ratelimit::Dir::Down,
+    )
+    .await
 }
 
-async fn qbit_transfer_set_limit(state: &AppState, query: &str, headers: &HeaderMap, body: &str, dir: typhon_engine::torrent::ratelimit::Dir) -> Response {
+async fn qbit_transfer_set_limit(
+    state: &AppState,
+    query: &str,
+    headers: &HeaderMap,
+    body: &str,
+    dir: typhon_engine::torrent::ratelimit::Dir,
+) -> Response {
     let query = query.to_string();
     guard!(*state, *headers, query);
     let form = shim_form(&query, body);
@@ -11429,22 +12661,55 @@ async fn qbit_transfer_set_limit(state: &AppState, query: &str, headers: &Header
     qbit_ok()
 }
 
-async fn qbit_transfer_set_upload_limit(State(state): State<AppState>, RawQuery(query): RawQuery, headers: HeaderMap, body: String) -> Response {
-    qbit_transfer_set_limit(&state, &query.unwrap_or_default(), &headers, &body, typhon_engine::torrent::ratelimit::Dir::Up).await
+async fn qbit_transfer_set_upload_limit(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    qbit_transfer_set_limit(
+        &state,
+        &query.unwrap_or_default(),
+        &headers,
+        &body,
+        typhon_engine::torrent::ratelimit::Dir::Up,
+    )
+    .await
 }
 
-async fn qbit_transfer_set_download_limit(State(state): State<AppState>, RawQuery(query): RawQuery, headers: HeaderMap, body: String) -> Response {
-    qbit_transfer_set_limit(&state, &query.unwrap_or_default(), &headers, &body, typhon_engine::torrent::ratelimit::Dir::Down).await
+async fn qbit_transfer_set_download_limit(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    qbit_transfer_set_limit(
+        &state,
+        &query.unwrap_or_default(),
+        &headers,
+        &body,
+        typhon_engine::torrent::ratelimit::Dir::Down,
+    )
+    .await
 }
 
 /// The full hashes a shim call names, resolved; `all` is every torrent.
 fn shim_resolved_hashes(state: &AppState, form: &Fields) -> Vec<String> {
     let wanted = qbit_hashes(state, form);
     let store = state.store.read().unwrap_or_else(|p| p.into_inner());
-    wanted.iter().filter_map(|p| store.resolve_hash(p)).collect()
+    wanted
+        .iter()
+        .filter_map(|p| store.resolve_hash(p))
+        .collect()
 }
 
-async fn qbit_torrents_limit_read(state: &AppState, query: &str, headers: &HeaderMap, body: &str, dir: typhon_engine::torrent::ratelimit::Dir) -> Response {
+async fn qbit_torrents_limit_read(
+    state: &AppState,
+    query: &str,
+    headers: &HeaderMap,
+    body: &str,
+    dir: typhon_engine::torrent::ratelimit::Dir,
+) -> Response {
     let query = query.to_string();
     guard!(*state, *headers, query);
     let form = shim_form(&query, body);
@@ -11452,26 +12717,61 @@ async fn qbit_torrents_limit_read(state: &AppState, query: &str, headers: &Heade
     for hash in shim_resolved_hashes(state, &form) {
         if let Some((_, t)) = find_torrent(state, &hash) {
             let (up, down) = t.rate_limits();
-            let v = if dir == typhon_engine::torrent::ratelimit::Dir::Up { up } else { down };
+            let v = if dir == typhon_engine::torrent::ratelimit::Dir::Up {
+                up
+            } else {
+                down
+            };
             out.insert(hash, serde_json::json!(v));
         }
     }
     Json(serde_json::Value::Object(out)).into_response()
 }
 
-async fn qbit_torrents_upload_limit(State(state): State<AppState>, RawQuery(query): RawQuery, headers: HeaderMap, body: String) -> Response {
-    qbit_torrents_limit_read(&state, &query.unwrap_or_default(), &headers, &body, typhon_engine::torrent::ratelimit::Dir::Up).await
+async fn qbit_torrents_upload_limit(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    qbit_torrents_limit_read(
+        &state,
+        &query.unwrap_or_default(),
+        &headers,
+        &body,
+        typhon_engine::torrent::ratelimit::Dir::Up,
+    )
+    .await
 }
 
-async fn qbit_torrents_download_limit(State(state): State<AppState>, RawQuery(query): RawQuery, headers: HeaderMap, body: String) -> Response {
-    qbit_torrents_limit_read(&state, &query.unwrap_or_default(), &headers, &body, typhon_engine::torrent::ratelimit::Dir::Down).await
+async fn qbit_torrents_download_limit(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    qbit_torrents_limit_read(
+        &state,
+        &query.unwrap_or_default(),
+        &headers,
+        &body,
+        typhon_engine::torrent::ratelimit::Dir::Down,
+    )
+    .await
 }
 
 /// Cap every local copy of each torrent, as the shim's other per-torrent
 /// verbs do: a qBit client names a hash, never an engine.
 /// What an add asked of a torrent once it exists: speed caps (bytes/s) and
 /// download order. Shared by the `.torrent` add and a magnet's resolution.
-pub(crate) fn apply_add_options(state: &AppState, hash: &str, up: Option<u64>, down: Option<u64>, sequential: bool, first_last: bool) {
+pub(crate) fn apply_add_options(
+    state: &AppState,
+    hash: &str,
+    up: Option<u64>,
+    down: Option<u64>,
+    sequential: bool,
+    first_last: bool,
+) {
     if up.is_some() || down.is_some() {
         // The add itself is done and answered; a cap the store could not keep
         // is logged, and the operator sets it again.
@@ -11488,7 +12788,12 @@ pub(crate) fn apply_add_options(state: &AppState, hash: &str, up: Option<u64>, d
 }
 
 /// Every copy is tried; the error names the ones whose engine did not keep the cap.
-fn shim_cap_torrents(state: &AppState, hashes: &[String], up: Option<u64>, down: Option<u64>) -> Result<(), String> {
+fn shim_cap_torrents(
+    state: &AppState,
+    hashes: &[String],
+    up: Option<u64>,
+    down: Option<u64>,
+) -> Result<(), String> {
     let mut failed = Vec::new();
     for hash in hashes {
         for (engine, t) in torrent_copies(state, hash, "") {
@@ -11500,10 +12805,20 @@ fn shim_cap_torrents(state: &AppState, hashes: &[String], up: Option<u64>, down:
             }
         }
     }
-    if failed.is_empty() { Ok(()) } else { Err(failed.join("; ")) }
+    if failed.is_empty() {
+        Ok(())
+    } else {
+        Err(failed.join("; "))
+    }
 }
 
-async fn qbit_torrents_set_limit(state: &AppState, query: &str, headers: &HeaderMap, body: &str, dir: typhon_engine::torrent::ratelimit::Dir) -> Response {
+async fn qbit_torrents_set_limit(
+    state: &AppState,
+    query: &str,
+    headers: &HeaderMap,
+    body: &str,
+    dir: typhon_engine::torrent::ratelimit::Dir,
+) -> Response {
     let query = query.to_string();
     guard!(*state, *headers, query);
     let form = shim_form(&query, body);
@@ -11512,8 +12827,12 @@ async fn qbit_torrents_set_limit(state: &AppState, query: &str, headers: &Header
     };
     let hashes = shim_resolved_hashes(state, &form);
     let applied = match dir {
-        typhon_engine::torrent::ratelimit::Dir::Up => shim_cap_torrents(state, &hashes, Some(limit), None),
-        typhon_engine::torrent::ratelimit::Dir::Down => shim_cap_torrents(state, &hashes, None, Some(limit)),
+        typhon_engine::torrent::ratelimit::Dir::Up => {
+            shim_cap_torrents(state, &hashes, Some(limit), None)
+        }
+        typhon_engine::torrent::ratelimit::Dir::Down => {
+            shim_cap_torrents(state, &hashes, None, Some(limit))
+        }
     };
     match applied {
         Ok(()) => qbit_ok(),
@@ -11521,12 +12840,36 @@ async fn qbit_torrents_set_limit(state: &AppState, query: &str, headers: &Header
     }
 }
 
-async fn qbit_torrents_set_upload_limit(State(state): State<AppState>, RawQuery(query): RawQuery, headers: HeaderMap, body: String) -> Response {
-    qbit_torrents_set_limit(&state, &query.unwrap_or_default(), &headers, &body, typhon_engine::torrent::ratelimit::Dir::Up).await
+async fn qbit_torrents_set_upload_limit(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    qbit_torrents_set_limit(
+        &state,
+        &query.unwrap_or_default(),
+        &headers,
+        &body,
+        typhon_engine::torrent::ratelimit::Dir::Up,
+    )
+    .await
 }
 
-async fn qbit_torrents_set_download_limit(State(state): State<AppState>, RawQuery(query): RawQuery, headers: HeaderMap, body: String) -> Response {
-    qbit_torrents_set_limit(&state, &query.unwrap_or_default(), &headers, &body, typhon_engine::torrent::ratelimit::Dir::Down).await
+async fn qbit_torrents_set_download_limit(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    qbit_torrents_set_limit(
+        &state,
+        &query.unwrap_or_default(),
+        &headers,
+        &body,
+        typhon_engine::torrent::ratelimit::Dir::Down,
+    )
+    .await
 }
 
 // --- Share limits (see `sharelimits`) ---------------------------------------
@@ -11547,23 +12890,51 @@ async fn qbit_set_share_limits(
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
     let form = shim_form(&query, &body);
-    let num = |k: &str| form.get(k).and_then(|v| v.trim().parse::<f64>().ok()).filter(|v| v.is_finite());
-    let (Some(ratio), Some(seeding)) = (num("ratioLimit"), num("seedingTimeLimit")) else {
-        return (StatusCode::BAD_REQUEST, "ratioLimit and seedingTimeLimit are required").into_response();
+    let num = |k: &str| {
+        form.get(k)
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .filter(|v| v.is_finite())
     };
-    let inactive = num("inactiveSeedingTimeLimit").unwrap_or(crate::sharelimits::FOLLOW_ENGINE as f64);
+    let (Some(ratio), Some(seeding)) = (num("ratioLimit"), num("seedingTimeLimit")) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            "ratioLimit and seedingTimeLimit are required",
+        )
+            .into_response();
+    };
+    let inactive =
+        num("inactiveSeedingTimeLimit").unwrap_or(crate::sharelimits::FOLLOW_ENGINE as f64);
     let hashes = shim_resolved_hashes(&state, &form);
-    match crate::sharelimits::set_torrent_limits(&state, &hashes, Some(ratio), Some(seeding as i64), Some(inactive as i64)) {
+    match crate::sharelimits::set_torrent_limits(
+        &state,
+        &hashes,
+        Some(ratio),
+        Some(seeding as i64),
+        Some(inactive as i64),
+    ) {
         Ok(_) => qbit_ok(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
     }
 }
 
-fn torrent_share_limits_json(state: &AppState, hash: &str, copies: &[(String, std::sync::Arc<typhon_engine::torrent::meta::TorrentState>)]) -> serde_json::Value {
-    let own = state.store.read().map(|s| s.share_limits_of(hash)).unwrap_or_default();
+fn torrent_share_limits_json(
+    state: &AppState,
+    hash: &str,
+    copies: &[(
+        String,
+        std::sync::Arc<typhon_engine::torrent::meta::TorrentState>,
+    )],
+) -> serde_json::Value {
+    let own = state
+        .store
+        .read()
+        .map(|s| s.share_limits_of(hash))
+        .unwrap_or_default();
     let list: Vec<_> = copies
         .iter()
-        .map(|(e, _)| crate::sharelimits::native_json(e, &own, &crate::sharelimits::engine_limits(state, e)))
+        .map(|(e, _)| {
+            crate::sharelimits::native_json(e, &own, &crate::sharelimits::engine_limits(state, e))
+        })
         .collect();
     serde_json::json!({"info_hash": hash, "copies": list})
 }
@@ -11580,7 +12951,9 @@ async fn get_torrent_share_limits(
     guard!(state, headers, query);
     let hash = {
         let store = state.store.read().unwrap_or_else(|p| p.into_inner());
-        store.resolve_hash(&info_hash).unwrap_or_else(|| info_hash.to_lowercase())
+        store
+            .resolve_hash(&info_hash)
+            .unwrap_or_else(|| info_hash.to_lowercase())
     };
     let copies = torrent_copies(&state, &hash, &engine_param(&query, ""));
     if copies.is_empty() {
@@ -11618,12 +12991,17 @@ async fn post_torrent_share_limits(
         Ok(r) => r,
         Err(e) => return bad_request(&format!("invalid body: {e}")),
     };
-    if req.ratio_limit.is_none() && req.seeding_time_limit.is_none() && req.inactive_seeding_time_limit.is_none() {
+    if req.ratio_limit.is_none()
+        && req.seeding_time_limit.is_none()
+        && req.inactive_seeding_time_limit.is_none()
+    {
         return bad_request("need ratio_limit, seeding_time_limit and/or inactive_seeding_time_limit (-2 = the engine's, -1 = none)");
     }
     let hash = {
         let store = state.store.read().unwrap_or_else(|p| p.into_inner());
-        store.resolve_hash(&info_hash).unwrap_or_else(|| info_hash.to_lowercase())
+        store
+            .resolve_hash(&info_hash)
+            .unwrap_or_else(|| info_hash.to_lowercase())
     };
     let copies = torrent_copies(&state, &hash, "");
     if copies.is_empty() {
@@ -11636,7 +13014,11 @@ async fn post_torrent_share_limits(
         req.seeding_time_limit,
         req.inactive_seeding_time_limit,
     ) {
-        return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response();
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e})),
+        )
+            .into_response();
     }
     Json(torrent_share_limits_json(&state, &hash, &copies)).into_response()
 }
@@ -11651,9 +13033,17 @@ async fn get_engine_share_limits(
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
     if state.engines.get(&id).is_none() {
-        return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "no such engine"}))).into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "no such engine"})),
+        )
+            .into_response();
     }
-    Json(crate::sharelimits::engine_json(&id, &crate::sharelimits::engine_limits(&state, &id))).into_response()
+    Json(crate::sharelimits::engine_json(
+        &id,
+        &crate::sharelimits::engine_limits(&state, &id),
+    ))
+    .into_response()
 }
 
 /// Set one engine's share limits: `max_ratio`, `max_seeding_time`,
@@ -11674,18 +13064,32 @@ async fn post_engine_share_limits(
         Err(e) => return bad_request(&format!("invalid body: {e}")),
     };
     if change.is_empty() {
-        return bad_request("need max_ratio, max_seeding_time, max_inactive_seeding_time and/or share_limit_action");
+        return bad_request(
+            "need max_ratio, max_seeding_time, max_inactive_seeding_time and/or share_limit_action",
+        );
     }
     if state.engines.get(&id).is_none() {
-        return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "no such engine"}))).into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "no such engine"})),
+        )
+            .into_response();
     }
     if let Err(e) = change.pairs() {
         return bad_request(&e);
     }
     if let Err(e) = crate::sharelimits::write_engine_limits(&state, &id, &change) {
-        return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response();
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e})),
+        )
+            .into_response();
     }
-    Json(crate::sharelimits::engine_json(&id, &crate::sharelimits::engine_limits(&state, &id))).into_response()
+    Json(crate::sharelimits::engine_json(
+        &id,
+        &crate::sharelimits::engine_limits(&state, &id),
+    ))
+    .into_response()
 }
 
 /// Outbound dial pacing for one engine, applied live and kept.
@@ -11704,8 +13108,11 @@ async fn post_engine_share_limits(
 /// not missing, the last inch of wiring was. cf `project_hydra_v4_full_rust`.
 async fn set_dial_limits(state: &AppState, engine: &str, body: &str) -> Response {
     let Ok(req) = serde_json::from_str::<DialLimits>(body) else {
-        return (StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "invalid body"}))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "invalid body"})),
+        )
+            .into_response();
     };
     if req.max_dials_per_sec.is_none() && req.max_connections.is_none() {
         return (
@@ -11733,8 +13140,11 @@ async fn set_dial_limits(state: &AppState, engine: &str, body: &str) -> Response
             .into_response();
     }
     let Some(eng) = state.engines.get(engine) else {
-        return (StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({"error": "agent unavailable"}))).into_response();
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": "agent unavailable"})),
+        )
+            .into_response();
     };
 
     // Apply to the live limiter, then read BACK from it. Echoing the request
@@ -11796,7 +13206,6 @@ async fn race_dial_limits(
     let _ = cfg;
     set_dial_limits(&state, "race", &body).await
 }
-
 
 // ---------------------------------------------------------------------------
 // Engine maintenance
@@ -11867,7 +13276,8 @@ async fn drain_now(
         return bad_request("drain panicked");
     };
     if touched.is_empty() {
-        return Json(serde_json::json!({"status": "no_volume", "volumes": touched})).into_response();
+        return Json(serde_json::json!({"status": "no_volume", "volumes": touched}))
+            .into_response();
     }
     let did = total.deleted + total.graduated;
     Json(serde_json::json!({
@@ -11925,11 +13335,7 @@ async fn hoard_verify_one(
         .into_response(),
         // recheck refuses a torrent it cannot check. A refusal is a 409,
         // never a silent ok.
-        Err(e) => (
-            StatusCode::CONFLICT,
-            Json(serde_json::json!({"error": e})),
-        )
-            .into_response(),
+        Err(e) => (StatusCode::CONFLICT, Json(serde_json::json!({"error": e}))).into_response(),
     }
 }
 
@@ -12088,13 +13494,19 @@ async fn vpn_speedtest_run(
     // the result it gets back. Disabled counts as unconfigured.
     match crate::speedtest::run(&state).await {
         Ok(m) => Json(m).into_response(),
-        Err(e) if e.contains("not configured") || e.contains("SOCKS5") => {
-            (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e}))).into_response()
-        }
+        Err(e) if e.contains("not configured") || e.contains("SOCKS5") => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": e})),
+        )
+            .into_response(),
         Err(e) if e.contains("already running") => {
             (StatusCode::CONFLICT, Json(serde_json::json!({"error": e}))).into_response()
         }
-        Err(e) => (StatusCode::BAD_GATEWAY, Json(serde_json::json!({"error": e}))).into_response(),
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({"error": e})),
+        )
+            .into_response(),
     }
 }
 
@@ -12158,8 +13570,16 @@ fn tracker_rows(
     let next_at = torrent.next_announce_at.load(Ordering::Relaxed);
     // -1 is "never / not known", which the UI draws as a dash. 0 is a real
     // answer meaning "due now" and has to stay distinguishable from it.
-    let last_announce = if last_at > 0 { (now - last_at).max(0) } else { -1 };
-    let next_announce = if next_at > 0 { (next_at - now).max(0) } else { -1 };
+    let last_announce = if last_at > 0 {
+        (now - last_at).max(0)
+    } else {
+        -1
+    };
+    let next_announce = if next_at > 0 {
+        (next_at - now).max(0)
+    } else {
+        -1
+    };
 
     // An announce that has never happened cannot have succeeded and cannot
     // have failed. A tracker that answered with an error keeps saying so even
@@ -12208,7 +13628,6 @@ fn tracker_rows(
     rows
 }
 
-
 /// Per-tracker announce state, in the engine's own shape.
 fn tracker_detail(
     torrent: &std::sync::Arc<typhon_engine::torrent::meta::TorrentState>,
@@ -12232,8 +13651,16 @@ fn tracker_detail(
     let next_at = torrent.next_announce_at.load(Ordering::Relaxed);
     // -1 means "never" / "not known", which the UI renders as a dash. 0 is a
     // real answer meaning "due now" and has to stay distinguishable from it.
-    let last_announce = if last_at > 0 { (now - last_at).max(0) } else { -1 };
-    let next_announce = if next_at > 0 { (next_at - now).max(0) } else { -1 };
+    let last_announce = if last_at > 0 {
+        (now - last_at).max(0)
+    } else {
+        -1
+    };
+    let next_announce = if next_at > 0 {
+        (next_at - now).max(0)
+    } else {
+        -1
+    };
 
     let mut out = Vec::new();
     for (tier, urls) in torrent.live_trackers.read().iter().enumerate() {
@@ -12294,7 +13721,14 @@ async fn get_race_torrent(
             .into_response();
     }
 
-    Json(detail_payload(&state, &engine_id, &hash, &torrent, &admission_of(&state, &engine_id))).into_response()
+    Json(detail_payload(
+        &state,
+        &engine_id,
+        &hash,
+        &torrent,
+        &admission_of(&state, &engine_id),
+    ))
+    .into_response()
 }
 
 /// This engine's scheduler progress, by its real id.
@@ -12432,7 +13866,12 @@ async fn get_hoard_torrent(
     let _ = cfg;
     // The store resolves a prefix to a full hash and proves the torrent is
     // hoard's; the engine then supplies the live half of the panel.
-    let hash = match resolve_in_hoard(&state, &engine_param(&query, "hoard"), &info_hash, "torrent not found") {
+    let hash = match resolve_in_hoard(
+        &state,
+        &engine_param(&query, "hoard"),
+        &info_hash,
+        "torrent not found",
+    ) {
         Ok(hash) => hash,
         Err(response) => return response,
     };
@@ -12453,7 +13892,14 @@ async fn get_hoard_torrent(
         )
             .into_response();
     }
-    Json(detail_payload(&state, &engine_id, &hash, &torrent, &admission_of(&state, &engine_id))).into_response()
+    Json(detail_payload(
+        &state,
+        &engine_id,
+        &hash,
+        &torrent,
+        &admission_of(&state, &engine_id),
+    ))
+    .into_response()
 }
 
 /// Add a torrent, native API: a `torrent_path` already on this node's disk, a
@@ -12515,11 +13961,21 @@ pub(crate) async fn post_torrent_add(
     let Ok(payload) = serde_json::from_str::<serde_json::Value>(&body) else {
         return refuse(StatusCode::BAD_REQUEST, "the body is not JSON".into());
     };
-    let s = |k: &str| payload.get(k).and_then(|v| v.as_str()).unwrap_or_default().trim().to_string();
+    let s = |k: &str| {
+        payload
+            .get(k)
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .trim()
+            .to_string()
+    };
     let flag = |k: &str| payload.get(k).and_then(|v| v.as_bool());
     let paused = flag("stopped").or_else(|| flag("paused")).unwrap_or(false);
-    let seed_mode = flag("seed_mode").or_else(|| flag("skip_recheck")).unwrap_or(false);
-    let subfolder = flag("create_subfolder").unwrap_or_else(|| state.cfg().daemon.create_torrent_folder);
+    let seed_mode = flag("seed_mode")
+        .or_else(|| flag("skip_recheck"))
+        .unwrap_or(false);
+    let subfolder =
+        flag("create_subfolder").unwrap_or_else(|| state.cfg().daemon.create_torrent_folder);
 
     // `engine` names an engine; `mode` names a role and takes the engine that
     // carries it (the one named after the role first).
@@ -12531,19 +13987,35 @@ pub(crate) async fn post_torrent_add(
     let torrent_path = s("torrent_path");
     let torrent_url = s("torrent_url");
     let magnet_uri = s("magnet_uri");
-    let given = [!torrent_path.is_empty(), !torrent_url.is_empty(), !magnet_uri.is_empty()]
-        .iter()
-        .filter(|g| **g)
-        .count();
+    let given = [
+        !torrent_path.is_empty(),
+        !torrent_url.is_empty(),
+        !magnet_uri.is_empty(),
+    ]
+    .iter()
+    .filter(|g| **g)
+    .count();
     if given != 1 {
-        return refuse(StatusCode::BAD_REQUEST, "give exactly one of torrent_path, torrent_url or magnet_uri".into());
+        return refuse(
+            StatusCode::BAD_REQUEST,
+            "give exactly one of torrent_path, torrent_url or magnet_uri".into(),
+        );
     }
 
     if !magnet_uri.is_empty() {
         let st = state.clone();
         let (cat, sp, tags) = (s("category"), s("save_path"), s("tags"));
         let res = tokio::task::spawn_blocking(move || {
-            crate::magnets::request_with(&st, &magnet_uri, &cat, &sp, &tags, paused, seed_mode, &engine)
+            crate::magnets::request_with(
+                &st,
+                &magnet_uri,
+                &cat,
+                &sp,
+                &tags,
+                paused,
+                seed_mode,
+                &engine,
+            )
         })
         .await
         .unwrap_or_else(|e| Err(e.to_string()));
@@ -12563,24 +14035,48 @@ pub(crate) async fn post_torrent_add(
         match crate::mcp::fetch_torrent(&torrent_url).await {
             Ok(b) => b,
             // A tracker's .torrent URL carries the passkey: not echoed back.
-            Err(e) => return refuse(StatusCode::BAD_REQUEST, e.replace(torrent_url.as_str(), "<url>")),
+            Err(e) => {
+                return refuse(
+                    StatusCode::BAD_REQUEST,
+                    e.replace(torrent_url.as_str(), "<url>"),
+                )
+            }
         }
     } else {
         match std::fs::read(&torrent_path) {
             Ok(b) => b,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return refuse(StatusCode::NOT_FOUND, format!("{torrent_path}: no such file"))
+                return refuse(
+                    StatusCode::NOT_FOUND,
+                    format!("{torrent_path}: no such file"),
+                )
             }
             Err(e) => return refuse(StatusCode::BAD_REQUEST, format!("{torrent_path}: {e}")),
         }
     };
 
-    let save_path = match add_save_path(&state, &bytes, &s("category"), &engine, &s("save_path"), subfolder) {
+    let save_path = match add_save_path(
+        &state,
+        &bytes,
+        &s("category"),
+        &engine,
+        &s("save_path"),
+        subfolder,
+    ) {
         Ok(p) => p,
         Err(e) => return refuse(StatusCode::BAD_REQUEST, e),
     };
 
-    match add_torrent_bytes(&state, &bytes, &s("category"), &save_path, &s("tags"), paused, seed_mode, &engine) {
+    match add_torrent_bytes(
+        &state,
+        &bytes,
+        &s("category"),
+        &save_path,
+        &s("tags"),
+        paused,
+        seed_mode,
+        &engine,
+    ) {
         Ok((hash, name)) => {
             let (engine_id, _) = placement(&state, &s("category"), &engine);
             Json(serde_json::json!({"info_hash": hash, "name": name, "engine": engine_id, "mode": engine_role(&state, &engine_id)}))
@@ -12592,7 +14088,11 @@ pub(crate) async fn post_torrent_add(
 
 /// The engine an add goes to: `engine` by id, or `mode` by role (the engine
 /// named after the role first). Empty = let the category decide.
-pub(crate) fn add_target_engine(state: &AppState, engine: &str, mode: &str) -> Result<String, String> {
+pub(crate) fn add_target_engine(
+    state: &AppState,
+    engine: &str,
+    mode: &str,
+) -> Result<String, String> {
     let engine = engine.trim();
     let mode = mode.trim().to_ascii_lowercase();
     if !engine.is_empty() {
@@ -12636,7 +14136,11 @@ pub(crate) fn add_save_path(
     if meta.multi_file {
         return Ok(save_path.to_string());
     }
-    let base = if save_path.is_empty() { placement(state, category, engine).1 } else { save_path.to_string() };
+    let base = if save_path.is_empty() {
+        placement(state, category, engine).1
+    } else {
+        save_path.to_string()
+    };
     if base.is_empty() {
         return Err("no save path: give one, or a category that has one".into());
     }
@@ -12714,17 +14218,29 @@ async fn qbit_torrent_add(
                     "paused" | "stopped" => paused = value == "true" || value == "1",
                     "skip_checking" => seed_mode = value == "true" || value == "1",
                     // Caps at add, bytes/s; 0 or negative = none.
-                    "upLimit" => up_limit = value.trim().parse::<i64>().ok().map(|v| v.max(0) as u64),
-                    "dlLimit" => dl_limit = value.trim().parse::<i64>().ok().map(|v| v.max(0) as u64),
-                    "ratioLimit" => ratio_limit = value.trim().parse::<f64>().ok().filter(|v| v.is_finite()),
-                    "seedingTimeLimit" => seeding_limit = value.trim().parse::<f64>().ok().map(|v| v as i64),
+                    "upLimit" => {
+                        up_limit = value.trim().parse::<i64>().ok().map(|v| v.max(0) as u64)
+                    }
+                    "dlLimit" => {
+                        dl_limit = value.trim().parse::<i64>().ok().map(|v| v.max(0) as u64)
+                    }
+                    "ratioLimit" => {
+                        ratio_limit = value.trim().parse::<f64>().ok().filter(|v| v.is_finite())
+                    }
+                    "seedingTimeLimit" => {
+                        seeding_limit = value.trim().parse::<f64>().ok().map(|v| v as i64)
+                    }
                     "inactiveSeedingTimeLimit" => {
                         inactive_limit = value.trim().parse::<f64>().ok().map(|v| v as i64)
                     }
                     // One link per line: magnets, or URLs of .torrent files.
                     // It is how autobrr, Sonarr and Radarr send a magnet.
                     "urls" => urls.extend(
-                        value.lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from),
+                        value
+                            .lines()
+                            .map(str::trim)
+                            .filter(|l| !l.is_empty())
+                            .map(String::from),
                     ),
                     "contentLayout" => layout = Some(value.trim().to_string()),
                     "root_folder" => root_folder = Some(value == "true" || value == "1"),
@@ -12792,7 +14308,13 @@ async fn qbit_torrent_add(
     // seedingTimeLimit in minutes): it lands on the torrent's own limits.
     let share_at_add = std::sync::Arc::new(move |st: &AppState, hash: String| {
         if ratio_limit.is_some() || seeding_limit.is_some() || inactive_limit.is_some() {
-            if let Err(e) = crate::sharelimits::set_torrent_limits(st, &[hash], ratio_limit, seeding_limit, inactive_limit) {
+            if let Err(e) = crate::sharelimits::set_torrent_limits(
+                st,
+                &[hash],
+                ratio_limit,
+                seeding_limit,
+                inactive_limit,
+            ) {
                 tracing::warn!("qbit add: share limits not stored: {e}");
             }
         }
@@ -12814,7 +14336,10 @@ async fn qbit_torrent_add(
                 no_subfolder,
             };
             tokio::task::spawn_blocking(move || {
-                crate::magnets::request_with_options(&st, &u2, &c, &sp, &tg, paused, seed_mode, "", &opts).map(|hash| {
+                crate::magnets::request_with_options(
+                    &st, &u2, &c, &sp, &tg, paused, seed_mode, "", &opts,
+                )
+                .map(|hash| {
                     // Keyed by hash, so a magnet's limits wait for it in the
                     // store and apply once it has resolved.
                     shared(&st, hash);
@@ -12850,7 +14375,8 @@ async fn qbit_torrent_add(
     }
     for bytes in &files {
         if no_subfolder
-            && typhon_engine::torrent::metainfo::parse_torrent_bytes(bytes).is_ok_and(|m| m.multi_file)
+            && typhon_engine::torrent::metainfo::parse_torrent_bytes(bytes)
+                .is_ok_and(|m| m.multi_file)
         {
             tracing::warn!("qbit add refused: contentLayout NoSubfolder on a multi-file torrent is not supported");
             failed += 1;
@@ -12864,7 +14390,9 @@ async fn qbit_torrent_add(
                 continue;
             }
         };
-        match add_torrent_bytes(&state, bytes, &category, &save_path, &tags, paused, seed_mode, "") {
+        match add_torrent_bytes(
+            &state, bytes, &category, &save_path, &tags, paused, seed_mode, "",
+        ) {
             // upLimit / dlLimit and the download order land on the torrent
             // the moment it exists, and persist with it. A magnet keeps them
             // with its request until then (`magnets::AddOptions`).
@@ -12887,7 +14415,6 @@ async fn qbit_torrent_add(
     }
     (StatusCode::OK, "Ok.").into_response()
 }
-
 
 /// Add a torrent from an uploaded .torrent file.
 ///
@@ -12924,7 +14451,9 @@ async fn post_torrent_upload(
             "tags" => tags = value,
             "engine" => engine = value,
             "paused" | "stopped" => paused = value == "true" || value == "1",
-            "skip_checking" | "seed_mode" | "skip_recheck" => seed_mode = value == "true" || value == "1",
+            "skip_checking" | "seed_mode" | "skip_recheck" => {
+                seed_mode = value == "true" || value == "1"
+            }
             "mode" => mode = value,
             "create_subfolder" => subfolder = value == "true" || value == "1",
             _ => {}
@@ -12942,11 +14471,23 @@ async fn post_torrent_upload(
     // tier without anyone noticing.
     let engine = match add_target_engine(&state, &engine, &mode) {
         Ok(e) => e,
-        Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e}))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": e})),
+            )
+                .into_response()
+        }
     };
     let save_path = match add_save_path(&state, &bytes, &category, &engine, &save_path, subfolder) {
         Ok(p) => p,
-        Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e}))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": e})),
+            )
+                .into_response()
+        }
     };
     match add_torrent_bytes(
         &state, &bytes, &category, &save_path, &tags, paused, seed_mode, &engine,
@@ -12959,7 +14500,11 @@ async fn post_torrent_upload(
             .into_response()
         }
         Err(e) => {
-            let code = if e.contains("already added") { StatusCode::CONFLICT } else { StatusCode::BAD_REQUEST };
+            let code = if e.contains("already added") {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::BAD_REQUEST
+            };
             (code, Json(serde_json::json!({"error": e}))).into_response()
         }
     }
@@ -12984,9 +14529,12 @@ async fn delete_torrent(
 
     let hash = info_hash.to_lowercase();
     let mut timings = DeleteTimings::start();
-    let resolved = timed_store(&state, &mut timings.lookup_wait, &mut timings.lookup_hold, |store| {
-        store.resolve_hash(&hash)
-    });
+    let resolved = timed_store(
+        &state,
+        &mut timings.lookup_wait,
+        &mut timings.lookup_hold,
+        |store| store.resolve_hash(&hash),
+    );
     // An engine can run a torrent the store no longer lists (13/10/2026: a row
     // dropped by the reconcile mid-add). Answering 404 left it unremovable by
     // any route -- the shim's delete resolves through the store too -- and a
@@ -13016,12 +14564,21 @@ async fn delete_torrent(
     // before a torrent could be in two places.
     let want = engine_param(&query, "");
     let sessions: Vec<String> = if want.is_empty() {
-        let listed = timed_store(&state, &mut timings.lookup_wait, &mut timings.lookup_hold, |store| {
-            store.sessions_of(&hash)
-        });
+        let listed = timed_store(
+            &state,
+            &mut timings.lookup_wait,
+            &mut timings.lookup_hold,
+            |store| store.sessions_of(&hash),
+        );
         if listed.is_empty() {
             // No row: the engines that hold it are the copies.
-            state.engines.engines().iter().filter(|e| find_copy(&state, &e.id, &hash).is_some()).map(|e| e.id.clone()).collect()
+            state
+                .engines
+                .engines()
+                .iter()
+                .filter(|e| find_copy(&state, &e.id, &hash).is_some())
+                .map(|e| e.id.clone())
+                .collect()
         } else {
             listed
         }
@@ -13166,7 +14723,10 @@ pub(crate) struct DeleteTimings {
 
 impl DeleteTimings {
     pub(crate) fn start() -> Self {
-        Self { started: Some(std::time::Instant::now()), ..Default::default() }
+        Self {
+            started: Some(std::time::Instant::now()),
+            ..Default::default()
+        }
     }
 
     fn report(&self, hash: &str) {
@@ -13222,7 +14782,14 @@ pub(crate) fn remove_one_torrent(
     want: &str,
     delete_files: bool,
 ) -> Result<usize, String> {
-    remove_one_torrent_timed(state, hash, sessions, want, delete_files, DeleteTimings::start())
+    remove_one_torrent_timed(
+        state,
+        hash,
+        sessions,
+        want,
+        delete_files,
+        DeleteTimings::start(),
+    )
 }
 
 /// `remove_one_torrent`, continuing a `DeleteTimings` the caller started, so
@@ -13257,7 +14824,9 @@ fn remove_one_inner(
     // the rest of the copies still go, and the answer says what did not.
     let mut refused: Option<String> = None;
     for session in sessions {
-        let Some(engine) = state.engines.get(session) else { continue };
+        let Some(engine) = state.engines.get(session) else {
+            continue;
+        };
         let stage = Instant::now();
         let found = find_copy(state, session, hash);
         tm.find += stage.elapsed();
@@ -13274,11 +14843,18 @@ fn remove_one_inner(
         // payloads, and "files go with the last copy" kept the race one for a
         // hoard copy that never read it -- 58 of the 62 orphans /race gathered
         // on 2026-10-06.
-        let spare = if keep { Default::default() } else { crate::jobsrun::files_read_by_others(state, &torrent) };
+        let spare = if keep {
+            Default::default()
+        } else {
+            crate::jobsrun::files_read_by_others(state, &torrent)
+        };
         // Before the engine lets go: the departure needs the torrent's own
         // book and counters, and nothing else would tell the trackers.
         state.engines.spawn_departure(session, torrent.clone());
-        let (removed, engine_tm) = engine.manager.remove_torrent_sparing(&torrent.info_hash, keep, &spare);
+        let (removed, engine_tm) =
+            engine
+                .manager
+                .remove_torrent_sparing(&torrent.info_hash, keep, &spare);
         if engine_tm.spared > 0 {
             tracing::info!(hash = %hash, session, spared = engine_tm.spared, "files kept: another torrent reads them");
         }
@@ -13316,7 +14892,9 @@ fn remove_one_inner(
     }
     if let Some(e) = refused {
         tracing::error!(hash = %hash, "removed from the engines, the store refused to drop it: {e}");
-        return Err(format!("removed from the engine, but the store refused: {e}"));
+        return Err(format!(
+            "removed from the engine, but the store refused: {e}"
+        ));
     }
     Ok(dropped)
 }
@@ -13344,10 +14922,21 @@ async fn post_torrent_copy(
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
     let v: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
-    let target = v.get("engine").and_then(|x| x.as_str()).unwrap_or_default().trim().to_string();
+    let target = v
+        .get("engine")
+        .and_then(|x| x.as_str())
+        .unwrap_or_default()
+        .trim()
+        .to_string();
     let hash = info_hash.to_lowercase();
 
-    let bad = |m: String| (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": m}))).into_response();
+    let bad = |m: String| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": m})),
+        )
+            .into_response()
+    };
     if target.is_empty() {
         return bad("engine is required".into());
     }
@@ -13380,12 +14969,16 @@ async fn post_torrent_copy(
         store.torrent_blob(&hash).ok().flatten()
     };
     let Some(blob) = blob else { return not_found() };
-    let Some(dst) = state.engines.get(&target) else { return not_found() };
+    let Some(dst) = state.engines.get(&target) else {
+        return not_found();
+    };
     // Seed mode is a promise that every byte is on disk; only a whole source
     // copy can make it.
     // The source's renamed files: the copy reads the same bytes at the same
     // paths, not the .torrent's.
-    let renames = find_copy(&state, &existing, &hash).map(|t| t.meta.renamed_files()).unwrap_or_default();
+    let renames = find_copy(&state, &existing, &hash)
+        .map(|t| t.meta.renamed_files())
+        .unwrap_or_default();
     let whole = find_copy(&state, &existing, &hash).is_some_and(|t| {
         t.status.load(std::sync::atomic::Ordering::Relaxed)
             != typhon_engine::torrent::meta::TorrentStatus::Checking as u8
@@ -13400,7 +14993,10 @@ async fn post_torrent_copy(
         )
             .into_response();
     }
-    let (ih, _) = match dst.manager.add_torrent_bytes_renamed(&blob, &save_path, false, true, &renames) {
+    let (ih, _) = match dst
+        .manager
+        .add_torrent_bytes_renamed(&blob, &save_path, false, true, &renames)
+    {
         Ok(added) => added,
         Err(e) => {
             return (
@@ -13410,7 +15006,9 @@ async fn post_torrent_copy(
                 .into_response();
         }
     };
-    let stored = state.store.lock().unwrap().insert_torrent(&hash, &target, &blob, &save_path, &category, added, false, "");
+    let stored = state.store.lock().unwrap().insert_torrent(
+        &hash, &target, &blob, &save_path, &category, added, false, "",
+    );
     if let Err(e) = stored {
         // A copy the store does not know would be gone at the next restart,
         // seeding in the meantime: take it back out of the engine (the files
@@ -13456,20 +15054,44 @@ async fn post_torrent_graduate(
     let Some((current, torrent)) = find_torrent(&state, &hash) else {
         return not_found();
     };
-    let to = v.get("engine").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
-    let category = v.get("category").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
-    let mut save_path = v.get("save_path").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+    let to = v
+        .get("engine")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let category = v
+        .get("category")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let mut save_path = v
+        .get("save_path")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
     if to.is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "engine is required"})))
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "engine is required"})),
+        )
             .into_response();
     }
     if to == current {
-        return (StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": format!("already in {current}")}))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": format!("already in {current}")})),
+        )
+            .into_response();
     }
     if state.engines.get(&to).is_none() {
-        return (StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": format!("no engine named {to}")}))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": format!("no engine named {to}")})),
+        )
+            .into_response();
     }
     // The category's own save path when the caller did not name one: that is
     // where a graduation is supposed to land, and asking the operator to repeat
@@ -13484,15 +15106,23 @@ async fn post_torrent_graduate(
         }
     }
     if save_path.is_empty() {
-        return (StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "save_path is required (or a category that has one)"})))
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(
+                serde_json::json!({"error": "save_path is required (or a category that has one)"}),
+            ),
+        )
             .into_response();
     }
     // The same checks as a category change that graduates: an unsafe path,
     // files another torrent reads, hardlinks (unless allowed) and free space.
     // 4.3 queued this route's job with none of them.
-    let allow = v.get("allow_breaking_hardlinks").and_then(|x| x.as_bool()).unwrap_or(false);
-    let plan = crate::jobsrun::plan_move_checked(&state, &torrent, std::path::Path::new(&save_path));
+    let allow = v
+        .get("allow_breaking_hardlinks")
+        .and_then(|x| x.as_bool())
+        .unwrap_or(false);
+    let plan =
+        crate::jobsrun::plan_move_checked(&state, &torrent, std::path::Path::new(&save_path));
     match queue_data_move_core(
         &state,
         &hash,
@@ -13504,7 +15134,8 @@ async fn post_torrent_graduate(
         Some(to),
         allow,
     ) {
-        Ok(v) => Json(serde_json::json!({"status": "queued", "job": v["job"], "plan": v["plan"]})).into_response(),
+        Ok(v) => Json(serde_json::json!({"status": "queued", "job": v["job"], "plan": v["plan"]}))
+            .into_response(),
         Err((code, v)) => (code, Json(v)).into_response(),
     }
 }
@@ -13648,7 +15279,12 @@ async fn post_torrent_engine(
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
     let v: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
-    let target = v.get("engine").and_then(|x| x.as_str()).unwrap_or_default().trim().to_string();
+    let target = v
+        .get("engine")
+        .and_then(|x| x.as_str())
+        .unwrap_or_default()
+        .trim()
+        .to_string();
 
     let hash = info_hash.to_lowercase();
     // WHICH copy moves. With the same torrent in two engines, "move it" without
@@ -13666,7 +15302,10 @@ async fn post_torrent_engine(
         }
     };
     if target.is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "engine is required"})))
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "engine is required"})),
+        )
             .into_response();
     }
     if target == current {
@@ -13714,9 +15353,15 @@ async fn post_torrent_engine(
     // a restart reads it back. Both engines point at the same files for the
     // instant they overlap, which is what "duplicate to engine" does anyway.
     let ih = torrent.info_hash;
-    let Some(src) = state.engines.get(&current) else { return not_found() };
-    let Some(dst) = state.engines.get(&target) else { return not_found() };
-    let Some(original) = src.manager.export_state(&ih) else { return not_found() };
+    let Some(src) = state.engines.get(&current) else {
+        return not_found();
+    };
+    let Some(dst) = state.engines.get(&target) else {
+        return not_found();
+    };
+    let Some(original) = src.manager.export_state(&ih) else {
+        return not_found();
+    };
     let mut record = original.clone();
     if !save_path.is_empty() {
         record.save_path = save_path.clone();
@@ -13742,12 +15387,23 @@ async fn post_torrent_engine(
             .into_response();
     }
     src.announce_cache.forget(&hash);
-    let stored = state.store.lock().unwrap().set_session(&hash, &current, &target);
+    let stored = state
+        .store
+        .lock()
+        .unwrap()
+        .set_session(&hash, &current, &target);
     if let Err(e) = stored {
         // The store still says `current`: put the torrent back there, so the
         // engines and the store agree again.
-        let back = src.manager.import_state_bytes(&original, &blob).map_err(|u| u.to_string());
-        let back = back.and_then(|_| dst.manager.remove_torrent(&ih, true).map_err(|u| u.to_string()));
+        let back = src
+            .manager
+            .import_state_bytes(&original, &blob)
+            .map_err(|u| u.to_string());
+        let back = back.and_then(|_| {
+            dst.manager
+                .remove_torrent(&ih, true)
+                .map_err(|u| u.to_string())
+        });
         if let Err(u) = back {
             tracing::error!(hash = %hash, from = %current, to = %target, "could not undo the engine move after the store refused it: {u}");
         }
@@ -13763,7 +15419,11 @@ async fn post_torrent_engine(
 /// row alone leaves a torrent that still seeds, still announces, and comes back
 /// at the next restart from the engine's own state -- present to the network,
 /// invisible to the interface.
-fn remove_torrent_everywhere(state: &AppState, info_hash: &str, delete_files: bool) -> Result<(), String> {
+fn remove_torrent_everywhere(
+    state: &AppState,
+    info_hash: &str,
+    delete_files: bool,
+) -> Result<(), String> {
     let hash = info_hash.to_lowercase();
     let keep_data = !delete_files;
     let mut refused: Option<String> = None;
@@ -13778,14 +15438,23 @@ fn remove_torrent_everywhere(state: &AppState, info_hash: &str, delete_files: bo
                 // torrent of another hash reads: copies need not share a path
                 // (see `remove_one_inner`), so "the last copy deletes" left
                 // the others' payloads behind.
-                let spare = if keep_data { Default::default() } else { crate::jobsrun::files_read_by_other_hashes(state, &copy) };
+                let spare = if keep_data {
+                    Default::default()
+                } else {
+                    crate::jobsrun::files_read_by_other_hashes(state, &copy)
+                };
                 state.engines.spawn_departure(&engine.id, copy.clone());
-                if let Err(e) = engine.manager.remove_torrent_sparing(&ih, keep_data, &spare).0 {
+                if let Err(e) = engine
+                    .manager
+                    .remove_torrent_sparing(&ih, keep_data, &spare)
+                    .0
+                {
                     tracing::warn!(hash = %hash, "engine refused removal: {e}");
                     return Err(e.to_string());
                 }
                 engine.announce_cache.forget(&hash);
-                if let Err(e) = absorb_checked(state, &engine.id, &copy, &hash, Some(&engine.id)).2 {
+                if let Err(e) = absorb_checked(state, &engine.id, &copy, &hash, Some(&engine.id)).2
+                {
                     refused = Some(e);
                 }
             }
@@ -13829,14 +15498,16 @@ async fn purge_race_torrent(
         // deleted every store row of the hash and left the engine seeding:
         // the race copy came back at the next restart, and a hoard copy of
         // the same torrent lost its row for good.
-        Some(hash) => match remove_one_torrent(&state, &hash, &["race".to_string()], "race", true) {
-            Ok(_) => Json(serde_json::json!({"status": "ok"})).into_response(),
-            Err(e) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": format!("the race engine refused: {e}")})),
-            )
-                .into_response(),
-        },
+        Some(hash) => {
+            match remove_one_torrent(&state, &hash, &["race".to_string()], "race", true) {
+                Ok(_) => Json(serde_json::json!({"status": "ok"})).into_response(),
+                Err(e) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": format!("the race engine refused: {e}")})),
+                )
+                    .into_response(),
+            }
+        }
         None => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": "torrent not in race"})),
@@ -13903,7 +15574,6 @@ async fn qbit_delete(
     qbit_ok()
 }
 
-
 /// Restart the daemon.
 ///
 /// Answers FIRST, then exits after a short delay: the caller must receive the
@@ -13924,7 +15594,9 @@ async fn post_restart(
     // After the response is out: the stop drains the API, this request with it.
     tokio::spawn(async {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        tracing::info!("restart requested via API: stopping cleanly, then exiting for the supervisor");
+        tracing::info!(
+            "restart requested via API: stopping cleanly, then exiting for the supervisor"
+        );
         crate::shutdown::request_restart();
     });
     Json(serde_json::json!({"ok": true, "restarting": true})).into_response()
@@ -13943,7 +15615,9 @@ async fn post_settings_restart(
 
     tokio::spawn(async {
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-        tracing::info!("restart requested from settings: stopping cleanly, then exiting for the supervisor");
+        tracing::info!(
+            "restart requested from settings: stopping cleanly, then exiting for the supervisor"
+        );
         crate::shutdown::request_restart();
     });
     Json(serde_json::json!({"status": "restarting"})).into_response()
@@ -13991,8 +15665,11 @@ async fn get_race_timeline(
 
     let hash = info_hash.to_lowercase();
     if hash.is_empty() {
-        return (StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "info_hash required"}))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "info_hash required"})),
+        )
+            .into_response();
     }
     let state_str = find_selected(&state, &query, &hash)
         .map(|(_, torrent)| {
@@ -14033,7 +15710,6 @@ async fn get_race_timeline(
     .into_response()
 }
 
-
 /// The starting config template, embedded like 3.x embeds it.
 ///
 /// A fresh install can write its own config with no file to hand, and a reset
@@ -14073,10 +15749,14 @@ async fn post_settings_reset(
 
     let writer = crate::cfgfile::lock();
     let Ok(current) = std::fs::read_to_string(&state.config_path) else {
-        return (StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": "cannot read the config"}))).into_response();
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": "cannot read the config"})),
+        )
+            .into_response();
     };
-    let live: toml::Value = toml::from_str(&current).unwrap_or(toml::Value::Table(Default::default()));
+    let live: toml::Value =
+        toml::from_str(&current).unwrap_or(toml::Value::Table(Default::default()));
 
     let mut doc = DEFAULT_CONFIG_TOML.to_string();
     let mut kept: Vec<String> = Vec::new();
@@ -14107,8 +15787,16 @@ async fn post_settings_reset(
         .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
         .unwrap_or_default();
     if !roots.is_empty() {
-        let list = roots.iter().map(|r| crate::tomledit::quote_toml_key(r)).collect::<Vec<_>>().join(", ");
-        if let Ok(next) = crate::tomledit::set_toml_table(&doc, "mcp", &[("torrent_roots".to_string(), format!("[{list}]"))]) {
+        let list = roots
+            .iter()
+            .map(|r| crate::tomledit::quote_toml_key(r))
+            .collect::<Vec<_>>()
+            .join(", ");
+        if let Ok(next) = crate::tomledit::set_toml_table(
+            &doc,
+            "mcp",
+            &[("torrent_roots".to_string(), format!("[{list}]"))],
+        ) {
             doc = next;
             kept.push("mcp.torrent_roots".to_string());
         }
@@ -14120,20 +15808,25 @@ async fn post_settings_reset(
         .unwrap_or(0);
     let backup = format!("{}.bak-reset-{}", state.config_path.display(), now);
     if std::fs::write(&backup, &current).is_err() {
-        return (StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": "cannot write the backup"}))).into_response();
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": "cannot write the backup"})),
+        )
+            .into_response();
     }
     if crate::cfgfile::write_edit(&state.config_path, &doc).is_err() {
-        return (StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": "cannot write the config"}))).into_response();
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": "cannot write the config"})),
+        )
+            .into_response();
     }
     if let Ok(reloaded) = toml::from_str::<Config>(&doc) {
         state.set_cfg(reloaded);
     }
     drop(writer);
 
-    Json(serde_json::json!({"backup": backup, "preserved": kept, "status": "ok"}))
-        .into_response()
+    Json(serde_json::json!({"backup": backup, "preserved": kept, "status": "ok"})).into_response()
 }
 
 /// Start a qBittorrent import.
@@ -14152,7 +15845,9 @@ async fn post_settings_reset(
 /// The newest import job. Ids are `imp-<nanos>`, so the newest is the greatest.
 fn latest_import(state: &AppState) -> Option<(String, Arc<crate::importer::Progress>)> {
     let jobs = state.imports.lock().unwrap();
-    jobs.iter().max_by(|a, b| a.0.cmp(b.0)).map(|(id, p)| (id.clone(), p.clone()))
+    jobs.iter()
+        .max_by(|a, b| a.0.cmp(b.0))
+        .map(|(id, p)| (id.clone(), p.clone()))
 }
 
 /// Register a new job, or refuse while one is still running: two imports
@@ -14174,7 +15869,11 @@ fn import_begin(state: &AppState) -> Result<(String, Arc<crate::importer::Progre
     let id = format!("imp-{nanos:020}");
     let progress = Arc::new(crate::importer::Progress::default());
     progress.set_phase("connect");
-    state.imports.lock().unwrap().insert(id.clone(), progress.clone());
+    state
+        .imports
+        .lock()
+        .unwrap()
+        .insert(id.clone(), progress.clone());
     Ok((id, progress))
 }
 
@@ -14195,16 +15894,19 @@ fn import_engine(state: &AppState) -> String {
 fn import_categories(state: &AppState) -> crate::importer::CategoryFn {
     let state = state.clone();
     Arc::new(move |cats| {
-        crate::store::log_store("import: create categories", edit_categories(&state, |doc| {
-            for (name, path) in cats {
-                if !doc.contains_key(name) {
-                    doc.insert(
-                        name.clone(),
-                        serde_json::json!({"name": name, "save_path": path, "mode": "hoard"}),
-                    );
+        crate::store::log_store(
+            "import: create categories",
+            edit_categories(&state, |doc| {
+                for (name, path) in cats {
+                    if !doc.contains_key(name) {
+                        doc.insert(
+                            name.clone(),
+                            serde_json::json!({"name": name, "save_path": path, "mode": "hoard"}),
+                        );
+                    }
                 }
-            }
-        }));
+            }),
+        );
     })
 }
 
@@ -14218,23 +15920,42 @@ fn import_add(state: &AppState) -> crate::importer::AddFn {
             .map_err(|e| format!("torrent file did not parse: {e}"))?;
         // In ANY engine: adding a race torrent's twin to the hoard would seed
         // one payload from two places.
-        if state.engines.engines().iter().any(|e| e.manager.get(&meta.info_hash).is_some()) {
+        if state
+            .engines
+            .engines()
+            .iter()
+            .any(|e| e.manager.get(&meta.info_hash).is_some())
+        {
             return Ok(Added::AlreadyThere);
         }
         // Quiet: an imported library is not a stream of new arrivals, and an
         // "on add" webhook firing once per torrent of it would be a flood.
         add_torrent_bytes_as(
-            &state, &r.bytes, &r.category, &r.plan.save_path, &r.tags,
-            r.plan.paused, r.plan.seed_mode, &engine_id,
+            &state,
+            &r.bytes,
+            &r.category,
+            &r.plan.save_path,
+            &r.tags,
+            r.plan.paused,
+            r.plan.seed_mode,
+            &engine_id,
         )?;
         // The source client's lifetime counters come along, as history: not
         // this session's traffic, so not counted in the day or session totals.
         if r.uploaded > 0 || r.downloaded > 0 {
-            if let Some(t) = state.engines.get(&engine_id).and_then(|e| e.manager.get(&meta.info_hash)) {
+            if let Some(t) = state
+                .engines
+                .get(&engine_id)
+                .and_then(|e| e.manager.get(&meta.info_hash))
+            {
                 t.restore_lifetime(r.uploaded, r.downloaded);
             }
         }
-        Ok(if r.plan.seed_mode { Added::Seeded } else { Added::Resumed })
+        Ok(if r.plan.seed_mode {
+            Added::Seeded
+        } else {
+            Added::Resumed
+        })
     })
 }
 
@@ -14253,9 +15974,14 @@ async fn import_and_record(
     record_provenance(&state, client, &progress);
 }
 
-pub(crate) fn record_provenance(state: &AppState, client: &str, progress: &crate::importer::Progress) {
+pub(crate) fn record_provenance(
+    state: &AppState,
+    client: &str,
+    progress: &crate::importer::Progress,
+) {
     use std::sync::atomic::Ordering;
-    let added = progress.seeded.load(Ordering::Relaxed) + progress.downloading.load(Ordering::Relaxed);
+    let added =
+        progress.seeded.load(Ordering::Relaxed) + progress.downloading.load(Ordering::Relaxed);
     let carried = progress.carried_uploaded.load(Ordering::Relaxed);
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -14263,7 +15989,8 @@ pub(crate) fn record_provenance(state: &AppState, client: &str, progress: &crate
         .unwrap_or(0);
     let store = state.store.lock().unwrap();
     let prev = store.meta_doc("provenance");
-    if let Some(doc) = crate::importer::provenance_doc(prev.as_deref(), client, added, carried, now) {
+    if let Some(doc) = crate::importer::provenance_doc(prev.as_deref(), client, added, carried, now)
+    {
         if let Err(e) = store.put_meta("provenance", &doc) {
             tracing::warn!(error = %e, "import: provenance not recorded");
         }
@@ -14272,18 +15999,30 @@ pub(crate) fn record_provenance(state: &AppState, client: &str, progress: &crate
 
 /// Log in to qBittorrent and list its library: the shared first half of the
 /// preview and the start, so both refuse the same things the same way.
-async fn qbit_library(body: &str) -> Result<(crate::importer::Qbit, Vec<crate::importer::Candidate>), Response> {
+async fn qbit_library(
+    body: &str,
+) -> Result<(crate::importer::Qbit, Vec<crate::importer::Candidate>), Response> {
     let creds = serde_json::from_str::<crate::importer::QbitCreds>(body)
         .map_err(|_| bad_request("invalid body: url, username, password"))?;
     if creds.url.trim().is_empty() {
         return Err(bad_request("empty qBittorrent URL"));
     }
-    let qbit = crate::importer::Qbit::login(&creds).await.map_err(|e| bad_request(&e))?;
-    let list = qbit
-        .torrents()
+    let qbit = crate::importer::Qbit::login(&creds)
         .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, Json(serde_json::json!({"error": e}))).into_response())?;
-    Ok((qbit, list.iter().map(crate::importer::Candidate::from_qbit).collect()))
+        .map_err(|e| bad_request(&e))?;
+    let list = qbit.torrents().await.map_err(|e| {
+        (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({"error": e})),
+        )
+            .into_response()
+    })?;
+    Ok((
+        qbit,
+        list.iter()
+            .map(crate::importer::Candidate::from_qbit)
+            .collect(),
+    ))
 }
 
 /// What a qBittorrent import would do, before it does anything.
@@ -14299,9 +16038,10 @@ async fn post_qbit_import_preview(
         Ok(x) => x,
         Err(resp) => return resp,
     };
-    let preview = tokio::task::spawn_blocking(move || crate::importer::preview(&cands, |p| p.exists()))
-        .await
-        .unwrap_or_default();
+    let preview =
+        tokio::task::spawn_blocking(move || crate::importer::preview(&cands, |p| p.exists()))
+            .await
+            .unwrap_or_default();
     Json(preview).into_response()
 }
 
@@ -14356,7 +16096,11 @@ async fn post_import_retry(
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
     let Some((prev_id, prev)) = latest_import(&state) else {
-        return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "no import to retry"}))).into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "no import to retry"})),
+        )
+            .into_response();
     };
     if prev.running() {
         return (
@@ -14388,7 +16132,11 @@ async fn post_import_retry(
     };
     let n = kit.cands.len();
     tracing::info!(job = %job_id, from = %prev_id, torrents = n, "import retry started");
-    let client = if kit.creds.is_some() { "qBittorrent" } else { "Transmission" };
+    let client = if kit.creds.is_some() {
+        "qBittorrent"
+    } else {
+        "Transmission"
+    };
     tokio::spawn(import_and_record(
         state.clone(),
         client,
@@ -14487,17 +16235,24 @@ async fn post_transmission_upload(
 
 /// Write the `file` field of an upload to `to`, chunk by chunk. Returns the
 /// bytes written: 0 when the request had no such field.
-async fn receive_zip(multipart: &mut axum::extract::Multipart, to: &std::path::Path) -> Result<u64, String> {
+async fn receive_zip(
+    multipart: &mut axum::extract::Multipart,
+    to: &std::path::Path,
+) -> Result<u64, String> {
     use tokio::io::AsyncWriteExt;
     if let Some(dir) = to.parent() {
-        tokio::fs::create_dir_all(dir).await.map_err(|e| format!("{}: {e}", dir.display()))?;
+        tokio::fs::create_dir_all(dir)
+            .await
+            .map_err(|e| format!("{}: {e}", dir.display()))?;
     }
     let mut written = 0u64;
     while let Some(mut field) = multipart.next_field().await.map_err(|e| e.to_string())? {
         if field.name() != Some("file") {
             continue;
         }
-        let mut out = tokio::fs::File::create(to).await.map_err(|e| format!("{}: {e}", to.display()))?;
+        let mut out = tokio::fs::File::create(to)
+            .await
+            .map_err(|e| format!("{}: {e}", to.display()))?;
         written = 0;
         while let Some(chunk) = field.chunk().await.map_err(|e| e.to_string())? {
             out.write_all(&chunk).await.map_err(|e| e.to_string())?;
@@ -14565,7 +16320,6 @@ async fn post_transmission_import_start(
     Json(serde_json::json!({"job_id": job_id})).into_response()
 }
 
-
 /// Diagnose what the outside world sees of this node: a real leak test.
 ///
 /// Until 4.4 this made four identical requests by the default route (race
@@ -14600,7 +16354,11 @@ async fn post_network_check(
 
     let asked = serde_json::from_str::<serde_json::Value>(&body)
         .ok()
-        .and_then(|v| v.get("echo_url").and_then(|u| u.as_str()).map(str::to_string))
+        .and_then(|v| {
+            v.get("echo_url")
+                .and_then(|u| u.as_str())
+                .map(str::to_string)
+        })
         .filter(|u| !u.trim().is_empty());
     let mode = crate::netmode::current(&cfg);
     // `[daemon] exit_probe = false`: no echo service is asked unless the
@@ -14619,14 +16377,18 @@ async fn post_network_check(
     // announce probe through the engine's announce proxy, the peer probe
     // through its SOCKS5, both by the engine's interface.
     let probe_client = |proxy: Option<String>, device: &str| -> Result<reqwest::Client, String> {
-        let mut b = reqwest::Client::builder().timeout(std::time::Duration::from_secs(8)).no_proxy();
+        let mut b = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(8))
+            .no_proxy();
         if let Some(url) = proxy {
             b = b.proxy(reqwest::Proxy::all(&url).map_err(|e| e.to_string())?);
         }
         if !device.trim().is_empty() {
             #[cfg(target_os = "linux")]
             {
-                b = b.interface(device.trim()).dns_resolver(typhon_engine::tunneldns::Resolver::new(device));
+                b = b
+                    .interface(device.trim())
+                    .dns_resolver(typhon_engine::tunneldns::Resolver::new(device));
             }
             #[cfg(not(target_os = "linux"))]
             return Err(typhon_engine::netpin::UNSUPPORTED.to_string());
@@ -14638,7 +16400,12 @@ async fn post_network_check(
         async move {
             let c = client.map_err(|e| format!("no HTTP client: {e}"))?;
             let r = c.get(&echo).send().await.map_err(|e| e.to_string())?;
-            let ip = r.text().await.map_err(|e| e.to_string())?.trim().to_string();
+            let ip = r
+                .text()
+                .await
+                .map_err(|e| e.to_string())?
+                .trim()
+                .to_string();
             // An echo answers a bare address; anything else is a captive
             // portal or an error page, and comparing it would prove nothing.
             ip.parse::<std::net::IpAddr>()
@@ -14685,7 +16452,9 @@ async fn post_network_check(
         for (prefix, what) in [("announce", "trackers"), ("peer_egress", "peers")] {
             let label = format!("Address {what} see ({engine})");
             let proxy = if prefix == "announce" {
-                typhon_engine::tracker::http::effective_proxy(&crate::engines::session_http_proxy(session))
+                typhon_engine::tracker::http::effective_proxy(&crate::engines::session_http_proxy(
+                    session,
+                ))
             } else {
                 Some(crate::engines::session_socks5_url(session)).filter(|u| !u.is_empty())
             };
@@ -14699,8 +16468,11 @@ async fn post_network_check(
             }
             let way = leave_way(&device, proxy.as_deref());
             let measured = ask(probe_client(proxy, &device)).await;
-            let (status, detail) = leak_verdict(what, way.as_deref(), measured, baseline.as_deref());
-            results.push(serde_json::json!({"id": id, "label": label, "status": status, "detail": detail}));
+            let (status, detail) =
+                leak_verdict(what, way.as_deref(), measured, baseline.as_deref());
+            results.push(
+                serde_json::json!({"id": id, "label": label, "status": status, "detail": detail}),
+            );
         }
     }
 
@@ -14713,7 +16485,12 @@ async fn post_network_check(
     let daemon_way = (!route.is_direct()).then(|| route.describe());
     let (status, detail) = match own {
         Err(e) if daemon_way.is_some() => ("warn", format!("{e} ({})", route.describe())),
-        other => leak_verdict("the daemon's requests", daemon_way.as_deref(), other, baseline.as_deref()),
+        other => leak_verdict(
+            "the daemon's requests",
+            daemon_way.as_deref(),
+            other,
+            baseline.as_deref(),
+        ),
     };
     results.push(serde_json::json!({
         "id": "host_ip", "label": "Address the daemon's own requests use", "status": status, "detail": detail,
@@ -14793,10 +16570,20 @@ fn forward_words(f: &serde_json::Value) -> String {
     let s = |k: &str| f[k].as_str().unwrap_or_default().to_string();
     match s("by").as_str() {
         "upnp" | "natpmp" if !f["udp"].as_bool().unwrap_or(false) => format!(
-            "Port {} forwarded by {} (TCP only: {}).", f["external_port"], s("by"), s("udp_error")
+            "Port {} forwarded by {} (TCP only: {}).",
+            f["external_port"],
+            s("by"),
+            s("udp_error")
         ),
-        "upnp" | "natpmp" => format!("Port {} forwarded by {}, TCP and UDP.", f["external_port"], s("by")),
-        "wireguard" => format!("Port {} forwarded by the WireGuard tunnel.", f["external_port"]),
+        "upnp" | "natpmp" => format!(
+            "Port {} forwarded by {}, TCP and UDP.",
+            f["external_port"],
+            s("by")
+        ),
+        "wireguard" => format!(
+            "Port {} forwarded by the WireGuard tunnel.",
+            f["external_port"]
+        ),
         "gluetun" => format!("Port {} taken from gluetun.", f["external_port"]),
         "off" => "Automatic port forwarding is off: forward it by hand.".into(),
         "pending" => "The router has not answered yet.".into(),
@@ -14805,7 +16592,6 @@ fn forward_words(f: &serde_json::Value) -> String {
         _ => "Not forwarded.".into(),
     }
 }
-
 
 /// Integrity report: what the library has that it should not, and what it
 /// fetched twice. Built by `obs::anomalies`, from the background invariant
@@ -14820,7 +16606,6 @@ async fn get_health_anomalies(
     guard!(state, headers, query);
     Json(crate::obs::anomalies(&state)).into_response()
 }
-
 
 // ---------------------------------------------------------------------------
 // Fully ported
@@ -14842,7 +16627,11 @@ async fn post_password_route(
     guard!(state, headers, q);
     let old = serde_json::from_str::<serde_json::Value>(&body)
         .ok()
-        .and_then(|v| v.get("old_password").and_then(|p| p.as_str()).map(str::to_string));
+        .and_then(|v| {
+            v.get("old_password")
+                .and_then(|p| p.as_str())
+                .map(str::to_string)
+        });
     if let Some(old) = old {
         let who = crate::session::Caller::of(peer.ip());
         let throttle = &state.sessions.throttle;
@@ -14878,7 +16667,11 @@ async fn post_password(
 
     let password = serde_json::from_str::<serde_json::Value>(&body)
         .ok()
-        .and_then(|v| v.get("password").and_then(|p| p.as_str()).map(str::to_string))
+        .and_then(|v| {
+            v.get("password")
+                .and_then(|p| p.as_str())
+                .map(str::to_string)
+        })
         .unwrap_or_default();
     if password.chars().count() < 8 {
         return (
@@ -14916,7 +16709,6 @@ async fn post_password(
     Json(serde_json::json!({"status": "ok"})).into_response()
 }
 
-
 /// The network mode form. The listen ports are validated first, so an empty
 /// body reports the race port rather than a generic "bad request".
 /// Refuse any non-empty `*bind_interface` in a request body where no socket
@@ -14949,7 +16741,10 @@ fn interface_pin_allowed(supported: bool, body: &serde_json::Value) -> Result<()
     named(body, &mut asked);
     match asked.first() {
         None => Ok(()),
-        Some(i) => Err(format!("bind_interface {i:?} refused: {}", typhon_engine::netpin::UNSUPPORTED)),
+        Some(i) => Err(format!(
+            "bind_interface {i:?} refused: {}",
+            typhon_engine::netpin::UNSUPPORTED
+        )),
     }
 }
 
@@ -14972,7 +16767,10 @@ async fn post_network_mode(
     // but the tab, which sends them all) wiped the rest -- or was refused,
     // a race listen port of 0 being out of range.
     let mut merged = serde_json::to_value(network_fields(&cfg)).unwrap_or_default();
-    if let (Some(m), Some(sent)) = (merged.as_object_mut(), parsed.get("fields").and_then(|f| f.as_object())) {
+    if let (Some(m), Some(sent)) = (
+        merged.as_object_mut(),
+        parsed.get("fields").and_then(|f| f.as_object()),
+    ) {
         for (k, v) in sent {
             if is_kept_secret(k, v) {
                 continue;
@@ -15055,14 +16853,24 @@ async fn post_network_mode(
                 .into_response();
         }
     };
-    let bad = |msg: String| (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": msg}))).into_response();
+    let bad = |msg: String| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": msg})),
+        )
+            .into_response()
+    };
     let proxied = mode == "socks5" || mode == "proxy_v2";
     // Refused with the reason on a host that cannot bring a tunnel up:
     // saved, every engine given a tunnel would be pinned to a device that
     // never appears.
     if mode == "wireguard" {
         if let Err(why) = crate::wgtunnel::support() {
-            return (StatusCode::CONFLICT, Json(serde_json::json!({"error": why}))).into_response();
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({"error": why})),
+            )
+                .into_response();
         }
     }
 
@@ -15090,7 +16898,9 @@ async fn post_network_mode(
     if mode == "proxy_v2" {
         for (name, p) in [("race", race_pv2), ("hoard", hoard_pv2)] {
             if !(0..=65535).contains(&p) {
-                return bad(format!("the {name} PROXY-v2 port must be between 0 and 65535"));
+                return bad(format!(
+                    "the {name} PROXY-v2 port must be between 0 and 65535"
+                ));
             }
             if p != 0 && (p == race_port || p == hoard_port) {
                 return bad(format!("the {name} PROXY-v2 port is already a listen port"));
@@ -15104,12 +16914,21 @@ async fn post_network_mode(
         }
         // Checked here because the engine drops what it cannot parse: a typo
         // would leave the relay untrusted and every peer it sends refused.
-        for s in f.get("proxy_v2_trusted_sources").and_then(|v| v.as_array()).into_iter().flatten() {
+        for s in f
+            .get("proxy_v2_trusted_sources")
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+        {
             let s = s.as_str().unwrap_or_default().trim();
             if s.is_empty() {
                 continue;
             }
-            if s.trim_start_matches('[').trim_end_matches(']').parse::<std::net::IpAddr>().is_err() {
+            if s.trim_start_matches('[')
+                .trim_end_matches(']')
+                .parse::<std::net::IpAddr>()
+                .is_err()
+            {
                 return bad(format!("trusted source {s:?} is not an IP address"));
             }
             trusted_list.push(q(s));
@@ -15137,7 +16956,10 @@ async fn post_network_mode(
         }
         if mode == "proxy_v2" {
             kv.push(("listen_port_proxy_v2".into(), pv2.to_string()));
-            kv.push(("listen_addr_proxy_v2".into(), q(txt("proxy_v2_listen_addr").trim())));
+            kv.push((
+                "listen_addr_proxy_v2".into(),
+                q(txt("proxy_v2_listen_addr").trim()),
+            ));
             kv.push(("proxy_v2_trusted_sources".into(), format!("[{trusted}]")));
         }
         kv
@@ -15203,14 +17025,23 @@ async fn post_network_mode(
                 }
             }
         }
-        out = crate::tomledit::set_toml_table(&out, "network", &[("mode".to_string(), mode_value.clone())])?;
+        out = crate::tomledit::set_toml_table(
+            &out,
+            "network",
+            &[("mode".to_string(), mode_value.clone())],
+        )?;
         for e in &extras {
-            let Some(id) = e.get("id").and_then(|v| v.as_str()) else { continue };
+            let Some(id) = e.get("id").and_then(|v| v.as_str()) else {
+                continue;
+            };
             if let Some(p) = e.get("listen_port").and_then(|v| v.as_i64()) {
                 if (1..=65535).contains(&p) {
-                    if let Some(next) =
-                        crate::tomledit::set_agent_session_key(&out, id, "listen_port", &p.to_string())
-                    {
+                    if let Some(next) = crate::tomledit::set_agent_session_key(
+                        &out,
+                        id,
+                        "listen_port",
+                        &p.to_string(),
+                    ) {
                         out = next;
                     }
                 }
@@ -15236,12 +17067,16 @@ async fn post_network_mode(
     // when the file now asks a running engine for something it does not have.
     // It said `true` for every save, including one that changed nothing.
     let now = state.cfg();
-    let running: Vec<(String, crate::config::Session)> =
-        state.engines.engines().iter().map(|e| (e.id.clone(), e.session.clone())).collect();
+    let running: Vec<(String, crate::config::Session)> = state
+        .engines
+        .engines()
+        .iter()
+        .map(|e| (e.id.clone(), e.session.clone()))
+        .collect();
     // The mode also decides which engines the kill switch keeps off the
     // network, which is settled at boot too.
-    let restart_required =
-        crate::netmode::restart_required(&now, &running) || crate::killswitch::blocking_changed(&now, &state.engines);
+    let restart_required = crate::netmode::restart_required(&now, &running)
+        || crate::killswitch::blocking_changed(&now, &state.engines);
     let warnings = crate::netmode::warnings(&now, &|id: &str| engine_lists_udp(&state, id));
     // Another mode switches the tunnels off now, not at the next boot: the
     // engines pinned to them stop reaching anybody until the restart this
@@ -15284,9 +17119,10 @@ async fn qbit_set_preferences(
     let cfg = state.cfg();
     let _ = cfg;
 
-    let has_form_json = body
-        .split('&')
-        .any(|pair| pair.split_once('=').is_some_and(|(k, v)| k == "json" && !v.is_empty()));
+    let has_form_json = body.split('&').any(|pair| {
+        pair.split_once('=')
+            .is_some_and(|(k, v)| k == "json" && !v.is_empty())
+    });
     let has_json_body = serde_json::from_str::<serde_json::Value>(&body).is_ok();
 
     if !has_form_json && !has_json_body {
@@ -15300,20 +17136,32 @@ async fn qbit_set_preferences(
     // accepted and ignored as before. Every local engine: a qBit client has one
     // session in mind and means all of it.
     let doc: serde_json::Value = if has_form_json {
-        form_field(&body, "json").and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default()
+        form_field(&body, "json")
+            .and_then(|j| serde_json::from_str(&j).ok())
+            .unwrap_or_default()
     } else {
         serde_json::from_str(&body).unwrap_or_default()
     };
     // Refused before anything is written, so a bad field changes nothing.
     if let Some(p) = doc.get("save_path").and_then(|v| v.as_str()).map(str::trim) {
         if !p.is_empty() && !std::path::Path::new(p).is_absolute() {
-            return (StatusCode::BAD_REQUEST, format!("save_path must be absolute: {p}")).into_response();
+            return (
+                StatusCode::BAD_REQUEST,
+                format!("save_path must be absolute: {p}"),
+            )
+                .into_response();
         }
     }
     let change = crate::sharelimits::change_from_qbit_preferences(&doc);
-    let shown = crate::sharelimits::engine_limits(&state, &crate::sharelimits::preferences_engine(&state));
+    let shown =
+        crate::sharelimits::engine_limits(&state, &crate::sharelimits::preferences_engine(&state));
     if !change.is_empty() && !change.is_noop_for(&shown) {
-        let ids: Vec<String> = state.cfg().local_engines().into_iter().map(|l| l.id).collect();
+        let ids: Vec<String> = state
+            .cfg()
+            .local_engines()
+            .into_iter()
+            .map(|l| l.id)
+            .collect();
         for id in ids {
             if let Err(e) = crate::sharelimits::write_engine_limits(&state, &id, &change) {
                 tracing::warn!(engine = %id, "setPreferences: share limits not written: {e}");
@@ -15325,14 +17173,18 @@ async fn qbit_set_preferences(
     // client that posts back the whole page it read must not switch LSD on
     // for a hoard that the page never spoke for. Takes effect at the next
     // start of the engines, like the settings tab's `enable_lsd`.
-    let lsd = doc.get("lsd").and_then(|v| v.as_bool().or_else(|| match v.as_str()? {
-        "true" | "1" => Some(true),
-        "false" | "0" => Some(false),
-        _ => None,
-    }));
+    let lsd = doc.get("lsd").and_then(|v| {
+        v.as_bool().or_else(|| match v.as_str()? {
+            "true" | "1" => Some(true),
+            "false" | "0" => Some(false),
+            _ => None,
+        })
+    });
     if let Some(on) = lsd.filter(|on| *on != qbit_preferences_lsd(&state)) {
         for id in state.cfg().local_engines().into_iter().map(|l| l.id) {
-            if let Err(e) = write_engine_key(&state, &id, "enable_lsd", if on { "true" } else { "false" }) {
+            if let Err(e) =
+                write_engine_key(&state, &id, "enable_lsd", if on { "true" } else { "false" })
+            {
                 tracing::warn!(engine = %id, "setPreferences: lsd not written: {e}");
                 return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
             }
@@ -15346,7 +17198,12 @@ async fn qbit_set_preferences(
     // find out without reading the source.
     let ignored: Vec<&str> = doc
         .as_object()
-        .map(|o| o.keys().map(String::as_str).filter(|k| !QBIT_PREFERENCES_APPLIED.contains(k)).collect())
+        .map(|o| {
+            o.keys()
+                .map(String::as_str)
+                .filter(|k| !QBIT_PREFERENCES_APPLIED.contains(k))
+                .collect()
+        })
         .unwrap_or_default();
     if !ignored.is_empty() {
         tracing::info!(keys = ?ignored, "setPreferences: these keys have no effect in Hydranos");
@@ -15357,11 +17214,25 @@ async fn qbit_set_preferences(
 /// The `setPreferences` keys that change something. Everything else answers
 /// 200 and does nothing (see docs/API.md).
 const QBIT_PREFERENCES_APPLIED: &[&str] = &[
-    "max_ratio_enabled", "max_ratio", "max_seeding_time_enabled", "max_seeding_time",
-    "max_inactive_seeding_time_enabled", "max_inactive_seeding_time", "max_ratio_act",
-    "lsd", "up_limit", "dl_limit", "dht", "pex", "save_path",
-    "max_active_downloads", "max_active_uploads", "max_active_torrents",
-    "dont_count_slow_torrents", "slow_torrent_dl_rate_threshold", "slow_torrent_ul_rate_threshold",
+    "max_ratio_enabled",
+    "max_ratio",
+    "max_seeding_time_enabled",
+    "max_seeding_time",
+    "max_inactive_seeding_time_enabled",
+    "max_inactive_seeding_time",
+    "max_ratio_act",
+    "lsd",
+    "up_limit",
+    "dl_limit",
+    "dht",
+    "pex",
+    "save_path",
+    "max_active_downloads",
+    "max_active_uploads",
+    "max_active_torrents",
+    "dont_count_slow_torrents",
+    "slow_torrent_dl_rate_threshold",
+    "slow_torrent_ul_rate_threshold",
     "slow_torrent_inactive_timer",
 ];
 
@@ -15371,7 +17242,14 @@ const QBIT_PREFERENCES_APPLIED: &[&str] = &[
 const QBIT_SAVE_PATH_KEY: &str = "qbit_default_save_path";
 
 pub(crate) fn qbit_default_save_path(state: &AppState) -> String {
-    state.store.lock().unwrap().setting(QBIT_SAVE_PATH_KEY).ok().flatten().unwrap_or_default()
+    state
+        .store
+        .lock()
+        .unwrap()
+        .setting(QBIT_SAVE_PATH_KEY)
+        .ok()
+        .flatten()
+        .unwrap_or_default()
 }
 
 /// The `setPreferences` keys added in 4.4 beyond share limits and LSD.
@@ -15392,13 +17270,21 @@ pub(crate) fn qbit_default_save_path(state: &AppState) -> String {
 ///   `active_downloads` is a ceiling either way.
 /// - `save_path`: where a shim add with no category and no `savepath` lands.
 fn qbit_apply_more_preferences(state: &AppState, doc: &serde_json::Value) -> Result<(), String> {
-    let num = |k: &str| doc.get(k).and_then(|v| v.as_i64().or_else(|| v.as_f64().map(|f| f as i64)).or_else(|| v.as_str()?.trim().parse().ok()));
+    let num = |k: &str| {
+        doc.get(k).and_then(|v| {
+            v.as_i64()
+                .or_else(|| v.as_f64().map(|f| f as i64))
+                .or_else(|| v.as_str()?.trim().parse().ok())
+        })
+    };
     let flag = |k: &str| {
-        doc.get(k).and_then(|v| v.as_bool().or_else(|| match v.as_str()? {
-            "true" | "1" => Some(true),
-            "false" | "0" => Some(false),
-            _ => None,
-        }))
+        doc.get(k).and_then(|v| {
+            v.as_bool().or_else(|| match v.as_str()? {
+                "true" | "1" => Some(true),
+                "false" | "0" => Some(false),
+                _ => None,
+            })
+        })
     };
     let cfg = state.cfg();
     let engines: Vec<String> = cfg.local_engines().into_iter().map(|l| l.id).collect();
@@ -15413,11 +17299,16 @@ fn qbit_apply_more_preferences(state: &AppState, doc: &serde_json::Value) -> Res
     };
 
     let client = state.engines.client_rates();
-    for (key, dir) in [("up_limit", typhon_engine::torrent::ratelimit::Dir::Up), ("dl_limit", typhon_engine::torrent::ratelimit::Dir::Down)] {
+    for (key, dir) in [
+        ("up_limit", typhon_engine::torrent::ratelimit::Dir::Up),
+        ("dl_limit", typhon_engine::torrent::ratelimit::Dir::Down),
+    ] {
         if let Some(v) = num(key) {
             let bytes = v.max(0) as u64;
             if bytes != client.get(dir).rate() && !set_client_rate_limit(state, dir, bytes) {
-                tracing::warn!("setPreferences: {key} set but not persisted: the store refused the write");
+                tracing::warn!(
+                    "setPreferences: {key} set but not persisted: the store refused the write"
+                );
             }
         }
     }
@@ -15427,7 +17318,8 @@ fn qbit_apply_more_preferences(state: &AppState, doc: &serde_json::Value) -> Res
     if let Some(on) = flag("pex").filter(|on| *on != cfg.race.enable_pex) {
         all("enable_pex", if on { "true" } else { "false" })?;
     }
-    if let Some(v) = num("max_active_downloads").filter(|v| *v != qbit_shown_active_downloads(&cfg)) {
+    if let Some(v) = num("max_active_downloads").filter(|v| *v != qbit_shown_active_downloads(&cfg))
+    {
         all("active_downloads", &v.max(-1).to_string())?;
     }
     if cfg.race.queueing.unwrap_or(false) {
@@ -15439,19 +17331,37 @@ fn qbit_apply_more_preferences(state: &AppState, doc: &serde_json::Value) -> Res
             all("active_limit", &v.max(-1).to_string())?;
         }
     }
-    if let Some(on) = flag("dont_count_slow_torrents").filter(|on| *on != cfg.race.dont_count_slow_torrents.unwrap_or(false)) {
-        all("dont_count_slow_torrents", if on { "true" } else { "false" })?;
+    if let Some(on) = flag("dont_count_slow_torrents")
+        .filter(|on| *on != cfg.race.dont_count_slow_torrents.unwrap_or(false))
+    {
+        all(
+            "dont_count_slow_torrents",
+            if on { "true" } else { "false" },
+        )?;
     }
     for (key, shown) in [
-        ("slow_torrent_dl_rate_threshold", cfg.race.slow_torrent_dl_rate_threshold.unwrap_or(2)),
-        ("slow_torrent_ul_rate_threshold", cfg.race.slow_torrent_ul_rate_threshold.unwrap_or(2)),
-        ("slow_torrent_inactive_timer", cfg.race.slow_torrent_inactive_timer.unwrap_or(60)),
+        (
+            "slow_torrent_dl_rate_threshold",
+            cfg.race.slow_torrent_dl_rate_threshold.unwrap_or(2),
+        ),
+        (
+            "slow_torrent_ul_rate_threshold",
+            cfg.race.slow_torrent_ul_rate_threshold.unwrap_or(2),
+        ),
+        (
+            "slow_torrent_inactive_timer",
+            cfg.race.slow_torrent_inactive_timer.unwrap_or(60),
+        ),
     ] {
         if let Some(v) = num(key).filter(|v| *v != shown) {
             all(key, &v.max(0).to_string())?;
         }
     }
-    if let Some(p) = doc.get("save_path").and_then(|v| v.as_str()).map(|s| s.trim().to_string()) {
+    if let Some(p) = doc
+        .get("save_path")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+    {
         if p != qbit_default_save_path(state) {
             state
                 .store
@@ -15467,7 +17377,11 @@ fn qbit_apply_more_preferences(state: &AppState, doc: &serde_json::Value) -> Res
 /// `max_active_downloads` as `app/preferences` shows it: the race engine's
 /// `active_downloads`, -1 (qBittorrent's "no limit") when it sets none.
 fn qbit_shown_active_downloads(cfg: &Config) -> i64 {
-    if cfg.race.active_downloads > 0 { cfg.race.active_downloads } else { -1 }
+    if cfg.race.active_downloads > 0 {
+        cfg.race.active_downloads
+    } else {
+        -1
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -15483,7 +17397,12 @@ fn qbit_refuse(code: StatusCode, msg: &str) -> Response {
 /// The same plan and refusals as the native move (`queue_location_move`): a
 /// job per copy, visible on the Jobs tab. qBittorrent's codes: 400 without a
 /// location, 409 when nothing could be queued (the reason is the body).
-async fn qbit_set_location(State(state): State<AppState>, RawQuery(query): RawQuery, headers: HeaderMap, body: String) -> Response {
+async fn qbit_set_location(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
     let form = shim_form(&query, &body);
@@ -15516,11 +17435,19 @@ async fn qbit_set_location(State(state): State<AppState>, RawQuery(query): RawQu
 /// starts it; the queue runs a forced torrent whatever its ceiling, without
 /// counting it, as qBittorrent does. `value=false` lifts the mark and leaves
 /// the torrent to the queue.
-async fn qbit_set_force_start(State(state): State<AppState>, RawQuery(query): RawQuery, headers: HeaderMap, body: String) -> Response {
+async fn qbit_set_force_start(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
     let form = shim_form(&query, &body);
-    let on = matches!(form.get("value").map(String::as_str), Some("true") | Some("1"));
+    let on = matches!(
+        form.get("value").map(String::as_str),
+        Some("true") | Some("1")
+    );
     let hashes = shim_resolved_hashes(&state, &form);
     // Forced is the pin the queue reads: it runs past the ceiling and takes
     // no slot. 4.4 refused this with 409 on any engine with a queue -- the
@@ -15554,13 +17481,21 @@ async fn qbit_set_force_start(State(state): State<AppState>, RawQuery(query): Ra
 /// not download") is refused (409) rather than answered 200 over a file that
 /// will be downloaded anyway: Hydranos is a seeding client, and a torrent
 /// left incomplete by choice is one it could never seed.
-async fn qbit_file_prio(State(state): State<AppState>, RawQuery(query): RawQuery, headers: HeaderMap, body: String) -> Response {
+async fn qbit_file_prio(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
     let form = shim_form(&query, &body);
     let hash = form.get("hash").cloned().unwrap_or_default();
     let ids = form.get("id").cloned().unwrap_or_default();
-    let Some(prio) = form.get("priority").and_then(|p| p.trim().parse::<i64>().ok()) else {
+    let Some(prio) = form
+        .get("priority")
+        .and_then(|p| p.trim().parse::<i64>().ok())
+    else {
         return qbit_refuse(StatusCode::BAD_REQUEST, "priority is required");
     };
     if ![0, 1, 6, 7].contains(&prio) {
@@ -15570,21 +17505,34 @@ async fn qbit_file_prio(State(state): State<AppState>, RawQuery(query): RawQuery
         return not_found();
     };
     let n = torrent.meta.files.len();
-    if ids.split('|').any(|i| i.trim().parse::<usize>().map_or(true, |i| i >= n)) {
+    if ids
+        .split('|')
+        .any(|i| i.trim().parse::<usize>().map_or(true, |i| i >= n))
+    {
         return qbit_refuse(StatusCode::CONFLICT, "file id is not valid");
     }
     if prio == 0 {
         return qbit_refuse(StatusCode::CONFLICT, FILE_PRIO_ZERO_REFUSAL);
     }
-    let ids: Vec<usize> = ids.split('|').filter_map(|i| i.trim().parse().ok()).collect();
-    let copies = torrent_copies(&state, &typhon_engine::torrent::hex_encode(&torrent.info_hash), "");
+    let ids: Vec<usize> = ids
+        .split('|')
+        .filter_map(|i| i.trim().parse().ok())
+        .collect();
+    let copies = torrent_copies(
+        &state,
+        &typhon_engine::torrent::hex_encode(&torrent.info_hash),
+        "",
+    );
     let applied = edit_download_order(&state, &copies, |o| {
         for &id in &ids {
             o.set_file_priority(id, n, prio as u8);
         }
     });
     if let Err(e) = applied {
-        return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": format!("not applied: {e}")})))
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("not applied: {e}")})),
+        )
             .into_response();
     }
     qbit_ok()
@@ -15594,13 +17542,21 @@ async fn qbit_file_prio(State(state): State<AppState>, RawQuery(query): RawQuery
 /// `hashes` (or `all`), each torrent flipped from what it is now, as
 /// qBittorrent does. Every local copy of a hash takes the new value of the
 /// first, so two copies never end up flipped in opposite directions.
-async fn qbit_toggle_order_flag(state: &AppState, query: &str, headers: &HeaderMap, body: &str, sequential: bool) -> Response {
+async fn qbit_toggle_order_flag(
+    state: &AppState,
+    query: &str,
+    headers: &HeaderMap,
+    body: &str,
+    sequential: bool,
+) -> Response {
     let query = query.to_string();
     guard!(*state, *headers, query);
     let form = shim_form(&query, body);
     for hash in shim_resolved_hashes(state, &form) {
         let copies = torrent_copies(state, &hash, "");
-        let Some((_, first)) = copies.first() else { continue };
+        let Some((_, first)) = copies.first() else {
+            continue;
+        };
         let (seq, fl) = first.download_order_flags();
         let on = !if sequential { seq } else { fl };
         if let Err(e) = edit_download_order(state, &copies, |o| {
@@ -15610,18 +17566,31 @@ async fn qbit_toggle_order_flag(state: &AppState, query: &str, headers: &HeaderM
                 o.first_last = on;
             }
         }) {
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": format!("not applied: {e}")})))
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": format!("not applied: {e}")})),
+            )
                 .into_response();
         }
     }
     qbit_ok()
 }
 
-async fn qbit_toggle_sequential(State(state): State<AppState>, RawQuery(query): RawQuery, headers: HeaderMap, body: String) -> Response {
+async fn qbit_toggle_sequential(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
     qbit_toggle_order_flag(&state, &query.unwrap_or_default(), &headers, &body, true).await
 }
 
-async fn qbit_toggle_first_last(State(state): State<AppState>, RawQuery(query): RawQuery, headers: HeaderMap, body: String) -> Response {
+async fn qbit_toggle_first_last(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
     qbit_toggle_order_flag(&state, &query.unwrap_or_default(), &headers, &body, false).await
 }
 
@@ -15630,7 +17599,12 @@ async fn qbit_toggle_first_last(State(state): State<AppState>, RawQuery(query): 
 /// The name Hydranos shows is the .torrent's: there is no separate display
 /// name to change, and answering 200 would let a client believe the torrent
 /// is now called something it is not.
-async fn qbit_rename(State(state): State<AppState>, RawQuery(query): RawQuery, headers: HeaderMap, body: String) -> Response {
+async fn qbit_rename(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
     let form = shim_form(&query, &body);
@@ -15638,14 +17612,22 @@ async fn qbit_rename(State(state): State<AppState>, RawQuery(query): RawQuery, h
     if find_torrent(&state, &hash).is_none() {
         return not_found();
     }
-    qbit_refuse(StatusCode::CONFLICT, "Hydranos shows the name from the .torrent; renaming a torrent is not supported")
+    qbit_refuse(
+        StatusCode::CONFLICT,
+        "Hydranos shows the name from the .torrent; renaming a torrent is not supported",
+    )
 }
 
 /// `torrents/topPrio`, `bottomPrio`, `increasePrio`, `decreasePrio`: 409.
 ///
 /// qBittorrent answers 409 when queueing is off, and Hydranos's queue, when
 /// on, orders by age: there is no position to move a torrent to.
-async fn qbit_queue_prio(State(state): State<AppState>, RawQuery(query): RawQuery, headers: HeaderMap, body: String) -> Response {
+async fn qbit_queue_prio(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
     // The queues of the engines holding these torrents, not `[race] queueing`
@@ -15658,9 +17640,11 @@ async fn qbit_queue_prio(State(state): State<AppState>, RawQuery(query): RawQuer
         .filter(|l| !crate::workers::QueueLimits::from_session(&l.session).is_empty())
         .map(|l| l.id)
         .collect();
-    let any_queued = shim_resolved_hashes(&state, &form)
-        .iter()
-        .any(|h| torrent_copies(&state, h, "").iter().any(|(e, _)| queued.contains(e)));
+    let any_queued = shim_resolved_hashes(&state, &form).iter().any(|h| {
+        torrent_copies(&state, h, "")
+            .iter()
+            .any(|(e, _)| queued.contains(e))
+    });
     if !any_queued {
         return qbit_refuse(StatusCode::CONFLICT, "Torrent queueing is not enabled");
     }
@@ -15668,14 +17652,22 @@ async fn qbit_queue_prio(State(state): State<AppState>, RawQuery(query): RawQuer
 }
 
 /// `app/defaultSavePath`: the `save_path` of `app/preferences`.
-async fn qbit_default_save_path_route(State(state): State<AppState>, RawQuery(query): RawQuery, headers: HeaderMap) -> Response {
+async fn qbit_default_save_path_route(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
     (StatusCode::OK, qbit_default_save_path(&state)).into_response()
 }
 
 /// `torrents/count`: how many torrents `torrents/info` lists.
-async fn qbit_torrents_count(State(state): State<AppState>, RawQuery(query): RawQuery, headers: HeaderMap) -> Response {
+async fn qbit_torrents_count(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
     (StatusCode::OK, qbit_all_rows(&state).len().to_string()).into_response()
@@ -15686,10 +17678,19 @@ fn qbit_all_rows(state: &AppState) -> Vec<serde_json::Value> {
     let now = now_secs();
     let mut rows = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    let ids: Vec<String> = state.engines.engines().iter().map(|e| e.id.clone()).collect();
+    let ids: Vec<String> = state
+        .engines
+        .engines()
+        .iter()
+        .map(|e| e.id.clone())
+        .collect();
     for engine in &ids {
         for row in engine_qbit_rows(state, engine, now, None, None) {
-            let h = row.get("hash").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let h = row
+                .get("hash")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             if seen.insert(h) {
                 rows.push(row);
             }
@@ -15707,13 +17708,21 @@ static QBIT_SYNC_RID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU6
 /// they get on their first call. No delta is computed: that would mean
 /// keeping each client's last view, and the listing this is built from costs
 /// the same either way. `rid` still moves forward, as clients expect.
-async fn qbit_sync_maindata(State(state): State<AppState>, RawQuery(query): RawQuery, headers: HeaderMap) -> Response {
+async fn qbit_sync_maindata(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
     let rid = QBIT_SYNC_RID.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
     let mut torrents = serde_json::Map::new();
     for mut row in qbit_all_rows(&state) {
-        let hash = row.get("hash").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let hash = row
+            .get("hash")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         if let Some(o) = row.as_object_mut() {
             o.remove("hash");
         }
@@ -15721,13 +17730,24 @@ async fn qbit_sync_maindata(State(state): State<AppState>, RawQuery(query): RawQ
     }
     let mut categories = serde_json::Map::new();
     for (name, c) in categories_map(&state) {
-        categories.insert(name.clone(), serde_json::json!({"name": name, "savePath": c.save_path}));
+        categories.insert(
+            name.clone(),
+            serde_json::json!({"name": name, "savePath": c.save_path}),
+        );
     }
-    let tags = state.store.lock().unwrap().registered_tags().unwrap_or_default();
+    let tags = state
+        .store
+        .lock()
+        .unwrap()
+        .registered_tags()
+        .unwrap_or_default();
     // This session, as `transfer/info`.
     let (up, down) = state.engines.moved_totals();
     let (up_speed, down_speed) = state.engines.engines().iter().fold((0u64, 0u64), |acc, e| {
-        (acc.0 + e.manager.upload_rate.get(), acc.1 + e.manager.download_rate.get())
+        (
+            acc.0 + e.manager.upload_rate.get(),
+            acc.1 + e.manager.download_rate.get(),
+        )
     });
     let rates = state.engines.client_rates();
     Json(serde_json::json!({
@@ -15768,7 +17788,12 @@ fn qbit_preferences_lsd(state: &AppState) -> bool {
 
 /// Set one session key of one local engine in the config file: the
 /// `[race]`/`[hoard]` section, or the session of an `[[engine]]` block.
-fn write_engine_key(state: &AppState, engine_id: &str, key: &str, literal: &str) -> Result<(), String> {
+fn write_engine_key(
+    state: &AppState,
+    engine_id: &str,
+    key: &str,
+    literal: &str,
+) -> Result<(), String> {
     let kv = [(key.to_string(), literal.to_string())];
     let ok = edit_config(state, |doc| {
         if engine_id == "race" || engine_id == "hoard" {
@@ -15777,7 +17802,11 @@ fn write_engine_key(state: &AppState, engine_id: &str, key: &str, literal: &str)
         crate::tomledit::set_agent_session_key(doc, engine_id, key, literal)
             .ok_or_else(|| format!("no [[engine]] block for {engine_id}"))
     });
-    if ok { Ok(()) } else { Err("the config could not be written".into()) }
+    if ok {
+        Ok(())
+    } else {
+        Err("the config could not be written".into())
+    }
 }
 
 /// Every engine holding a copy of `hash`, with that copy.
@@ -15915,7 +17944,6 @@ async fn qbit_recheck(
     qbit_ok()
 }
 
-
 /// Cancel a job. 409, not 404: the id may be well-formed and simply finished,
 /// and a client retrying a 404 forever is worse than one told it conflicts.
 async fn delete_job(
@@ -15938,7 +17966,11 @@ async fn delete_job(
         store.job(&id).map(|j| (j.kind, j.state))
     };
     let Some((kind, job_state)) = kind else {
-        return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": format!("no such job {id}")}))).into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": format!("no such job {id}")})),
+        )
+            .into_response();
     };
     if job_state == "running" && kind != "graduate" {
         return (
@@ -15950,10 +17982,18 @@ async fn delete_job(
     // `waiting` is a move to a node waiting for the far side: cancelling it
     // keeps the local copy, and the node keeps the one it received.
     if job_state != "queued" && job_state != "running" && job_state != "waiting" {
-        return (StatusCode::CONFLICT, Json(serde_json::json!({"error": format!("the job is already {job_state}")}))).into_response();
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": format!("the job is already {job_state}")})),
+        )
+            .into_response();
     }
     let before = state.store.lock().unwrap().cancel_job(&id);
-    let status = if before.as_deref() == Some("running") { "cancelling" } else { "cancelled" };
+    let status = if before.as_deref() == Some("running") {
+        "cancelling"
+    } else {
+        "cancelled"
+    };
     Json(serde_json::json!({"status": status})).into_response()
 }
 
@@ -15978,8 +18018,18 @@ async fn post_engine_create(
     if let Err(e) = interface_pin_allowed(typhon_engine::netpin::DEVICE_PIN_SUPPORTED, &v) {
         return bad_request(&e);
     }
-    let id = v.get("id").and_then(|x| x.as_str()).unwrap_or_default().trim().to_string();
-    let role = v.get("role").and_then(|x| x.as_str()).unwrap_or_default().trim().to_string();
+    let id = v
+        .get("id")
+        .and_then(|x| x.as_str())
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let role = v
+        .get("role")
+        .and_then(|x| x.as_str())
+        .unwrap_or_default()
+        .trim()
+        .to_string();
     let port = v.get("listen_port").and_then(|x| x.as_i64()).unwrap_or(0);
     let iface = v
         .get("bind_interface")
@@ -15989,11 +18039,17 @@ async fn post_engine_create(
         .to_string();
 
     let bad = |m: &str| {
-        (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": m}))).into_response()
+        (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": m})),
+        )
+            .into_response()
     };
     // An id becomes a directory name under the config dir, and a TOML key.
     if id.is_empty()
-        || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        || !id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
     {
         return bad("id must be non-empty and only letters, digits, - or _");
     }
@@ -16050,7 +18106,9 @@ async fn post_engine_create(
         ));
     }
     let ok = edit_config(&state, |doc| {
-        Ok(crate::tomledit::append_agent_block(doc, &id, &role, &session))
+        Ok(crate::tomledit::append_agent_block(
+            doc, &id, &role, &session,
+        ))
     });
     if !ok {
         return (
@@ -16059,8 +18117,7 @@ async fn post_engine_create(
         )
             .into_response();
     }
-    Json(serde_json::json!({"status": "ok", "id": id, "restart_required": true}))
-        .into_response()
+    Json(serde_json::json!({"status": "ok", "id": id, "restart_required": true})).into_response()
 }
 
 /// Removing an engine is NOT idempotent: an unknown one is 404.
@@ -16098,15 +18155,20 @@ async fn delete_engine(
             .into_response();
     }
     let mut found = false;
-    let ok = edit_config(&state, |doc| match crate::tomledit::delete_agent_block(doc, &id) {
-        Some(edited) => {
-            found = true;
-            Ok(edited)
+    let ok = edit_config(&state, |doc| {
+        match crate::tomledit::delete_agent_block(doc, &id) {
+            Some(edited) => {
+                found = true;
+                Ok(edited)
+            }
+            None => Err("unknown engine".to_string()),
         }
-        None => Err("unknown engine".to_string()),
     });
     if !found || !ok {
-        return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "unknown engine"})))
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "unknown engine"})),
+        )
             .into_response();
     }
     Json(serde_json::json!({"status": "ok", "restart_required": true})).into_response()
@@ -16132,8 +18194,16 @@ async fn delete_wireguard_config(
             tracing::info!(file = %name, "wireguard: provider file removed");
             Json(serde_json::json!({"removed": name})).into_response()
         }
-        Ok(false) => (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": format!("no file {name:?}")}))).into_response(),
-        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e}))).into_response(),
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": format!("no file {name:?}")})),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": e})),
+        )
+            .into_response(),
     }
 }
 
@@ -16153,7 +18223,10 @@ async fn move_preview(
     guard!(state, headers, query);
     let category = query_param(&query, "category").unwrap_or_default();
     if category.is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "category required"})))
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "category required"})),
+        )
             .into_response();
     }
     let hash = info_hash.to_lowercase();
@@ -16260,7 +18333,6 @@ async fn race_snapshots(
     }
 }
 
-
 // ---------------------------------------------------------------------------
 // Rescue mode
 // ---------------------------------------------------------------------------
@@ -16327,7 +18399,9 @@ fn rescue_authorised(state: &RescueState, headers: &HeaderMap) -> bool {
         .get("X-Api-Key")
         .and_then(|v| v.to_str().ok())
         .unwrap_or_default();
-    !expected.is_empty() && !provided.is_empty() && constant_time_eq(provided.as_bytes(), expected.as_bytes())
+    !expected.is_empty()
+        && !provided.is_empty()
+        && constant_time_eq(provided.as_bytes(), expected.as_bytes())
 }
 
 async fn rescue_repair(State(state): State<RescueState>, headers: HeaderMap) -> Response {
@@ -16366,7 +18440,11 @@ async fn rescue_repair(State(state): State<RescueState>, headers: HeaderMap) -> 
         // conflict rather than a server fault: the caller has to move the file
         // to a filesystem that can lock it, not retry here.
         Err(e) => (
-            if d.hot_wal { StatusCode::CONFLICT } else { StatusCode::INTERNAL_SERVER_ERROR },
+            if d.hot_wal {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            },
             Json(serde_json::json!({
                 "ran": true,
                 "repaired": false,
@@ -16395,7 +18473,10 @@ async fn rescue_restart(State(state): State<RescueState>, headers: HeaderMap) ->
 pub fn rescue_router(state: RescueState) -> Router {
     Router::new()
         .route("/health", get(|| async { "ok" }))
-        .route("/", get(|| async { "hydra: the store could not be opened" }))
+        .route(
+            "/",
+            get(|| async { "hydra: the store could not be opened" }),
+        )
         .route("/api/setup", get(rescue_setup))
         .route("/api/store/repair", get(rescue_status).post(rescue_repair))
         .route("/api/settings/restart", axum::routing::post(rescue_restart))
@@ -16418,7 +18499,11 @@ pub fn rescue_router(state: RescueState) -> Router {
 async fn get_health(State(state): State<AppState>) -> Response {
     crate::obs::refresh_store(&state).await;
     let (ok, body) = crate::obs::health(&state);
-    let code = if ok { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE };
+    let code = if ok {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
     (code, Json(body)).into_response()
 }
 
@@ -16435,8 +18520,15 @@ async fn get_health_gated(
     if state.cfg().daemon.health_detail_requires_key && !authorised(&state, &headers, &query) {
         crate::obs::refresh_store(&state).await;
         let (ok, body) = crate::obs::health(&state);
-        let code = if ok { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE };
-        return (code, Json(serde_json::json!({"status": body["status"], "version": body["version"]})))
+        let code = if ok {
+            StatusCode::OK
+        } else {
+            StatusCode::SERVICE_UNAVAILABLE
+        };
+        return (
+            code,
+            Json(serde_json::json!({"status": body["status"], "version": body["version"]})),
+        )
             .into_response();
     }
     get_health(State(state)).await
@@ -16617,7 +18709,6 @@ async fn engine_resume_all_by_id(
     pause_all(&state, &id, false).await
 }
 
-
 /// A bulk action within one engine, addressed by ID.
 async fn engine_bulk_by_id(
     State(state): State<AppState>,
@@ -16728,23 +18819,59 @@ fn router_with(state: AppState, extra: Router<AppState>) -> Router {
         .route("/api/categories/orphans", get(get_categories_orphans))
         .route("/api/arr-cleanup/scan", get(get_arr_cleanup_scan))
         .route("/api/hoard/pinned", get(get_hoard_pinned))
-        .route("/api/race/listen-port", axum::routing::post(set_race_listen_port))
-        .route("/api/hoard/listen-port", axum::routing::post(set_hoard_listen_port))
-        .route("/api/race/dial-limits", axum::routing::post(race_dial_limits))
-        .route("/api/hoard/dial-limits", axum::routing::post(hoard_dial_limits))
-        .route("/api/hoard/torrents/:info_hash/verify", axum::routing::post(hoard_verify_one))
-        .route("/api/torrents/:info_hash/reannounce", axum::routing::post(reannounce_one))
+        .route(
+            "/api/race/listen-port",
+            axum::routing::post(set_race_listen_port),
+        )
+        .route(
+            "/api/hoard/listen-port",
+            axum::routing::post(set_hoard_listen_port),
+        )
+        .route(
+            "/api/race/dial-limits",
+            axum::routing::post(race_dial_limits),
+        )
+        .route(
+            "/api/hoard/dial-limits",
+            axum::routing::post(hoard_dial_limits),
+        )
+        .route(
+            "/api/hoard/torrents/:info_hash/verify",
+            axum::routing::post(hoard_verify_one),
+        )
+        .route(
+            "/api/torrents/:info_hash/reannounce",
+            axum::routing::post(reannounce_one),
+        )
         .route("/api/drain/now", axum::routing::post(drain_now))
         .route("/api/drain/policy", axum::routing::post(set_volume_policy))
         .route("/api/health/anomalies", get(get_health_anomalies))
-        .route("/api/network/check", axum::routing::post(post_network_check))
+        .route(
+            "/api/network/check",
+            axum::routing::post(post_network_check),
+        )
         .route("/api/restart", axum::routing::post(post_restart))
-        .route("/api/settings/reset", axum::routing::post(post_settings_reset))
-        .route("/api/import/qbit/start", axum::routing::post(post_qbit_import_start))
+        .route(
+            "/api/settings/reset",
+            axum::routing::post(post_settings_reset),
+        )
+        .route(
+            "/api/import/qbit/start",
+            axum::routing::post(post_qbit_import_start),
+        )
         .route("/api/import/retry", axum::routing::post(post_import_retry))
-        .route("/api/import/transmission/start", axum::routing::post(post_transmission_import_start))
-        .route("/api/settings/restart", axum::routing::post(post_settings_restart))
-        .route("/api/startup-pause/release", axum::routing::post(post_startup_release))
+        .route(
+            "/api/import/transmission/start",
+            axum::routing::post(post_transmission_import_start),
+        )
+        .route(
+            "/api/settings/restart",
+            axum::routing::post(post_settings_restart),
+        )
+        .route(
+            "/api/startup-pause/release",
+            axum::routing::post(post_startup_release),
+        )
         .route("/api/race/timeline/:info_hash", get(get_race_timeline))
         .route(
             "/api/import/transmission/upload",
@@ -16753,29 +18880,74 @@ fn router_with(state: AppState, extra: Router<AppState>) -> Router {
             axum::routing::post(post_transmission_upload)
                 .layer(axum::extract::DefaultBodyLimit::max(4 << 30)),
         )
-        .route("/api/network/wireguard/configs", axum::routing::post(post_wireguard_config_upload))
+        .route(
+            "/api/network/wireguard/configs",
+            axum::routing::post(post_wireguard_config_upload),
+        )
         .route("/api/hoard/torrents/:info_hash", get(get_hoard_torrent))
         .route("/api/race/torrents/:info_hash", get(get_race_torrent))
         .route("/api/torrents", axum::routing::post(post_torrent_add))
-        .route("/api/torrents/upload", axum::routing::post(post_torrent_upload))
-        .route("/api/torrents/export", axum::routing::post(post_torrent_export))
-        .route("/api/torrents/:info_hash", axum::routing::delete(delete_torrent))
-        .route("/api/race/torrents/:info_hash/purge", axum::routing::post(purge_race_torrent))
-        .route("/api/import/transmission/preview", axum::routing::post(post_transmission_preview))
+        .route(
+            "/api/torrents/upload",
+            axum::routing::post(post_torrent_upload),
+        )
+        .route(
+            "/api/torrents/export",
+            axum::routing::post(post_torrent_export),
+        )
+        .route(
+            "/api/torrents/:info_hash",
+            axum::routing::delete(delete_torrent),
+        )
+        .route(
+            "/api/race/torrents/:info_hash/purge",
+            axum::routing::post(purge_race_torrent),
+        )
+        .route(
+            "/api/import/transmission/preview",
+            axum::routing::post(post_transmission_preview),
+        )
         .route("/api/v2/torrents/delete", axum::routing::post(qbit_delete))
-        .route("/api/v2/torrents/add", axum::routing::post(qbit_torrent_add))
+        .route(
+            "/api/v2/torrents/add",
+            axum::routing::post(qbit_torrent_add),
+        )
         .route("/api/nodes", get(get_nodes).post(post_node))
         .route("/api/nodes/test", axum::routing::post(post_node_test))
         .route("/api/nodes/enrol", axum::routing::post(post_node_enrol))
-        .route("/api/nodes/register", axum::routing::post(post_node_register))
+        .route(
+            "/api/nodes/register",
+            axum::routing::post(post_node_register),
+        )
         .route("/install.sh", get(get_install_script))
-        .route("/api/nodes/:name", axum::routing::delete(delete_node).patch(patch_node))
-        .route("/api/nodes/:name/rotate-key", axum::routing::post(post_node_rotate_key))
-        .route("/api/auth/api-key/rotate", axum::routing::post(post_api_key_rotate))
-        .route("/api/auth/api-key/confirm", axum::routing::post(post_api_key_confirm))
-        .route("/api/nodes/:name/handoff", axum::routing::post(post_node_handoff))
-        .route("/api/nodes/:name/fetch", axum::routing::post(post_node_fetch))
-        .route("/api/nodes/:name/move-engine", axum::routing::post(post_node_move_engine))
+        .route(
+            "/api/nodes/:name",
+            axum::routing::delete(delete_node).patch(patch_node),
+        )
+        .route(
+            "/api/nodes/:name/rotate-key",
+            axum::routing::post(post_node_rotate_key),
+        )
+        .route(
+            "/api/auth/api-key/rotate",
+            axum::routing::post(post_api_key_rotate),
+        )
+        .route(
+            "/api/auth/api-key/confirm",
+            axum::routing::post(post_api_key_confirm),
+        )
+        .route(
+            "/api/nodes/:name/handoff",
+            axum::routing::post(post_node_handoff),
+        )
+        .route(
+            "/api/nodes/:name/fetch",
+            axum::routing::post(post_node_fetch),
+        )
+        .route(
+            "/api/nodes/:name/move-engine",
+            axum::routing::post(post_node_move_engine),
+        )
         .route("/node/:name/open", get(get_node_open))
         // The 3.x agent API, gone since agents became engines and nodes. 410
         // on every path and verb under it, so a 3.x script learns where to go
@@ -16783,104 +18955,298 @@ fn router_with(state: AppState, extra: Router<AppState>) -> Router {
         .route("/api/agents", axum::routing::any(agents_gone))
         .route("/api/agents/*rest", axum::routing::any(agents_gone))
         .route("/api/engines/:id", axum::routing::delete(delete_engine))
-        .route("/api/auth/password", axum::routing::post(post_password_route))
-        .route("/api/import/qbit/preview", axum::routing::post(post_qbit_import_preview))
-        .route("/api/jobs/move-remote", axum::routing::any(move_remote_gone))
+        .route(
+            "/api/auth/password",
+            axum::routing::post(post_password_route),
+        )
+        .route(
+            "/api/import/qbit/preview",
+            axum::routing::post(post_qbit_import_preview),
+        )
+        .route(
+            "/api/jobs/move-remote",
+            axum::routing::any(move_remote_gone),
+        )
         .route("/api/jobs/:id", get(get_job).delete(delete_job))
-        .route("/api/network/mode", get(get_network_mode).post(post_network_mode))
-        .route("/api/network/wireguard/engines", axum::routing::post(post_wireguard_engines))
-        .route("/api/network/wireguard/configs/:name", axum::routing::delete(delete_wireguard_config))
+        .route(
+            "/api/network/mode",
+            get(get_network_mode).post(post_network_mode),
+        )
+        .route(
+            "/api/network/wireguard/engines",
+            axum::routing::post(post_wireguard_engines),
+        )
+        .route(
+            "/api/network/wireguard/configs/:name",
+            axum::routing::delete(delete_wireguard_config),
+        )
         .route("/api/race/settings", get(get_race_settings))
-        .route("/api/race/torrents/:info_hash/move-preview", get(move_preview))
-        .route("/api/hoard/torrents/:info_hash/move-preview", get(move_preview))
-        .route("/api/benchmark/race-snapshots/:info_hash", get(race_snapshots))
-        .route("/api/v2/app/setPreferences", axum::routing::post(qbit_set_preferences))
-        .route("/api/v2/torrents/reannounce", axum::routing::post(qbit_reannounce))
-        .route("/api/v2/torrents/recheck", axum::routing::post(qbit_recheck))
-        .route("/api/import/check-paths", axum::routing::post(import_check_paths))
-        .route("/api/vpn-speedtest/run", axum::routing::post(vpn_speedtest_run))
+        .route(
+            "/api/race/torrents/:info_hash/move-preview",
+            get(move_preview),
+        )
+        .route(
+            "/api/hoard/torrents/:info_hash/move-preview",
+            get(move_preview),
+        )
+        .route(
+            "/api/benchmark/race-snapshots/:info_hash",
+            get(race_snapshots),
+        )
+        .route(
+            "/api/v2/app/setPreferences",
+            axum::routing::post(qbit_set_preferences),
+        )
+        .route(
+            "/api/v2/torrents/reannounce",
+            axum::routing::post(qbit_reannounce),
+        )
+        .route(
+            "/api/v2/torrents/recheck",
+            axum::routing::post(qbit_recheck),
+        )
+        .route(
+            "/api/import/check-paths",
+            axum::routing::post(import_check_paths),
+        )
+        .route(
+            "/api/vpn-speedtest/run",
+            axum::routing::post(vpn_speedtest_run),
+        )
         .route("/api/hoard/pause-all", axum::routing::post(hoard_pause_all))
-        .route("/api/hoard/resume-all", axum::routing::post(hoard_resume_all))
+        .route(
+            "/api/hoard/resume-all",
+            axum::routing::post(hoard_resume_all),
+        )
         .route("/api/hoard/pause", axum::routing::post(hoard_pause_bulk))
         // Any engine, not just the two with a literal route. A node running one
         // engine per tunnel has to be able to pause the copy on ONE of them.
-        .route("/api/engines/:id/pause", axum::routing::post(engine_pause_bulk))
+        .route(
+            "/api/engines/:id/pause",
+            axum::routing::post(engine_pause_bulk),
+        )
         .route("/api/race/pause", axum::routing::post(race_pause_bulk))
-        .route("/api/race/torrents/:info_hash/pause", axum::routing::post(race_pause_one))
-        .route("/api/race/torrents/:info_hash/resume", axum::routing::post(race_resume_one))
+        .route(
+            "/api/race/torrents/:info_hash/pause",
+            axum::routing::post(race_pause_one),
+        )
+        .route(
+            "/api/race/torrents/:info_hash/resume",
+            axum::routing::post(race_resume_one),
+        )
         .route("/api/hoard/torrents/bulk", axum::routing::post(hoard_bulk))
         .route("/api/race/torrents/bulk", axum::routing::post(race_bulk))
         .route("/api/hoard/download-slots", get(get_download_slots))
         .route("/api/import/qbit/status", get(get_qbit_import_status))
         // Any verb: cross-seed sends every call, reads included, as a POST.
-        .route("/api/v2/torrents/categories", axum::routing::any(qbit_categories))
+        .route(
+            "/api/v2/torrents/categories",
+            axum::routing::any(qbit_categories),
+        )
         .route("/api/v2/torrents/tags", axum::routing::any(qbit_tags))
         .route("/api/v2/app/version", axum::routing::any(qbit_version))
-        .route("/api/v2/app/webapiVersion", axum::routing::any(qbit_webapi_version))
+        .route(
+            "/api/v2/app/webapiVersion",
+            axum::routing::any(qbit_webapi_version),
+        )
         .route("/api/v2/app/buildInfo", axum::routing::any(qbit_build_info))
-        .route("/api/v2/app/preferences", axum::routing::any(qbit_preferences))
-        .route("/api/v2/transfer/info", axum::routing::any(qbit_transfer_info))
-        .route("/api/v2/torrents/info", axum::routing::any(qbit_torrents_info))
-        .route("/api/v2/torrents/files", axum::routing::any(qbit_torrent_files))
-        .route("/api/v2/torrents/trackers", axum::routing::any(qbit_torrent_trackers))
-        .route("/api/v2/torrents/properties", axum::routing::any(qbit_torrent_properties))
-        .route("/api/v2/torrents/export", axum::routing::any(qbit_torrent_export))
+        .route(
+            "/api/v2/app/preferences",
+            axum::routing::any(qbit_preferences),
+        )
+        .route(
+            "/api/v2/transfer/info",
+            axum::routing::any(qbit_transfer_info),
+        )
+        .route(
+            "/api/v2/torrents/info",
+            axum::routing::any(qbit_torrents_info),
+        )
+        .route(
+            "/api/v2/torrents/files",
+            axum::routing::any(qbit_torrent_files),
+        )
+        .route(
+            "/api/v2/torrents/trackers",
+            axum::routing::any(qbit_torrent_trackers),
+        )
+        .route(
+            "/api/v2/torrents/properties",
+            axum::routing::any(qbit_torrent_properties),
+        )
+        .route(
+            "/api/v2/torrents/export",
+            axum::routing::any(qbit_torrent_export),
+        )
         // Speed limits. Reads on any verb (cross-seed POSTs its reads), writes
         // on POST as qBittorrent has them.
-        .route("/api/v2/transfer/uploadLimit", axum::routing::any(qbit_transfer_upload_limit))
-        .route("/api/v2/transfer/downloadLimit", axum::routing::any(qbit_transfer_download_limit))
-        .route("/api/v2/transfer/setUploadLimit", axum::routing::post(qbit_transfer_set_upload_limit))
-        .route("/api/v2/transfer/setDownloadLimit", axum::routing::post(qbit_transfer_set_download_limit))
-        .route("/api/v2/torrents/uploadLimit", axum::routing::any(qbit_torrents_upload_limit))
-        .route("/api/v2/torrents/downloadLimit", axum::routing::any(qbit_torrents_download_limit))
-        .route("/api/v2/torrents/setUploadLimit", axum::routing::post(qbit_torrents_set_upload_limit))
-        .route("/api/v2/torrents/setDownloadLimit", axum::routing::post(qbit_torrents_set_download_limit))
-        .route("/api/torrents/:info_hash/limits", get(get_torrent_limits).post(post_torrent_limits))
-        .route("/api/engines/:id/rate-limits", get(get_engine_rate_limits).post(post_engine_rate_limits))
-        .route("/api/v2/torrents/setShareLimits", axum::routing::post(qbit_set_share_limits))
-        .route("/api/v2/torrents/setLocation", axum::routing::post(qbit_set_location))
-        .route("/api/v2/torrents/setForceStart", axum::routing::post(qbit_set_force_start))
-        .route("/api/v2/torrents/filePrio", axum::routing::post(qbit_file_prio))
-        .route("/api/v2/torrents/toggleSequentialDownload", axum::routing::post(qbit_toggle_sequential))
-        .route("/api/v2/torrents/toggleFirstLastPiecePrio", axum::routing::post(qbit_toggle_first_last))
-        .route("/api/torrents/:info_hash/download-order", get(get_torrent_download_order).post(post_torrent_download_order))
+        .route(
+            "/api/v2/transfer/uploadLimit",
+            axum::routing::any(qbit_transfer_upload_limit),
+        )
+        .route(
+            "/api/v2/transfer/downloadLimit",
+            axum::routing::any(qbit_transfer_download_limit),
+        )
+        .route(
+            "/api/v2/transfer/setUploadLimit",
+            axum::routing::post(qbit_transfer_set_upload_limit),
+        )
+        .route(
+            "/api/v2/transfer/setDownloadLimit",
+            axum::routing::post(qbit_transfer_set_download_limit),
+        )
+        .route(
+            "/api/v2/torrents/uploadLimit",
+            axum::routing::any(qbit_torrents_upload_limit),
+        )
+        .route(
+            "/api/v2/torrents/downloadLimit",
+            axum::routing::any(qbit_torrents_download_limit),
+        )
+        .route(
+            "/api/v2/torrents/setUploadLimit",
+            axum::routing::post(qbit_torrents_set_upload_limit),
+        )
+        .route(
+            "/api/v2/torrents/setDownloadLimit",
+            axum::routing::post(qbit_torrents_set_download_limit),
+        )
+        .route(
+            "/api/torrents/:info_hash/limits",
+            get(get_torrent_limits).post(post_torrent_limits),
+        )
+        .route(
+            "/api/engines/:id/rate-limits",
+            get(get_engine_rate_limits).post(post_engine_rate_limits),
+        )
+        .route(
+            "/api/v2/torrents/setShareLimits",
+            axum::routing::post(qbit_set_share_limits),
+        )
+        .route(
+            "/api/v2/torrents/setLocation",
+            axum::routing::post(qbit_set_location),
+        )
+        .route(
+            "/api/v2/torrents/setForceStart",
+            axum::routing::post(qbit_set_force_start),
+        )
+        .route(
+            "/api/v2/torrents/filePrio",
+            axum::routing::post(qbit_file_prio),
+        )
+        .route(
+            "/api/v2/torrents/toggleSequentialDownload",
+            axum::routing::post(qbit_toggle_sequential),
+        )
+        .route(
+            "/api/v2/torrents/toggleFirstLastPiecePrio",
+            axum::routing::post(qbit_toggle_first_last),
+        )
+        .route(
+            "/api/torrents/:info_hash/download-order",
+            get(get_torrent_download_order).post(post_torrent_download_order),
+        )
         .route("/api/v2/torrents/rename", axum::routing::post(qbit_rename))
-        .route("/api/v2/torrents/topPrio", axum::routing::post(qbit_queue_prio))
-        .route("/api/v2/torrents/bottomPrio", axum::routing::post(qbit_queue_prio))
-        .route("/api/v2/torrents/increasePrio", axum::routing::post(qbit_queue_prio))
-        .route("/api/v2/torrents/decreasePrio", axum::routing::post(qbit_queue_prio))
-        .route("/api/v2/torrents/count", axum::routing::any(qbit_torrents_count))
-        .route("/api/v2/app/defaultSavePath", axum::routing::any(qbit_default_save_path_route))
-        .route("/api/v2/sync/maindata", axum::routing::any(qbit_sync_maindata))
-        .route("/api/torrents/:info_hash/share-limits", get(get_torrent_share_limits).post(post_torrent_share_limits))
-        .route("/api/engines/:id/share-limits", get(get_engine_share_limits).post(post_engine_share_limits))
+        .route(
+            "/api/v2/torrents/topPrio",
+            axum::routing::post(qbit_queue_prio),
+        )
+        .route(
+            "/api/v2/torrents/bottomPrio",
+            axum::routing::post(qbit_queue_prio),
+        )
+        .route(
+            "/api/v2/torrents/increasePrio",
+            axum::routing::post(qbit_queue_prio),
+        )
+        .route(
+            "/api/v2/torrents/decreasePrio",
+            axum::routing::post(qbit_queue_prio),
+        )
+        .route(
+            "/api/v2/torrents/count",
+            axum::routing::any(qbit_torrents_count),
+        )
+        .route(
+            "/api/v2/app/defaultSavePath",
+            axum::routing::any(qbit_default_save_path_route),
+        )
+        .route(
+            "/api/v2/sync/maindata",
+            axum::routing::any(qbit_sync_maindata),
+        )
+        .route(
+            "/api/torrents/:info_hash/share-limits",
+            get(get_torrent_share_limits).post(post_torrent_share_limits),
+        )
+        .route(
+            "/api/engines/:id/share-limits",
+            get(get_engine_share_limits).post(post_engine_share_limits),
+        )
         .route("/api/torrents/:info_hash/files", get(get_torrent_files))
-        .route("/api/torrents/:info_hash/files/rename", axum::routing::post(post_torrent_file_rename))
-        .route("/api/v2/torrents/renameFile", axum::routing::post(qbit_rename_file))
+        .route(
+            "/api/torrents/:info_hash/files/rename",
+            axum::routing::post(post_torrent_file_rename),
+        )
+        .route(
+            "/api/v2/torrents/renameFile",
+            axum::routing::post(qbit_rename_file),
+        )
         .route("/api/torrents/:info_hash/torrent", get(get_torrent_file))
-        .route("/api/torrents/:info_hash/peers", axum::routing::post(post_torrent_peers))
-        .route("/api/torrents/:info_hash/engine", axum::routing::post(post_torrent_engine))
-        .route("/api/torrents/:info_hash/graduate", axum::routing::post(post_torrent_graduate))
-        .route("/api/torrents/:info_hash/copy", axum::routing::post(post_torrent_copy))
-        .route("/api/torrents/:info_hash/trackers", get(get_torrent_trackers).post(post_torrent_trackers))
-        .route("/api/torrents/:info_hash/add-tracker", axum::routing::post(post_add_tracker))
+        .route(
+            "/api/torrents/:info_hash/peers",
+            axum::routing::post(post_torrent_peers),
+        )
+        .route(
+            "/api/torrents/:info_hash/engine",
+            axum::routing::post(post_torrent_engine),
+        )
+        .route(
+            "/api/torrents/:info_hash/graduate",
+            axum::routing::post(post_torrent_graduate),
+        )
+        .route(
+            "/api/torrents/:info_hash/copy",
+            axum::routing::post(post_torrent_copy),
+        )
+        .route(
+            "/api/torrents/:info_hash/trackers",
+            get(get_torrent_trackers).post(post_torrent_trackers),
+        )
+        .route(
+            "/api/torrents/:info_hash/add-tracker",
+            axum::routing::post(post_add_tracker),
+        )
         .route("/api/trackers", get(get_trackers))
         .route("/api/fs/browse", get(get_fs_browse))
         .route("/api/fs/list", get(crate::fslist::get_fs_list))
-        .route("/api/v2/app/getDirectoryContent", axum::routing::any(crate::fslist::qbit_directory_content))
+        .route(
+            "/api/v2/app/getDirectoryContent",
+            axum::routing::any(crate::fslist::qbit_directory_content),
+        )
         .route("/api/benchmark/records", get(get_bench_records))
         .route("/api/benchmark/range", get(get_bench_range))
         .route("/api/benchmark/engines", get(get_bench_engines_range))
         .route("/api/benchmark/race-events", get(get_race_events))
-        .route("/api/benchmark/trackers/current", get(get_tracker_stats_current))
-        .route("/api/benchmark/trackers/range", get(get_tracker_stats_range))
+        .route(
+            "/api/benchmark/trackers/current",
+            get(get_tracker_stats_current),
+        )
+        .route(
+            "/api/benchmark/trackers/range",
+            get(get_tracker_stats_range),
+        )
         // The interface. Not an API route, which is exactly why a bench that
         // compares /api/* answers cannot tell whether it is served at all.
         // The four the interface calls before it can show anything. /api/setup
         // is its very first request: unanswered, the page sits on
         // "Initializing…" with every other route green.
-        .route("/api/setup", get(crate::bootstrap::setup_status)
-                             .post(crate::bootstrap::setup_password))
+        .route(
+            "/api/setup",
+            get(crate::bootstrap::setup_status).post(crate::bootstrap::setup_password),
+        )
         .route("/api/login", axum::routing::post(crate::bootstrap::login))
         .route("/api/startup", get(crate::bootstrap::startup))
         .route("/metrics", get(get_metrics_gated))
@@ -16897,43 +19263,121 @@ fn router_with(state: AppState, extra: Router<AppState>) -> Router {
         .route("/api/port-forward", get(get_port_forward))
         .route("/api/benchmark/compare", get(get_bench_compare))
         .route("/api/network/wireguard", get(get_wireguard))
-        .route("/api/network/egress", get(crate::killswitch::get_egress).post(crate::killswitch::post_egress))
-        .route("/api/v2/torrents/createCategory", axum::routing::post(qbit_create_category))
-        .route("/api/v2/torrents/editCategory", axum::routing::post(qbit_edit_category))
-        .route("/api/v2/torrents/removeCategories", axum::routing::post(qbit_remove_categories))
-        .route("/api/v2/torrents/createTags", axum::routing::post(qbit_create_tags))
-        .route("/api/v2/torrents/deleteTags", axum::routing::post(qbit_delete_tags))
-        .route("/api/v2/torrents/addTags", axum::routing::post(qbit_add_tags))
-        .route("/api/v2/torrents/removeTags", axum::routing::post(qbit_remove_tags))
+        .route(
+            "/api/network/egress",
+            get(crate::killswitch::get_egress).post(crate::killswitch::post_egress),
+        )
+        .route(
+            "/api/v2/torrents/createCategory",
+            axum::routing::post(qbit_create_category),
+        )
+        .route(
+            "/api/v2/torrents/editCategory",
+            axum::routing::post(qbit_edit_category),
+        )
+        .route(
+            "/api/v2/torrents/removeCategories",
+            axum::routing::post(qbit_remove_categories),
+        )
+        .route(
+            "/api/v2/torrents/createTags",
+            axum::routing::post(qbit_create_tags),
+        )
+        .route(
+            "/api/v2/torrents/deleteTags",
+            axum::routing::post(qbit_delete_tags),
+        )
+        .route(
+            "/api/v2/torrents/addTags",
+            axum::routing::post(qbit_add_tags),
+        )
+        .route(
+            "/api/v2/torrents/removeTags",
+            axum::routing::post(qbit_remove_tags),
+        )
         .route("/api/v2/torrents/pause", axum::routing::post(qbit_pause))
         .route("/api/v2/torrents/resume", axum::routing::post(qbit_resume))
-        .route("/api/v2/torrents/setCategory", axum::routing::post(qbit_set_category))
+        .route(
+            "/api/v2/torrents/setCategory",
+            axum::routing::post(qbit_set_category),
+        )
         .route("/api/v2/torrents/start", axum::routing::post(qbit_start))
         .route("/api/v2/torrents/stop", axum::routing::post(qbit_stop))
-        .route("/api/v2/torrents/addTrackers", axum::routing::post(qbit_add_trackers))
-        .route("/api/v2/torrents/removeTrackers", axum::routing::post(qbit_remove_trackers))
+        .route(
+            "/api/v2/torrents/addTrackers",
+            axum::routing::post(qbit_add_trackers),
+        )
+        .route(
+            "/api/v2/torrents/removeTrackers",
+            axum::routing::post(qbit_remove_trackers),
+        )
         .route("/api/v2/auth/login", axum::routing::post(qbit_login))
         .route("/api/v2/auth/logout", axum::routing::post(qbit_logout))
-        .route("/api/hoard/torrents/:info_hash/pause", axum::routing::post(hoard_pause_one))
-        .route("/api/hoard/torrents/:info_hash/resume", axum::routing::post(hoard_resume_one))
-        .route("/api/hoard/torrents/:info_hash/pin", axum::routing::post(hoard_pin_one))
-        .route("/api/hoard/torrents/:info_hash/unpin", axum::routing::post(hoard_unpin_one))
-        .route("/api/hoard/torrents/:info_hash/category", axum::routing::post(set_torrent_category))
-        .route("/api/hoard/torrents/:info_hash/tags", axum::routing::post(set_torrent_tags))
-        .route("/api/race/torrents/:info_hash/category", axum::routing::post(set_race_torrent_category))
-        .route("/api/hoard/torrents/:info_hash/location", axum::routing::post(set_torrent_location))
-        .route("/api/race/torrents/:info_hash/location", axum::routing::post(set_race_torrent_location))
-        .route("/api/race/torrents/:info_hash/tags", axum::routing::post(set_race_torrent_tags))
+        .route(
+            "/api/hoard/torrents/:info_hash/pause",
+            axum::routing::post(hoard_pause_one),
+        )
+        .route(
+            "/api/hoard/torrents/:info_hash/resume",
+            axum::routing::post(hoard_resume_one),
+        )
+        .route(
+            "/api/hoard/torrents/:info_hash/pin",
+            axum::routing::post(hoard_pin_one),
+        )
+        .route(
+            "/api/hoard/torrents/:info_hash/unpin",
+            axum::routing::post(hoard_unpin_one),
+        )
+        .route(
+            "/api/hoard/torrents/:info_hash/category",
+            axum::routing::post(set_torrent_category),
+        )
+        .route(
+            "/api/hoard/torrents/:info_hash/tags",
+            axum::routing::post(set_torrent_tags),
+        )
+        .route(
+            "/api/race/torrents/:info_hash/category",
+            axum::routing::post(set_race_torrent_category),
+        )
+        .route(
+            "/api/hoard/torrents/:info_hash/location",
+            axum::routing::post(set_torrent_location),
+        )
+        .route(
+            "/api/race/torrents/:info_hash/location",
+            axum::routing::post(set_race_torrent_location),
+        )
+        .route(
+            "/api/race/torrents/:info_hash/tags",
+            axum::routing::post(set_race_torrent_tags),
+        )
         .route("/api/categories", axum::routing::post(category_create))
-        .route("/api/announce/ip-modes", get(get_ip_modes).post(set_announce_ip_mode))
+        .route(
+            "/api/announce/ip-modes",
+            get(get_ip_modes).post(set_announce_ip_mode),
+        )
         .route("/api/announce/health", get(get_announce_health))
         .route("/api/announce/errors", get(get_announce_errors))
         .route("/api/announce/policy", get(get_live_announce_policy))
         .route("/api/announce/mute", axum::routing::post(set_announce_mute))
-        .route("/api/announce/hidden", axum::routing::post(set_announce_hidden))
-        .route("/api/announce/min-seed", axum::routing::post(set_announce_min_seed))
-        .route("/api/announce/passkeys", get(get_passkeys).post(set_announce_passkey))
-        .route("/api/categories/:name", axum::routing::put(category_update).delete(category_delete))
+        .route(
+            "/api/announce/hidden",
+            axum::routing::post(set_announce_hidden),
+        )
+        .route(
+            "/api/announce/min-seed",
+            axum::routing::post(set_announce_min_seed),
+        )
+        .route(
+            "/api/announce/passkeys",
+            get(get_passkeys).post(set_announce_passkey),
+        )
+        .route(
+            "/api/categories/:name",
+            axum::routing::put(category_update).delete(category_delete),
+        )
         // Workflows carry their own routes, so this file does not grow another
         // six handlers. Merged before with_state so they share it.
         .merge(crate::rulesapi::routes())
@@ -16966,7 +19410,10 @@ fn router_with(state: AppState, extra: Router<AppState>) -> Router {
                 .compress_when(tower_http::compression::predicate::SizeAbove::new(32)),
         )
         // Inside `qbit_refusal_shape`, so the shim's refusals still read 403.
-        .layer(axum::middleware::from_fn_with_state(state, refuse_by_default))
+        .layer(axum::middleware::from_fn_with_state(
+            state,
+            refuse_by_default,
+        ))
         .layer(axum::middleware::from_fn(qbit_refusal_shape))
 }
 
@@ -17031,7 +19478,11 @@ async fn refuse_by_default(
         );
         if !safe
             && !key_authorised(&state, req.headers(), query)
-            && !same_origin(req.headers(), req.uri().authority(), &state.cfg().daemon.public_url)
+            && !same_origin(
+                req.headers(),
+                req.uri().authority(),
+                &state.cfg().daemon.public_url,
+            )
         {
             return (
                 StatusCode::FORBIDDEN,
@@ -17063,7 +19514,11 @@ fn same_origin(
     };
     let bare = |authority: &str| -> String {
         let a = authority.trim().to_ascii_lowercase();
-        let default = if scheme.eq_ignore_ascii_case("https") { ":443" } else { ":80" };
+        let default = if scheme.eq_ignore_ascii_case("https") {
+            ":443"
+        } else {
+            ":80"
+        };
         a.strip_suffix(default).map(str::to_string).unwrap_or(a)
     };
     let named = bare(named);
@@ -17071,10 +19526,18 @@ fn same_origin(
     let candidates = [
         header("host").map(str::to_string),
         uri_authority.map(|a| a.as_str().to_string()),
-        header("x-forwarded-host").and_then(|f| f.split(',').next()).map(str::to_string),
-        public_url.split_once("://").and_then(|(_, rest)| rest.split('/').next()).map(str::to_string),
+        header("x-forwarded-host")
+            .and_then(|f| f.split(',').next())
+            .map(str::to_string),
+        public_url
+            .split_once("://")
+            .and_then(|(_, rest)| rest.split('/').next())
+            .map(str::to_string),
     ];
-    candidates.iter().flatten().any(|c| !c.trim().is_empty() && bare(c) == named)
+    candidates
+        .iter()
+        .flatten()
+        .any(|c| !c.trim().is_empty() && bare(c) == named)
 }
 
 /// Answer an unauthenticated qBittorrent call the way qBittorrent answers it.
@@ -17090,10 +19553,7 @@ fn same_origin(
 /// Only the shim. The native API keeps 401, which is the right code and what
 /// its own callers expect; this is compatibility with one client's reading of
 /// another server's quirk, and it is scoped to the paths that imitate it.
-async fn qbit_refusal_shape(
-    req: axum::extract::Request,
-    next: axum::middleware::Next,
-) -> Response {
+async fn qbit_refusal_shape(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
     let is_shim = req.uri().path().starts_with("/api/v2/");
     let res = next.run(req).await;
     if is_shim && res.status() == StatusCode::UNAUTHORIZED {
@@ -17112,16 +19572,25 @@ mod fleet_tests {
     #[test]
     fn loopback_is_recognised_whatever_the_url_looks_like() {
         let host_of = |url: &str| -> String {
-            url.split("//").nth(1).unwrap_or(url)
-                .split('/').next().unwrap_or_default()
-                .rsplit(':').last().unwrap_or_default()
+            url.split("//")
+                .nth(1)
+                .unwrap_or(url)
+                .split('/')
+                .next()
+                .unwrap_or_default()
+                .rsplit(':')
+                .last()
+                .unwrap_or_default()
                 .trim_matches(|c| c == '[' || c == ']')
                 .to_string()
         };
         assert_eq!(host_of("http://127.0.0.1:8499"), "127.0.0.1");
         assert_eq!(host_of("http://localhost:8199/"), "localhost");
         assert_eq!(host_of("http://192.168.99.200:8499"), "192.168.99.200");
-        assert_eq!(host_of("https://seedbox.example.net:8199"), "seedbox.example.net");
+        assert_eq!(
+            host_of("https://seedbox.example.net:8199"),
+            "seedbox.example.net"
+        );
         // A LAN address must NOT be mistaken for loopback.
         assert!(!host_of("http://192.168.99.200:8499").starts_with("127."));
     }
@@ -17160,10 +19629,12 @@ mod fleet_tests {
     /// in order and each row exactly once.
     #[test]
     fn consecutive_windows_are_disjoint_and_complete() {
-        let mk = || vec![
-            page(&[("aa", 30.0), ("bb", 10.0)]),
-            page(&[("cc", 20.0), ("dd", 5.0)]),
-        ];
+        let mk = || {
+            vec![
+                page(&[("aa", 30.0), ("bb", 10.0)]),
+                page(&[("cc", 20.0), ("dd", 5.0)]),
+            ]
+        };
         let first = hashes(&merge_pages(mk(), "added_time", false, 0, 2));
         let second = hashes(&merge_pages(mk(), "added_time", false, 2, 2));
         assert_eq!(first, vec!["aa", "cc"]);
@@ -17172,7 +19643,11 @@ mod fleet_tests {
         all.extend(second);
         all.sort();
         all.dedup();
-        assert_eq!(all.len(), 4, "a row was duplicated or dropped between pages");
+        assert_eq!(
+            all.len(),
+            4,
+            "a row was duplicated or dropped between pages"
+        );
     }
 
     /// Rows that compare equal still need a total order, or the same torrent
@@ -17238,7 +19713,10 @@ mod fleet_tests {
     /// error at all, which belong to no class and must not be swept away.
     #[test]
     fn no_filter_leaves_every_row_alone() {
-        let mut pages = vec![page_with(vec![("a", ""), ("b", "v4: tracker: invalid passkey")], 2)];
+        let mut pages = vec![page_with(
+            vec![("a", ""), ("b", "v4: tracker: invalid passkey")],
+            2,
+        )];
         enforce_error_class(&mut pages, &[], &[], 10);
         assert_eq!(pages[0]["rows"].as_array().unwrap().len(), 2);
     }
@@ -17246,7 +19724,10 @@ mod fleet_tests {
     /// Excluding a class keeps the torrents that are in NO class.
     #[test]
     fn excluding_a_class_keeps_the_healthy_ones() {
-        let mut pages = vec![page_with(vec![("a", ""), ("b", "v4: tracker: invalid passkey")], 2)];
+        let mut pages = vec![page_with(
+            vec![("a", ""), ("b", "v4: tracker: invalid passkey")],
+            2,
+        )];
         enforce_error_class(&mut pages, &[], &["auth".to_string()], 10);
         let rows = pages[0]["rows"].as_array().unwrap();
         assert_eq!(rows.len(), 1);
@@ -17286,7 +19767,8 @@ mod fleet_tests {
     #[test]
     fn a_seeding_row_sorts_as_complete_whatever_its_progress() {
         let seeding = serde_json::json!({"state": "seeding", "progress": 0.2, "info_hash": "aa"});
-        let leeching = serde_json::json!({"state": "downloading", "progress": 0.9, "info_hash": "bb"});
+        let leeching =
+            serde_json::json!({"state": "downloading", "progress": 0.9, "info_hash": "bb"});
         assert_eq!(row_sort_key(&seeding, "progress").1, 1.0);
         assert_eq!(row_sort_key(&leeching, "progress").1, 0.9);
     }
@@ -17312,7 +19794,10 @@ mod bulk_body_tests {
     fn a_location_keeps_the_trailing_space_of_its_folder() {
         let p = location_path("/calewood/sw_1/Purity  2016 ").unwrap();
         assert_eq!(p, std::path::PathBuf::from("/calewood/sw_1/Purity  2016 "));
-        assert_eq!(location_path("/data/tv/").unwrap(), std::path::PathBuf::from("/data/tv"));
+        assert_eq!(
+            location_path("/data/tv/").unwrap(),
+            std::path::PathBuf::from("/data/tv")
+        );
         assert!(location_path("   ").is_err());
         assert!(location_path(" /data").is_err());
     }
@@ -17330,7 +19815,9 @@ mod bulk_body_tests {
     fn the_body_that_started_the_whole_library_is_refused() {
         let body = r#"{"action":"start","filter":{"category":"Calewood","search":"","tracker":"","tag":"","state":""},"exclude":[]}"#;
         let parsed = serde_json::from_str::<BulkBody>(body);
-        let err = parsed.err().expect("a filter this API never implemented must not parse");
+        let err = parsed
+            .err()
+            .expect("a filter this API never implemented must not parse");
         assert!(
             err.to_string().contains("filter"),
             "the error must NAME the field, or the caller learns nothing: {err}"
@@ -17357,10 +19844,9 @@ mod bulk_body_tests {
 
     #[test]
     fn a_normal_selection_still_parses() {
-        let req: BulkBody = serde_json::from_str(
-            r#"{"action":"stop","hashes":["aa","BB"],"exclude":["cc"]}"#,
-        )
-        .unwrap();
+        let req: BulkBody =
+            serde_json::from_str(r#"{"action":"stop","hashes":["aa","BB"],"exclude":["cc"]}"#)
+                .unwrap();
         assert_eq!(req.hashes, vec!["aa", "BB"]);
         assert_eq!(req.exclude, vec!["cc"]);
         assert!(!req.all);
@@ -17374,13 +19860,28 @@ mod tests {
     /// The day is the session minus its value at the last local midnight.
     #[test]
     fn midnight_resets_the_day_but_not_the_session() {
-        let mut odo = Odometer { day_baseline: (0, 0), day_date: "2026-09-08".into() };
-        assert_eq!(odo.day((700, 10), "2026-09-08"), (700, 10), "the boot day counts from zero");
+        let mut odo = Odometer {
+            day_baseline: (0, 0),
+            day_date: "2026-09-08".into(),
+        };
+        assert_eq!(
+            odo.day((700, 10), "2026-09-08"),
+            (700, 10),
+            "the boot day counts from zero"
+        );
 
         // The date rolls: the session keeps counting, the day starts over.
-        assert_eq!(odo.day((900, 10), "2026-09-09"), (0, 0), "the day does not survive midnight");
+        assert_eq!(
+            odo.day((900, 10), "2026-09-09"),
+            (0, 0),
+            "the day does not survive midnight"
+        );
         assert_eq!(odo.day((1000, 15), "2026-09-09"), (100, 5));
-        assert_eq!(odo.day_baseline, (900, 10), "the baseline is the session at the rollover");
+        assert_eq!(
+            odo.day_baseline,
+            (900, 10),
+            "the baseline is the session at the rollover"
+        );
 
         // A second midnight: yesterday's traffic is not today's.
         assert_eq!(odo.day((5000, 15), "2026-09-10"), (0, 0));
@@ -17444,8 +19945,8 @@ mod tests {
     /// An unconfigured instance whose config is a real file, so first-run
     /// setup can write the account.
     fn unconfigured(name: &str) -> (AppState, std::path::PathBuf) {
-        let path = std::env::temp_dir()
-            .join(format!("hydra-setup-{}-{name}.toml", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("hydra-setup-{}-{name}.toml", std::process::id()));
         std::fs::write(&path, include_str!("../../../configs/default.toml")).unwrap();
         let mut st = state("k", "");
         st.config_path = path.clone();
@@ -17462,7 +19963,9 @@ mod tests {
         )
         .await;
         let status = r.status();
-        let bytes = axum::body::to_bytes(r.into_body(), usize::MAX).await.unwrap();
+        let bytes = axum::body::to_bytes(r.into_body(), usize::MAX)
+            .await
+            .unwrap();
         (status, String::from_utf8_lossy(&bytes).into_owned())
     }
 
@@ -17480,7 +19983,11 @@ mod tests {
             let (status, _) = setup_call(&st, body).await;
             assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
         }
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), before, "no account written");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            before,
+            "no account written"
+        );
         assert!(st.cfg().auth.password_hash.is_empty());
         let _ = std::fs::remove_file(&path);
     }
@@ -17495,11 +20002,17 @@ mod tests {
             setup_call(&st, r#"{"password":"AAAAAAAA","setup_code":"WRONG-CODE2"}"#).await;
         assert_eq!(status, StatusCode::FORBIDDEN);
         assert!(!text.contains("ABCDE") && !text.contains("FGH23"), "{text}");
-        let (status, text) =
-            setup_call(&st, r#"{"password":"AAAAAAAA","setup_code":" abcde fgh23 "}"#).await;
+        let (status, text) = setup_call(
+            &st,
+            r#"{"password":"AAAAAAAA","setup_code":" abcde fgh23 "}"#,
+        )
+        .await;
         assert_eq!(status, StatusCode::OK, "{text}");
         assert!(!st.cfg().auth.password_hash.is_empty());
-        assert!(!crate::bootstrap::setup_code_pending(), "the code dies with the first account");
+        assert!(
+            !crate::bootstrap::setup_code_pending(),
+            "the code dies with the first account"
+        );
         let (status, _) =
             setup_call(&st, r#"{"password":"BBBBBBBB","setup_code":"ABCDE-FGH23"}"#).await;
         assert_eq!(status, StatusCode::CONFLICT);
@@ -17580,15 +20093,30 @@ mod tests {
         let hash = bcrypt::hash("hunter2", 4).unwrap();
         let s = state("secret-key", &hash);
 
-        assert!(qbit_creds_ok(&s, "admin", "hunter2"), "the admin account works");
-        assert!(qbit_creds_ok(&s, "admin", "secret-key"), "so does the API key");
+        assert!(
+            qbit_creds_ok(&s, "admin", "hunter2"),
+            "the admin account works"
+        );
+        assert!(
+            qbit_creds_ok(&s, "admin", "secret-key"),
+            "so does the API key"
+        );
         // Any username with the key: the clients let people type anything
         // there, and the key is what is being checked.
         assert!(qbit_creds_ok(&s, "whatever", "secret-key"));
 
-        assert!(!qbit_creds_ok(&s, "admin", "wrong"), "a wrong password is refused");
-        assert!(!qbit_creds_ok(&s, "notadmin", "hunter2"), "the right password under the wrong name is refused");
-        assert!(!qbit_creds_ok(&s, "admin", ""), "an empty password is refused");
+        assert!(
+            !qbit_creds_ok(&s, "admin", "wrong"),
+            "a wrong password is refused"
+        );
+        assert!(
+            !qbit_creds_ok(&s, "notadmin", "hunter2"),
+            "the right password under the wrong name is refused"
+        );
+        assert!(
+            !qbit_creds_ok(&s, "admin", ""),
+            "an empty password is refused"
+        );
     }
 
     /// An instance with nothing configured authorises nobody here either.
@@ -17636,7 +20164,12 @@ mod tests {
 
         let before = ticks.load(SeqCst);
         let peer = axum::extract::ConnectInfo("192.0.2.1:40000".parse().unwrap());
-        let r = qbit_login(State(st.clone()), peer, "username=admin&password=wrong".into()).await;
+        let r = qbit_login(
+            State(st.clone()),
+            peer,
+            "username=admin&password=wrong".into(),
+        )
+        .await;
         let during_qbit = ticks.load(SeqCst) - before;
         assert_eq!(r.status(), StatusCode::OK);
 
@@ -17651,8 +20184,14 @@ mod tests {
         assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
         ticker.abort();
 
-        assert!(during_qbit > 0, "/api/v2/auth/login held the runtime for its bcrypt check");
-        assert!(during_web > 0, "/api/login held the runtime for its bcrypt check");
+        assert!(
+            during_qbit > 0,
+            "/api/v2/auth/login held the runtime for its bcrypt check"
+        );
+        assert!(
+            during_web > 0,
+            "/api/login held the runtime for its bcrypt check"
+        );
     }
 
     /// Five wrong passwords from one caller block it on both login routes,
@@ -17684,16 +20223,25 @@ mod tests {
                 .method("POST")
                 .uri("/api/v2/auth/login")
                 .header("content-type", "application/x-www-form-urlencoded")
-                .body(axum::body::Body::from(format!("username=admin&password={password}")))
+                .body(axum::body::Body::from(format!(
+                    "username=admin&password={password}"
+                )))
                 .unwrap()
         };
         let text = |r: Response| async move {
-            String::from_utf8_lossy(&axum::body::to_bytes(r.into_body(), usize::MAX).await.unwrap())
-                .into_owned()
+            String::from_utf8_lossy(
+                &axum::body::to_bytes(r.into_body(), usize::MAX)
+                    .await
+                    .unwrap(),
+            )
+            .into_owned()
         };
 
         for _ in 0..3 {
-            assert_eq!(call("203.0.113.9", web("wrong")).await.unwrap().status(), StatusCode::UNAUTHORIZED);
+            assert_eq!(
+                call("203.0.113.9", web("wrong")).await.unwrap().status(),
+                StatusCode::UNAUTHORIZED
+            );
         }
         for _ in 0..2 {
             let r = call("203.0.113.9", qbit("wrong")).await.unwrap();
@@ -17701,15 +20249,26 @@ mod tests {
         }
 
         let r = call("203.0.113.9", web("right-password")).await.unwrap();
-        assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS, "blocked, right password or not");
+        assert_eq!(
+            r.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "blocked, right password or not"
+        );
         assert!(r.headers().contains_key(axum::http::header::RETRY_AFTER));
         let r = call("203.0.113.9", qbit("right-password")).await.unwrap();
         assert_eq!(r.status(), StatusCode::FORBIDDEN);
         let r = call("203.0.113.9", qbit("the-api-key")).await.unwrap();
-        assert!(r.headers().contains_key(axum::http::header::SET_COOKIE), "the key still opens a session");
+        assert!(
+            r.headers().contains_key(axum::http::header::SET_COOKIE),
+            "the key still opens a session"
+        );
         assert_eq!(text(r).await, "Ok.");
         let r = call("203.0.113.9", web("right-password")).await.unwrap();
-        assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS, "and the key lifted nothing");
+        assert_eq!(
+            r.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "and the key lifted nothing"
+        );
 
         let r = call("198.51.100.7", web("right-password")).await.unwrap();
         assert_eq!(r.status(), StatusCode::OK, "another caller is not blocked");
@@ -17717,20 +20276,41 @@ mod tests {
 
     #[test]
     fn a_form_body_is_split_like_a_query() {
-        assert_eq!(form_field("username=admin&password=p", "username").as_deref(), Some("admin"));
-        assert_eq!(form_field("username=admin&password=p", "password").as_deref(), Some("p"));
+        assert_eq!(
+            form_field("username=admin&password=p", "username").as_deref(),
+            Some("admin")
+        );
+        assert_eq!(
+            form_field("username=admin&password=p", "password").as_deref(),
+            Some("p")
+        );
         // The passwords people actually use.
-        assert_eq!(form_field("password=a%2Bb%26c", "password").as_deref(), Some("a+b&c"));
-        assert_eq!(form_field("password=a+b", "password").as_deref(), Some("a b"));
+        assert_eq!(
+            form_field("password=a%2Bb%26c", "password").as_deref(),
+            Some("a+b&c")
+        );
+        assert_eq!(
+            form_field("password=a+b", "password").as_deref(),
+            Some("a b")
+        );
         assert_eq!(form_field("username=admin", "password"), None);
     }
 
     #[test]
     fn a_real_key_is_required_and_checked() {
         let s = state("secret", "$2a$hash");
-        assert!(!authorised(&s, &HeaderMap::new(), ""), "no key must be refused");
-        assert!(!authorised(&s, &with_key("wrong"), ""), "wrong key must be refused");
-        assert!(authorised(&s, &with_key("secret"), ""), "right key must pass");
+        assert!(
+            !authorised(&s, &HeaderMap::new(), ""),
+            "no key must be refused"
+        );
+        assert!(
+            !authorised(&s, &with_key("wrong"), ""),
+            "wrong key must be refused"
+        );
+        assert!(
+            authorised(&s, &with_key("secret"), ""),
+            "right key must pass"
+        );
     }
 
     #[test]
@@ -17848,10 +20428,12 @@ mod tests {
     // Emitting 0.0 would change the bytes every client parses.
     #[test]
     fn integral_floats_are_emitted_as_integers() {
-        let parsed: toml::Value =
-            toml::from_str("a = 0.0\nb = 1.5\nc = 3\n").unwrap();
+        let parsed: toml::Value = toml::from_str("a = 0.0\nb = 1.5\nc = 3\n").unwrap();
         let json = toml_to_json(&parsed);
-        assert_eq!(serde_json::to_string(&json).unwrap(), r#"{"a":0,"b":1.5,"c":3}"#);
+        assert_eq!(
+            serde_json::to_string(&json).unwrap(),
+            r#"{"a":0,"b":1.5,"c":3}"#
+        );
     }
 
     #[test]
@@ -17967,8 +20549,12 @@ pub(crate) mod testing {
         if bytes.is_empty() {
             return serde_json::Value::Null;
         }
-        serde_json::from_slice(&bytes)
-            .unwrap_or_else(|e| panic!("body is not JSON: {:?} ({e})", String::from_utf8_lossy(&bytes)))
+        serde_json::from_slice(&bytes).unwrap_or_else(|e| {
+            panic!(
+                "body is not JSON: {:?} ({e})",
+                String::from_utf8_lossy(&bytes)
+            )
+        })
     }
 
     /// A category, written where the category routes write it.
@@ -17976,10 +20562,20 @@ pub(crate) mod testing {
         let mut all = categories_map(state);
         all.insert(
             name.to_string(),
-            Category { name: name.to_string(), save_path: save_path.to_string(), mode: mode.to_string(), ..Default::default() },
+            Category {
+                name: name.to_string(),
+                save_path: save_path.to_string(),
+                mode: mode.to_string(),
+                ..Default::default()
+            },
         );
         let doc = serde_json::to_string(&all).unwrap();
-        state.store.lock().unwrap().put_meta("categories", &doc).unwrap();
+        state
+            .store
+            .lock()
+            .unwrap()
+            .put_meta("categories", &doc)
+            .unwrap();
     }
 
     /// Headers carrying an API key.
@@ -17998,7 +20594,13 @@ mod dedup_config_tests {
     const KEY: &str = "0123456789abcdef0123456789abcdef";
 
     async fn post(s: &TestState, body: &str) -> axum::response::Response {
-        post_dedup_config(State(s.state.clone()), RawQuery(None), keyed(KEY), body.to_string()).await
+        post_dedup_config(
+            State(s.state.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            body.to_string(),
+        )
+        .await
     }
 
     /// The method is saved and read back; a save that does not name it (the
@@ -18006,18 +20608,30 @@ mod dedup_config_tests {
     #[tokio::test]
     async fn the_link_method_is_saved_kept_and_validated() {
         let s = state_from("dedup-method", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
-        assert_eq!(s.state.cfg().dedup.method, crate::dedup::Method::Hardlink, "default");
+        assert_eq!(
+            s.state.cfg().dedup.method,
+            crate::dedup::Method::Hardlink,
+            "default"
+        );
 
         let resp = post(&s, r#"{"enabled":true,"method":"reflink"}"#).await;
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(body_json(resp).await["method"], "reflink");
         let text = std::fs::read_to_string(&s.state.config_path).unwrap();
         let on_disk: Config = toml::from_str(&text).unwrap();
-        assert_eq!(on_disk.dedup.method, crate::dedup::Method::Reflink, "{text}");
+        assert_eq!(
+            on_disk.dedup.method,
+            crate::dedup::Method::Reflink,
+            "{text}"
+        );
 
         let resp = post(&s, r#"{"enabled":false}"#).await;
         assert_eq!(resp.status(), StatusCode::OK);
-        assert_eq!(s.state.cfg().dedup.method, crate::dedup::Method::Reflink, "kept");
+        assert_eq!(
+            s.state.cfg().dedup.method,
+            crate::dedup::Method::Reflink,
+            "kept"
+        );
         assert!(!s.state.cfg().dedup.enabled);
 
         let resp = get_dedup_stats(State(s.state.clone()), RawQuery(None), keyed(KEY)).await;
@@ -18026,7 +20640,11 @@ mod dedup_config_tests {
         let before = std::fs::read_to_string(&s.state.config_path).unwrap();
         let resp = post(&s, r#"{"enabled":true,"method":"copy"}"#).await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-        assert_eq!(std::fs::read_to_string(&s.state.config_path).unwrap(), before, "nothing written");
+        assert_eq!(
+            std::fs::read_to_string(&s.state.config_path).unwrap(),
+            before,
+            "nothing written"
+        );
     }
 }
 
@@ -18064,7 +20682,12 @@ mod event_stream_tests {
     #[tokio::test]
     async fn a_page_that_stops_reading_does_not_hold_the_bus() {
         let s = state_from("sse-stall", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
-        let resp = stream_events(State(s.state.clone()), RawQuery(Some("hydrate=0".into())), keyed(KEY)).await;
+        let resp = stream_events(
+            State(s.state.clone()),
+            RawQuery(Some("hydrate=0".into())),
+            keyed(KEY),
+        )
+        .await;
         let mut body = resp.into_body().into_data_stream();
         // Read up to the first status frame of the live loop: by then every
         // engine's relay is subscribed.
@@ -18075,7 +20698,9 @@ mod event_stream_tests {
                 .expect("a frame")
                 .expect("not the end")
                 .expect("a chunk");
-            statuses += String::from_utf8_lossy(&chunk).matches("\"status_snapshot\"").count();
+            statuses += String::from_utf8_lossy(&chunk)
+                .matches("\"status_snapshot\"")
+                .count();
         }
         // From here the page reads nothing more.
         let manager = s.state.engines.engines()[0].manager.clone();
@@ -18091,12 +20716,19 @@ mod event_stream_tests {
             progress: 0.0,
         };
         for _ in 0..500 {
-            manager.bus().publish(typhon_engine::rpc::events::Event::StatsSnapshot { torrents: vec![mini()] });
+            manager
+                .bus()
+                .publish(typhon_engine::rpc::events::Event::StatsSnapshot {
+                    torrents: vec![mini()],
+                });
             tokio::task::yield_now().await;
         }
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         let held = manager.bus().backlog();
-        assert!(held < 100, "the bus still holds {held} of 500 events for a page that stopped reading");
+        assert!(
+            held < 100,
+            "the bus still holds {held} of 500 events for a page that stopped reading"
+        );
         drop(body);
     }
 
@@ -18107,7 +20739,12 @@ mod event_stream_tests {
     #[tokio::test]
     async fn a_page_that_reads_again_gets_every_removal_and_the_latest_figures() {
         let s = state_from("sse-catchup", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
-        let resp = stream_events(State(s.state.clone()), RawQuery(Some("hydrate=0".into())), keyed(KEY)).await;
+        let resp = stream_events(
+            State(s.state.clone()),
+            RawQuery(Some("hydrate=0".into())),
+            keyed(KEY),
+        )
+        .await;
         let mut body = resp.into_body().into_data_stream();
         let mut statuses = 0;
         while statuses < 2 {
@@ -18116,7 +20753,9 @@ mod event_stream_tests {
                 .expect("a frame")
                 .expect("not the end")
                 .expect("a chunk");
-            statuses += String::from_utf8_lossy(&chunk).matches("\"status_snapshot\"").count();
+            statuses += String::from_utf8_lossy(&chunk)
+                .matches("\"status_snapshot\"")
+                .count();
         }
         let manager = s.state.engines.engines()[0].manager.clone();
         let row = |hash: &str, up: u64| typhon_engine::rpc::events::TorrentStatsMini {
@@ -18132,19 +20771,30 @@ mod event_stream_tests {
         };
         let (kept, gone) = ("aa".repeat(20), "bb".repeat(20));
         for i in 0..300u64 {
-            manager.bus().publish(typhon_engine::rpc::events::Event::StatsSnapshot { torrents: vec![row(&kept, 1000 + i)] });
+            manager
+                .bus()
+                .publish(typhon_engine::rpc::events::Event::StatsSnapshot {
+                    torrents: vec![row(&kept, 1000 + i)],
+                });
             tokio::task::yield_now().await;
         }
-        manager.bus().publish(typhon_engine::rpc::events::Event::TorrentRemoved { info_hash: gone.clone() });
+        manager
+            .bus()
+            .publish(typhon_engine::rpc::events::Event::TorrentRemoved {
+                info_hash: gone.clone(),
+            });
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         // The page reads again.
         let (mut saw_removal, mut saw_last) = (false, false);
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
         let mut text = String::new();
         while !(saw_removal && saw_last) && tokio::time::Instant::now() < deadline {
-            let Ok(Some(Ok(chunk))) = tokio::time::timeout_at(deadline, body.next()).await else { break };
+            let Ok(Some(Ok(chunk))) = tokio::time::timeout_at(deadline, body.next()).await else {
+                break;
+            };
             text.push_str(&String::from_utf8_lossy(&chunk));
-            saw_removal = text.contains(&format!("\"info_hash\":\"{gone}\"")) && text.contains("torrent_removed");
+            saw_removal = text.contains(&format!("\"info_hash\":\"{gone}\""))
+                && text.contains("torrent_removed");
             saw_last = text.contains("\"upload_rate\":1299");
         }
         assert!(saw_removal, "the removal reached the page");
@@ -18181,7 +20831,8 @@ mod password_change_tests {
         assert!(bcrypt::verify("new-password", &live).unwrap());
         assert!(!bcrypt::verify("old-password", &live).unwrap());
 
-        let on_disk: Config = toml::from_str(&std::fs::read_to_string(&s.state.config_path).unwrap()).unwrap();
+        let on_disk: Config =
+            toml::from_str(&std::fs::read_to_string(&s.state.config_path).unwrap()).unwrap();
         assert!(bcrypt::verify("new-password", &on_disk.auth.password_hash).unwrap());
         assert_eq!(on_disk.auth.username, "admin", "the rest of [auth] is kept");
     }
@@ -18193,7 +20844,13 @@ mod password_change_tests {
             "pw-short",
             &format!("[daemon]\napi_key = \"{KEY}\"\n\n[auth]\npassword_hash = \"{old}\"\n"),
         );
-        let resp = post_password(State(s.state.clone()), RawQuery(None), keyed(KEY), r#"{"password":"short"}"#.into()).await;
+        let resp = post_password(
+            State(s.state.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            r#"{"password":"short"}"#.into(),
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         assert!(bcrypt::verify("old-password", &s.state.cfg().auth.password_hash).unwrap());
     }
@@ -18211,7 +20868,10 @@ mod auth_tests {
     }
 
     fn with_key_in_query(tag: &str) -> TestState {
-        state_from(tag, &format!("[daemon]\napi_key = \"{KEY}\"\napi_key_in_query = true\n"))
+        state_from(
+            tag,
+            &format!("[daemon]\napi_key = \"{KEY}\"\napi_key_in_query = true\n"),
+        )
     }
 
     /// ⚠️ THE regression to keep out. A Docker install that has never been
@@ -18223,9 +20883,18 @@ mod auth_tests {
         let s = state("nokey");
         assert!(!authorised(&s, &HeaderMap::new(), ""), "no key, no header");
         assert!(!authorised(&s, &keyed(""), ""), "no key, empty header");
-        assert!(!authorised(&s, &keyed("anything"), ""), "no key, any header");
-        assert!(!authorised(&s, &HeaderMap::new(), "apikey="), "no key, empty query param");
-        assert!(!authorised(&s, &HeaderMap::new(), "apikey=guess"), "no key, any query param");
+        assert!(
+            !authorised(&s, &keyed("anything"), ""),
+            "no key, any header"
+        );
+        assert!(
+            !authorised(&s, &HeaderMap::new(), "apikey="),
+            "no key, empty query param"
+        );
+        assert!(
+            !authorised(&s, &HeaderMap::new(), "apikey=guess"),
+            "no key, any query param"
+        );
     }
 
     #[test]
@@ -18265,7 +20934,11 @@ mod auth_tests {
     fn the_key_may_arrive_in_the_query_instead() {
         let s = with_key_in_query("query");
         assert!(authorised(&s, &HeaderMap::new(), &format!("apikey={KEY}")));
-        assert!(authorised(&s, &HeaderMap::new(), &format!("foo=1&apikey={KEY}&bar=2")));
+        assert!(authorised(
+            &s,
+            &HeaderMap::new(),
+            &format!("foo=1&apikey={KEY}&bar=2")
+        ));
         assert!(!authorised(&s, &HeaderMap::new(), "apikey=wrong"));
     }
 
@@ -18282,8 +20955,16 @@ mod auth_tests {
     #[test]
     fn a_lookalike_query_parameter_is_not_the_key() {
         let s = with_key("lookalike");
-        assert!(!authorised(&s, &HeaderMap::new(), &format!("notapikey={KEY}")));
-        assert!(!authorised(&s, &HeaderMap::new(), &format!("apikeyx={KEY}")));
+        assert!(!authorised(
+            &s,
+            &HeaderMap::new(),
+            &format!("notapikey={KEY}")
+        ));
+        assert!(!authorised(
+            &s,
+            &HeaderMap::new(),
+            &format!("apikeyx={KEY}")
+        ));
     }
 
     #[test]
@@ -18292,9 +20973,14 @@ mod auth_tests {
         let mut h = HeaderMap::new();
         h.insert(
             axum::http::header::COOKIE,
-            format!("{}=never-issued", crate::session::COOKIE_NAME).parse().unwrap(),
+            format!("{}=never-issued", crate::session::COOKIE_NAME)
+                .parse()
+                .unwrap(),
         );
-        assert!(!authorised(&s, &h, ""), "an unissued session id is not a session");
+        assert!(
+            !authorised(&s, &h, ""),
+            "an unissued session id is not a session"
+        );
     }
 
     /// The *arr stack's only path: log in, get a cookie, ride it. A session
@@ -18306,7 +20992,9 @@ mod auth_tests {
         let mut h = HeaderMap::new();
         h.insert(
             axum::http::header::COOKIE,
-            format!("{}={sid}", crate::session::COOKIE_NAME).parse().unwrap(),
+            format!("{}={sid}", crate::session::COOKIE_NAME)
+                .parse()
+                .unwrap(),
         );
         assert!(authorised(&s, &h, ""));
     }
@@ -18331,7 +21019,11 @@ mod pure_tests {
     #[test]
     fn percent_decoding_handles_plus_escapes_and_literals() {
         assert_eq!(percent_decode("plain"), "plain");
-        assert_eq!(percent_decode("a+b"), "a b", "+ is a space in a query string");
+        assert_eq!(
+            percent_decode("a+b"),
+            "a b",
+            "+ is a space in a query string"
+        );
         assert_eq!(percent_decode("%41%42"), "AB");
         assert_eq!(percent_decode("a%2Fb"), "a/b");
         assert_eq!(percent_decode("100%25"), "100%");
@@ -18341,11 +21033,24 @@ mod pure_tests {
     /// pin every page to the same rows.
     #[test]
     fn a_list_query_loses_the_callers_paging_only() {
-        assert_eq!(without_paging("category=tv&offset=5000&limit=10&tag=a"), "category=tv&tag=a");
+        assert_eq!(
+            without_paging("category=tv&offset=5000&limit=10&tag=a"),
+            "category=tv&tag=a"
+        );
         assert_eq!(without_paging("offset=1"), "");
-        assert_eq!(without_paging("category=offset&limiter=1"), "category=offset&limiter=1");
-        let q = format!("{}&offset=5000&limit=5000", without_paging("category=tv&offset=0"));
-        assert_eq!(query_param(&q, "offset").as_deref(), Some("5000"), "the appended offset is the one read");
+        assert_eq!(
+            without_paging("category=offset&limiter=1"),
+            "category=offset&limiter=1"
+        );
+        let q = format!(
+            "{}&offset=5000&limit=5000",
+            without_paging("category=tv&offset=0")
+        );
+        assert_eq!(
+            query_param(&q, "offset").as_deref(),
+            Some("5000"),
+            "the appended offset is the one read"
+        );
     }
 
     /// A stray `%` is not an escape and must come back as itself rather than
@@ -18367,7 +21072,11 @@ mod pure_tests {
         assert_eq!(query_param("a=1&b=2", "b").as_deref(), Some("2"));
         assert_eq!(query_param("a=1", "missing"), None);
         assert_eq!(query_param("", "a"), None);
-        assert_eq!(query_param("flag", "flag"), None, "a bare flag has no value");
+        assert_eq!(
+            query_param("flag", "flag"),
+            None,
+            "a bare flag has no value"
+        );
         assert_eq!(query_param("name=a%20b", "name").as_deref(), Some("a b"));
     }
 
@@ -18383,7 +21092,11 @@ mod pure_tests {
         assert_eq!(url_host("http://example.com/path"), "example.com");
         assert_eq!(url_host("https://example.com:8199/x"), "example.com");
         assert_eq!(url_host("http://192.168.99.200:8199"), "192.168.99.200");
-        assert_eq!(url_host("example.com"), "example.com", "a bare host is a host");
+        assert_eq!(
+            url_host("example.com"),
+            "example.com",
+            "a bare host is a host"
+        );
     }
 
     /// ⚠️ A bracketed IPv6 literal keeps its colons. Splitting on the last
@@ -18425,7 +21138,10 @@ mod pure_tests {
         assert!(!is_semver_tag("v4.27.0.1"));
         assert!(!is_semver_tag("nightly"));
         assert!(!is_semver_tag("v4.27.x"));
-        assert!(!is_semver_tag("v4..0"), "an empty component is not a number");
+        assert!(
+            !is_semver_tag("v4..0"),
+            "an empty component is not a number"
+        );
     }
 
     /// ⭐ String comparison is what makes this subtly wrong: "3.9.0" sorts
@@ -18433,7 +21149,10 @@ mod pure_tests {
     /// update.
     #[test]
     fn versions_compare_numerically_not_lexically() {
-        assert!(version_less("3.9.0", "3.180.0"), "9 < 180, whatever the strings do");
+        assert!(
+            version_less("3.9.0", "3.180.0"),
+            "9 < 180, whatever the strings do"
+        );
         assert!(!version_less("3.180.0", "3.9.0"));
         assert!(version_less("4.26.0", "4.27.0"));
         assert!(!version_less("4.27.0", "4.27.0"), "equal is not less");
@@ -18461,7 +21180,10 @@ mod pure_tests {
     fn seed_mode_is_taken_at_its_word_and_never_rechecks() {
         assert!(!add_recheck_wanted(true, true), "seed mode skips the check");
         assert!(!add_recheck_wanted(true, false));
-        assert!(add_recheck_wanted(false, true), "data on disk is worth checking");
+        assert!(
+            add_recheck_wanted(false, true),
+            "data on disk is worth checking"
+        );
         assert!(
             !add_recheck_wanted(false, false),
             "a fresh download has nothing on disk: an all-miss check is wasted"
@@ -18485,14 +21207,20 @@ mod pure_tests {
         assert!(name_has_token("Some.Show.S01E01.1080p", "s01e01"));
         assert!(name_has_token("Some.Show.S01E01.1080p", "show"));
         assert!(name_has_token("Some.Show.S01E01.1080p", "1080"));
-        assert!(!name_has_token("Some.Show.S01E01", "showS01"), "a token cannot span words");
+        assert!(
+            !name_has_token("Some.Show.S01E01", "showS01"),
+            "a token cannot span words"
+        );
         assert!(!name_has_token("Some.Show", "absent"));
     }
 
     #[test]
     fn token_matching_ignores_case_including_outside_ascii() {
         assert!(name_has_token("SOME.SHOW", "show"));
-        assert!(name_has_token("CAFÉ.2024", "café"), "real folding for non-ascii");
+        assert!(
+            name_has_token("CAFÉ.2024", "café"),
+            "real folding for non-ascii"
+        );
     }
 
     #[test]
@@ -18500,7 +21228,10 @@ mod pure_tests {
         assert!(!name_has_token("ab", "abc"));
         // The ASCII fast path agrees with the word-wise walk it replaces.
         assert!(name_has_token("x.ABC.y", "abc"));
-        assert!(name_has_token("Aaab", "aab"), "a first-byte candidate that fails is not the last one");
+        assert!(
+            name_has_token("Aaab", "aab"),
+            "a first-byte candidate that fails is not the last one"
+        );
         assert!(!name_has_token("a.b", "ab"), "not across a separator");
         assert!(name_has_token("anything", ""));
     }
@@ -18515,14 +21246,21 @@ mod pure_tests {
             "http://[::1]:80/a",
             "",
         ] {
-            assert_eq!(tracker_host_in(url), typhon_engine::rpc::dispatch::tracker_host_of(url), "{url}");
+            assert_eq!(
+                tracker_host_in(url),
+                typhon_engine::rpc::dispatch::tracker_host_of(url),
+                "{url}"
+            );
         }
     }
 
     #[test]
     fn hex_on_the_stack_is_hex_encode() {
         let h: [u8; 20] = core::array::from_fn(|i| (i * 37 + 11) as u8);
-        assert_eq!(std::str::from_utf8(&hex40(&h)).unwrap(), typhon_engine::torrent::hex_encode(&h));
+        assert_eq!(
+            std::str::from_utf8(&hex40(&h)).unwrap(),
+            typhon_engine::torrent::hex_encode(&h)
+        );
     }
 
     /// The window is REPLACED, never appended: a query that already carried an
@@ -18532,7 +21270,11 @@ mod pure_tests {
     fn paging_replaces_any_window_the_query_already_had() {
         let out = with_window("sort=name&offset=500&limit=10", 0, 100);
         assert!(out.contains("sort=name"));
-        assert_eq!(out.matches("offset=").count(), 1, "exactly one offset: {out}");
+        assert_eq!(
+            out.matches("offset=").count(),
+            1,
+            "exactly one offset: {out}"
+        );
         assert_eq!(out.matches("limit=").count(), 1, "exactly one limit: {out}");
         assert!(out.contains("offset=0") && out.contains("limit=100"));
     }
@@ -18605,7 +21347,10 @@ mod handler_tests {
     }
 
     fn with_key_in_query(tag: &str) -> TestState {
-        state_from(tag, &format!("[daemon]\napi_key = \"{KEY}\"\napi_key_in_query = true\n"))
+        state_from(
+            tag,
+            &format!("[daemon]\napi_key = \"{KEY}\"\napi_key_in_query = true\n"),
+        )
     }
 
     /// Every read route, against a fresh install: refused without a key, and
@@ -18726,9 +21471,13 @@ mod handler_tests {
     #[tokio::test]
     async fn a_fresh_install_reports_empty_collections_not_null() {
         let s = with_key("route-empty");
-        let jobs = body_json(super::get_jobs(State(s.state.clone()), RawQuery(None), keyed(KEY)).await).await;
+        let jobs =
+            body_json(super::get_jobs(State(s.state.clone()), RawQuery(None), keyed(KEY)).await)
+                .await;
         assert!(!jobs.is_null(), "jobs answered null: {jobs}");
-        let tags = body_json(super::get_tags(State(s.state.clone()), RawQuery(None), keyed(KEY)).await).await;
+        let tags =
+            body_json(super::get_tags(State(s.state.clone()), RawQuery(None), keyed(KEY)).await)
+                .await;
         assert!(!tags.is_null(), "tags answered null: {tags}");
     }
 }
@@ -18808,7 +21557,10 @@ mod pure2_tests {
     fn a_job_with_unparseable_params_still_lists_without_them() {
         let v = job_view(&job("move", "{not json", 0, 0, ""));
         assert_eq!(v["id"], serde_json::json!("j1"));
-        assert!(v.get("params").is_none(), "the corrupt field is dropped, not embedded");
+        assert!(
+            v.get("params").is_none(),
+            "the corrupt field is dropped, not embedded"
+        );
     }
 
     #[test]
@@ -18943,7 +21695,10 @@ mod pure2_tests {
     async fn an_override_naming_no_engine_of_this_node_is_ignored() {
         let s = state_from("placement-bad", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
         let (engine, _) = placement(&s.state, "no-such-category", "no-such-engine");
-        assert_eq!(engine, "race", "the bogus override falls back rather than being obeyed");
+        assert_eq!(
+            engine, "race",
+            "the bogus override falls back rather than being obeyed"
+        );
     }
 }
 
@@ -19051,7 +21806,11 @@ mod page_tests {
         add(&s, "race", "alpha");
         add(&s, "race", "bravo");
         let v = engine_page_value(&s.state, "race", "search=alpha").await;
-        assert_eq!(v["total"], serde_json::json!(2), "the library did not shrink");
+        assert_eq!(
+            v["total"],
+            serde_json::json!(2),
+            "the library did not shrink"
+        );
         assert_eq!(v["filtered"], serde_json::json!(1));
         assert_eq!(rows(&v).len(), 1);
         assert_eq!(rows(&v)[0]["name"], serde_json::json!("alpha"));
@@ -19063,7 +21822,10 @@ mod page_tests {
         add(&s, "race", "alpha");
         let v = engine_page_value(&s.state, "race", "search=nosuchthing").await;
         assert_eq!(v["filtered"], serde_json::json!(0));
-        assert!(rows(&v).is_empty(), "an unmatched search must not fall back to everything");
+        assert!(
+            rows(&v).is_empty(),
+            "an unmatched search must not fall back to everything"
+        );
     }
 
     #[tokio::test]
@@ -19125,11 +21887,17 @@ mod page_tests {
         add(&s, "race", "apple");
 
         let up = engine_page_value(&s.state, "race", "sort=name&order=asc").await;
-        let names: Vec<&str> = rows(&up).iter().filter_map(|r| r["name"].as_str()).collect();
+        let names: Vec<&str> = rows(&up)
+            .iter()
+            .filter_map(|r| r["name"].as_str())
+            .collect();
         assert_eq!(names, vec!["apple", "Zebra"], "ascending folds case");
 
         let down = engine_page_value(&s.state, "race", "sort=name").await;
-        let names: Vec<&str> = rows(&down).iter().filter_map(|r| r["name"].as_str()).collect();
+        let names: Vec<&str> = rows(&down)
+            .iter()
+            .filter_map(|r| r["name"].as_str())
+            .collect();
         assert_eq!(names, vec!["Zebra", "apple"], "descending is the default");
     }
 
@@ -19146,11 +21914,20 @@ mod page_tests {
             add(&s, "race", &format!("Name{:02}", (i * 7) % 37));
         }
         let hash = |r: &serde_json::Value| {
-            r["hash"].as_str().or(r["info_hash"].as_str()).unwrap_or_default().to_string()
+            r["hash"]
+                .as_str()
+                .or(r["info_hash"].as_str())
+                .unwrap_or_default()
+                .to_string()
         };
         for sort in ["name", "added_time", "total_size", "state", "category"] {
             for order in ["asc", "desc"] {
-                let all = engine_page_value(&s.state, "race", &format!("sort={sort}&order={order}&limit=5000")).await;
+                let all = engine_page_value(
+                    &s.state,
+                    "race",
+                    &format!("sort={sort}&order={order}&limit=5000"),
+                )
+                .await;
                 let want: Vec<String> = rows(&all).iter().map(hash).collect();
                 assert_eq!(want.len(), 37);
                 let mut got = Vec::new();
@@ -19193,7 +21970,11 @@ mod page_tests {
             .expect("a row carries its info hash")
             .to_string();
         let v = engine_page_value(&s.state, "race", &format!("search={}", &hash[..12])).await;
-        assert_eq!(v["filtered"], serde_json::json!(1), "a hash prefix finds its torrent");
+        assert_eq!(
+            v["filtered"],
+            serde_json::json!(1),
+            "a hash prefix finds its torrent"
+        );
     }
 
     /// The routes on top of the page carry the same gate as everything else.
@@ -19271,7 +22052,11 @@ mod merge_tests {
     fn rows_from_two_nodes_interleave_by_the_sort_key() {
         let merged = merge_pages(
             vec![
-                page(2, 2, vec![row("alpha", "a1", 1.0), row("charlie", "c1", 3.0)]),
+                page(
+                    2,
+                    2,
+                    vec![row("alpha", "a1", 1.0), row("charlie", "c1", 3.0)],
+                ),
                 page(1, 1, vec![row("bravo", "b1", 2.0)]),
             ],
             "name",
@@ -19316,7 +22101,10 @@ mod merge_tests {
         };
         let first = merge_pages(mk(), "name", true, 0, 100);
         let second = merge_pages(mk(), "name", true, 0, 100);
-        assert_eq!(first["rows"], second["rows"], "the order must be deterministic");
+        assert_eq!(
+            first["rows"], second["rows"],
+            "the order must be deterministic"
+        );
 
         let hashes: Vec<&str> = first["rows"]
             .as_array()
@@ -19324,7 +22112,11 @@ mod merge_tests {
             .iter()
             .filter_map(|r| r["info_hash"].as_str())
             .collect();
-        assert_eq!(hashes, vec!["0000", "8888", "ffff"], "ordered by hash on a tie");
+        assert_eq!(
+            hashes,
+            vec!["0000", "8888", "ffff"],
+            "ordered by hash on a tie"
+        );
     }
 
     /// The window is applied AFTER the merge, or each node would contribute
@@ -19333,7 +22125,11 @@ mod merge_tests {
     fn the_window_applies_to_the_merged_list_not_to_each_node() {
         let merged = merge_pages(
             vec![
-                page(2, 2, vec![row("alpha", "a1", 1.0), row("charlie", "c1", 3.0)]),
+                page(
+                    2,
+                    2,
+                    vec![row("alpha", "a1", 1.0), row("charlie", "c1", 3.0)],
+                ),
                 page(1, 1, vec![row("bravo", "b1", 2.0)]),
             ],
             "name",
@@ -19343,7 +22139,11 @@ mod merge_tests {
         );
         let rows = merged["rows"].as_array().unwrap();
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0]["name"], serde_json::json!("bravo"), "the second row overall");
+        assert_eq!(
+            rows[0]["name"],
+            serde_json::json!("bravo"),
+            "the second row overall"
+        );
         assert_eq!(merged["offset"], serde_json::json!(1));
         assert_eq!(merged["limit"], serde_json::json!(1));
     }
@@ -19352,7 +22152,13 @@ mod merge_tests {
     /// the fleet.
     #[test]
     fn an_offset_past_the_merged_end_is_empty_but_still_counts() {
-        let merged = merge_pages(vec![page(9, 9, vec![row("a", "a1", 1.0)])], "name", true, 50, 10);
+        let merged = merge_pages(
+            vec![page(9, 9, vec![row("a", "a1", 1.0)])],
+            "name",
+            true,
+            50,
+            10,
+        );
         assert!(merged["rows"].as_array().unwrap().is_empty());
         assert_eq!(merged["total"], serde_json::json!(9));
     }
@@ -19372,7 +22178,11 @@ mod merge_tests {
             0,
             100,
         );
-        assert_eq!(merged["total"], serde_json::json!(6), "the counts it did give still count");
+        assert_eq!(
+            merged["total"],
+            serde_json::json!(6),
+            "the counts it did give still count"
+        );
         assert_eq!(merged["rows"].as_array().unwrap().len(), 1);
     }
 
@@ -19394,7 +22204,11 @@ mod merge_tests {
             .iter()
             .filter_map(|r| r["ratio"].as_f64())
             .collect();
-        assert_eq!(ratios, vec![2.0, 10.0], "2 before 10, not \"10\" before \"2\"");
+        assert_eq!(
+            ratios,
+            vec![2.0, 10.0],
+            "2 before 10, not \"10\" before \"2\""
+        );
     }
 
     /// Session and day counters are derived from marks, never stored twice.
@@ -19413,7 +22227,10 @@ mod merge_tests {
     /// a panic on an index that is not there.
     #[tokio::test]
     async fn an_unknown_engine_has_zeroed_session_counters() {
-        let s = state_from("counters-unknown", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+        let s = state_from(
+            "counters-unknown",
+            &format!("[daemon]\napi_key = \"{KEY}\"\n"),
+        );
         assert_eq!(engine_session(&s.state, "no-such-engine"), (0, 0));
     }
 
@@ -19462,7 +22279,11 @@ mod merge_tests {
         assert!((0.0..=100.0).contains(&pct), "got {pct}");
 
         let (t2, u2, p2) = disk_usage("/tmp/typhon-no-such-dir-3f8a");
-        assert_eq!((t2, u2, p2), (0, 0, 0.0), "a path we cannot stat is zeroes, not a refusal");
+        assert_eq!(
+            (t2, u2, p2),
+            (0, 0, 0.0),
+            "a path we cannot stat is zeroes, not a refusal"
+        );
     }
 
     /// The reserved-block gap, stated as a fact rather than as a preference:
@@ -19648,7 +22469,8 @@ mod more_route_tests {
         for resp in [
             super::qbit_version(State(s.state.clone()), RawQuery(None), HeaderMap::new()).await,
             super::qbit_preferences(State(s.state.clone()), RawQuery(None), HeaderMap::new()).await,
-            super::qbit_transfer_info(State(s.state.clone()), RawQuery(None), HeaderMap::new()).await,
+            super::qbit_transfer_info(State(s.state.clone()), RawQuery(None), HeaderMap::new())
+                .await,
         ] {
             assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
         }
@@ -19678,7 +22500,11 @@ mod more_route_tests {
             body_json(super::get_nodes(State(s.state.clone()), RawQuery(None), keyed(KEY)).await)
                 .await;
         let empty = body.as_array().map(|a| a.is_empty()).unwrap_or(false)
-            || body.get("nodes").and_then(|n| n.as_array()).map(|a| a.is_empty()).unwrap_or(false);
+            || body
+                .get("nodes")
+                .and_then(|n| n.as_array())
+                .map(|a| a.is_empty())
+                .unwrap_or(false);
         assert!(empty, "got {body}");
     }
 }
@@ -19903,19 +22729,28 @@ mod body_route_tests {
         // so a restart lost both numbers.
         assert_eq!(body["persisted"], true, "the change must be saved: {body}");
         let cfg = s.state.cfg();
-        assert_eq!(cfg.race.max_dials_per_sec, 7.5, "written where [race] reads it");
+        assert_eq!(
+            cfg.race.max_dials_per_sec, 7.5,
+            "written where [race] reads it"
+        );
         assert_eq!(cfg.race.max_connections, 4242);
         let text = std::fs::read_to_string(&s.state.config_path).unwrap();
         assert!(text.contains("max_dials_per_sec = 7.5"), "{text}");
         // And the next start reads it.
         let engine_cfg = crate::engines::engine_config_for_test(&cfg.race);
-        assert_eq!(engine_cfg.max_dials_per_sec, 7.5, "the engine starts with the saved rate");
+        assert_eq!(
+            engine_cfg.max_dials_per_sec, 7.5,
+            "the engine starts with the saved rate"
+        );
 
         // The answer could be an echo. The limiter cannot.
         let limiter = s.state.engines.get("race").expect("race").manager.limiter();
         assert_eq!(limiter.max_dials_per_sec(), 7.5, "the limiter did not move");
         assert_eq!(limiter.max_connections(), 4242);
-        assert_ne!(before, 7.5, "the fixture must not start at the tested value");
+        assert_ne!(
+            before, 7.5,
+            "the fixture must not start at the tested value"
+        );
     }
 
     /// The two engines of a test state are loaded but NOT on the network, so no
@@ -19965,7 +22800,9 @@ mod body_route_tests {
             advertised_port: port,
             only_v6: false,
         };
-        let utp = typhon_engine::peer::UtpHandle::bind(port, None).await.expect("uTP binds");
+        let utp = typhon_engine::peer::UtpHandle::bind(port, None)
+            .await
+            .expect("uTP binds");
         let (m, d, flag) = (eng.manager.clone(), eng.disk.clone(), eng.listening.clone());
         tokio::spawn(async move {
             let _ = typhon_engine::peer::listen(vec![binding], port, m, d, utp, flag).await;
@@ -20011,10 +22848,19 @@ mod body_route_tests {
         assert_eq!(body["persisted"], true, "{body}");
 
         // TCP: the new port accepts, the old one is closed.
-        assert!(std::net::TcpStream::connect(("127.0.0.1", new)).is_ok(), "TCP on the new port");
-        assert!(std::net::TcpStream::connect(("127.0.0.1", old)).is_err(), "the old TCP port is let go");
+        assert!(
+            std::net::TcpStream::connect(("127.0.0.1", new)).is_ok(),
+            "TCP on the new port"
+        );
+        assert!(
+            std::net::TcpStream::connect(("127.0.0.1", old)).is_err(),
+            "the old TCP port is let go"
+        );
         // uTP: the new UDP port is taken by the engine, the old one is free.
-        assert!(std::net::UdpSocket::bind(("0.0.0.0", new)).is_err(), "uTP holds the new port");
+        assert!(
+            std::net::UdpSocket::bind(("0.0.0.0", new)).is_err(),
+            "uTP holds the new port"
+        );
         let mut freed = false;
         for _ in 0..50 {
             if std::net::UdpSocket::bind(("0.0.0.0", old)).is_ok() {
@@ -20026,8 +22872,16 @@ mod body_route_tests {
         assert!(freed, "the old uTP socket is shut down, not left answering");
 
         let eng = s.state.engines.get("race").unwrap();
-        assert_eq!(eng.manager.announced_port(eng.listen_port), new, "trackers are told the new port");
-        assert_eq!(s.state.cfg().race.listen_port, new, "the next start listens there too");
+        assert_eq!(
+            eng.manager.announced_port(eng.listen_port),
+            new,
+            "trackers are told the new port"
+        );
+        assert_eq!(
+            s.state.cfg().race.listen_port,
+            new,
+            "the next start listens there too"
+        );
     }
 
     /// ⭐⭐ #51. A port that cannot be bound leaves the engine where it was:
@@ -20039,18 +22893,45 @@ mod body_route_tests {
         let squatter = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let taken = squatter.local_addr().unwrap().port();
         let before = std::fs::read_to_string(&s.state.config_path).unwrap();
-        let resp = super::set_listen_port(&s.state, "race", &format!(r#"{{"port":{taken}}}"#)).await;
+        let resp =
+            super::set_listen_port(&s.state, "race", &format!(r#"{{"port":{taken}}}"#)).await;
         assert_eq!(resp.status(), StatusCode::CONFLICT);
         let body = body_json(resp).await;
-        assert_eq!(body["port"], old, "the answer names the port still in use: {body}");
-        assert!(body["error"].as_str().unwrap_or_default().contains(&format!("still listening on {old}")), "{body}");
+        assert_eq!(
+            body["port"], old,
+            "the answer names the port still in use: {body}"
+        );
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains(&format!("still listening on {old}")),
+            "{body}"
+        );
 
         let eng = s.state.engines.get("race").unwrap();
-        assert!(eng.listening.load(std::sync::atomic::Ordering::Relaxed), "still listening");
-        assert!(std::net::TcpStream::connect(("127.0.0.1", old)).is_ok(), "the old port still accepts");
-        assert!(std::net::UdpSocket::bind(("0.0.0.0", old)).is_err(), "uTP still on the old port");
-        assert_eq!(eng.manager.announced_port(eng.listen_port), old, "announces unchanged");
-        assert_eq!(std::fs::read_to_string(&s.state.config_path).unwrap(), before, "nothing written");
+        assert!(
+            eng.listening.load(std::sync::atomic::Ordering::Relaxed),
+            "still listening"
+        );
+        assert!(
+            std::net::TcpStream::connect(("127.0.0.1", old)).is_ok(),
+            "the old port still accepts"
+        );
+        assert!(
+            std::net::UdpSocket::bind(("0.0.0.0", old)).is_err(),
+            "uTP still on the old port"
+        );
+        assert_eq!(
+            eng.manager.announced_port(eng.listen_port),
+            old,
+            "announces unchanged"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&s.state.config_path).unwrap(),
+            before,
+            "nothing written"
+        );
 
         // And the engine can still move afterwards.
         let next = free_port();
@@ -20069,7 +22950,13 @@ mod body_route_tests {
         let resp = super::set_listen_port(&s.state, "race", r#"{"port":40100}"#).await;
         assert_eq!(resp.status(), StatusCode::CONFLICT);
         let body = body_json(resp).await;
-        assert!(body["error"].as_str().unwrap_or_default().contains("gluetun"), "{body}");
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("gluetun"),
+            "{body}"
+        );
     }
 
     /// Another engine's port is refused before anything moves: the next
@@ -20080,10 +22967,14 @@ mod body_route_tests {
         listening(&s, "race").await;
         let hoard = s.state.engines.get("hoard").unwrap();
         let theirs = hoard.manager.announced_port(hoard.listen_port);
-        let resp = super::set_listen_port(&s.state, "race", &format!(r#"{{"port":{theirs}}}"#)).await;
+        let resp =
+            super::set_listen_port(&s.state, "race", &format!(r#"{{"port":{theirs}}}"#)).await;
         assert_eq!(resp.status(), StatusCode::CONFLICT);
         let body = body_json(resp).await;
-        assert!(body["error"].as_str().unwrap_or_default().contains("hoard"), "{body}");
+        assert!(
+            body["error"].as_str().unwrap_or_default().contains("hoard"),
+            "{body}"
+        );
     }
 
     /// An HTTP echo on loopback: the first request (the default route,
@@ -20120,11 +23011,16 @@ mod body_route_tests {
         )
         .await;
         assert_eq!(resp.status(), StatusCode::OK);
-        body_json(resp).await["results"].as_array().cloned().unwrap_or_default()
+        body_json(resp).await["results"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
     }
 
     fn row<'a>(rows: &'a [serde_json::Value], id: &str) -> &'a serde_json::Value {
-        rows.iter().find(|r| r["id"] == id).unwrap_or_else(|| panic!("no {id} in {rows:?}"))
+        rows.iter()
+            .find(|r| r["id"] == id)
+            .unwrap_or_else(|| panic!("no {id} in {rows:?}"))
     }
 
     /// ⭐⭐ #53. An engine set to leave by an interface that shows the
@@ -20148,7 +23044,10 @@ mod body_route_tests {
         // hoard has no interface and no proxy: the default route on purpose.
         let hoard = row(&rows, "announce_hoard");
         assert_eq!(hoard["status"], "ok", "{hoard}");
-        assert!(hoard["detail"].as_str().unwrap().contains("default route"), "{hoard}");
+        assert!(
+            hoard["detail"].as_str().unwrap().contains("default route"),
+            "{hoard}"
+        );
     }
 
     /// The same engine whose interface shows another address is fine, and
@@ -20166,11 +23065,20 @@ mod body_route_tests {
         let rows = check(&s, &echo_server("198.51.100.1", "203.0.113.9").await).await;
         let race = row(&rows, "announce_race");
         assert_eq!(race["status"], "ok", "{race}");
-        assert!(race["detail"].as_str().unwrap().contains("not the default route's 198.51.100.1"), "{race}");
+        assert!(
+            race["detail"]
+                .as_str()
+                .unwrap()
+                .contains("not the default route's 198.51.100.1"),
+            "{race}"
+        );
         row(&rows, "announce_vpn7");
         // Inbound comes from what happened, never "not tested".
         let inbound = row(&rows, "inbound_race");
-        assert!(!inbound["detail"].as_str().unwrap().contains("not tested"), "{inbound}");
+        assert!(
+            !inbound["detail"].as_str().unwrap().contains("not tested"),
+            "{inbound}"
+        );
     }
 
     /// Under the kill switch the default route is not even probed.
@@ -20187,7 +23095,9 @@ mod body_route_tests {
     }
 
     /// An echo that counts the requests it gets.
-    async fn counting_echo(body: &'static str) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    async fn counting_echo(
+        body: &'static str,
+    ) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -20199,7 +23109,10 @@ mod body_route_tests {
                 tokio::spawn(async move {
                     let mut buf = [0u8; 2048];
                     let _ = sock.read(&mut buf).await;
-                    let resp = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
                     let _ = sock.write_all(resp.as_bytes()).await;
                 });
             }
@@ -20216,7 +23129,15 @@ mod body_route_tests {
             "exitprobe-url",
             &format!("[daemon]\napi_key = \"{KEY}\"\nexit_probe_url = \"{url}\"\n"),
         );
-        let v = body_json(super::get_public_ip(State(s.state.clone()), RawQuery(Some("refresh=1".into())), keyed(KEY)).await).await;
+        let v = body_json(
+            super::get_public_ip(
+                State(s.state.clone()),
+                RawQuery(Some("refresh=1".into())),
+                keyed(KEY),
+            )
+            .await,
+        )
+        .await;
         assert_eq!(v["ip"], "203.0.113.7", "{v}");
         assert!(hits.load(std::sync::atomic::Ordering::SeqCst) > 0);
     }
@@ -20230,20 +23151,46 @@ mod body_route_tests {
             "exitprobe-off",
             &format!("[daemon]\napi_key = \"{KEY}\"\nexit_probe = false\nexit_probe_url = \"{url}\"\n\n[race]\nlisten_port = 16172\n"),
         );
-        let v = body_json(super::get_public_ip(State(s.state.clone()), RawQuery(Some("refresh=1".into())), keyed(KEY)).await).await;
+        let v = body_json(
+            super::get_public_ip(
+                State(s.state.clone()),
+                RawQuery(Some("refresh=1".into())),
+                keyed(KEY),
+            )
+            .await,
+        )
+        .await;
         assert_eq!(v["ip"], "", "{v}");
         assert_eq!(v["exit_probe"], "off", "{v}");
-        let n = body_json(super::get_network_engines(State(s.state.clone()), RawQuery(Some("refresh=1".into())), keyed(KEY)).await).await;
+        let n = body_json(
+            super::get_network_engines(
+                State(s.state.clone()),
+                RawQuery(Some("refresh=1".into())),
+                keyed(KEY),
+            )
+            .await,
+        )
+        .await;
         let rows = n["engines"].as_array().unwrap();
         assert!(!rows.is_empty(), "{n}");
         for r in rows {
             assert_eq!(r["state"], "unknown", "{r}");
             assert!(r.get("exit_ip").is_none(), "{r}");
         }
-        let resp = super::post_network_check(State(s.state.clone()), RawQuery(None), keyed(KEY), "{}".into()).await;
+        let resp = super::post_network_check(
+            State(s.state.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            "{}".into(),
+        )
+        .await;
         let c = body_json(resp).await;
         assert_eq!(c["results"][0]["id"], "exit_probe", "{c}");
-        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0, "no request reached the echo service");
+        assert_eq!(
+            hits.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "no request reached the echo service"
+        );
     }
 
     /// ⭐ #62. Where no socket can be pinned, any `bind_interface` in a write
@@ -20254,32 +23201,81 @@ mod body_route_tests {
         let form = serde_json::json!({"fields": {"race_bind_interface": "wg0", "hoard_bind_interface": ""}});
         let err = super::interface_pin_allowed(false, &form).unwrap_err();
         assert!(err.contains("Linux-only") && err.contains("wg0"), "{err}");
-        let extra = serde_json::json!({"extra_engines": [{"id": "vpn7", "bind_interface": "tun1"}]});
+        let extra =
+            serde_json::json!({"extra_engines": [{"id": "vpn7", "bind_interface": "tun1"}]});
         assert!(super::interface_pin_allowed(false, &extra).is_err());
         let create = serde_json::json!({"id": "x", "bind_interface": "  "});
-        assert!(super::interface_pin_allowed(false, &create).is_ok(), "blank is no interface");
-        assert!(super::interface_pin_allowed(true, &form).is_ok(), "Linux applies it");
+        assert!(
+            super::interface_pin_allowed(false, &create).is_ok(),
+            "blank is no interface"
+        );
+        assert!(
+            super::interface_pin_allowed(true, &form).is_ok(),
+            "Linux applies it"
+        );
         // This build's answer, as the Network tab reads it.
-        assert_eq!(typhon_engine::netpin::DEVICE_PIN_SUPPORTED, cfg!(target_os = "linux"));
+        assert_eq!(
+            typhon_engine::netpin::DEVICE_PIN_SUPPORTED,
+            cfg!(target_os = "linux")
+        );
     }
 
     /// The Network tab is told whether the field can be offered.
     #[tokio::test]
     async fn the_network_tab_is_told_whether_bind_interface_applies() {
         let s = st("netmode-bindiface");
-        let v = body_json(super::get_network_mode(State(s.state.clone()), RawQuery(None), keyed(KEY)).await).await;
-        assert_eq!(v["bind_interface"]["supported"], cfg!(target_os = "linux"), "{v}");
+        let v = body_json(
+            super::get_network_mode(State(s.state.clone()), RawQuery(None), keyed(KEY)).await,
+        )
+        .await;
+        assert_eq!(
+            v["bind_interface"]["supported"],
+            cfg!(target_os = "linux"),
+            "{v}"
+        );
     }
 
     #[test]
     fn a_leak_verdict_reads_the_comparison() {
         let v = |way, m: Result<&str, &str>, b| {
-            super::leak_verdict("trackers", way, m.map(str::to_string).map_err(str::to_string), b)
+            super::leak_verdict(
+                "trackers",
+                way,
+                m.map(str::to_string).map_err(str::to_string),
+                b,
+            )
         };
-        assert_eq!(v(Some("by interface wg0"), Ok("203.0.113.1"), Some("203.0.113.1")).0, "fail");
-        assert_eq!(v(Some("by interface wg0"), Ok("198.51.100.2"), Some("203.0.113.1")).0, "ok");
-        assert_eq!(v(Some("by interface wg0"), Ok("198.51.100.2"), None).0, "warn");
-        assert_eq!(v(Some("by interface wg0"), Err("timeout"), Some("203.0.113.1")).0, "fail");
+        assert_eq!(
+            v(
+                Some("by interface wg0"),
+                Ok("203.0.113.1"),
+                Some("203.0.113.1")
+            )
+            .0,
+            "fail"
+        );
+        assert_eq!(
+            v(
+                Some("by interface wg0"),
+                Ok("198.51.100.2"),
+                Some("203.0.113.1")
+            )
+            .0,
+            "ok"
+        );
+        assert_eq!(
+            v(Some("by interface wg0"), Ok("198.51.100.2"), None).0,
+            "warn"
+        );
+        assert_eq!(
+            v(
+                Some("by interface wg0"),
+                Err("timeout"),
+                Some("203.0.113.1")
+            )
+            .0,
+            "fail"
+        );
         assert_eq!(v(None, Ok("203.0.113.1"), Some("203.0.113.1")).0, "ok");
     }
 
@@ -20287,17 +23283,29 @@ mod body_route_tests {
     /// constants (`listen_healthy: true`, 0 peers, reach `unknown`).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn port_forward_reports_what_the_engines_do() {
-        let s = state_from("pf-real", &format!("auto_port_forward = false\n\n[daemon]\napi_key = \"{KEY}\"\n"));
+        let s = state_from(
+            "pf-real",
+            &format!("auto_port_forward = false\n\n[daemon]\napi_key = \"{KEY}\"\n"),
+        );
         let get = |s: &TestState| {
             let st = s.state.clone();
             async move {
-                body_json(super::get_port_forward(State(st), RawQuery(None), keyed(KEY)).await).await
+                body_json(super::get_port_forward(State(st), RawQuery(None), keyed(KEY)).await)
+                    .await
             }
         };
         // Nothing on the network yet: not listening, and said.
         let before = get(&s).await;
         assert_eq!(before["listen_healthy"], false, "{before}");
-        let race = |v: &serde_json::Value| v["engines"].as_array().unwrap().iter().find(|e| e["engine"] == "race").cloned().unwrap();
+        let race = |v: &serde_json::Value| {
+            v["engines"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|e| e["engine"] == "race")
+                .cloned()
+                .unwrap()
+        };
         assert_eq!(race(&before)["reachable"], "no");
 
         let port = listening(&s, "race").await;
@@ -20307,9 +23315,17 @@ mod body_route_tests {
         assert_eq!(mid["reachable"], "unproven", "listening is not reachable");
         assert_eq!(mid["forward"]["by"], "off", "auto_port_forward = false");
 
-        s.state.engines.get("race").unwrap().manager.note_inbound_peer();
+        s.state
+            .engines
+            .get("race")
+            .unwrap()
+            .manager
+            .note_inbound_peer();
         let after = race(&get(&s).await);
-        assert_eq!((after["inbound_peers"].as_u64(), after["reachable"].as_str()), (Some(1), Some("yes")));
+        assert_eq!(
+            (after["inbound_peers"].as_u64(), after["reachable"].as_str()),
+            (Some(1), Some("yes"))
+        );
     }
 
     /// An engine whose mapping was refused says why.
@@ -20317,22 +23333,31 @@ mod body_route_tests {
     async fn port_forward_names_a_refused_mapping() {
         let s = state_from("pf-refused", &format!("[daemon]\napi_key = \"{KEY}\"\n\n[[engine]]\nname = \"pfrefused\"\nrole = \"race\"\n[engine.session]\nlisten_port = 26993\n"));
         crate::portmap::record_refusal("pfrefused", 26993, "it leaves through a SOCKS5 proxy");
-        let v = body_json(super::get_port_forward(State(s.state.clone()), RawQuery(None), keyed(KEY)).await).await;
-        let row = v["engines"].as_array().unwrap().iter().find(|e| e["engine"] == "pfrefused").cloned().unwrap();
+        let v = body_json(
+            super::get_port_forward(State(s.state.clone()), RawQuery(None), keyed(KEY)).await,
+        )
+        .await;
+        let row = v["engines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["engine"] == "pfrefused")
+            .cloned()
+            .unwrap();
         assert_eq!(row["forward"]["by"], "none", "{row}");
-        assert!(row["forward"]["refused"].as_str().unwrap().contains("SOCKS5"));
+        assert!(row["forward"]["refused"]
+            .as_str()
+            .unwrap()
+            .contains("SOCKS5"));
     }
 
     /// An unknown engine is not an excuse to answer ok.
     #[tokio::test]
     async fn dial_limits_on_an_absent_engine_is_refused() {
         let s = st("dial-limits-absent");
-        let resp = super::set_dial_limits(
-            &s.state,
-            "no-such-engine",
-            r#"{"max_dials_per_sec":1.0}"#,
-        )
-        .await;
+        let resp =
+            super::set_dial_limits(&s.state, "no-such-engine", r#"{"max_dials_per_sec":1.0}"#)
+                .await;
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
@@ -20342,12 +23367,26 @@ mod body_route_tests {
     async fn the_stubs_still_refuse_a_body_that_is_wrong() {
         let s = st("stub-validate");
         let bad = super::set_race_listen_port(
-            State(s.state.clone()), RawQuery(None), keyed(KEY), "{not json".into()).await;
+            State(s.state.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            "{not json".into(),
+        )
+        .await;
         assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
 
         let zero = super::set_race_listen_port(
-            State(s.state.clone()), RawQuery(None), keyed(KEY), r#"{"port":0}"#.into()).await;
-        assert_eq!(zero.status(), StatusCode::BAD_REQUEST, "port 0 is out of range");
+            State(s.state.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            r#"{"port":0}"#.into(),
+        )
+        .await;
+        assert_eq!(
+            zero.status(),
+            StatusCode::BAD_REQUEST,
+            "port 0 is out of range"
+        );
     }
 
     /// ⭐⭐ A route that DELETES must not answer success for a torrent it does
@@ -20384,9 +23423,10 @@ mod body_route_tests {
         .await;
         assert!(made.status().is_success(), "got {:?}", made.status());
 
-        let listed =
-            body_json(super::get_categories(State(s.state.clone()), RawQuery(None), keyed(KEY)).await)
-                .await;
+        let listed = body_json(
+            super::get_categories(State(s.state.clone()), RawQuery(None), keyed(KEY)).await,
+        )
+        .await;
         assert!(
             listed.to_string().contains("films"),
             "the category we just made is listed: {listed}"
@@ -20422,8 +23462,10 @@ mod body_route_tests {
             // The struct has no Default; every optional field does, so a
             // document naming only the volume is the smallest valid body.
             Json(
-                serde_json::from_value::<VolumePolicyBody>(serde_json::json!({"volume": "/mnt/race"}))
-                    .expect("volume is the only required field"),
+                serde_json::from_value::<VolumePolicyBody>(
+                    serde_json::json!({"volume": "/mnt/race"}),
+                )
+                .expect("volume is the only required field"),
             ),
         )
         .await;
@@ -20455,16 +23497,41 @@ mod shim_fidelity_tests {
     async fn the_shim_answers_like_qbittorrent() {
         let s = state_from("shim-fid", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
         let a = torrent_bytes("alpha");
-        let (ha, _) = add_torrent_bytes(&s.state, &a, "", "/tmp", "keep,drop", true, true, "race").unwrap();
+        let (ha, _) =
+            add_torrent_bytes(&s.state, &a, "", "/tmp", "keep,drop", true, true, "race").unwrap();
         add_torrent_bytes(&s.state, &a, "", "/tmp", "keep,drop", true, true, "hoard").unwrap();
-        assert!(s.state.store.lock().unwrap().tags_of(&ha).contains(&"drop".to_string()));
-        let (hb, _) = add_torrent_bytes(&s.state, &torrent_bytes("bravo"), "", "/tmp", "", true, true, "hoard").unwrap();
+        assert!(s
+            .state
+            .store
+            .lock()
+            .unwrap()
+            .tags_of(&ha)
+            .contains(&"drop".to_string()));
+        let (hb, _) = add_torrent_bytes(
+            &s.state,
+            &torrent_bytes("bravo"),
+            "",
+            "/tmp",
+            "",
+            true,
+            true,
+            "hoard",
+        )
+        .unwrap();
 
-        let r = qbit_torrents_info(State(s.state.clone()), RawQuery(None), keyed(KEY), String::new()).await;
+        let r = qbit_torrents_info(
+            State(s.state.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            String::new(),
+        )
+        .await;
         let rows = body_json(r).await;
         let rows = rows.as_array().unwrap();
         assert_eq!(rows.len(), 2, "alpha once, bravo once: {rows:?}");
-        assert!(rows.iter().all(|r| r["tracker"] == "https://tracker.example/announce"));
+        assert!(rows
+            .iter()
+            .all(|r| r["tracker"] == "https://tracker.example/announce"));
 
         let mut form = Fields::new();
         form.insert("hashes".into(), "all".into());
@@ -20476,8 +23543,17 @@ mod shim_fidelity_tests {
 
         let mut form = Fields::new();
         form.insert("tags".into(), "drop".into());
-        qbit_delete_tags(State(s.state.clone()), RawQuery(None), keyed(KEY), Form(form)).await;
-        assert_eq!(s.state.store.lock().unwrap().tags_of(&ha), vec!["keep".to_string()]);
+        qbit_delete_tags(
+            State(s.state.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            Form(form),
+        )
+        .await;
+        assert_eq!(
+            s.state.store.lock().unwrap().tags_of(&ha),
+            vec!["keep".to_string()]
+        );
     }
 }
 
@@ -20489,10 +23565,29 @@ mod category_lifecycle_tests {
     const KEY: &str = "0123456789abcdef0123456789abcdef";
 
     fn labelled(s: &TestState, hash: &str, cat: &str) {
-        s.state.store.lock().unwrap().insert_torrent(hash, "hoard", b"d4:infod4:name1:xee", "/data", cat, 0.0, false, "").unwrap();
+        s.state
+            .store
+            .lock()
+            .unwrap()
+            .insert_torrent(
+                hash,
+                "hoard",
+                b"d4:infod4:name1:xee",
+                "/data",
+                cat,
+                0.0,
+                false,
+                "",
+            )
+            .unwrap();
     }
     fn label_of(s: &TestState, hash: &str) -> String {
-        s.state.store.lock().unwrap().category_of(hash, "hoard").unwrap_or_default()
+        s.state
+            .store
+            .lock()
+            .unwrap()
+            .category_of(hash, "hoard")
+            .unwrap_or_default()
     }
 
     /// Rename moves the definition AND the torrents' labels; delete clears
@@ -20502,28 +23597,63 @@ mod category_lifecycle_tests {
     async fn a_category_lives_and_dies_with_its_labels() {
         let s = state_from("cat-life", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
         let h1 = "a".repeat(40);
-        let r = category_create(State(s.state.clone()), RawQuery(None), keyed(KEY),
-            r#"{"name":"films","save_path":"/data/films","mode":"Hoard"}"#.into()).await;
+        let r = category_create(
+            State(s.state.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            r#"{"name":"films","save_path":"/data/films","mode":"Hoard"}"#.into(),
+        )
+        .await;
         assert_eq!(r.status(), StatusCode::CREATED);
-        assert_eq!(categories_map(&s.state)["films"].mode, "hoard", "normalised");
-        let r = category_create(State(s.state.clone()), RawQuery(None), keyed(KEY),
-            r#"{"name":"x","save_path":"/x","mode":"turbo"}"#.into()).await;
+        assert_eq!(
+            categories_map(&s.state)["films"].mode,
+            "hoard",
+            "normalised"
+        );
+        let r = category_create(
+            State(s.state.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            r#"{"name":"x","save_path":"/x","mode":"turbo"}"#.into(),
+        )
+        .await;
         assert_eq!(r.status(), StatusCode::BAD_REQUEST);
 
         labelled(&s, &h1, "films");
-        let r = category_update(State(s.state.clone()), Path("films".into()), RawQuery(None), keyed(KEY),
-            r#"{"name":"movies","save_path":"/data/films","mode":"hoard"}"#.into()).await;
+        let r = category_update(
+            State(s.state.clone()),
+            Path("films".into()),
+            RawQuery(None),
+            keyed(KEY),
+            r#"{"name":"movies","save_path":"/data/films","mode":"hoard"}"#.into(),
+        )
+        .await;
         assert_eq!(r.status(), StatusCode::OK);
-        assert!(categories_map(&s.state).contains_key("movies") && !categories_map(&s.state).contains_key("films"));
+        assert!(
+            categories_map(&s.state).contains_key("movies")
+                && !categories_map(&s.state).contains_key("films")
+        );
         assert_eq!(label_of(&s, &h1), "movies");
 
-        let v = body_json(category_delete(State(s.state.clone()), Path("movies".into()), RawQuery(None), keyed(KEY)).await).await;
+        let v = body_json(
+            category_delete(
+                State(s.state.clone()),
+                Path("movies".into()),
+                RawQuery(None),
+                keyed(KEY),
+            )
+            .await,
+        )
+        .await;
         assert_eq!(v["cleared"], 1);
         assert_eq!(label_of(&s, &h1), "");
 
         let h2 = "b".repeat(40);
         labelled(&s, &h2, "ghost");
-        let v = body_json(get_categories_orphans(State(s.state.clone()), RawQuery(None), keyed(KEY)).await).await;
+        let v = body_json(
+            get_categories_orphans(State(s.state.clone()), RawQuery(None), keyed(KEY)).await,
+        )
+        .await;
         assert_eq!(v[0]["name"], "ghost");
         assert_eq!(v[0]["torrents"], 1);
         assert_eq!(v[0]["mode"], "hoard");
@@ -20539,14 +23669,23 @@ mod category_lifecycle_tests {
         let s = state_from("cat-refused", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
         let h = "c".repeat(40);
         labelled(&s, &h, "films");
-        let r = category_create(State(s.state.clone()), RawQuery(None), keyed(KEY),
-            r#"{"name":"films","save_path":"/data/films","mode":"hoard"}"#.into()).await;
+        let r = category_create(
+            State(s.state.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            r#"{"name":"films","save_path":"/data/films","mode":"hoard"}"#.into(),
+        )
+        .await;
         assert_eq!(r.status(), StatusCode::CREATED);
 
         let broken = "RAISE(ABORT, 'database disk image is malformed')";
         // A tag that exists, so that deleting it has a row to delete.
         let mut sql = String::from("INSERT INTO tag_registry (name) VALUES ('x');");
-        for (table, events) in [("meta", ["INSERT", "UPDATE", "DELETE"]), ("tag_registry", ["INSERT", "UPDATE", "DELETE"]), ("torrents", ["INSERT", "UPDATE", "DELETE"])] {
+        for (table, events) in [
+            ("meta", ["INSERT", "UPDATE", "DELETE"]),
+            ("tag_registry", ["INSERT", "UPDATE", "DELETE"]),
+            ("torrents", ["INSERT", "UPDATE", "DELETE"]),
+        ] {
             for ev in events {
                 sql += &format!("CREATE TRIGGER broken_{table}_{ev} BEFORE {ev} ON {table} BEGIN SELECT {broken}; END;");
             }
@@ -20554,7 +23693,12 @@ mod category_lifecycle_tests {
         s.state.store.lock().unwrap().execute_batch_for_tests(&sql);
 
         fn form(pairs: &[(&str, &str)]) -> Form<Fields> {
-            Form(pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect())
+            Form(
+                pairs
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
+            )
         }
         let st = s.state.clone();
         let p = |n: &str| Path(n.to_string());
@@ -20565,38 +23709,183 @@ mod category_lifecycle_tests {
                 seen.push(($name, $fut.await.status()))
             };
         }
-        call!("POST /api/categories", category_create(State(st.clone()), RawQuery(None), keyed(KEY),
-            r#"{"name":"series","save_path":"/data/series","mode":"hoard"}"#.into()));
-        call!("PUT /api/categories/:name", category_update(State(st.clone()), p("films"), RawQuery(None), keyed(KEY),
-            r#"{"save_path":"/data/other"}"#.into()));
-        call!("DELETE /api/categories/:name", category_delete(State(st.clone()), p("films"), RawQuery(None), keyed(KEY)));
-        call!("qbit createCategory", qbit_create_category(State(st.clone()), RawQuery(None), keyed(KEY),
-            form(&[("category", "anime"), ("savePath", "/data/anime")])));
-        call!("qbit editCategory", qbit_edit_category(State(st.clone()), RawQuery(None), keyed(KEY),
-            form(&[("category", "films"), ("savePath", "/data/other")])));
-        call!("qbit removeCategories", qbit_remove_categories(State(st.clone()), RawQuery(None), keyed(KEY),
-            form(&[("categories", "films")])));
-        call!("qbit createTags", qbit_create_tags(State(st.clone()), RawQuery(None), keyed(KEY), form(&[("tags", "x")])));
-        call!("qbit deleteTags", qbit_delete_tags(State(st.clone()), RawQuery(None), keyed(KEY), form(&[("tags", "x")])));
-        call!("qbit addTags", qbit_add_tags(State(st.clone()), RawQuery(None), keyed(KEY),
-            form(&[("hashes", h.as_str()), ("tags", "x")])));
-        call!("qbit removeTags", qbit_remove_tags(State(st.clone()), RawQuery(None), keyed(KEY),
-            form(&[("hashes", h.as_str()), ("tags", "x")])));
-        call!("qbit setCategory", qbit_set_category(State(st.clone()), RawQuery(None), keyed(KEY),
-            form(&[("hashes", h.as_str()), ("category", "films")])));
-        call!("qbit pause", qbit_pause(State(st.clone()), RawQuery(None), keyed(KEY), form(&[("hashes", h.as_str())])));
-        call!("qbit resume", qbit_resume(State(st.clone()), RawQuery(None), keyed(KEY), form(&[("hashes", h.as_str())])));
-        call!("POST torrent tags", set_torrent_tags(State(st.clone()), hp(), RawQuery(None), keyed(KEY),
-            r#"{"tags":["x"]}"#.into()));
-        call!("POST torrent category", set_torrent_category(State(st.clone()), hp(), RawQuery(None), keyed(KEY),
-            r#"{"category":"films"}"#.into()));
-        call!("POST torrent pause", hoard_pause_one(State(st.clone()), hp(), RawQuery(None), keyed(KEY), String::new()));
-        call!("POST torrent resume", hoard_resume_one(State(st.clone()), hp(), RawQuery(None), keyed(KEY), String::new()));
-        call!("POST torrent pin", hoard_pin_one(State(st.clone()), hp(), RawQuery(None), keyed(KEY), String::new()));
-        call!("DELETE torrent pin", hoard_unpin_one(State(st.clone()), hp(), RawQuery(None), keyed(KEY)));
+        call!(
+            "POST /api/categories",
+            category_create(
+                State(st.clone()),
+                RawQuery(None),
+                keyed(KEY),
+                r#"{"name":"series","save_path":"/data/series","mode":"hoard"}"#.into()
+            )
+        );
+        call!(
+            "PUT /api/categories/:name",
+            category_update(
+                State(st.clone()),
+                p("films"),
+                RawQuery(None),
+                keyed(KEY),
+                r#"{"save_path":"/data/other"}"#.into()
+            )
+        );
+        call!(
+            "DELETE /api/categories/:name",
+            category_delete(State(st.clone()), p("films"), RawQuery(None), keyed(KEY))
+        );
+        call!(
+            "qbit createCategory",
+            qbit_create_category(
+                State(st.clone()),
+                RawQuery(None),
+                keyed(KEY),
+                form(&[("category", "anime"), ("savePath", "/data/anime")])
+            )
+        );
+        call!(
+            "qbit editCategory",
+            qbit_edit_category(
+                State(st.clone()),
+                RawQuery(None),
+                keyed(KEY),
+                form(&[("category", "films"), ("savePath", "/data/other")])
+            )
+        );
+        call!(
+            "qbit removeCategories",
+            qbit_remove_categories(
+                State(st.clone()),
+                RawQuery(None),
+                keyed(KEY),
+                form(&[("categories", "films")])
+            )
+        );
+        call!(
+            "qbit createTags",
+            qbit_create_tags(
+                State(st.clone()),
+                RawQuery(None),
+                keyed(KEY),
+                form(&[("tags", "x")])
+            )
+        );
+        call!(
+            "qbit deleteTags",
+            qbit_delete_tags(
+                State(st.clone()),
+                RawQuery(None),
+                keyed(KEY),
+                form(&[("tags", "x")])
+            )
+        );
+        call!(
+            "qbit addTags",
+            qbit_add_tags(
+                State(st.clone()),
+                RawQuery(None),
+                keyed(KEY),
+                form(&[("hashes", h.as_str()), ("tags", "x")])
+            )
+        );
+        call!(
+            "qbit removeTags",
+            qbit_remove_tags(
+                State(st.clone()),
+                RawQuery(None),
+                keyed(KEY),
+                form(&[("hashes", h.as_str()), ("tags", "x")])
+            )
+        );
+        call!(
+            "qbit setCategory",
+            qbit_set_category(
+                State(st.clone()),
+                RawQuery(None),
+                keyed(KEY),
+                form(&[("hashes", h.as_str()), ("category", "films")])
+            )
+        );
+        call!(
+            "qbit pause",
+            qbit_pause(
+                State(st.clone()),
+                RawQuery(None),
+                keyed(KEY),
+                form(&[("hashes", h.as_str())])
+            )
+        );
+        call!(
+            "qbit resume",
+            qbit_resume(
+                State(st.clone()),
+                RawQuery(None),
+                keyed(KEY),
+                form(&[("hashes", h.as_str())])
+            )
+        );
+        call!(
+            "POST torrent tags",
+            set_torrent_tags(
+                State(st.clone()),
+                hp(),
+                RawQuery(None),
+                keyed(KEY),
+                r#"{"tags":["x"]}"#.into()
+            )
+        );
+        call!(
+            "POST torrent category",
+            set_torrent_category(
+                State(st.clone()),
+                hp(),
+                RawQuery(None),
+                keyed(KEY),
+                r#"{"category":"films"}"#.into()
+            )
+        );
+        call!(
+            "POST torrent pause",
+            hoard_pause_one(
+                State(st.clone()),
+                hp(),
+                RawQuery(None),
+                keyed(KEY),
+                String::new()
+            )
+        );
+        call!(
+            "POST torrent resume",
+            hoard_resume_one(
+                State(st.clone()),
+                hp(),
+                RawQuery(None),
+                keyed(KEY),
+                String::new()
+            )
+        );
+        call!(
+            "POST torrent pin",
+            hoard_pin_one(
+                State(st.clone()),
+                hp(),
+                RawQuery(None),
+                keyed(KEY),
+                String::new()
+            )
+        );
+        call!(
+            "DELETE torrent pin",
+            hoard_unpin_one(State(st.clone()), hp(), RawQuery(None), keyed(KEY))
+        );
 
-        let acked: Vec<String> = seen.iter().filter(|(_, c)| c.is_success()).map(|(n, c)| format!("{n} -> {c}")).collect();
-        assert!(acked.is_empty(), "acknowledged although the store refused the write: {acked:?}");
+        let acked: Vec<String> = seen
+            .iter()
+            .filter(|(_, c)| c.is_success())
+            .map(|(n, c)| format!("{n} -> {c}"))
+            .collect();
+        assert!(
+            acked.is_empty(),
+            "acknowledged although the store refused the write: {acked:?}"
+        );
         for (n, c) in &seen {
             assert!(c.is_server_error(), "{n}: {c}");
         }
@@ -20611,33 +23900,66 @@ mod category_lifecycle_tests {
             r#"{"name":"films","save_path":"/data/films","mode":"hoard"}"#,
             r#"{"name":"race-films","save_path":"/race/films","mode":"race","graduate_to":"films"}"#,
         ] {
-            let r = category_create(State(s.state.clone()), RawQuery(None), keyed(KEY), body.into()).await;
+            let r = category_create(
+                State(s.state.clone()),
+                RawQuery(None),
+                keyed(KEY),
+                body.into(),
+            )
+            .await;
             assert_eq!(r.status(), StatusCode::CREATED);
         }
         {
             let store = s.state.store.lock().unwrap();
             store.rss_rule_put("r1", r#"{"enabled":true,"mustContain":"x","assignedCategory":"films","torrentParams":{"category":"films"}}"#).unwrap();
-            store.put_setting("watch_folders", r#"[{"path":"/w","category":"films"}]"#).unwrap();
+            store
+                .put_setting("watch_folders", r#"[{"path":"/w","category":"films"}]"#)
+                .unwrap();
             let w = serde_json::json!({
                 "id": "w1", "name": "w", "enabled": false,
                 "when": {"kind": "cond", "field": "category", "op": "eq", "value": "Films"},
                 "then": [{"type": "set_category", "to": "films"}],
             });
-            store.put_workflow(&crate::store::StoredWorkflow {
-                id: "w1".into(), name: "w".into(), body: w.to_string(), enabled: false,
-                position: 0, interval_secs: 0, last_run: 0,
-            }).unwrap();
+            store
+                .put_workflow(&crate::store::StoredWorkflow {
+                    id: "w1".into(),
+                    name: "w".into(),
+                    body: w.to_string(),
+                    enabled: false,
+                    position: 0,
+                    interval_secs: 0,
+                    last_run: 0,
+                })
+                .unwrap();
         }
-        let r = category_update(State(s.state.clone()), Path("films".into()), RawQuery(None), keyed(KEY),
-            r#"{"name":"movies"}"#.into()).await;
+        let r = category_update(
+            State(s.state.clone()),
+            Path("films".into()),
+            RawQuery(None),
+            keyed(KEY),
+            r#"{"name":"movies"}"#.into(),
+        )
+        .await;
         let v = body_json(r).await;
         assert_eq!(v["followed"]["rss_rules"], 1, "{v}");
         assert_eq!(categories_map(&s.state)["race-films"].graduate_to, "movies");
         assert_eq!(categories_map(&s.state)["movies"].mode, "hoard");
         let store = s.state.store.lock().unwrap();
-        let (_, rule) = store.rss_rules().unwrap().into_iter().find(|(n, _)| n == "r1").unwrap();
-        assert!(rule.contains("movies") && !rule.contains("\"films\""), "{rule}");
-        assert!(store.setting("watch_folders").unwrap().unwrap().contains("\"movies\""));
+        let (_, rule) = store
+            .rss_rules()
+            .unwrap()
+            .into_iter()
+            .find(|(n, _)| n == "r1")
+            .unwrap();
+        assert!(
+            rule.contains("movies") && !rule.contains("\"films\""),
+            "{rule}"
+        );
+        assert!(store
+            .setting("watch_folders")
+            .unwrap()
+            .unwrap()
+            .contains("\"movies\""));
         let body = &store.workflows().unwrap()[0].body;
         assert!(!body.to_lowercase().contains("\"films\""), "{body}");
     }
@@ -20647,11 +23969,22 @@ mod category_lifecycle_tests {
     #[tokio::test]
     async fn a_partial_update_keeps_the_mode() {
         let s = state_from("cat-partial", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
-        let r = category_create(State(s.state.clone()), RawQuery(None), keyed(KEY),
-            r#"{"name":"films","save_path":"/data/films","mode":"hoard"}"#.into()).await;
+        let r = category_create(
+            State(s.state.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            r#"{"name":"films","save_path":"/data/films","mode":"hoard"}"#.into(),
+        )
+        .await;
         assert_eq!(r.status(), StatusCode::CREATED);
-        let r = category_update(State(s.state.clone()), Path("films".into()), RawQuery(None), keyed(KEY),
-            r#"{"save_path":"/data/movies"}"#.into()).await;
+        let r = category_update(
+            State(s.state.clone()),
+            Path("films".into()),
+            RawQuery(None),
+            keyed(KEY),
+            r#"{"save_path":"/data/movies"}"#.into(),
+        )
+        .await;
         assert_eq!(r.status(), StatusCode::OK);
         let c = &categories_map(&s.state)["films"];
         assert_eq!(c.mode, "hoard", "a PUT without mode made it race");
@@ -20677,7 +24010,13 @@ mod native_add_tests {
     }
 
     async fn add(s: &TestState, body: serde_json::Value) -> (StatusCode, serde_json::Value) {
-        let r = post_torrent_add(State(s.state.clone()), RawQuery(None), keyed(KEY), body.to_string()).await;
+        let r = post_torrent_add(
+            State(s.state.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            body.to_string(),
+        )
+        .await;
         let code = r.status();
         (code, body_json(r).await)
     }
@@ -20686,11 +24025,18 @@ mod native_add_tests {
     /// caller's to fix (400), never a 500.
     #[tokio::test]
     async fn a_refused_add_is_not_a_server_error() {
-        let s = state_from("native-add-refused", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
-        let (code, v) = add(&s, serde_json::json!({
-            "magnet_uri": format!("magnet:?xt=urn:btmh:1220{}", "ab".repeat(32)),
-            "save_path": s.dir.display().to_string(),
-        })).await;
+        let s = state_from(
+            "native-add-refused",
+            &format!("[daemon]\napi_key = \"{KEY}\"\n"),
+        );
+        let (code, v) = add(
+            &s,
+            serde_json::json!({
+                "magnet_uri": format!("magnet:?xt=urn:btmh:1220{}", "ab".repeat(32)),
+                "save_path": s.dir.display().to_string(),
+            }),
+        )
+        .await;
         assert_eq!(code, StatusCode::BAD_REQUEST, "{v}");
     }
 
@@ -20703,16 +24049,26 @@ mod native_add_tests {
         let file = s.dir.join("book.epub.torrent");
         std::fs::write(&file, torrent_bytes("book.epub")).unwrap();
         let base = s.dir.join("lib").display().to_string();
-        let (code, v) = add(&s, serde_json::json!({
-            "torrent_path": file.display().to_string(), "save_path": base,
-            "mode": "hoard", "stopped": true, "create_subfolder": true, "seed_mode": true,
-        })).await;
+        let (code, v) = add(
+            &s,
+            serde_json::json!({
+                "torrent_path": file.display().to_string(), "save_path": base,
+                "mode": "hoard", "stopped": true, "create_subfolder": true, "seed_mode": true,
+            }),
+        )
+        .await;
         assert_eq!(code, StatusCode::OK, "{v}");
         assert_eq!(v["mode"], "hoard");
         let hash = v["info_hash"].as_str().unwrap().to_string();
         let t = find_copy(&s.state, "hoard", &hash).expect("in hoard");
-        assert!(t.is_paused.load(std::sync::atomic::Ordering::Relaxed), "added without starting");
-        assert_eq!(*t.save_path.read(), std::path::Path::new(&base).join("book"));
+        assert!(
+            t.is_paused.load(std::sync::atomic::Ordering::Relaxed),
+            "added without starting"
+        );
+        assert_eq!(
+            *t.save_path.read(),
+            std::path::Path::new(&base).join("book")
+        );
 
         // The same again: already added is a conflict, not a server error.
         let (code, _) = add(&s, serde_json::json!({"torrent_path": file.display().to_string(), "save_path": base, "mode": "hoard"})).await;
@@ -20721,11 +24077,22 @@ mod native_add_tests {
 
     #[tokio::test]
     async fn a_refusal_says_what_was_wrong() {
-        let s = state_from("native-add-refuse", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
-        let (code, v) = add(&s, serde_json::json!({"torrent_path": "/nonexistent/x.torrent", "save_path": "/tmp"})).await;
+        let s = state_from(
+            "native-add-refuse",
+            &format!("[daemon]\napi_key = \"{KEY}\"\n"),
+        );
+        let (code, v) = add(
+            &s,
+            serde_json::json!({"torrent_path": "/nonexistent/x.torrent", "save_path": "/tmp"}),
+        )
+        .await;
         assert_eq!(code, StatusCode::NOT_FOUND);
         assert!(!v["error"].as_str().unwrap().starts_with("race:"), "{v}");
-        let (code, _) = add(&s, serde_json::json!({"torrent_path": "/x", "mode": "turbo"})).await;
+        let (code, _) = add(
+            &s,
+            serde_json::json!({"torrent_path": "/x", "mode": "turbo"}),
+        )
+        .await;
         assert_eq!(code, StatusCode::BAD_REQUEST);
         let (code, _) = add(&s, serde_json::json!({})).await;
         assert_eq!(code, StatusCode::BAD_REQUEST);
@@ -20759,16 +24126,36 @@ mod purge_tests {
         std::fs::create_dir_all(&dir).unwrap();
         let bytes = torrent_bytes("purged");
         let save = dir.display().to_string();
-        let (hash, _) = add_torrent_bytes(&s.state, &bytes, "", &save, "", true, true, "race").expect("race add");
+        let (hash, _) = add_torrent_bytes(&s.state, &bytes, "", &save, "", true, true, "race")
+            .expect("race add");
         add_torrent_bytes(&s.state, &bytes, "", &save, "", true, true, "hoard").expect("hoard add");
-        assert_eq!(s.state.store.lock().unwrap().sessions_of(&hash), vec!["hoard".to_string(), "race".to_string()]);
+        assert_eq!(
+            s.state.store.lock().unwrap().sessions_of(&hash),
+            vec!["hoard".to_string(), "race".to_string()]
+        );
 
-        let resp = purge_race_torrent(State(s.state.clone()), Path(hash.clone()), RawQuery(None), keyed(KEY)).await;
+        let resp = purge_race_torrent(
+            State(s.state.clone()),
+            Path(hash.clone()),
+            RawQuery(None),
+            keyed(KEY),
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::OK);
 
-        assert_eq!(s.state.store.lock().unwrap().sessions_of(&hash), vec!["hoard".to_string()], "the hoard row stays");
-        assert!(find_copy(&s.state, "race", &hash).is_none(), "the race engine let go");
-        assert!(find_copy(&s.state, "hoard", &hash).is_some(), "the hoard engine still holds it");
+        assert_eq!(
+            s.state.store.lock().unwrap().sessions_of(&hash),
+            vec!["hoard".to_string()],
+            "the hoard row stays"
+        );
+        assert!(
+            find_copy(&s.state, "race", &hash).is_none(),
+            "the race engine let go"
+        );
+        assert!(
+            find_copy(&s.state, "hoard", &hash).is_some(),
+            "the hoard engine still holds it"
+        );
     }
 }
 
@@ -20829,8 +24216,16 @@ mod filter_tests {
             "state=no_such_state",
         ] {
             let v = engine_page_value(&s.state, "race", q).await;
-            assert_eq!(v["total"], serde_json::json!(1), "{q}: the library is unchanged");
-            assert_eq!(v["filtered"], serde_json::json!(0), "{q} kept something: {v}");
+            assert_eq!(
+                v["total"],
+                serde_json::json!(1),
+                "{q}: the library is unchanged"
+            );
+            assert_eq!(
+                v["filtered"],
+                serde_json::json!(0),
+                "{q} kept something: {v}"
+            );
             assert!(rows(&v).is_empty(), "{q}");
         }
     }
@@ -20883,8 +24278,15 @@ mod filter_tests {
         }
         let v = engine_page_value(&s.state, "race", "fields=hash&limit=1").await;
         let hashes = v["hashes"].as_array().expect("a hashes array");
-        assert_eq!(hashes.len(), 3, "the window does not apply to the selection universe");
-        assert!(v.get("rows").is_none() || rows(&v).is_empty(), "no rows are built: {v}");
+        assert_eq!(
+            hashes.len(),
+            3,
+            "the window does not apply to the selection universe"
+        );
+        assert!(
+            v.get("rows").is_none() || rows(&v).is_empty(),
+            "no rows are built: {v}"
+        );
         assert_eq!(v["total"], serde_json::json!(3));
         for h in hashes {
             assert_eq!(h.as_str().map(|s| s.len()), Some(40), "a hex info hash");
@@ -20941,7 +24343,12 @@ mod filter_tests {
     async fn two_filters_narrow_together_rather_than_widening() {
         let s = st("f-and");
         add(&s, "race", "alpha");
-        let v = engine_page_value(&s.state, "race", "tracker=tracker.example&search=nosuchthing").await;
+        let v = engine_page_value(
+            &s.state,
+            "race",
+            "tracker=tracker.example&search=nosuchthing",
+        )
+        .await;
         assert_eq!(v["filtered"], serde_json::json!(0), "got {v}");
     }
 
@@ -20963,7 +24370,11 @@ mod filter_tests {
         let s = st("f-hex");
         let h = add(&s, "race", "alpha");
         let v = engine_page_value(&s.state, "race", &format!("search={}", &h[..10])).await;
-        assert_eq!(v["filtered"], serde_json::json!(1), "the hash prefix finds it: {v}");
+        assert_eq!(
+            v["filtered"],
+            serde_json::json!(1),
+            "the hash prefix finds it: {v}"
+        );
     }
 
     /// Both engines answer their own page independently, including under a
@@ -21016,7 +24427,9 @@ mod filter_tests {
         let engines = s.engines.engines();
         let race = engines.iter().find(|e| e.id == "race").unwrap();
         assert!(
-            race.manager.add_torrent_bytes(&torrent_bytes("alpha"), "/tmp", true, true).is_err(),
+            race.manager
+                .add_torrent_bytes(&torrent_bytes("alpha"), "/tmp", true, true)
+                .is_err(),
             "the duplicate must be refused"
         );
         assert_eq!(race.manager.count(), 1);
@@ -21055,8 +24468,13 @@ mod node_route_tests {
                     }))
                 }),
             )
-            .route("/api/engines", get(|| async { Json(serde_json::json!([])) }));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+            .route(
+                "/api/engines",
+                get(|| async { Json(serde_json::json!([])) }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
         let addr = listener.local_addr().expect("addr");
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
         tokio::spawn(async move {
@@ -21068,7 +24486,10 @@ mod node_route_tests {
         });
         // Declared by IP rather than 127.0.0.1: the loopback guard refuses
         // that spelling on purpose, and this fixture is about the rest.
-        FakeNode { url: format!("http://{addr}"), _shutdown: tx }
+        FakeNode {
+            url: format!("http://{addr}"),
+            _shutdown: tx,
+        }
     }
 
     /// ⭐⭐ A node URL is used for TWO things: this process probes it, AND the
@@ -21079,7 +24500,11 @@ mod node_route_tests {
     #[tokio::test]
     async fn a_node_declared_on_loopback_is_refused() {
         let s = st("node-loopback");
-        for url in ["http://127.0.0.1:8499", "http://localhost:8499", "http://[::1]:8499"] {
+        for url in [
+            "http://127.0.0.1:8499",
+            "http://localhost:8499",
+            "http://[::1]:8499",
+        ] {
             let resp = super::post_node(
                 State(s.state.clone()),
                 RawQuery(None),
@@ -21180,12 +24605,19 @@ mod node_route_tests {
             .to_string(),
         )
         .await;
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "an unreachable node is refused");
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "an unreachable node is refused"
+        );
 
         let listed =
             body_json(super::get_nodes(State(s.state.clone()), RawQuery(None), keyed(KEY)).await)
                 .await;
-        assert!(!listed.to_string().contains("ghost"), "and nothing was stored: {listed}");
+        assert!(
+            !listed.to_string().contains("ghost"),
+            "and nothing was stored: {listed}"
+        );
     }
 
     /// Probing a declared node that answers: the route reaches it over real
@@ -21281,15 +24713,28 @@ mod node_route_tests {
         let mut h = keyed(KEY);
         h.insert(axum::http::header::HOST, "10.0.0.2:8199".parse().unwrap());
         let resp = super::post_node_enrol(State(s.state.clone()), RawQuery(None), h).await;
-        let cmd = body_json(resp).await["command"].as_str().unwrap().to_string();
+        let cmd = body_json(resp).await["command"]
+            .as_str()
+            .unwrap()
+            .to_string();
         let sha: String = Sha256::digest(include_str!("../../../install.sh").as_bytes())
             .iter()
             .map(|b| format!("{b:02x}"))
             .collect();
-        assert!(!cmd.contains("install.sh |"), "the download is not piped into a shell: {cmd}");
-        assert!(cmd.contains(&format!("{sha}  ")), "the command pins the served script: {cmd}");
-        let check = cmd.find("sha256sum -c").expect("the command checks the hash");
-        let run = cmd.find("sh hydranos-enrol.sh").expect("the command runs the checked file");
+        assert!(
+            !cmd.contains("install.sh |"),
+            "the download is not piped into a shell: {cmd}"
+        );
+        assert!(
+            cmd.contains(&format!("{sha}  ")),
+            "the command pins the served script: {cmd}"
+        );
+        let check = cmd
+            .find("sha256sum -c")
+            .expect("the command checks the hash");
+        let run = cmd
+            .find("sh hydranos-enrol.sh")
+            .expect("the command runs the checked file");
         assert!(check < run, "checked before it runs: {cmd}");
     }
 
@@ -21301,21 +24746,52 @@ mod node_route_tests {
         h.insert(axum::http::header::HOST, "10.0.0.2:8199".parse().unwrap());
 
         let s = st("node-enrol-host");
-        let cmd = body_json(super::post_node_enrol(State(s.state.clone()), RawQuery(None), h.clone()).await)
-            .await["command"].as_str().unwrap().to_string();
-        assert!(cmd.contains("http://10.0.0.2:8199/install.sh"), "the default follows Host: {cmd}");
+        let cmd = body_json(
+            super::post_node_enrol(State(s.state.clone()), RawQuery(None), h.clone()).await,
+        )
+        .await["command"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            cmd.contains("http://10.0.0.2:8199/install.sh"),
+            "the default follows Host: {cmd}"
+        );
 
         for (configured, base) in [
-            ("https://hydra.example.net:9443", "https://hydra.example.net:9443"),
-            ("https://hydra.example.net/hydra/", "https://hydra.example.net/hydra"),
+            (
+                "https://hydra.example.net:9443",
+                "https://hydra.example.net:9443",
+            ),
+            (
+                "https://hydra.example.net/hydra/",
+                "https://hydra.example.net/hydra",
+            ),
             ("hydra.example.net:8199", "http://hydra.example.net:8199"),
         ] {
-            let s = state_from("node-enrol-public", &format!("[daemon]\napi_key = \"{KEY}\"\npublic_url = \"{configured}\"\n"));
-            let cmd = body_json(super::post_node_enrol(State(s.state.clone()), RawQuery(None), h.clone()).await)
-                .await["command"].as_str().unwrap().to_string();
-            assert!(cmd.contains(&format!("curl -fsSL {base}/install.sh ")), "{configured}: {cmd}");
-            assert!(cmd.contains(&format!("--register-to {base} ")), "{configured}: {cmd}");
-            assert!(!cmd.contains("10.0.0.2"), "the caller's Host is not used: {cmd}");
+            let s = state_from(
+                "node-enrol-public",
+                &format!("[daemon]\napi_key = \"{KEY}\"\npublic_url = \"{configured}\"\n"),
+            );
+            let cmd = body_json(
+                super::post_node_enrol(State(s.state.clone()), RawQuery(None), h.clone()).await,
+            )
+            .await["command"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            assert!(
+                cmd.contains(&format!("curl -fsSL {base}/install.sh ")),
+                "{configured}: {cmd}"
+            );
+            assert!(
+                cmd.contains(&format!("--register-to {base} ")),
+                "{configured}: {cmd}"
+            );
+            assert!(
+                !cmd.contains("10.0.0.2"),
+                "the caller's Host is not used: {cmd}"
+            );
         }
     }
 
@@ -21342,7 +24818,8 @@ mod node_route_tests {
         super::post_node_register(
             State(s.clone()),
             keyed(KEY),
-            serde_json::json!({"token": token, "name": name, "url": "http://10.0.0.9:8199"}).to_string(),
+            serde_json::json!({"token": token, "name": name, "url": "http://10.0.0.9:8199"})
+                .to_string(),
         )
         .await
         .status()
@@ -21365,8 +24842,14 @@ mod node_route_tests {
     async fn a_bad_token_learns_nothing_about_node_names() {
         let s = st("node-register-names");
         put_test_node(&s.state, "taken");
-        assert_eq!(register_status(&s.state, "never-minted", "taken").await, StatusCode::UNAUTHORIZED);
-        assert_eq!(register_status(&s.state, "never-minted", "free").await, StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            register_status(&s.state, "never-minted", "taken").await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            register_status(&s.state, "never-minted", "free").await,
+            StatusCode::UNAUTHORIZED
+        );
     }
 
     /// A live token with a name already taken is refused without being spent:
@@ -21375,10 +24858,26 @@ mod node_route_tests {
     async fn a_taken_name_does_not_spend_a_live_token() {
         let s = st("node-register-keep");
         put_test_node(&s.state, "taken");
-        let (token, _) = s.state.store.lock().unwrap().create_enrol_token(600).unwrap();
-        assert_eq!(register_status(&s.state, &token, "taken").await, StatusCode::CONFLICT);
-        assert_eq!(register_status(&s.state, &token, "fresh").await, StatusCode::OK);
-        assert_eq!(register_status(&s.state, &token, "other").await, StatusCode::UNAUTHORIZED, "spent by the one that worked");
+        let (token, _) = s
+            .state
+            .store
+            .lock()
+            .unwrap()
+            .create_enrol_token(600)
+            .unwrap();
+        assert_eq!(
+            register_status(&s.state, &token, "taken").await,
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            register_status(&s.state, &token, "fresh").await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            register_status(&s.state, &token, "other").await,
+            StatusCode::UNAUTHORIZED,
+            "spent by the one that worked"
+        );
     }
 
     /// ⭐ A node may not register itself at a loopback address either -- the
@@ -21414,7 +24913,11 @@ mod node_route_tests {
                 .to_string(),
             )
             .await;
-            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{name} must be refused");
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "{name} must be refused"
+            );
         }
     }
 
@@ -21438,8 +24941,13 @@ mod node_route_tests {
     async fn the_install_script_is_served() {
         let resp = super::get_install_script().await;
         assert!(resp.status().is_success());
-        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.expect("body");
-        assert!(!bytes.is_empty(), "an empty install script installs nothing");
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        assert!(
+            !bytes.is_empty(),
+            "an empty install script installs nothing"
+        );
     }
 }
 
@@ -21497,9 +25005,17 @@ mod add_path_tests {
         let s = st("add-ok");
         // ⚠️ The tuple is (info hash, torrent NAME) -- not the engine. Reading
         // the second field as an engine id silently compares a name to "race".
-        let (hash, name) =
-            add_torrent_bytes(&s.state, &torrent_bytes("alpha"), "", "/tmp", "", true, true, "")
-                .expect("a valid torrent is accepted");
+        let (hash, name) = add_torrent_bytes(
+            &s.state,
+            &torrent_bytes("alpha"),
+            "",
+            "/tmp",
+            "",
+            true,
+            true,
+            "",
+        )
+        .expect("a valid torrent is accepted");
         assert_eq!(hash.len(), 40, "a hex info hash: {hash}");
         assert_eq!(name, "alpha", "the torrent name comes back");
 
@@ -21536,8 +25052,17 @@ mod add_path_tests {
     #[tokio::test]
     async fn an_explicit_engine_overrides_the_category() {
         let s = st("add-override");
-        add_torrent_bytes(&s.state, &torrent_bytes("alpha"), "", "/tmp", "", true, true, "hoard")
-            .expect("accepted");
+        add_torrent_bytes(
+            &s.state,
+            &torrent_bytes("alpha"),
+            "",
+            "/tmp",
+            "",
+            true,
+            true,
+            "hoard",
+        )
+        .expect("accepted");
         assert_eq!(engine_holding(&s, "alpha").as_deref(), Some("hoard"));
     }
 
@@ -21569,10 +25094,27 @@ mod add_path_tests {
     #[tokio::test]
     async fn adding_the_same_torrent_twice_is_refused() {
         let s = st("add-dup");
-        add_torrent_bytes(&s.state, &torrent_bytes("alpha"), "", "/tmp", "", true, true, "race")
-            .expect("first add");
-        let second =
-            add_torrent_bytes(&s.state, &torrent_bytes("alpha"), "", "/tmp", "", true, true, "race");
+        add_torrent_bytes(
+            &s.state,
+            &torrent_bytes("alpha"),
+            "",
+            "/tmp",
+            "",
+            true,
+            true,
+            "race",
+        )
+        .expect("first add");
+        let second = add_torrent_bytes(
+            &s.state,
+            &torrent_bytes("alpha"),
+            "",
+            "/tmp",
+            "",
+            true,
+            true,
+            "race",
+        );
         assert!(second.is_err(), "the duplicate is refused: {second:?}");
     }
 
@@ -21594,7 +25136,11 @@ mod add_path_tests {
         let store = s.store.lock().unwrap();
         let mut tags = store.tags_of(&hash);
         tags.sort();
-        assert_eq!(tags, vec!["anime".to_string(), "fr".to_string()], "got {tags:?}");
+        assert_eq!(
+            tags,
+            vec!["anime".to_string(), "fr".to_string()],
+            "got {tags:?}"
+        );
     }
 
     /// ⭐ Seed mode is taken at its word: the torrent is not rechecked, which
@@ -21644,12 +25190,20 @@ mod add_path_tests {
         let s = st("qbit-version");
         let resp = super::qbit_version(State(s.state.clone()), RawQuery(None), keyed(KEY)).await;
         assert!(resp.status().is_success());
-        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.expect("body");
-        assert!(!bytes.is_empty(), "a client parses this to decide what it can call");
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        assert!(
+            !bytes.is_empty(),
+            "a client parses this to decide what it can call"
+        );
 
-        let api = super::qbit_webapi_version(State(s.state.clone()), RawQuery(None), keyed(KEY)).await;
+        let api =
+            super::qbit_webapi_version(State(s.state.clone()), RawQuery(None), keyed(KEY)).await;
         assert!(api.status().is_success());
-        let bytes = axum::body::to_bytes(api.into_body(), usize::MAX).await.expect("body");
+        let bytes = axum::body::to_bytes(api.into_body(), usize::MAX)
+            .await
+            .expect("body");
         assert!(!bytes.is_empty());
     }
 
@@ -21689,8 +25243,17 @@ mod add_path_tests {
     #[tokio::test]
     async fn a_torrent_added_natively_appears_in_the_qbit_listing() {
         let s = st("qbit-sees");
-        add_torrent_bytes(&s.state, &torrent_bytes("alpha"), "", "/tmp", "", true, true, "race")
-            .expect("added");
+        add_torrent_bytes(
+            &s.state,
+            &torrent_bytes("alpha"),
+            "",
+            "/tmp",
+            "",
+            true,
+            true,
+            "race",
+        )
+        .expect("added");
         let body = body_json(
             super::qbit_torrents_info(
                 State(s.state.clone()),
@@ -21742,11 +25305,22 @@ mod populated_tests {
     fn populated(tag: &str) -> (TestState, Vec<String>) {
         let s = st(tag);
         let mut hashes = Vec::new();
-        for (engine, names) in [("race", ["alpha", "bravo"]), ("hoard", ["charlie", "delta"])] {
+        for (engine, names) in [
+            ("race", ["alpha", "bravo"]),
+            ("hoard", ["charlie", "delta"]),
+        ] {
             for n in names {
-                let (hash, _name) =
-                    add_torrent_bytes(&s.state, &torrent_bytes(n), "", "/tmp", "fr", true, true, engine)
-                        .unwrap_or_else(|e| panic!("add {n}: {e}"));
+                let (hash, _name) = add_torrent_bytes(
+                    &s.state,
+                    &torrent_bytes(n),
+                    "",
+                    "/tmp",
+                    "fr",
+                    true,
+                    true,
+                    engine,
+                )
+                .unwrap_or_else(|e| panic!("add {n}: {e}"));
                 hashes.push(hash);
             }
         }
@@ -21846,8 +25420,14 @@ mod populated_tests {
         )
         .await;
         assert!(resp.status().is_success(), "got {:?}", resp.status());
-        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.expect("body");
-        assert!(bytes.starts_with(b"d"), "a bencoded document: {:?}", &bytes[..bytes.len().min(8)]);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        assert!(
+            bytes.starts_with(b"d"),
+            "a bencoded document: {:?}",
+            &bytes[..bytes.len().min(8)]
+        );
     }
 
     /// ⭐⭐ A bulk action names its torrents. Acting on an EMPTY list must
@@ -21906,10 +25486,7 @@ mod populated_tests {
             .await,
         )
         .await;
-        let shim_race = shim
-            .as_array()
-            .map(|rows| rows.len())
-            .expect("an array");
+        let shim_race = shim.as_array().map(|rows| rows.len()).expect("an array");
         assert_eq!(page["total"].as_i64(), Some(2), "the race page");
         assert_eq!(shim_race, 4, "the shim lists every engine's torrents");
     }
@@ -21942,9 +25519,10 @@ mod populated_tests {
     #[tokio::test]
     async fn the_tracker_tab_groups_by_host() {
         let (s, _h) = populated("pop-trackers");
-        let body =
-            body_json(super::get_trackers(State(s.state.clone()), RawQuery(None), keyed(KEY)).await)
-                .await;
+        let body = body_json(
+            super::get_trackers(State(s.state.clone()), RawQuery(None), keyed(KEY)).await,
+        )
+        .await;
         let text = body.to_string();
         assert!(text.contains("tracker.example"), "got {body}");
     }
@@ -21972,7 +25550,9 @@ mod populated_tests {
         use std::sync::atomic::Ordering;
         use typhon_engine::torrent::meta::TorrentStatus;
         let (s, _h) = populated("pop-seedsize");
-        let set = |t: &std::sync::Arc<typhon_engine::torrent::meta::TorrentState>, st: TorrentStatus, paused: bool| {
+        let set = |t: &std::sync::Arc<typhon_engine::torrent::meta::TorrentState>,
+                   st: TorrentStatus,
+                   paused: bool| {
             t.status.store(st as u8, Ordering::Relaxed);
             t.is_paused.store(paused, Ordering::Relaxed);
         };
@@ -21985,10 +25565,21 @@ mod populated_tests {
 
         let rows = crate::benchsampler::tracker_totals(&s.state.engines, &s.state.store, 42);
         let of = |engine: &str| {
-            rows.iter().find(|r| r.engine == engine && r.tracker == "tracker.example").expect("row").seed_size
+            rows.iter()
+                .find(|r| r.engine == engine && r.tracker == "tracker.example")
+                .expect("row")
+                .seed_size
         };
-        assert_eq!(of("hoard"), hoard[0].meta.total_size as i64, "a downloading torrent is not seeded");
-        assert_eq!(of("race"), race[0].meta.total_size as i64, "a paused one announces nothing");
+        assert_eq!(
+            of("hoard"),
+            hoard[0].meta.total_size as i64,
+            "a downloading torrent is not seeded"
+        );
+        assert_eq!(
+            of("race"),
+            race[0].meta.total_size as i64,
+            "a paused one announces nothing"
+        );
         assert!(of("hoard") > 0);
     }
 
@@ -22000,8 +25591,16 @@ mod populated_tests {
         for name in ["MAM", "animes", "Calewood", "kids", "ABNormal"] {
             crate::api::testing::put_category(&s.state, name, "hoard", "/tmp");
         }
-        let v = body_json(super::get_categories(State(s.state.clone()), RawQuery(None), keyed(KEY)).await).await;
-        let names: Vec<&str> = v.as_array().unwrap().iter().map(|c| c["name"].as_str().unwrap()).collect();
+        let v = body_json(
+            super::get_categories(State(s.state.clone()), RawQuery(None), keyed(KEY)).await,
+        )
+        .await;
+        let names: Vec<&str> = v
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["name"].as_str().unwrap())
+            .collect();
         assert_eq!(names, vec!["ABNormal", "animes", "Calewood", "kids", "MAM"]);
     }
 
@@ -22016,24 +25615,45 @@ mod populated_tests {
         std::fs::create_dir_all(dir.join("torrents")).unwrap();
         std::fs::create_dir_all(dir.join("resume")).unwrap();
         std::fs::write(dir.join("torrents/A.torrent"), torrent_bytes("alpha")).unwrap();
-        std::fs::write(dir.join("resume/A.resume"), b"d11:destination10:/tmp/films8:uploadedi77ee").unwrap();
-        let body = serde_json::json!({"dir": dir, "path_map": {}, "start_stopped": true}).to_string();
+        std::fs::write(
+            dir.join("resume/A.resume"),
+            b"d11:destination10:/tmp/films8:uploadedi77ee",
+        )
+        .unwrap();
+        let body =
+            serde_json::json!({"dir": dir, "path_map": {}, "start_stopped": true}).to_string();
 
         let preview = body_json(
-            super::post_transmission_preview(State(s.state.clone()), RawQuery(None), keyed(KEY), body.clone()).await,
+            super::post_transmission_preview(
+                State(s.state.clone()),
+                RawQuery(None),
+                keyed(KEY),
+                body.clone(),
+            )
+            .await,
         )
         .await;
         assert_eq!(preview["total"], 1, "got {preview}");
-        assert_eq!(preview["incomplete"], 1, "no progress in the resume: checked, not trusted");
+        assert_eq!(
+            preview["incomplete"], 1,
+            "no progress in the resume: checked, not trusted"
+        );
         assert_eq!(preview["carried_uploaded_bytes"], 77);
         assert_eq!(preview["categories"][0]["name"], "films");
 
         let run = || async {
             let resp = super::post_transmission_import_start(
-                State(s.state.clone()), RawQuery(None), keyed(KEY), body.clone(),
+                State(s.state.clone()),
+                RawQuery(None),
+                keyed(KEY),
+                body.clone(),
             )
             .await;
-            assert!(resp.status().is_success(), "start answered {:?}", resp.status());
+            assert!(
+                resp.status().is_success(),
+                "start answered {:?}",
+                resp.status()
+            );
             for _ in 0..500 {
                 if !latest_import(&s.state).expect("a job").1.running() {
                     break;
@@ -22044,16 +25664,33 @@ mod populated_tests {
         };
         let first = run().await;
         assert_eq!(first["phase"], "done", "got {first}");
-        assert_eq!((first["done"].as_u64(), first["downloading"].as_u64()), (Some(1), Some(1)), "got {first}");
+        assert_eq!(
+            (first["done"].as_u64(), first["downloading"].as_u64()),
+            (Some(1), Some(1)),
+            "got {first}"
+        );
 
         let hoard = s.state.engines.get("hoard").expect("hoard").manager.all();
         assert_eq!(hoard.len(), 1);
-        assert!(hoard[0].is_paused.load(std::sync::atomic::Ordering::Relaxed), "imported stopped");
-        assert_eq!(hoard[0].total_uploaded.load(std::sync::atomic::Ordering::Relaxed), 77);
+        assert!(
+            hoard[0]
+                .is_paused
+                .load(std::sync::atomic::Ordering::Relaxed),
+            "imported stopped"
+        );
+        assert_eq!(
+            hoard[0]
+                .total_uploaded
+                .load(std::sync::atomic::Ordering::Relaxed),
+            77
+        );
         assert_eq!(categories_map(&s.state)["films"].mode, "hoard");
 
         let second = run().await;
-        assert_eq!(second["skipped"], 1, "already there: skipped, not added twice: {second}");
+        assert_eq!(
+            second["skipped"], 1,
+            "already there: skipped, not added twice: {second}"
+        );
         assert_eq!(s.state.engines.get("hoard").unwrap().manager.all().len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -22063,7 +25700,10 @@ mod populated_tests {
     async fn the_qbit_preview_refuses_an_empty_url_and_reports_an_unreachable_one() {
         let s = st("imp-qb");
         let empty = super::post_qbit_import_preview(
-            State(s.state.clone()), RawQuery(None), keyed(KEY), r#"{"url":"  "}"#.into(),
+            State(s.state.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            r#"{"url":"  "}"#.into(),
         )
         .await;
         assert_eq!(empty.status(), StatusCode::BAD_REQUEST);
@@ -22071,14 +25711,19 @@ mod populated_tests {
         // A filled URL nobody answers on: the error names it, it is not "empty".
         let down = body_json(
             super::post_qbit_import_preview(
-                State(s.state.clone()), RawQuery(None), keyed(KEY),
+                State(s.state.clone()),
+                RawQuery(None),
+                keyed(KEY),
                 r#"{"url":"127.0.0.1:1","username":"a","password":"b"}"#.into(),
             )
             .await,
         )
         .await;
         let msg = down["error"].as_str().unwrap_or_default();
-        assert!(msg.contains("cannot reach qBittorrent at http://127.0.0.1:1"), "got {down}");
+        assert!(
+            msg.contains("cannot reach qBittorrent at http://127.0.0.1:1"),
+            "got {down}"
+        );
     }
 
     /// The overview's space on disk is `null` until the link scanner has
@@ -22088,7 +25733,12 @@ mod populated_tests {
         let (s, _h) = populated("pop-diskusage");
         let before = status_payload(&s.state);
         assert!(before["storage"]["data_bytes"].is_null(), "got {before}");
-        let usage = crate::linkindex::DiskUsage { data_bytes: 5000, shared_bytes: 3000, missing_files: 1, torrents: 9 };
+        let usage = crate::linkindex::DiskUsage {
+            data_bytes: 5000,
+            shared_bytes: 3000,
+            missing_files: 1,
+            torrents: 9,
+        };
         s.state.engines.publish_catalogue_usage(usage, 1234);
         let after = status_payload(&s.state);
         assert_eq!(after["storage"]["data_bytes"], 5000, "got {after}");
@@ -22122,7 +25772,10 @@ mod populated_tests {
         assert_eq!(body["engines"][0]["engine"], "hoard", "got {body}");
         assert_eq!(class["class"], "unknown_torrent");
         assert_eq!(class["samples"][0]["message"], "Unregistered torrent");
-        assert_eq!(class["samples"][0]["name"], "charlie", "named, not just hashed: {body}");
+        assert_eq!(
+            class["samples"][0]["name"], "charlie",
+            "named, not just hashed: {body}"
+        );
         assert_eq!(class["samples"][0]["list_class"], "dead");
     }
 
@@ -22184,8 +25837,14 @@ mod populated_tests {
     async fn a_torrent_with_no_store_row_can_still_be_removed() {
         let (s, hashes) = populated("pop-delete-strayed");
         let h = hashes[0].clone();
-        assert!(s.state.store.lock().unwrap().delete_torrent(&h).unwrap(), "the row is gone");
-        assert!(find_torrent(&s.state, &h).is_some(), "the engine still runs it");
+        assert!(
+            s.state.store.lock().unwrap().delete_torrent(&h).unwrap(),
+            "the row is gone"
+        );
+        assert!(
+            find_torrent(&s.state, &h).is_some(),
+            "the engine still runs it"
+        );
 
         let resp = super::delete_torrent(
             State(s.state.clone()),
@@ -22195,7 +25854,10 @@ mod populated_tests {
         )
         .await;
         assert!(resp.status().is_success(), "got {:?}", resp.status());
-        assert!(find_torrent(&s.state, &h).is_none(), "and now the engine does not");
+        assert!(
+            find_torrent(&s.state, &h).is_none(),
+            "and now the engine does not"
+        );
     }
 }
 
@@ -22225,9 +25887,17 @@ mod write_path_tests {
 
     fn with_torrent(tag: &str) -> (TestState, String) {
         let s = state_from(tag, &format!("[daemon]\napi_key = \"{KEY}\"\n"));
-        let (hash, _name) =
-            add_torrent_bytes(&s.state, &torrent_bytes("alpha"), "", "/tmp", "", true, true, "race")
-                .expect("added");
+        let (hash, _name) = add_torrent_bytes(
+            &s.state,
+            &torrent_bytes("alpha"),
+            "",
+            "/tmp",
+            "",
+            true,
+            true,
+            "race",
+        )
+        .expect("added");
         (s, hash)
     }
 
@@ -22258,8 +25928,14 @@ mod write_path_tests {
         let (s, hash) = with_torrent("refuse-copy");
         let ih = typhon_engine::torrent::hex_decode(&hash).unwrap();
         refuse_writes(&s, &["torrents"]);
-        let r = super::post_torrent_copy(State(s.state.clone()), axum::extract::Path(hash.clone()),
-            RawQuery(None), keyed(KEY), r#"{"engine":"hoard"}"#.to_string()).await;
+        let r = super::post_torrent_copy(
+            State(s.state.clone()),
+            axum::extract::Path(hash.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            r#"{"engine":"hoard"}"#.to_string(),
+        )
+        .await;
         seen.push(("POST /api/torrents/:hash/copy", r.status()));
         let hoard = s.state.engines.get("hoard").unwrap();
         if hoard.manager.get(&ih).is_some() {
@@ -22270,11 +25946,29 @@ mod write_path_tests {
         let (s, hash) = with_torrent("refuse-move");
         let ih = typhon_engine::torrent::hex_decode(&hash).unwrap();
         refuse_writes(&s, &["torrents"]);
-        let r = super::post_torrent_engine(State(s.state.clone()), axum::extract::Path(hash.clone()),
-            RawQuery(None), keyed(KEY), r#"{"engine":"hoard"}"#.to_string()).await;
+        let r = super::post_torrent_engine(
+            State(s.state.clone()),
+            axum::extract::Path(hash.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            r#"{"engine":"hoard"}"#.to_string(),
+        )
+        .await;
         seen.push(("POST /api/torrents/:hash/engine", r.status()));
-        if s.state.engines.get("race").unwrap().manager.get(&ih).is_none()
-            || s.state.engines.get("hoard").unwrap().manager.get(&ih).is_some()
+        if s.state
+            .engines
+            .get("race")
+            .unwrap()
+            .manager
+            .get(&ih)
+            .is_none()
+            || s.state
+                .engines
+                .get("hoard")
+                .unwrap()
+                .manager
+                .get(&ih)
+                .is_some()
         {
             left_behind.push("move: the engines moved, the store did not");
         }
@@ -22282,44 +25976,90 @@ mod write_path_tests {
         // Removal: the engine let go, the store delete fails.
         let (s, hash) = with_torrent("refuse-delete");
         refuse_writes(&s, &["torrents"]);
-        let r = super::delete_torrent(State(s.state.clone()), axum::extract::Path(hash.clone()),
-            RawQuery(None), keyed(KEY)).await;
+        let r = super::delete_torrent(
+            State(s.state.clone()),
+            axum::extract::Path(hash.clone()),
+            RawQuery(None),
+            keyed(KEY),
+        )
+        .await;
         seen.push(("DELETE /api/torrents/:hash", r.status()));
         let (s, hash) = with_torrent("refuse-qbit-delete");
         refuse_writes(&s, &["torrents"]);
         let mut form = super::Fields::new();
         form.insert("hashes".into(), hash.clone());
-        let r = super::qbit_delete(State(s.state.clone()), RawQuery(None), keyed(KEY), axum::extract::Form(form)).await;
+        let r = super::qbit_delete(
+            State(s.state.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            axum::extract::Form(form),
+        )
+        .await;
         seen.push(("qbit delete", r.status()));
 
         // Pause of one race torrent.
         let (s, hash) = with_torrent("refuse-pause");
         refuse_writes(&s, &["torrents"]);
-        let r = super::race_pause_one(State(s.state.clone()), axum::extract::Path(hash.clone()),
-            RawQuery(None), keyed(KEY)).await;
+        let r = super::race_pause_one(
+            State(s.state.clone()),
+            axum::extract::Path(hash.clone()),
+            RawQuery(None),
+            keyed(KEY),
+        )
+        .await;
         seen.push(("POST /api/race/torrents/:hash/pause", r.status()));
 
         // The baseline counters.
         let (s, _) = with_torrent("refuse-baseline");
         refuse_writes(&s, &["counters"]);
-        let r = super::post_baseline(State(s.state.clone()), RawQuery(None), keyed(KEY),
-            r#"{"total_uploaded":5,"total_downloaded":6}"#.to_string()).await;
+        let r = super::post_baseline(
+            State(s.state.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            r#"{"total_uploaded":5,"total_downloaded":6}"#.to_string(),
+        )
+        .await;
         seen.push(("POST /api/stats/baseline", r.status()));
 
         // A rename that cannot follow a watched folder.
         let s = state_from("refuse-rename", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
-        super::category_create(State(s.state.clone()), RawQuery(None), keyed(KEY),
-            r#"{"name":"films","save_path":"/data/films","mode":"hoard"}"#.to_string()).await;
-        s.state.store.lock().unwrap()
-            .put_setting("watch_folders", r#"[{"path":"/watch","category":"films"}]"#).unwrap();
+        super::category_create(
+            State(s.state.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            r#"{"name":"films","save_path":"/data/films","mode":"hoard"}"#.to_string(),
+        )
+        .await;
+        s.state
+            .store
+            .lock()
+            .unwrap()
+            .put_setting("watch_folders", r#"[{"path":"/watch","category":"films"}]"#)
+            .unwrap();
         refuse_writes(&s, &["app_settings"]);
-        let r = super::category_update(State(s.state.clone()), axum::extract::Path("films".to_string()),
-            RawQuery(None), keyed(KEY), r#"{"name":"movies","save_path":"/data/films","mode":"hoard"}"#.to_string()).await;
+        let r = super::category_update(
+            State(s.state.clone()),
+            axum::extract::Path("films".to_string()),
+            RawQuery(None),
+            keyed(KEY),
+            r#"{"name":"movies","save_path":"/data/films","mode":"hoard"}"#.to_string(),
+        )
+        .await;
         seen.push(("PUT /api/categories/:name (rename)", r.status()));
 
-        let acked: Vec<String> = seen.iter().filter(|(_, c)| !c.is_server_error()).map(|(n, c)| format!("{n} -> {c}")).collect();
-        assert!(acked.is_empty(), "not refused although the store refused the write: {acked:?}");
-        assert!(left_behind.is_empty(), "engines and store disagree: {left_behind:?}");
+        let acked: Vec<String> = seen
+            .iter()
+            .filter(|(_, c)| !c.is_server_error())
+            .map(|(n, c)| format!("{n} -> {c}"))
+            .collect();
+        assert!(
+            acked.is_empty(),
+            "not refused although the store refused the write: {acked:?}"
+        );
+        assert!(
+            left_behind.is_empty(),
+            "engines and store disagree: {left_behind:?}"
+        );
     }
 
     /// ⭐⭐ The settings screen edits keys this binary does not model, so the
@@ -22331,9 +26071,8 @@ mod write_path_tests {
             "set-unmodelled",
             &format!("[daemon]\napi_key = \"{KEY}\"\n"),
         );
-        let doc = format!(
-            "[daemon]\napi_key = \"{KEY}\"\n\n[a_section_nobody_models]\nkept = \"yes\"\n"
-        );
+        let doc =
+            format!("[daemon]\napi_key = \"{KEY}\"\n\n[a_section_nobody_models]\nkept = \"yes\"\n");
         let resp = super::post_settings(
             State(s.state.clone()),
             RawQuery(None),
@@ -22358,7 +26097,11 @@ mod write_path_tests {
             serde_json::json!({"content": "[unclosed\nnot = toml ="}).to_string(),
         )
         .await;
-        assert!(!resp.status().is_success(), "invalid TOML must not be written: {:?}", resp.status());
+        assert!(
+            !resp.status().is_success(),
+            "invalid TOML must not be written: {:?}",
+            resp.status()
+        );
     }
 
     /// A category can be updated after it was created, and updating one that
@@ -22385,7 +26128,10 @@ mod write_path_tests {
         assert!(updated.status().is_success(), "got {:?}", updated.status());
 
         let (_engine, path) = placement(&s.state, "films", "");
-        assert_eq!(path, "/data/movies", "the new save path is what placement uses");
+        assert_eq!(
+            path, "/data/movies",
+            "the new save path is what placement uses"
+        );
     }
 
     /// Deleting a category that torrents still point at, then placing into it,
@@ -22408,7 +26154,10 @@ mod write_path_tests {
         )
         .await;
         let (engine, _path) = placement(&s.state, "films", "");
-        assert_eq!(engine, "race", "a category that is gone is an unknown category");
+        assert_eq!(
+            engine, "race",
+            "a category that is gone is an unknown category"
+        );
     }
 
     /// ⭐ Moving a torrent to another engine is a JOB, never inline: a bulk
@@ -22435,7 +26184,9 @@ mod write_path_tests {
         let (s, hash) = with_torrent("move-keeps");
         let ih = typhon_engine::torrent::hex_decode(&hash).unwrap();
         let race = s.state.engines.get("race").unwrap();
-        race.manager.set_trackers(&ih, vec![vec!["https://edited.example/announce".into()]]).unwrap();
+        race.manager
+            .set_trackers(&ih, vec![vec!["https://edited.example/announce".into()]])
+            .unwrap();
         let resp = super::post_torrent_engine(
             State(s.state.clone()),
             axum::extract::Path(hash.clone()),
@@ -22448,8 +26199,14 @@ mod write_path_tests {
         assert!(race.manager.get(&ih).is_none(), "the source let go");
         let hoard = s.state.engines.get("hoard").unwrap();
         let t = hoard.manager.get(&ih).expect("the target holds it");
-        assert_eq!(*t.live_trackers.read(), vec![vec!["https://edited.example/announce".to_string()]]);
-        assert!(t.is_paused.load(std::sync::atomic::Ordering::Relaxed), "added paused, still paused");
+        assert_eq!(
+            *t.live_trackers.read(),
+            vec![vec!["https://edited.example/announce".to_string()]]
+        );
+        assert!(
+            t.is_paused.load(std::sync::atomic::Ordering::Relaxed),
+            "added paused, still paused"
+        );
     }
 
     /// Copying to an engine that does not exist is refused: the copy would
@@ -22493,7 +26250,10 @@ mod write_path_tests {
             .await,
         )
         .await;
-        assert!(listed.to_string().contains("tracker.example"), "got {listed}");
+        assert!(
+            listed.to_string().contains("tracker.example"),
+            "got {listed}"
+        );
     }
 
     /// Replacing the tracker list REPLACES it; the old host must be gone.
@@ -22531,7 +26291,11 @@ mod write_path_tests {
             r#"{"up_kib":50}"#.to_string(),
         )
         .await;
-        assert_eq!(r.status(), StatusCode::INTERNAL_SERVER_ERROR, "a cap the store refused");
+        assert_eq!(
+            r.status(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "a cap the store refused"
+        );
         assert_eq!(race.manager.get(&ih).unwrap().rate_limits(), (0, 0));
 
         let r = super::post_torrent_trackers(
@@ -22542,8 +26306,15 @@ mod write_path_tests {
             r#"{"op":"set","tiers":[["https://edited.example/announce"]]}"#.to_string(),
         )
         .await;
-        assert_eq!(r.status(), StatusCode::INTERNAL_SERVER_ERROR, "a tracker list the store refused");
-        assert_eq!(*race.manager.get(&ih).unwrap().live_trackers.read(), trackers_before);
+        assert_eq!(
+            r.status(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "a tracker list the store refused"
+        );
+        assert_eq!(
+            *race.manager.get(&ih).unwrap().live_trackers.read(),
+            trackers_before
+        );
     }
 
     /// An add the engine's state store refused is answered with an error, and
@@ -22551,18 +26322,38 @@ mod write_path_tests {
     /// add route (native, qBittorrent shim, MCP, magnets) goes through this.
     #[tokio::test]
     async fn an_add_the_engine_store_did_not_keep_is_refused() {
-        let s = state_from("add-store-down", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+        let s = state_from(
+            "add-store-down",
+            &format!("[daemon]\napi_key = \"{KEY}\"\n"),
+        );
         let conn = rusqlite::Connection::open(s.dir.join("race").join("state.db")).unwrap();
         conn.execute("DROP TABLE torrent_state", []).unwrap();
         drop(conn);
 
         let bytes = torrent_bytes("alpha");
-        let ih = typhon_engine::torrent::metainfo::parse_torrent_bytes(&bytes).unwrap().info_hash;
+        let ih = typhon_engine::torrent::metainfo::parse_torrent_bytes(&bytes)
+            .unwrap()
+            .info_hash;
         let r = add_torrent_bytes(&s.state, &bytes, "", "/tmp", "", true, true, "race");
-        assert!(r.is_err(), "the engine's store refused the record, so the answer is no: {r:?}");
-        assert!(s.state.engines.get("race").unwrap().manager.get(&ih).is_none(), "no torrent is left in the engine");
+        assert!(
+            r.is_err(),
+            "the engine's store refused the record, so the answer is no: {r:?}"
+        );
+        assert!(
+            s.state
+                .engines
+                .get("race")
+                .unwrap()
+                .manager
+                .get(&ih)
+                .is_none(),
+            "no torrent is left in the engine"
+        );
         let hash = typhon_engine::torrent::hex_encode(&ih);
-        assert!(!s.state.store.lock().unwrap().has_torrent_blob(&hash), "nor a row in the hub's store");
+        assert!(
+            !s.state.store.lock().unwrap().has_torrent_blob(&hash),
+            "nor a row in the hub's store"
+        );
     }
 
     /// A job created by the daemon is listed and can be read back by id -- the
@@ -22572,13 +26363,18 @@ mod write_path_tests {
         let s = state_from("jobs", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
         let id = {
             let store = s.store.lock().unwrap();
-            store.create_job("move", &"a".repeat(40), "{}", 1000).expect("created")
+            store
+                .create_job("move", &"a".repeat(40), "{}", 1000)
+                .expect("created")
         };
 
         let listed =
             body_json(super::get_jobs(State(s.state.clone()), RawQuery(None), keyed(KEY)).await)
                 .await;
-        assert!(listed.to_string().contains(&id), "the job is listed: {listed}");
+        assert!(
+            listed.to_string().contains(&id),
+            "the job is listed: {listed}"
+        );
 
         let one = super::get_job(
             State(s.state.clone()),
@@ -22590,7 +26386,11 @@ mod write_path_tests {
         assert!(one.status().is_success(), "got {:?}", one.status());
         let body = body_json(one).await;
         assert_eq!(body["id"], serde_json::json!(id));
-        assert_eq!(body["type"], serde_json::json!("move"), "`type` in JSON, `kind` in Rust");
+        assert_eq!(
+            body["type"],
+            serde_json::json!("move"),
+            "`type` in JSON, `kind` in Rust"
+        );
     }
 
     /// Deleting a job that exists works; deleting it twice is reported.
@@ -22599,7 +26399,9 @@ mod write_path_tests {
         let s = state_from("jobs-delete", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
         let id = {
             let store = s.store.lock().unwrap();
-            store.create_job("move", &"a".repeat(40), "{}", 10).expect("created")
+            store
+                .create_job("move", &"a".repeat(40), "{}", 10)
+                .expect("created")
         };
         let first = super::delete_job(
             State(s.state.clone()),
@@ -22608,7 +26410,11 @@ mod write_path_tests {
             keyed(KEY),
         )
         .await;
-        assert!(!first.status().is_server_error(), "got {:?}", first.status());
+        assert!(
+            !first.status().is_server_error(),
+            "got {:?}",
+            first.status()
+        );
     }
 
     /// Checking import paths that do not exist reports them as missing rather
@@ -22646,7 +26452,10 @@ mod write_path_tests {
     /// drain -- it must apply on the NEXT tick, not after a restart.
     #[tokio::test]
     async fn a_volume_policy_is_stored_and_read_back_by_the_drain() {
-        let s = state_from("volpolicy-store", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+        let s = state_from(
+            "volpolicy-store",
+            &format!("[daemon]\napi_key = \"{KEY}\"\n"),
+        );
         let body: VolumePolicyBody = serde_json::from_value(serde_json::json!({
             "volume": "/mnt/race",
             "enabled": true,
@@ -22654,9 +26463,13 @@ mod write_path_tests {
             "low_watermark": 77
         }))
         .expect("a valid policy body");
-        let resp =
-            super::set_volume_policy(State(s.state.clone()), RawQuery(None), keyed(KEY), Json(body))
-                .await;
+        let resp = super::set_volume_policy(
+            State(s.state.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            Json(body),
+        )
+        .await;
         assert!(!resp.status().is_server_error(), "got {:?}", resp.status());
 
         let cfg = s.cfg();
@@ -22671,25 +26484,41 @@ mod write_path_tests {
     #[tokio::test]
     async fn trim_after_drain_is_off_by_default_and_does_not_freeze_the_watermarks() {
         let s = state_from("voltrim", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
-        assert!(!crate::volumes::trim_enabled(&s.state, "/mnt/race"), "off unless asked");
+        assert!(
+            !crate::volumes::trim_enabled(&s.state, "/mnt/race"),
+            "off unless asked"
+        );
         let body: VolumePolicyBody = serde_json::from_value(serde_json::json!({
             "volume": "/mnt/race", "trim_after_drain": true
         }))
         .unwrap();
-        let resp =
-            super::set_volume_policy(State(s.state.clone()), RawQuery(None), keyed(KEY), Json(body))
-                .await;
+        let resp = super::set_volume_policy(
+            State(s.state.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            Json(body),
+        )
+        .await;
         assert!(!resp.status().is_server_error(), "got {:?}", resp.status());
         assert!(crate::volumes::trim_enabled(&s.state, "/mnt/race"));
         let cfg = s.cfg();
         let p = crate::volumes::policy_for(&s.state, "/mnt/race", &cfg.race_drain);
-        assert!(p.inherited, "the watermarks still follow the global default");
+        assert!(
+            p.inherited,
+            "the watermarks still follow the global default"
+        );
 
         let off: VolumePolicyBody = serde_json::from_value(serde_json::json!({
             "volume": "/mnt/race", "trim_after_drain": false
         }))
         .unwrap();
-        super::set_volume_policy(State(s.state.clone()), RawQuery(None), keyed(KEY), Json(off)).await;
+        super::set_volume_policy(
+            State(s.state.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            Json(off),
+        )
+        .await;
         assert!(!crate::volumes::trim_enabled(&s.state, "/mnt/race"));
     }
 
@@ -22703,7 +26532,10 @@ mod write_path_tests {
         std::fs::create_dir_all(&dir).unwrap();
         let mount = dir.to_string_lossy().to_string();
         crate::volumes::trim_after_drain(&s.state, &mount);
-        assert!(crate::volumes::last_trim(&s.state, &mount).is_none(), "off: nothing runs");
+        assert!(
+            crate::volumes::last_trim(&s.state, &mount).is_none(),
+            "off: nothing runs"
+        );
 
         crate::volumes::save_trim(&s.state, &mount, true).unwrap();
         crate::volumes::trim_after_drain(&s.state, &mount);
@@ -22720,26 +26552,43 @@ mod write_path_tests {
         let last = last.expect("the outcome is written down");
         eprintln!("trim outcome on {mount}: {last}");
         assert!(last.get("secs").is_some(), "got {last}");
-        assert!(last.get("bytes").is_some() || last.get("error").is_some(), "got {last}");
+        assert!(
+            last.get("bytes").is_some() || last.get("error").is_some(),
+            "got {last}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Clearing a volume's policy puts it back on the global default.
     #[tokio::test]
     async fn clearing_a_volume_policy_returns_it_to_the_global_default() {
-        let s = state_from("volpolicy-clear", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+        let s = state_from(
+            "volpolicy-clear",
+            &format!("[daemon]\napi_key = \"{KEY}\"\n"),
+        );
         let set: VolumePolicyBody = serde_json::from_value(serde_json::json!({
             "volume": "/mnt/race", "enabled": true, "high_watermark": 91, "low_watermark": 77
         }))
         .unwrap();
-        super::set_volume_policy(State(s.state.clone()), RawQuery(None), keyed(KEY), Json(set)).await;
+        super::set_volume_policy(
+            State(s.state.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            Json(set),
+        )
+        .await;
 
         let inherit: VolumePolicyBody = serde_json::from_value(serde_json::json!({
             "volume": "/mnt/race", "inherit": true
         }))
         .unwrap();
-        super::set_volume_policy(State(s.state.clone()), RawQuery(None), keyed(KEY), Json(inherit))
-            .await;
+        super::set_volume_policy(
+            State(s.state.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            Json(inherit),
+        )
+        .await;
 
         let cfg = s.cfg();
         let p = crate::volumes::policy_for(&s.state, "/mnt/race", &cfg.race_drain);
@@ -22861,8 +26710,13 @@ mod remaining_routes_tests {
     async fn the_changelog_is_served_from_the_binary() {
         let resp = super::get_changelog().await;
         assert!(resp.status().is_success());
-        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
-        assert!(!bytes.is_empty(), "a release with no entry cannot describe itself");
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(
+            !bytes.is_empty(),
+            "a release with no entry cannot describe itself"
+        );
     }
 
     /// Per-torrent timeline routes: refused without a key, and answering for a
@@ -23163,15 +27017,51 @@ mod route_table_tests {
         let srv = serve("route-removed").await;
         let c = reqwest::Client::new();
         let cases: &[(reqwest::Method, &str, reqwest::StatusCode)] = &[
-            (reqwest::Method::GET, "/api/race/choking", reqwest::StatusCode::NOT_FOUND),
-            (reqwest::Method::GET, "/api/opt/flags", reqwest::StatusCode::NOT_FOUND),
-            (reqwest::Method::POST, "/api/opt/flags", reqwest::StatusCode::NOT_FOUND),
-            (reqwest::Method::POST, "/api/hoard/verify-downloading", reqwest::StatusCode::NOT_FOUND),
-            (reqwest::Method::POST, "/api/hoard/restart-stuck", reqwest::StatusCode::NOT_FOUND),
-            (reqwest::Method::POST, "/api/arr-cleanup/execute", reqwest::StatusCode::NOT_FOUND),
-            (reqwest::Method::POST, "/api/race/settings", reqwest::StatusCode::METHOD_NOT_ALLOWED),
-            (reqwest::Method::POST, "/api/hoard/download-slots", reqwest::StatusCode::METHOD_NOT_ALLOWED),
-            (reqwest::Method::DELETE, "/api/hoard/download-slots", reqwest::StatusCode::METHOD_NOT_ALLOWED),
+            (
+                reqwest::Method::GET,
+                "/api/race/choking",
+                reqwest::StatusCode::NOT_FOUND,
+            ),
+            (
+                reqwest::Method::GET,
+                "/api/opt/flags",
+                reqwest::StatusCode::NOT_FOUND,
+            ),
+            (
+                reqwest::Method::POST,
+                "/api/opt/flags",
+                reqwest::StatusCode::NOT_FOUND,
+            ),
+            (
+                reqwest::Method::POST,
+                "/api/hoard/verify-downloading",
+                reqwest::StatusCode::NOT_FOUND,
+            ),
+            (
+                reqwest::Method::POST,
+                "/api/hoard/restart-stuck",
+                reqwest::StatusCode::NOT_FOUND,
+            ),
+            (
+                reqwest::Method::POST,
+                "/api/arr-cleanup/execute",
+                reqwest::StatusCode::NOT_FOUND,
+            ),
+            (
+                reqwest::Method::POST,
+                "/api/race/settings",
+                reqwest::StatusCode::METHOD_NOT_ALLOWED,
+            ),
+            (
+                reqwest::Method::POST,
+                "/api/hoard/download-slots",
+                reqwest::StatusCode::METHOD_NOT_ALLOWED,
+            ),
+            (
+                reqwest::Method::DELETE,
+                "/api/hoard/download-slots",
+                reqwest::StatusCode::METHOD_NOT_ALLOWED,
+            ),
         ];
         let mut wrong = Vec::new();
         for (method, path, want) in cases {
@@ -23203,10 +27093,26 @@ mod route_table_tests {
             (reqwest::Method::GET, "/api/agents/torrents", "/api/nodes"),
             (reqwest::Method::POST, "/api/agents/test", "/api/nodes"),
             (reqwest::Method::PUT, "/api/agents/seedbox-de", "/api/nodes"),
-            (reqwest::Method::DELETE, "/api/agents/seedbox-de", "/api/nodes"),
-            (reqwest::Method::POST, "/api/agents/restore/seedbox-de", "/api/nodes"),
-            (reqwest::Method::POST, "/api/agents/seedbox-de/action", "/api/nodes"),
-            (reqwest::Method::POST, "/api/jobs/move-remote", "/api/selection/handoff"),
+            (
+                reqwest::Method::DELETE,
+                "/api/agents/seedbox-de",
+                "/api/nodes",
+            ),
+            (
+                reqwest::Method::POST,
+                "/api/agents/restore/seedbox-de",
+                "/api/nodes",
+            ),
+            (
+                reqwest::Method::POST,
+                "/api/agents/seedbox-de/action",
+                "/api/nodes",
+            ),
+            (
+                reqwest::Method::POST,
+                "/api/jobs/move-remote",
+                "/api/selection/handoff",
+            ),
         ];
         let mut wrong = Vec::new();
         for (method, path, names) in cases {
@@ -23251,7 +27157,11 @@ mod route_table_tests {
                 .send()
                 .await
                 .expect("request");
-            assert_ne!(resp.status(), reqwest::StatusCode::NOT_FOUND, "{path} left the table");
+            assert_ne!(
+                resp.status(),
+                reqwest::StatusCode::NOT_FOUND,
+                "{path} left the table"
+            );
         }
     }
 
@@ -23263,8 +27173,17 @@ mod route_table_tests {
         let srv = serve("route-egress").await;
         let c = reqwest::Client::new();
         let url = format!("{}/api/network/egress", srv.url);
-        assert_eq!(c.get(&url).send().await.unwrap().status(), reqwest::StatusCode::UNAUTHORIZED);
-        let bad = c.post(&url).header("X-API-Key", KEY).body(r#"{"socks5_host":"10.0.0.1","socks5_port":0}"#).send().await.unwrap();
+        assert_eq!(
+            c.get(&url).send().await.unwrap().status(),
+            reqwest::StatusCode::UNAUTHORIZED
+        );
+        let bad = c
+            .post(&url)
+            .header("X-API-Key", KEY)
+            .body(r#"{"socks5_host":"10.0.0.1","socks5_port":0}"#)
+            .send()
+            .await
+            .unwrap();
         assert_eq!(bad.status(), reqwest::StatusCode::BAD_REQUEST);
 
         let saved: serde_json::Value = c
@@ -23278,8 +27197,16 @@ mod route_table_tests {
             .await
             .unwrap();
         assert_eq!(saved["kill_switch"], true, "{saved:#}");
-        assert!(saved["daemon"]["error"].as_str().unwrap().contains("kill switch"), "{saved:#}");
-        assert!(saved["not_covered"].as_array().is_some_and(|a| !a.is_empty()));
+        assert!(
+            saved["daemon"]["error"]
+                .as_str()
+                .unwrap()
+                .contains("kill switch"),
+            "{saved:#}"
+        );
+        assert!(saved["not_covered"]
+            .as_array()
+            .is_some_and(|a| !a.is_empty()));
 
         let got: serde_json::Value = c
             .post(&url)
@@ -23293,10 +27220,23 @@ mod route_table_tests {
             .unwrap();
         assert_eq!(got["daemon"]["socks5_host"], "10.0.0.1");
         assert_eq!(got["daemon"]["error"], "", "{got:#}");
-        assert!(!got["daemon"]["route"].as_str().unwrap().contains(":p@"), "credentials never shown in the route line");
-        let again: serde_json::Value =
-            c.get(&url).header("X-API-Key", KEY).send().await.unwrap().json().await.unwrap();
-        assert_eq!(again["daemon"]["socks5_port"], 1080, "read back from the file");
+        assert!(
+            !got["daemon"]["route"].as_str().unwrap().contains(":p@"),
+            "credentials never shown in the route line"
+        );
+        let again: serde_json::Value = c
+            .get(&url)
+            .header("X-API-Key", KEY)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(
+            again["daemon"]["socks5_port"], 1080,
+            "read back from the file"
+        );
         assert_eq!(again["egress"], "proxy");
         assert_eq!(again["daemon"]["via_kind"], "proxy");
 
@@ -23314,10 +27254,24 @@ mod route_table_tests {
         assert_eq!(auto["kill_switch"], serde_json::Value::Null, "{auto:#}");
         assert_eq!(auto["armed"], false, "direct mode, nothing written");
         assert_eq!(auto["daemon"]["via_kind"], "direct");
-        assert_eq!(auto["daemon"]["socks5_host"], "10.0.0.1", "untouched: not in the body");
+        assert_eq!(
+            auto["daemon"]["socks5_host"], "10.0.0.1",
+            "untouched: not in the body"
+        );
         // A typo and an unknown engine are refused, nothing written.
-        for body in [r#"{"egress":"tunnel"}"#, r#"{"egress":"engine:nope"}"#, r#"{"allow_direct":{"nope":true}}"#, r#"{"kill_switch":"yes"}"#] {
-            let r = c.post(&url).header("X-API-Key", KEY).body(body).send().await.unwrap();
+        for body in [
+            r#"{"egress":"tunnel"}"#,
+            r#"{"egress":"engine:nope"}"#,
+            r#"{"allow_direct":{"nope":true}}"#,
+            r#"{"kill_switch":"yes"}"#,
+        ] {
+            let r = c
+                .post(&url)
+                .header("X-API-Key", KEY)
+                .body(body)
+                .send()
+                .await
+                .unwrap();
             assert_eq!(r.status(), reqwest::StatusCode::BAD_REQUEST, "{body}");
         }
         // allow_direct on an engine, by the route.
@@ -23331,7 +27285,13 @@ mod route_table_tests {
             .json()
             .await
             .unwrap();
-        let hoard = d["engines"].as_array().unwrap().iter().find(|e| e["engine"] == "hoard").unwrap().clone();
+        let hoard = d["engines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["engine"] == "hoard")
+            .unwrap()
+            .clone();
         assert_eq!(hoard["allow_direct"], true, "{d:#}");
     }
 }
@@ -23459,9 +27419,7 @@ mod qbit_bulk_tests {
 
     fn torrent_bytes(name: &str) -> Vec<u8> {
         let mut info = Vec::new();
-        info.extend_from_slice(
-            format!("d6:lengthi16384e4:name{}:{name}", name.len()).as_bytes(),
-        );
+        info.extend_from_slice(format!("d6:lengthi16384e4:name{}:{name}", name.len()).as_bytes());
         info.extend_from_slice(b"12:piece lengthi16384e6:pieces20:");
         info.extend_from_slice(&[0u8; 20]);
         info.extend_from_slice(b"e");
@@ -23619,9 +27577,7 @@ mod race_path_engine_tests {
 
     fn torrent_bytes(name: &str) -> Vec<u8> {
         let mut info = Vec::new();
-        info.extend_from_slice(
-            format!("d6:lengthi16384e4:name{}:{name}", name.len()).as_bytes(),
-        );
+        info.extend_from_slice(format!("d6:lengthi16384e4:name{}:{name}", name.len()).as_bytes());
         info.extend_from_slice(b"12:piece lengthi16384e6:pieces20:");
         info.extend_from_slice(&[0u8; 20]);
         info.extend_from_slice(b"e");
@@ -23715,7 +27671,10 @@ mod engine_refusal_tests {
     /// here instead of shipping its own wording.
     #[tokio::test]
     async fn an_unknown_engine_is_refused_by_name_on_every_route() {
-        let s = state_from("unknown-engine", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+        let s = state_from(
+            "unknown-engine",
+            &format!("[daemon]\napi_key = \"{KEY}\"\n"),
+        );
         let sel = "no-such-tunnel".to_string();
 
         let responses = vec![
@@ -23820,16 +27779,25 @@ mod export_route_tests {
     fn populated(tag: &str) -> (TestState, String, Vec<u8>) {
         let s = state_from(tag, &format!("[daemon]\napi_key = \"{KEY}\"\n"));
         let bytes = torrent_bytes("alpha");
-        let (hash, _) = add_torrent_bytes(&s.state, &bytes, "", "/tmp", "", true, true, "hoard").expect("added");
+        let (hash, _) = add_torrent_bytes(&s.state, &bytes, "", "/tmp", "", true, true, "hoard")
+            .expect("added");
         (s, hash, bytes)
     }
 
     fn form(pairs: &[(&str, &str)]) -> axum::extract::Form<Fields> {
-        axum::extract::Form(pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect())
+        axum::extract::Form(
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        )
     }
 
     async fn body(resp: Response) -> Vec<u8> {
-        axum::body::to_bytes(resp.into_body(), usize::MAX).await.expect("body").to_vec()
+        axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("body")
+            .to_vec()
     }
 
     #[tokio::test]
@@ -23858,9 +27826,19 @@ mod export_route_tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let h = resp.headers();
         assert_eq!(h.get("content-type").unwrap(), "application/zip");
-        assert_eq!(h.get("content-encoding").unwrap(), "identity", "the gzip layer must stay off");
-        assert!(h.get("content-disposition").unwrap().to_str().unwrap().starts_with("attachment;"));
-        let mut z = zip::ZipArchive::new(std::io::Cursor::new(body(resp).await)).expect("a valid zip");
+        assert_eq!(
+            h.get("content-encoding").unwrap(),
+            "identity",
+            "the gzip layer must stay off"
+        );
+        assert!(h
+            .get("content-disposition")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("attachment;"));
+        let mut z =
+            zip::ZipArchive::new(std::io::Cursor::new(body(resp).await)).expect("a valid zip");
         assert_eq!(z.len(), 1);
         let mut got = Vec::new();
         z.by_index(0).unwrap().read_to_end(&mut got).unwrap();
@@ -23885,11 +27863,20 @@ mod export_route_tests {
     async fn a_bad_format_or_no_hash_is_refused_before_anything_is_sent() {
         let (s, hash, _) = populated("export-bad");
         for (pairs, why) in [
-            (vec![("hashes", hash.as_str()), ("format", "tar")], "unknown format"),
+            (
+                vec![("hashes", hash.as_str()), ("format", "tar")],
+                "unknown format",
+            ),
             (vec![("hashes", "not-a-hash")], "no usable hash"),
             (vec![], "no hashes at all"),
         ] {
-            let resp = super::post_torrent_export(State(s.state.clone()), RawQuery(None), keyed(KEY), form(&pairs)).await;
+            let resp = super::post_torrent_export(
+                State(s.state.clone()),
+                RawQuery(None),
+                keyed(KEY),
+                form(&pairs),
+            )
+            .await;
             assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{why}");
         }
     }
@@ -23917,7 +27904,10 @@ mod export_route_tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        assert_eq!(String::from_utf8(body(resp).await).unwrap(), format!("{hash}\n"));
+        assert_eq!(
+            String::from_utf8(body(resp).await).unwrap(),
+            format!("{hash}\n")
+        );
 
         let resp = super::router(s.state.clone())
             .oneshot(post(serde_json::json!({"filter": "limit=1", "expect": 1})))
@@ -23929,12 +27919,22 @@ mod export_route_tests {
             .oneshot(post(serde_json::json!({"filter": "", "expect": 0})))
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::CONFLICT, "one torrent, none confirmed");
+        assert_eq!(
+            resp.status(),
+            StatusCode::CONFLICT,
+            "one torrent, none confirmed"
+        );
     }
 
     fn enc_form(s: &str) -> String {
         s.bytes()
-            .map(|b| if b.is_ascii_alphanumeric() { (b as char).to_string() } else { format!("%{b:02X}") })
+            .map(|b| {
+                if b.is_ascii_alphanumeric() {
+                    (b as char).to_string()
+                } else {
+                    format!("%{b:02X}")
+                }
+            })
             .collect()
     }
 }
@@ -23965,7 +27965,10 @@ mod odometer_tests {
     }
 
     fn add(s: &TestState, engine_id: &str, name: &str) -> [u8; 20] {
-        let engine = s.engines.get(engine_id).unwrap_or_else(|| panic!("no engine {engine_id}"));
+        let engine = s
+            .engines
+            .get(engine_id)
+            .unwrap_or_else(|| panic!("no engine {engine_id}"));
         engine
             .manager
             .add_torrent_bytes(&torrent_bytes(name), "/tmp", true, true)
@@ -23986,8 +27989,14 @@ mod odometer_tests {
     }
 
     fn upload(s: &TestState, engine_id: &str, ih: &[u8; 20], n: u64) {
-        s.engines.get(engine_id).unwrap().manager.get(ih).unwrap()
-            .total_uploaded.fetch_add(n, Ordering::Relaxed);
+        s.engines
+            .get(engine_id)
+            .unwrap()
+            .manager
+            .get(ih)
+            .unwrap()
+            .total_uploaded
+            .fetch_add(n, Ordering::Relaxed);
     }
 
     fn tick(s: &TestState) {
@@ -24004,7 +28013,10 @@ mod odometer_tests {
     /// poll after the delete.
     #[tokio::test]
     async fn a_poll_between_a_delete_and_the_next_tick_leaves_the_session_alone() {
-        let s = state_from("odo-delete-race", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+        let s = state_from(
+            "odo-delete-race",
+            &format!("[daemon]\napi_key = \"{KEY}\"\n"),
+        );
         let old = add(&s, "hoard", "old");
         let busy = add(&s, "hoard", "busy");
         load_lifetime(&s, "hoard", &old, 1_000_000);
@@ -24020,7 +28032,8 @@ mod odometer_tests {
         assert_eq!(day.0, 300);
 
         let hash = typhon_engine::torrent::hex_encode(&old);
-        remove_one_torrent(&s.state, &hash, &["hoard".to_string()], "hoard", false).expect("removed");
+        remove_one_torrent(&s.state, &hash, &["hoard".to_string()], "hoard", false)
+            .expect("removed");
 
         // The poll lands before the 1 Hz cache refresh.
         let (_, session, day) = session_and_day(&s.state);
@@ -24030,7 +28043,10 @@ mod odometer_tests {
 
         tick(&s);
         let (_, session, day) = session_and_day(&s.state);
-        assert_eq!(session.0, 300, "a delete is not traffic (after the refresh)");
+        assert_eq!(
+            session.0, 300,
+            "a delete is not traffic (after the refresh)"
+        );
         assert_eq!(day.0, 300);
         assert_eq!(engine_session(&s.state, "hoard").0, 300);
     }
@@ -24064,8 +28080,16 @@ mod odometer_tests {
         hoard.remove_torrent(&ih, true).expect("hoard lets go");
         tick(&s);
         assert_eq!(session_and_day(&s.state).1, (40, 0));
-        assert_eq!(engine_session(&s.state, "hoard"), (40, 0), "hoard keeps what it moved");
-        assert_eq!(engine_session(&s.state, "race"), (0, 0), "race moved nothing yet");
+        assert_eq!(
+            engine_session(&s.state, "hoard"),
+            (40, 0),
+            "hoard keeps what it moved"
+        );
+        assert_eq!(
+            engine_session(&s.state, "race"),
+            (0, 0),
+            "race moved nothing yet"
+        );
 
         upload(&s, "race", &ih, 2);
         tick(&s);
@@ -24085,10 +28109,18 @@ mod odometer_tests {
         upload(&s, "race", &ih, 9);
         let hash = typhon_engine::torrent::hex_encode(&ih);
         remove_one_torrent(&s.state, &hash, &["race".to_string()], "race", false).expect("removed");
-        assert_eq!(session_and_day(&s.state).1, (9, 0), "settled by the removal, not lost");
+        assert_eq!(
+            session_and_day(&s.state).1,
+            (9, 0),
+            "settled by the removal, not lost"
+        );
         tick(&s);
         let (_, session, day) = session_and_day(&s.state);
-        assert_eq!((session, day), ((9, 0), (9, 0)), "and not counted again by the tick");
+        assert_eq!(
+            (session, day),
+            ((9, 0), (9, 0)),
+            "and not counted again by the tick"
+        );
         assert_eq!(engine_session(&s.state, "race"), (9, 0));
     }
 }
@@ -24123,16 +28155,42 @@ mod delete_spares_shared_files_tests {
         let file = dir.join("book.epub");
         std::fs::write(&file, vec![7u8; 16384]).unwrap();
         let root = dir.to_string_lossy().to_string();
-        let (source, _) = add_torrent_bytes(&s.state, &torrent_bytes(false), "", &root, "", true, true, "hoard").expect("source added");
-        let (upload, _) = add_torrent_bytes(&s.state, &torrent_bytes(true), "", &root, "", true, true, "hoard").expect("upload added");
+        let (source, _) = add_torrent_bytes(
+            &s.state,
+            &torrent_bytes(false),
+            "",
+            &root,
+            "",
+            true,
+            true,
+            "hoard",
+        )
+        .expect("source added");
+        let (upload, _) = add_torrent_bytes(
+            &s.state,
+            &torrent_bytes(true),
+            "",
+            &root,
+            "",
+            true,
+            true,
+            "hoard",
+        )
+        .expect("upload added");
         assert_ne!(source, upload);
         let sessions = vec!["hoard".to_string()];
 
         remove_one_torrent(&s.state, &source, &sessions, "", true).expect("source removed");
-        assert!(file.exists(), "the upload still reads book.epub: it must stay");
+        assert!(
+            file.exists(),
+            "the upload still reads book.epub: it must stay"
+        );
 
         remove_one_torrent(&s.state, &upload, &sessions, "", true).expect("upload removed");
-        assert!(!file.exists(), "nothing reads it any more: deleting with files deletes it");
+        assert!(
+            !file.exists(),
+            "nothing reads it any more: deleting with files deletes it"
+        );
     }
 
     /// `torrent_bytes(false)` seeded by `engine` from `dir`, next to whatever
@@ -24142,9 +28200,21 @@ mod delete_spares_shared_files_tests {
         std::fs::write(dir.join("book.epub"), vec![7u8; 16384]).unwrap();
         let blob = torrent_bytes(false);
         let root = dir.to_string_lossy().to_string();
-        let (ih, _) = s.state.engines.get(engine).unwrap().manager.add_torrent_bytes(&blob, &root, false, true).expect("seeded");
+        let (ih, _) = s
+            .state
+            .engines
+            .get(engine)
+            .unwrap()
+            .manager
+            .add_torrent_bytes(&blob, &root, false, true)
+            .expect("seeded");
         let hash = typhon_engine::torrent::hex_encode(&ih);
-        s.state.store.lock().unwrap().insert_torrent(&hash, engine, &blob, &root, "", 0.0, false, "").unwrap();
+        s.state
+            .store
+            .lock()
+            .unwrap()
+            .insert_torrent(&hash, engine, &blob, &root, "", 0.0, false, "")
+            .unwrap();
         hash
     }
 
@@ -24160,9 +28230,16 @@ mod delete_spares_shared_files_tests {
         let hash = seed_copy(&s, "race", &race);
         assert_eq!(seed_copy(&s, "hoard", &hoard), hash);
 
-        remove_one_torrent(&s.state, &hash, &["race".to_string()], "race", true).expect("race copy removed");
-        assert!(!race.join("book.epub").exists(), "nothing reads the race payload any more");
-        assert!(hoard.join("book.epub").exists(), "the hoard copy's own payload stays");
+        remove_one_torrent(&s.state, &hash, &["race".to_string()], "race", true)
+            .expect("race copy removed");
+        assert!(
+            !race.join("book.epub").exists(),
+            "nothing reads the race payload any more"
+        );
+        assert!(
+            hoard.join("book.epub").exists(),
+            "the hoard copy's own payload stays"
+        );
     }
 
     /// Two engines seeding ONE payload (POST /copy): the first removal keeps
@@ -24174,9 +28251,14 @@ mod delete_spares_shared_files_tests {
         let hash = seed_copy(&s, "race", &dir);
         seed_copy(&s, "hoard", &dir);
 
-        remove_one_torrent(&s.state, &hash, &["race".to_string()], "race", true).expect("race copy removed");
-        assert!(dir.join("book.epub").exists(), "the hoard copy still reads it");
-        remove_one_torrent(&s.state, &hash, &["hoard".to_string()], "hoard", true).expect("hoard copy removed");
+        remove_one_torrent(&s.state, &hash, &["race".to_string()], "race", true)
+            .expect("race copy removed");
+        assert!(
+            dir.join("book.epub").exists(),
+            "the hoard copy still reads it"
+        );
+        remove_one_torrent(&s.state, &hash, &["hoard".to_string()], "hoard", true)
+            .expect("hoard copy removed");
         assert!(!dir.join("book.epub").exists(), "the last reader is gone");
     }
 
@@ -24205,7 +28287,11 @@ mod delete_spares_shared_files_tests {
         seed_copy(&s, "hoard", &shared);
         let race = find_copy(&s.state, "race", &hash).unwrap();
         let plan = crate::jobsrun::plan_move_checked(&s.state, &race, &s.dir.join("dst"));
-        assert_eq!(plan.refusal().map(|r| r.0), Some("shared"), "the hoard copy reads these files");
+        assert_eq!(
+            plan.refusal().map(|r| r.0),
+            Some("shared"),
+            "the hoard copy reads these files"
+        );
         assert_eq!(plan.shared_with, vec![hash.clone()]);
 
         let t = state("move-copy-elsewhere");
@@ -24213,7 +28299,10 @@ mod delete_spares_shared_files_tests {
         seed_copy(&t, "hoard", &t.dir.join("hoard"));
         let race = find_copy(&t.state, "race", &hash).unwrap();
         let plan = crate::jobsrun::plan_move_checked(&t.state, &race, &t.dir.join("dst"));
-        assert!(plan.refusal().is_none(), "the hoard copy reads its own payload");
+        assert!(
+            plan.refusal().is_none(),
+            "the hoard copy reads its own payload"
+        );
     }
 }
 
@@ -24291,7 +28380,9 @@ mod qbit_shim_post_tests {
             .unwrap();
         let resp = super::router(s.state.clone()).oneshot(req).await.unwrap();
         let status = resp.status();
-        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         (status, bytes.to_vec())
     }
 
@@ -24300,7 +28391,11 @@ mod qbit_shim_post_tests {
     }
 
     fn listed<'a>(info: &'a serde_json::Value, hash: &str) -> &'a serde_json::Value {
-        info.as_array().unwrap().iter().find(|r| r["hash"] == hash).expect("listed")
+        info.as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["hash"] == hash)
+            .expect("listed")
     }
 
     /// A cap the engine's state store could not keep is answered with an error,
@@ -24312,7 +28407,13 @@ mod qbit_shim_post_tests {
         conn.execute("DROP TABLE torrent_state", []).unwrap();
         drop(conn);
 
-        let (st, _) = call(&s, "POST", "/api/v2/torrents/setUploadLimit", &format!("hashes={hash}&limit=51200")).await;
+        let (st, _) = call(
+            &s,
+            "POST",
+            "/api/v2/torrents/setUploadLimit",
+            &format!("hashes={hash}&limit=51200"),
+        )
+        .await;
         assert_eq!(st, StatusCode::INTERNAL_SERVER_ERROR);
         let (_, t) = find_torrent(&s.state, &hash).unwrap();
         assert_eq!(t.rate_limits(), (0, 0), "the engine keeps the cap it had");
@@ -24325,33 +28426,85 @@ mod qbit_shim_post_tests {
     #[tokio::test]
     async fn a_torrent_cap_set_over_post_reaches_the_engine_and_every_read() {
         let (s, hash) = populated("shim-limit-torrent", &single_file_bytes());
-        let (st, _) = call(&s, "POST", "/api/v2/torrents/setUploadLimit", &format!("hashes={hash}&limit=51200")).await;
+        let (st, _) = call(
+            &s,
+            "POST",
+            "/api/v2/torrents/setUploadLimit",
+            &format!("hashes={hash}&limit=51200"),
+        )
+        .await;
         assert_eq!(st, StatusCode::OK);
         let (_, t) = find_torrent(&s.state, &hash).unwrap();
         assert_eq!(t.rate_limits(), (51_200, 0), "the engine holds the cap");
-        assert!(t.rate_chain(typhon_engine::torrent::ratelimit::Dir::Up).is_limited());
+        assert!(t
+            .rate_chain(typhon_engine::torrent::ratelimit::Dir::Up)
+            .is_limited());
 
-        let (_, b) = call(&s, "POST", "/api/v2/torrents/uploadLimit", &format!("hashes={hash}")).await;
+        let (_, b) = call(
+            &s,
+            "POST",
+            "/api/v2/torrents/uploadLimit",
+            &format!("hashes={hash}"),
+        )
+        .await;
         assert_eq!(json(&b)[&hash], 51_200);
-        let (_, b) = call(&s, "POST", "/api/v2/torrents/downloadLimit", &format!("hashes={hash}")).await;
-        assert_eq!(json(&b)[&hash], 0, "no download cap reads 0 here, as in qBit");
+        let (_, b) = call(
+            &s,
+            "POST",
+            "/api/v2/torrents/downloadLimit",
+            &format!("hashes={hash}"),
+        )
+        .await;
+        assert_eq!(
+            json(&b)[&hash],
+            0,
+            "no download cap reads 0 here, as in qBit"
+        );
         let (_, b) = call(&s, "POST", "/api/v2/torrents/info", "").await;
         let row = json(&b);
         assert_eq!(listed(&row, &hash)["up_limit"], 51_200);
-        assert_eq!(listed(&row, &hash)["dl_limit"], -1, "and -1 in the listing, as in qBit");
-        let (_, b) = call(&s, "POST", "/api/v2/torrents/properties", &format!("hash={hash}")).await;
+        assert_eq!(
+            listed(&row, &hash)["dl_limit"],
+            -1,
+            "and -1 in the listing, as in qBit"
+        );
+        let (_, b) = call(
+            &s,
+            "POST",
+            "/api/v2/torrents/properties",
+            &format!("hash={hash}"),
+        )
+        .await;
         assert_eq!(json(&b)["up_limit"], 51_200);
         assert_eq!(json(&b)["dl_limit"], -1);
 
         // 0 lifts it; so does any negative value.
-        call(&s, "POST", "/api/v2/torrents/setUploadLimit", &format!("hashes={hash}&limit=-1")).await;
+        call(
+            &s,
+            "POST",
+            "/api/v2/torrents/setUploadLimit",
+            &format!("hashes={hash}&limit=-1"),
+        )
+        .await;
         assert_eq!(t.rate_limits(), (0, 0));
         // A write is POST only, as qBittorrent has it; a GET changes nothing.
-        let (st, _) = call(&s, "GET", &format!("/api/v2/torrents/setUploadLimit?hashes={hash}&limit=1"), "").await;
+        let (st, _) = call(
+            &s,
+            "GET",
+            &format!("/api/v2/torrents/setUploadLimit?hashes={hash}&limit=1"),
+            "",
+        )
+        .await;
         assert_eq!(st, StatusCode::METHOD_NOT_ALLOWED);
         assert_eq!(t.rate_limits(), (0, 0));
         // No limit at all is refused rather than read as "lift".
-        let (st, _) = call(&s, "POST", "/api/v2/torrents/setUploadLimit", &format!("hashes={hash}")).await;
+        let (st, _) = call(
+            &s,
+            "POST",
+            "/api/v2/torrents/setUploadLimit",
+            &format!("hashes={hash}"),
+        )
+        .await;
         assert_eq!(st, StatusCode::BAD_REQUEST);
     }
 
@@ -24360,11 +28513,31 @@ mod qbit_shim_post_tests {
     #[tokio::test]
     async fn hashes_all_caps_every_torrent_from_the_query_of_a_post() {
         let (s, a) = populated("shim-limit-all", &single_file_bytes());
-        let (b, _) = add_torrent_bytes(&s.state, &multi_file_bytes(), "", "/tmp", "", true, true, "race").unwrap();
-        let (st, _) = call(&s, "POST", "/api/v2/torrents/setDownloadLimit?hashes=all&limit=8192", "").await;
+        let (b, _) = add_torrent_bytes(
+            &s.state,
+            &multi_file_bytes(),
+            "",
+            "/tmp",
+            "",
+            true,
+            true,
+            "race",
+        )
+        .unwrap();
+        let (st, _) = call(
+            &s,
+            "POST",
+            "/api/v2/torrents/setDownloadLimit?hashes=all&limit=8192",
+            "",
+        )
+        .await;
         assert_eq!(st, StatusCode::OK);
         for h in [&a, &b] {
-            assert_eq!(find_torrent(&s.state, h).unwrap().1.rate_limits(), (0, 8192), "{h}");
+            assert_eq!(
+                find_torrent(&s.state, h).unwrap().1.rate_limits(),
+                (0, 8192),
+                "{h}"
+            );
         }
     }
 
@@ -24374,12 +28547,28 @@ mod qbit_shim_post_tests {
     #[tokio::test]
     async fn the_global_cap_is_set_over_post_and_read_everywhere() {
         let (s, _) = populated("shim-limit-global", &single_file_bytes());
-        let (st, _) = call(&s, "POST", "/api/v2/transfer/setUploadLimit", "limit=1048576").await;
+        let (st, _) = call(
+            &s,
+            "POST",
+            "/api/v2/transfer/setUploadLimit",
+            "limit=1048576",
+        )
+        .await;
         assert_eq!(st, StatusCode::OK);
-        call(&s, "POST", "/api/v2/transfer/setDownloadLimit", "limit=524288").await;
+        call(
+            &s,
+            "POST",
+            "/api/v2/transfer/setDownloadLimit",
+            "limit=524288",
+        )
+        .await;
         assert_eq!(s.state.engines.client_rates().up.rate(), 1_048_576);
         let race = s.state.engines.get("race").unwrap();
-        assert_eq!(race.manager.rates().client().unwrap().up.rate(), 1_048_576, "the engine is under it");
+        assert_eq!(
+            race.manager.rates().client().unwrap().up.rate(),
+            1_048_576,
+            "the engine is under it"
+        );
 
         let (_, b) = call(&s, "POST", "/api/v2/transfer/uploadLimit", "").await;
         assert_eq!(String::from_utf8(b).unwrap(), "1048576");
@@ -24424,7 +28613,10 @@ mod qbit_shim_post_tests {
 
         call(&s, "POST", "/api/v2/app/setPreferences", &lsd_prefs(false)).await;
         let cfg = s.state.cfg();
-        assert_eq!((cfg.race.enable_lsd, cfg.hoard.enable_lsd), (Some(false), Some(false)));
+        assert_eq!(
+            (cfg.race.enable_lsd, cfg.hoard.enable_lsd),
+            (Some(false), Some(false))
+        );
         let (_, b) = call(&s, "GET", "/api/v2/app/preferences", "").await;
         assert_eq!(json(&b)["lsd"], false);
 
@@ -24440,19 +28632,47 @@ mod qbit_shim_post_tests {
     #[tokio::test]
     async fn the_lsd_tracker_row_shows_the_real_state() {
         let row = |b: &[u8]| {
-            json(b).as_array().unwrap().iter().find(|r| r["url"] == "** [LSD] **").cloned().expect("an [LSD] row")
+            json(b)
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|r| r["url"] == "** [LSD] **")
+                .cloned()
+                .expect("an [LSD] row")
         };
         let (s, hash) = populated("shim-lsd-row", &single_file_bytes());
-        let (_, b) = call(&s, "GET", &format!("/api/v2/torrents/trackers?hash={hash}"), "").await;
+        let (_, b) = call(
+            &s,
+            "GET",
+            &format!("/api/v2/torrents/trackers?hash={hash}"),
+            "",
+        )
+        .await;
         let r = row(&b);
-        assert_eq!((r["status"].clone(), r["msg"].clone()), (serde_json::json!(0), serde_json::json!("LSD is off for this engine")));
+        assert_eq!(
+            (r["status"].clone(), r["msg"].clone()),
+            (
+                serde_json::json!(0),
+                serde_json::json!("LSD is off for this engine")
+            )
+        );
 
-        let mut private = format!("d4:infod6:lengthi16384e4:name{}12:piece lengthi16384e6:pieces20:", bstr("secret.mkv")).into_bytes();
+        let mut private = format!(
+            "d4:infod6:lengthi16384e4:name{}12:piece lengthi16384e6:pieces20:",
+            bstr("secret.mkv")
+        )
+        .into_bytes();
         private.extend_from_slice(&[1u8; 20]);
         private.extend_from_slice(b"7:privatei1eee");
-        let (secret, _) = add_torrent_bytes(&s.state, &private, "", "/tmp", "fr", true, true, "race").expect("added");
+        let (secret, _) =
+            add_torrent_bytes(&s.state, &private, "", "/tmp", "fr", true, true, "race")
+                .expect("added");
 
-        let port = std::net::UdpSocket::bind("0.0.0.0:0").unwrap().local_addr().unwrap().port();
+        let port = std::net::UdpSocket::bind("0.0.0.0:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
         let Ok(lsd) = typhon_engine::lsd::LsdSession::bind(None, port).await else {
             eprintln!("no multicast here: the running half is skipped");
             return;
@@ -24461,16 +28681,49 @@ mod qbit_shim_post_tests {
         race.manager.set_lsd(lsd.clone());
         let ih = typhon_engine::torrent::hex_decode(&hash).unwrap();
         // Added stopped by the fixture; a stopped torrent takes no LSD peer.
-        find_torrent(&s.state, &hash).unwrap().1.is_paused.store(false, std::sync::atomic::Ordering::Relaxed);
+        find_torrent(&s.state, &hash)
+            .unwrap()
+            .1
+            .is_paused
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         let from: std::net::SocketAddr = "192.168.0.7:6771".parse().unwrap();
-        lsd.offer(&race.manager, from, &typhon_engine::lsd::Announce { port: 6881, info_hashes: vec![ih], cookie: None });
+        lsd.offer(
+            &race.manager,
+            from,
+            &typhon_engine::lsd::Announce {
+                port: 6881,
+                info_hashes: vec![ih],
+                cookie: None,
+            },
+        );
 
-        let (_, b) = call(&s, "GET", &format!("/api/v2/torrents/trackers?hash={hash}"), "").await;
+        let (_, b) = call(
+            &s,
+            "GET",
+            &format!("/api/v2/torrents/trackers?hash={hash}"),
+            "",
+        )
+        .await;
         let r = row(&b);
-        assert_eq!((r["status"].clone(), r["num_peers"].clone()), (serde_json::json!(2), serde_json::json!(1)));
-        let (_, b) = call(&s, "GET", &format!("/api/v2/torrents/trackers?hash={secret}"), "").await;
+        assert_eq!(
+            (r["status"].clone(), r["num_peers"].clone()),
+            (serde_json::json!(2), serde_json::json!(1))
+        );
+        let (_, b) = call(
+            &s,
+            "GET",
+            &format!("/api/v2/torrents/trackers?hash={secret}"),
+            "",
+        )
+        .await;
         let r = row(&b);
-        assert_eq!((r["status"].clone(), r["msg"].clone()), (serde_json::json!(0), serde_json::json!("This torrent is private")));
+        assert_eq!(
+            (r["status"].clone(), r["msg"].clone()),
+            (
+                serde_json::json!(0),
+                serde_json::json!("This torrent is private")
+            )
+        );
     }
 
     /// ⭐ The engine keys are live: saving `upload_rate_limit` (bytes/s, the
@@ -24480,7 +28733,10 @@ mod qbit_shim_post_tests {
     /// same key, from KiB/s.
     #[tokio::test]
     async fn saving_the_engine_keys_moves_the_running_engine() {
-        let s = state_from("live-engine-keys", &format!("[daemon]\napi_key = \"{KEY}\"\n\n[race]\nlisten_port = 1\n"));
+        let s = state_from(
+            "live-engine-keys",
+            &format!("[daemon]\napi_key = \"{KEY}\"\n\n[race]\nlisten_port = 1\n"),
+        );
         let race = s.state.engines.get("race").unwrap();
         assert!(!race.manager.policy().choking(), "off by default");
         let body = serde_json::json!({"changes": [
@@ -24491,13 +28747,23 @@ mod qbit_shim_post_tests {
         ]});
         let (st, b) = call(&s, "POST", "/api/settings", &body.to_string()).await;
         assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
-        assert_eq!(json(&b)["restart_required"], false, "every key of the batch is live");
+        assert_eq!(
+            json(&b)["restart_required"],
+            false,
+            "every key of the batch is live"
+        );
         assert_eq!(race.manager.rates().engine.up.rate(), 65_536);
         assert!(race.manager.policy().choking());
         assert_eq!(race.manager.policy().unchoke_slots(), Some(2));
         assert_eq!(race.manager.policy().idle_timeout().as_secs(), 600);
 
-        let (st, b) = call(&s, "POST", "/api/engines/race/rate-limits", r#"{"upload_kib": 128, "download_kib": 0}"#).await;
+        let (st, b) = call(
+            &s,
+            "POST",
+            "/api/engines/race/rate-limits",
+            r#"{"upload_kib": 128, "download_kib": 0}"#,
+        )
+        .await;
         assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
         assert_eq!(race.manager.rates().engine.up.rate(), 131_072);
         assert_eq!(json(&b)["upload_kib"], 128);
@@ -24510,9 +28776,16 @@ mod qbit_shim_post_tests {
     #[tokio::test]
     async fn saving_peer_encryption_moves_the_running_engine() {
         use typhon_engine::peer::extension::Encryption;
-        let s = state_from("live-peer-encryption", &format!("[daemon]\napi_key = \"{KEY}\"\n\n[race]\nlisten_port = 1\n"));
+        let s = state_from(
+            "live-peer-encryption",
+            &format!("[daemon]\napi_key = \"{KEY}\"\n\n[race]\nlisten_port = 1\n"),
+        );
         let race = s.state.engines.get("race").unwrap();
-        assert_eq!(race.manager.policy().encryption(), Encryption::Allow, "allow by default");
+        assert_eq!(
+            race.manager.policy().encryption(),
+            Encryption::Allow,
+            "allow by default"
+        );
         let body = serde_json::json!({"changes": [{"section": "race", "key": "peer_encryption", "value": "require"}]});
         let (st, b) = call(&s, "POST", "/api/settings", &body.to_string()).await;
         assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
@@ -24524,9 +28797,16 @@ mod qbit_shim_post_tests {
     /// saved, then the running engine follows the file without a restart.
     #[tokio::test]
     async fn saving_the_unknown_infohash_limit_moves_the_running_engine() {
-        let s = state_from("live-unknown-infohash", &format!("[daemon]\napi_key = \"{KEY}\"\n\n[race]\nlisten_port = 1\n"));
+        let s = state_from(
+            "live-unknown-infohash",
+            &format!("[daemon]\napi_key = \"{KEY}\"\n\n[race]\nlisten_port = 1\n"),
+        );
         let race = s.state.engines.get("race").unwrap();
-        assert_eq!(race.manager.policy().unknown_hash_limit(), 0, "off by default");
+        assert_eq!(
+            race.manager.policy().unknown_hash_limit(),
+            0,
+            "off by default"
+        );
         let body = serde_json::json!({"changes": [{"section": "race", "key": "max_unknown_infohash_per_ip", "value": 20}]});
         let (st, b) = call(&s, "POST", "/api/settings", &body.to_string()).await;
         assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
@@ -24547,11 +28827,20 @@ mod qbit_shim_post_tests {
         let row = listed(&info, &hash);
         assert_eq!(row["uploaded"], 30_000);
         assert_eq!(row["ratio"], serde_json::json!(3));
-        let (_, b) = call(&s, "POST", "/api/v2/torrents/properties", &format!("hash={hash}")).await;
+        let (_, b) = call(
+            &s,
+            "POST",
+            "/api/v2/torrents/properties",
+            &format!("hash={hash}"),
+        )
+        .await;
         let p = json(&b);
         assert_eq!(p["total_uploaded"], 30_000);
         assert_eq!(p["total_downloaded"], 10_000);
-        assert_eq!(p["share_ratio"], row["ratio"], "one ratio, whichever route asks");
+        assert_eq!(
+            p["share_ratio"], row["ratio"],
+            "one ratio, whichever route asks"
+        );
     }
 
     /// ⭐⭐ The bug as cross-seed met it: hash in the body, nothing on the URL.
@@ -24561,10 +28850,20 @@ mod qbit_shim_post_tests {
         let form = format!("hash={hash}");
         for route in ["files", "properties", "trackers"] {
             let (status, _) = call(&s, "POST", &format!("/api/v2/torrents/{route}"), &form).await;
-            assert_eq!(status, StatusCode::OK, "POST torrents/{route} with the hash in the body");
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "POST torrents/{route} with the hash in the body"
+            );
         }
         // The query string still works, as it did.
-        let (status, _) = call(&s, "GET", &format!("/api/v2/torrents/files?hash={hash}"), "").await;
+        let (status, _) = call(
+            &s,
+            "GET",
+            &format!("/api/v2/torrents/files?hash={hash}"),
+            "",
+        )
+        .await;
         assert_eq!(status, StatusCode::OK);
     }
 
@@ -24574,7 +28873,11 @@ mod qbit_shim_post_tests {
         let form = format!("hash={}", "ab".repeat(20));
         for route in ["files", "properties", "trackers", "export"] {
             let (status, _) = call(&s, "POST", &format!("/api/v2/torrents/{route}"), &form).await;
-            assert_eq!(status, StatusCode::NOT_FOUND, "torrents/{route}: a 200 here reads as an empty torrent");
+            assert_eq!(
+                status,
+                StatusCode::NOT_FOUND,
+                "torrents/{route}: a 200 here reads as an empty torrent"
+            );
         }
     }
 
@@ -24583,10 +28886,25 @@ mod qbit_shim_post_tests {
     #[tokio::test]
     async fn files_carry_the_torrent_folder_and_the_padded_piece_range() {
         let (s, hash) = populated("shim-files-layout", &multi_file_bytes());
-        let (_, body) = call(&s, "POST", "/api/v2/torrents/files", &format!("hash={hash}")).await;
+        let (_, body) = call(
+            &s,
+            "POST",
+            "/api/v2/torrents/files",
+            &format!("hash={hash}"),
+        )
+        .await;
         let files = json(&body);
-        let names: Vec<&str> = files.as_array().unwrap().iter().map(|f| f["name"].as_str().unwrap()).collect();
-        assert_eq!(names, ["Show S02/a.mkv", "Show S02/b.mkv"], "the pad is not a file");
+        let names: Vec<&str> = files
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            names,
+            ["Show S02/a.mkv", "Show S02/b.mkv"],
+            "the pad is not a file"
+        );
         // b.mkv starts at 16384 (10000 + the 6384 pad), i.e. at piece 1, and
         // runs to byte 36383, piece 2. A running sum of the listed lengths
         // put it at 10000, piece 0.
@@ -24597,7 +28915,13 @@ mod qbit_shim_post_tests {
     #[tokio::test]
     async fn a_single_file_torrent_is_named_without_a_folder() {
         let (s, hash) = populated("shim-files-single", &single_file_bytes());
-        let (_, body) = call(&s, "POST", "/api/v2/torrents/files", &format!("hash={hash}")).await;
+        let (_, body) = call(
+            &s,
+            "POST",
+            "/api/v2/torrents/files",
+            &format!("hash={hash}"),
+        )
+        .await;
         assert_eq!(json(&body)[0]["name"], "solo.mkv");
     }
 
@@ -24606,12 +28930,23 @@ mod qbit_shim_post_tests {
         let bytes = multi_file_bytes();
         let (s, hash) = populated("shim-export", &bytes);
         for (method, uri, form) in [
-            ("POST", "/api/v2/torrents/export".to_string(), format!("hash={hash}")),
-            ("GET", format!("/api/v2/torrents/export?hash={}", hash.to_uppercase()), String::new()),
+            (
+                "POST",
+                "/api/v2/torrents/export".to_string(),
+                format!("hash={hash}"),
+            ),
+            (
+                "GET",
+                format!("/api/v2/torrents/export?hash={}", hash.to_uppercase()),
+                String::new(),
+            ),
         ] {
             let (status, body) = call(&s, method, &uri, &form).await;
             assert_eq!(status, StatusCode::OK, "{method} export");
-            assert_eq!(body, bytes, "{method}: byte-identical, so the info hash still matches");
+            assert_eq!(
+                body, bytes,
+                "{method}: byte-identical, so the info hash still matches"
+            );
         }
     }
 
@@ -24654,9 +28989,18 @@ mod qbit_shim_post_tests {
 
     #[test]
     fn shim_param_prefers_a_non_empty_query_then_the_body() {
-        assert_eq!(shim_param("hash=aa", "hash=bb", "hash").as_deref(), Some("aa"));
-        assert_eq!(shim_param("hash=", "hash=bb", "hash").as_deref(), Some("bb"));
-        assert_eq!(shim_param("", "category=a%20b", "category").as_deref(), Some("a b"));
+        assert_eq!(
+            shim_param("hash=aa", "hash=bb", "hash").as_deref(),
+            Some("aa")
+        );
+        assert_eq!(
+            shim_param("hash=", "hash=bb", "hash").as_deref(),
+            Some("bb")
+        );
+        assert_eq!(
+            shim_param("", "category=a%20b", "category").as_deref(),
+            Some("a b")
+        );
         assert_eq!(shim_param("", "", "hash"), None);
     }
 
@@ -24665,17 +29009,58 @@ mod qbit_shim_post_tests {
     /// second engine serves pieces nobody fetched.
     #[tokio::test]
     async fn duplicating_an_incomplete_torrent_is_refused() {
-        let s = state_from("copy-incomplete", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+        let s = state_from(
+            "copy-incomplete",
+            &format!("[daemon]\napi_key = \"{KEY}\"\n"),
+        );
         let dir = s.dir.join("partial").display().to_string();
-        let (partial, _) = add_torrent_bytes(&s.state, &multi_file_bytes(), "", &dir, "", true, false, "race")
-            .expect("added");
-        let (st, body) = call(&s, "POST", &format!("/api/torrents/{partial}/copy"), r#"{"engine":"hoard"}"#).await;
-        assert_eq!(st, StatusCode::CONFLICT, "{}", String::from_utf8_lossy(&body));
-        assert!(find_copy(&s.state, "hoard", &partial).is_none(), "nothing was added to hoard");
+        let (partial, _) = add_torrent_bytes(
+            &s.state,
+            &multi_file_bytes(),
+            "",
+            &dir,
+            "",
+            true,
+            false,
+            "race",
+        )
+        .expect("added");
+        let (st, body) = call(
+            &s,
+            "POST",
+            &format!("/api/torrents/{partial}/copy"),
+            r#"{"engine":"hoard"}"#,
+        )
+        .await;
+        assert_eq!(
+            st,
+            StatusCode::CONFLICT,
+            "{}",
+            String::from_utf8_lossy(&body)
+        );
+        assert!(
+            find_copy(&s.state, "hoard", &partial).is_none(),
+            "nothing was added to hoard"
+        );
 
-        let (whole, _) = add_torrent_bytes(&s.state, &single_file_bytes(), "", "/tmp", "", true, true, "race")
-            .expect("added");
-        let (st, body) = call(&s, "POST", &format!("/api/torrents/{whole}/copy"), r#"{"engine":"hoard"}"#).await;
+        let (whole, _) = add_torrent_bytes(
+            &s.state,
+            &single_file_bytes(),
+            "",
+            "/tmp",
+            "",
+            true,
+            true,
+            "race",
+        )
+        .expect("added");
+        let (st, body) = call(
+            &s,
+            "POST",
+            &format!("/api/torrents/{whole}/copy"),
+            r#"{"engine":"hoard"}"#,
+        )
+        .await;
         assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
         assert!(find_copy(&s.state, "hoard", &whole).is_some());
     }
@@ -24698,7 +29083,13 @@ mod network_mode_tests {
         [race]\nlisten_port = 16171\n\n[hoard]\nlisten_port = 16172\n";
 
     async fn save(s: &AppState, body: serde_json::Value) -> (StatusCode, serde_json::Value) {
-        let r = post_network_mode(State(s.clone()), RawQuery(None), keyed(KEY), body.to_string()).await;
+        let r = post_network_mode(
+            State(s.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            body.to_string(),
+        )
+        .await;
         let status = r.status();
         (status, body_json(r).await)
     }
@@ -24721,11 +29112,18 @@ mod network_mode_tests {
     #[tokio::test]
     async fn a_partial_save_keeps_the_fields_it_does_not_send() {
         let s = state_from("netmode-partial", SOCKS_FILE);
-        let (status, body) = save(&s, serde_json::json!({"mode": "socks5", "fields": {"socks5_port": 1081}})).await;
+        let (status, body) = save(
+            &s,
+            serde_json::json!({"mode": "socks5", "fields": {"socks5_port": 1081}}),
+        )
+        .await;
         assert_eq!(status, StatusCode::OK, "{body}");
         let f = &load(&s).await["fields"];
         assert_eq!(f["socks5_port"], 1081, "the field sent is written");
-        assert_eq!(f["socks5_host"], "10.0.0.1", "the proxy host it did not send is kept");
+        assert_eq!(
+            f["socks5_host"], "10.0.0.1",
+            "the proxy host it did not send is kept"
+        );
         assert_eq!(f["race_listen_port"], 16171, "and the listen ports");
         assert_eq!(f["hoard_listen_port"], 16172);
     }
@@ -24742,7 +29140,8 @@ mod network_mode_tests {
         let f = &load(&s).await["fields"];
         assert_eq!(f["socks5_pass"], SECRET_MASK);
         assert_eq!(f["socks5_user"], "u", "only the secret is masked");
-        let settings = body_json(get_settings(State(s.clone()), RawQuery(None), keyed(KEY)).await).await;
+        let settings =
+            body_json(get_settings(State(s.clone()), RawQuery(None), keyed(KEY)).await).await;
         assert!(!settings.to_string().contains("s3cr3t-pw"), "{settings}");
         assert_eq!(settings["race"]["socks5_outbound_pass"], SECRET_MASK);
 
@@ -24750,13 +29149,21 @@ mod network_mode_tests {
             "socks5_host": "10.0.0.1", "socks5_port": 1080, "socks5_user": "u", "socks5_pass": SECRET_MASK,
         }))).await;
         assert_eq!(st, StatusCode::OK, "{body}");
-        assert_eq!(s.cfg().race.socks5_outbound_pass, "s3cr3t-pw", "the mask was written as the password");
+        assert_eq!(
+            s.cfg().race.socks5_outbound_pass,
+            "s3cr3t-pw",
+            "the mask was written as the password"
+        );
 
         let (st, body) = save(&s, form("socks5", serde_json::json!({
             "socks5_host": "10.0.0.1", "socks5_port": 1080, "socks5_user": "u", "socks5_pass": "new-pw",
         }))).await;
         assert_eq!(st, StatusCode::OK, "{body}");
-        assert_eq!(s.cfg().race.socks5_outbound_pass, "new-pw", "a new one is written");
+        assert_eq!(
+            s.cfg().race.socks5_outbound_pass,
+            "new-pw",
+            "a new one is written"
+        );
     }
 
     /// ⭐ A tracker passkey does not leave the daemon either: `/api/settings`
@@ -24764,49 +29171,112 @@ mod network_mode_tests {
     /// and posting the mask back (a form saved as it was) keeps the real value.
     #[tokio::test]
     async fn tracker_passkeys_are_masked_and_a_masked_save_keeps_them() {
-        let file = format!("{DIRECT_FILE}\n[announce_passkeys]\n\"tracker.example\" = \"pk-s3cr3t\"\n");
+        let file =
+            format!("{DIRECT_FILE}\n[announce_passkeys]\n\"tracker.example\" = \"pk-s3cr3t\"\n");
         let s = state_from("passkey-mask", &file);
 
-        let settings = body_json(get_settings(State(s.clone()), RawQuery(None), keyed(KEY)).await).await;
+        let settings =
+            body_json(get_settings(State(s.clone()), RawQuery(None), keyed(KEY)).await).await;
         assert!(!settings.to_string().contains("pk-s3cr3t"), "{settings}");
-        assert_eq!(settings["announce_passkeys"]["tracker.example"], SECRET_MASK);
-        let list = body_json(get_passkeys(State(s.clone()), RawQuery(None), keyed(KEY)).await).await;
+        assert_eq!(
+            settings["announce_passkeys"]["tracker.example"],
+            SECRET_MASK
+        );
+        let list =
+            body_json(get_passkeys(State(s.clone()), RawQuery(None), keyed(KEY)).await).await;
         assert!(!list.to_string().contains("pk-s3cr3t"), "{list}");
-        assert_eq!(list["tracker.example"], SECRET_MASK, "which hosts have one stays readable");
+        assert_eq!(
+            list["tracker.example"], SECRET_MASK,
+            "which hosts have one stays readable"
+        );
 
-        let kept = |s: &TestState| s.cfg().announce_passkeys.get("tracker.example").cloned().unwrap_or_default();
-        let change = |v: &str| serde_json::json!({"changes": [
-            {"section": "announce_passkeys", "key": "tracker.example", "value": v}]}).to_string();
+        let kept = |s: &TestState| {
+            s.cfg()
+                .announce_passkeys
+                .get("tracker.example")
+                .cloned()
+                .unwrap_or_default()
+        };
+        let change = |v: &str| {
+            serde_json::json!({"changes": [
+            {"section": "announce_passkeys", "key": "tracker.example", "value": v}]})
+            .to_string()
+        };
 
-        let r = post_settings(State(s.clone()), RawQuery(None), keyed(KEY), change(SECRET_MASK)).await;
+        let r = post_settings(
+            State(s.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            change(SECRET_MASK),
+        )
+        .await;
         assert_eq!(r.status(), StatusCode::OK);
         assert_eq!(kept(&s), "pk-s3cr3t", "the mask was written as the passkey");
 
-        let body = serde_json::json!({"host": "tracker.example", "passkey": SECRET_MASK}).to_string();
+        let body =
+            serde_json::json!({"host": "tracker.example", "passkey": SECRET_MASK}).to_string();
         let r = set_announce_passkey(State(s.clone()), RawQuery(None), keyed(KEY), body).await;
         let answer = body_json(r).await;
         assert!(!answer.to_string().contains("pk-s3cr3t"), "{answer}");
         assert_eq!(kept(&s), "pk-s3cr3t", "the tracker form wrote the mask");
 
-        let r = post_settings(State(s.clone()), RawQuery(None), keyed(KEY), change("pk-new")).await;
+        let r = post_settings(
+            State(s.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            change("pk-new"),
+        )
+        .await;
         assert_eq!(r.status(), StatusCode::OK);
         assert_eq!(kept(&s), "pk-new", "a new one is written");
     }
 
     #[test]
     fn a_proxy_url_masks_its_password_only() {
-        assert_eq!(mask_proxy_url("socks5h://u:pw@10.0.0.1:1080"), "socks5h://u:********@10.0.0.1:1080");
-        assert_eq!(mask_proxy_url("http://u:p@ss@h:3128/x"), "http://u:********@h:3128/x", "the last @ ends the userinfo");
-        assert_eq!(mask_proxy_url("socks5h://u@10.0.0.1:1080"), "socks5h://u@10.0.0.1:1080", "no password, nothing to hide");
-        assert_eq!(mask_proxy_url("socks5h://10.0.0.1:1080"), "socks5h://10.0.0.1:1080");
+        assert_eq!(
+            mask_proxy_url("socks5h://u:pw@10.0.0.1:1080"),
+            "socks5h://u:********@10.0.0.1:1080"
+        );
+        assert_eq!(
+            mask_proxy_url("http://u:p@ss@h:3128/x"),
+            "http://u:********@h:3128/x",
+            "the last @ ends the userinfo"
+        );
+        assert_eq!(
+            mask_proxy_url("socks5h://u@10.0.0.1:1080"),
+            "socks5h://u@10.0.0.1:1080",
+            "no password, nothing to hide"
+        );
+        assert_eq!(
+            mask_proxy_url("socks5h://10.0.0.1:1080"),
+            "socks5h://10.0.0.1:1080"
+        );
         assert_eq!(mask_proxy_url(""), "");
-        assert_eq!(mask_proxy_url("http://h:3128/a@b"), "http://h:3128/a@b", "an @ in the path is not userinfo");
+        assert_eq!(
+            mask_proxy_url("http://h:3128/a@b"),
+            "http://h:3128/a@b",
+            "an @ in the path is not userinfo"
+        );
 
         let stored = "socks5h://u:pw@10.0.0.1:1080";
-        assert_eq!(unmask_proxy_url("socks5h://u:********@10.0.0.1:1080", stored), stored);
-        assert_eq!(unmask_proxy_url("socks5h://u:********@10.0.0.9:1080", stored), "socks5h://u:pw@10.0.0.9:1080", "host edited, password kept");
-        assert_eq!(unmask_proxy_url("socks5h://u:new@10.0.0.1:1080", stored), "socks5h://u:new@10.0.0.1:1080");
-        assert_eq!(unmask_proxy_url("socks5h://u:********@10.0.0.1:1080", ""), "socks5h://u@10.0.0.1:1080", "the mask is never written");
+        assert_eq!(
+            unmask_proxy_url("socks5h://u:********@10.0.0.1:1080", stored),
+            stored
+        );
+        assert_eq!(
+            unmask_proxy_url("socks5h://u:********@10.0.0.9:1080", stored),
+            "socks5h://u:pw@10.0.0.9:1080",
+            "host edited, password kept"
+        );
+        assert_eq!(
+            unmask_proxy_url("socks5h://u:new@10.0.0.1:1080", stored),
+            "socks5h://u:new@10.0.0.1:1080"
+        );
+        assert_eq!(
+            unmask_proxy_url("socks5h://u:********@10.0.0.1:1080", ""),
+            "socks5h://u@10.0.0.1:1080",
+            "the mask is never written"
+        );
     }
 
     /// ⭐ `announce_proxy` carries its password in the URL: masked in both GETs,
@@ -24821,20 +29291,42 @@ mod network_mode_tests {
         let s = state_from("netmode-proxy-secret", &file);
         let masked = "socks5h://u:********@10.0.0.1:1080";
         assert_eq!(load(&s).await["fields"]["announce_proxy"], masked);
-        let settings = body_json(get_settings(State(s.clone()), RawQuery(None), keyed(KEY)).await).await;
+        let settings =
+            body_json(get_settings(State(s.clone()), RawQuery(None), keyed(KEY)).await).await;
         assert!(!settings.to_string().contains("s3cr3t-pw"), "{settings}");
         assert_eq!(settings["race"]["announce_proxy"], masked);
 
-        let (st, body) = save(&s, form("socks5", serde_json::json!({
-            "socks5_host": "10.0.0.1", "socks5_port": 1080, "announce_proxy": masked,
-        }))).await;
+        let (st, body) = save(
+            &s,
+            form(
+                "socks5",
+                serde_json::json!({
+                    "socks5_host": "10.0.0.1", "socks5_port": 1080, "announce_proxy": masked,
+                }),
+            ),
+        )
+        .await;
         assert_eq!(st, StatusCode::OK, "{body}");
-        assert_eq!(s.cfg().race.announce_proxy, "socks5h://u:s3cr3t-pw@10.0.0.1:1080", "the Network tab wrote the mask");
+        assert_eq!(
+            s.cfg().race.announce_proxy,
+            "socks5h://u:s3cr3t-pw@10.0.0.1:1080",
+            "the Network tab wrote the mask"
+        );
 
         let change = serde_json::json!({"changes": [{"section": "race", "key": "announce_proxy", "value": masked}]});
-        let r = post_settings(State(s.clone()), RawQuery(None), keyed(KEY), change.to_string()).await;
+        let r = post_settings(
+            State(s.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            change.to_string(),
+        )
+        .await;
         assert_eq!(r.status(), StatusCode::OK);
-        assert_eq!(s.cfg().race.announce_proxy, "socks5h://u:s3cr3t-pw@10.0.0.1:1080", "the settings screen wrote the mask");
+        assert_eq!(
+            s.cfg().race.announce_proxy,
+            "socks5h://u:s3cr3t-pw@10.0.0.1:1080",
+            "the settings screen wrote the mask"
+        );
     }
 
     /// ⭐⭐ Leaving SOCKS5 for direct REMOVES the proxy keys -- from race, from
@@ -24844,20 +29336,38 @@ mod network_mode_tests {
     #[tokio::test]
     async fn switching_from_socks5_to_direct_clears_the_proxy_everywhere() {
         let s = state_from("netmode-socks-direct", SOCKS_FILE);
-        assert_eq!(load(&s).await["mode"], "proxy_v2", "an old file is still deduced");
+        assert_eq!(
+            load(&s).await["mode"],
+            "proxy_v2",
+            "an old file is still deduced"
+        );
 
         let (st, body) = save(&s, form("direct", serde_json::json!({}))).await;
         assert_eq!(st, StatusCode::OK, "{body}");
-        assert_eq!(body["restart_required"], true, "the running engines still use the proxy");
+        assert_eq!(
+            body["restart_required"], true,
+            "the running engines still use the proxy"
+        );
 
         let text = std::fs::read_to_string(&s.config_path).unwrap();
-        for key in ["socks5_outbound_host", "socks5_outbound_port", "announce_ip", "listen_port_proxy_v2"] {
+        for key in [
+            "socks5_outbound_host",
+            "socks5_outbound_port",
+            "announce_ip",
+            "listen_port_proxy_v2",
+        ] {
             assert!(!text.contains(key), "{key} survived the switch:\n{text}");
         }
-        assert!(text.contains("listen_port = 16999"), "the extra engine keeps the rest of its block:\n{text}");
+        assert!(
+            text.contains("listen_port = 16999"),
+            "the extra engine keeps the rest of its block:\n{text}"
+        );
         let now = s.cfg();
         assert_eq!(now.network.mode, "direct");
-        assert!(now.local_engines().iter().all(|e| e.session.socks5_outbound_host.is_empty()));
+        assert!(now
+            .local_engines()
+            .iter()
+            .all(|e| e.session.socks5_outbound_host.is_empty()));
         assert_eq!(load(&s).await["mode"], "direct", "read back as saved");
     }
 
@@ -24868,9 +29378,19 @@ mod network_mode_tests {
         let s = state_from("netmode-restart", DIRECT_FILE);
         let (st, body) = save(&s, form("direct", serde_json::json!({}))).await;
         assert_eq!(st, StatusCode::OK, "{body}");
-        assert_eq!(body["restart_required"], false, "same network, nothing to restart: {body}");
+        assert_eq!(
+            body["restart_required"], false,
+            "same network, nothing to restart: {body}"
+        );
 
-        let (st, body) = save(&s, form("socks5", serde_json::json!({"socks5_host": "10.0.0.1", "socks5_port": 1080}))).await;
+        let (st, body) = save(
+            &s,
+            form(
+                "socks5",
+                serde_json::json!({"socks5_host": "10.0.0.1", "socks5_port": 1080}),
+            ),
+        )
+        .await;
         assert_eq!(st, StatusCode::OK, "{body}");
         assert_eq!(body["restart_required"], true);
         assert_eq!(load(&s).await["mode"], "socks5");
@@ -24886,18 +29406,37 @@ mod network_mode_tests {
     #[tokio::test]
     async fn saving_a_proxy_warns_that_udp_trackers_will_not_be_announced() {
         let s = state_from("netmode-udp", DIRECT_FILE);
-        let (_, body) = save(&s, form("socks5", serde_json::json!({"socks5_host": "10.0.0.1"}))).await;
-        let warned = body["warnings"].as_array().unwrap().iter().any(|w| w == crate::netmode::UDP_BEHIND_PROXY);
+        let (_, body) = save(
+            &s,
+            form("socks5", serde_json::json!({"socks5_host": "10.0.0.1"})),
+        )
+        .await;
+        let warned = body["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|w| w == crate::netmode::UDP_BEHIND_PROXY);
         assert!(warned, "{body}");
         let page = load(&s).await;
-        assert!(page["warnings"].as_array().unwrap().iter().any(|w| w == crate::netmode::UDP_BEHIND_PROXY), "{page}");
+        assert!(
+            page["warnings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|w| w == crate::netmode::UDP_BEHIND_PROXY),
+            "{page}"
+        );
     }
 
     #[tokio::test]
     async fn a_proxy_mode_without_its_essentials_is_refused() {
         let s = state_from("netmode-refuse", DIRECT_FILE);
         let (st, _) = save(&s, form("socks5", serde_json::json!({}))).await;
-        assert_eq!(st, StatusCode::BAD_REQUEST, "SOCKS5 with no host is direct under another name");
+        assert_eq!(
+            st,
+            StatusCode::BAD_REQUEST,
+            "SOCKS5 with no host is direct under another name"
+        );
         let (st, _) = save(&s, form("proxy_v2", serde_json::json!({"race_proxy_v2_port": 16271, "proxy_v2_trusted_sources": ["not-an-ip"]}))).await;
         assert_eq!(st, StatusCode::BAD_REQUEST);
         let (st, _) = save(&s, form("teleport", serde_json::json!({}))).await;
@@ -24909,7 +29448,14 @@ mod network_mode_tests {
     #[tokio::test]
     async fn the_gluetun_engine_is_read_back() {
         let s = state_from("netmode-gluetun", DIRECT_FILE);
-        let (st, body) = save(&s, form("gluetun", serde_json::json!({"gluetun_port_forward": true, "gluetun_port_engine": "race"}))).await;
+        let (st, body) = save(
+            &s,
+            form(
+                "gluetun",
+                serde_json::json!({"gluetun_port_forward": true, "gluetun_port_engine": "race"}),
+            ),
+        )
+        .await;
         assert_eq!(st, StatusCode::OK, "{body}");
         let page = load(&s).await;
         assert_eq!(page["mode"], "gluetun");
@@ -24925,7 +29471,8 @@ mod wireguard_route_tests {
 
     const KEY: &str = "0123456789abcdef0123456789abcdef";
 
-    const CONF: &str = "[Interface]\nPrivateKey = aPrivateKeyValue=\nAddress = 10.2.0.2/32\nDNS = 10.2.0.1\n\n\
+    const CONF: &str =
+        "[Interface]\nPrivateKey = aPrivateKeyValue=\nAddress = 10.2.0.2/32\nDNS = 10.2.0.1\n\n\
                         [Peer]\nPublicKey = aPublicKeyValue=\nPresharedKey = aPresharedValue=\n\
                         AllowedIPs = 0.0.0.0/0\nEndpoint = 192.0.2.10:51820\n";
 
@@ -24946,8 +29493,16 @@ mod wireguard_route_tests {
     }
 
     async fn upload_raw(s: &AppState, name: &str, text: &str) -> (StatusCode, serde_json::Value) {
-        let req = axum::extract::Request::builder().body(axum::body::Body::from(text.to_string())).unwrap();
-        let r = post_wireguard_config_upload(State(s.clone()), RawQuery(Some(format!("name={name}"))), keyed(KEY), req).await;
+        let req = axum::extract::Request::builder()
+            .body(axum::body::Body::from(text.to_string()))
+            .unwrap();
+        let r = post_wireguard_config_upload(
+            State(s.clone()),
+            RawQuery(Some(format!("name={name}"))),
+            keyed(KEY),
+            req,
+        )
+        .await;
         let st = r.status();
         (st, body_json(r).await)
     }
@@ -24955,11 +29510,23 @@ mod wireguard_route_tests {
     async fn status(s: &AppState) -> String {
         let r = get_wireguard(State(s.clone()), RawQuery(None), keyed(KEY)).await;
         assert_eq!(r.status(), StatusCode::OK);
-        String::from_utf8(axum::body::to_bytes(r.into_body(), usize::MAX).await.unwrap().to_vec()).unwrap()
+        String::from_utf8(
+            axum::body::to_bytes(r.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap()
     }
 
     async fn assign(s: &AppState, body: serde_json::Value) -> (StatusCode, serde_json::Value) {
-        let r = post_wireguard_engines(State(s.clone()), RawQuery(None), keyed(KEY), body.to_string()).await;
+        let r = post_wireguard_engines(
+            State(s.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            body.to_string(),
+        )
+        .await;
         let st = r.status();
         (st, body_json(r).await)
     }
@@ -24986,12 +29553,22 @@ mod wireguard_route_tests {
         ]});
         let (st, r) = assign(&s, body).await;
         assert_eq!(st, StatusCode::OK, "{r}");
-        assert!(r["warnings"].as_array().unwrap().iter().any(|w| w.as_str().unwrap().contains("off the network")), "{r}");
+        assert!(
+            r["warnings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|w| w.as_str().unwrap().contains("off the network")),
+            "{r}"
+        );
         let text = std::fs::read_to_string(&s.config_path).unwrap();
         let cfg = s.cfg();
         let plan = crate::killswitch::plan_with(&cfg, &|_| None, None);
         assert!(plan.blocked("race").is_none());
-        assert!(plan.blocked("hoard").is_some(), "unassigned = blocked:\n{text}");
+        assert!(
+            plan.blocked("hoard").is_some(),
+            "unassigned = blocked:\n{text}"
+        );
         assert_eq!(r["restart_required"], true);
 
         let body = serde_json::json!({"engines": [
@@ -25000,8 +29577,14 @@ mod wireguard_route_tests {
         ]});
         assert_eq!(assign(&s, body).await.0, StatusCode::OK);
         let cfg = s.cfg();
-        assert!(cfg.hoard.allow_direct && cfg.hoard.wireguard_enabled.is_none(), "{:?}", cfg.hoard);
-        assert!(crate::killswitch::plan_with(&cfg, &|_| None, None).blocked("hoard").is_none());
+        assert!(
+            cfg.hoard.allow_direct && cfg.hoard.wireguard_enabled.is_none(),
+            "{:?}",
+            cfg.hoard
+        );
+        assert!(crate::killswitch::plan_with(&cfg, &|_| None, None)
+            .blocked("hoard")
+            .is_none());
         let page: serde_json::Value = serde_json::from_str(&status(&s).await).unwrap();
         assert_eq!(page["engines"]["hoard"]["assignment"], "direct");
         assert_eq!(page["engines"]["race"]["assignment"], "tunnel");
@@ -25012,9 +29595,15 @@ mod wireguard_route_tests {
         let bad = serde_json::json!({"engines": [{"engine_id": "race", "assignment": "maybe"}]});
         assert_eq!(assign(&s, bad).await.0, StatusCode::BAD_REQUEST);
         // The Network tab's answer carries the same verdicts.
-        let mode = body_json(get_network_mode(State(s.state.clone()), RawQuery(None), keyed(KEY)).await).await;
+        let mode =
+            body_json(get_network_mode(State(s.state.clone()), RawQuery(None), keyed(KEY)).await)
+                .await;
         assert_eq!(mode["kill_switch"]["armed"], true, "{mode:#}");
-        assert!(mode["kill_switch"]["summary"].as_array().unwrap().iter().any(|l| l.as_str().unwrap().starts_with("hoard: direct on purpose")));
+        assert!(mode["kill_switch"]["summary"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|l| l.as_str().unwrap().starts_with("hoard: direct on purpose")));
         crate::wgtunnel::force_support(None);
     }
 
@@ -25029,18 +29618,35 @@ mod wireguard_route_tests {
         assert_eq!(body["address"], "10.2.0.2/32");
         let page = status(&s).await;
         for secret in ["aPrivateKeyValue", "aPresharedValue"] {
-            assert!(!body.to_string().contains(secret) && !page.contains(secret), "{secret} left the process:\n{page}");
+            assert!(
+                !body.to_string().contains(secret) && !page.contains(secret),
+                "{secret} left the process:\n{page}"
+            );
         }
-        assert!(page.contains("\"name\":\"proton-ch.conf\"") && page.contains("192.0.2.10:51820"), "{page}");
+        assert!(
+            page.contains("\"name\":\"proton-ch.conf\"") && page.contains("192.0.2.10:51820"),
+            "{page}"
+        );
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let dir = crate::wgtunnel::conf_dir(&s.cfg().daemon.data_dir);
-            assert_eq!(std::fs::metadata(dir.join("proton-ch.conf")).unwrap().permissions().mode() & 0o777, 0o600);
+            assert_eq!(
+                std::fs::metadata(dir.join("proton-ch.conf"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
         }
-        let (st, body) = upload_raw(&s, "broken.conf", "[Interface]\nAddress = 10.0.0.2/32\n").await;
+        let (st, body) =
+            upload_raw(&s, "broken.conf", "[Interface]\nAddress = 10.0.0.2/32\n").await;
         assert_eq!(st, StatusCode::BAD_REQUEST);
-        assert!(body["error"].as_str().unwrap().contains("PrivateKey"), "{body}");
+        assert!(
+            body["error"].as_str().unwrap().contains("PrivateKey"),
+            "{body}"
+        );
         let (st, _) = upload_raw(&s, "", CONF).await;
         assert_eq!(st, StatusCode::BAD_REQUEST, "no name");
     }
@@ -25061,7 +29667,8 @@ mod wireguard_route_tests {
             .unwrap();
         let mut headers = keyed(KEY);
         headers.insert("content-type", ct.parse().unwrap());
-        let r = post_wireguard_config_upload(State(s.state.clone()), RawQuery(None), headers, req).await;
+        let r = post_wireguard_config_upload(State(s.state.clone()), RawQuery(None), headers, req)
+            .await;
         assert_eq!(r.status(), StatusCode::OK);
         assert!(status(&s).await.contains("\"name\":\"mine.conf\""));
     }
@@ -25070,10 +29677,20 @@ mod wireguard_route_tests {
     async fn a_conf_is_removed_once() {
         let s = node("wg-delete");
         upload_raw(&s, "gone.conf", CONF).await;
-        let del = |n: &str| delete_wireguard_config(State(s.state.clone()), Path(n.to_string()), RawQuery(None), keyed(KEY));
+        let del = |n: &str| {
+            delete_wireguard_config(
+                State(s.state.clone()),
+                Path(n.to_string()),
+                RawQuery(None),
+                keyed(KEY),
+            )
+        };
         assert_eq!(del("gone.conf").await.status(), StatusCode::OK);
         assert_eq!(del("gone.conf").await.status(), StatusCode::NOT_FOUND);
-        assert_eq!(del("..%2Fdefault.toml").await.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            del("..%2Fdefault.toml").await.status(),
+            StatusCode::BAD_REQUEST
+        );
         assert!(!status(&s).await.contains("gone.conf"));
     }
 
@@ -25089,16 +29706,31 @@ mod wireguard_route_tests {
         assert_eq!(st, StatusCode::CONFLICT, "{body}");
         assert_eq!(body["error"], crate::wgtunnel::NEEDS_NET_ADMIN);
         let form = serde_json::json!({"mode": "wireguard", "fields": {"race_listen_port": 16171, "hoard_listen_port": 16172}});
-        let r = post_network_mode(State(s.state.clone()), RawQuery(None), keyed(KEY), form.to_string()).await;
+        let r = post_network_mode(
+            State(s.state.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            form.to_string(),
+        )
+        .await;
         assert_eq!(r.status(), StatusCode::CONFLICT);
-        assert_eq!(std::fs::read_to_string(&s.config_path).unwrap(), before, "nothing written");
+        assert_eq!(
+            std::fs::read_to_string(&s.config_path).unwrap(),
+            before,
+            "nothing written"
+        );
 
         let page: serde_json::Value = serde_json::from_str(&status(&s).await).unwrap();
         assert_eq!(page["supported"], false);
         assert_eq!(page["unsupported_reason"], crate::wgtunnel::NEEDS_NET_ADMIN);
-        let mode = body_json(get_network_mode(State(s.state.clone()), RawQuery(None), keyed(KEY)).await).await;
+        let mode =
+            body_json(get_network_mode(State(s.state.clone()), RawQuery(None), keyed(KEY)).await)
+                .await;
         assert_eq!(mode["wireguard"]["supported"], false);
-        assert_eq!(mode["wireguard"]["reason"], crate::wgtunnel::NEEDS_NET_ADMIN);
+        assert_eq!(
+            mode["wireguard"]["reason"],
+            crate::wgtunnel::NEEDS_NET_ADMIN
+        );
         crate::wgtunnel::force_support(None);
     }
 
@@ -25115,11 +29747,21 @@ mod wireguard_route_tests {
         assert_eq!(body["restart_required"], true);
         let cfg = s.cfg();
         assert_eq!(cfg.network.mode, "wireguard");
-        let race = cfg.local_engines().into_iter().find(|e| e.id == "race").unwrap();
+        let race = cfg
+            .local_engines()
+            .into_iter()
+            .find(|e| e.id == "race")
+            .unwrap();
         assert_eq!(race.session.wireguard_enabled, Some(true));
         assert_eq!(race.session.wireguard_config, "a.conf");
-        assert_eq!(race.session.bind_interface, "wg-race", "pinned to its device");
-        assert!(race.session.socks5_outbound_host.is_empty(), "the SOCKS5 mode's keys are gone");
+        assert_eq!(
+            race.session.bind_interface, "wg-race",
+            "pinned to its device"
+        );
+        assert!(
+            race.session.socks5_outbound_host.is_empty(),
+            "the SOCKS5 mode's keys are gone"
+        );
         let page: serde_json::Value = serde_json::from_str(&status(&s).await).unwrap();
         assert_eq!(page["engines"]["race"]["config_file"], "a.conf");
         assert_eq!(page["engines"]["race"]["device"], "wg-race");
@@ -25129,16 +29771,33 @@ mod wireguard_route_tests {
         both["engines"][1] = serde_json::json!({"engine_id": "hoard", "enabled": true, "config_file": "a.conf", "provider": "proton"});
         assert_eq!(assign(&s, both).await.0, StatusCode::BAD_REQUEST);
         // A file that is not there, an engine that is not there.
-        assert_eq!(assign(&s, race_on("missing.conf")).await.0, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            assign(&s, race_on("missing.conf")).await.0,
+            StatusCode::BAD_REQUEST
+        );
         let ghost = serde_json::json!({"engines": [{"engine_id": "ghost", "enabled": false}]});
         assert_eq!(assign(&s, ghost).await.0, StatusCode::BAD_REQUEST);
 
         let form = serde_json::json!({"mode": "direct", "fields": {"race_listen_port": 16171, "hoard_listen_port": 16172}});
-        let r = post_network_mode(State(s.state.clone()), RawQuery(None), keyed(KEY), form.to_string()).await;
+        let r = post_network_mode(
+            State(s.state.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            form.to_string(),
+        )
+        .await;
         assert_eq!(r.status(), StatusCode::OK);
         let text = std::fs::read_to_string(&s.config_path).unwrap();
-        assert!(!text.contains("wireguard_"), "a tunnel outlived the mode:\n{text}");
-        let race = s.cfg().local_engines().into_iter().find(|e| e.id == "race").unwrap();
+        assert!(
+            !text.contains("wireguard_"),
+            "a tunnel outlived the mode:\n{text}"
+        );
+        let race = s
+            .cfg()
+            .local_engines()
+            .into_iter()
+            .find(|e| e.id == "race")
+            .unwrap();
         assert_eq!(race.session.bind_interface, "");
         crate::wgtunnel::force_support(None);
     }
@@ -25147,13 +29806,23 @@ mod wireguard_route_tests {
     #[tokio::test]
     async fn the_network_mode_reports_what_each_engine_runs() {
         let s = node("wg-state");
-        let mode = body_json(get_network_mode(State(s.state.clone()), RawQuery(None), keyed(KEY)).await).await;
+        let mode =
+            body_json(get_network_mode(State(s.state.clone()), RawQuery(None), keyed(KEY)).await)
+                .await;
         let rows = mode["engine_state"].as_array().unwrap();
         assert_eq!(rows.len(), 2);
         let race = rows.iter().find(|r| r["id"] == "race").unwrap();
         assert_eq!(race["dht_running"], false);
-        assert_eq!(race["dht_note"], "offline", "an engine not on the network says so");
-        assert!(mode["warnings"].to_string().contains("DHT is off behind the SOCKS5 proxy"), "{mode}");
+        assert_eq!(
+            race["dht_note"], "offline",
+            "an engine not on the network says so"
+        );
+        assert!(
+            mode["warnings"]
+                .to_string()
+                .contains("DHT is off behind the SOCKS5 proxy"),
+            "{mode}"
+        );
     }
 }
 
@@ -25181,7 +29850,9 @@ mod release_check_identity_tests {
                 }
             }),
         );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
         let addr = listener.local_addr().expect("addr");
         tokio::spawn(async move {
             let _ = axum::serve(listener, app).await;
@@ -25218,7 +29889,10 @@ mod job_view_tests {
         };
         let view = job_view(&job);
         assert!(view["params"].get("record").is_none());
-        assert_eq!(view["params"]["to_engine"], "hoard", "the rest is still shown");
+        assert_eq!(
+            view["params"]["to_engine"], "hoard",
+            "the rest is still shown"
+        );
     }
 }
 
@@ -25280,12 +29954,17 @@ mod detail_panel_tests {
     /// read, and the healthy torrent's panel lost its category with it.
     #[tokio::test]
     async fn a_torrent_panel_does_not_depend_on_the_other_rows_of_its_session() {
-        let s = state_from("detail-own-row", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+        let s = state_from(
+            "detail-own-row",
+            &format!("[daemon]\napi_key = \"{KEY}\"\n"),
+        );
         let hash = hold(&s, "hoard", "alpha", "movies");
         let neighbour = "b".repeat(40);
         {
             let store = s.state.store.lock().unwrap();
-            store.insert_torrent(&neighbour, "hoard", b"x", "", "", 0.0, false, "").unwrap();
+            store
+                .insert_torrent(&neighbour, "hoard", b"x", "", "", 0.0, false, "")
+                .unwrap();
             store.execute_batch_for_tests(&format!(
                 "UPDATE torrents SET added_time = 'not a number' WHERE info_hash = '{neighbour}'"
             ));
@@ -25295,7 +29974,10 @@ mod detail_panel_tests {
             );
         }
         let body = get(&s, &format!("/api/hoard/torrents/{hash}")).await;
-        assert_eq!(body["category"], "movies", "the panel keeps its own row's category");
+        assert_eq!(
+            body["category"], "movies",
+            "the panel keeps its own row's category"
+        );
     }
 
     /// An install whose second engine of each role has an id that is not the
@@ -25320,7 +30002,10 @@ mod detail_panel_tests {
     #[tokio::test]
     async fn a_hoard_panel_reads_the_session_of_the_engine_holding_the_torrent() {
         let s = tunnelled("detail-hoard2");
-        assert_eq!(s.state.engines.get("hoard2").expect("fixture engine").role, "hoard");
+        assert_eq!(
+            s.state.engines.get("hoard2").expect("fixture engine").role,
+            "hoard"
+        );
         let hash = hold(&s, "hoard2", "gamma", "tv");
         let body = get(&s, &format!("/api/hoard/torrents/{hash}?engine=hoard2")).await;
         assert_eq!(body["category"], "tv");
@@ -25330,7 +30015,10 @@ mod detail_panel_tests {
     #[tokio::test]
     async fn a_race_panel_reads_the_session_of_the_engine_holding_the_torrent() {
         let s = tunnelled("detail-vpn1");
-        assert_eq!(s.state.engines.get("vpn1").expect("fixture engine").role, "race");
+        assert_eq!(
+            s.state.engines.get("vpn1").expect("fixture engine").role,
+            "race"
+        );
         let hash = hold(&s, "vpn1", "delta", "Race");
         let body = get(&s, &format!("/api/race/torrents/{hash}?engine=vpn1")).await;
         assert_eq!(body["category"], "Race");
@@ -25485,7 +30173,16 @@ mod detail_panel_tests {
         {
             let store = s.state.store.lock().unwrap();
             store
-                .insert_torrent(&hash, engine, &blob, STORE_SAVE, category, STORE_ADDED as f64, !live, "x,y")
+                .insert_torrent(
+                    &hash,
+                    engine,
+                    &blob,
+                    STORE_SAVE,
+                    category,
+                    STORE_ADDED as f64,
+                    !live,
+                    "x,y",
+                )
                 .unwrap();
             store.execute_batch_for_tests(&format!(
                 "UPDATE torrents SET completed_time = {STORE_COMPLETED}, seeding_time = {STORE_SEEDING},
@@ -25500,10 +30197,16 @@ mod detail_panel_tests {
         let mut guards = Vec::new();
         if !live {
             // Half of it on disk: a progress that is neither 0 nor 1.
-            t.picker.get().expect("a download has a picker").lock().unwrap().set_have(0);
+            t.picker
+                .get()
+                .expect("a download has a picker")
+                .lock()
+                .unwrap()
+                .set_have(0);
         }
         if live {
-            t.status.store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+            t.status
+                .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
             // Accumulated, with no open interval: a figure that does not tick
             // between the two reads.
             t.seed_secs.store(777, Ordering::Relaxed);
@@ -25519,15 +30222,26 @@ mod detail_panel_tests {
             t.next_announce_at.store(now + 1800, Ordering::Relaxed);
             *t.current_tracker.lock().unwrap() = "https://one.example/announce".into();
 
-            for (n, (port, client, enc, fast)) in
-                [(51413u16, "qBittorrent 4.6.0", true, true), (6881, "Transmission 4.0", false, false)]
-                    .into_iter()
-                    .enumerate()
+            for (n, (port, client, enc, fast)) in [
+                (51413u16, "qBittorrent 4.6.0", true, true),
+                (6881, "Transmission 4.0", false, false),
+            ]
+            .into_iter()
+            .enumerate()
             {
-                let addr: std::net::SocketAddr = format!("192.0.2.{}:{port}", n + 10).parse().unwrap();
-                let p = std::sync::Arc::new(PeerStats::new(addr, [n as u8; 20], client.into(), enc, fast));
-                p.total_uploaded.store(1_000_000 * (n as u64 + 1), Ordering::Relaxed);
-                p.total_downloaded.store(8192 * (n as u64 + 1), Ordering::Relaxed);
+                let addr: std::net::SocketAddr =
+                    format!("192.0.2.{}:{port}", n + 10).parse().unwrap();
+                let p = std::sync::Arc::new(PeerStats::new(
+                    addr,
+                    [n as u8; 20],
+                    client.into(),
+                    enc,
+                    fast,
+                ));
+                p.total_uploaded
+                    .store(1_000_000 * (n as u64 + 1), Ordering::Relaxed);
+                p.total_downloaded
+                    .store(8192 * (n as u64 + 1), Ordering::Relaxed);
                 p.num_pieces_have.store(n as u32 + 1, Ordering::Relaxed);
                 p.is_seed.store(n == 1, Ordering::Relaxed);
                 p.interested.store(n == 0, Ordering::Relaxed);
@@ -25558,9 +30272,16 @@ mod detail_panel_tests {
             (Value::Object(x), Value::Object(y)) => {
                 let keys: std::collections::BTreeSet<&String> = x.keys().chain(y.keys()).collect();
                 for k in keys {
-                    let (va, vb) = (x.get(k).unwrap_or(&Value::Null), y.get(k).unwrap_or(&Value::Null));
+                    let (va, vb) = (
+                        x.get(k).unwrap_or(&Value::Null),
+                        y.get(k).unwrap_or(&Value::Null),
+                    );
                     if x.contains_key(k) != y.contains_key(k) {
-                        out.push(format!("{at}.{k}: present {} vs {}", x.contains_key(k), y.contains_key(k)));
+                        out.push(format!(
+                            "{at}.{k}: present {} vs {}",
+                            x.contains_key(k),
+                            y.contains_key(k)
+                        ));
                     } else {
                         differences(va, vb, &format!("{at}.{k}"), out);
                     }
@@ -25590,14 +30311,21 @@ mod detail_panel_tests {
         by_addr(before);
         let settle = |a: &mut serde_json::Value, b: &mut serde_json::Value, what: &str| {
             let (x, y) = (a.as_i64().unwrap(), b.as_i64().unwrap());
-            assert!((x - y).abs() <= 1, "{what}: {x} vs {y}, more than a clock tick apart");
+            assert!(
+                (x - y).abs() <= 1,
+                "{what}: {x} vs {y}, more than a clock tick apart"
+            );
             *a = b.clone();
         };
         let n = now["peers"].as_array().map_or(0, |p| p.len());
         if n == before["peers"].as_array().map_or(0, |p| p.len()) {
             for i in 0..n {
                 let b = &mut before["peers"][i]["connection_duration"];
-                settle(&mut now["peers"][i]["connection_duration"], b, "connection_duration");
+                settle(
+                    &mut now["peers"][i]["connection_duration"],
+                    b,
+                    "connection_duration",
+                );
             }
         }
         let n = now["trackers"].as_array().map_or(0, |t| t.len());
@@ -25622,7 +30350,13 @@ mod detail_panel_tests {
         t: &std::sync::Arc<typhon_engine::torrent::meta::TorrentState>,
     ) -> (serde_json::Value, serde_json::Value, Vec<String>) {
         let mut now = get(s, uri).await;
-        let mut before = detail_payload_before(&s.state, old_session, hash, t, &admission_of(&s.state, engine));
+        let mut before = detail_payload_before(
+            &s.state,
+            old_session,
+            hash,
+            t,
+            &admission_of(&s.state, engine),
+        );
         settle_clocks(&mut now, &mut before);
         let mut diff = Vec::new();
         differences(&now, &before, "", &mut diff);
@@ -25642,21 +30376,36 @@ mod detail_panel_tests {
         use std::sync::atomic::Ordering;
         // The store row.
         assert_eq!(p["category"], category, "category from the row");
-        assert_eq!(p["save_path"], STORE_SAVE, "save_path from the row, not the engine's");
+        assert_eq!(
+            p["save_path"], STORE_SAVE,
+            "save_path from the row, not the engine's"
+        );
         assert_eq!(p["added_time"], STORE_ADDED, "added_time from the row");
-        assert_eq!(p["completed_time"], STORE_COMPLETED, "completed_time from the row");
+        assert_eq!(
+            p["completed_time"], STORE_COMPLETED,
+            "completed_time from the row"
+        );
         // The engine.
         assert_eq!(p["info_hash"], hash);
         assert_eq!(p["name"], name);
-        assert_eq!(p["engine_save_path"], &*t.save_path.read().to_string_lossy());
+        assert_eq!(
+            p["engine_save_path"],
+            &*t.save_path.read().to_string_lossy()
+        );
         assert_eq!(p["multi_file"], true);
         assert_eq!(p["total_size"], 24_576);
         assert_eq!(p["num_pieces"], 2);
         assert_eq!(p["piece_length"], 16_384);
         if live {
-            assert_eq!(serde_json::json!([p["progress"], p["total_done"]]), serde_json::json!([1, 24_576]));
+            assert_eq!(
+                serde_json::json!([p["progress"], p["total_done"]]),
+                serde_json::json!([1, 24_576])
+            );
         } else {
-            assert_eq!(serde_json::json!([p["progress"], p["total_done"]]), serde_json::json!([0.5, 16_384]));
+            assert_eq!(
+                serde_json::json!([p["progress"], p["total_done"]]),
+                serde_json::json!([0.5, 16_384])
+            );
         }
         assert_eq!(p["total_upload"], 3_000_000);
         assert_eq!(p["total_download"], 24_576);
@@ -25665,8 +30414,10 @@ mod detail_panel_tests {
         assert_eq!(p["download_limit"], 2_000_000);
         assert_eq!(p["torrent_error"], false);
         let trackers = p["trackers"].as_array().expect("trackers");
-        let urls: Vec<(&str, i64)> =
-            trackers.iter().map(|r| (r["url"].as_str().unwrap(), r["tier"].as_i64().unwrap())).collect();
+        let urls: Vec<(&str, i64)> = trackers
+            .iter()
+            .map(|r| (r["url"].as_str().unwrap(), r["tier"].as_i64().unwrap()))
+            .collect();
         assert_eq!(
             urls,
             [
@@ -25680,41 +30431,79 @@ mod detail_panel_tests {
         assert_eq!(p["tracker_error"], false);
         if live {
             assert_eq!(p["state"], "seeding");
-            assert_eq!(p["seeding_time"], 777, "the engine's live seed time wins over the row's");
+            assert_eq!(
+                p["seeding_time"], 777,
+                "the engine's live seed time wins over the row's"
+            );
             assert_eq!(p["upload_rate"], t.upload_rate.get() as i64);
             assert_eq!(p["download_rate"], t.download_rate.get() as i64);
-            assert!(t.upload_rate.get() > 0 && t.download_rate.get() > 0, "the fixture has rates");
+            assert!(
+                t.upload_rate.get() > 0 && t.download_rate.get() > 0,
+                "the fixture has rates"
+            );
             assert_eq!(p["num_peers"], 2);
-            assert_eq!(serde_json::json!([p["list_seeds"], p["list_peers"]]), serde_json::json!([7, 3]));
-            assert_eq!(serde_json::json!([p["num_seeds"], p["swarm_seeds"]]), serde_json::json!([7, 7]));
+            assert_eq!(
+                serde_json::json!([p["list_seeds"], p["list_peers"]]),
+                serde_json::json!([7, 3])
+            );
+            assert_eq!(
+                serde_json::json!([p["num_seeds"], p["swarm_seeds"]]),
+                serde_json::json!([7, 7])
+            );
             assert_eq!(p["swarm_leechers"], 3);
             for r in trackers {
                 let e = &r["endpoints"][0];
-                assert_eq!((e["status"].as_str(), e["scrape_complete"].as_i64()), (Some("ok"), Some(7)));
+                assert_eq!(
+                    (e["status"].as_str(), e["scrape_complete"].as_i64()),
+                    (Some("ok"), Some(7))
+                );
             }
             let peers = p["peers"].as_array().expect("peers");
             assert_eq!(peers.len(), t.peer_stats.len());
             assert_eq!(peers.len(), 2);
             for peer in peers {
                 let addr: std::net::SocketAddr =
-                    format!("{}:{}", peer["ip"].as_str().unwrap(), peer["port"]).parse().unwrap();
+                    format!("{}:{}", peer["ip"].as_str().unwrap(), peer["port"])
+                        .parse()
+                        .unwrap();
                 let st = t.peer_stats.get(&addr).expect("a peer of the session");
                 assert_eq!(peer["client"], st.client.as_str());
-                assert_eq!(peer["total_upload"], st.total_uploaded.load(Ordering::Relaxed));
-                assert_eq!(peer["total_download"], st.total_downloaded.load(Ordering::Relaxed));
-                assert_eq!(peer["num_pieces"], st.num_pieces_have.load(Ordering::Relaxed));
+                assert_eq!(
+                    peer["total_upload"],
+                    st.total_uploaded.load(Ordering::Relaxed)
+                );
+                assert_eq!(
+                    peer["total_download"],
+                    st.total_downloaded.load(Ordering::Relaxed)
+                );
+                assert_eq!(
+                    peer["num_pieces"],
+                    st.num_pieces_have.load(Ordering::Relaxed)
+                );
                 assert_eq!(peer["ul_rate"], st.ul_rate.get());
                 assert_eq!(peer["dl_rate"], st.dl_rate.get());
                 assert!(st.ul_rate.get() > 0, "the fixture has peer rates");
             }
             let flags: Vec<&str> = peers.iter().map(|p| p["flags"].as_str().unwrap()).collect();
-            assert!(flags.contains(&"iUEF") && flags.contains(&"S"), "flags {flags:?}");
+            assert!(
+                flags.contains(&"iUEF") && flags.contains(&"S"),
+                "flags {flags:?}"
+            );
         } else {
-            assert_eq!(p["state"], "stopped", "the row's user pause makes it stopped, not queued");
-            assert_eq!(p["seeding_time"], STORE_SEEDING, "no live seed time: the row's figure");
+            assert_eq!(
+                p["state"], "stopped",
+                "the row's user pause makes it stopped, not queued"
+            );
+            assert_eq!(
+                p["seeding_time"], STORE_SEEDING,
+                "no live seed time: the row's figure"
+            );
             assert_eq!(p["num_peers"], 0);
             assert_eq!(p["peers"], serde_json::json!([]));
-            assert_eq!(serde_json::json!([p["upload_rate"], p["download_rate"]]), serde_json::json!([0, 0]));
+            assert_eq!(
+                serde_json::json!([p["upload_rate"], p["download_rate"]]),
+                serde_json::json!([0, 0])
+            );
         }
     }
 
@@ -25723,13 +30512,28 @@ mod detail_panel_tests {
     /// code before a5d18acd built, every field of it.
     #[tokio::test]
     async fn the_fast_panel_of_a_live_torrent_is_the_panel_it_replaced() {
-        let s = state_from("detail-same-live", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+        let s = state_from(
+            "detail-same-live",
+            &format!("[daemon]\napi_key = \"{KEY}\"\n"),
+        );
         // A neighbour in the same session, so the old whole-session read had
         // more than one row to pick from.
         let _other = fixture(&s, "hoard", "other", "music", true).await;
         let (hash, t, _peers) = fixture(&s, "hoard", "alpha", "movies", true).await;
-        let (now, _, diff) = both(&s, &format!("/api/hoard/torrents/{hash}"), "hoard", "hoard", &hash, &t).await;
-        assert_eq!(diff, Vec::<String>::new(), "the new panel differs from the old one");
+        let (now, _, diff) = both(
+            &s,
+            &format!("/api/hoard/torrents/{hash}"),
+            "hoard",
+            "hoard",
+            &hash,
+            &t,
+        )
+        .await;
+        assert_eq!(
+            diff,
+            Vec::<String>::new(),
+            "the new panel differs from the old one"
+        );
         assert_sources(&now, &t, &hash, "alpha", "movies", true);
     }
 
@@ -25737,16 +30541,36 @@ mod detail_panel_tests {
     /// its pause deciding the state. Same panel as before.
     #[tokio::test]
     async fn the_fast_panel_of_a_stopped_torrent_is_the_panel_it_replaced() {
-        let s = state_from("detail-same-stopped", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+        let s = state_from(
+            "detail-same-stopped",
+            &format!("[daemon]\napi_key = \"{KEY}\"\n"),
+        );
         let (hash, t, _) = fixture(&s, "hoard", "beta", "books", false).await;
-        let (now, _, diff) = both(&s, &format!("/api/hoard/torrents/{hash}"), "hoard", "hoard", &hash, &t).await;
-        assert_eq!(diff, Vec::<String>::new(), "the new panel differs from the old one");
+        let (now, _, diff) = both(
+            &s,
+            &format!("/api/hoard/torrents/{hash}"),
+            "hoard",
+            "hoard",
+            &hash,
+            &t,
+        )
+        .await;
+        assert_eq!(
+            diff,
+            Vec::<String>::new(),
+            "the new panel differs from the old one"
+        );
         assert_sources(&now, &t, &hash, "beta", "books", false);
 
         // In the store, held by no engine: no panel, as before -- the lookup
         // that decides it (find_selected) is the one both versions use.
         let ghost = "c".repeat(40);
-        s.state.store.lock().unwrap().insert_torrent(&ghost, "hoard", b"x", "", "", 0.0, true, "").unwrap();
+        s.state
+            .store
+            .lock()
+            .unwrap()
+            .insert_torrent(&ghost, "hoard", b"x", "", "", 0.0, true, "")
+            .unwrap();
         let req = axum::http::Request::builder()
             .uri(format!("/api/hoard/torrents/{ghost}"))
             .header("X-API-Key", KEY)
@@ -25760,7 +30584,12 @@ mod detail_panel_tests {
     /// old routes passed the role as the session, so the old panel read no row
     /// for it; these are the differences, each the fix of 61555df0 and nothing
     /// else.
-    async fn a_second_engine_differs_only_by_its_row(role: &str, engine: &str, name: &str, category: &str) {
+    async fn a_second_engine_differs_only_by_its_row(
+        role: &str,
+        engine: &str,
+        name: &str,
+        category: &str,
+    ) {
         let s = tunnelled(&format!("detail-same-{engine}"));
         let (hash, t, _peers) = fixture(&s, engine, name, category, true).await;
         let uri = format!("/api/{role}/torrents/{hash}?engine={engine}");
@@ -25772,9 +30601,16 @@ mod detail_panel_tests {
         // Before: no row in the session called after the role, so every store
         // fact fell back to the engine's own figure or to empty.
         assert_eq!(before["category"], "", "old: no row, no category");
-        assert_eq!(before["save_path"], engine_save.as_str(), "old: the engine's save path");
+        assert_eq!(
+            before["save_path"],
+            engine_save.as_str(),
+            "old: the engine's save path"
+        );
         assert_eq!(before["added_time"], added, "old: the engine's added time");
-        assert_eq!(before["completed_time"], ENGINE_COMPLETED, "old: the engine's completed time");
+        assert_eq!(
+            before["completed_time"], ENGINE_COMPLETED,
+            "old: the engine's completed time"
+        );
         // ... and the share limits were named after the role, not the engine.
         assert_eq!(before["share_limits"]["engine"], role);
         assert_eq!(now["share_limits"]["engine"], engine);

@@ -17,7 +17,10 @@
 pub const CLASSES: [&str; 5] = ["auth", "dead", "throttled", "unreachable", "other"];
 
 fn rank(class: &str) -> usize {
-    CLASSES.iter().position(|c| *c == class).unwrap_or(CLASSES.len())
+    CLASSES
+        .iter()
+        .position(|c| *c == class)
+        .unwrap_or(CLASSES.len())
 }
 
 /// Classify ONE half of a tracker error message.

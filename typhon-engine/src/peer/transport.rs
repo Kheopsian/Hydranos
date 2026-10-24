@@ -3,12 +3,12 @@
 //! All peer I/O goes through this enum so MSE/handshake/codec stay transport-agnostic.
 //! TCP-specific tuning (e.g. set_nodelay) is applied before wrapping into the enum.
 
+use librqbit_utp::UtpStream;
 use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
-use librqbit_utp::UtpStream;
 
 pub enum PeerTransport {
     Tcp(TcpStream),

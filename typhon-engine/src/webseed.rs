@@ -17,8 +17,8 @@
 //! Claims live in `CLAIMED` so two workers never fight over the same picker.
 
 use std::collections::VecDeque;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use dashmap::{DashMap, DashSet};
@@ -128,11 +128,7 @@ fn add_ns(c: &std::sync::atomic::AtomicU64, t: std::time::Instant) {
     c.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
 }
 
-
 /// info_hash -> (consecutive failures, unix time before which not to retry)
-
-
-
 
 fn now_secs() -> u64 {
     SystemTime::now()
@@ -202,7 +198,10 @@ async fn fetch_range(
     let status = resp.status();
     let whole_file = from == 0 && to + 1 >= file_len;
     if status.as_u16() != 206 && !(status.is_success() && whole_file) {
-        return Err(format!("{} answered {} for bytes={}-{}", url, status, from, to));
+        return Err(format!(
+            "{} answered {} for bytes={}-{}",
+            url, status, from, to
+        ));
     }
     // Never more than the range asked for: a mirror that keeps sending is cut
     // off at `want` bytes, not read to the end of the 120 s timeout.
@@ -224,7 +223,11 @@ async fn fetch_range(
 /// its LAN can reach: `localhost`, or a loopback, private, link-local, CGNAT,
 /// unique-local or unspecified address, IPv4-mapped forms included.
 pub fn is_internal_host(host: &str) -> bool {
-    let h = host.trim_start_matches('[').trim_end_matches(']').trim_end_matches('.').to_ascii_lowercase();
+    let h = host
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
     if h == "localhost" || h.ends_with(".localhost") {
         return true;
     }
@@ -238,7 +241,10 @@ pub fn is_internal_host(host: &str) -> bool {
 /// forms `is_internal_host` lists.
 pub fn is_internal_ip(ip: std::net::IpAddr) -> bool {
     let ip = match ip {
-        std::net::IpAddr::V6(v6) => v6.to_ipv4_mapped().map(std::net::IpAddr::V4).unwrap_or(std::net::IpAddr::V6(v6)),
+        std::net::IpAddr::V6(v6) => v6
+            .to_ipv4_mapped()
+            .map(std::net::IpAddr::V4)
+            .unwrap_or(std::net::IpAddr::V6(v6)),
         ip => ip,
     };
     match ip {
@@ -253,7 +259,10 @@ pub fn is_internal_ip(ip: std::net::IpAddr) -> bool {
         }
         std::net::IpAddr::V6(v6) => {
             let s0 = v6.segments()[0];
-            v6.is_loopback() || v6.is_unspecified() || (s0 & 0xfe00) == 0xfc00 || (s0 & 0xffc0) == 0xfe80
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || (s0 & 0xfe00) == 0xfc00
+                || (s0 & 0xffc0) == 0xfe80
         }
     }
 }
@@ -271,7 +280,10 @@ fn redirect_policy() -> reqwest::redirect::Policy {
         if !matches!(to.scheme(), "http" | "https") {
             return attempt.error("redirect to a scheme other than http(s)");
         }
-        let from = attempt.previous().last().and_then(|u| u.host_str().map(str::to_string));
+        let from = attempt
+            .previous()
+            .last()
+            .and_then(|u| u.host_str().map(str::to_string));
         let to_host = to.host_str().unwrap_or("");
         if is_internal_host(to_host) && from.as_deref() != Some(to_host) {
             return attempt.error("redirect to an internal address");
@@ -301,7 +313,13 @@ impl StartGuard {
     /// Decided now when the URL's host is an address or `localhost`.
     pub fn for_url(url: &str) -> Self {
         let parsed = reqwest::Url::parse(url).ok();
-        let decided = |internal: bool| if internal { START_INTERNAL } else { START_PUBLIC };
+        let decided = |internal: bool| {
+            if internal {
+                START_INTERNAL
+            } else {
+                START_PUBLIC
+            }
+        };
         let state = match parsed.as_ref().and_then(|u| u.host()) {
             Some(url::Host::Domain(d)) if is_internal_host(d) => START_INTERNAL,
             Some(url::Host::Ipv4(ip)) => decided(is_internal_ip(ip.into())),
@@ -318,7 +336,11 @@ impl StartGuard {
 
     /// Record where the fetch began, if it has not been recorded yet.
     pub fn decide(&self, internal: bool) {
-        let to = if internal { START_INTERNAL } else { START_PUBLIC };
+        let to = if internal {
+            START_INTERNAL
+        } else {
+            START_PUBLIC
+        };
         let _ = self.0.compare_exchange(
             START_UNDECIDED,
             to,
@@ -420,15 +442,14 @@ async fn fetch_span(
     let want = span_end - span_start;
     let reqs = span_file_ranges(meta, base, first, last);
 
-    let chunks: Vec<Result<Vec<u8>, String>> = futures::stream::iter(reqs.into_iter().map(
-        |(url, from, to, len)| {
+    let chunks: Vec<Result<Vec<u8>, String>> =
+        futures::stream::iter(reqs.into_iter().map(|(url, from, to, len)| {
             let client = client.clone();
             async move { fetch_range(&client, &url, from, to, len).await }
-        },
-    ))
-    .buffered(SPAN_FILE_PARALLEL)
-    .collect()
-    .await;
+        }))
+        .buffered(SPAN_FILE_PARALLEL)
+        .collect()
+        .await;
 
     // Laid out at their place in the stream rather than appended: between two
     // files there may be alignment padding (BEP 47, v2) that no mirror
@@ -440,7 +461,9 @@ async fn fetch_span(
         let from = (at - span_start) as usize;
         let to = from + c.len();
         if to > out.len() {
-            return Err(format!("pieces {first}..={last}: a file range overran the span"));
+            return Err(format!(
+                "pieces {first}..={last}: a file range overran the span"
+            ));
         }
         out[from..to].copy_from_slice(&c);
     }
@@ -503,7 +526,9 @@ fn reserve_run(
     // The engine's download memory is the peers' as much as the mirror's:
     // with it spent, start nothing, and grow the run only as far as it admits.
     // The check and the reservation are one step (see `start_piece_within_budget`).
-    if p.start_piece_within_budget(first, meta.piece_size(first), BLOCK_SIZE, owner).is_none() {
+    if p.start_piece_within_budget(first, meta.piece_size(first), BLOCK_SIZE, owner)
+        .is_none()
+    {
         return Vec::new();
     }
     run.push(first);
@@ -518,7 +543,9 @@ fn reserve_run(
             break;
         }
         let sz = meta.piece_size(next);
-        if p.start_piece_within_budget(next, sz, BLOCK_SIZE, owner).is_none() {
+        if p.start_piece_within_budget(next, sz, BLOCK_SIZE, owner)
+            .is_none()
+        {
             break;
         }
         run.push(next);
@@ -721,7 +748,6 @@ async fn worker(mgr: Arc<TorrentManager>, disk: Arc<DiskManager>, client: reqwes
 
 /// Work waiting to be claimed, filled by the scanner, drained by the workers.
 
-
 /// Refill the queue when it runs low, in ONE walk of the catalogue.
 ///
 /// Every worker used to walk all 243k torrents itself, once per torrent it
@@ -827,7 +853,11 @@ async fn reporter(mgr: Arc<TorrentManager>) {
             reqs as f64 / 60.0,
             bytes as f64 / 1e6,
             bytes as f64 / 60.0 / 1e6,
-            if reqs > 0 { f as f64 / reqs as f64 } else { 0.0 }
+            if reqs > 0 {
+                f as f64 / reqs as f64
+            } else {
+                0.0
+            }
         );
     }
 }
@@ -932,7 +962,12 @@ mod tests {
         let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let h = hits.clone();
         let app = axum::Router::new()
-            .route("/r", axum::routing::get(move || async move { (axum::http::StatusCode::FOUND, [("location", to)]) }))
+            .route(
+                "/r",
+                axum::routing::get(move || async move {
+                    (axum::http::StatusCode::FOUND, [("location", to)])
+                }),
+            )
             .route(
                 "/x",
                 axum::routing::get(move || async move {
@@ -940,7 +975,9 @@ mod tests {
                     (axum::http::StatusCode::PARTIAL_CONTENT, b"abcd".to_vec())
                 }),
             );
-        let listener = tokio::net::TcpListener::bind(format!("{ip}:0")).await.expect("bind");
+        let listener = tokio::net::TcpListener::bind(format!("{ip}:0"))
+            .await
+            .expect("bind");
         let addr = listener.local_addr().expect("addr");
         tokio::spawn(async move {
             let _ = axum::serve(listener, app).await;
@@ -952,7 +989,8 @@ mod tests {
     /// not read into memory until the 120 s timeout.
     #[tokio::test]
     async fn a_mirror_sending_past_the_range_is_cut_off_at_it() {
-        let (base, _) = crate::tracker::http::endless::server("206 Partial Content", vec![], b'x').await;
+        let (base, _) =
+            crate::tracker::http::endless::server("206 Partial Content", vec![], b'x').await;
         let out = tokio::time::timeout(
             Duration::from_secs(5),
             fetch_range(&client(), &format!("{base}/f"), 0, 16383, 1 << 30),
@@ -971,7 +1009,11 @@ mod tests {
         let (outer, _) = mirror("127.0.0.1", format!("{inner}/x")).await;
         let out = fetch_range(&client(), &format!("{outer}/r"), 0, 3, 4).await;
         assert!(out.is_err(), "the redirect was refused: {out:?}");
-        assert_eq!(hits.load(Ordering::Relaxed), 0, "the internal target was never asked");
+        assert_eq!(
+            hits.load(Ordering::Relaxed),
+            0,
+            "the internal target was never asked"
+        );
     }
 
     /// A redirect that stays on the mirror's host is still followed: a LAN
@@ -987,13 +1029,30 @@ mod tests {
 
     #[test]
     fn internal_hosts_are_recognised_in_every_spelling() {
-        for h in ["localhost", "a.localhost", "127.0.0.1", "10.1.2.3", "172.16.0.1", "192.168.99.1", "169.254.169.254",
+        for h in [
+            "localhost",
+            "a.localhost",
+            "127.0.0.1",
+            "10.1.2.3",
+            "172.16.0.1",
+            "192.168.99.1",
+            "169.254.169.254",
             "100.64.0.1", // leak-ok: CGNAT, internal by definition
-            "0.0.0.0", "[::1]", "[fc00::1]", "[fe80::1]", "[::ffff:127.0.0.1]", "[::ffff:192.168.0.1]"] {
+            "0.0.0.0",
+            "[::1]",
+            "[fc00::1]",
+            "[fe80::1]",
+            "[::ffff:127.0.0.1]",
+            "[::ffff:192.168.0.1]",
+        ] {
             assert!(is_internal_host(h), "{h} is internal");
         }
-        for h in ["archive.org", "[2001:db8::1]",
-            "93.184.216.34", "100.128.0.1", "1.1.1.1", // leak-ok: public addresses, the counter-examples
+        for h in [
+            "archive.org",
+            "[2001:db8::1]",
+            "93.184.216.34", // leak-ok: public address, a counter-example
+            "100.128.0.1",   // leak-ok: public address, a counter-example
+            "1.1.1.1",       // leak-ok: public addresses, the counter-examples
         ] {
             assert!(!is_internal_host(h), "{h} is not");
         }
@@ -1008,7 +1067,10 @@ mod tests {
         m.total_size = 16384 + 50;
         m.num_pieces = 2;
         let reqs = span_file_ranges(&m, "http://m/", 0, 1);
-        assert_eq!(reqs.iter().map(|r| (r.1, r.2)).collect::<Vec<_>>(), vec![(0, 99), (0, 49)]);
+        assert_eq!(
+            reqs.iter().map(|r| (r.1, r.2)).collect::<Vec<_>>(),
+            vec![(0, 99), (0, 49)]
+        );
         assert_eq!(span_file_starts(&m, 0, 1), vec![0, 16384]);
         assert_eq!(span_byte_range(&m, 0, 1), (0, 16384 + 50));
     }
@@ -1194,7 +1256,9 @@ mod tests {
     #[test]
     fn a_webseed_starts_no_piece_when_the_budget_is_spent() {
         let (m, mut p) = budgeted(16384);
-        assert!(p.start_piece_within_budget(3, 16384, BLOCK_SIZE, 1).is_some());
+        assert!(p
+            .start_piece_within_budget(3, 16384, BLOCK_SIZE, 1)
+            .is_some());
         let run = reserve_run(&mut p, &m, 2, 64);
         assert!(run.is_empty(), "no room, no run: {run:?}");
         assert!(!p.is_pending(0), "and nothing was reserved behind its back");
@@ -1302,7 +1366,12 @@ mod gate_tests {
     #[test]
     fn a_paused_or_removed_torrent_is_not_fetched() {
         let (mgr, root) = manager("paused");
-        let t = torrent(&mgr, "paused", Some("https://archive.example/files/"), false);
+        let t = torrent(
+            &mgr,
+            "paused",
+            Some("https://archive.example/files/"),
+            false,
+        );
 
         t.is_paused.store(true, Ordering::Relaxed);
         assert!(!wants_webseed(&t), "a paused torrent pulls nothing");
@@ -1318,8 +1387,17 @@ mod gate_tests {
     #[test]
     fn only_a_downloading_torrent_pulls_from_a_webseed() {
         let (mgr, root) = manager("status");
-        let t = torrent(&mgr, "status", Some("https://archive.example/files/"), false);
-        for status in [TorrentStatus::Seeding, TorrentStatus::Stopped, TorrentStatus::Error] {
+        let t = torrent(
+            &mgr,
+            "status",
+            Some("https://archive.example/files/"),
+            false,
+        );
+        for status in [
+            TorrentStatus::Seeding,
+            TorrentStatus::Stopped,
+            TorrentStatus::Error,
+        ] {
             t.status.store(status as u8, Ordering::Relaxed);
             assert!(!wants_webseed(&t), "{status:?} must not pull");
         }
@@ -1354,10 +1432,16 @@ mod gate_tests {
         let (public, private) = (&ids[0], &ids[1]);
         assert!(private.meta.private, "the fixture must really be private");
         let ws = mgr.webseed();
-        assert!(wants_webseed_in(public, ws) && wants_webseed_in(private, ws), "default: both pull");
+        assert!(
+            wants_webseed_in(public, ws) && wants_webseed_in(private, ws),
+            "default: both pull"
+        );
         ws.set_private_allowed(false);
         assert!(wants_webseed_in(public, ws), "a public torrent still pulls");
-        assert!(!wants_webseed_in(private, ws), "a private torrent no longer does");
+        assert!(
+            !wants_webseed_in(private, ws),
+            "a private torrent no longer does"
+        );
         ws.set_private_allowed(true);
         assert!(wants_webseed_in(private, ws));
         let _ = std::fs::remove_dir_all(root);
@@ -1394,13 +1478,22 @@ mod gate_tests {
     #[test]
     fn an_eligible_candidate_is_handed_out_once() {
         let (mgr, root) = manager("claim");
-        let t = torrent(&mgr, "pullme", Some("https://archive.example/files/"), false);
-        t.status.store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+        let t = torrent(
+            &mgr,
+            "pullme",
+            Some("https://archive.example/files/"),
+            false,
+        );
+        t.status
+            .store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
 
         mgr.webseed().queue.lock().unwrap().push_back(t.info_hash);
         let got = next_candidate(&mgr);
         if got.is_some() {
-            assert!(mgr.webseed().claimed.contains(&t.info_hash), "it is claimed");
+            assert!(
+                mgr.webseed().claimed.contains(&t.info_hash),
+                "it is claimed"
+            );
             // The queue is empty now, so a second worker gets nothing.
             assert!(next_candidate(&mgr).is_none());
         }
@@ -1415,7 +1508,10 @@ mod gate_tests {
     fn the_webseed_client_builds_from_the_engine_config() {
         let cfg: EngineConfig =
             toml::from_str("").expect("every EngineConfig field has a serde default");
-        assert!(build_client(&cfg).is_ok(), "the client must build on a default config");
+        assert!(
+            build_client(&cfg).is_ok(),
+            "the client must build on a default config"
+        );
     }
 
     /// A URL segment is percent-encoded so a file with a space or an accent
@@ -1425,7 +1521,11 @@ mod gate_tests {
         assert_eq!(enc_segment("plain"), "plain");
         assert_eq!(enc_segment("a b"), "a%20b");
         assert_eq!(enc_segment("caf\u{e9}"), "caf%C3%A9");
-        assert_eq!(enc_segment("a/b"), "a%2Fb", "a separator inside a name is escaped");
+        assert_eq!(
+            enc_segment("a/b"),
+            "a%2Fb",
+            "a separator inside a name is escaped"
+        );
     }
 
     /// The unreserved set is left alone -- escaping it would still resolve but
@@ -1434,5 +1534,4 @@ mod gate_tests {
     fn unreserved_characters_are_left_alone() {
         assert_eq!(enc_segment("A-Z_a-z.0-9~"), "A-Z_a-z.0-9~");
     }
-
 }

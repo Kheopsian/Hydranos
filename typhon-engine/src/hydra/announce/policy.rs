@@ -81,7 +81,10 @@ impl CleartextPasskey {
 /// path segment that looks like a key (anywhere in the path), or a query
 /// parameter whose value looks like a key (the name does not matter).
 pub fn sends_passkey_in_clear(policy: &Policy, tracker_url: &str) -> bool {
-    let is_http = tracker_url.get(..7).map(|p| p.eq_ignore_ascii_case("http://")).unwrap_or(false);
+    let is_http = tracker_url
+        .get(..7)
+        .map(|p| p.eq_ignore_ascii_case("http://"))
+        .unwrap_or(false);
     if !is_http {
         return false;
     }
@@ -94,7 +97,8 @@ pub fn sends_passkey_in_clear(policy: &Policy, tracker_url: &str) -> bool {
 /// Whether the policy is `refuse` and this announce would carry a passkey in
 /// clear: the one decision both `prepare` and the runner's error report use.
 pub fn refused_for_cleartext(policy: &Policy, tracker_url: &str) -> bool {
-    policy.cleartext_passkey == CleartextPasskey::Refuse && sends_passkey_in_clear(policy, tracker_url)
+    policy.cleartext_passkey == CleartextPasskey::Refuse
+        && sends_passkey_in_clear(policy, tracker_url)
 }
 
 /// True the first time this host is seen, false after: the warning is once
@@ -103,7 +107,10 @@ fn first_cleartext_note(host: &str) -> bool {
     use std::collections::HashSet;
     use std::sync::{Mutex, OnceLock};
     static SEEN: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
-    SEEN.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner()).insert(host.to_string())
+    SEEN.get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(host.to_string())
 }
 
 /// The passkey this tracker should be given, if it is not the one already in
@@ -181,7 +188,6 @@ pub fn announced_peer_id(policy: &Policy, _trackers: &[Vec<String>]) -> [u8; 20]
     out
 }
 
-
 pub fn prepare(
     policy: &Policy,
     tracker_url: &str,
@@ -197,7 +203,9 @@ pub fn prepare(
     if refused_for_cleartext(policy, tracker_url) {
         return None;
     }
-    if policy.cleartext_passkey == CleartextPasskey::Warn && sends_passkey_in_clear(policy, tracker_url) {
+    if policy.cleartext_passkey == CleartextPasskey::Warn
+        && sends_passkey_in_clear(policy, tracker_url)
+    {
         let host = override_host(tracker_url);
         if first_cleartext_note(&host) {
             // The host only: the URL carries the passkey.
@@ -236,7 +244,14 @@ pub fn prepare(
     if policy.no_ipv6 {
         ip_mode = typhon_engine::tracker::http::IpMode::V4;
     }
-    Some(Request { url: primary, user_agent, ip_mode, udp, device: policy.device.clone(), proxy: policy.proxy.clone() })
+    Some(Request {
+        url: primary,
+        user_agent,
+        ip_mode,
+        udp,
+        device: policy.device.clone(),
+        proxy: policy.proxy.clone(),
+    })
 }
 
 /// The BEP 15 form of one announce.
@@ -265,7 +280,11 @@ fn udp_request(a: &Announce, tracker: &str) -> Option<typhon_engine::tracker::ud
         left: a.left.max(0) as u64,
         uploaded: a.uploaded.max(0) as u64,
         event: typhon_engine::tracker::udp::event_code(a.event),
-        ip: a.public_ip.parse::<std::net::Ipv4Addr>().map(u32::from).unwrap_or(0),
+        ip: a
+            .public_ip
+            .parse::<std::net::Ipv4Addr>()
+            .map(u32::from)
+            .unwrap_or(0),
         // The HTTP `key`, read back as the 32 bits it is: one key per peer and
         // torrent, whichever transport carries it.
         key: u32::from_str_radix(&url::key_for(a.peer_id, a.info_hash), 16).unwrap_or(0),
@@ -315,11 +334,39 @@ mod tests {
         p.device = "wg1".into();
         p.ip_modes.insert("tracker.example".into(), "v6".into());
         let ih = "ab".repeat(20);
-        let r = prepare(&p, "https://tracker.example/announce", &ih, 6881, 0, 0, 0, "", None, None).expect("request");
+        let r = prepare(
+            &p,
+            "https://tracker.example/announce",
+            &ih,
+            6881,
+            0,
+            0,
+            0,
+            "",
+            None,
+            None,
+        )
+        .expect("request");
         assert_eq!(r.ip_mode, typhon_engine::tracker::http::IpMode::V4);
         assert_eq!(r.device, "wg1");
-        let r = prepare(&policy(), "https://other.example/announce", &ih, 6881, 0, 0, 0, "", None, None).expect("request");
-        assert_eq!(r.ip_mode, typhon_engine::tracker::http::IpMode::Auto, "a default policy keeps both families");
+        let r = prepare(
+            &policy(),
+            "https://other.example/announce",
+            &ih,
+            6881,
+            0,
+            0,
+            0,
+            "",
+            None,
+            None,
+        )
+        .expect("request");
+        assert_eq!(
+            r.ip_mode,
+            typhon_engine::tracker::http::IpMode::Auto,
+            "a default policy keeps both families"
+        );
         assert_eq!(r.device, "");
     }
 
@@ -328,12 +375,53 @@ mod tests {
     #[test]
     fn two_torrents_do_not_share_a_key() {
         let p = policy();
-        let key_of = |url: &str| url.split("&key=").nth(1).map(|k| k[..8].to_string()).expect("a key");
-        let a = prepare(&p, "udp://tr4ker.net:6969/announce", &"ab".repeat(20), 16172, 0, 0, 0, "", None, None).unwrap();
-        let b = prepare(&p, "udp://tr4ker.net:6969/announce", &"cd".repeat(20), 16172, 0, 0, 0, "", None, None).unwrap();
+        let key_of = |url: &str| {
+            url.split("&key=")
+                .nth(1)
+                .map(|k| k[..8].to_string())
+                .expect("a key")
+        };
+        let a = prepare(
+            &p,
+            "udp://tr4ker.net:6969/announce",
+            &"ab".repeat(20),
+            16172,
+            0,
+            0,
+            0,
+            "",
+            None,
+            None,
+        )
+        .unwrap();
+        let b = prepare(
+            &p,
+            "udp://tr4ker.net:6969/announce",
+            &"cd".repeat(20),
+            16172,
+            0,
+            0,
+            0,
+            "",
+            None,
+            None,
+        )
+        .unwrap();
         assert_ne!(key_of(&a.url), key_of(&b.url), "HTTP key");
         assert_ne!(a.udp.unwrap().key, b.udp.unwrap().key, "UDP key");
-        let again = prepare(&p, "udp://tr4ker.net:6969/announce", &"ab".repeat(20), 16172, 0, 0, 0, "", None, None).unwrap();
+        let again = prepare(
+            &p,
+            "udp://tr4ker.net:6969/announce",
+            &"ab".repeat(20),
+            16172,
+            0,
+            0,
+            0,
+            "",
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(key_of(&a.url), key_of(&again.url), "stable for one torrent");
     }
 
@@ -354,21 +442,54 @@ mod tests {
     fn a_udp_tracker_is_told_what_the_http_url_says() {
         let mut p = policy();
         p.public_ip = "203.0.113.9".into();
-        let r = prepare(&p, "udp://tr4ker.net:6969/announce/OLDKEY", &"ab".repeat(20), 16172, 30, 20, 10, "completed", None, None)
-            .expect("prepared");
+        let r = prepare(
+            &p,
+            "udp://tr4ker.net:6969/announce/OLDKEY",
+            &"ab".repeat(20),
+            16172,
+            30,
+            20,
+            10,
+            "completed",
+            None,
+            None,
+        )
+        .expect("prepared");
         let u = r.udp.expect("a UDP request for a udp:// tracker");
-        assert_eq!(u.tracker, "udp://tr4ker.net:6969/announce/NEWKEY", "the passkey is rewritten here too");
+        assert_eq!(
+            u.tracker, "udp://tr4ker.net:6969/announce/NEWKEY",
+            "the passkey is rewritten here too"
+        );
         assert_eq!(u.info_hash, [0xAB; 20]);
         assert_eq!(&u.peer_id, b"-TY0001-abcdefghijkl");
         assert_eq!((u.uploaded, u.downloaded, u.left), (30, 20, 10));
         assert_eq!(u.event, 1, "completed");
         assert_eq!(u.port, 16172);
-        assert_eq!(u.num_want, 200, "still leeching: asks for peers, as the URL does");
+        assert_eq!(
+            u.num_want, 200,
+            "still leeching: asks for peers, as the URL does"
+        );
         assert!(r.url.contains("&numwant=200"));
         assert_eq!(u.ip, u32::from(std::net::Ipv4Addr::new(203, 0, 113, 9)));
-        assert_eq!(format!("{:08x}", u.key), url::key_for(&p.peer_id, &"ab".repeat(20)), "the same key as &key=");
+        assert_eq!(
+            format!("{:08x}", u.key),
+            url::key_for(&p.peer_id, &"ab".repeat(20)),
+            "the same key as &key="
+        );
 
-        let http = prepare(&p, "https://tr4ker.net/announce/OLDKEY", &"ab".repeat(20), 16172, 0, 0, 0, "", None, None).unwrap();
+        let http = prepare(
+            &p,
+            "https://tr4ker.net/announce/OLDKEY",
+            &"ab".repeat(20),
+            16172,
+            0,
+            0,
+            0,
+            "",
+            None,
+            None,
+        )
+        .unwrap();
         assert!(http.udp.is_none(), "an HTTP tracker gets no UDP request");
     }
 
@@ -379,9 +500,22 @@ mod tests {
     #[test]
     fn a_passkey_over_plain_http_is_announced_unchanged_by_default() {
         let mut p = policy();
-        p.passkeys.insert("clear-default.example".into(), "NEWKEY".into());
+        p.passkeys
+            .insert("clear-default.example".into(), "NEWKEY".into());
         let ih = "ab".repeat(20);
-        let r = prepare(&p, "http://clear-default.example/announce/OLDKEY", &ih, 6881, 0, 0, 0, "", None, None).expect("announces");
+        let r = prepare(
+            &p,
+            "http://clear-default.example/announce/OLDKEY",
+            &ih,
+            6881,
+            0,
+            0,
+            0,
+            "",
+            None,
+            None,
+        )
+        .expect("announces");
         let expected = format!(
             "http://clear-default.example/announce/NEWKEY?info_hash={}&peer_id=-TY0001-abcdefghijkl&port=6881&uploaded=0&downloaded=0&left=0&compact=1&numwant=0&key={}",
             "%AB".repeat(20),
@@ -395,11 +529,17 @@ mod tests {
     fn only_refuse_refuses_a_cleartext_passkey() {
         let u = "http://clear-default.example/announce/0123456789abcdef0123456789abcdef";
         let mut p = policy();
-        let default = prepare(&p, u, IH40, 6881, 0, 0, 0, "", None, None).expect("default announces");
+        let default =
+            prepare(&p, u, IH40, 6881, 0, 0, 0, "", None, None).expect("default announces");
         for mode in [CleartextPasskey::Warn, CleartextPasskey::Allow] {
             p.cleartext_passkey = mode;
             assert!(!refused_for_cleartext(&p, u));
-            assert_eq!(prepare(&p, u, IH40, 6881, 0, 0, 0, "", None, None).expect("announces").url, default.url);
+            assert_eq!(
+                prepare(&p, u, IH40, 6881, 0, 0, 0, "", None, None)
+                    .expect("announces")
+                    .url,
+                default.url
+            );
         }
         p.cleartext_passkey = CleartextPasskey::Refuse;
         assert!(refused_for_cleartext(&p, u));
@@ -412,14 +552,29 @@ mod tests {
     #[test]
     fn refuse_builds_no_request_for_a_cleartext_passkey() {
         let mut p = policy();
-        p.passkeys.insert("configured.example".into(), "NEWKEY".into());
+        p.passkeys
+            .insert("configured.example".into(), "NEWKEY".into());
         p.cleartext_passkey = CleartextPasskey::Refuse;
         let refused = |u: &str| prepare(&p, u, IH40, 1, 0, 0, 0, "", None, None).is_none();
-        assert!(refused("http://t.example/announce/0123456789abcdef0123456789abcdef"), "key after announce");
-        assert!(refused("http://t.example/0123456789abcdef0123456789abcdef/announce"), "key before announce");
-        assert!(refused("http://t.example/announce?pk=0123456789abcdef0123"), "key in a query value");
-        assert!(refused("http://configured.example/announce"), "configured override");
-        assert!(!refused("https://t.example/announce/0123456789abcdef0123456789abcdef"));
+        assert!(
+            refused("http://t.example/announce/0123456789abcdef0123456789abcdef"),
+            "key after announce"
+        );
+        assert!(
+            refused("http://t.example/0123456789abcdef0123456789abcdef/announce"),
+            "key before announce"
+        );
+        assert!(
+            refused("http://t.example/announce?pk=0123456789abcdef0123"),
+            "key in a query value"
+        );
+        assert!(
+            refused("http://configured.example/announce"),
+            "configured override"
+        );
+        assert!(!refused(
+            "https://t.example/announce/0123456789abcdef0123456789abcdef"
+        ));
         assert!(!refused("udp://t.example:6969/announce"));
         assert!(!refused("http://t.example/announce"));
         assert!(!refused("http://t.example/announce.php"));
@@ -459,8 +614,14 @@ mod tests {
     #[test]
     fn a_passkey_never_reaches_a_tracker_it_was_not_meant_for() {
         let p = policy();
-        assert_eq!(passkey_for(&p, "https://tr4ker.net/announce/X"), Some("NEWKEY"));
-        assert_eq!(passkey_for(&p, "https://tk.tr4ker.net/announce/X"), Some("NEWKEY"));
+        assert_eq!(
+            passkey_for(&p, "https://tr4ker.net/announce/X"),
+            Some("NEWKEY")
+        );
+        assert_eq!(
+            passkey_for(&p, "https://tk.tr4ker.net/announce/X"),
+            Some("NEWKEY")
+        );
         assert_eq!(passkey_for(&p, "https://nottr4ker.net/announce/X"), None);
         assert_eq!(passkey_for(&p, "https://mam.example/announce/X"), None);
     }
@@ -468,18 +629,47 @@ mod tests {
     #[test]
     fn every_tracker_gets_the_same_identity() {
         let p = policy();
-        let r = prepare(&p, "https://mam.example/announce/K", &"ab".repeat(20), 16171, 0, 0, 0, "", None, None)
-            .unwrap();
+        let r = prepare(
+            &p,
+            "https://mam.example/announce/K",
+            &"ab".repeat(20),
+            16171,
+            0,
+            0,
+            0,
+            "",
+            None,
+            None,
+        )
+        .unwrap();
         assert!(r.url.contains("peer_id=-TY0001-abcdefghijkl"), "{}", r.url);
-        assert_eq!(r.user_agent, "Hydra/4.0.0", "no tracker gets told anything else");
+        assert_eq!(
+            r.user_agent, "Hydra/4.0.0",
+            "no tracker gets told anything else"
+        );
     }
 
     #[test]
     fn an_ordinary_tracker_keeps_our_identity() {
         let p = policy();
-        let r = prepare(&p, "https://tr4ker.net/announce/OLD", &"ab".repeat(20), 16171, 1, 2, 3, "started", None, None)
-            .unwrap();
-        assert!(r.url.starts_with("https://tr4ker.net/announce/NEWKEY?"), "{}", r.url);
+        let r = prepare(
+            &p,
+            "https://tr4ker.net/announce/OLD",
+            &"ab".repeat(20),
+            16171,
+            1,
+            2,
+            3,
+            "started",
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(
+            r.url.starts_with("https://tr4ker.net/announce/NEWKEY?"),
+            "{}",
+            r.url
+        );
         assert!(r.url.contains("peer_id=-TY0001-abcdefghijkl"));
         assert_eq!(r.user_agent, "Hydra/4.0.0");
     }

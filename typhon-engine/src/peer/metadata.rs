@@ -45,18 +45,17 @@ pub async fn fetch_from_peer(
     egress: crate::netpin::Egress,
     policy: Arc<crate::peer::extension::PeerPolicy>,
 ) -> Result<Vec<u8>, String> {
-    let (cs, _fast_ext, lt_ext, _remote_peer_id, _encrypted) =
-        crate::tracker::open_peer(
-            addr,
-            &utp_socket,
-            &info_hash,
-            &peer_id,
-            &egress,
-            &policy,
-            false,
-        )
-            .await
-            .ok_or_else(|| "no connection".to_string())?;
+    let (cs, _fast_ext, lt_ext, _remote_peer_id, _encrypted) = crate::tracker::open_peer(
+        addr,
+        &utp_socket,
+        &info_hash,
+        &peer_id,
+        &egress,
+        &policy,
+        false,
+    )
+    .await
+    .ok_or_else(|| "no connection".to_string())?;
     if !lt_ext {
         return Err("peer does not speak BEP 10".into());
     }
@@ -72,7 +71,10 @@ pub async fn fetch_from_peer(
     // peer must use to send blocks back to us.
     let hs = extension::build_extension_handshake(listen_port, None, &extension::DEFAULT_POLICY);
     framed
-        .send(Message::Extended { ext_id: 0, payload: Bytes::from(hs) })
+        .send(Message::Extended {
+            ext_id: 0,
+            payload: Bytes::from(hs),
+        })
         .await
         .map_err(|e| e.to_string())?;
 
@@ -90,8 +92,9 @@ pub async fn fetch_from_peer(
                     // it would just duplicate every block in flight.
                     continue;
                 }
-                let peer_hs = extension::parse_extension_handshake_full(&payload, &extension::DEFAULT_POLICY)
-                    .ok_or_else(|| "unreadable extension handshake".to_string())?;
+                let peer_hs =
+                    extension::parse_extension_handshake_full(&payload, &extension::DEFAULT_POLICY)
+                        .ok_or_else(|| "unreadable extension handshake".to_string())?;
                 let their_id = peer_hs
                     .ut_metadata_id
                     .ok_or_else(|| "peer does not offer ut_metadata".to_string())?;
@@ -99,7 +102,10 @@ pub async fn fetch_from_peer(
                     .metadata_size
                     .ok_or_else(|| "peer offers ut_metadata but no metadata_size".to_string())?;
                 if size > MAX_METADATA_SIZE {
-                    return Err(format!("metadata_size {} over the {} cap", size, MAX_METADATA_SIZE));
+                    return Err(format!(
+                        "metadata_size {} over the {} cap",
+                        size, MAX_METADATA_SIZE
+                    ));
                 }
                 let blocks = extension::metadata_block_count(size) as usize;
                 dict = vec![0u8; size];
@@ -110,7 +116,10 @@ pub async fn fetch_from_peer(
                 for piece in 0..blocks as u32 {
                     let req = extension::build_metadata_request(piece);
                     framed
-                        .send(Message::Extended { ext_id: their_id, payload: Bytes::from(req) })
+                        .send(Message::Extended {
+                            ext_id: their_id,
+                            payload: Bytes::from(req),
+                        })
                         .await
                         .map_err(|e| e.to_string())?;
                 }
@@ -196,8 +205,7 @@ pub async fn fetch(
             let eg = egress.clone();
             let pol = policy.clone();
             inflight.push(async move {
-                let attempt =
-                    fetch_from_peer(addr, info_hash, peer_id, utp, listen_port, eg, pol);
+                let attempt = fetch_from_peer(addr, info_hash, peer_id, utp, listen_port, eg, pol);
                 match tokio::time::timeout(PEER_TIMEOUT, attempt).await {
                     Ok(r) => (addr, r),
                     Err(_) => (addr, Err("timed out".to_string())),

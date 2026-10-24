@@ -56,11 +56,18 @@ fn a_login_name_with_a_line_break_is_one_log_line() {
             .env("TYPHON_LOG_CHILD", "1")
             .output()
             .unwrap();
-        let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
         assert!(out.status.success() && text.contains("1 passed"), "{text}");
         return;
     }
-    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
     rt.block_on(async {
         let hash = bcrypt::hash("right-password", 4).unwrap();
         let s = state_from(
@@ -136,7 +143,10 @@ fn anonymous(method: &str, uri: &str) -> axum::http::Request<axum::body::Body> {
 /// must still be turned away, and one with the key let in.
 #[tokio::test]
 async fn a_route_that_forgets_its_check_is_refused_anyway() {
-    let s = state_from("forgot", &format!("[daemon]\napi_key = \"{KEY}\"\napi_key_in_query = true\n"));
+    let s = state_from(
+        "forgot",
+        &format!("[daemon]\napi_key = \"{KEY}\"\napi_key_in_query = true\n"),
+    );
     let extra = Router::new().route("/api/forgotten", get(|| async { "leaked" }));
     let call = |req: axum::http::Request<axum::body::Body>| {
         let peer = std::net::SocketAddr::new("10.0.0.7".parse().unwrap(), 40000);
@@ -147,7 +157,11 @@ async fn a_route_that_forgets_its_check_is_refused_anyway() {
     let r = call(anonymous("GET", "/api/forgotten")).await;
     assert_eq!(r.status(), StatusCode::UNAUTHORIZED, "no key, no answer");
     let r = call(anonymous("GET", "/api/forgotten?apikey=wrong")).await;
-    assert_eq!(r.status(), StatusCode::UNAUTHORIZED, "a wrong key is no key");
+    assert_eq!(
+        r.status(),
+        StatusCode::UNAUTHORIZED,
+        "a wrong key is no key"
+    );
     let r = call(anonymous("GET", &format!("/api/forgotten?apikey={KEY}"))).await;
     assert_eq!(r.status(), StatusCode::OK, "the right key still opens it");
     let r = call(anonymous("GET", "/api/nowhere-at-all")).await;
@@ -199,7 +213,10 @@ async fn every_route_but_the_open_ones_refuses_a_caller_with_no_key() {
     named.sort_unstable();
     let mut known: Vec<&str> = merged.iter().map(|(n, _)| *n).collect();
     known.sort_unstable();
-    assert_eq!(named, known, "a module merged into the router is not in this test");
+    assert_eq!(
+        named, known,
+        "a module merged into the router is not in this test"
+    );
 
     let mut paths = routes_in(router_src);
     for (_, src) in merged {
@@ -207,7 +224,10 @@ async fn every_route_but_the_open_ones_refuses_a_caller_with_no_key() {
     }
     assert!(paths.len() > 250, "only {} routes found", paths.len());
     for open in OPEN {
-        assert!(paths.iter().any(|p| p == open), "{open} is listed as open and is not a route");
+        assert!(
+            paths.iter().any(|p| p == open),
+            "{open} is listed as open and is not a route"
+        );
     }
 
     let s = state_from("every-route", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
@@ -232,7 +252,11 @@ async fn every_route_but_the_open_ones_refuses_a_caller_with_no_key() {
             }
         }
     }
-    assert!(answered.is_empty(), "answered a caller with no key:\n{}", answered.join("\n"));
+    assert!(
+        answered.is_empty(),
+        "answered a caller with no key:\n{}",
+        answered.join("\n")
+    );
 }
 
 /// The list the code refuses by is the list written above.
@@ -259,7 +283,10 @@ async fn changing_the_password_ends_every_session() {
     let cookie = cookie_of(&s.state);
     let mut h = axum::http::HeaderMap::new();
     h.insert(axum::http::header::COOKIE, cookie.parse().unwrap());
-    assert!(authorised(&s.state, &h, ""), "the session is live before the change");
+    assert!(
+        authorised(&s.state, &h, ""),
+        "the session is live before the change"
+    );
 
     let r = post_password(
         State(s.state.clone()),
@@ -270,8 +297,14 @@ async fn changing_the_password_ends_every_session() {
     .await;
     assert_eq!(r.status(), StatusCode::OK);
 
-    assert!(!authorised(&s.state, &h, ""), "the session did not survive the change");
-    assert!(authorised(&s.state, &keyed(KEY), ""), "the key is not a session and still works");
+    assert!(
+        !authorised(&s.state, &h, ""),
+        "the session did not survive the change"
+    );
+    assert!(
+        authorised(&s.state, &keyed(KEY), ""),
+        "the key is not a session and still works"
+    );
 }
 
 fn write_with(
@@ -307,24 +340,64 @@ async fn a_cookie_does_not_authorise_a_write_from_another_origin() {
     let cookie = ("cookie", cookie.as_str());
     let write = "/api/hoard/pause-all";
 
-    for foreign in ["http://evil.example", "http://hydra.lan:9999", "http://hydra.lan", "null"] {
-        let r = call(&s.state, "10.0.0.7", write_with(write, "POST", host, Some(foreign), cookie)).await;
+    for foreign in [
+        "http://evil.example",
+        "http://hydra.lan:9999",
+        "http://hydra.lan",
+        "null",
+    ] {
+        let r = call(
+            &s.state,
+            "10.0.0.7",
+            write_with(write, "POST", host, Some(foreign), cookie),
+        )
+        .await;
         assert_eq!(r.status(), StatusCode::FORBIDDEN, "origin {foreign}");
     }
-    for ok in [Some("http://hydra.lan:8199"), Some("HTTP://HYDRA.LAN:8199"), None] {
-        let r = call(&s.state, "10.0.0.7", write_with(write, "POST", host, ok, cookie)).await;
+    for ok in [
+        Some("http://hydra.lan:8199"),
+        Some("HTTP://HYDRA.LAN:8199"),
+        None,
+    ] {
+        let r = call(
+            &s.state,
+            "10.0.0.7",
+            write_with(write, "POST", host, ok, cookie),
+        )
+        .await;
         assert_eq!(r.status(), StatusCode::OK, "origin {ok:?}");
     }
     // The key is a header a page of another origin cannot set.
     let r = call(
         &s.state,
         "10.0.0.7",
-        write_with(write, "POST", host, Some("http://evil.example"), ("x-api-key", KEY)),
+        write_with(
+            write,
+            "POST",
+            host,
+            Some("http://evil.example"),
+            ("x-api-key", KEY),
+        ),
     )
     .await;
-    assert_eq!(r.status(), StatusCode::OK, "the key is not what the cookie attack rides on");
+    assert_eq!(
+        r.status(),
+        StatusCode::OK,
+        "the key is not what the cookie attack rides on"
+    );
     // A read changes nothing.
-    let r = call(&s.state, "10.0.0.7", write_with("/api/status", "GET", host, Some("http://evil.example"), cookie)).await;
+    let r = call(
+        &s.state,
+        "10.0.0.7",
+        write_with(
+            "/api/status",
+            "GET",
+            host,
+            Some("http://evil.example"),
+            cookie,
+        ),
+    )
+    .await;
     assert_eq!(r.status(), StatusCode::OK);
 }
 
@@ -357,32 +430,96 @@ async fn a_cookie_write_from_the_proxied_origin_is_accepted() {
     let cookie = cookie_of(&s.state);
     let go = |req| call(&s.state, "10.0.0.7", req);
 
-    let r = go(proxied_write("hydranos:8080", "https://hydra.example.net", Some("hydra.example.net"), &cookie)).await;
-    assert_eq!(r.status(), StatusCode::OK, "the forwarded host is the page's origin");
-    let r = go(proxied_write("hydranos:8080", "https://hydra.example.net", Some("Hydra.Example.Net, proxy.lan"), &cookie)).await;
-    assert_eq!(r.status(), StatusCode::OK, "the first forwarded host counts");
-    let r = go(proxied_write("hydranos:8080", "https://hydra.example.net", Some("proxy.lan, hydra.example.net"), &cookie)).await;
+    let r = go(proxied_write(
+        "hydranos:8080",
+        "https://hydra.example.net",
+        Some("hydra.example.net"),
+        &cookie,
+    ))
+    .await;
+    assert_eq!(
+        r.status(),
+        StatusCode::OK,
+        "the forwarded host is the page's origin"
+    );
+    let r = go(proxied_write(
+        "hydranos:8080",
+        "https://hydra.example.net",
+        Some("Hydra.Example.Net, proxy.lan"),
+        &cookie,
+    ))
+    .await;
+    assert_eq!(
+        r.status(),
+        StatusCode::OK,
+        "the first forwarded host counts"
+    );
+    let r = go(proxied_write(
+        "hydranos:8080",
+        "https://hydra.example.net",
+        Some("proxy.lan, hydra.example.net"),
+        &cookie,
+    ))
+    .await;
     assert_eq!(r.status(), StatusCode::FORBIDDEN, "a later one does not");
-    let r = go(proxied_write("hydranos:8080", "https://evil.example", Some("hydra.example.net"), &cookie)).await;
-    assert_eq!(r.status(), StatusCode::FORBIDDEN, "an origin that matches nothing is refused");
-    let r = go(proxied_write("hydranos:8080", "https://hydra.example.net", None, &cookie)).await;
-    assert_eq!(r.status(), StatusCode::FORBIDDEN, "no forwarded host, no match");
+    let r = go(proxied_write(
+        "hydranos:8080",
+        "https://evil.example",
+        Some("hydra.example.net"),
+        &cookie,
+    ))
+    .await;
+    assert_eq!(
+        r.status(),
+        StatusCode::FORBIDDEN,
+        "an origin that matches nothing is refused"
+    );
+    let r = go(proxied_write(
+        "hydranos:8080",
+        "https://hydra.example.net",
+        None,
+        &cookie,
+    ))
+    .await;
+    assert_eq!(
+        r.status(),
+        StatusCode::FORBIDDEN,
+        "no forwarded host, no match"
+    );
     let r = go(proxied_write("h:443", "https://h", None, &cookie)).await;
     assert_eq!(r.status(), StatusCode::OK, "https://h is h:443");
     let r = go(proxied_write("h", "http://h:80", None, &cookie)).await;
     assert_eq!(r.status(), StatusCode::OK, "http://h:80 is h");
     let r = go(proxied_write("h:443", "http://h", None, &cookie)).await;
-    assert_eq!(r.status(), StatusCode::FORBIDDEN, "443 is not the default port of http");
+    assert_eq!(
+        r.status(),
+        StatusCode::FORBIDDEN,
+        "443 is not the default port of http"
+    );
 
     let s = state_from(
         "origin-public",
-        &format!("[daemon]\napi_key = \"{KEY}\"\npublic_url = \"https://hydra.example.net:9443/\"\n"),
+        &format!(
+            "[daemon]\napi_key = \"{KEY}\"\npublic_url = \"https://hydra.example.net:9443/\"\n"
+        ),
     );
     let cookie = cookie_of(&s.state);
     let go = |req| call(&s.state, "10.0.0.7", req);
-    let r = go(proxied_write("hydranos:8080", "https://hydra.example.net:9443", None, &cookie)).await;
+    let r = go(proxied_write(
+        "hydranos:8080",
+        "https://hydra.example.net:9443",
+        None,
+        &cookie,
+    ))
+    .await;
     assert_eq!(r.status(), StatusCode::OK, "public_url names the origin");
-    let r = go(proxied_write("hydranos:8080", "https://evil.example", None, &cookie)).await;
+    let r = go(proxied_write(
+        "hydranos:8080",
+        "https://evil.example",
+        None,
+        &cookie,
+    ))
+    .await;
     assert_eq!(r.status(), StatusCode::FORBIDDEN);
 }
 
@@ -391,7 +528,9 @@ async fn status_of(s: &AppState, uri: &str, key_header: Option<&str>) -> StatusC
     if let Some(k) = key_header {
         b = b.header("x-api-key", k);
     }
-    call(s, "10.0.0.7", b.body(axum::body::Body::empty()).unwrap()).await.status()
+    call(s, "10.0.0.7", b.body(axum::body::Body::empty()).unwrap())
+        .await
+        .status()
 }
 
 /// The key does not travel in an address unless `api_key_in_query` says so: an
@@ -400,12 +539,25 @@ async fn status_of(s: &AppState, uri: &str, key_header: Option<&str>) -> StatusC
 async fn the_key_in_the_address_is_refused_by_default() {
     let s = state_from("query-default", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
     let by_query = format!("/api/status?apikey={KEY}");
-    assert_eq!(status_of(&s, &by_query, None).await, StatusCode::UNAUTHORIZED);
-    assert_eq!(status_of(&s, &format!("/api/status?x=1&apikey={KEY}"), None).await, StatusCode::UNAUTHORIZED);
-    assert_eq!(status_of(&s, "/api/status", Some(KEY)).await, StatusCode::OK, "the header works");
+    assert_eq!(
+        status_of(&s, &by_query, None).await,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        status_of(&s, &format!("/api/status?x=1&apikey={KEY}"), None).await,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        status_of(&s, "/api/status", Some(KEY)).await,
+        StatusCode::OK,
+        "the header works"
+    );
     // A header and a query together: the header is what counts.
     assert_eq!(status_of(&s, &by_query, Some(KEY)).await, StatusCode::OK);
-    assert_eq!(status_of(&s, &by_query, Some("wrong")).await, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        status_of(&s, &by_query, Some("wrong")).await,
+        StatusCode::UNAUTHORIZED
+    );
 }
 
 /// With the option on, the old behaviour is back unchanged.
@@ -415,17 +567,33 @@ async fn the_option_brings_the_key_in_the_address_back() {
         "query-option",
         &format!("[daemon]\napi_key = \"{KEY}\"\napi_key_in_query = true\n"),
     );
-    assert_eq!(status_of(&s, &format!("/api/status?apikey={KEY}"), None).await, StatusCode::OK);
-    assert_eq!(status_of(&s, "/api/status?apikey=wrong", None).await, StatusCode::UNAUTHORIZED);
-    assert_eq!(status_of(&s, "/api/status", None).await, StatusCode::UNAUTHORIZED);
-    assert_eq!(status_of(&s, "/api/status", Some(KEY)).await, StatusCode::OK, "the header still works");
+    assert_eq!(
+        status_of(&s, &format!("/api/status?apikey={KEY}"), None).await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        status_of(&s, "/api/status?apikey=wrong", None).await,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        status_of(&s, "/api/status", None).await,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        status_of(&s, "/api/status", Some(KEY)).await,
+        StatusCode::OK,
+        "the header still works"
+    );
 }
 
 /// The rescue router over a config file of this test's own.
 fn rescue_over(tag: &str, toml_src: &str) -> (Router, std::path::PathBuf) {
     let path = std::env::temp_dir().join(format!("hydra-rescue-{}-{tag}.toml", std::process::id()));
     std::fs::write(&path, toml_src).unwrap();
-    let state = RescueState { diagnosis: Default::default(), config_path: path.clone() };
+    let state = RescueState {
+        diagnosis: Default::default(),
+        config_path: path.clone(),
+    };
     (rescue_router(state), path)
 }
 
@@ -434,7 +602,11 @@ async fn rescue_call(app: &Router, method: &str, uri: &str, key: Option<&str>) -
     if let Some(k) = key {
         b = b.header("x-api-key", k);
     }
-    app.clone().oneshot(b.body(axum::body::Body::empty()).unwrap()).await.unwrap().status()
+    app.clone()
+        .oneshot(b.body(axum::body::Body::empty()).unwrap())
+        .await
+        .unwrap()
+        .status()
 }
 
 /// In rescue mode the repair and the restart want the key of the config file
@@ -444,8 +616,16 @@ async fn rescue_call(app: &Router, method: &str, uri: &str, key: Option<&str>) -
 async fn the_rescue_router_wants_the_key_for_repair_and_restart() {
     let (app, path) = rescue_over("keyed", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
     for uri in ["/api/store/repair", "/api/settings/restart"] {
-        assert_eq!(rescue_call(&app, "POST", uri, None).await, StatusCode::UNAUTHORIZED, "{uri}: no key");
-        assert_eq!(rescue_call(&app, "POST", uri, Some("wrong")).await, StatusCode::UNAUTHORIZED, "{uri}: wrong key");
+        assert_eq!(
+            rescue_call(&app, "POST", uri, None).await,
+            StatusCode::UNAUTHORIZED,
+            "{uri}: no key"
+        );
+        assert_eq!(
+            rescue_call(&app, "POST", uri, Some("wrong")).await,
+            StatusCode::UNAUTHORIZED,
+            "{uri}: wrong key"
+        );
         assert_eq!(
             rescue_call(&app, "POST", &format!("{uri}?apikey={KEY}"), None).await,
             StatusCode::UNAUTHORIZED,
@@ -453,10 +633,17 @@ async fn the_rescue_router_wants_the_key_for_repair_and_restart() {
         );
     }
     // The right key reaches the repair (nothing to repair here: it says so).
-    assert_eq!(rescue_call(&app, "POST", "/api/store/repair", Some(KEY)).await, StatusCode::OK);
+    assert_eq!(
+        rescue_call(&app, "POST", "/api/store/repair", Some(KEY)).await,
+        StatusCode::OK
+    );
     // Open: the explanation, the probe and the page.
     for uri in ["/health", "/", "/api/setup", "/api/store/repair"] {
-        assert_eq!(rescue_call(&app, "GET", uri, None).await, StatusCode::OK, "{uri}");
+        assert_eq!(
+            rescue_call(&app, "GET", uri, None).await,
+            StatusCode::OK,
+            "{uri}"
+        );
     }
     let _ = std::fs::remove_file(&path);
 }
@@ -466,12 +653,23 @@ async fn the_rescue_router_wants_the_key_for_repair_and_restart() {
 async fn the_rescue_router_with_no_key_to_check_refuses_everyone() {
     let (app, path) = rescue_over("nokey", "[daemon]\napi_key = \"\"\n");
     for key in [None, Some(""), Some("guess")] {
-        assert_eq!(rescue_call(&app, "POST", "/api/store/repair", key).await, StatusCode::UNAUTHORIZED, "{key:?}");
-        assert_eq!(rescue_call(&app, "POST", "/api/settings/restart", key).await, StatusCode::UNAUTHORIZED, "{key:?}");
+        assert_eq!(
+            rescue_call(&app, "POST", "/api/store/repair", key).await,
+            StatusCode::UNAUTHORIZED,
+            "{key:?}"
+        );
+        assert_eq!(
+            rescue_call(&app, "POST", "/api/settings/restart", key).await,
+            StatusCode::UNAUTHORIZED,
+            "{key:?}"
+        );
     }
     let _ = std::fs::remove_file(&path);
     let (app, path) = rescue_over("unreadable", "this is [not toml");
-    assert_eq!(rescue_call(&app, "POST", "/api/store/repair", Some(KEY)).await, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        rescue_call(&app, "POST", "/api/store/repair", Some(KEY)).await,
+        StatusCode::UNAUTHORIZED
+    );
     let _ = std::fs::remove_file(&path);
 }
 
@@ -480,22 +678,47 @@ async fn the_rescue_router_with_no_key_to_check_refuses_everyone() {
 #[test]
 fn the_repair_screen_asks_for_the_key_not_a_login() {
     let js = include_str!("../../../web/static/app.js");
-    let from = js.find("async function showStoreRepairModal").expect("repair screen");
+    let from = js
+        .find("async function showStoreRepairModal")
+        .expect("repair screen");
     let screen = &js[from..from + js[from..].find("\n}\n").unwrap()];
-    assert!(screen.contains("promptApiKey("), "a 401 on the repair screen opens the key box");
-    assert!(!screen.contains("promptLogin("), "promptLogin posts to /api/login, which rescue mode does not serve");
-    assert!(screen.matches("promptApiKey(").count() >= 2, "the restart answers a 401 the same way");
+    assert!(
+        screen.contains("promptApiKey("),
+        "a 401 on the repair screen opens the key box"
+    );
+    assert!(
+        !screen.contains("promptLogin("),
+        "promptLogin posts to /api/login, which rescue mode does not serve"
+    );
+    assert!(
+        screen.matches("promptApiKey(").count() >= 2,
+        "the restart answers a 401 the same way"
+    );
 }
 
-async fn rescue_json(app: &Router, method: &str, uri: &str, key: Option<&str>) -> (StatusCode, serde_json::Value) {
+async fn rescue_json(
+    app: &Router,
+    method: &str,
+    uri: &str,
+    key: Option<&str>,
+) -> (StatusCode, serde_json::Value) {
     let mut b = axum::http::Request::builder().method(method).uri(uri);
     if let Some(k) = key {
         b = b.header("x-api-key", k);
     }
-    let resp = app.clone().oneshot(b.body(axum::body::Body::empty()).unwrap()).await.unwrap();
+    let resp = app
+        .clone()
+        .oneshot(b.body(axum::body::Body::empty()).unwrap())
+        .await
+        .unwrap();
     let code = resp.status();
-    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
-    (code, serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null))
+    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    (
+        code,
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+    )
 }
 
 /// A rescue router over a database that needs the repair, and which the repair
@@ -518,7 +741,13 @@ fn rescue_repairable(tag: &str) -> (Router, std::path::PathBuf) {
         in_wal: true,
         hot_wal: false,
     };
-    (rescue_router(RescueState { diagnosis, config_path: cfg }), dir)
+    (
+        rescue_router(RescueState {
+            diagnosis,
+            config_path: cfg,
+        }),
+        dir,
+    )
 }
 
 /// The interface opens its repair screen on `store_repair` in `GET /api/setup`.
@@ -529,7 +758,10 @@ async fn the_rescue_setup_announces_the_repair_screen() {
     let (app, path) = rescue_over("setup-flag", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
     let (code, body) = rescue_json(&app, "GET", "/api/setup", None).await;
     assert_eq!(code, StatusCode::OK);
-    assert_eq!(body["store_repair"], true, "the page opens the repair screen on this: {body}");
+    assert_eq!(
+        body["store_repair"], true,
+        "the page opens the repair screen on this: {body}"
+    );
     let _ = std::fs::remove_file(&path);
 }
 
@@ -539,7 +771,9 @@ async fn the_rescue_setup_announces_the_repair_screen() {
 #[tokio::test]
 async fn the_repair_answer_carries_what_the_screen_reads() {
     let js = include_str!("../../../web/static/app.js");
-    let from = js.find("async function showStoreRepairModal").expect("repair screen");
+    let from = js
+        .find("async function showStoreRepairModal")
+        .expect("repair screen");
     let screen = &js[from..from + js[from..].find("\n}\n").unwrap()];
     let mut read: Vec<&str> = Vec::new();
     for var in ["body.", "st."] {
@@ -550,11 +784,16 @@ async fn the_repair_answer_carries_what_the_screen_reads() {
             if before.is_alphanumeric() || before == '_' || before == '.' {
                 continue;
             }
-            let end = rest.find(|c: char| !(c.is_alphanumeric() || c == '_')).unwrap_or(rest.len());
+            let end = rest
+                .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .unwrap_or(rest.len());
             read.push(&rest[..end]);
         }
     }
-    assert!(read.contains(&"repaired"), "the screen reads a verdict on the repair: {read:?}");
+    assert!(
+        read.contains(&"repaired"),
+        "the screen reads a verdict on the repair: {read:?}"
+    );
 
     let (app, dir) = rescue_repairable("answer");
     let (code, done) = rescue_json(&app, "POST", "/api/store/repair", Some(KEY)).await;
@@ -564,7 +803,9 @@ async fn the_repair_answer_carries_what_the_screen_reads() {
         // `filesystem` is read with a fallback, and `error` is only there when
         // the repair could not even take its backup (a 500, not this case).
         assert!(
-            done.get(field).is_some() || status.get(field).is_some() || ["filesystem", "error"].contains(&field),
+            done.get(field).is_some()
+                || status.get(field).is_some()
+                || ["filesystem", "error"].contains(&field),
             "the screen reads `{field}`, which the daemon does not send: {done} / {status}"
         );
     }
@@ -601,26 +842,57 @@ fn stored_accepts(s: &AppState, password: &str) -> bool {
 #[tokio::test]
 async fn a_wrong_old_password_changes_nothing() {
     let s = password_change_over("oldpw-wrong");
-    let code = change_password(&s, "10.0.0.7", serde_json::json!({"password": "new-password", "old_password": "nope"})).await;
+    let code = change_password(
+        &s,
+        "10.0.0.7",
+        serde_json::json!({"password": "new-password", "old_password": "nope"}),
+    )
+    .await;
     assert_eq!(code, StatusCode::FORBIDDEN);
-    assert!(stored_accepts(&s, "old-password"), "the old password still works");
+    assert!(
+        stored_accepts(&s, "old-password"),
+        "the old password still works"
+    );
     assert!(!stored_accepts(&s, "new-password"));
 
-    let code = change_password(&s, "10.0.0.7", serde_json::json!({"password": "new-password", "old_password": ""})).await;
-    assert_eq!(code, StatusCode::FORBIDDEN, "an empty old password is a wrong one");
+    let code = change_password(
+        &s,
+        "10.0.0.7",
+        serde_json::json!({"password": "new-password", "old_password": ""}),
+    )
+    .await;
+    assert_eq!(
+        code,
+        StatusCode::FORBIDDEN,
+        "an empty old password is a wrong one"
+    );
     assert!(stored_accepts(&s, "old-password"));
 }
 
 #[tokio::test]
 async fn the_right_old_password_or_none_lets_the_change_through() {
     let s = password_change_over("oldpw-right");
-    let code = change_password(&s, "10.0.0.7", serde_json::json!({"password": "new-password", "old_password": "old-password"})).await;
+    let code = change_password(
+        &s,
+        "10.0.0.7",
+        serde_json::json!({"password": "new-password", "old_password": "old-password"}),
+    )
+    .await;
     assert_eq!(code, StatusCode::OK);
     assert!(stored_accepts(&s, "new-password"));
 
     let s = password_change_over("oldpw-absent");
-    let code = change_password(&s, "10.0.0.7", serde_json::json!({"password": "new-password"})).await;
-    assert_eq!(code, StatusCode::OK, "no old password: the behaviour is the one it was");
+    let code = change_password(
+        &s,
+        "10.0.0.7",
+        serde_json::json!({"password": "new-password"}),
+    )
+    .await;
+    assert_eq!(
+        code,
+        StatusCode::OK,
+        "no old password: the behaviour is the one it was"
+    );
     assert!(stored_accepts(&s, "new-password"));
 }
 
@@ -631,27 +903,49 @@ async fn the_right_old_password_or_none_lets_the_change_through() {
 async fn a_wrong_old_password_counts_in_the_failed_login_limit() {
     let s = password_change_over("oldpw-limit");
     for _ in 0..5 {
-        let code = change_password(&s, "10.0.0.7", serde_json::json!({"password": "new-password", "old_password": "nope"})).await;
+        let code = change_password(
+            &s,
+            "10.0.0.7",
+            serde_json::json!({"password": "new-password", "old_password": "nope"}),
+        )
+        .await;
         assert_eq!(code, StatusCode::FORBIDDEN);
     }
-    let code = change_password(&s, "10.0.0.7", serde_json::json!({"password": "new-password", "old_password": "old-password"})).await;
-    assert_eq!(code, StatusCode::TOO_MANY_REQUESTS, "blocked, even with the right one");
+    let code = change_password(
+        &s,
+        "10.0.0.7",
+        serde_json::json!({"password": "new-password", "old_password": "old-password"}),
+    )
+    .await;
+    assert_eq!(
+        code,
+        StatusCode::TOO_MANY_REQUESTS,
+        "blocked, even with the right one"
+    );
     assert!(stored_accepts(&s, "old-password"));
     let login = axum::http::Request::builder()
         .method("POST")
         .uri("/api/login")
         .header("content-type", "application/json")
-        .body(axum::body::Body::from(r#"{"username":"admin","password":"old-password"}"#))
+        .body(axum::body::Body::from(
+            r#"{"username":"admin","password":"old-password"}"#,
+        ))
         .unwrap();
-    assert_eq!(call(&s, "10.0.0.7", login).await.status(), StatusCode::TOO_MANY_REQUESTS, "the same limit as the login");
-    let code = change_password(&s, "10.0.0.8", serde_json::json!({"password": "new-password", "old_password": "old-password"})).await;
+    assert_eq!(
+        call(&s, "10.0.0.7", login).await.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "the same limit as the login"
+    );
+    let code = change_password(
+        &s,
+        "10.0.0.8",
+        serde_json::json!({"password": "new-password", "old_password": "old-password"}),
+    )
+    .await;
     assert_eq!(code, StatusCode::OK, "another caller is untouched");
 }
 
-fn rpc_post(
-    uri: &str,
-    headers: &[(&str, &str)],
-) -> axum::http::Request<axum::body::Body> {
+fn rpc_post(uri: &str, headers: &[(&str, &str)]) -> axum::http::Request<axum::body::Body> {
     let mut b = axum::http::Request::builder()
         .method("POST")
         .uri(uri)
@@ -661,7 +955,10 @@ fn rpc_post(
     for (k, v) in headers {
         b = b.header(*k, *v);
     }
-    b.body(axum::body::Body::from(r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#)).unwrap()
+    b.body(axum::body::Body::from(
+        r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#,
+    ))
+    .unwrap()
 }
 
 /// `/mcp` answers to the key or the bearer token, never to the session cookie:
@@ -673,10 +970,22 @@ async fn mcp_is_opened_by_the_key_or_a_bearer_and_never_by_the_cookie() {
     let cookie = cookie_of(&s.state);
     let go = |req| call(&s.state, "10.0.0.7", req);
 
-    let r = go(rpc_post("/mcp", &[("cookie", &cookie), ("origin", "http://hydra.lan:9999")])).await;
-    assert_eq!(r.status(), StatusCode::UNAUTHORIZED, "a cookie from another origin");
+    let r = go(rpc_post(
+        "/mcp",
+        &[("cookie", &cookie), ("origin", "http://hydra.lan:9999")],
+    ))
+    .await;
+    assert_eq!(
+        r.status(),
+        StatusCode::UNAUTHORIZED,
+        "a cookie from another origin"
+    );
     let r = go(rpc_post("/mcp", &[("cookie", &cookie)])).await;
-    assert_eq!(r.status(), StatusCode::UNAUTHORIZED, "a cookie from anywhere");
+    assert_eq!(
+        r.status(),
+        StatusCode::UNAUTHORIZED,
+        "a cookie from anywhere"
+    );
     let r = go(rpc_post("/mcp", &[])).await;
     assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
 
@@ -688,14 +997,27 @@ async fn mcp_is_opened_by_the_key_or_a_bearer_and_never_by_the_cookie() {
     let r = go(rpc_post("/mcp", &[("authorization", "Bearer wrong")])).await;
     assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
     let r = go(rpc_post(&format!("/mcp?apikey={KEY}"), &[])).await;
-    assert_eq!(r.status(), StatusCode::UNAUTHORIZED, "the key in the address, option off");
+    assert_eq!(
+        r.status(),
+        StatusCode::UNAUTHORIZED,
+        "the key in the address, option off"
+    );
 
     let s = state_from(
         "mcp-query",
         &format!("[daemon]\napi_key = \"{KEY}\"\napi_key_in_query = true\n"),
     );
-    let r = call(&s.state, "10.0.0.7", rpc_post(&format!("/mcp?apikey={KEY}"), &[])).await;
-    assert_eq!(r.status(), StatusCode::OK, "the key in the address, option on");
+    let r = call(
+        &s.state,
+        "10.0.0.7",
+        rpc_post(&format!("/mcp?apikey={KEY}"), &[]),
+    )
+    .await;
+    assert_eq!(
+        r.status(),
+        StatusCode::OK,
+        "the key in the address, option on"
+    );
 }
 
 /// No open path takes a write on the strength of a session cookie alone,
@@ -728,7 +1050,9 @@ async fn no_open_path_takes_a_write_on_a_cookie_alone() {
                 .header("content-type", "text/plain")
                 .header("cookie", &cookie);
             let req = b
-                .body(axum::body::Body::from(r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#))
+                .body(axum::body::Body::from(
+                    r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#,
+                ))
                 .unwrap();
             let r = call(&s.state, "10.0.0.7", req).await;
             if r.status().is_success() {
@@ -736,7 +1060,11 @@ async fn no_open_path_takes_a_write_on_a_cookie_alone() {
             }
         }
     }
-    assert!(accepted.is_empty(), "open paths that took a write on a cookie alone:\n{}", accepted.join("\n"));
+    assert!(
+        accepted.is_empty(),
+        "open paths that took a write on a cookie alone:\n{}",
+        accepted.join("\n")
+    );
 }
 
 /// HTTP/2 carries the host in `:authority` and may send no `host` header: the
@@ -754,12 +1082,46 @@ async fn the_uri_authority_stands_in_for_a_missing_host_header() {
             .body(axum::body::Body::empty())
             .unwrap()
     };
-    let r = call(&s.state, "10.0.0.7", h2("https://hydra.lan/api/hoard/pause-all", "https://hydra.lan")).await;
+    let r = call(
+        &s.state,
+        "10.0.0.7",
+        h2("https://hydra.lan/api/hoard/pause-all", "https://hydra.lan"),
+    )
+    .await;
     assert_eq!(r.status(), StatusCode::OK, "the authority is the origin");
-    let r = call(&s.state, "10.0.0.7", h2("http://hydra.lan:8199/api/hoard/pause-all", "http://hydra.lan:8199")).await;
+    let r = call(
+        &s.state,
+        "10.0.0.7",
+        h2(
+            "http://hydra.lan:8199/api/hoard/pause-all",
+            "http://hydra.lan:8199",
+        ),
+    )
+    .await;
     assert_eq!(r.status(), StatusCode::OK);
-    let r = call(&s.state, "10.0.0.7", h2("http://hydra.lan:8199/api/hoard/pause-all", "http://evil.example")).await;
-    assert_eq!(r.status(), StatusCode::FORBIDDEN, "another origin is still refused");
-    let r = call(&s.state, "10.0.0.7", h2("/api/hoard/pause-all", "http://hydra.lan:8199")).await;
-    assert_eq!(r.status(), StatusCode::FORBIDDEN, "no host and no authority: no match");
+    let r = call(
+        &s.state,
+        "10.0.0.7",
+        h2(
+            "http://hydra.lan:8199/api/hoard/pause-all",
+            "http://evil.example",
+        ),
+    )
+    .await;
+    assert_eq!(
+        r.status(),
+        StatusCode::FORBIDDEN,
+        "another origin is still refused"
+    );
+    let r = call(
+        &s.state,
+        "10.0.0.7",
+        h2("/api/hoard/pause-all", "http://hydra.lan:8199"),
+    )
+    .await;
+    assert_eq!(
+        r.status(),
+        StatusCode::FORBIDDEN,
+        "no host and no authority: no match"
+    );
 }

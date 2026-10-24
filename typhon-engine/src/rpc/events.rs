@@ -15,8 +15,8 @@
 //! process. Events carry an info hash and no engine tag: merged, a subscriber
 //! watching the race would receive the hoard's 240k torrents too, with no way
 //! to tell them apart.
-use tokio::sync::broadcast;
 use serde::Serialize;
+use tokio::sync::broadcast;
 
 /// Capacity = 4096. Enough buffer for a slow consumer without OOM.
 /// If a consumer lags > 4096 events, it gets `RecvError::Lagged(n)` and should
@@ -83,7 +83,7 @@ pub enum Event {
 #[derive(Clone, Debug, Serialize)]
 pub struct TorrentStatsMini {
     pub info_hash: String,
-    pub status: u8,              // TorrentStatus as u8
+    pub status: u8, // TorrentStatus as u8
     pub total_uploaded: u64,
     pub total_downloaded: u64,
     pub upload_rate: u64,

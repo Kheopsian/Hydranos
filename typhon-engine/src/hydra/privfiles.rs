@@ -48,7 +48,9 @@ pub fn tighten(path: &Path) {
         use std::os::unix::fs::PermissionsExt;
         match std::fs::metadata(path) {
             Ok(m) if m.is_file() && m.permissions().mode() & 0o777 != 0o600 => {
-                if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
+                if let Err(e) =
+                    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+                {
                     tracing::warn!(path = %path.display(), error = %e, "private_files: cannot restrict the file");
                 }
             }
@@ -65,7 +67,11 @@ pub fn precreate(path: &Path) {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        let _ = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(path);
+        let _ = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path);
     }
     #[cfg(not(unix))]
     let _ = path;
@@ -91,7 +97,11 @@ pub fn apply(on: bool, config: &Path, log: &Path, db: &Path, bench: &Path) {
         return;
     }
     tighten(config);
-    for p in log_files(log).iter().chain(store_files(db).iter()).chain(store_files(bench).iter()) {
+    for p in log_files(log)
+        .iter()
+        .chain(store_files(db).iter())
+        .chain(store_files(bench).iter())
+    {
         tighten(p);
     }
 }
@@ -128,14 +138,21 @@ mod tests {
     fn private_files_brings_existing_files_to_0600() {
         let _g = flag_lock();
         let d = dir("on");
-        let (cfg, log, db, bench) = (d.join("hydranos.toml"), d.join("hydranos.log"), d.join("hydra.db"), d.join("bench.db"));
+        let (cfg, log, db, bench) = (
+            d.join("hydranos.toml"),
+            d.join("hydranos.log"),
+            d.join("hydra.db"),
+            d.join("bench.db"),
+        );
         put(&cfg);
         put(&log);
         put(&d.join("hydranos.log.1"));
         // A database left at 0644, with the -wal and -shm SQLite makes after the fact.
         let conn = rusqlite::Connection::open(&db).unwrap();
-        conn.query_row("PRAGMA journal_mode=WAL", [], |_| Ok(())).unwrap();
-        conn.execute_batch("CREATE TABLE t(x); INSERT INTO t VALUES (1);").unwrap();
+        conn.query_row("PRAGMA journal_mode=WAL", [], |_| Ok(()))
+            .unwrap();
+        conn.execute_batch("CREATE TABLE t(x); INSERT INTO t VALUES (1);")
+            .unwrap();
         for p in store_files(&db) {
             if p.exists() {
                 std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
@@ -148,10 +165,23 @@ mod tests {
             }
         }
         assert!(d.join("bench.db-wal").exists(), "bench.db is in WAL mode");
-        assert!(d.join("hydra.db-wal").exists(), "the database is in WAL mode");
+        assert!(
+            d.join("hydra.db-wal").exists(),
+            "the database is in WAL mode"
+        );
         assert!(d.join("hydra.db-shm").exists());
         apply(true, &cfg, &log, &db, &bench);
-        for p in [&cfg, &log, &d.join("hydranos.log.1"), &db, &d.join("hydra.db-wal"), &d.join("hydra.db-shm"), &bench, &d.join("bench.db-wal"), &d.join("bench.db-shm")] {
+        for p in [
+            &cfg,
+            &log,
+            &d.join("hydranos.log.1"),
+            &db,
+            &d.join("hydra.db-wal"),
+            &d.join("hydra.db-shm"),
+            &bench,
+            &d.join("bench.db-wal"),
+            &d.join("bench.db-shm"),
+        ] {
             assert_eq!(mode(p), 0o600, "{}", p.display());
         }
         drop(conn);
@@ -164,7 +194,12 @@ mod tests {
     fn private_files_off_changes_nothing() {
         let _g = flag_lock();
         let d = dir("off");
-        let (cfg, log, db, bench) = (d.join("hydranos.toml"), d.join("hydranos.log"), d.join("hydra.db"), d.join("bench.db"));
+        let (cfg, log, db, bench) = (
+            d.join("hydranos.toml"),
+            d.join("hydranos.log"),
+            d.join("hydra.db"),
+            d.join("bench.db"),
+        );
         for p in [&cfg, &log, &db, &bench] {
             put(p);
         }

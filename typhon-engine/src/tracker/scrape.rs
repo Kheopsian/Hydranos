@@ -33,10 +33,17 @@ pub fn scrape_url(announce: &str) -> Option<String> {
     // became `http://scrape-x.com?pk=K`, the passkey sent to another domain.
     let slash = after_scheme + base[after_scheme..].rfind('/')?;
     let last = &base[slash + 1..];
-    if !last.starts_with("announce") || !(base.starts_with("http://") || base.starts_with("https://")) {
+    if !last.starts_with("announce")
+        || !(base.starts_with("http://") || base.starts_with("https://"))
+    {
         return None;
     }
-    Some(format!("{}/scrape{}{}", &base[..slash], &last["announce".len()..], query))
+    Some(format!(
+        "{}/scrape{}{}",
+        &base[..slash],
+        &last["announce".len()..],
+        query
+    ))
 }
 
 /// Scrape an HTTP tracker for up to `BATCH` torrents.
@@ -49,7 +56,11 @@ pub async fn http_scrape_on(
 ) -> Result<Vec<ScrapeEntry>, String> {
     let mut url = scrape_url.to_string();
     for (i, h) in hashes.iter().take(BATCH).enumerate() {
-        let sep = if i == 0 && !url.contains('?') { '?' } else { '&' };
+        let sep = if i == 0 && !url.contains('?') {
+            '?'
+        } else {
+            '&'
+        };
         url.push(sep);
         url.push_str("info_hash=");
         url.push_str(&super::http::url_encode_binary(h));
@@ -68,7 +79,11 @@ pub async fn http_scrape_on(
     }
     let client = builder.build().map_err(|e| format!("http client: {e}"))?;
     // The error names the host, never the URL: it carries the passkey.
-    let resp = client.get(&url).send().await.map_err(|e| format!("scrape request: {}", e.without_url()))?;
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("scrape request: {}", e.without_url()))?;
     if !resp.status().is_success() {
         return Err(format!("scrape: HTTP {}", resp.status().as_u16()));
     }
@@ -131,7 +146,10 @@ struct Parser<'a> {
 
 impl<'a> Parser<'a> {
     fn peek(&self) -> Result<u8, String> {
-        self.d.get(self.i).copied().ok_or_else(|| "scrape: truncated".to_string())
+        self.d
+            .get(self.i)
+            .copied()
+            .ok_or_else(|| "scrape: truncated".to_string())
     }
     fn expect(&mut self, c: u8) -> Result<(), String> {
         if self.peek()? != c {
@@ -141,20 +159,32 @@ impl<'a> Parser<'a> {
         Ok(())
     }
     fn bytes(&mut self) -> Result<&'a [u8], String> {
-        let colon = self.d[self.i..].iter().position(|&b| b == b':').ok_or("scrape: bad string")?;
+        let colon = self.d[self.i..]
+            .iter()
+            .position(|&b| b == b':')
+            .ok_or("scrape: bad string")?;
         let len: usize = std::str::from_utf8(&self.d[self.i..self.i + colon])
             .ok()
             .and_then(|s| s.parse().ok())
             .ok_or("scrape: bad string length")?;
         let start = self.i + colon + 1;
-        let end = start.checked_add(len).filter(|e| *e <= self.d.len()).ok_or("scrape: truncated")?;
+        let end = start
+            .checked_add(len)
+            .filter(|e| *e <= self.d.len())
+            .ok_or("scrape: truncated")?;
         self.i = end;
         Ok(&self.d[start..end])
     }
     fn int(&mut self) -> Result<i64, String> {
         self.expect(b'i')?;
-        let end = self.d[self.i..].iter().position(|&b| b == b'e').ok_or("scrape: bad int")?;
-        let v = std::str::from_utf8(&self.d[self.i..self.i + end]).ok().and_then(|s| s.parse().ok()).ok_or("scrape: bad int")?;
+        let end = self.d[self.i..]
+            .iter()
+            .position(|&b| b == b'e')
+            .ok_or("scrape: bad int")?;
+        let v = std::str::from_utf8(&self.d[self.i..self.i + end])
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .ok_or("scrape: bad int")?;
         self.i += end + 1;
         Ok(v)
     }
@@ -199,7 +229,8 @@ mod tests {
     /// into memory to the end of the timeout.
     #[tokio::test]
     async fn a_scrape_answer_past_the_cap_is_refused_unread() {
-        let (base, _) = crate::tracker::http::endless::server("200 OK", b"d5:filesd".to_vec(), b'l').await;
+        let (base, _) =
+            crate::tracker::http::endless::server("200 OK", b"d5:filesd".to_vec(), b'l').await;
         let out = tokio::time::timeout(
             std::time::Duration::from_secs(5),
             http_scrape_on(&format!("{base}/scrape"), &[[0x41u8; 20]], "t", "", ""),
@@ -212,12 +243,33 @@ mod tests {
 
     #[test]
     fn the_scrape_url_is_bep_48s() {
-        assert_eq!(scrape_url("http://t.example/announce").as_deref(), Some("http://t.example/scrape"));
-        assert_eq!(scrape_url("https://t.example/x/announce.php?passkey=k").as_deref(), Some("https://t.example/x/scrape.php?passkey=k"));
-        assert_eq!(scrape_url("https://t.example/abc/announce").as_deref(), Some("https://t.example/abc/scrape"));
-        assert_eq!(scrape_url("https://t.example/a"), None, "no announce segment, no scrape");
-        assert_eq!(scrape_url("https://t.example/announce/x"), None, "announce must be the last segment");
-        assert_eq!(scrape_url("udp://t.example:80/announce"), None, "UDP has its own scrape");
+        assert_eq!(
+            scrape_url("http://t.example/announce").as_deref(),
+            Some("http://t.example/scrape")
+        );
+        assert_eq!(
+            scrape_url("https://t.example/x/announce.php?passkey=k").as_deref(),
+            Some("https://t.example/x/scrape.php?passkey=k")
+        );
+        assert_eq!(
+            scrape_url("https://t.example/abc/announce").as_deref(),
+            Some("https://t.example/abc/scrape")
+        );
+        assert_eq!(
+            scrape_url("https://t.example/a"),
+            None,
+            "no announce segment, no scrape"
+        );
+        assert_eq!(
+            scrape_url("https://t.example/announce/x"),
+            None,
+            "announce must be the last segment"
+        );
+        assert_eq!(
+            scrape_url("udp://t.example:80/announce"),
+            None,
+            "UDP has its own scrape"
+        );
         // No path: the host is never rewritten, whatever it is called.
         assert_eq!(scrape_url("http://announce-x.example?pk=K"), None);
         assert_eq!(scrape_url("https://announce.t.example"), None);
@@ -231,20 +283,39 @@ mod tests {
         body.extend_from_slice(&a);
         body.extend_from_slice(b"d8:completei12e10:downloadedi99e10:incompletei3e4:name3:fooe20:");
         body.extend_from_slice(&b);
-        body.extend_from_slice(b"d8:completei0e10:incompletei7eee5:flagsd20:min_request_intervali1800eee");
+        body.extend_from_slice(
+            b"d8:completei0e10:incompletei7eee5:flagsd20:min_request_intervali1800eee",
+        );
         let got = parse_http_scrape(&body).unwrap();
-        assert_eq!(got, vec![
-            ScrapeEntry { info_hash: a, complete: 12, incomplete: 3 },
-            ScrapeEntry { info_hash: b, complete: 0, incomplete: 7 },
-        ]);
+        assert_eq!(
+            got,
+            vec![
+                ScrapeEntry {
+                    info_hash: a,
+                    complete: 12,
+                    incomplete: 3
+                },
+                ScrapeEntry {
+                    info_hash: b,
+                    complete: 0,
+                    incomplete: 7
+                },
+            ]
+        );
     }
 
     #[test]
     fn a_refusal_or_garbage_is_an_error_not_zeroes() {
-        assert!(parse_http_scrape(b"d14:failure reason9:forbiddene").unwrap_err().contains("forbidden"));
+        assert!(parse_http_scrape(b"d14:failure reason9:forbiddene")
+            .unwrap_err()
+            .contains("forbidden"));
         assert!(parse_http_scrape(b"<html>").is_err());
         assert!(parse_http_scrape(b"d5:filesd20:short").is_err());
-        assert_eq!(parse_http_scrape(b"d5:filesdee").unwrap(), vec![], "nothing known is an empty answer");
+        assert_eq!(
+            parse_http_scrape(b"d5:filesdee").unwrap(),
+            vec![],
+            "nothing known is an empty answer"
+        );
     }
 
     /// ⭐ The scrape URL carries the passkey like the announce one: a redirect
@@ -253,7 +324,12 @@ mod tests {
     async fn a_scrape_does_not_follow_a_redirect() {
         use crate::tracker::http::redirect_trap;
         use std::sync::atomic::Ordering;
-        for status in ["301 Moved Permanently", "302 Found", "307 Temporary Redirect", "308 Permanent Redirect"] {
+        for status in [
+            "301 Moved Permanently",
+            "302 Found",
+            "307 Temporary Redirect",
+            "308 Permanent Redirect",
+        ] {
             let trap = redirect_trap::start(status, b"d5:filesdee").await;
             let url = format!("{}/scrape?passkey=SECRET", trap.base);
             let out = tokio::time::timeout(
@@ -262,9 +338,21 @@ mod tests {
             )
             .await
             .expect("the client gave up on its own");
-            assert_eq!(trap.reached.load(Ordering::SeqCst), 0, "{status}: the redirect target was contacted");
-            assert!(out.is_err(), "{status}: a redirect is not an answer: {:?}", out.map(|v| v.len()));
-            assert_eq!(trap.asked.load(Ordering::SeqCst), 1, "{status}: the tracker was asked once");
+            assert_eq!(
+                trap.reached.load(Ordering::SeqCst),
+                0,
+                "{status}: the redirect target was contacted"
+            );
+            assert!(
+                out.is_err(),
+                "{status}: a redirect is not an answer: {:?}",
+                out.map(|v| v.len())
+            );
+            assert_eq!(
+                trap.asked.load(Ordering::SeqCst),
+                1,
+                "{status}: the tracker was asked once"
+            );
         }
     }
 }

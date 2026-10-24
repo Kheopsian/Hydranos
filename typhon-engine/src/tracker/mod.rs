@@ -9,7 +9,8 @@ pub mod udp;
 /// qualify.
 fn looks_like_key(s: &str) -> bool {
     s.len() >= 16
-        && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
         && s.bytes().any(|b| b.is_ascii_digit())
         && s.bytes().any(|b| b.is_ascii_alphabetic())
 }
@@ -19,7 +20,10 @@ fn looks_like_key(s: &str) -> bool {
 /// query parameter whose value looks like a key (the name does not matter).
 /// A passkey configured for the host is not in the URL, so it is not seen here.
 pub fn carries_key_in_clear(tracker_url: &str) -> bool {
-    let is_http = tracker_url.get(..7).map(|p| p.eq_ignore_ascii_case("http://")).unwrap_or(false);
+    let is_http = tracker_url
+        .get(..7)
+        .map(|p| p.eq_ignore_ascii_case("http://"))
+        .unwrap_or(false);
     if !is_http {
         return false;
     }
@@ -29,14 +33,17 @@ pub fn carries_key_in_clear(tracker_url: &str) -> bool {
     };
     let path = base.split_once('/').map(|(_, p)| p).unwrap_or("");
     path.split('/').any(looks_like_key)
-        || query.split('&').filter_map(|kv| kv.split_once('=')).any(|(_, v)| looks_like_key(v))
+        || query
+            .split('&')
+            .filter_map(|kv| kv.split_once('='))
+            .any(|(_, v)| looks_like_key(v))
 }
 
+use librqbit_utp::UtpSocketUdp;
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering as AtomicOrdering};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicI64, Ordering as AtomicOrdering};
 use std::time::Duration;
 use tracing::{info, warn};
-use librqbit_utp::UtpSocketUdp;
 
 use crate::disk::DiskManager;
 use crate::torrent::meta::TorrentState;
@@ -72,13 +79,16 @@ pub static DIAL_UTP_SKIPPED_INFLIGHT: AtomicU64 = AtomicU64::new(0);
 /// peer ADDRESS, and the uTP socket is bound once per process on a single UDP
 /// port. Two engines dialling one address really would share that socket, so
 /// the dedup has to span them.
-static UTP_INFLIGHT: std::sync::OnceLock<dashmap::DashSet<std::net::SocketAddr>> = std::sync::OnceLock::new();
+static UTP_INFLIGHT: std::sync::OnceLock<dashmap::DashSet<std::net::SocketAddr>> =
+    std::sync::OnceLock::new();
 fn utp_inflight() -> &'static dashmap::DashSet<std::net::SocketAddr> {
     UTP_INFLIGHT.get_or_init(dashmap::DashSet::new)
 }
 struct UtpInflightGuard(std::net::SocketAddr);
 impl Drop for UtpInflightGuard {
-    fn drop(&mut self) { utp_inflight().remove(&self.0); }
+    fn drop(&mut self) {
+        utp_inflight().remove(&self.0);
+    }
 }
 
 // Dedup dial_peer tasks per (info_hash, addr). Tracker/DHT/PEX can all queue
@@ -135,27 +145,42 @@ static OWN_IPS: std::sync::RwLock<Vec<std::net::IpAddr>> = std::sync::RwLock::ne
 /// so they cannot appear as a peer address.
 #[cfg(target_os = "linux")]
 pub fn refresh_own_ips() {
-    let Ok(raw) = std::fs::read_to_string("/proc/net/if_inet6") else { return };
+    let Ok(raw) = std::fs::read_to_string("/proc/net/if_inet6") else {
+        return;
+    };
     let mut out = Vec::new();
     for line in raw.lines() {
         let mut f = line.split_whitespace();
-        let (Some(hex), Some(_idx), Some(_plen), Some(scope)) = (f.next(), f.next(), f.next(), f.next())
-        else { continue };
+        let (Some(hex), Some(_idx), Some(_plen), Some(scope)) =
+            (f.next(), f.next(), f.next(), f.next())
+        else {
+            continue;
+        };
         // scope 0x00 = global. 0x20 link-local, 0x10 host: both unreachable
         // from a swarm, so they can never show up as a peer.
-        if scope != "00" { continue; }
-        if hex.len() != 32 { continue; }
+        if scope != "00" {
+            continue;
+        }
+        if hex.len() != 32 {
+            continue;
+        }
         let mut octets = [0u8; 16];
         let mut ok = true;
         for i in 0..16 {
             match u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16) {
                 Ok(b) => octets[i] = b,
-                Err(_) => { ok = false; break; }
+                Err(_) => {
+                    ok = false;
+                    break;
+                }
             }
         }
-        if ok { out.push(std::net::IpAddr::V6(std::net::Ipv6Addr::from(octets))); }
+        if ok {
+            out.push(std::net::IpAddr::V6(std::net::Ipv6Addr::from(octets)));
+        }
     }
-    out.sort(); out.dedup();
+    out.sort();
+    out.dedup();
     let changed = *OWN_IPS.read().unwrap() != out;
     if changed {
         eprintln!("[tracker] own addresses: {} discovered", out.len());
@@ -170,23 +195,38 @@ pub fn refresh_own_ips() {}
 /// The pushed set and the discovered set, for diagnostics.
 pub fn self_ip_sets() -> (Vec<String>, Vec<String>) {
     (
-        SELF_IPS.read().unwrap().iter().map(|i| i.to_string()).collect(),
-        OWN_IPS.read().unwrap().iter().map(|i| i.to_string()).collect(),
+        SELF_IPS
+            .read()
+            .unwrap()
+            .iter()
+            .map(|i| i.to_string())
+            .collect(),
+        OWN_IPS
+            .read()
+            .unwrap()
+            .iter()
+            .map(|i| i.to_string())
+            .collect(),
     )
 }
 
 /// Seed the self-IP set from the TYPHON_SELF_IPS env (comma-separated).
 pub fn seed_self_ips_from_env() {
     let raw = std::env::var("TYPHON_SELF_IPS").unwrap_or_default();
-    let v: Vec<std::net::IpAddr> = raw.split(',')
+    let v: Vec<std::net::IpAddr> = raw
+        .split(',')
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
         .filter_map(|s| s.parse::<std::net::IpAddr>().ok())
         .collect();
-    if !v.is_empty() { set_self_ips(v); }
+    if !v.is_empty() {
+        set_self_ips(v);
+    }
 }
 fn is_self_dial(addr: std::net::SocketAddr, listen_port: u16) -> bool {
-    if addr.port() != listen_port { return false; }
+    if addr.port() != listen_port {
+        return false;
+    }
     is_self_ip(addr.ip())
 }
 
@@ -197,7 +237,10 @@ fn is_self_dial(addr: std::net::SocketAddr, listen_port: u16) -> bool {
 pub fn is_self_ip(ip: std::net::IpAddr) -> bool {
     // Normalize IPv4-mapped v6 (::ffff:a.b.c.d) so we compare against raw v4.
     let target = match ip {
-        std::net::IpAddr::V6(v6) => v6.to_ipv4_mapped().map(std::net::IpAddr::V4).unwrap_or(std::net::IpAddr::V6(v6)),
+        std::net::IpAddr::V6(v6) => v6
+            .to_ipv4_mapped()
+            .map(std::net::IpAddr::V4)
+            .unwrap_or(std::net::IpAddr::V6(v6)),
         v4 => v4,
     };
     if SELF_IPS.read().unwrap().iter().any(|ip| *ip == target) {
@@ -205,13 +248,16 @@ pub fn is_self_ip(ip: std::net::IpAddr) -> bool {
     }
     OWN_IPS.read().unwrap().iter().any(|ip| *ip == target)
 }
-static DIAL_INFLIGHT: std::sync::OnceLock<dashmap::DashSet<([u8; 20], std::net::SocketAddr)>> = std::sync::OnceLock::new();
+static DIAL_INFLIGHT: std::sync::OnceLock<dashmap::DashSet<([u8; 20], std::net::SocketAddr)>> =
+    std::sync::OnceLock::new();
 fn dial_inflight() -> &'static dashmap::DashSet<([u8; 20], std::net::SocketAddr)> {
     DIAL_INFLIGHT.get_or_init(dashmap::DashSet::new)
 }
 struct DialInflightGuard(([u8; 20], std::net::SocketAddr));
 impl Drop for DialInflightGuard {
-    fn drop(&mut self) { dial_inflight().remove(&self.0); }
+    fn drop(&mut self) {
+        dial_inflight().remove(&self.0);
+    }
 }
 pub static DIAL_HANDSHAKE_OK: AtomicU64 = AtomicU64::new(0);
 pub static DIAL_HANDSHAKE_FAIL: AtomicU64 = AtomicU64::new(0);
@@ -287,7 +333,7 @@ pub static BT_GOT_REQUEST: AtomicU64 = AtomicU64::new(0);
 pub static BT_SENT_PIECE: AtomicU64 = AtomicU64::new(0);
 pub static BT_SENT_REQUEST: AtomicU64 = AtomicU64::new(0);
 pub static BT_GOT_PIECE: AtomicU64 = AtomicU64::new(0);
-pub static BT_DL_ENTRIES_LOOP: AtomicU64 = AtomicU64::new(0);        // how many peer sessions entered the dl loop
+pub static BT_DL_ENTRIES_LOOP: AtomicU64 = AtomicU64::new(0); // how many peer sessions entered the dl loop
 pub static BT_DL_SHOULD_INTERESTED_FALSE: AtomicU64 = AtomicU64::new(0); // how many times should_be_interested returned false (at least once per peer)
 
 // Instant gauges: signed so we can spot classification/accounting bugs (negative means over-decrement).
@@ -338,8 +384,9 @@ static DIAL_TX: std::sync::OnceLock<DialTx> = std::sync::OnceLock::new();
 /// binding, peer id, uTP socket and connection limits -- out of the wrong
 /// tunnel, under the wrong identity.
 type DialTx = tokio::sync::mpsc::Sender<(std::net::SocketAddr, Arc<TorrentState>)>;
-static ENGINE_DIAL_TX: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<usize, DialTx>>> =
-    std::sync::OnceLock::new();
+static ENGINE_DIAL_TX: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<usize, DialTx>>,
+> = std::sync::OnceLock::new();
 
 fn dial_tx_for(torrent: &TorrentState) -> Option<DialTx> {
     if let Some(limiter) = torrent.limiter.get() {
@@ -442,14 +489,17 @@ pub fn start_announce_loop(
     mgr: Arc<crate::torrent::TorrentManager>,
 ) {
     if bindings.is_empty() {
-        warn!("[tracker] start_announce_loop called with no bindings — dials will use kernel default");
+        warn!(
+            "[tracker] start_announce_loop called with no bindings — dials will use kernel default"
+        );
     }
     // Set up the PEX/DHT dial queue consumer. Peer tasks push addrs through
     // `enqueue_dial`; this consumer owns disk_mgr/utp_socket and actually
     // spawns dial_peer (breaking the recursive-async-fn Send cycle). Per-dial
     // it picks one binding by hashing the peer addr → consistent peer_id+src
     // per peer across reconnects.
-    let (dial_tx, mut dial_rx) = tokio::sync::mpsc::channel::<(std::net::SocketAddr, Arc<TorrentState>)>(DIAL_QUEUE_CAP);
+    let (dial_tx, mut dial_rx) =
+        tokio::sync::mpsc::channel::<(std::net::SocketAddr, Arc<TorrentState>)>(DIAL_QUEUE_CAP);
     // This engine's queue, for this engine's torrents. The first one is also
     // the fallback for a torrent that has no engine handle yet.
     ENGINE_DIAL_TX
@@ -474,7 +524,10 @@ pub fn start_announce_loop(
         // restart.
         let mut pacer = dial_limiter::DialPacer::new();
         if max_dials_per_sec > 0.0 {
-            info!("[peer] outbound dial rate limit active: {}/s", max_dials_per_sec);
+            info!(
+                "[peer] outbound dial rate limit active: {}/s",
+                max_dials_per_sec
+            );
         }
         tokio::spawn(async move {
             while let Some((addr, t)) = dial_rx.recv().await {
@@ -509,17 +562,14 @@ pub fn start_announce_loop(
             }
         });
     }
-
 }
-
-
 
 // client_from_peer_id lived here too, byte for byte the same as the copy in
 // peer::choking. Both are gone: peer::peerclient is the one table now.
 
-use tokio::net::{TcpSocket, TcpStream};
-use crate::peer::transport::PeerTransport;
 use crate::crypto::stream::CryptoStream;
+use crate::peer::transport::PeerTransport;
+use tokio::net::{TcpSocket, TcpStream};
 
 /// One TCP connection to `dest`, leaving by the egress the engine was given.
 ///
@@ -600,12 +650,18 @@ async fn socks5_connect(
     let (host, port, auth) = proxy;
     // The proxy's own name, resolved here: it is our infrastructure, not a
     // peer. A literal address (the usual case) costs no lookup at all.
-    let proxy_addr = tokio::net::lookup_host((host.as_str(), *port)).await.ok()?.next()?;
+    let proxy_addr = tokio::net::lookup_host((host.as_str(), *port))
+        .await
+        .ok()?
+        .next()?;
     let to_proxy = steered_connect(proxy_addr, egress).await?;
     let target = (addr.ip(), addr.port());
     let stream = match auth {
         Some((u, pw)) => {
-            tokio_socks::tcp::Socks5Stream::connect_with_password_and_socket(to_proxy, target, u, pw).await
+            tokio_socks::tcp::Socks5Stream::connect_with_password_and_socket(
+                to_proxy, target, u, pw,
+            )
+            .await
         }
         None => tokio_socks::tcp::Socks5Stream::connect_with_socket(to_proxy, target).await,
     };
@@ -726,7 +782,9 @@ pub(crate) async fn open_peer(
         crate::ipfilter::BLOCKED_OUT.fetch_add(1, AtomicOrdering::Relaxed);
         return None;
     }
-    let skip_mse = std::env::var("TYPHON_NO_MSE").map(|v| v == "1").unwrap_or(false)
+    let skip_mse = std::env::var("TYPHON_NO_MSE")
+        .map(|v| v == "1")
+        .unwrap_or(false)
         || policy.block_mse();
     // Leg order. `allow`: plaintext, then MSE. `prefer`: MSE, then plaintext.
     // `require`: MSE only, and offered as RC4 only. A skipped MSE leg stays
@@ -735,14 +793,19 @@ pub(crate) async fn open_peer(
     let plain_ok = mode != crate::peer::extension::Encryption::Require;
     let rc4_only = !plain_ok;
     let mse_first = mode != crate::peer::extension::Encryption::Allow;
-    let legs: [bool; 2] = if mse_first { [true, false] } else { [false, true] }; // true = MSE
+    let legs: [bool; 2] = if mse_first {
+        [true, false]
+    } else {
+        [false, true]
+    }; // true = MSE
     for mse in legs {
         if mse {
             if skip_mse {
                 MSE_OUTBOUND_SKIPPED.fetch_add(1, AtomicOrdering::Relaxed);
                 continue;
             }
-            if let Some(r) = dial_tcp_mse(addr, egress, info_hash, peer_id, rc4_only, traced).await {
+            if let Some(r) = dial_tcp_mse(addr, egress, info_hash, peer_id, rc4_only, traced).await
+            {
                 return Some(r);
             }
         } else if plain_ok {
@@ -768,9 +831,19 @@ pub(crate) async fn open_peer(
                 if let Some(mut t) = try_utp(addr, sock).await {
                     if let Ok(Ok((enc, dec, hs))) = tokio::time::timeout(
                         DIAL_HS_TIMEOUT,
-                        crate::crypto::mse::handshake_outgoing_with(&mut t, info_hash, peer_id, rc4_only),
-                    ).await {
-                        return Some((CryptoStream::new(t, Some(enc), Some(dec)), hs.fast_extension, hs.extended_protocol, hs.peer_id, true));
+                        crate::crypto::mse::handshake_outgoing_with(
+                            &mut t, info_hash, peer_id, rc4_only,
+                        ),
+                    )
+                    .await
+                    {
+                        return Some((
+                            CryptoStream::new(t, Some(enc), Some(dec)),
+                            hs.fast_extension,
+                            hs.extended_protocol,
+                            hs.peer_id,
+                            true,
+                        ));
                     }
                 }
             } else if plain_ok {
@@ -778,8 +851,16 @@ pub(crate) async fn open_peer(
                     if let Ok(Ok(hs)) = tokio::time::timeout(
                         DIAL_HS_TIMEOUT,
                         crate::peer::handshake::outgoing(&mut t, info_hash, peer_id),
-                    ).await {
-                        return Some((CryptoStream::plain(t), hs.fast_extension, hs.extended_protocol, hs.peer_id, false));
+                    )
+                    .await
+                    {
+                        return Some((
+                            CryptoStream::plain(t),
+                            hs.fast_extension,
+                            hs.extended_protocol,
+                            hs.peer_id,
+                            false,
+                        ));
                     }
                 }
             }
@@ -807,7 +888,9 @@ async fn dial_tcp_plain(
     let hs_res = match tokio::time::timeout(
         DIAL_HS_TIMEOUT,
         crate::peer::handshake::outgoing(&mut t, info_hash, peer_id),
-    ).await {
+    )
+    .await
+    {
         Ok(r) => r,
         Err(_) => {
             DIAL_HS_TIMED_OUT.fetch_add(1, AtomicOrdering::Relaxed);
@@ -820,7 +903,13 @@ async fn dial_tcp_plain(
             if traced {
                 info!("[dialtrace] {} tcp/plain handshake OK", addr);
             }
-            Some((CryptoStream::plain(t), hs.fast_extension, hs.extended_protocol, hs.peer_id, false))
+            Some((
+                CryptoStream::plain(t),
+                hs.fast_extension,
+                hs.extended_protocol,
+                hs.peer_id,
+                false,
+            ))
         }
         Err(e) => {
             DIAL_PLAIN_FAIL.fetch_add(1, AtomicOrdering::Relaxed);
@@ -846,7 +935,9 @@ async fn dial_tcp_mse(
     let mse_res = match tokio::time::timeout(
         DIAL_HS_TIMEOUT,
         crate::crypto::mse::handshake_outgoing_with(&mut t, info_hash, peer_id, rc4_only),
-    ).await {
+    )
+    .await
+    {
         Ok(r) => r,
         Err(_) => {
             DIAL_HS_TIMED_OUT.fetch_add(1, AtomicOrdering::Relaxed);
@@ -859,7 +950,13 @@ async fn dial_tcp_mse(
             if traced {
                 info!("[dialtrace] {} tcp/MSE handshake OK", addr);
             }
-            Some((CryptoStream::new(t, Some(enc), Some(dec)), hs.fast_extension, hs.extended_protocol, hs.peer_id, true))
+            Some((
+                CryptoStream::new(t, Some(enc), Some(dec)),
+                hs.fast_extension,
+                hs.extended_protocol,
+                hs.peer_id,
+                true,
+            ))
         }
         Err(e) => {
             DIAL_MSE_FAIL.fetch_add(1, AtomicOrdering::Relaxed);
@@ -871,7 +968,6 @@ async fn dial_tcp_mse(
     }
 }
 
-
 pub async fn dial_peer(
     addr: std::net::SocketAddr,
     torrent: Arc<TorrentState>,
@@ -881,8 +977,8 @@ pub async fn dial_peer(
     listen_port: u16,
     egress: &crate::netpin::Egress,
 ) {
-    use tokio_util::codec::Framed;
     use crate::wire::codec::BtCodec;
+    use tokio_util::codec::Framed;
 
     let traced = is_traced(&torrent.info_hash);
     if traced {
@@ -913,7 +1009,10 @@ pub async fn dial_peer(
     if !dial_inflight().insert(inflight_key) {
         DIAL_SKIPPED_INFLIGHT.fetch_add(1, AtomicOrdering::Relaxed);
         if traced {
-            info!("[dialtrace] {} SKIPPED inflight (stale entry never cleared?)", addr);
+            info!(
+                "[dialtrace] {} SKIPPED inflight (stale entry never cleared?)",
+                addr
+            );
         }
         return;
     }
@@ -921,8 +1020,21 @@ pub async fn dial_peer(
 
     DIAL_ATTEMPTED.fetch_add(1, AtomicOrdering::Relaxed);
 
-    let (cs, fast_ext, lt_ext, remote_peer_id, is_encrypted) = match open_peer(addr, &utp_socket, &torrent.info_hash, &peer_id, egress, torrent.policy(), traced).await {
-        Some(v) => { DIAL_HANDSHAKE_OK.fetch_add(1, AtomicOrdering::Relaxed); v }
+    let (cs, fast_ext, lt_ext, remote_peer_id, is_encrypted) = match open_peer(
+        addr,
+        &utp_socket,
+        &torrent.info_hash,
+        &peer_id,
+        egress,
+        torrent.policy(),
+        traced,
+    )
+    .await
+    {
+        Some(v) => {
+            DIAL_HANDSHAKE_OK.fetch_add(1, AtomicOrdering::Relaxed);
+            v
+        }
         None => {
             DIAL_HANDSHAKE_FAIL.fetch_add(1, AtomicOrdering::Relaxed);
             if traced {
@@ -932,7 +1044,10 @@ pub async fn dial_peer(
         }
     };
     if traced {
-        info!("[dialtrace] {} session starting (encrypted={})", addr, is_encrypted);
+        info!(
+            "[dialtrace] {} session starting (encrypted={})",
+            addr, is_encrypted
+        );
     }
     let framed = Framed::new(cs, BtCodec::new());
     crate::peer::session::run(
@@ -960,7 +1075,9 @@ static SELF_IP_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(test)]
 fn self_ip_test_lock() -> std::sync::MutexGuard<'static, ()> {
-    SELF_IP_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    SELF_IP_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 #[cfg(test)]
@@ -978,7 +1095,10 @@ mod self_ip_tests {
         set_self_ips(vec![]);
         let mine: IpAddr = "2a01:db8::200".parse().unwrap();
         *OWN_IPS.write().unwrap() = vec![mine];
-        assert!(is_self_ip(mine), "a discovered address must be recognised as ours");
+        assert!(
+            is_self_ip(mine),
+            "a discovered address must be recognised as ours"
+        );
         *OWN_IPS.write().unwrap() = vec![];
     }
 
@@ -992,8 +1112,14 @@ mod self_ip_tests {
         *OWN_IPS.write().unwrap() = vec![mine];
         let ours = std::net::SocketAddr::new(mine, 16172);
         let neighbour = std::net::SocketAddr::new(mine, 16171);
-        assert!(is_self_dial(ours, 16172), "our own address on our own port is us");
-        assert!(!is_self_dial(neighbour, 16172), "another engine's port must stay dialable");
+        assert!(
+            is_self_dial(ours, 16172),
+            "our own address on our own port is us"
+        );
+        assert!(
+            !is_self_dial(neighbour, 16172),
+            "another engine's port must stay dialable"
+        );
         *OWN_IPS.write().unwrap() = vec![];
     }
 
@@ -1059,13 +1185,26 @@ mod self_dial_tests {
         // The port matters for a DIAL: our address on another port is another
         // service, not us. Only our own listen port is a self-dial.
         assert!(is_self_dial(SocketAddr::new(v4, 16371), 16371));
-        assert!(!is_self_dial(SocketAddr::new(v4, 6881), 16371), "another port is not our listener");
-        assert!(!is_self_dial(SocketAddr::new(other, 16371), 16371), "another host is not us");
+        assert!(
+            !is_self_dial(SocketAddr::new(v4, 6881), 16371),
+            "another port is not our listener"
+        );
+        assert!(
+            !is_self_dial(SocketAddr::new(other, 16371), 16371),
+            "another host is not us"
+        );
 
         // What the panel shows: the pushed set and the observed set, apart.
         let (pushed, own) = self_ip_sets();
-        assert!(pushed.iter().any(|s| s == "93.184.216.34"), "got {pushed:?}");
-        assert_eq!(own.len(), own.len(), "the observed set is reported separately");
+        assert!(
+            pushed.iter().any(|s| s == "93.184.216.34"),
+            "got {pushed:?}"
+        );
+        assert_eq!(
+            own.len(),
+            own.len(),
+            "the observed set is reported separately"
+        );
 
         // Replacing the set REPLACES it: an address that is no longer ours
         // must stop being filtered, or a reassigned IP is unreachable forever.
@@ -1088,7 +1227,10 @@ mod self_dial_tests {
         std::env::set_var("TYPHON_SELF_IPS", "93.184.216.34, not-an-ip ,45.33.32.156");
         seed_self_ips_from_env();
         let (pushed, _) = self_ip_sets();
-        assert!(pushed.iter().any(|s| s == "93.184.216.34"), "got {pushed:?}");
+        assert!(
+            pushed.iter().any(|s| s == "93.184.216.34"),
+            "got {pushed:?}"
+        );
         assert!(pushed.iter().any(|s| s == "45.33.32.156"), "got {pushed:?}");
         assert!(!pushed.iter().any(|s| s == "not-an-ip"));
         std::env::remove_var("TYPHON_SELF_IPS");
@@ -1159,7 +1301,14 @@ mod per_engine_dial_tests {
         ));
         let limiter = Arc::new(dial_limiter::DialLimiter::default());
         limiter.set_max_dials_per_sec(0.001);
-        start_announce_loop(disk, Vec::new(), crate::peer::UtpHandle::off(), 0.001, limiter.clone(), mgr);
+        start_announce_loop(
+            disk,
+            Vec::new(),
+            crate::peer::UtpHandle::off(),
+            0.001,
+            limiter.clone(),
+            mgr,
+        );
         let t = torrent_of(&limiter, 9);
         let before = DIAL_ENQUEUE_DROPPED.load(AtomicOrdering::Relaxed);
         for i in 0..10_000u32 {
@@ -1167,14 +1316,20 @@ mod per_engine_dial_tests {
             enqueue_dial(peer, t.clone());
         }
         let dropped = DIAL_ENQUEUE_DROPPED.load(AtomicOrdering::Relaxed) - before;
-        assert!(dropped >= 5000, "only {dropped} of 10000 dropped: the queue kept the rest");
+        assert!(
+            dropped >= 5000,
+            "only {dropped} of 10000 dropped: the queue kept the rest"
+        );
     }
 
     /// Each engine's torrents reach that engine's queue, so a dial leaves with
     /// that engine's binding. 4.3 sent every engine's dials to the first one.
     #[test]
     fn a_torrent_dials_through_its_own_engine() {
-        let (a, b) = (Arc::new(dial_limiter::DialLimiter::default()), Arc::new(dial_limiter::DialLimiter::default()));
+        let (a, b) = (
+            Arc::new(dial_limiter::DialLimiter::default()),
+            Arc::new(dial_limiter::DialLimiter::default()),
+        );
         let (tx_a, mut rx_a) = tokio::sync::mpsc::channel(8);
         let (tx_b, mut rx_b) = tokio::sync::mpsc::channel(8);
         {
@@ -1199,14 +1354,21 @@ mod socks_dial_tests {
     /// A SOCKS5 server on loopback that records every CONNECT target and
     /// answers each with `reply` (0 = granted, anything else = refused).
     /// Granted connections are held open and never spoken to again.
-    async fn fake_socks5(reply: u8) -> (std::net::SocketAddr, Arc<std::sync::Mutex<Vec<std::net::SocketAddr>>>) {
+    async fn fake_socks5(
+        reply: u8,
+    ) -> (
+        std::net::SocketAddr,
+        Arc<std::sync::Mutex<Vec<std::net::SocketAddr>>>,
+    ) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let seen: Arc<std::sync::Mutex<Vec<std::net::SocketAddr>>> = Default::default();
         let log = seen.clone();
         tokio::spawn(async move {
             loop {
-                let Ok((mut s, _)) = listener.accept().await else { return };
+                let Ok((mut s, _)) = listener.accept().await else {
+                    return;
+                };
                 let log = log.clone();
                 tokio::spawn(async move {
                     let mut hdr = [0u8; 2];
@@ -1217,14 +1379,26 @@ mod socks_dial_tests {
                     let mut req = [0u8; 4];
                     s.read_exact(&mut req).await.ok()?;
                     let ip: std::net::IpAddr = match req[3] {
-                        1 => { let mut b = [0u8; 4]; s.read_exact(&mut b).await.ok()?; b.into() }
-                        4 => { let mut b = [0u8; 16]; s.read_exact(&mut b).await.ok()?; b.into() }
+                        1 => {
+                            let mut b = [0u8; 4];
+                            s.read_exact(&mut b).await.ok()?;
+                            b.into()
+                        }
+                        4 => {
+                            let mut b = [0u8; 16];
+                            s.read_exact(&mut b).await.ok()?;
+                            b.into()
+                        }
                         _ => return None,
                     };
                     let mut port = [0u8; 2];
                     s.read_exact(&mut port).await.ok()?;
-                    log.lock().unwrap().push((ip, u16::from_be_bytes(port)).into());
-                    s.write_all(&[5, reply, 0, 1, 0, 0, 0, 0, 0, 0]).await.ok()?;
+                    log.lock()
+                        .unwrap()
+                        .push((ip, u16::from_be_bytes(port)).into());
+                    s.write_all(&[5, reply, 0, 1, 0, 0, 0, 0, 0, 0])
+                        .await
+                        .ok()?;
                     if reply == 0 {
                         tokio::time::sleep(Duration::from_secs(30)).await;
                     }
@@ -1251,8 +1425,15 @@ mod socks_dial_tests {
         for peer in ["203.0.113.9:6881", "[2001:db8::9]:6881"] {
             let peer: std::net::SocketAddr = peer.parse().unwrap();
             let t = try_tcp(peer, &proxied(proxy)).await;
-            assert!(t.is_some(), "the proxy granted {peer}, the dial must succeed");
-            assert!(seen.lock().unwrap().contains(&peer), "the proxy was asked for {peer}: {:?}", seen.lock().unwrap());
+            assert!(
+                t.is_some(),
+                "the proxy granted {peer}, the dial must succeed"
+            );
+            assert!(
+                seen.lock().unwrap().contains(&peer),
+                "the proxy was asked for {peer}: {:?}",
+                seen.lock().unwrap()
+            );
         }
     }
 
@@ -1268,17 +1449,39 @@ mod socks_dial_tests {
         let tcp = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let peer = tcp.local_addr().unwrap();
         let udp = tokio::net::UdpSocket::bind(peer).await.unwrap();
-        let utp = librqbit_utp::UtpSocketUdp::new_udp("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let utp = librqbit_utp::UtpSocketUdp::new_udp("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
 
         let policy = crate::peer::extension::PeerPolicy::default();
-        let out = open_peer(peer, &Some(utp), &[7u8; 20], &[8u8; 20], &proxied(proxy), &policy, false).await;
+        let out = open_peer(
+            peer,
+            &Some(utp),
+            &[7u8; 20],
+            &[8u8; 20],
+            &proxied(proxy),
+            &policy,
+            false,
+        )
+        .await;
         assert!(out.is_none(), "the proxy refused: the dial has failed");
-        assert!(!seen.lock().unwrap().is_empty(), "the attempt went to the proxy");
+        assert!(
+            !seen.lock().unwrap().is_empty(),
+            "the attempt went to the proxy"
+        );
 
         let quiet = Duration::from_millis(500);
-        assert!(tokio::time::timeout(quiet, tcp.accept()).await.is_err(), "a direct TCP dial reached the peer");
+        assert!(
+            tokio::time::timeout(quiet, tcp.accept()).await.is_err(),
+            "a direct TCP dial reached the peer"
+        );
         let mut buf = [0u8; 64];
-        assert!(tokio::time::timeout(quiet, udp.recv_from(&mut buf)).await.is_err(), "a direct uTP packet reached the peer");
+        assert!(
+            tokio::time::timeout(quiet, udp.recv_from(&mut buf))
+                .await
+                .is_err(),
+            "a direct uTP packet reached the peer"
+        );
     }
 
     /// The control for the test above: the same peer, no proxy, and the
@@ -1288,8 +1491,14 @@ mod socks_dial_tests {
     async fn without_a_proxy_the_same_peer_is_dialled_directly() {
         let tcp = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let peer = tcp.local_addr().unwrap();
-        let dial = tokio::spawn(async move { try_tcp(peer, &crate::netpin::Egress::default()).await.is_some() });
-        assert!(tokio::time::timeout(Duration::from_secs(3), tcp.accept()).await.is_ok());
+        let dial = tokio::spawn(async move {
+            try_tcp(peer, &crate::netpin::Egress::default())
+                .await
+                .is_some()
+        });
+        assert!(tokio::time::timeout(Duration::from_secs(3), tcp.accept())
+            .await
+            .is_ok());
         assert!(dial.await.unwrap());
     }
 
@@ -1304,7 +1513,9 @@ mod socks_dial_tests {
         let log = seen.clone();
         tokio::spawn(async move {
             loop {
-                let Ok((mut s, _)) = tcp.accept().await else { return };
+                let Ok((mut s, _)) = tcp.accept().await else {
+                    return;
+                };
                 let log = log.clone();
                 tokio::spawn(async move {
                     use tokio::io::AsyncReadExt;
@@ -1317,7 +1528,16 @@ mod socks_dial_tests {
         });
         let policy = crate::peer::extension::PeerPolicy::default();
         policy.set_encryption(mode);
-        let out = open_peer(peer, &None, &[7u8; 20], &[8u8; 20], &crate::netpin::Egress::default(), &policy, false).await;
+        let out = open_peer(
+            peer,
+            &None,
+            &[7u8; 20],
+            &[8u8; 20],
+            &crate::netpin::Egress::default(),
+            &policy,
+            false,
+        )
+        .await;
         assert!(out.is_none(), "the fake peer completes no handshake");
         tokio::time::sleep(Duration::from_millis(200)).await;
         let v = seen.lock().unwrap().clone();
@@ -1330,7 +1550,11 @@ mod socks_dial_tests {
     async fn encryption_allow_dials_plaintext_then_mse() {
         assert_eq!(dial_openings("allow").await, vec![true, false]);
         assert_eq!(dial_openings("").await, vec![true, false], "absent = allow");
-        assert_eq!(dial_openings("nonsense").await, vec![true, false], "a typo is allow, not require");
+        assert_eq!(
+            dial_openings("nonsense").await,
+            vec![true, false],
+            "a typo is allow, not require"
+        );
     }
 
     /// `prefer` tries MSE first and falls back to plaintext.
@@ -1356,18 +1580,31 @@ mod socks_dial_tests {
         let log = seen.clone();
         tokio::spawn(async move {
             loop {
-                let Ok((mut s, _)) = tcp.accept().await else { return };
+                let Ok((mut s, _)) = tcp.accept().await else {
+                    return;
+                };
                 let log = log.clone();
                 tokio::spawn(async move {
                     use tokio::io::AsyncReadExt;
                     let mut buf = [0u8; 20];
                     let n = tokio::time::timeout(Duration::from_secs(2), s.read(&mut buf)).await;
-                    log.lock().unwrap().push(matches!(n, Ok(Ok(20))) && buf == *b"\x13BitTorrent protocol");
+                    log.lock()
+                        .unwrap()
+                        .push(matches!(n, Ok(Ok(20))) && buf == *b"\x13BitTorrent protocol");
                 });
             }
         });
         let policy = crate::peer::extension::PeerPolicy::default();
-        let out = open_peer(peer, &None, &[7u8; 20], &[8u8; 20], &crate::netpin::Egress::default(), &policy, false).await;
+        let out = open_peer(
+            peer,
+            &None,
+            &[7u8; 20],
+            &[8u8; 20],
+            &crate::netpin::Egress::default(),
+            &policy,
+            false,
+        )
+        .await;
         assert!(out.is_none());
         tokio::time::sleep(Duration::from_millis(200)).await;
         assert_eq!(*seen.lock().unwrap(), vec![true, false]);

@@ -131,7 +131,10 @@ pub fn find_service(xml: &str, base: &str) -> Option<Gateway> {
                 // absolute URL to another host would have our SOAP POST sent
                 // wherever the document says.
                 if host_of(&control_url).is_some() && host_of(&control_url) == host_of(base) {
-                    return Some(Gateway { control_url, service_type: wanted.to_string() });
+                    return Some(Gateway {
+                        control_url,
+                        service_type: wanted.to_string(),
+                    });
                 }
             }
             rest = &after[wanted.len()..];
@@ -143,7 +146,12 @@ pub fn find_service(xml: &str, base: &str) -> Option<Gateway> {
 /// The host of `url`, brackets off an IPv6 literal.
 fn host_of(url: &str) -> Option<String> {
     let u = reqwest::Url::parse(url).ok()?;
-    Some(u.host_str()?.trim_start_matches('[').trim_end_matches(']').to_ascii_lowercase())
+    Some(
+        u.host_str()?
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .to_ascii_lowercase(),
+    )
 }
 
 /// The text of the first `<tag>` in this fragment.
@@ -257,10 +265,14 @@ pub async fn discover_at(target: SocketAddr) -> Result<Gateway, String> {
             // router answered" -- the ordinary case on a machine with no
             // UPnP gateway -- into a hard error on every Windows host. Keep
             // listening until the deadline; other devices may still answer.
-            Ok(Err(e)) if matches!(
-                e.kind(),
-                std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionRefused
-            ) => continue,
+            Ok(Err(e))
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionRefused
+                ) =>
+            {
+                continue
+            }
             Ok(Err(e)) => return Err(format!("cannot read the answer: {e}")),
             Err(_) => return Err(last),
         };
@@ -300,7 +312,11 @@ pub async fn describe(location: &str) -> Result<Gateway, String> {
         .map_err(|e| format!("cannot fetch {location}: {e}"))?;
     // A description is a few kilobytes; nothing past `MAX_DESCRIPTION` is read.
     let mut raw = Vec::new();
-    while let Some(chunk) = resp.chunk().await.map_err(|e| format!("cannot read {location}: {e}"))? {
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .map_err(|e| format!("cannot read {location}: {e}"))?
+    {
         if raw.len() + chunk.len() > MAX_DESCRIPTION {
             return Err(format!("{location} is larger than {MAX_DESCRIPTION} bytes"));
         }
@@ -395,7 +411,10 @@ mod tests {
     fn the_search_carries_what_a_router_checks() {
         let r = search_request();
         assert!(r.starts_with("M-SEARCH * HTTP/1.1\r\n"));
-        assert!(r.contains("MAN: \"ssdp:discover\""), "quoted, with the colon: {r}");
+        assert!(
+            r.contains("MAN: \"ssdp:discover\""),
+            "quoted, with the colon: {r}"
+        );
         assert!(r.contains("HOST: 239.255.255.250:1900"));
         assert!(r.contains("ST: urn:schemas-upnp-org:device:InternetGatewayDevice:1"));
         assert!(r.ends_with("\r\n\r\n"), "a blank line ends the request");
@@ -425,7 +444,10 @@ mod tests {
     fn the_control_url_comes_from_the_matching_service() {
         let g = find_service(DESC, "http://192.168.99.1:5000/rootDesc.xml").unwrap();
         assert_eq!(g.control_url, "http://192.168.99.1:5000/ctl/IPConn");
-        assert_eq!(g.service_type, "urn:schemas-upnp-org:service:WANIPConnection:1");
+        assert_eq!(
+            g.service_type,
+            "urn:schemas-upnp-org:service:WANIPConnection:1"
+        );
     }
 
     /// Older ADSL boxes only have the PPP flavour.
@@ -433,7 +455,10 @@ mod tests {
     fn the_ppp_service_is_accepted_too() {
         let xml = DESC.replace("WANIPConnection:1", "WANPPPConnection:1");
         let g = find_service(&xml, "http://192.168.99.1:5000/d.xml").unwrap();
-        assert_eq!(g.service_type, "urn:schemas-upnp-org:service:WANPPPConnection:1");
+        assert_eq!(
+            g.service_type,
+            "urn:schemas-upnp-org:service:WANPPPConnection:1"
+        );
     }
 
     #[test]
@@ -447,9 +472,18 @@ mod tests {
     #[test]
     fn a_control_url_is_resolved_in_all_three_forms() {
         let base = "http://192.168.99.1:5000/rootDesc.xml";
-        assert_eq!(resolve_url(base, "http://10.0.0.1/ctl"), "http://10.0.0.1/ctl");
-        assert_eq!(resolve_url(base, "/ctl/IPConn"), "http://192.168.99.1:5000/ctl/IPConn");
-        assert_eq!(resolve_url(base, "ctl/IPConn"), "http://192.168.99.1:5000/ctl/IPConn");
+        assert_eq!(
+            resolve_url(base, "http://10.0.0.1/ctl"),
+            "http://10.0.0.1/ctl"
+        );
+        assert_eq!(
+            resolve_url(base, "/ctl/IPConn"),
+            "http://192.168.99.1:5000/ctl/IPConn"
+        );
+        assert_eq!(
+            resolve_url(base, "ctl/IPConn"),
+            "http://192.168.99.1:5000/ctl/IPConn"
+        );
     }
 
     #[test]
@@ -518,7 +552,10 @@ mod io_tests {
 
     /// A router that answers one request with `status` and `body`, then stops.
     /// Returns its base URL and the request it received.
-    fn router(status: &'static str, body: &'static str) -> (String, std::sync::mpsc::Receiver<String>) {
+    fn router(
+        status: &'static str,
+        body: &'static str,
+    ) -> (String, std::sync::mpsc::Receiver<String>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let port = listener.local_addr().unwrap().port();
         let (tx, rx) = std::sync::mpsc::channel();
@@ -537,7 +574,8 @@ mod io_tests {
                 }
             }
             let mut rest = vec![0u8; 4096];
-            sock.set_read_timeout(Some(std::time::Duration::from_millis(200))).ok();
+            sock.set_read_timeout(Some(std::time::Duration::from_millis(200)))
+                .ok();
             if let Ok(n) = sock.read(&mut rest) {
                 buf.extend_from_slice(&rest[..n]);
             }
@@ -558,8 +596,13 @@ mod io_tests {
     #[test]
     fn a_description_document_is_fetched_and_read() {
         let (url, _rx) = router("200 OK", DESC_DOC);
-        let g = rt().block_on(describe(&url)).expect("the router described itself");
-        assert_eq!(g.service_type, "urn:schemas-upnp-org:service:WANIPConnection:1");
+        let g = rt()
+            .block_on(describe(&url))
+            .expect("the router described itself");
+        assert_eq!(
+            g.service_type,
+            "urn:schemas-upnp-org:service:WANIPConnection:1"
+        );
         // Resolved against the document's own URL, not guessed.
         assert!(g.control_url.ends_with("/ctl/IPConn"), "{}", g.control_url);
         assert!(g.control_url.starts_with("http://127.0.0.1:"));
@@ -570,7 +613,9 @@ mod io_tests {
     #[test]
     fn a_document_without_a_mapping_service_is_refused() {
         let (url, _rx) = router("200 OK", "<root><device></device></root>");
-        let err = rt().block_on(describe(&url)).expect_err("no service, no gateway");
+        let err = rt()
+            .block_on(describe(&url))
+            .expect_err("no service, no gateway");
         assert!(err.contains("no port mapping service"), "{err}");
     }
 
@@ -584,10 +629,19 @@ mod io_tests {
             control_url: url,
             service_type: "urn:schemas-upnp-org:service:WANIPConnection:1".into(),
         };
-        rt().block_on(add_mapping(&g, "192.168.99.50", 16171, 16171, "TCP", Duration::from_secs(3600)))
-            .expect("the router accepted");
+        rt().block_on(add_mapping(
+            &g,
+            "192.168.99.50",
+            16171,
+            16171,
+            "TCP",
+            Duration::from_secs(3600),
+        ))
+        .expect("the router accepted");
 
-        let req = rx.recv_timeout(std::time::Duration::from_secs(5)).expect("a request arrived");
+        let req = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("a request arrived");
         assert!(req.starts_with("POST "), "{req}");
         // Lowercased, because the `http` crate normalises header names and
         // HTTP/1.1 says they are case-insensitive. Asserted as it actually
@@ -601,7 +655,10 @@ mod io_tests {
             "the action header is what a router dispatches on: {req}"
         );
         assert!(req.contains("<u:AddPortMapping"), "{req}");
-        assert!(req.contains("<NewInternalPort>16171</NewInternalPort>"), "{req}");
+        assert!(
+            req.contains("<NewInternalPort>16171</NewInternalPort>"),
+            "{req}"
+        );
     }
 
     /// A refusal arrives as HTTP 500 with the reason in the body. Reporting the
@@ -615,10 +672,20 @@ mod io_tests {
             service_type: "urn:schemas-upnp-org:service:WANIPConnection:1".into(),
         };
         let err = rt()
-            .block_on(add_mapping(&g, "192.168.99.50", 16171, 16171, "TCP", Duration::from_secs(3600)))
+            .block_on(add_mapping(
+                &g,
+                "192.168.99.50",
+                16171,
+                16171,
+                "TCP",
+                Duration::from_secs(3600),
+            ))
             .expect_err("718 is a refusal");
         assert!(err.contains("already mapped"), "{err}");
-        assert!(err.contains("718"), "the number is there for searching: {err}");
+        assert!(
+            err.contains("718"),
+            "the number is there for searching: {err}"
+        );
     }
 
     /// The whole discovery path, end to end: a search goes out, an answer comes
@@ -651,13 +718,21 @@ mod io_tests {
             let _ = ssdp.send_to(reply.as_bytes(), from);
         });
 
-        let g = rt().block_on(discover_at(ssdp_addr)).expect("a gateway answered");
-        assert_eq!(g.service_type, "urn:schemas-upnp-org:service:WANIPConnection:1");
+        let g = rt()
+            .block_on(discover_at(ssdp_addr))
+            .expect("a gateway answered");
+        assert_eq!(
+            g.service_type,
+            "urn:schemas-upnp-org:service:WANIPConnection:1"
+        );
         assert!(g.control_url.ends_with("/ctl/IPConn"));
     }
 
     /// A router on `ip` that serves `body` to every request and counts them.
-    fn counting_router(ip: &str, body: &'static str) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    fn counting_router(
+        ip: &str,
+        body: &'static str,
+    ) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
         let listener = TcpListener::bind(format!("{ip}:0")).expect("bind");
         let port = listener.local_addr().unwrap().port();
         let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -667,9 +742,13 @@ mod io_tests {
                 let Ok(mut sock) = sock else { return };
                 h.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let mut buf = [0u8; 4096];
-                sock.set_read_timeout(Some(std::time::Duration::from_millis(200))).ok();
+                sock.set_read_timeout(Some(std::time::Duration::from_millis(200)))
+                    .ok();
                 let _ = sock.read(&mut buf);
-                let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
                 let _ = sock.write_all(head.as_bytes());
                 let _ = sock.write_all(body.as_bytes());
             }
@@ -686,13 +765,23 @@ mod io_tests {
         let ssdp_addr = ssdp.local_addr().unwrap();
         std::thread::spawn(move || {
             let mut buf = [0u8; 2048];
-            let Ok((_, from)) = ssdp.recv_from(&mut buf) else { return };
+            let Ok((_, from)) = ssdp.recv_from(&mut buf) else {
+                return;
+            };
             let reply = format!("HTTP/1.1 200 OK\r\nLOCATION: {desc_url}\r\n\r\n");
             let _ = ssdp.send_to(reply.as_bytes(), from);
         });
         let out = rt().block_on(discover_at(ssdp_addr));
-        assert!(out.is_err(), "no gateway from another host: {:?}", out.map(|g| g.control_url));
-        assert_eq!(hits.load(std::sync::atomic::Ordering::Relaxed), 0, "the other host was never asked");
+        assert!(
+            out.is_err(),
+            "no gateway from another host: {:?}",
+            out.map(|g| g.control_url)
+        );
+        assert_eq!(
+            hits.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "the other host was never asked"
+        );
     }
 
     /// ⭐ A description whose control URL names another host yields no
@@ -717,7 +806,9 @@ mod io_tests {
         drop(quiet); // nothing is listening there now
 
         let started = std::time::Instant::now();
-        let err = rt().block_on(discover_at(addr)).expect_err("nobody answered");
+        let err = rt()
+            .block_on(discover_at(addr))
+            .expect_err("nobody answered");
         assert!(err.contains("no router"), "{err}");
         assert!(
             started.elapsed() < DISCOVERY_WINDOW + Duration::from_secs(2),
@@ -731,11 +822,25 @@ mod io_tests {
     /// unless the parent handed it a router.
     #[test]
     fn proxy_probe_child() {
-        let Ok(url) = std::env::var("IGD_PROBE_URL") else { return };
-        let g = rt().block_on(describe(&url)).expect("the router described itself");
-        let gw = Gateway { control_url: url, service_type: g.service_type };
-        rt().block_on(add_mapping(&gw, "192.168.99.5", 6881, 6881, "TCP", Duration::from_secs(60)))
-            .expect("the router mapped the port");
+        let Ok(url) = std::env::var("IGD_PROBE_URL") else {
+            return;
+        };
+        let g = rt()
+            .block_on(describe(&url))
+            .expect("the router described itself");
+        let gw = Gateway {
+            control_url: url,
+            service_type: g.service_type,
+        };
+        rt().block_on(add_mapping(
+            &gw,
+            "192.168.99.5",
+            6881,
+            6881,
+            "TCP",
+            Duration::from_secs(60),
+        ))
+        .expect("the router mapped the port");
     }
 
     /// ⭐ The router is on the LAN: a proxy in the environment never sees the
@@ -756,9 +861,18 @@ mod io_tests {
             .env_remove("no_proxy")
             .output()
             .expect("run the probe");
-        let log = String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
-        assert_eq!(proxy_hits.load(std::sync::atomic::Ordering::Relaxed), 0, "the proxy was asked: {log}");
+        let log = String::from_utf8_lossy(&out.stdout).into_owned()
+            + &String::from_utf8_lossy(&out.stderr);
+        assert_eq!(
+            proxy_hits.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "the proxy was asked: {log}"
+        );
         assert!(out.status.success(), "the probe failed: {log}");
-        assert_eq!(router_hits.load(std::sync::atomic::Ordering::Relaxed), 2, "describe and the mapping");
+        assert_eq!(
+            router_hits.load(std::sync::atomic::Ordering::Relaxed),
+            2,
+            "describe and the mapping"
+        );
     }
 }

@@ -221,7 +221,11 @@ const POLICY_PREFIX: &str = "volume_policy:";
 /// into the panel has to apply on the NEXT tick, and a TOML value only applies
 /// after a restart. The whole race panel used to carry an "Apply & restart"
 /// button for this reason.
-pub fn policy_for(state: &crate::api::AppState, mount: &str, cfg: &crate::config::RaceDrain) -> Policy {
+pub fn policy_for(
+    state: &crate::api::AppState,
+    mount: &str,
+    cfg: &crate::config::RaceDrain,
+) -> Policy {
     let mut p = Policy::global(cfg);
     let key = format!("{POLICY_PREFIX}{mount}");
     let raw = {
@@ -286,8 +290,15 @@ pub fn quota_for(state: &crate::api::AppState, mount: &str) -> Option<u64> {
 }
 
 /// Declare, or with `None` drop, a volume's capacity.
-pub fn save_quota(state: &crate::api::AppState, mount: &str, bytes: Option<u64>) -> anyhow::Result<()> {
-    let doc = bytes.filter(|q| *q > 0).map(|q| q.to_string()).unwrap_or_default();
+pub fn save_quota(
+    state: &crate::api::AppState,
+    mount: &str,
+    bytes: Option<u64>,
+) -> anyhow::Result<()> {
+    let doc = bytes
+        .filter(|q| *q > 0)
+        .map(|q| q.to_string())
+        .unwrap_or_default();
     let store = match state.store.lock() {
         Ok(s) => s,
         Err(e) => e.into_inner(),
@@ -507,7 +518,9 @@ pub fn discover(
         let Some(dev) = device_of_nearest(&path) else {
             continue;
         };
-        let entry = by_dev.entry(dev).or_insert_with(|| (path.clone(), Tally::default()));
+        let entry = by_dev
+            .entry(dev)
+            .or_insert_with(|| (path.clone(), Tally::default()));
         entry.1.add(&t);
     }
     let mut out: Vec<Volume> = Vec::new();
@@ -582,7 +595,16 @@ fn build(
     let id = mount.to_string_lossy().to_string();
     let policy = policy_for(state, &id, cfg);
     let quota = quota_for(state, &id);
-    Some(Volume::measure(id, dev, disk, quota, tally.data, tally.committed, tally.torrents, policy))
+    Some(Volume::measure(
+        id,
+        dev,
+        disk,
+        quota,
+        tally.data,
+        tally.committed,
+        tally.torrents,
+        policy,
+    ))
 }
 
 #[cfg(test)]
@@ -597,10 +619,24 @@ mod tests {
         d
     }
 
-    const POLICY: Policy = Policy { enabled: true, high: 90, low: 80, inherited: true };
+    const POLICY: Policy = Policy {
+        enabled: true,
+        high: 90,
+        low: 80,
+        inherited: true,
+    };
 
     fn vol(total: u64, used: u64) -> Volume {
-        Volume::measure("/mnt".into(), 1, (used, total, total.saturating_sub(used)), None, 0, 0, 0, POLICY)
+        Volume::measure(
+            "/mnt".into(),
+            1,
+            (used, total, total.saturating_sub(used)),
+            None,
+            0,
+            0,
+            0,
+            POLICY,
+        )
     }
 
     /// A slot on a shared disk: `disk_used` of `disk_total` taken by everyone,
@@ -659,7 +695,10 @@ mod tests {
         let v = slot(40_000, 10_000, 2_000, 1_500, 400);
         assert_eq!(v.used_pct(), 75.0);
         assert_eq!(v.alloc_pct(), 95.0);
-        assert_eq!(v.free, 500, "free is the quota minus WRITTEN data; admission subtracts committed");
+        assert_eq!(
+            v.free, 500,
+            "free is the quota minus WRITTEN data; admission subtracts committed"
+        );
     }
 
     /// The disk under the quota is still a hard limit: a quota does not make
@@ -690,7 +729,10 @@ mod tests {
 
     #[test]
     fn the_basis_names_what_the_percentage_is_of() {
-        assert_eq!(slot(40_000, 0, 2_000_000_000_000, 0, 0).basis(), "of 2.0 TB quota");
+        assert_eq!(
+            slot(40_000, 0, 2_000_000_000_000, 0, 0).basis(),
+            "of 2.0 TB quota"
+        );
         assert_eq!(vol(100, 1).basis(), "of disk");
     }
 
@@ -699,7 +741,11 @@ mod tests {
     fn after_a_drain_without_a_quota_the_disk_is_read_again() {
         let v = vol(1000, 900);
         assert_eq!(v.after_drain(Some((700, 1000))), (200, 70.0));
-        assert_eq!(v.after_drain(None), (0, 90.0), "unreadable: nothing claimed freed");
+        assert_eq!(
+            v.after_drain(None),
+            (0, 90.0),
+            "unreadable: nothing claimed freed"
+        );
     }
 
     /// Under a quota, freed is still the disk delta (only statvfs knows what a
@@ -720,7 +766,11 @@ mod tests {
     fn merging_engines_adds_data_only_under_a_quota() {
         let mut a = vol(1000, 600);
         a.merge_engine(&vol(1000, 600));
-        assert_eq!((a.used, a.total, a.free), (600, 1000, 400), "the disk is not counted twice");
+        assert_eq!(
+            (a.used, a.total, a.free),
+            (600, 1000, 400),
+            "the disk is not counted twice"
+        );
 
         let mut q = slot(40_000, 10_000, 2_000, 800, 100);
         q.merge_engine(&slot(40_000, 10_000, 2_000, 700, 50));
@@ -766,7 +816,11 @@ mod tests {
         let mut v = vol(1000, 600);
         v.committed = 350;
         assert_eq!(v.used_pct(), 60.0, "occupancy is what statvfs says");
-        assert_eq!(v.alloc_pct(), 95.0, "allocation is occupancy plus what is promised");
+        assert_eq!(
+            v.alloc_pct(),
+            95.0,
+            "allocation is occupancy plus what is promised"
+        );
     }
 
     /// Promising more than the disk holds is exactly the case worth reacting
@@ -798,7 +852,10 @@ mod tests {
     #[test]
     fn the_global_policy_is_marked_inherited() {
         let p = Policy::global(&drain(true, 91, 77));
-        assert!(p.inherited, "a policy built from the global default is inherited");
+        assert!(
+            p.inherited,
+            "a policy built from the global default is inherited"
+        );
         assert!(p.enabled);
         assert_eq!(p.high, 91);
         assert_eq!(p.low, 77);

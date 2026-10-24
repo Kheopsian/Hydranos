@@ -38,13 +38,20 @@ pub fn register_pieces(engine: &str, mem: Arc<PieceMem>) {
 /// block bytes they hold. Empty when no engine is registered.
 #[cfg_attr(not(unix), allow(dead_code))]
 fn pieces_summary() -> String {
-    let Ok(v) = PIECES.lock() else { return String::new() };
+    let Ok(v) = PIECES.lock() else {
+        return String::new();
+    };
     if v.is_empty() {
         return String::new();
     }
     let mut out = String::from(" pieces");
     for (id, m) in v.iter() {
-        out.push_str(&format!(" {}={}/{:.0}MiB", id, m.pieces(), m.bytes() as f64 / (1024.0 * 1024.0)));
+        out.push_str(&format!(
+            " {}={}/{:.0}MiB",
+            id,
+            m.pieces(),
+            m.bytes() as f64 / (1024.0 * 1024.0)
+        ));
     }
     out
 }
@@ -68,7 +75,10 @@ pub fn memory() -> Option<(u64, u64)> {
     {
         use tikv_jemalloc_ctl::{epoch, stats};
         epoch::advance().ok()?;
-        Some((stats::allocated::read().ok()? as u64, stats::resident::read().ok()? as u64))
+        Some((
+            stats::allocated::read().ok()? as u64,
+            stats::resident::read().ok()? as u64,
+        ))
     }
     #[cfg(not(unix))]
     {
@@ -111,8 +121,8 @@ fn spawn_dump() {
 #[cfg(unix)]
 fn spawn_decay() {
     tokio::spawn(async {
-        use tokio::signal::unix::{signal, SignalKind};
         use tikv_jemalloc_ctl::{epoch, stats};
+        use tokio::signal::unix::{signal, SignalKind};
         let mb = |v: usize| v as f64 / (1024.0 * 1024.0);
         let snapshot = || {
             let _ = epoch::advance();

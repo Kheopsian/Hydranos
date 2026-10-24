@@ -7,8 +7,8 @@ use std::sync::Mutex;
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
-use crate::peer::transport::PeerTransport;
 use super::rc4::Rc4;
+use crate::peer::transport::PeerTransport;
 
 /// A peer transport (TCP or uTP) wrapped with optional RC4 encryption/decryption.
 ///
@@ -48,7 +48,12 @@ impl CryptoStream {
 
     /// Plaintext wrapper (no encryption).
     pub fn plain(stream: PeerTransport) -> Self {
-        Self { inner: stream, encrypt: None, decrypt: None, pending_write: Vec::new() }
+        Self {
+            inner: stream,
+            encrypt: None,
+            decrypt: None,
+            pending_write: Vec::new(),
+        }
     }
 
     /// Raw TCP socket ref for the zero-copy `sendfile` serve fast-path.

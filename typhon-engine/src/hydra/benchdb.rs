@@ -155,9 +155,30 @@ pub const BENCH_COLUMNS: &str = "ts, race_upload_rate, race_download_rate, race_
 /// field. `CREATE TABLE IF NOT EXISTS` does not touch a table that is there,
 /// so an existing bench.db would lack them and every insert naming them would
 /// fail -- the sampler would stop recording anything at all.
-const ADDED_COLUMNS: &[&str] = &["race_announce_needed", "race_announce_late", "race_announce_lag_p50", "race_announce_lag_p90", "race_announce_concurrency", "race_announce_latency_ms", "race_announce_throttled_pct", "race_announce_in_flight", "hoard_announce_needed", "hoard_announce_late", "hoard_announce_lag_p50", "hoard_announce_lag_p90", "hoard_announce_concurrency", "hoard_announce_latency_ms", "hoard_announce_throttled_pct", "hoard_announce_in_flight",
+const ADDED_COLUMNS: &[&str] = &[
+    "race_announce_needed",
+    "race_announce_late",
+    "race_announce_lag_p50",
+    "race_announce_lag_p90",
+    "race_announce_concurrency",
+    "race_announce_latency_ms",
+    "race_announce_throttled_pct",
+    "race_announce_in_flight",
+    "hoard_announce_needed",
+    "hoard_announce_late",
+    "hoard_announce_lag_p50",
+    "hoard_announce_lag_p90",
+    "hoard_announce_concurrency",
+    "hoard_announce_latency_ms",
+    "hoard_announce_throttled_pct",
+    "hoard_announce_in_flight",
     // 4.4: the engines beyond race and hoard, summed, and hoard's download.
-    "hoard_download_rate", "extra_upload_rate", "extra_download_rate", "extra_peers", "extra_uploading"];
+    "hoard_download_rate",
+    "extra_upload_rate",
+    "extra_download_rate",
+    "extra_peers",
+    "extra_uploading",
+];
 
 fn add_missing_columns(conn: &Connection) -> anyhow::Result<()> {
     let have: std::collections::HashSet<String> = {
@@ -167,7 +188,9 @@ fn add_missing_columns(conn: &Connection) -> anyhow::Result<()> {
     };
     for c in ADDED_COLUMNS {
         if !have.contains(*c) {
-            conn.execute_batch(&format!("ALTER TABLE bench_samples ADD COLUMN {c} REAL DEFAULT 0"))?;
+            conn.execute_batch(&format!(
+                "ALTER TABLE bench_samples ADD COLUMN {c} REAL DEFAULT 0"
+            ))?;
         }
     }
     Ok(())
@@ -315,7 +338,10 @@ struct Seen {
 
 impl RaceRecorder {
     pub fn new(started_at: f64) -> Self {
-        Self { seen: std::collections::HashMap::new(), started_at }
+        Self {
+            seen: std::collections::HashMap::new(),
+            started_at,
+        }
     }
 
     /// One sighting. Returns every moment this tick crossed.
@@ -336,7 +362,10 @@ impl RaceRecorder {
         let complete = progress >= 1.0;
         let mut out = Vec::new();
         let previous = self.seen.get(info_hash).copied();
-        let mut state = previous.unwrap_or(Seen { progress, ..Default::default() });
+        let mut state = previous.unwrap_or(Seen {
+            progress,
+            ..Default::default()
+        });
 
         match previous {
             None => {
@@ -348,7 +377,11 @@ impl RaceRecorder {
             }
             Some(prev) => {
                 if complete && prev.progress < 1.0 {
-                    let download_time = if added_time > 0.0 { now - added_time } else { 0.0 };
+                    let download_time = if added_time > 0.0 {
+                        now - added_time
+                    } else {
+                        0.0
+                    };
                     out.push(("completed".to_string(), now, download_time));
                 }
             }
@@ -555,8 +588,7 @@ impl BenchDb {
     /// same order as the schema.
     pub fn record_sample(&self, sample: &serde_json::Value) -> anyhow::Result<()> {
         let cols: Vec<&str> = BENCH_COLUMNS.split(',').map(|c| c.trim()).collect();
-        let placeholders: Vec<String> =
-            (1..=cols.len()).map(|i| format!("?{i}")).collect();
+        let placeholders: Vec<String> = (1..=cols.len()).map(|i| format!("?{i}")).collect();
         let sql = format!(
             "INSERT INTO bench_samples ({}) VALUES ({})",
             cols.join(", "),
@@ -575,12 +607,20 @@ impl BenchDb {
     /// Average, maximum and 95th percentile of each of `cols` over the
     /// samples between two instants, and how many samples there were. One
     /// pass over the window: the comparison of two periods reads each row once.
-    pub fn period_stats(&self, start: f64, end: f64, cols: &[&str]) -> anyhow::Result<(usize, Vec<PeriodStat>)> {
+    pub fn period_stats(
+        &self,
+        start: f64,
+        end: f64,
+        cols: &[&str],
+    ) -> anyhow::Result<(usize, Vec<PeriodStat>)> {
         let known: Vec<&str> = BENCH_COLUMNS.split(',').map(|c| c.trim()).collect();
         if let Some(c) = cols.iter().find(|c| !known.contains(c)) {
             anyhow::bail!("not a bench column: {c}");
         }
-        let sql = format!("SELECT {} FROM bench_samples WHERE ts >= ?1 AND ts < ?2", cols.join(", "));
+        let sql = format!(
+            "SELECT {} FROM bench_samples WHERE ts >= ?1 AND ts < ?2",
+            cols.join(", ")
+        );
         let mut stmt = self.conn.prepare(&sql)?;
         let mut values: Vec<Vec<f64>> = vec![Vec::new(); cols.len()];
         let mut rows = stmt.query(rusqlite::params![start, end])?;
@@ -619,7 +659,10 @@ impl BenchDb {
     }
 
     /// Line tests since `since` (unix seconds), oldest first.
-    pub fn speedtests_since(&self, since: f64) -> anyhow::Result<Vec<crate::speedtest::Measurement>> {
+    pub fn speedtests_since(
+        &self,
+        since: f64,
+    ) -> anyhow::Result<Vec<crate::speedtest::Measurement>> {
         let mut stmt = self.conn.prepare(
             "SELECT ts, ul_mbps, dl_mbps, ul_torrent_mbps, dl_torrent_mbps FROM vpn_speedtest WHERE ts >= ?1 ORDER BY ts",
         )?;
@@ -691,7 +734,15 @@ impl BenchDb {
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             )?;
             for r in rows {
-                stmt.execute(rusqlite::params![ts, r.engine, r.upload_rate, r.download_rate, r.peers, r.uploading, r.torrents])?;
+                stmt.execute(rusqlite::params![
+                    ts,
+                    r.engine,
+                    r.upload_rate,
+                    r.download_rate,
+                    r.peers,
+                    r.uploading,
+                    r.torrents
+                ])?;
             }
         }
         tx.commit()?;
@@ -723,7 +774,8 @@ impl BenchDb {
                 }),
             ))
         })?;
-        let mut out: std::collections::BTreeMap<String, Vec<serde_json::Value>> = Default::default();
+        let mut out: std::collections::BTreeMap<String, Vec<serde_json::Value>> =
+            Default::default();
         for (engine, row) in rows.filter_map(|r| r.ok()) {
             out.entry(engine).or_default().push(row);
         }
@@ -749,9 +801,16 @@ impl BenchDb {
             )?;
             for r in rows {
                 stmt.execute(rusqlite::params![
-                    ts, r.engine, r.tracker, r.upload_rate as f64, r.download_rate as f64,
-                    r.peers as f64, r.active as f64, r.torrents as f64,
-                    r.cum_uploaded, r.cum_downloaded,
+                    ts,
+                    r.engine,
+                    r.tracker,
+                    r.upload_rate as f64,
+                    r.download_rate as f64,
+                    r.peers as f64,
+                    r.active as f64,
+                    r.torrents as f64,
+                    r.cum_uploaded,
+                    r.cum_downloaded,
                 ])?;
             }
         }
@@ -772,8 +831,8 @@ impl BenchDb {
     /// meets two months of 5 s samples (14M rows on the production node), and
     /// this runs with the writer's mutex held.
     pub fn compact_tracker_samples(&self, now: f64) -> anyhow::Result<bool> {
-        let cutoff = ((now - TRACKER_RAW_KEEP_SECS) / TRACKER_BUCKET_SECS).floor()
-            * TRACKER_BUCKET_SECS;
+        let cutoff =
+            ((now - TRACKER_RAW_KEEP_SECS) / TRACKER_BUCKET_SECS).floor() * TRACKER_BUCKET_SECS;
         let mark: Option<f64> = self
             .conn
             .query_row(
@@ -785,9 +844,9 @@ impl BenchDb {
         let from = match mark {
             Some(m) => m,
             None => {
-                let oldest: Option<f64> = self
-                    .conn
-                    .query_row("SELECT MIN(ts) FROM tracker_samples", [], |r| r.get(0))?;
+                let oldest: Option<f64> =
+                    self.conn
+                        .query_row("SELECT MIN(ts) FROM tracker_samples", [], |r| r.get(0))?;
                 match oldest {
                     Some(t) => (t / TRACKER_BUCKET_SECS).floor() * TRACKER_BUCKET_SECS,
                     None => cutoff,
@@ -803,8 +862,11 @@ impl BenchDb {
         let to = (from + TRACKER_COMPACT_SLICE_SECS).min(cutoff);
 
         let tx = self.conn.unchecked_transaction()?;
-        let last_raw: i64 =
-            tx.query_row("SELECT IFNULL(MAX(rowid), 0) FROM tracker_samples", [], |r| r.get(0))?;
+        let last_raw: i64 = tx.query_row(
+            "SELECT IFNULL(MAX(rowid), 0) FROM tracker_samples",
+            [],
+            |r| r.get(0),
+        )?;
         tx.execute(
             "INSERT INTO tracker_samples
                  (ts, engine, tracker, upload_rate, download_rate, peers, active,
@@ -863,9 +925,10 @@ impl BenchDb {
         bucket: f64,
     ) -> anyhow::Result<Vec<serde_json::Value>> {
         let mut stmt = self.conn.prepare(TRACKER_RANGE_SQL)?;
-        let rows = stmt.query_map(rusqlite::params![tracker, start, end, bucket.max(1.0)], |row| {
-            Ok(tracker_row_json(row))
-        })?;
+        let rows = stmt.query_map(
+            rusqlite::params![tracker, start, end, bucket.max(1.0)],
+            |row| Ok(tracker_row_json(row)),
+        )?;
         Ok(rows.filter_map(|r| r.ok()).collect())
     }
 
@@ -921,7 +984,9 @@ impl BenchDb {
                  ORDER BY v DESC LIMIT 1"
             );
             self.conn
-                .query_row(&sql, [], |r| Ok((r.get(0).unwrap_or(0.0), r.get(1).unwrap_or(0.0))))
+                .query_row(&sql, [], |r| {
+                    Ok((r.get(0).unwrap_or(0.0), r.get(1).unwrap_or(0.0)))
+                })
                 .ok()
         };
         // A rate record is held over a minute, not read off one sample. The
@@ -938,7 +1003,9 @@ impl BenchDb {
                  HAVING COUNT(*) >= {RATE_WINDOW_MIN_SAMPLES} ORDER BY v DESC LIMIT 1"
             );
             self.conn
-                .query_row(&sql, [], |r| Ok((r.get(0).unwrap_or(0.0), r.get(1).unwrap_or(0.0))))
+                .query_row(&sql, [], |r| {
+                    Ok((r.get(0).unwrap_or(0.0), r.get(1).unwrap_or(0.0)))
+                })
                 .ok()
         };
         let rec = |label: &str, value: f64, unit: &str, ts: f64, hi: bool| {
@@ -952,10 +1019,13 @@ impl BenchDb {
         };
 
         let mut records = Vec::new();
-        if let Some((ts, v)) = sustained("race_upload_rate + hoard_upload_rate + extra_upload_rate") {
+        if let Some((ts, v)) = sustained("race_upload_rate + hoard_upload_rate + extra_upload_rate")
+        {
             records.push(rec("Peak upload", v * 8.0 / 1e9, "Gbps", ts, true));
         }
-        if let Some((ts, v)) = sustained("race_download_rate + hoard_download_rate + extra_download_rate") {
+        if let Some((ts, v)) =
+            sustained("race_download_rate + hoard_download_rate + extra_download_rate")
+        {
             records.push(rec("Peak download", v * 8.0 / 1e9, "Gbps", ts, false));
         }
         if let Some((ts, v)) = peak("race_peers + hoard_peers + extra_peers") {
@@ -966,7 +1036,12 @@ impl BenchDb {
                FROM bench_samples WHERE ts>=?1 \
               GROUP BY CAST(ts/86400 AS INT) ORDER BY delta DESC LIMIT 1",
             rusqlite::params![t_clean],
-            |r| Ok((r.get::<_, f64>(0).unwrap_or(0.0), r.get::<_, f64>(1).unwrap_or(0.0))),
+            |r| {
+                Ok((
+                    r.get::<_, f64>(0).unwrap_or(0.0),
+                    r.get::<_, f64>(1).unwrap_or(0.0),
+                ))
+            },
         ) {
             records.push(rec("Best upload day", delta / TIB, "TiB", ts, true));
         }
@@ -976,7 +1051,12 @@ impl BenchDb {
         if let Ok((ts, ul)) = self.conn.query_row(
             "SELECT ts, ul_mbps FROM vpn_speedtest ORDER BY ul_mbps DESC LIMIT 1",
             [],
-            |r| Ok((r.get::<_, f64>(0).unwrap_or(0.0), r.get::<_, f64>(1).unwrap_or(0.0))),
+            |r| {
+                Ok((
+                    r.get::<_, f64>(0).unwrap_or(0.0),
+                    r.get::<_, f64>(1).unwrap_or(0.0),
+                ))
+            },
         ) {
             records.push(rec("Best line test", ul / 1000.0, "Gbps", ts, false));
         }
@@ -986,7 +1066,9 @@ impl BenchDb {
         // card credits it to the previous client rather than to Hydra.
         let g_max: f64 = self
             .conn
-            .query_row("SELECT MAX(global_uploaded) FROM bench_samples", [], |r| r.get(0))
+            .query_row("SELECT MAX(global_uploaded) FROM bench_samples", [], |r| {
+                r.get(0)
+            })
             .unwrap_or(0.0);
         let g_min_clean: f64 = self
             .conn
@@ -1055,10 +1137,8 @@ impl BenchDb {
                 let rate = (w1 - w0) / (wt1 - wt0);
                 if rate > 0.0 {
                     let togo = (next_pib as f64) * PIB - g_max;
-                    out["rate_tib_day"] =
-                        crate::row::num_json(round2(rate * 86400.0 / TIB));
-                    out["next_eta_days"] =
-                        crate::row::num_json(round2(togo / rate / 86400.0));
+                    out["rate_tib_day"] = crate::row::num_json(round2(rate * 86400.0 / TIB));
+                    out["next_eta_days"] = crate::row::num_json(round2(togo / rate / 86400.0));
                     out["next_eta_date"] = iso_date(now + togo / rate).into();
                 }
             }
@@ -1177,8 +1257,10 @@ impl BenchDb {
     pub fn purge(&self, info_hash: &str) -> anyhow::Result<()> {
         self.conn
             .execute("DELETE FROM race_events WHERE info_hash = ?1", [info_hash])?;
-        self.conn
-            .execute("DELETE FROM race_snapshots WHERE info_hash = ?1", [info_hash])?;
+        self.conn.execute(
+            "DELETE FROM race_snapshots WHERE info_hash = ?1",
+            [info_hash],
+        )?;
         Ok(())
     }
 }
@@ -1194,17 +1276,50 @@ mod tests {
     #[test]
     fn period_stats_summarise_each_side_of_the_split() {
         let db = BenchDb::open_in_memory().unwrap();
-        for (ts, up) in [(100.0, 10.0), (105.0, 30.0), (110.0, 20.0), (200.0, 50.0), (205.0, 70.0)] {
-            db.record_sample(&serde_json::json!({"ts": ts, "race_upload_rate": up})).unwrap();
+        for (ts, up) in [
+            (100.0, 10.0),
+            (105.0, 30.0),
+            (110.0, 20.0),
+            (200.0, 50.0),
+            (205.0, 70.0),
+        ] {
+            db.record_sample(&serde_json::json!({"ts": ts, "race_upload_rate": up}))
+                .unwrap();
         }
-        let (n1, s1) = db.period_stats(100.0, 200.0, &["race_upload_rate"]).unwrap();
-        let (n2, s2) = db.period_stats(200.0, 300.0, &["race_upload_rate"]).unwrap();
+        let (n1, s1) = db
+            .period_stats(100.0, 200.0, &["race_upload_rate"])
+            .unwrap();
+        let (n2, s2) = db
+            .period_stats(200.0, 300.0, &["race_upload_rate"])
+            .unwrap();
         assert_eq!((n1, n2), (3, 2), "the sample at mid belongs to P2 only");
-        assert_eq!(s1[0], PeriodStat { avg: 20.0, max: 30.0, p95: 30.0 });
-        assert_eq!(s2[0], PeriodStat { avg: 60.0, max: 70.0, p95: 70.0 });
+        assert_eq!(
+            s1[0],
+            PeriodStat {
+                avg: 20.0,
+                max: 30.0,
+                p95: 30.0
+            }
+        );
+        assert_eq!(
+            s2[0],
+            PeriodStat {
+                avg: 60.0,
+                max: 70.0,
+                p95: 70.0
+            }
+        );
         let (n0, s0) = db.period_stats(0.0, 50.0, &["race_upload_rate"]).unwrap();
-        assert_eq!((n0, s0[0]), (0, PeriodStat::default()), "an empty period is zeros, not an error");
-        assert!(db.period_stats(0.0, 1.0, &["ts; DROP TABLE bench_samples"]).is_err(), "only known columns");
+        assert_eq!(
+            (n0, s0[0]),
+            (0, PeriodStat::default()),
+            "an empty period is zeros, not an error"
+        );
+        assert!(
+            db.period_stats(0.0, 1.0, &["ts; DROP TABLE bench_samples"])
+                .is_err(),
+            "only known columns"
+        );
     }
 
     /// Line tests are kept, the newest is the latest, the window filters.
@@ -1212,7 +1327,13 @@ mod tests {
     fn speedtests_round_trip() {
         let db = BenchDb::open_in_memory().unwrap();
         assert!(db.latest_speedtest().is_none());
-        let m = |ts: i64, ul: f64| crate::speedtest::Measurement { ts, ul_mbps: ul, dl_mbps: 2.0 * ul, ul_torrent_mbps: 1.0, dl_torrent_mbps: 0.5 };
+        let m = |ts: i64, ul: f64| crate::speedtest::Measurement {
+            ts,
+            ul_mbps: ul,
+            dl_mbps: 2.0 * ul,
+            ul_torrent_mbps: 1.0,
+            dl_torrent_mbps: 0.5,
+        };
         db.record_speedtest(&m(1000, 100.0)).unwrap();
         db.record_speedtest(&m(2000, 300.0)).unwrap();
         assert_eq!(db.latest_speedtest(), Some(m(2000, 300.0)));
@@ -1225,7 +1346,13 @@ mod tests {
     #[test]
     fn extra_engines_are_recorded_and_counted_in_the_records() {
         let db = BenchDb::open_in_memory().unwrap();
-        let row = |e: &str, up: f64| EngineSample { engine: e.into(), upload_rate: up, peers: 3.0, torrents: 1.0, ..Default::default() };
+        let row = |e: &str, up: f64| EngineSample {
+            engine: e.into(),
+            upload_rate: up,
+            peers: 3.0,
+            torrents: 1.0,
+            ..Default::default()
+        };
         for i in 0..12 {
             let ts = 1_000.0 + i as f64 * 5.0;
             db.record_sample(&serde_json::json!({
@@ -1233,7 +1360,8 @@ mod tests {
                 "extra_upload_rate": 1_000.0, "extra_peers": 6.0,
             }))
             .unwrap();
-            db.record_engine_samples(ts, &[row("vpn1", 600.0), row("vpn2", 400.0)]).unwrap();
+            db.record_engine_samples(ts, &[row("vpn1", 600.0), row("vpn2", 400.0)])
+                .unwrap();
         }
         let by_engine = db.engine_samples_in_range(0.0, 5_000.0, 60.0).unwrap();
         assert_eq!(by_engine.keys().collect::<Vec<_>>(), ["vpn1", "vpn2"]);
@@ -1250,7 +1378,13 @@ mod tests {
             .unwrap();
         // (10 + 10 + 1000) B/s in Gbps, rounded to two places by the payload.
         assert!((peak - (1020.0 * 8.0 / 1e9)).abs() < 0.01, "{peak}");
-        let peers = rec["records"].as_array().unwrap().iter().find(|r| r["label"] == "Peak swarm peers").unwrap()["value"].clone();
+        let peers = rec["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["label"] == "Peak swarm peers")
+            .unwrap()["value"]
+            .clone();
         assert_eq!(peers, 6.0, "race_peers + hoard_peers + extra_peers");
     }
 
@@ -1264,7 +1398,11 @@ mod tests {
         for minute in [960.0, 1_980.0] {
             for i in 0..12 {
                 let ts = minute + i as f64 * 5.0;
-                let up = if minute == 1_980.0 && i == 3 { 579.0 * GBPS } else { GBPS };
+                let up = if minute == 1_980.0 && i == 3 {
+                    579.0 * GBPS
+                } else {
+                    GBPS
+                };
                 db.record_sample(&serde_json::json!({
                     "ts": ts, "race_upload_rate": up, "hoard_upload_rate": 0.0, "extra_upload_rate": 0.0,
                 }))
@@ -1283,11 +1421,21 @@ mod tests {
         assert_eq!(cleared, 1);
 
         let rec = db.records_payload().expect("the records read a NULL rate");
-        let peak = rec["records"].as_array().unwrap().iter().find(|r| r["label"] == "Peak upload").unwrap()["value"]
+        let peak = rec["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["label"] == "Peak upload")
+            .unwrap()["value"]
             .as_f64()
             .unwrap();
-        assert!((peak - 1.0).abs() < 0.01, "the cleared sample is out of its minute's average: {peak}");
-        let back = db.samples_in_range(0.0, 3_000.0).expect("the samples read a NULL rate");
+        assert!(
+            (peak - 1.0).abs() < 0.01,
+            "the cleared sample is out of its minute's average: {peak}"
+        );
+        let back = db
+            .samples_in_range(0.0, 3_000.0)
+            .expect("the samples read a NULL rate");
         assert_eq!(back.len(), 24, "the cleared row is still a sample");
     }
 
@@ -1311,8 +1459,15 @@ mod tests {
                 .unwrap()
         };
         let peak_upload = |db: &BenchDb| -> Option<f64> {
-            let rec = db.records_payload().expect("the records read a cleared window");
-            rec["records"].as_array().unwrap().iter().find(|r| r["label"] == "Peak upload").map(|r| r["value"].as_f64().unwrap())
+            let rec = db
+                .records_payload()
+                .expect("the records read a cleared window");
+            rec["records"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|r| r["label"] == "Peak upload")
+                .map(|r| r["value"].as_f64().unwrap())
         };
 
         // A sound minute next to one cleared from end to end.
@@ -1329,7 +1484,11 @@ mod tests {
         fill(&cleared, 960.0, 500.0 * GBPS);
         fill(&cleared, 1_980.0, 300.0 * GBPS);
         assert_eq!(clear(&cleared), 24);
-        assert_eq!(peak_upload(&cleared), None, "no sound minute, no upload record");
+        assert_eq!(
+            peak_upload(&cleared),
+            None,
+            "no sound minute, no upload record"
+        );
         assert_eq!(cleared.samples_in_range(0.0, 3_000.0).unwrap().len(), 24);
     }
 
@@ -1350,10 +1509,18 @@ mod tests {
             .unwrap();
         }
         db.conn
-            .execute("UPDATE bench_samples SET race_upload_rate = NULL WHERE race_upload_rate > 1.25e9", [])
+            .execute(
+                "UPDATE bench_samples SET race_upload_rate = NULL WHERE race_upload_rate > 1.25e9",
+                [],
+            )
             .unwrap();
         let rec = db.records_payload().unwrap();
-        let peak = rec["records"].as_array().unwrap().iter().find(|r| r["label"] == "Peak upload").unwrap()["value"]
+        let peak = rec["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["label"] == "Peak upload")
+            .unwrap()["value"]
             .as_f64()
             .expect("a number, not null");
         // 2 Gbps over the 11 whole samples; counting the cleared one as its
@@ -1370,7 +1537,8 @@ mod tests {
     /// sampler records nothing from then on.
     #[test]
     fn an_old_database_gains_the_new_columns() {
-        let dir = std::env::temp_dir().join(format!("hydra-benchdb-migrate-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("hydra-benchdb-migrate-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("bench.db");
         {
@@ -1380,12 +1548,20 @@ mod tests {
                 .split(',')
                 .map(|c| c.trim())
                 .filter(|c| !ADDED_COLUMNS.contains(c))
-                .map(|c| if c == "ts" { "ts REAL NOT NULL".to_string() } else { format!("{c} REAL DEFAULT 0") })
+                .map(|c| {
+                    if c == "ts" {
+                        "ts REAL NOT NULL".to_string()
+                    } else {
+                        format!("{c} REAL DEFAULT 0")
+                    }
+                })
                 .collect();
-            c.execute_batch(&format!("CREATE TABLE bench_samples ({})", old.join(", "))).unwrap();
+            c.execute_batch(&format!("CREATE TABLE bench_samples ({})", old.join(", ")))
+                .unwrap();
         }
         let db = BenchDb::open(&path).expect("opens and migrates");
-        db.record_sample(&serde_json::json!({"ts": 1.0, "hoard_announce_late": 42.0})).expect("insert with new columns");
+        db.record_sample(&serde_json::json!({"ts": 1.0, "hoard_announce_late": 42.0}))
+            .expect("insert with new columns");
         let v = db.samples_in_range(0.0, 2.0).unwrap();
         assert_eq!(v[0]["hoard_announce_late"], 42);
         std::fs::remove_dir_all(&dir).ok();
@@ -1532,12 +1708,25 @@ mod race_recorder_tests {
     #[test]
     fn the_first_peer_and_the_first_upload_fire_once_each() {
         let mut r = RaceRecorder::new(START);
-        assert_eq!(kinds(&r.sight(H, START + 1.0, 0.0, 0, 0, None, START + 2.0)), ["added"]);
-        assert_eq!(kinds(&r.sight(H, START + 1.0, 0.1, 3, 0, None, START + 7.0)), ["first_peer"]);
+        assert_eq!(
+            kinds(&r.sight(H, START + 1.0, 0.0, 0, 0, None, START + 2.0)),
+            ["added"]
+        );
+        assert_eq!(
+            kinds(&r.sight(H, START + 1.0, 0.1, 3, 0, None, START + 7.0)),
+            ["first_peer"]
+        );
         // Still peers, still no upload: nothing new to say.
-        assert!(r.sight(H, START + 1.0, 0.2, 5, 0, None, START + 12.0).is_empty());
-        assert_eq!(kinds(&r.sight(H, START + 1.0, 0.3, 5, 128, None, START + 17.0)), ["first_upload"]);
-        assert!(r.sight(H, START + 1.0, 0.4, 5, 900, None, START + 22.0).is_empty());
+        assert!(r
+            .sight(H, START + 1.0, 0.2, 5, 0, None, START + 12.0)
+            .is_empty());
+        assert_eq!(
+            kinds(&r.sight(H, START + 1.0, 0.3, 5, 128, None, START + 17.0)),
+            ["first_upload"]
+        );
+        assert!(r
+            .sight(H, START + 1.0, 0.4, 5, 900, None, START + 22.0)
+            .is_empty());
     }
 
     /// Both firsts can land between two looks. The tick answers a list, not one.
@@ -1557,12 +1746,22 @@ mod race_recorder_tests {
         let t1 = Instant::now();
         // First sighting: the stamp is only remembered, never reported -- we
         // cannot tell a fresh announce from one that happened before we looked.
-        assert_eq!(kinds(&r.sight(H, START + 1.0, 0.0, 0, 0, Some(t1), START + 2.0)), ["added"]);
-        assert!(r.sight(H, START + 1.0, 0.1, 0, 0, Some(t1), START + 7.0).is_empty());
+        assert_eq!(
+            kinds(&r.sight(H, START + 1.0, 0.0, 0, 0, Some(t1), START + 2.0)),
+            ["added"]
+        );
+        assert!(r
+            .sight(H, START + 1.0, 0.1, 0, 0, Some(t1), START + 7.0)
+            .is_empty());
 
         let t2 = t1 + Duration::from_secs(1800);
-        assert_eq!(kinds(&r.sight(H, START + 1.0, 0.2, 0, 0, Some(t2), START + 12.0)), ["announce"]);
-        assert!(r.sight(H, START + 1.0, 0.3, 0, 0, Some(t2), START + 17.0).is_empty());
+        assert_eq!(
+            kinds(&r.sight(H, START + 1.0, 0.2, 0, 0, Some(t2), START + 12.0)),
+            ["announce"]
+        );
+        assert!(r
+            .sight(H, START + 1.0, 0.3, 0, 0, Some(t2), START + 17.0)
+            .is_empty());
     }
 
     /// An old torrent still reports its announces: unlike the firsts, an
@@ -1571,9 +1770,14 @@ mod race_recorder_tests {
     fn an_older_torrent_still_reports_announces() {
         let mut r = RaceRecorder::new(START);
         let t1 = Instant::now();
-        assert!(r.sight(H, START - 500.0, 0.9, 2, 1, Some(t1), START + 2.0).is_empty());
+        assert!(r
+            .sight(H, START - 500.0, 0.9, 2, 1, Some(t1), START + 2.0)
+            .is_empty());
         let t2 = t1 + Duration::from_secs(60);
-        assert_eq!(kinds(&r.sight(H, START - 500.0, 0.9, 2, 1, Some(t2), START + 7.0)), ["announce"]);
+        assert_eq!(
+            kinds(&r.sight(H, START - 500.0, 0.9, 2, 1, Some(t2), START + 7.0)),
+            ["announce"]
+        );
     }
 
     #[test]
@@ -1670,7 +1874,12 @@ mod sample_tests {
         assert!(d.samples_in_range(500.0, 10.0).unwrap().is_empty());
     }
 
-    fn trow(engine: &str, tracker: &str, upload_rate: i64, cum_uploaded: i64) -> crate::benchsampler::TrackerRow {
+    fn trow(
+        engine: &str,
+        tracker: &str,
+        upload_rate: i64,
+        cum_uploaded: i64,
+    ) -> crate::benchsampler::TrackerRow {
         crate::benchsampler::TrackerRow {
             engine: engine.into(),
             tracker: tracker.into(),
@@ -1687,10 +1896,16 @@ mod sample_tests {
     #[test]
     fn a_tracker_sample_round_trips() {
         let d = db();
-        d.record_tracker_samples(100.0, &[trow("race", "tracker.example", 700, 900)]).unwrap();
-        let got = d.tracker_samples_in_range("tracker.example", 0.0, 1000.0, 30.0).unwrap();
+        d.record_tracker_samples(100.0, &[trow("race", "tracker.example", 700, 900)])
+            .unwrap();
+        let got = d
+            .tracker_samples_in_range("tracker.example", 0.0, 1000.0, 30.0)
+            .unwrap();
         assert_eq!(got.len(), 1, "got {got:?}");
-        assert_eq!(got[0]["upload_rate"], 700, "the rate is stored, not a constant 0: {got:?}");
+        assert_eq!(
+            got[0]["upload_rate"], 700,
+            "the rate is stored, not a constant 0: {got:?}"
+        );
         assert_eq!(got[0]["cum_uploaded"], 900);
         assert_eq!(got[0]["peers"], 5);
     }
@@ -1702,10 +1917,15 @@ mod sample_tests {
         let d = db();
         d.record_tracker_samples(
             100.0,
-            &[trow("race", "tracker.example", 1, 900), trow("hoard", "tracker.example", 2, 800)],
+            &[
+                trow("race", "tracker.example", 1, 900),
+                trow("hoard", "tracker.example", 2, 800),
+            ],
         )
         .unwrap();
-        let got = d.tracker_samples_in_range("tracker.example", 0.0, 1000.0, 30.0).unwrap();
+        let got = d
+            .tracker_samples_in_range("tracker.example", 0.0, 1000.0, 30.0)
+            .unwrap();
         assert_eq!(got.len(), 2, "got {got:?}");
     }
 
@@ -1715,11 +1935,20 @@ mod sample_tests {
     fn a_window_is_averaged_into_buckets_stamped_at_their_start() {
         let d = db();
         for (i, rate) in [100, 200, 300, 400].iter().enumerate() {
-            d.record_tracker_samples(600.0 + 30.0 * i as f64, &[trow("hoard", "t.example", *rate, 1000 + i as i64)])
-                .unwrap();
+            d.record_tracker_samples(
+                600.0 + 30.0 * i as f64,
+                &[trow("hoard", "t.example", *rate, 1000 + i as i64)],
+            )
+            .unwrap();
         }
-        let got = d.tracker_samples_in_range("t.example", 0.0, 10_000.0, 60.0).unwrap();
-        assert_eq!(got.len(), 2, "four 30 s samples in two 60 s buckets: {got:?}");
+        let got = d
+            .tracker_samples_in_range("t.example", 0.0, 10_000.0, 60.0)
+            .unwrap();
+        assert_eq!(
+            got.len(),
+            2,
+            "four 30 s samples in two 60 s buckets: {got:?}"
+        );
         assert_eq!(got[0]["ts"], 600);
         assert_eq!(got[0]["upload_rate"], 150);
         assert_eq!(got[0]["cum_uploaded"], 1001);
@@ -1751,20 +1980,31 @@ mod sample_tests {
         let old = now - super::TRACKER_RAW_KEEP_SECS - 3600.0;
         // Ten 30 s samples in one old 5-minute bucket, rising counters.
         for i in 0..10 {
-            d.record_tracker_samples(old + 30.0 * i as f64, &[trow("hoard", "t.example", 100 * i, 1000 + i)])
-                .unwrap();
+            d.record_tracker_samples(
+                old + 30.0 * i as f64,
+                &[trow("hoard", "t.example", 100 * i, 1000 + i)],
+            )
+            .unwrap();
         }
-        d.record_tracker_samples(now - 60.0, &[trow("hoard", "t.example", 7, 5000)]).unwrap();
+        d.record_tracker_samples(now - 60.0, &[trow("hoard", "t.example", 7, 5000)])
+            .unwrap();
 
         while d.compact_tracker_samples(now).unwrap() {}
         let count = |d: &BenchDb| -> i64 {
-            d.conn.query_row("SELECT COUNT(*) FROM tracker_samples", [], |r| r.get(0)).unwrap()
+            d.conn
+                .query_row("SELECT COUNT(*) FROM tracker_samples", [], |r| r.get(0))
+                .unwrap()
         };
         assert_eq!(count(&d), 2, "one folded row and the recent sample");
-        let got = d.tracker_samples_in_range("t.example", 0.0, now, 1.0).unwrap();
+        let got = d
+            .tracker_samples_in_range("t.example", 0.0, now, 1.0)
+            .unwrap();
         assert_eq!(got[0]["ts"], old as i64, "stamped at the bucket start");
         assert_eq!(got[0]["upload_rate"], 450, "the mean of 0..900");
-        assert_eq!(got[0]["cum_uploaded"], 1009, "the counter's highest, never an average");
+        assert_eq!(
+            got[0]["cum_uploaded"], 1009,
+            "the counter's highest, never an average"
+        );
         assert_eq!(got[1]["upload_rate"], 7, "recent samples stay as recorded");
 
         // Nothing left to fold: another pass is a no-op.
@@ -1784,14 +2024,18 @@ mod sample_tests {
         let start = now - 30.0 * 86_400.0;
         let mut t = start;
         while t < now - super::TRACKER_RAW_KEEP_SECS {
-            d.record_tracker_samples(t, &[trow("hoard", "t.example", 1, 1)]).unwrap();
+            d.record_tracker_samples(t, &[trow("hoard", "t.example", 1, 1)])
+                .unwrap();
             t += 3600.0;
         }
         let mut calls = 0;
         while d.compact_tracker_samples(now).unwrap() {
             calls += 1;
         }
-        assert!(calls > 50, "28 days in 6 h slices is over a hundred calls, got {calls}");
+        assert!(
+            calls > 50,
+            "28 days in 6 h slices is over a hundred calls, got {calls}"
+        );
     }
 
     #[test]
@@ -1810,12 +2054,15 @@ mod sample_tests {
             .conn
             .prepare(&format!("EXPLAIN QUERY PLAN {}", super::TRACKER_RANGE_SQL))
             .unwrap()
-            .query_map(rusqlite::params!["t.example", 0.0, 1.0, 30.0], |r| r.get::<_, String>(3))
+            .query_map(rusqlite::params!["t.example", 0.0, 1.0, 30.0], |r| {
+                r.get::<_, String>(3)
+            })
             .unwrap()
             .map(|r| r.unwrap())
             .collect();
         assert!(
-            plan.iter().any(|p| p.contains("(tracker=? AND ts>? AND ts<?)")),
+            plan.iter()
+                .any(|p| p.contains("(tracker=? AND ts>? AND ts<?)")),
             "the window must be an index range, got {plan:?}"
         );
     }
@@ -1827,7 +2074,10 @@ mod sample_tests {
         let dir = std::env::temp_dir().join(format!("benchwal-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let d = BenchDb::open(&dir.join("bench.db")).unwrap();
-        let mode: String = d.conn.query_row("PRAGMA journal_mode", [], |r| r.get(0)).unwrap();
+        let mode: String = d
+            .conn
+            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(mode.to_lowercase(), "wal");
         drop(d);
         let _ = std::fs::remove_dir_all(&dir);
@@ -1837,7 +2087,9 @@ mod sample_tests {
     #[test]
     fn the_records_payload_answers_on_an_empty_database() {
         let d = db();
-        let payload = d.records_payload().expect("an empty database still has a payload");
+        let payload = d
+            .records_payload()
+            .expect("an empty database still has a payload");
         assert!(payload.is_object(), "got {payload}");
     }
 
@@ -1860,12 +2112,18 @@ mod sample_tests {
         let d = db();
         // Minute 0: a steady 900 MB/s, twelve samples.
         for i in 0..12 {
-            d.record_sample(&sample(f64::from(i) * 5.0, 900_000_000.0)).unwrap();
+            d.record_sample(&sample(f64::from(i) * 5.0, 900_000_000.0))
+                .unwrap();
         }
         // Minute 1: one 1.2 GB/s spike in an otherwise quiet minute.
         for i in 0..12 {
-            let rate = if i == 6 { 1_200_000_000.0 } else { 100_000_000.0 };
-            d.record_sample(&sample(60.0 + f64::from(i) * 5.0, rate)).unwrap();
+            let rate = if i == 6 {
+                1_200_000_000.0
+            } else {
+                100_000_000.0
+            };
+            d.record_sample(&sample(60.0 + f64::from(i) * 5.0, rate))
+                .unwrap();
         }
         // Minute 2: a lone sample, too thin to stand for a minute.
         d.record_sample(&sample(125.0, 1_500_000_000.0)).unwrap();
@@ -1880,7 +2138,10 @@ mod sample_tests {
         let missing = std::env::temp_dir().join("typhon-no-such-bench-4a1f.db");
         let _ = std::fs::remove_file(&missing);
         assert!(BenchDb::open_read_only(&missing).is_err());
-        assert!(!missing.exists(), "a read-only open must not create the file");
+        assert!(
+            !missing.exists(),
+            "a read-only open must not create the file"
+        );
     }
 
     /// Opening for writing creates the file and its schema.

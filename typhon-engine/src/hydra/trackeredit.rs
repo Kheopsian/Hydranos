@@ -22,7 +22,9 @@ pub fn normalise_url(raw: &str) -> Result<String, String> {
     // announced to nowhere, every pass, with an error that does not say why.
     if scheme.eq_ignore_ascii_case("udp") {
         if typhon_engine::tracker::udp::split_url(url).is_none() {
-            return Err(format!("{url:?}: a UDP tracker needs a host and a port, udp://host:port/announce"));
+            return Err(format!(
+                "{url:?}: a UDP tracker needs a host and a port, udp://host:port/announce"
+            ));
         }
         return Ok(url.to_string());
     }
@@ -50,7 +52,11 @@ fn contains(tiers: &[Vec<String>], want: &str) -> bool {
 fn compact(tiers: Vec<Vec<String>>) -> Vec<Vec<String>> {
     tiers
         .into_iter()
-        .map(|tier| tier.into_iter().filter(|u| !u.is_empty()).collect::<Vec<_>>())
+        .map(|tier| {
+            tier.into_iter()
+                .filter(|u| !u.is_empty())
+                .collect::<Vec<_>>()
+        })
         .filter(|tier: &Vec<String>| !tier.is_empty())
         .collect()
 }
@@ -82,8 +88,11 @@ pub fn apply(
         }
 
         "remove" => {
-            let wanted: std::collections::HashSet<&str> =
-                urls.iter().map(|u| u.trim()).filter(|u| !u.is_empty()).collect();
+            let wanted: std::collections::HashSet<&str> = urls
+                .iter()
+                .map(|u| u.trim())
+                .filter(|u| !u.is_empty())
+                .collect();
             if wanted.is_empty() {
                 return Err("remove needs at least one URL".into());
             }
@@ -182,17 +191,25 @@ mod tests {
     #[test]
     fn adding_a_tracker_already_present_changes_nothing() {
         let current = tiers(&[&["https://a/announce"]]);
-        let (out, changed) = apply(&current, "add", &urls(&["https://a/announce"]), "", "").unwrap();
-        assert!(!changed, "a duplicate would make the torrent announce twice");
+        let (out, changed) =
+            apply(&current, "add", &urls(&["https://a/announce"]), "", "").unwrap();
+        assert!(
+            !changed,
+            "a duplicate would make the torrent announce twice"
+        );
         assert_eq!(out, current);
     }
 
     #[test]
     fn adding_puts_the_new_tracker_in_its_own_tier() {
         let current = tiers(&[&["https://a/announce"]]);
-        let (out, changed) = apply(&current, "add", &urls(&["https://b/announce"]), "", "").unwrap();
+        let (out, changed) =
+            apply(&current, "add", &urls(&["https://b/announce"]), "", "").unwrap();
         assert!(changed);
-        assert_eq!(out, tiers(&[&["https://a/announce"], &["https://b/announce"]]));
+        assert_eq!(
+            out,
+            tiers(&[&["https://a/announce"], &["https://b/announce"]])
+        );
     }
 
     // An emptied tier must disappear, not linger: it is a level of the fallback
@@ -215,16 +232,28 @@ mod tests {
     #[test]
     fn replacing_refuses_a_url_the_torrent_does_not_have() {
         let current = tiers(&[&["https://a/announce"]]);
-        let err = apply(&current, "replace", &[], "https://nope/announce", "https://c/announce")
-            .unwrap_err();
+        let err = apply(
+            &current,
+            "replace",
+            &[],
+            "https://nope/announce",
+            "https://c/announce",
+        )
+        .unwrap_err();
         assert!(err.contains("does not announce"), "{err}");
     }
 
     #[test]
     fn replacing_keeps_the_tier_it_was_in() {
         let current = tiers(&[&["https://a/announce", "https://b/announce"]]);
-        let (out, changed) =
-            apply(&current, "replace", &[], "https://a/announce", "https://c/announce").unwrap();
+        let (out, changed) = apply(
+            &current,
+            "replace",
+            &[],
+            "https://a/announce",
+            "https://c/announce",
+        )
+        .unwrap();
         assert!(changed);
         assert_eq!(out, tiers(&[&["https://c/announce", "https://b/announce"]]));
     }

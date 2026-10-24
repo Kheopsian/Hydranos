@@ -74,7 +74,9 @@ fn parse_ip(s: &str) -> Option<IpAddr> {
     if let Some(v4) = parse_v4(s) {
         return Some(IpAddr::V4(Ipv4Addr::from(v4)));
     }
-    s.parse::<Ipv6Addr>().ok().map(|v6| canonical(IpAddr::V6(v6)))
+    s.parse::<Ipv6Addr>()
+        .ok()
+        .map(|v6| canonical(IpAddr::V6(v6)))
 }
 
 enum Range {
@@ -108,7 +110,11 @@ fn cidr(s: &str) -> Option<Range> {
         }
         IpAddr::V6(v6) if len <= 128 => {
             let base = u128::from(v6);
-            let mask = if len == 0 { 0 } else { u128::MAX << (128 - len) };
+            let mask = if len == 0 {
+                0
+            } else {
+                u128::MAX << (128 - len)
+            };
             Some(Range::V6(base & mask, (base & mask) | !mask))
         }
         _ => None,
@@ -225,7 +231,13 @@ impl IpFilter {
                 }
             }
         }
-        (IpFilter { v4: merge(v4), v6: merge(v6) }, st)
+        (
+            IpFilter {
+                v4: merge(v4),
+                v6: merge(v6),
+            },
+            st,
+        )
     }
 
     /// Several lists as one.
@@ -299,7 +311,11 @@ pub fn blocked(ip: IpAddr) -> bool {
 
 /// Ranges in the installed list.
 pub fn installed_len() -> usize {
-    FILTER.read().ok().and_then(|g| g.as_ref().map(|f| f.len())).unwrap_or(0)
+    FILTER
+        .read()
+        .ok()
+        .and_then(|g| g.as_ref().map(|f| f.len()))
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -327,11 +343,35 @@ Weird: name: with colons:10.0.0.1-10.0.0.9
 not an address at all
 ";
         let (f, st) = IpFilter::parse(text);
-        assert_eq!(st, ParseStats { ranges: 7, unreadable: 1, allowed: 1 });
-        for yes in ["203.0.113.10", "203.0.113.20", "10.0.0.5", "198.51.100.7", "192.168.50.99", "203.0.113.200", "2001:db8:ffff::1", "2001:db9::80"] {
+        assert_eq!(
+            st,
+            ParseStats {
+                ranges: 7,
+                unreadable: 1,
+                allowed: 1
+            }
+        );
+        for yes in [
+            "203.0.113.10",
+            "203.0.113.20",
+            "10.0.0.5",
+            "198.51.100.7",
+            "192.168.50.99",
+            "203.0.113.200",
+            "2001:db8:ffff::1",
+            "2001:db9::80",
+        ] {
             assert!(f.contains(ip(yes)), "{yes} should be blocked");
         }
-        for no in ["203.0.113.9", "203.0.113.21", "192.0.2.9", "192.168.51.0", "203.0.113.201", "2001:dba::1", "2001:db9::100"] {
+        for no in [
+            "203.0.113.9",
+            "203.0.113.21",
+            "192.0.2.9",
+            "192.168.51.0",
+            "203.0.113.201",
+            "2001:dba::1",
+            "2001:db9::100",
+        ] {
             assert!(!f.contains(ip(no)), "{no} should pass");
         }
     }
@@ -347,8 +387,16 @@ not an address at all
     #[test]
     fn overlapping_and_touching_ranges_merge() {
         let (f, _) = IpFilter::parse("203.0.113.0-203.0.113.10\n203.0.113.5-203.0.113.20\n203.0.113.21-203.0.113.30\n203.0.113.40-203.0.113.50");
-        assert_eq!(f.len(), 2, "three that touch are one, the fourth stands apart");
-        assert!(f.contains(ip("203.0.113.30")) && !f.contains(ip("203.0.113.35")) && f.contains(ip("203.0.113.40")));
+        assert_eq!(
+            f.len(),
+            2,
+            "three that touch are one, the fourth stands apart"
+        );
+        assert!(
+            f.contains(ip("203.0.113.30"))
+                && !f.contains(ip("203.0.113.35"))
+                && f.contains(ip("203.0.113.40"))
+        );
         let (g, _) = IpFilter::parse("0.0.0.0-255.255.255.255\n255.255.255.255");
         assert!(g.contains(ip("255.255.255.255")), "no overflow at the top");
         let u = IpFilter::union(&[f, IpFilter::parse("203.0.113.31-203.0.113.39").0]);
@@ -368,13 +416,31 @@ not an address at all
         let mut text = String::new();
         for i in 0..250_000u32 {
             let base = i * 16_000;
-            text.push_str(&format!("{}-{}\n", Ipv4Addr::from(base), Ipv4Addr::from(base + 7_000)));
+            text.push_str(&format!(
+                "{}-{}\n",
+                Ipv4Addr::from(base),
+                Ipv4Addr::from(base + 7_000)
+            ));
         }
         let (f, st) = IpFilter::parse(&text);
         assert_eq!(st.ranges, 250_000);
-        for probe in [0u32, 6_999, 7_000, 7_001, 15_999, 16_000, 3_999_999_999, 3_999_993_001] {
-            let linear = (0..250_000u32).any(|i| probe >= i * 16_000 && probe <= i * 16_000 + 7_000);
-            assert_eq!(f.contains(IpAddr::V4(Ipv4Addr::from(probe))), linear, "{probe}");
+        for probe in [
+            0u32,
+            6_999,
+            7_000,
+            7_001,
+            15_999,
+            16_000,
+            3_999_999_999,
+            3_999_993_001,
+        ] {
+            let linear =
+                (0..250_000u32).any(|i| probe >= i * 16_000 && probe <= i * 16_000 + 7_000);
+            assert_eq!(
+                f.contains(IpAddr::V4(Ipv4Addr::from(probe))),
+                linear,
+                "{probe}"
+            );
         }
     }
 

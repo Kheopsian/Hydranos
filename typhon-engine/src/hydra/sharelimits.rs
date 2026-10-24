@@ -156,7 +156,11 @@ impl Effective {
 
 pub fn effective(own: &TorrentShareLimits, engine: &EngineShareLimits) -> Effective {
     Effective {
-        ratio: if own.ratio <= FOLLOW_ENGINE as f64 { engine.ratio } else { own.ratio },
+        ratio: if own.ratio <= FOLLOW_ENGINE as f64 {
+            engine.ratio
+        } else {
+            own.ratio
+        },
         seeding_minutes: if own.seeding_minutes == FOLLOW_ENGINE {
             engine.seeding_minutes
         } else {
@@ -205,7 +209,9 @@ impl std::fmt::Display for Reached {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Reached::Ratio { ratio, limit } => write!(f, "ratio {ratio:.2} >= {limit}"),
-            Reached::SeedingTime { minutes, limit } => write!(f, "seeded {minutes} min >= {limit} min"),
+            Reached::SeedingTime { minutes, limit } => {
+                write!(f, "seeded {minutes} min >= {limit} min")
+            }
             Reached::Inactive { minutes, limit } => {
                 write!(f, "nothing uploaded for {minutes} min >= {limit} min")
             }
@@ -224,16 +230,25 @@ pub fn reached(
     if eff.ratio >= 0.0 {
         let r = ratio();
         if r >= eff.ratio {
-            return Some(Reached::Ratio { ratio: r, limit: eff.ratio });
+            return Some(Reached::Ratio {
+                ratio: r,
+                limit: eff.ratio,
+            });
         }
     }
     if eff.seeding_minutes >= 0 && seeding_secs >= eff.seeding_minutes * 60 {
-        return Some(Reached::SeedingTime { minutes: seeding_secs / 60, limit: eff.seeding_minutes });
+        return Some(Reached::SeedingTime {
+            minutes: seeding_secs / 60,
+            limit: eff.seeding_minutes,
+        });
     }
     if eff.inactive_minutes >= 0 {
         if let Some(idle) = inactive_secs {
             if idle >= eff.inactive_minutes * 60 {
-                return Some(Reached::Inactive { minutes: idle / 60, limit: eff.inactive_minutes });
+                return Some(Reached::Inactive {
+                    minutes: idle / 60,
+                    limit: eff.inactive_minutes,
+                });
             }
         }
     }
@@ -283,14 +298,24 @@ pub fn qbit_fields(own: &TorrentShareLimits, engine: &EngineShareLimits) -> serd
 }
 
 /// Lay `qbit_fields` over a shim row.
-pub fn fill_qbit_row(row: &mut serde_json::Value, own: &TorrentShareLimits, engine: &EngineShareLimits) {
-    if let (Some(obj), serde_json::Value::Object(fields)) = (row.as_object_mut(), qbit_fields(own, engine)) {
+pub fn fill_qbit_row(
+    row: &mut serde_json::Value,
+    own: &TorrentShareLimits,
+    engine: &EngineShareLimits,
+) {
+    if let (Some(obj), serde_json::Value::Object(fields)) =
+        (row.as_object_mut(), qbit_fields(own, engine))
+    {
         obj.extend(fields);
     }
 }
 
 /// The native view of one torrent's limits on one engine.
-pub fn native_json(engine_id: &str, own: &TorrentShareLimits, engine: &EngineShareLimits) -> serde_json::Value {
+pub fn native_json(
+    engine_id: &str,
+    own: &TorrentShareLimits,
+    engine: &EngineShareLimits,
+) -> serde_json::Value {
     let eff = effective(own, engine);
     serde_json::json!({
         "engine": engine_id,
@@ -326,7 +351,10 @@ pub fn set_torrent_limits(
     seeding_minutes: Option<i64>,
     inactive_minutes: Option<i64>,
 ) -> Result<usize, String> {
-    let store = state.store.lock().map_err(|_| "the store is unavailable".to_string())?;
+    let store = state
+        .store
+        .lock()
+        .map_err(|_| "the store is unavailable".to_string())?;
     store
         .set_share_limits_batch(
             hashes,
@@ -370,8 +398,12 @@ impl EngineChange {
             (r - current.ratio).abs() < 1e-9
         });
         ratio_same
-            && self.max_seeding_time.is_none_or(|m| m.max(-1) == current.seeding_minutes)
-            && self.max_inactive_seeding_time.is_none_or(|m| m.max(-1) == current.inactive_minutes)
+            && self
+                .max_seeding_time
+                .is_none_or(|m| m.max(-1) == current.seeding_minutes)
+            && self
+                .max_inactive_seeding_time
+                .is_none_or(|m| m.max(-1) == current.inactive_minutes)
             && self
                 .share_limit_action
                 .as_deref()
@@ -391,13 +423,19 @@ impl EngineChange {
             kv.push(("max_seeding_time".to_string(), m.max(-1).to_string()));
         }
         if let Some(m) = self.max_inactive_seeding_time {
-            kv.push(("max_inactive_seeding_time".to_string(), m.max(-1).to_string()));
+            kv.push((
+                "max_inactive_seeding_time".to_string(),
+                m.max(-1).to_string(),
+            ));
         }
         if let Some(a) = &self.share_limit_action {
             let a = Action::parse(a).ok_or_else(|| {
                 format!("share_limit_action must be stop, remove or remove_with_files, not {a:?}")
             })?;
-            kv.push(("share_limit_action".to_string(), format!("\"{}\"", a.as_str())));
+            kv.push((
+                "share_limit_action".to_string(),
+                format!("\"{}\"", a.as_str()),
+            ));
         }
         Ok(kv)
     }
@@ -407,7 +445,11 @@ impl EngineChange {
 /// `[hoard]`, or the `session` of its `[[engine]]` block, created when the
 /// file has no such key yet (every file from before 4.4). The worker reads
 /// the config on every pass, so nothing else is needed for it to apply.
-pub fn write_engine_limits(state: &AppState, engine_id: &str, change: &EngineChange) -> Result<(), String> {
+pub fn write_engine_limits(
+    state: &AppState,
+    engine_id: &str,
+    change: &EngineChange,
+) -> Result<(), String> {
     let kv = change.pairs()?;
     if kv.is_empty() {
         return Ok(());
@@ -423,14 +465,23 @@ pub fn write_engine_limits(state: &AppState, engine_id: &str, change: &EngineCha
         }
         Ok(out)
     });
-    if ok { Ok(()) } else { Err("the config could not be written".into()) }
+    if ok {
+        Ok(())
+    } else {
+        Err("the config could not be written".into())
+    }
 }
 
 /// The engine whose limits the qBittorrent API's single `preferences` page
 /// speaks for: `race` when there is one, as the rest of that page does,
 /// else the first local engine.
 pub fn preferences_engine(state: &AppState) -> String {
-    let ids: Vec<String> = state.engines.engines().iter().map(|e| e.id.clone()).collect();
+    let ids: Vec<String> = state
+        .engines
+        .engines()
+        .iter()
+        .map(|e| e.id.clone())
+        .collect();
     if ids.iter().any(|i| i == "race") {
         return "race".into();
     }
@@ -455,29 +506,48 @@ pub fn qbit_preferences(e: &EngineShareLimits) -> serde_json::Value {
 /// (`max_ratio` alone changes nothing), and a flag set to false switches the
 /// limit off whatever value comes with it.
 pub fn change_from_qbit_preferences(doc: &serde_json::Value) -> EngineChange {
-    let num = |k: &str| doc.get(k).and_then(|v| v.as_f64().or_else(|| v.as_str()?.trim().parse().ok()));
+    let num = |k: &str| {
+        doc.get(k)
+            .and_then(|v| v.as_f64().or_else(|| v.as_str()?.trim().parse().ok()))
+    };
     let flag = |k: &str| {
-        doc.get(k).and_then(|v| v.as_bool().or_else(|| match v.as_str()? {
-            "true" | "1" => Some(true),
-            "false" | "0" => Some(false),
-            _ => None,
-        }))
+        doc.get(k).and_then(|v| {
+            v.as_bool().or_else(|| match v.as_str()? {
+                "true" | "1" => Some(true),
+                "false" | "0" => Some(false),
+                _ => None,
+            })
+        })
     };
     let mut c = EngineChange::default();
     if let Some(on) = flag("max_ratio_enabled") {
-        c.max_ratio = Some(if on { num("max_ratio").unwrap_or(-1.0) } else { -1.0 });
+        c.max_ratio = Some(if on {
+            num("max_ratio").unwrap_or(-1.0)
+        } else {
+            -1.0
+        });
     }
     if let Some(on) = flag("max_seeding_time_enabled") {
-        c.max_seeding_time = Some(if on { num("max_seeding_time").map_or(-1, |v| v as i64) } else { -1 });
+        c.max_seeding_time = Some(if on {
+            num("max_seeding_time").map_or(-1, |v| v as i64)
+        } else {
+            -1
+        });
     }
     if let Some(on) = flag("max_inactive_seeding_time_enabled") {
-        c.max_inactive_seeding_time =
-            Some(if on { num("max_inactive_seeding_time").map_or(-1, |v| v as i64) } else { -1 });
+        c.max_inactive_seeding_time = Some(if on {
+            num("max_inactive_seeding_time").map_or(-1, |v| v as i64)
+        } else {
+            -1
+        });
     }
     if let Some(code) = num("max_ratio_act") {
         match Action::from_qbit(code as i64) {
             Some(a) => c.share_limit_action = Some(a.as_str().to_string()),
-            None => tracing::warn!(code, "setPreferences: max_ratio_act not supported here, the action is unchanged"),
+            None => tracing::warn!(
+                code,
+                "setPreferences: max_ratio_act not supported here, the action is unchanged"
+            ),
         }
     }
     c
@@ -508,30 +578,75 @@ mod tests {
 
     #[test]
     fn an_integer_ratio_in_the_file_is_read() {
-        let e = EngineShareLimits::from_session(&session("max_ratio = 2\nshare_limit_action = \"remove\"\n"));
+        let e = EngineShareLimits::from_session(&session(
+            "max_ratio = 2\nshare_limit_action = \"remove\"\n",
+        ));
         assert_eq!(e.ratio, 2.0);
         assert_eq!(e.action, Action::Remove);
     }
 
     #[test]
     fn a_torrent_follows_its_engine_unless_it_says_otherwise() {
-        let engine = EngineShareLimits { ratio: 2.0, seeding_minutes: 60, inactive_minutes: -1, action: Action::Stop };
+        let engine = EngineShareLimits {
+            ratio: 2.0,
+            seeding_minutes: 60,
+            inactive_minutes: -1,
+            action: Action::Stop,
+        };
         let follow = TorrentShareLimits::default();
-        assert_eq!(effective(&follow, &engine), Effective { ratio: 2.0, seeding_minutes: 60, inactive_minutes: -1 });
-        let own = TorrentShareLimits { ratio: -1.0, seeding_minutes: 10, inactive_minutes: -2 };
-        assert_eq!(effective(&own, &engine), Effective { ratio: -1.0, seeding_minutes: 10, inactive_minutes: -1 });
+        assert_eq!(
+            effective(&follow, &engine),
+            Effective {
+                ratio: 2.0,
+                seeding_minutes: 60,
+                inactive_minutes: -1
+            }
+        );
+        let own = TorrentShareLimits {
+            ratio: -1.0,
+            seeding_minutes: 10,
+            inactive_minutes: -2,
+        };
+        assert_eq!(
+            effective(&own, &engine),
+            Effective {
+                ratio: -1.0,
+                seeding_minutes: 10,
+                inactive_minutes: -1
+            }
+        );
     }
 
     #[test]
     fn any_one_limit_is_enough() {
-        let eff = Effective { ratio: 1.0, seeding_minutes: 60, inactive_minutes: 30 };
-        assert!(matches!(reached(&eff, || 1.0, 0, None), Some(Reached::Ratio { .. })));
-        assert!(matches!(reached(&eff, || 0.5, 3600, None), Some(Reached::SeedingTime { .. })));
-        assert!(matches!(reached(&eff, || 0.5, 60, Some(1800)), Some(Reached::Inactive { .. })));
+        let eff = Effective {
+            ratio: 1.0,
+            seeding_minutes: 60,
+            inactive_minutes: 30,
+        };
+        assert!(matches!(
+            reached(&eff, || 1.0, 0, None),
+            Some(Reached::Ratio { .. })
+        ));
+        assert!(matches!(
+            reached(&eff, || 0.5, 3600, None),
+            Some(Reached::SeedingTime { .. })
+        ));
+        assert!(matches!(
+            reached(&eff, || 0.5, 60, Some(1800)),
+            Some(Reached::Inactive { .. })
+        ));
         assert_eq!(reached(&eff, || 0.5, 60, Some(60)), None);
         // A limit that is off is never reached, even at 0.
-        let off = Effective { ratio: -1.0, seeding_minutes: -1, inactive_minutes: -1 };
-        assert_eq!(reached(&off, || 99.0, i64::MAX / 120, Some(i64::MAX / 120)), None);
+        let off = Effective {
+            ratio: -1.0,
+            seeding_minutes: -1,
+            inactive_minutes: -1,
+        };
+        assert_eq!(
+            reached(&off, || 99.0, i64::MAX / 120, Some(i64::MAX / 120)),
+            None
+        );
     }
 
     #[test]
@@ -559,17 +674,30 @@ mod tests {
     #[test]
     fn set_preferences_takes_a_value_only_with_its_flag() {
         let c = change_from_qbit_preferences(&serde_json::json!({"max_ratio": 3}));
-        assert!(c.is_empty(), "a bare max_ratio changes nothing, as in qBittorrent");
+        assert!(
+            c.is_empty(),
+            "a bare max_ratio changes nothing, as in qBittorrent"
+        );
         let c = change_from_qbit_preferences(&serde_json::json!({
             "max_ratio_enabled": true, "max_ratio": 1.5,
             "max_seeding_time_enabled": false, "max_seeding_time": 60,
             "max_ratio_act": 1,
         }));
         assert_eq!(c.max_ratio, Some(1.5));
-        assert_eq!(c.max_seeding_time, Some(-1), "disabled is off whatever the value");
+        assert_eq!(
+            c.max_seeding_time,
+            Some(-1),
+            "disabled is off whatever the value"
+        );
         assert_eq!(c.share_limit_action.as_deref(), Some("remove"));
-        assert_eq!(c.pairs().unwrap()[0], ("max_ratio".to_string(), "1.5".to_string()));
-        let two = EngineChange { max_ratio: Some(2.0), ..Default::default() };
+        assert_eq!(
+            c.pairs().unwrap()[0],
+            ("max_ratio".to_string(), "1.5".to_string())
+        );
+        let two = EngineChange {
+            max_ratio: Some(2.0),
+            ..Default::default()
+        };
         assert_eq!(two.pairs().unwrap()[0].1, "2.0", "written as a float");
     }
 }
@@ -610,18 +738,35 @@ mod worker_tests {
         let declared = min_seed
             .map(|h| format!("\n[announce_min_seed_hours]\n\"tracker.example\" = \"{h}\"\n"))
             .unwrap_or_default();
-        state_from(tag, &format!("[daemon]\napi_key = \"{KEY}\"\n\n[race]\nlisten_port = 16171\n{race}\n{declared}"))
+        state_from(
+            tag,
+            &format!(
+                "[daemon]\napi_key = \"{KEY}\"\n\n[race]\nlisten_port = 16171\n{race}\n{declared}"
+            ),
+        )
     }
 
     /// A seed on the race engine with its files on disk, `ratio` x its size
     /// uploaded, `seeded_secs` of seeding behind it.
-    fn seed(s: &TestState, name: &str, ratio: u64, seeded_secs: i64) -> (String, std::sync::Arc<TorrentState>, std::path::PathBuf) {
+    fn seed(
+        s: &TestState,
+        name: &str,
+        ratio: u64,
+        seeded_secs: i64,
+    ) -> (String, std::sync::Arc<TorrentState>, std::path::PathBuf) {
         let dir = s.dir.join("data");
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join(name);
         std::fs::write(&file, vec![0u8; SIZE as usize]).unwrap();
         let (hash, _) = crate::api::add_torrent_bytes(
-            &s.state, &torrent_bytes(name), "", dir.to_str().unwrap(), "", false, true, "race",
+            &s.state,
+            &torrent_bytes(name),
+            "",
+            dir.to_str().unwrap(),
+            "",
+            false,
+            true,
+            "race",
         )
         .expect("added");
         let (_, t) = crate::api::find_torrent(&s.state, &hash).expect("held");
@@ -630,7 +775,8 @@ mod worker_tests {
             live.clear();
             live.push(vec!["https://tracker.example/announce".to_string()]);
         }
-        t.status.store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+        t.status
+            .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
         t.is_paused.store(false, Ordering::Relaxed);
         t.total_uploaded.store(ratio * SIZE, Ordering::Relaxed);
         t.seed_secs.store(seeded_secs, Ordering::Relaxed);
@@ -638,13 +784,23 @@ mod worker_tests {
         (hash, t, file)
     }
 
-    fn pass(s: &TestState, book: &mut ShareLimitBook, now: i64) -> crate::workers::ShareLimitOutcome {
+    fn pass(
+        s: &TestState,
+        book: &mut ShareLimitBook,
+        now: i64,
+    ) -> crate::workers::ShareLimitOutcome {
         let mgr = s.engines.get("race").unwrap().manager.clone();
         share_limits_pass(&s.state, &mgr, &s.cfg(), "race", now, book)
     }
 
     fn user_paused(s: &TestState, hash: &str) -> bool {
-        s.store.read().unwrap().paused_hashes("race").unwrap().iter().any(|h| h == hash)
+        s.store
+            .read()
+            .unwrap()
+            .paused_hashes("race")
+            .unwrap()
+            .iter()
+            .any(|h| h == hash)
     }
 
     /// ⭐ The engine's ratio limit stops a seed past it, and only that one;
@@ -681,12 +837,19 @@ mod worker_tests {
         let (_, idle, _) = seed(&s, "idle", 0, 0);
         let (_, busy, _) = seed(&s, "busy", 0, 0);
         let mut book = ShareLimitBook::default();
-        assert_eq!(pass(&s, &mut book, NOW).stopped, 0, "the clock starts now, not at some unmeasured past");
+        assert_eq!(
+            pass(&s, &mut book, NOW).stopped,
+            0,
+            "the clock starts now, not at some unmeasured past"
+        );
         busy.total_uploaded.fetch_add(1000, Ordering::Relaxed);
         assert_eq!(pass(&s, &mut book, NOW + 29 * 60).stopped, 0);
         assert_eq!(pass(&s, &mut book, NOW + 30 * 60).stopped, 1);
         assert!(idle.is_paused.load(Ordering::Relaxed));
-        assert!(!busy.is_paused.load(Ordering::Relaxed), "its upload 29 minutes in reset its clock");
+        assert!(
+            !busy.is_paused.load(Ordering::Relaxed),
+            "its upload 29 minutes in reset its clock"
+        );
     }
 
     /// ⭐⭐ A seed still owing its tracker seeding time is never touched, by
@@ -694,14 +857,22 @@ mod worker_tests {
     /// the race drain's rule. Declaring the hours is what opts it in.
     #[test]
     fn a_seed_under_its_trackers_obligation_is_never_removed() {
-        let s = state("sl-owed", "max_ratio = 1.0\nshare_limit_action = \"remove_with_files\"", Some("72"));
+        let s = state(
+            "sl-owed",
+            "max_ratio = 1.0\nshare_limit_action = \"remove_with_files\"",
+            Some("72"),
+        );
         let (hash, t, file) = seed(&s, "owed", 5, 3600);
         let out = pass(&s, &mut ShareLimitBook::default(), NOW);
         assert_eq!((out.removed, out.stopped, out.held), (0, 0, 1));
         assert!(crate::api::find_torrent(&s.state, &hash).is_some() && file.exists());
         assert!(!t.is_paused.load(Ordering::Relaxed), "not even stopped");
 
-        let s = state("sl-undeclared", "max_ratio = 1.0\nshare_limit_action = \"remove\"", None);
+        let s = state(
+            "sl-undeclared",
+            "max_ratio = 1.0\nshare_limit_action = \"remove\"",
+            None,
+        );
         let (hash, t, _) = seed(&s, "undeclared", 5, 10_000_000);
         let out = pass(&s, &mut ShareLimitBook::default(), NOW);
         assert_eq!((out.removed, out.stopped, out.held), (0, 0, 1));
@@ -709,7 +880,11 @@ mod worker_tests {
         assert!(!t.is_paused.load(Ordering::Relaxed));
 
         // Served: 72 h seeded, now it goes.
-        let s = state("sl-served", "max_ratio = 1.0\nshare_limit_action = \"remove\"", Some("72"));
+        let s = state(
+            "sl-served",
+            "max_ratio = 1.0\nshare_limit_action = \"remove\"",
+            Some("72"),
+        );
         let (hash, _, file) = seed(&s, "served", 5, 72 * 3600);
         assert_eq!(pass(&s, &mut ShareLimitBook::default(), NOW).removed, 1);
         assert!(crate::api::find_torrent(&s.state, &hash).is_none());
@@ -718,23 +893,42 @@ mod worker_tests {
 
     #[test]
     fn remove_with_files_deletes_the_torrent_and_its_data() {
-        let s = state("sl-rmfiles", "max_ratio = 1.0\nshare_limit_action = \"remove_with_files\"", Some("0"));
+        let s = state(
+            "sl-rmfiles",
+            "max_ratio = 1.0\nshare_limit_action = \"remove_with_files\"",
+            Some("0"),
+        );
         let (hash, _, file) = seed(&s, "gone", 2, 0);
         assert!(file.exists());
         assert_eq!(pass(&s, &mut ShareLimitBook::default(), NOW).removed, 1);
-        assert!(crate::api::find_torrent(&s.state, &hash).is_none(), "out of the engine");
-        assert!(s.store.read().unwrap().sessions_of(&hash).is_empty(), "out of the store");
+        assert!(
+            crate::api::find_torrent(&s.state, &hash).is_none(),
+            "out of the engine"
+        );
+        assert!(
+            s.store.read().unwrap().sessions_of(&hash).is_empty(),
+            "out of the store"
+        );
         assert!(!file.exists(), "and its file is gone");
     }
 
     /// Downloading, or stopped by the operator: neither is the worker's.
     #[test]
     fn a_downloading_or_user_stopped_torrent_is_ignored() {
-        let s = state("sl-dl", "max_ratio = 0.0\nshare_limit_action = \"remove\"", Some("0"));
+        let s = state(
+            "sl-dl",
+            "max_ratio = 0.0\nshare_limit_action = \"remove\"",
+            Some("0"),
+        );
         let (dl, t_dl, _) = seed(&s, "downloading", 5, 0);
-        t_dl.status.store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+        t_dl.status
+            .store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
         let (stopped, _, _) = seed(&s, "stopped", 5, 0);
-        s.store.lock().unwrap().set_paused(&stopped, "race", true).unwrap();
+        s.store
+            .lock()
+            .unwrap()
+            .set_paused(&stopped, "race", true)
+            .unwrap();
         let out = pass(&s, &mut ShareLimitBook::default(), NOW);
         assert_eq!((out.removed, out.stopped), (0, 0));
         assert!(crate::api::find_torrent(&s.state, &dl).is_some());
@@ -778,7 +972,13 @@ mod worker_tests {
         assert_eq!(prefs["max_ratio_act"], 0);
         assert_eq!(prefs["queueing_enabled"], false);
         let (_, info) = call(&s, "POST", "/api/v2/torrents/info", "").await;
-        let row = &info.as_array().unwrap().iter().find(|r| r["hash"] == hash.as_str()).unwrap().clone();
+        let row = &info
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["hash"] == hash.as_str())
+            .unwrap()
+            .clone();
         assert_eq!(row["ratio_limit"], -2);
         assert_eq!(row["seeding_time_limit"], -2);
         assert_eq!(row["inactive_seeding_time_limit"], -2);
@@ -787,7 +987,12 @@ mod worker_tests {
         assert_eq!(row["state"], "stalledUP", "seeding, not stopped");
     }
 
-    async fn call(s: &TestState, method: &str, uri: &str, form: &str) -> (StatusCode, serde_json::Value) {
+    async fn call(
+        s: &TestState,
+        method: &str,
+        uri: &str,
+        form: &str,
+    ) -> (StatusCode, serde_json::Value) {
         let req = axum::http::Request::builder()
             .method(method)
             .uri(uri)
@@ -795,10 +1000,18 @@ mod worker_tests {
             .header("content-type", "application/x-www-form-urlencoded")
             .body(axum::body::Body::from(form.to_string()))
             .unwrap();
-        let resp = crate::api::router(s.state.clone()).oneshot(req).await.unwrap();
+        let resp = crate::api::router(s.state.clone())
+            .oneshot(req)
+            .await
+            .unwrap();
         let status = resp.status();
-        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
-        (status, serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null))
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+        )
     }
 
     /// ⭐ `setShareLimits` over POST, hashes in the body, then in the query
@@ -809,11 +1022,19 @@ mod worker_tests {
         let s = state("sl-shim", "max_seeding_time = 600", Some("0"));
         let (a, _, _) = seed(&s, "a", 0, 0);
         let (b, _, _) = seed(&s, "b", 0, 0);
-        let (st, _) = call(&s, "POST", "/api/v2/torrents/setShareLimits",
-            &format!("hashes={a}&ratioLimit=1.5&seedingTimeLimit=-2&inactiveSeedingTimeLimit=30")).await;
+        let (st, _) = call(
+            &s,
+            "POST",
+            "/api/v2/torrents/setShareLimits",
+            &format!("hashes={a}&ratioLimit=1.5&seedingTimeLimit=-2&inactiveSeedingTimeLimit=30"),
+        )
+        .await;
         assert_eq!(st, StatusCode::OK);
         let own = s.store.read().unwrap().share_limits_of(&a);
-        assert_eq!((own.ratio, own.seeding_minutes, own.inactive_minutes), (1.5, -2, 30));
+        assert_eq!(
+            (own.ratio, own.seeding_minutes, own.inactive_minutes),
+            (1.5, -2, 30)
+        );
 
         let (_, info) = call(&s, "POST", "/api/v2/torrents/info", &format!("hashes={a}")).await;
         let row = &info[0];
@@ -822,24 +1043,67 @@ mod worker_tests {
         assert_eq!(row["seeding_time_limit"], -2);
         assert_eq!(row["max_seeding_time"], 600, "followed from the engine");
         assert_eq!(row["max_inactive_seeding_time"], 30);
-        let (_, props) = call(&s, "POST", "/api/v2/torrents/properties", &format!("hash={a}")).await;
+        let (_, props) = call(
+            &s,
+            "POST",
+            "/api/v2/torrents/properties",
+            &format!("hash={a}"),
+        )
+        .await;
         assert_eq!(props["ratio_limit"], 1.5);
         assert_eq!(props["max_seeding_time"], 600);
 
         // `all`, in the query of a POST; the inactive limit absent = -2.
-        let (st, _) = call(&s, "POST", "/api/v2/torrents/setShareLimits?hashes=all&ratioLimit=-1&seedingTimeLimit=90", "").await;
+        let (st, _) = call(
+            &s,
+            "POST",
+            "/api/v2/torrents/setShareLimits?hashes=all&ratioLimit=-1&seedingTimeLimit=90",
+            "",
+        )
+        .await;
         assert_eq!(st, StatusCode::OK);
         for h in [&a, &b] {
             let own = s.store.read().unwrap().share_limits_of(h);
-            assert_eq!((own.ratio, own.seeding_minutes, own.inactive_minutes), (-1.0, 90, -2));
+            assert_eq!(
+                (own.ratio, own.seeding_minutes, own.inactive_minutes),
+                (-1.0, 90, -2)
+            );
         }
-        let (st, _) = call(&s, "GET", &format!("/api/v2/torrents/setShareLimits?hashes={a}&ratioLimit=9&seedingTimeLimit=9"), "").await;
+        let (st, _) = call(
+            &s,
+            "GET",
+            &format!("/api/v2/torrents/setShareLimits?hashes={a}&ratioLimit=9&seedingTimeLimit=9"),
+            "",
+        )
+        .await;
         assert_eq!(st, StatusCode::METHOD_NOT_ALLOWED);
-        let (st, _) = call(&s, "POST", "/api/v2/torrents/setShareLimits", &format!("hashes={a}&ratioLimit=2")).await;
-        assert_eq!(st, StatusCode::BAD_REQUEST, "seedingTimeLimit is required, as in qBittorrent");
+        let (st, _) = call(
+            &s,
+            "POST",
+            "/api/v2/torrents/setShareLimits",
+            &format!("hashes={a}&ratioLimit=2"),
+        )
+        .await;
+        assert_eq!(
+            st,
+            StatusCode::BAD_REQUEST,
+            "seedingTimeLimit is required, as in qBittorrent"
+        );
         // Back to all -2: the row goes, the table stays sparse.
-        call(&s, "POST", "/api/v2/torrents/setShareLimits", &format!("hashes={a}|{b}&ratioLimit=-2&seedingTimeLimit=-2")).await;
-        assert!(s.store.read().unwrap().share_limits_all().unwrap().is_empty());
+        call(
+            &s,
+            "POST",
+            "/api/v2/torrents/setShareLimits",
+            &format!("hashes={a}|{b}&ratioLimit=-2&seedingTimeLimit=-2"),
+        )
+        .await;
+        assert!(s
+            .store
+            .read()
+            .unwrap()
+            .share_limits_all()
+            .unwrap()
+            .is_empty());
     }
 
     /// `setPreferences` writes the engine keys, every local engine, read the
@@ -848,12 +1112,23 @@ mod worker_tests {
     async fn set_preferences_writes_the_share_limits_of_every_engine() {
         let s = state("sl-prefs", "", Some("0"));
         let json = r#"{"max_ratio_enabled":true,"max_ratio":2,"max_seeding_time_enabled":true,"max_seeding_time":1440,"max_ratio_act":3}"#;
-        let body = format!("json={}", json.replace('{', "%7B").replace('}', "%7D").replace('"', "%22").replace(':', "%3A").replace(',', "%2C"));
+        let body = format!(
+            "json={}",
+            json.replace('{', "%7B")
+                .replace('}', "%7D")
+                .replace('"', "%22")
+                .replace(':', "%3A")
+                .replace(',', "%2C")
+        );
         let (st, _) = call(&s, "POST", "/api/v2/app/setPreferences", &body).await;
         assert_eq!(st, StatusCode::OK);
         for id in ["race", "hoard"] {
             let e = super::engine_limits(&s.state, id);
-            assert_eq!((e.ratio, e.seeding_minutes, e.action), (2.0, 1440, super::Action::RemoveWithFiles), "{id}");
+            assert_eq!(
+                (e.ratio, e.seeding_minutes, e.action),
+                (2.0, 1440, super::Action::RemoveWithFiles),
+                "{id}"
+            );
         }
         let (_, prefs) = call(&s, "GET", "/api/v2/app/preferences", "").await;
         assert_eq!(prefs["max_ratio_enabled"], true);
@@ -871,28 +1146,52 @@ mod worker_tests {
         let s = state("sl-native", "", Some("0"));
         let (a, _, _) = seed(&s, "a", 0, 0);
         let req = |m: &str, uri: String, body: &str| {
-            axum::http::Request::builder().method(m).uri(uri).header("X-API-Key", KEY)
-                .header("content-type", "application/json").body(axum::body::Body::from(body.to_string())).unwrap()
+            axum::http::Request::builder()
+                .method(m)
+                .uri(uri)
+                .header("X-API-Key", KEY)
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(body.to_string()))
+                .unwrap()
         };
         let resp = crate::api::router(s.state.clone())
-            .oneshot(req("POST", format!("/api/torrents/{a}/share-limits"), r#"{"ratio_limit": 3, "seeding_time_limit": -1}"#))
-            .await.unwrap();
+            .oneshot(req(
+                "POST",
+                format!("/api/torrents/{a}/share-limits"),
+                r#"{"ratio_limit": 3, "seeding_time_limit": -1}"#,
+            ))
+            .await
+            .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let v = crate::api::testing::body_json(resp).await;
         assert_eq!(v["copies"][0]["ratio_limit"], 3);
         assert_eq!(v["copies"][0]["seeding_time_limit"], -1);
         assert_eq!(v["copies"][0]["inactive_seeding_time_limit"], -2);
         let resp = crate::api::router(s.state.clone())
-            .oneshot(req("POST", "/api/engines/hoard/share-limits".into(), r#"{"max_ratio": 1.25, "share_limit_action": "remove"}"#))
-            .await.unwrap();
+            .oneshot(req(
+                "POST",
+                "/api/engines/hoard/share-limits".into(),
+                r#"{"max_ratio": 1.25, "share_limit_action": "remove"}"#,
+            ))
+            .await
+            .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let v = crate::api::testing::body_json(resp).await;
         assert_eq!(v["max_ratio"], 1.25);
         assert_eq!(v["share_limit_action"], "remove");
-        assert_eq!(super::engine_limits(&s.state, "race").ratio, -1.0, "the other engine is untouched");
+        assert_eq!(
+            super::engine_limits(&s.state, "race").ratio,
+            -1.0,
+            "the other engine is untouched"
+        );
         let resp = crate::api::router(s.state.clone())
-            .oneshot(req("POST", "/api/engines/hoard/share-limits".into(), r#"{"share_limit_action": "delete"}"#))
-            .await.unwrap();
+            .oneshot(req(
+                "POST",
+                "/api/engines/hoard/share-limits".into(),
+                r#"{"share_limit_action": "delete"}"#,
+            ))
+            .await
+            .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
@@ -902,21 +1201,43 @@ mod worker_tests {
         let s = state("sl-add", "", Some("0"));
         let boundary = "XyZ";
         let mut body = Vec::new();
-        for (k, v) in [("savepath", s.dir.join("data").to_str().unwrap().to_string()), ("skip_checking", "true".into()),
-                       ("ratioLimit", "1.5".into()), ("seedingTimeLimit", "4320".into())] {
-            body.extend_from_slice(format!("--{boundary}\r\nContent-Disposition: form-data; name=\"{k}\"\r\n\r\n{v}\r\n").as_bytes());
+        for (k, v) in [
+            ("savepath", s.dir.join("data").to_str().unwrap().to_string()),
+            ("skip_checking", "true".into()),
+            ("ratioLimit", "1.5".into()),
+            ("seedingTimeLimit", "4320".into()),
+        ] {
+            body.extend_from_slice(
+                format!(
+                    "--{boundary}\r\nContent-Disposition: form-data; name=\"{k}\"\r\n\r\n{v}\r\n"
+                )
+                .as_bytes(),
+            );
         }
         body.extend_from_slice(format!("--{boundary}\r\nContent-Disposition: form-data; name=\"torrents\"; filename=\"x.torrent\"\r\nContent-Type: application/x-bittorrent\r\n\r\n").as_bytes());
         body.extend_from_slice(&torrent_bytes("added"));
         body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
-        let req = axum::http::Request::builder().method("POST").uri("/api/v2/torrents/add").header("X-API-Key", KEY)
-            .header("content-type", format!("multipart/form-data; boundary={boundary}"))
-            .body(axum::body::Body::from(body)).unwrap();
-        let resp = crate::api::router(s.state.clone()).oneshot(req).await.unwrap();
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/v2/torrents/add")
+            .header("X-API-Key", KEY)
+            .header(
+                "content-type",
+                format!("multipart/form-data; boundary={boundary}"),
+            )
+            .body(axum::body::Body::from(body))
+            .unwrap();
+        let resp = crate::api::router(s.state.clone())
+            .oneshot(req)
+            .await
+            .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let all = s.store.read().unwrap().share_limits_all().unwrap();
         assert_eq!(all.len(), 1);
         let own = all.values().next().unwrap();
-        assert_eq!((own.ratio, own.seeding_minutes, own.inactive_minutes), (1.5, 4320, -2));
+        assert_eq!(
+            (own.ratio, own.seeding_minutes, own.inactive_minutes),
+            (1.5, 4320, -2)
+        );
     }
 }

@@ -67,7 +67,9 @@ by info_hash; there is no write by filter.";
 pub fn routes() -> axum::Router<AppState> {
     axum::Router::new().route(
         "/mcp",
-        axum::routing::post(post_mcp).get(no_stream).delete(no_stream),
+        axum::routing::post(post_mcp)
+            .get(no_stream)
+            .delete(no_stream),
     )
 }
 
@@ -146,7 +148,12 @@ pub(crate) async fn post_mcp(
     // Batches were dropped from the protocol in 2025-06-18; answering one
     // half-way would be worse than refusing it.
     if msg.is_array() {
-        return rpc_error(StatusCode::BAD_REQUEST, Value::Null, -32600, "batching is not supported");
+        return rpc_error(
+            StatusCode::BAD_REQUEST,
+            Value::Null,
+            -32600,
+            "batching is not supported",
+        );
     }
     // No id: a notification (or a response to a request we never send).
     // Nothing to answer, and the spec wants 202 with no body.
@@ -158,8 +165,15 @@ pub(crate) async fn post_mcp(
 
     match method {
         "initialize" => {
-            let asked = params.get("protocolVersion").and_then(Value::as_str).unwrap_or("");
-            let version = if PROTOCOL_VERSIONS.contains(&asked) { asked } else { PROTOCOL_VERSIONS[0] };
+            let asked = params
+                .get("protocolVersion")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let version = if PROTOCOL_VERSIONS.contains(&asked) {
+                asked
+            } else {
+                PROTOCOL_VERSIONS[0]
+            };
             rpc_result(
                 id,
                 json!({
@@ -174,11 +188,15 @@ pub(crate) async fn post_mcp(
         "tools/list" => rpc_result(id, json!({"tools": tools(destructive_allowed(&state))})),
         "tools/call" => {
             let name = params.get("name").and_then(Value::as_str).unwrap_or("");
-            let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+            let args = params
+                .get("arguments")
+                .cloned()
+                .unwrap_or_else(|| json!({}));
             if !tool_names(true).iter().any(|n| *n == name) {
                 return rpc_error(StatusCode::OK, id, -32602, &format!("unknown tool: {name}"));
             }
-            let outcome = if DESTRUCTIVE.iter().any(|n| *n == name) && !destructive_allowed(&state) {
+            let outcome = if DESTRUCTIVE.iter().any(|n| *n == name) && !destructive_allowed(&state)
+            {
                 // Not listed, and refused if called anyway: a client that
                 // cached an older tool list must not get around the switch.
                 Err(format!(
@@ -204,7 +222,12 @@ pub(crate) async fn post_mcp(
                 ),
             }
         }
-        _ => rpc_error(StatusCode::OK, id, -32601, &format!("method not found: {method}")),
+        _ => rpc_error(
+            StatusCode::OK,
+            id,
+            -32601,
+            &format!("method not found: {method}"),
+        ),
     }
 }
 
@@ -250,11 +273,27 @@ fn tool_names(with_destructive: bool) -> Vec<&'static str> {
 }
 
 const ALL_NAMES: &[&str] = &[
-    "overview", "find_torrents", "torrent_detail", "torrent_files", "tracker_errors",
-    "trackers", "categories", "health", "drain", "jobs", "logs",
-    "pause", "resume", "reannounce", "recheck", "set_category", "set_tags", "move_to_category",
+    "overview",
+    "find_torrents",
+    "torrent_detail",
+    "torrent_files",
+    "tracker_errors",
+    "trackers",
+    "categories",
+    "health",
+    "drain",
+    "jobs",
+    "logs",
+    "pause",
+    "resume",
+    "reannounce",
+    "recheck",
+    "set_category",
+    "set_tags",
+    "move_to_category",
     "add_torrent",
-    "delete_torrents", "purge_race",
+    "delete_torrents",
+    "purge_race",
 ];
 
 fn read_only(title: &str) -> Value {
@@ -291,8 +330,10 @@ fn tool(name: &str, description: &str, schema: Value, annotations: Value) -> Val
 fn tools(with_destructive: bool) -> Value {
     let engine = json!({"type": "string",
         "description": "Engine id, as listed by `overview`. Defaults to `hoard`."});
-    let limit = |def: usize, max: usize| json!({"type": "integer", "minimum": 1, "maximum": max,
-        "description": format!("Default {def}.")});
+    let limit = |def: usize, max: usize| {
+        json!({"type": "integer", "minimum": 1, "maximum": max,
+        "description": format!("Default {def}.")})
+    };
     let mut v = vec![
         tool("overview",
             "Every engine on this node with its torrent count, live rates, and counts by state, \
@@ -440,10 +481,15 @@ fn tools(with_destructive: bool) -> Value {
                 "engine": {"type": "string", "description": "Only the copy in this engine. Default: every copy."},
             }), &["info_hashes"]),
             destructive("Delete torrents")));
-        v.push(tool("purge_race",
+        v.push(tool(
+            "purge_race",
             "Remove race torrents and free their slot and data on the race volume.",
-            obj(json!({"info_hashes": hashes_schema(MAX_PER_TORRENT)}), &["info_hashes"]),
-            destructive("Purge race torrents")));
+            obj(
+                json!({"info_hashes": hashes_schema(MAX_PER_TORRENT)}),
+                &["info_hashes"],
+            ),
+            destructive("Purge race torrents"),
+        ));
     }
     Value::Array(v)
 }
@@ -508,7 +554,10 @@ fn arg_hashes(args: &Value, max: usize) -> Result<Vec<String>, String> {
         }
     }
     if out.len() > max {
-        return Err(format!("{} torrents named; this tool takes at most {max} per call", out.len()));
+        return Err(format!(
+            "{} torrents named; this tool takes at most {max} per call",
+            out.len()
+        ));
     }
     Ok(out)
 }
@@ -516,14 +565,26 @@ fn arg_hashes(args: &Value, max: usize) -> Result<Vec<String>, String> {
 /// The engine a call is about. Refused by name when unknown, listing the
 /// real ones: an empty page would read as "no such torrents".
 fn pick_engine(state: &AppState, args: &Value) -> Result<String, String> {
-    let ids: Vec<String> = state.engines.engines().iter().map(|e| e.id.clone()).collect();
+    let ids: Vec<String> = state
+        .engines
+        .engines()
+        .iter()
+        .map(|e| e.id.clone())
+        .collect();
     let wanted = arg_str(args, "engine").unwrap_or_else(|| {
-        if ids.iter().any(|i| i == "hoard") { "hoard".into() } else { ids.first().cloned().unwrap_or_default() }
+        if ids.iter().any(|i| i == "hoard") {
+            "hoard".into()
+        } else {
+            ids.first().cloned().unwrap_or_default()
+        }
     });
     if ids.iter().any(|i| *i == wanted) {
         Ok(wanted)
     } else {
-        Err(format!("unknown engine `{wanted}`; this node runs: {}", ids.join(", ")))
+        Err(format!(
+            "unknown engine `{wanted}`; this node runs: {}",
+            ids.join(", ")
+        ))
     }
 }
 
@@ -532,11 +593,19 @@ fn pick_engine(state: &AppState, args: &Value) -> Result<String, String> {
 fn top(facet: &Value, n: usize) -> Value {
     let mut v: Vec<(String, i64)> = facet
         .as_object()
-        .map(|o| o.iter().map(|(k, c)| (k.clone(), c.as_i64().unwrap_or(0))).collect())
+        .map(|o| {
+            o.iter()
+                .map(|(k, c)| (k.clone(), c.as_i64().unwrap_or(0)))
+                .collect()
+        })
         .unwrap_or_default();
     v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     let total = v.len();
-    let list: Vec<Value> = v.into_iter().take(n).map(|(k, c)| json!({"name": k, "count": c})).collect();
+    let list: Vec<Value> = v
+        .into_iter()
+        .take(n)
+        .map(|(k, c)| json!({"name": k, "count": c}))
+        .collect();
     if total > n {
         json!({"top": list, "distinct": total})
     } else {
@@ -545,9 +614,24 @@ fn top(facet: &Value, n: usize) -> Value {
 }
 
 const ROW_FIELDS: &[&str] = &[
-    "name", "info_hash", "state", "progress", "total_size", "category", "tags",
-    "tracker_host", "ratio", "total_upload", "upload_rate", "download_rate",
-    "num_peers", "num_seeds", "added_time", "save_path", "agent", "user_paused",
+    "name",
+    "info_hash",
+    "state",
+    "progress",
+    "total_size",
+    "category",
+    "tags",
+    "tracker_host",
+    "ratio",
+    "total_upload",
+    "upload_rate",
+    "download_rate",
+    "num_peers",
+    "num_seeds",
+    "added_time",
+    "save_path",
+    "agent",
+    "user_paused",
 ];
 
 /// The fields an agent reasons with. A full row is ~35 fields; twenty-five of
@@ -560,18 +644,27 @@ fn compact(row: &Value) -> Value {
         }
     }
     if row.get("tracker_error").and_then(Value::as_bool) == Some(true) {
-        let msg = row.get("tracker_error_msg").and_then(Value::as_str).unwrap_or("");
+        let msg = row
+            .get("tracker_error_msg")
+            .and_then(Value::as_str)
+            .unwrap_or("");
         o.insert("tracker_error".into(), json!(msg));
         o.insert("error_class".into(), json!(crate::errclass::classify(msg)));
     }
     if row.get("torrent_error").and_then(Value::as_bool) == Some(true) {
-        o.insert("torrent_error".into(), row.get("torrent_error_msg").cloned().unwrap_or(Value::Null));
+        o.insert(
+            "torrent_error".into(),
+            row.get("torrent_error_msg").cloned().unwrap_or(Value::Null),
+        );
     }
     Value::Object(o)
 }
 
 fn rows_of(page: &Value) -> Vec<Value> {
-    page.get("rows").and_then(Value::as_array).cloned().unwrap_or_default()
+    page.get("rows")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
 }
 
 /// Run one `/api` request through the real router, in-process.
@@ -580,10 +673,18 @@ fn rows_of(page: &Value) -> Vec<Value> {
 /// key so the handler's `guard!` lets it through exactly as it would an
 /// operator's. Built per call: a router is a table of two hundred routes, not
 /// something that costs to make, and holding one would pin a state.
-async fn internal(state: &AppState, method: Method, uri: &str, body: Option<Value>) -> (StatusCode, Value) {
+async fn internal(
+    state: &AppState,
+    method: Method,
+    uri: &str,
+    body: Option<Value>,
+) -> (StatusCode, Value) {
     use tower::ServiceExt;
     let key = state.cfg().daemon.api_key.clone();
-    let mut req = axum::http::Request::builder().method(method).uri(uri).header("X-Api-Key", key);
+    let mut req = axum::http::Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("X-Api-Key", key);
     let body = match body {
         Some(v) => {
             req = req.header(header::CONTENT_TYPE, "application/json");
@@ -600,7 +701,9 @@ async fn internal(state: &AppState, method: Method, uri: &str, body: Option<Valu
         Err(never) => match never {},
     };
     let status = resp.status();
-    let bytes = axum::body::to_bytes(resp.into_body(), 64 << 20).await.unwrap_or_default();
+    let bytes = axum::body::to_bytes(resp.into_body(), 64 << 20)
+        .await
+        .unwrap_or_default();
     let v = serde_json::from_slice(&bytes)
         .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&bytes).into_owned()));
     (status, v)
@@ -663,10 +766,20 @@ async fn overview(state: &AppState) -> Result<Value, String> {
 async fn find_torrents(state: &AppState, args: &Value) -> Result<Value, String> {
     let engine = pick_engine(state, args)?;
     let offset = arg_usize(args, "offset").unwrap_or(0);
-    let limit = arg_usize(args, "limit").unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
+    let limit = arg_usize(args, "limit")
+        .unwrap_or(DEFAULT_LIMIT)
+        .clamp(1, MAX_LIMIT);
 
     let mut q = format!("offset={offset}&limit={limit}");
-    for key in ["search", "category", "tag", "tracker", "state", "error_class", "sort"] {
+    for key in [
+        "search",
+        "category",
+        "tag",
+        "tracker",
+        "state",
+        "error_class",
+        "sort",
+    ] {
         if let Some(v) = arg_str(args, key) {
             q.push_str(&format!("&{key}={}", enc(&v)));
         }
@@ -696,8 +809,14 @@ async fn find_torrents(state: &AppState, args: &Value) -> Result<Value, String> 
 }
 
 fn one_hash(args: &Value) -> Result<String, String> {
-    let hash = arg_str(args, "info_hash").unwrap_or_default().to_ascii_lowercase();
-    if is_hash(&hash) { Ok(hash) } else { Err("info_hash must be 40 hexadecimal characters".into()) }
+    let hash = arg_str(args, "info_hash")
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if is_hash(&hash) {
+        Ok(hash)
+    } else {
+        Err("info_hash must be 40 hexadecimal characters".into())
+    }
 }
 
 async fn torrent_detail(state: &AppState, args: &Value) -> Result<Value, String> {
@@ -711,7 +830,9 @@ async fn torrent_detail(state: &AppState, args: &Value) -> Result<Value, String>
         .into_iter()
         .find(|r| r.get("info_hash").and_then(Value::as_str) == Some(hash.as_str()))
         .map(|r| match r {
-            Value::Object(o) => Value::Object(o.into_iter().filter(|(_, v)| !v.is_null()).collect()),
+            Value::Object(o) => {
+                Value::Object(o.into_iter().filter(|(_, v)| !v.is_null()).collect())
+            }
             other => other,
         })
         .unwrap_or(Value::Null);
@@ -722,7 +843,11 @@ async fn torrent_files(state: &AppState, args: &Value) -> Result<Value, String> 
     let hash = one_hash(args)?;
     let limit = arg_usize(args, "limit").unwrap_or(100).clamp(1, 1000);
     let v = get_json(state, &format!("/api/torrents/{hash}/files")).await?;
-    let files = v.get("files").and_then(Value::as_array).cloned().unwrap_or_default();
+    let files = v
+        .get("files")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
     let total: u64 = files.iter().filter_map(|f| f["size"].as_u64()).sum();
     Ok(json!({
         "info_hash": hash,
@@ -743,7 +868,11 @@ async fn tracker_errors(state: &AppState, args: &Value) -> Result<Value, String>
             let mut v: Vec<(String, i64)> = page
                 .pointer("/facets/error_class")
                 .and_then(Value::as_object)
-                .map(|o| o.iter().map(|(k, n)| (k.clone(), n.as_i64().unwrap_or(0))).collect())
+                .map(|o| {
+                    o.iter()
+                        .map(|(k, n)| (k.clone(), n.as_i64().unwrap_or(0)))
+                        .collect()
+                })
                 .unwrap_or_default();
             v.retain(|(_, n)| *n > 0);
             v.sort_by(|a, b| b.1.cmp(&a.1));
@@ -753,17 +882,23 @@ async fn tracker_errors(state: &AppState, args: &Value) -> Result<Value, String>
 
     let mut out = Vec::new();
     for (class, _) in classes {
-        let q = format!("error_class={}&limit={}&facets=1", enc(&class), samples.max(1));
+        let q = format!(
+            "error_class={}&limit={}&facets=1",
+            enc(&class),
+            samples.max(1)
+        );
         let page = api::fleet_page(state, &engine, &q).await;
         let examples: Vec<Value> = rows_of(&page)
             .iter()
             .take(samples)
-            .map(|r| json!({
-                "name": r.get("name"),
-                "info_hash": r.get("info_hash"),
-                "tracker_host": r.get("tracker_host"),
-                "message": r.get("tracker_error_msg"),
-            }))
+            .map(|r| {
+                json!({
+                    "name": r.get("name"),
+                    "info_hash": r.get("info_hash"),
+                    "tracker_host": r.get("tracker_host"),
+                    "message": r.get("tracker_error_msg"),
+                })
+            })
             .collect();
         out.push(json!({
             "class": class,
@@ -783,7 +918,12 @@ async fn trackers(state: &AppState, args: &Value) -> Result<Value, String> {
     let mut list: Vec<Value> = v.as_array().cloned().unwrap_or_default();
     list.retain(|t| hidden || t["hidden"] != true);
     list.retain(|t| !problems || t["status"] != "ok");
-    list.sort_by(|a, b| b["torrents"].as_i64().unwrap_or(0).cmp(&a["torrents"].as_i64().unwrap_or(0)));
+    list.sort_by(|a, b| {
+        b["torrents"]
+            .as_i64()
+            .unwrap_or(0)
+            .cmp(&a["torrents"].as_i64().unwrap_or(0))
+    });
     let matched = list.len();
     list.truncate(limit);
     Ok(json!({"matched": matched, "returned": list.len(), "trackers": list}))
@@ -803,7 +943,12 @@ async fn drain(state: &AppState, args: &Value) -> Result<Value, String> {
     let status = get_json(state, "/api/drain/status").await?;
     let history = get_json(state, "/api/drain/history").await?;
     let mut runs: Vec<Value> = history.as_array().cloned().unwrap_or_default();
-    runs.sort_by(|a, b| b["timestamp"].as_i64().unwrap_or(0).cmp(&a["timestamp"].as_i64().unwrap_or(0)));
+    runs.sort_by(|a, b| {
+        b["timestamp"]
+            .as_i64()
+            .unwrap_or(0)
+            .cmp(&a["timestamp"].as_i64().unwrap_or(0))
+    });
     runs.truncate(n);
     Ok(json!({"status": status, "recent_runs": runs}))
 }
@@ -816,7 +961,12 @@ async fn jobs(state: &AppState, args: &Value) -> Result<Value, String> {
     if let Some(s) = &want {
         list.retain(|j| j["state"].as_str() == Some(s.as_str()));
     }
-    list.sort_by(|a, b| b["updated_at"].as_i64().unwrap_or(0).cmp(&a["updated_at"].as_i64().unwrap_or(0)));
+    list.sort_by(|a, b| {
+        b["updated_at"]
+            .as_i64()
+            .unwrap_or(0)
+            .cmp(&a["updated_at"].as_i64().unwrap_or(0))
+    });
     let matched = list.len();
     list.truncate(limit);
     Ok(json!({"matched": matched, "returned": list.len(), "jobs": list}))
@@ -850,7 +1000,11 @@ async fn logs(state: &AppState, args: &Value) -> Result<Value, String> {
             None => true,
         })
         .filter(|e| match &module {
-            Some(m) => e["module"].as_str().unwrap_or("").to_lowercase().contains(m),
+            Some(m) => e["module"]
+                .as_str()
+                .unwrap_or("")
+                .to_lowercase()
+                .contains(m),
             None => true,
         })
         .collect();
@@ -904,7 +1058,13 @@ async fn reannounce(state: &AppState, args: &Value) -> Result<Value, String> {
     let hashes = arg_hashes(args, MAX_PER_TORRENT)?;
     let mut results = Vec::new();
     for h in &hashes {
-        let (s, v) = internal(state, Method::POST, &format!("/api/torrents/{h}/reannounce"), None).await;
+        let (s, v) = internal(
+            state,
+            Method::POST,
+            &format!("/api/torrents/{h}/reannounce"),
+            None,
+        )
+        .await;
         results.push(outcome(h, s, v));
     }
     Ok(per_torrent(results))
@@ -933,7 +1093,11 @@ async fn recheck(state: &AppState, args: &Value) -> Result<Value, String> {
 async fn category_names(state: &AppState) -> Result<Vec<String>, String> {
     let v = get_json(state, "/api/categories").await?;
     Ok(v.as_array()
-        .map(|a| a.iter().filter_map(|c| c["name"].as_str().map(str::to_string)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|c| c["name"].as_str().map(str::to_string))
+                .collect()
+        })
         .unwrap_or_default())
 }
 
@@ -945,7 +1109,10 @@ async fn known_category(state: &AppState, category: &str) -> Result<(), String> 
     if names.iter().any(|n| n == category) {
         Ok(())
     } else {
-        Err(format!("unknown category `{category}`; this node has: {}", names.join(", ")))
+        Err(format!(
+            "unknown category `{category}`; this node has: {}",
+            names.join(", ")
+        ))
     }
 }
 
@@ -1024,17 +1191,26 @@ pub(crate) async fn fetch_torrent(url: &str) -> Result<Vec<u8>, String> {
     // Test builds only: names a test gave a fixed address, so a route that
     // fetches a URL can be tried with a name no DNS knows.
     #[cfg(test)]
-    let fixed: Vec<(String, std::net::IpAddr)> = TEST_HOSTS.lock().unwrap_or_else(|p| p.into_inner()).clone();
+    let fixed: Vec<(String, std::net::IpAddr)> =
+        TEST_HOSTS.lock().unwrap_or_else(|p| p.into_inner()).clone();
     #[cfg(not(test))]
     let fixed: Vec<(String, std::net::IpAddr)> = Vec::new();
-    let hosts: Vec<(&str, std::net::IpAddr)> = fixed.iter().map(|(n, ip)| (n.as_str(), *ip)).collect();
-    fetch_torrent_via(&typhon_engine::egress::route(), url, &hosts, typhon_engine::webseed::is_internal_ip).await
+    let hosts: Vec<(&str, std::net::IpAddr)> =
+        fixed.iter().map(|(n, ip)| (n.as_str(), *ip)).collect();
+    fetch_torrent_via(
+        &typhon_engine::egress::route(),
+        url,
+        &hosts,
+        typhon_engine::webseed::is_internal_ip,
+    )
+    .await
 }
 
 /// Names fixed to an address for `fetch_torrent` in test builds. A test adds a
 /// name of its own (unique to it), so tests do not see each other's.
 #[cfg(test)]
-pub(crate) static TEST_HOSTS: std::sync::Mutex<Vec<(String, std::net::IpAddr)>> = std::sync::Mutex::new(Vec::new());
+pub(crate) static TEST_HOSTS: std::sync::Mutex<Vec<(String, std::net::IpAddr)>> =
+    std::sync::Mutex::new(Vec::new());
 
 /// `fetch_torrent` on a given route, with `hosts` names resolved to fixed
 /// addresses instead of by DNS, and `is_internal` deciding which addresses
@@ -1077,7 +1253,11 @@ pub(crate) async fn fetch_torrent_via(
     // one) is dropped at the first chunk past it, not held whole first.
     let mut resp = resp;
     let mut bytes: Vec<u8> = Vec::new();
-    while let Some(chunk) = resp.chunk().await.map_err(|e| format!("{url}: {}", e.without_url()))? {
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .map_err(|e| format!("{url}: {}", e.without_url()))?
+    {
         if bytes.len() + chunk.len() > MAX_TORRENT_BYTES {
             return Err(format!("{url} is larger than {MAX_TORRENT_BYTES} bytes"));
         }
@@ -1101,7 +1281,9 @@ fn read_torrent_file(state: &AppState, path: &str) -> Result<Vec<u8>, String> {
         return Err(refused());
     }
     let mut bytes = Vec::new();
-    file.take(MAX_TORRENT_BYTES as u64 + 1).read_to_end(&mut bytes).map_err(|_| refused())?;
+    file.take(MAX_TORRENT_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| refused())?;
     if bytes.len() > MAX_TORRENT_BYTES
         || typhon_engine::torrent::metainfo::parse_torrent_bytes(&bytes).is_err()
     {
@@ -1118,11 +1300,18 @@ async fn add_torrent(state: &AppState, args: &Value) -> Result<Value, String> {
             return Err("give one of torrent_path, torrent_url or magnet".into());
         }
         let st = state.clone();
-        let (sp, eng) = (arg_str(args, "save_path").unwrap_or_default(), arg_str(args, "engine").unwrap_or_default());
+        let (sp, eng) = (
+            arg_str(args, "save_path").unwrap_or_default(),
+            arg_str(args, "engine").unwrap_or_default(),
+        );
         let tags: Vec<String> = args
             .get("tags")
             .and_then(Value::as_array)
-            .map(|a| a.iter().filter_map(|t| t.as_str().map(|s| s.trim().to_string())).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|t| t.as_str().map(|s| s.trim().to_string()))
+                    .collect()
+            })
             .unwrap_or_default();
         let paused = arg_bool(args, "paused");
         let hash = tokio::task::spawn_blocking(move || {
@@ -1152,7 +1341,12 @@ async fn add_torrent(state: &AppState, args: &Value) -> Result<Value, String> {
     let tags: Vec<String> = args
         .get("tags")
         .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(|t| t.as_str().map(|s| s.trim().to_string())).filter(|t| !t.is_empty()).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|t| t.as_str().map(|s| s.trim().to_string()))
+                .filter(|t| !t.is_empty())
+                .collect()
+        })
         .unwrap_or_default();
     let paused = arg_bool(args, "paused");
 
@@ -1160,7 +1354,16 @@ async fn add_torrent(state: &AppState, args: &Value) -> Result<Value, String> {
     // async workers, as the bulk writes are.
     let st = state.clone();
     let res = tokio::task::spawn_blocking(move || {
-        api::add_torrent_bytes(&st, &bytes, &category, &save_path, &tags.join(","), paused, false, &engine)
+        api::add_torrent_bytes(
+            &st,
+            &bytes,
+            &category,
+            &save_path,
+            &tags.join(","),
+            paused,
+            false,
+            &engine,
+        )
     })
     .await
     .map_err(|e| format!("add panicked: {e}"))?;
@@ -1196,7 +1399,13 @@ async fn purge_race(state: &AppState, args: &Value) -> Result<Value, String> {
     let hashes = arg_hashes(args, MAX_PER_TORRENT)?;
     let mut results = Vec::new();
     for h in &hashes {
-        let (s, v) = internal(state, Method::POST, &format!("/api/race/torrents/{h}/purge"), None).await;
+        let (s, v) = internal(
+            state,
+            Method::POST,
+            &format!("/api/race/torrents/{h}/purge"),
+            None,
+        )
+        .await;
         results.push(outcome(h, s, v));
     }
     Ok(per_torrent(results))
@@ -1214,7 +1423,10 @@ mod tests {
     }
 
     fn st_destructive(tag: &str) -> TestState {
-        state_from(tag, &format!("[daemon]\napi_key = \"{KEY}\"\n\n[mcp]\nallow_destructive = true\n"))
+        state_from(
+            tag,
+            &format!("[daemon]\napi_key = \"{KEY}\"\n\n[mcp]\nallow_destructive = true\n"),
+        )
     }
 
     async fn call(s: &TestState, headers: HeaderMap, body: Value) -> Response {
@@ -1234,14 +1446,26 @@ mod tests {
     /// `tools/call` and its result, asserted to be a result and not a
     /// protocol error.
     async fn tool_call(s: &TestState, name: &str, args: Value) -> Value {
-        let v = body_json(call(s, keyed(KEY), rpc("tools/call", json!({"name": name, "arguments": args}))).await).await;
+        let v = body_json(
+            call(
+                s,
+                keyed(KEY),
+                rpc("tools/call", json!({"name": name, "arguments": args})),
+            )
+            .await,
+        )
+        .await;
         assert!(v.get("error").is_none(), "{name} was a protocol error: {v}");
         v["result"].clone()
     }
 
     async fn ok_call(s: &TestState, name: &str, args: Value) -> Value {
         let r = tool_call(s, name, args).await;
-        assert_eq!(r["isError"], false, "{name} failed: {}", r["content"][0]["text"]);
+        assert_eq!(
+            r["isError"], false,
+            "{name} failed: {}",
+            r["content"][0]["text"]
+        );
         r["structuredContent"].clone()
     }
 
@@ -1266,8 +1490,17 @@ mod tests {
     /// Add through the same path the API uses, so the store has the row the
     /// label and pause writes act on.
     fn add(s: &TestState, name: &str) -> String {
-        let (hash, _) = api::add_torrent_bytes(&s.state, &torrent_bytes(name), "", "/tmp", "", true, true, "hoard")
-            .unwrap_or_else(|e| panic!("add {name}: {e}"));
+        let (hash, _) = api::add_torrent_bytes(
+            &s.state,
+            &torrent_bytes(name),
+            "",
+            "/tmp",
+            "",
+            true,
+            true,
+            "hoard",
+        )
+        .unwrap_or_else(|e| panic!("add {name}: {e}"));
         hash
     }
 
@@ -1295,7 +1528,10 @@ mod tests {
     async fn bearer_is_accepted() {
         let s = st("mcp-bearer");
         let mut h = HeaderMap::new();
-        h.insert(header::AUTHORIZATION, format!("Bearer {KEY}").parse().unwrap());
+        h.insert(
+            header::AUTHORIZATION,
+            format!("Bearer {KEY}").parse().unwrap(),
+        );
         let r = call(&s, h, rpc("ping", json!({}))).await;
         assert_eq!(r.status(), StatusCode::OK);
         let wrong = {
@@ -1303,24 +1539,48 @@ mod tests {
             h.insert(header::AUTHORIZATION, "Bearer nope".parse().unwrap());
             h
         };
-        assert_eq!(call(&s, wrong, rpc("ping", json!({}))).await.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            call(&s, wrong, rpc("ping", json!({}))).await.status(),
+            StatusCode::UNAUTHORIZED
+        );
     }
 
     #[tokio::test]
     async fn initialize_negotiates_the_version() {
         let s = st("mcp-init");
-        let v = body_json(call(&s, keyed(KEY), rpc("initialize", json!({"protocolVersion": "2025-03-26"}))).await).await;
+        let v = body_json(
+            call(
+                &s,
+                keyed(KEY),
+                rpc("initialize", json!({"protocolVersion": "2025-03-26"})),
+            )
+            .await,
+        )
+        .await;
         assert_eq!(v["result"]["protocolVersion"], "2025-03-26");
         assert_eq!(v["result"]["serverInfo"]["name"], "hydranos");
         assert_eq!(v["result"]["serverInfo"]["version"], api::HYDRANOS_VERSION);
-        let v = body_json(call(&s, keyed(KEY), rpc("initialize", json!({"protocolVersion": "1999-01-01"}))).await).await;
+        let v = body_json(
+            call(
+                &s,
+                keyed(KEY),
+                rpc("initialize", json!({"protocolVersion": "1999-01-01"})),
+            )
+            .await,
+        )
+        .await;
         assert_eq!(v["result"]["protocolVersion"], PROTOCOL_VERSIONS[0]);
     }
 
     #[tokio::test]
     async fn notification_gets_202_and_no_body() {
         let s = st("mcp-notif");
-        let r = call(&s, keyed(KEY), json!({"jsonrpc": "2.0", "method": "notifications/initialized"})).await;
+        let r = call(
+            &s,
+            keyed(KEY),
+            json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+        )
+        .await;
         assert_eq!(r.status(), StatusCode::ACCEPTED);
         assert_eq!(body_json(r).await, Value::Null);
     }
@@ -1338,14 +1598,27 @@ mod tests {
         let s = st("mcp-unknown");
         let v = body_json(call(&s, keyed(KEY), rpc("resources/list", json!({}))).await).await;
         assert_eq!(v["error"]["code"], -32601);
-        let v = body_json(call(&s, keyed(KEY), rpc("tools/call", json!({"name": "rm_rf", "arguments": {}}))).await).await;
+        let v = body_json(
+            call(
+                &s,
+                keyed(KEY),
+                rpc("tools/call", json!({"name": "rm_rf", "arguments": {}})),
+            )
+            .await,
+        )
+        .await;
         assert_eq!(v["error"]["code"], -32602);
     }
 
     // --- catalogue --------------------------------------------------------
 
     fn listed(v: &Value) -> Vec<String> {
-        v["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect()
+        v["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap().to_string())
+            .collect()
     }
 
     #[tokio::test]
@@ -1355,7 +1628,10 @@ mod tests {
         let names = listed(&v);
         assert_eq!(names.len(), ALL_NAMES.len() - DESTRUCTIVE.len());
         for d in DESTRUCTIVE {
-            assert!(!names.iter().any(|n| n == d), "{d} listed without the switch");
+            assert!(
+                !names.iter().any(|n| n == d),
+                "{d} listed without the switch"
+            );
         }
         for t in v["result"]["tools"].as_array().unwrap() {
             assert_eq!(t["annotations"]["destructiveHint"], false, "{}", t["name"]);
@@ -1368,9 +1644,14 @@ mod tests {
         let s = st_destructive("mcp-list-d");
         let v = body_json(call(&s, keyed(KEY), rpc("tools/list", json!({}))).await).await;
         let names = listed(&v);
-        assert_eq!(names, ALL_NAMES.iter().map(|n| n.to_string()).collect::<Vec<_>>());
+        assert_eq!(
+            names,
+            ALL_NAMES.iter().map(|n| n.to_string()).collect::<Vec<_>>()
+        );
         for t in v["result"]["tools"].as_array().unwrap() {
-            let d = DESTRUCTIVE.iter().any(|n| *n == t["name"].as_str().unwrap());
+            let d = DESTRUCTIVE
+                .iter()
+                .any(|n| *n == t["name"].as_str().unwrap());
             assert_eq!(t["annotations"]["destructiveHint"], d, "{}", t["name"]);
         }
     }
@@ -1383,8 +1664,14 @@ mod tests {
         let h = add(&s, "keepme");
         let r = tool_call(&s, "delete_torrents", json!({"info_hashes": [h]})).await;
         assert_eq!(r["isError"], true);
-        assert!(r["content"][0]["text"].as_str().unwrap().contains("allow_destructive"));
-        assert!(api::find_torrent(&s.state, &h).is_some(), "the torrent was deleted anyway");
+        assert!(r["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("allow_destructive"));
+        assert!(
+            api::find_torrent(&s.state, &h).is_some(),
+            "the torrent was deleted anyway"
+        );
     }
 
     /// The catalogue and the name list are two literals; they must not drift,
@@ -1392,8 +1679,12 @@ mod tests {
     #[test]
     fn the_catalogue_and_the_names_agree() {
         for with in [false, true] {
-            let listed: Vec<String> = tools(with).as_array().unwrap().iter()
-                .map(|t| t["name"].as_str().unwrap().to_string()).collect();
+            let listed: Vec<String> = tools(with)
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t["name"].as_str().unwrap().to_string())
+                .collect();
             let names: Vec<String> = tool_names(with).iter().map(|n| n.to_string()).collect();
             assert_eq!(listed, names);
         }
@@ -1405,7 +1696,10 @@ mod tests {
     async fn overview_lists_the_engines() {
         let s = st("mcp-overview");
         let out = ok_call(&s, "overview", json!({})).await;
-        assert_eq!(out["engines"].as_array().unwrap().len(), s.engines.engines().len());
+        assert_eq!(
+            out["engines"].as_array().unwrap().len(),
+            s.engines.engines().len()
+        );
     }
 
     #[tokio::test]
@@ -1449,7 +1743,10 @@ mod tests {
         assert_eq!(r["isError"], true);
         let r = tool_call(&s, "find_torrents", json!({"engine": "nope"})).await;
         assert_eq!(r["isError"], true);
-        assert!(r["content"][0]["text"].as_str().unwrap().contains("unknown engine"));
+        assert!(r["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("unknown engine"));
         let r = tool_call(&s, "find_torrents", json!({"order": "sideways"})).await;
         assert_eq!(r["isError"], true);
     }
@@ -1457,8 +1754,13 @@ mod tests {
     #[tokio::test]
     async fn the_small_reads_answer() {
         let s = st("mcp-reads");
-        for (tool, key) in [("trackers", "trackers"), ("categories", "categories"), ("jobs", "jobs"),
-                            ("logs", "entries"), ("drain", "status")] {
+        for (tool, key) in [
+            ("trackers", "trackers"),
+            ("categories", "categories"),
+            ("jobs", "jobs"),
+            ("logs", "entries"),
+            ("drain", "status"),
+        ] {
             let out = ok_call(&s, tool, json!({})).await;
             assert!(out.get(key).is_some(), "{tool} has no `{key}`: {out}");
         }
@@ -1486,7 +1788,10 @@ mod tests {
         let too_many: Vec<String> = (0..=MAX_PER_TORRENT).map(|i| format!("{i:040x}")).collect();
         let r = tool_call(&s, "reannounce", json!({"info_hashes": too_many})).await;
         assert_eq!(r["isError"], true);
-        assert!(r["content"][0]["text"].as_str().unwrap().contains("at most"));
+        assert!(r["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("at most"));
     }
 
     #[tokio::test]
@@ -1507,32 +1812,65 @@ mod tests {
 
     #[tokio::test]
     async fn category_must_exist_and_tags_replace() {
-        let s = state_from(
-            "mcp-labels",
-            &format!("[daemon]\napi_key = \"{KEY}\"\n"),
-        );
+        let s = state_from("mcp-labels", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
         let h = add(&s, "golf");
-        let r = tool_call(&s, "set_category", json!({"info_hashes": [h], "category": "no-such-category"})).await;
+        let r = tool_call(
+            &s,
+            "set_category",
+            json!({"info_hashes": [h], "category": "no-such-category"}),
+        )
+        .await;
         assert_eq!(r["isError"], true);
-        assert!(r["content"][0]["text"].as_str().unwrap().contains("unknown category"));
+        assert!(r["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("unknown category"));
         // Clearing is always allowed.
-        let out = ok_call(&s, "set_category", json!({"info_hashes": [h], "category": ""})).await;
+        let out = ok_call(
+            &s,
+            "set_category",
+            json!({"info_hashes": [h], "category": ""}),
+        )
+        .await;
         assert_eq!(out["ok"], 1, "{out}");
-        let out = ok_call(&s, "set_tags", json!({"info_hashes": [h], "tags": ["one", " two ", ""]})).await;
+        let out = ok_call(
+            &s,
+            "set_tags",
+            json!({"info_hashes": [h], "tags": ["one", " two ", ""]}),
+        )
+        .await;
         assert_eq!(out["ok"], 1, "{out}");
         let row = ok_call(&s, "find_torrents", json!({"search": "golf"})).await;
         let tags = row["rows"][0]["tags"].clone();
-        assert!(tags.to_string().contains("one") && tags.to_string().contains("two"), "{tags}");
+        assert!(
+            tags.to_string().contains("one") && tags.to_string().contains("two"),
+            "{tags}"
+        );
     }
 
     #[tokio::test]
     async fn add_torrent_needs_a_known_category_and_one_source() {
         let s = st("mcp-add");
-        let r = tool_call(&s, "add_torrent", json!({"torrent_path": "/nonexistent.torrent"})).await;
+        let r = tool_call(
+            &s,
+            "add_torrent",
+            json!({"torrent_path": "/nonexistent.torrent"}),
+        )
+        .await;
         assert_eq!(r["isError"], true, "category is required");
-        let r = tool_call(&s, "add_torrent", json!({"category": "nope", "torrent_path": "/x"})).await;
+        let r = tool_call(
+            &s,
+            "add_torrent",
+            json!({"category": "nope", "torrent_path": "/x"}),
+        )
+        .await;
         assert_eq!(r["isError"], true);
-        let r = tool_call(&s, "add_torrent", json!({"category": "x", "torrent_url": "ftp://x"})).await;
+        let r = tool_call(
+            &s,
+            "add_torrent",
+            json!({"category": "x", "torrent_url": "ftp://x"}),
+        )
+        .await;
         assert_eq!(r["isError"], true);
     }
 
@@ -1556,9 +1894,11 @@ mod tests {
         let out = ok_call(&s, "delete_torrents", json!({"info_hashes": [h]})).await;
         assert_eq!(out["delete_files"], false);
         assert_eq!(out["ok"], 1, "{out}");
-        assert!(api::find_torrent(&s.state, &h).is_none(), "still there after delete");
+        assert!(
+            api::find_torrent(&s.state, &h).is_none(),
+            "still there after delete"
+        );
     }
-
 
     // --- moving data with a category ---------------------------------------
 
@@ -1567,25 +1907,48 @@ mod tests {
         std::fs::create_dir_all(root).unwrap();
         std::fs::write(root.join(name), vec![0x11u8; 16384]).unwrap();
         let (hash, _) = api::add_torrent_bytes(
-            &s.state, &torrent_bytes(name), "", &root.to_string_lossy(), "", true, true, "hoard",
+            &s.state,
+            &torrent_bytes(name),
+            "",
+            &root.to_string_lossy(),
+            "",
+            true,
+            true,
+            "hoard",
         )
         .unwrap_or_else(|e| panic!("add {name}: {e}"));
         hash
     }
 
     async fn make_category(s: &TestState, name: &str, path: &std::path::Path) {
-        let (st, v) = internal(&s.state, Method::POST, "/api/categories",
-            Some(json!({"name": name, "save_path": path.to_string_lossy(), "mode": "hoard"}))).await;
+        let (st, v) = internal(
+            &s.state,
+            Method::POST,
+            "/api/categories",
+            Some(json!({"name": name, "save_path": path.to_string_lossy(), "mode": "hoard"})),
+        )
+        .await;
         assert!(st.is_success(), "category {name}: {st} {v}");
     }
 
     async fn set_cat(s: &TestState, hash: &str, body: Value) -> (StatusCode, Value) {
-        internal(&s.state, Method::POST, &format!("/api/hoard/torrents/{hash}/category"), Some(body)).await
+        internal(
+            &s.state,
+            Method::POST,
+            &format!("/api/hoard/torrents/{hash}/category"),
+            Some(body),
+        )
+        .await
     }
 
     /// Run the queued job the way the runner would, synchronously.
     fn run_next_job(s: &TestState) -> Result<(), String> {
-        let job = s.store.lock().unwrap().claim_next_job().expect("a queued job");
+        let job = s
+            .store
+            .lock()
+            .unwrap()
+            .claim_next_job()
+            .expect("a queued job");
         crate::jobsrun::run_job(&s.state, &job)
     }
 
@@ -1617,13 +1980,21 @@ mod tests {
         let h = add_on_disk(&s, &src, "move.bin");
         make_category(&s, "books", &dst).await;
 
-        let (st_, v) = internal(&s.state, Method::GET,
-            &format!("/api/hoard/torrents/{h}/move-preview?category=books"), None).await;
+        let (st_, v) = internal(
+            &s.state,
+            Method::GET,
+            &format!("/api/hoard/torrents/{h}/move-preview?category=books"),
+            None,
+        )
+        .await;
         assert_eq!(st_, StatusCode::OK, "{v}");
         assert_eq!(v["kind"], "move_data");
         assert_eq!(v["plan"]["rename_files"], 1);
         assert_eq!(v["plan"]["copy_files"], 0);
-        assert!(src.join("move.bin").exists(), "a preview must not move anything");
+        assert!(
+            src.join("move.bin").exists(),
+            "a preview must not move anything"
+        );
 
         let (st_, v) = set_cat(&s, &h, json!({"category": "books", "move_files": true})).await;
         assert_eq!(st_, StatusCode::ACCEPTED, "{v}");
@@ -1634,11 +2005,21 @@ mod tests {
 
         run_next_job(&s).expect("the move");
         assert!(dst.join("move.bin").exists(), "the file is at the target");
-        assert!(!src.join("move.bin").exists(), "and no longer at the source");
+        assert!(
+            !src.join("move.bin").exists(),
+            "and no longer at the source"
+        );
         assert_eq!(std::fs::read(dst.join("move.bin")).unwrap().len(), 16384);
-        assert_eq!(root_of(&s, &h), dst, "the engine reads it from the new root");
+        assert_eq!(
+            root_of(&s, &h),
+            dst,
+            "the engine reads it from the new root"
+        );
         let (_, t) = api::find_torrent(&s.state, &h).unwrap();
-        assert!(t.is_paused.load(std::sync::atomic::Ordering::Relaxed), "a paused torrent stays paused");
+        assert!(
+            t.is_paused.load(std::sync::atomic::Ordering::Relaxed),
+            "a paused torrent stays paused"
+        );
         let row = ok_call(&s, "find_torrents", json!({"search": "move"})).await;
         assert_eq!(row["rows"][0]["category"], "books");
     }
@@ -1707,14 +2088,25 @@ mod tests {
         assert_eq!(v["reason"], "hardlinks");
         assert_eq!(v["hardlinked_files"], 1);
 
-        let (st_, v) = set_cat(&s, &h, json!({"category": "books", "move_files": true,
-                                              "allow_breaking_hardlinks": true})).await;
+        let (st_, v) = set_cat(
+            &s,
+            &h,
+            json!({"category": "books", "move_files": true,
+                                              "allow_breaking_hardlinks": true}),
+        )
+        .await;
         assert_eq!(st_, StatusCode::ACCEPTED, "{v}");
         assert_eq!(v["plan"]["copy_files"], 1);
         run_next_job(&s).expect("the copy");
         assert!(dst.join("linked.bin").exists());
-        assert!(!src.join("linked.bin").exists(), "the torrent's name is gone from the source");
-        assert!(src.join("library-copy.bin").exists(), "the other name keeps its bytes");
+        assert!(
+            !src.join("linked.bin").exists(),
+            "the torrent's name is gone from the source"
+        );
+        assert!(
+            src.join("library-copy.bin").exists(),
+            "the other name keeps its bytes"
+        );
         assert_eq!(root_of(&s, &h), dst);
         std::fs::remove_dir_all(&src).ok();
     }
@@ -1725,20 +2117,35 @@ mod tests {
         let (src, dst) = (s.dir.join("src"), s.dir.join("dst"));
         let h = add_on_disk(&s, &src, "agent.bin");
         make_category(&s, "books", &dst).await;
-        let out = ok_call(&s, "move_to_category", json!({"info_hashes": [h], "category": "books"})).await;
+        let out = ok_call(
+            &s,
+            "move_to_category",
+            json!({"info_hashes": [h], "category": "books"}),
+        )
+        .await;
         assert_eq!(out["ok"], 1, "{out}");
         assert_eq!(out["results"][0]["status"], 202);
         run_next_job(&s).expect("the move");
         assert!(dst.join("agent.bin").exists());
-        let r = tool_call(&s, "move_to_category", json!({"info_hashes": [h], "category": "nope"})).await;
+        let r = tool_call(
+            &s,
+            "move_to_category",
+            json!({"info_hashes": [h], "category": "nope"}),
+        )
+        .await;
         assert_eq!(r["isError"], true);
     }
-
 
     // --- moving data to a folder of one's choosing -------------------------
 
     async fn set_loc(s: &TestState, hash: &str, body: Value) -> (StatusCode, Value) {
-        internal(&s.state, Method::POST, &format!("/api/hoard/torrents/{hash}/location"), Some(body)).await
+        internal(
+            &s.state,
+            Method::POST,
+            &format!("/api/hoard/torrents/{hash}/location"),
+            Some(body),
+        )
+        .await
     }
 
     /// The move a category does, to a folder no category names, and the
@@ -1756,14 +2163,31 @@ mod tests {
         assert_eq!(st_, StatusCode::ACCEPTED, "{v}");
         assert_eq!(v["kind"], "move_data");
         let (st2, _) = set_loc(&s, &h, json!({"location": dst.to_string_lossy()})).await;
-        assert_eq!(st2, StatusCode::CONFLICT, "a second move while one is queued is refused");
+        assert_eq!(
+            st2,
+            StatusCode::CONFLICT,
+            "a second move while one is queued is refused"
+        );
 
         run_next_job(&s).expect("the move");
-        assert!(dst.join("episode.bin").exists(), "the file is at the new location");
-        assert!(!src.join("episode.bin").exists(), "and no longer at the old one");
-        assert_eq!(root_of(&s, &h), dst, "the engine reads it from the new root");
+        assert!(
+            dst.join("episode.bin").exists(),
+            "the file is at the new location"
+        );
+        assert!(
+            !src.join("episode.bin").exists(),
+            "and no longer at the old one"
+        );
+        assert_eq!(
+            root_of(&s, &h),
+            dst,
+            "the engine reads it from the new root"
+        );
         let row = ok_call(&s, "find_torrents", json!({"search": "episode"})).await;
-        assert_eq!(row["rows"][0]["category"], "books", "the category did not change");
+        assert_eq!(
+            row["rows"][0]["category"], "books",
+            "the category did not change"
+        );
         assert_eq!(row["rows"][0]["save_path"], dst.to_string_lossy().as_ref());
     }
 
@@ -1777,7 +2201,10 @@ mod tests {
         assert_eq!(st_, StatusCode::OK, "{v}");
         assert_eq!(v["moved"], false);
         assert!(src.join("here.bin").exists());
-        assert!(s.store.lock().unwrap().claim_next_job().is_none(), "no job was queued");
+        assert!(
+            s.store.lock().unwrap().claim_next_job().is_none(),
+            "no job was queued"
+        );
     }
 
     #[tokio::test]
@@ -1818,7 +2245,6 @@ mod tests {
         assert!(src.join("same.bin").exists());
     }
 
-
     // --- moves: what is NOT this torrent's stays put ------------------------
 
     /// A torrent from a list of (path components, length). Lengths and piece
@@ -1834,7 +2260,9 @@ mod tests {
             info.extend_from_slice(b"ee");
             total += len;
         }
-        info.extend_from_slice(format!("e4:name{}:{name}12:piece lengthi16384e", name.len()).as_bytes());
+        info.extend_from_slice(
+            format!("e4:name{}:{name}12:piece lengthi16384e", name.len()).as_bytes(),
+        );
         let pieces = total.div_ceil(16384).max(1);
         info.extend_from_slice(format!("6:pieces{}:", pieces * 20).as_bytes());
         info.extend(std::iter::repeat(salt).take(pieces * 20));
@@ -1847,9 +2275,18 @@ mod tests {
     }
 
     fn add_bytes(s: &TestState, bytes: &[u8], root: &std::path::Path) -> String {
-        api::add_torrent_bytes(&s.state, bytes, "", &root.to_string_lossy(), "", true, true, "hoard")
-            .unwrap_or_else(|e| panic!("add: {e}"))
-            .0
+        api::add_torrent_bytes(
+            &s.state,
+            bytes,
+            "",
+            &root.to_string_lossy(),
+            "",
+            true,
+            true,
+            "hoard",
+        )
+        .unwrap_or_else(|e| panic!("add: {e}"))
+        .0
     }
 
     /// No sub-folder: the torrent's one file sits in a shared category folder
@@ -1872,10 +2309,16 @@ mod tests {
 
         assert!(dst.join("mine.mkv").exists());
         assert!(!src.join("mine.mkv").exists());
-        assert_eq!(std::fs::read(src.join("neighbour.mkv")).unwrap(), b"not mine");
+        assert_eq!(
+            std::fs::read(src.join("neighbour.mkv")).unwrap(),
+            b"not mine"
+        );
         assert!(src.join("other-show").join("e01.mkv").exists());
         assert!(src.is_dir(), "the category folder itself is never removed");
-        assert!(!dst.join("neighbour.mkv").exists(), "nothing but the torrent's own file was copied");
+        assert!(
+            !dst.join("neighbour.mkv").exists(),
+            "nothing but the torrent's own file was copied"
+        );
     }
 
     /// A multi-file torrent's folder that also holds a file the torrent does
@@ -1890,7 +2333,15 @@ mod tests {
         std::fs::write(show.join("e1.bin"), vec![1u8; 100]).unwrap();
         std::fs::write(show.join("s1").join("e2.bin"), vec![2u8; 100]).unwrap();
         std::fs::write(show.join("notes.txt"), b"added by hand").unwrap();
-        let h = add_bytes(&s, &multi_torrent("Show", &[(&["e1.bin"], 100), (&["s1", "e2.bin"], 100)], 0x21), &src);
+        let h = add_bytes(
+            &s,
+            &multi_torrent(
+                "Show",
+                &[(&["e1.bin"], 100), (&["s1", "e2.bin"], 100)],
+                0x21,
+            ),
+            &src,
+        );
         make_category(&s, "books", &dst).await;
 
         let (st_, v) = set_cat(&s, &h, json!({"category": "books", "move_files": true})).await;
@@ -1899,9 +2350,18 @@ mod tests {
 
         assert!(dst.join("Show").join("e1.bin").exists());
         assert!(dst.join("Show").join("s1").join("e2.bin").exists());
-        assert!(!dst.join("Show").join("notes.txt").exists(), "a file the torrent does not name is not copied");
-        assert_eq!(std::fs::read(show.join("notes.txt")).unwrap(), b"added by hand");
-        assert!(!show.join("s1").exists(), "the emptied sub-folder is removed");
+        assert!(
+            !dst.join("Show").join("notes.txt").exists(),
+            "a file the torrent does not name is not copied"
+        );
+        assert_eq!(
+            std::fs::read(show.join("notes.txt")).unwrap(),
+            b"added by hand"
+        );
+        assert!(
+            !show.join("s1").exists(),
+            "the emptied sub-folder is removed"
+        );
         assert!(src.is_dir(), "the old root is never removed");
     }
 
@@ -1931,8 +2391,13 @@ mod tests {
         assert_eq!(v["reason"], "shared");
         assert_eq!(v["plan"]["shared_with"][0], b);
         // Consent to break hardlinks is not consent to this.
-        let (st_, _) = set_cat(&s, &a, json!({"category": "books", "move_files": true,
-                                             "allow_breaking_hardlinks": true})).await;
+        let (st_, _) = set_cat(
+            &s,
+            &a,
+            json!({"category": "books", "move_files": true,
+                                             "allow_breaking_hardlinks": true}),
+        )
+        .await;
         assert_eq!(st_, StatusCode::CONFLICT);
         assert!(src.join("same.bin").exists());
     }
@@ -1946,8 +2411,17 @@ mod tests {
         let src = s.dir.join("src");
         std::fs::create_dir_all(&src).unwrap();
         let bytes = multi_torrent("evil", &[(&["..", "..", "victim.bin"], 10)], 7);
-        let err = api::add_torrent_bytes(&s.state, &bytes, "", &src.to_string_lossy(), "", true, true, "hoard")
-            .expect_err("a torrent that escapes its folder must not be added");
+        let err = api::add_torrent_bytes(
+            &s.state,
+            &bytes,
+            "",
+            &src.to_string_lossy(),
+            "",
+            true,
+            true,
+            "hoard",
+        )
+        .expect_err("a torrent that escapes its folder must not be added");
         assert!(err.contains("unsafe path"), "{err}");
     }
 
@@ -1963,8 +2437,14 @@ mod tests {
     #[test]
     fn top_orders_and_cuts() {
         let f = json!({"a": 1, "b": 5, "c": 3});
-        assert_eq!(top(&f, 5), json!([{"name": "b", "count": 5}, {"name": "c", "count": 3}, {"name": "a", "count": 1}]));
-        assert_eq!(top(&f, 1), json!({"top": [{"name": "b", "count": 5}], "distinct": 3}));
+        assert_eq!(
+            top(&f, 5),
+            json!([{"name": "b", "count": 5}, {"name": "c", "count": 3}, {"name": "a", "count": 1}])
+        );
+        assert_eq!(
+            top(&f, 1),
+            json!({"top": [{"name": "b", "count": 5}], "distinct": 3})
+        );
     }
 
     #[test]
@@ -1986,7 +2466,12 @@ mod tests {
     }
 
     async fn add_from_path(s: &TestState, path: &std::path::Path) -> Value {
-        tool_call(s, "add_torrent", json!({"category": "books", "torrent_path": path.to_string_lossy()})).await
+        tool_call(
+            s,
+            "add_torrent",
+            json!({"category": "books", "torrent_path": path.to_string_lossy()}),
+        )
+        .await
     }
 
     fn error_text(r: &Value) -> String {
@@ -2020,7 +2505,12 @@ mod tests {
         let elsewhere = outside_dir("roots-elsewhere");
         let category = s.dir.join("books");
         std::fs::create_dir_all(&category).unwrap();
-        for (dir, name) in [(&data, "d"), (&root, "r"), (&elsewhere, "e"), (&category, "c")] {
+        for (dir, name) in [
+            (&data, "d"),
+            (&root, "r"),
+            (&elsewhere, "e"),
+            (&category, "c"),
+        ] {
             std::fs::write(dir.join("t.torrent"), torrent_bytes(name)).unwrap();
         }
         let ok = add_from_path(&s, &data.join("t.torrent")).await;
@@ -2043,8 +2533,17 @@ mod tests {
         let other = outside_dir("bypass-other").join("state").join("torrents");
         std::fs::create_dir_all(&other).unwrap();
         std::fs::write(other.join("t.torrent"), torrent_bytes("victim")).unwrap();
-        api::add_torrent_bytes(&s.state, &torrent_bytes("decoy"), "", &other.to_string_lossy(), "", true, true, "hoard")
-            .unwrap();
+        api::add_torrent_bytes(
+            &s.state,
+            &torrent_bytes("decoy"),
+            "",
+            &other.to_string_lossy(),
+            "",
+            true,
+            true,
+            "hoard",
+        )
+        .unwrap();
         error_text(&add_from_path(&s, &other.join("t.torrent")).await);
         for d in [data, root, other] {
             let _ = std::fs::remove_dir_all(&d);
@@ -2064,12 +2563,19 @@ mod tests {
         let body = json!({"changes": [{"section": "daemon", "key": "data_dir", "value": x.to_string_lossy()}]});
         let (status, v) = internal(&s.state, Method::POST, "/api/settings", Some(body)).await;
         assert!(status.is_success(), "{status} {v}");
-        assert_eq!(s.cfg().daemon.data_dir, x.to_string_lossy(), "the live config follows the edit");
+        assert_eq!(
+            s.cfg().daemon.data_dir,
+            x.to_string_lossy(),
+            "the live config follows the edit"
+        );
 
         error_text(&add_from_path(&s, &x.join("t.torrent")).await);
         std::fs::write(data.join("t.torrent"), torrent_bytes("boot")).unwrap();
         let ok = add_from_path(&s, &data.join("t.torrent")).await;
-        assert_eq!(ok["isError"], false, "the data folder of the start still counts: {ok}");
+        assert_eq!(
+            ok["isError"], false,
+            "the data folder of the start still counts: {ok}"
+        );
         for d in [data, root, x] {
             let _ = std::fs::remove_dir_all(&d);
         }
@@ -2085,7 +2591,11 @@ mod tests {
         std::os::unix::fs::symlink(&outside, data.join("link")).unwrap();
 
         error_text(&add_from_path(&s, &data.join("link/a.torrent")).await);
-        let up = data.join("..").join("..").join(outside.strip_prefix("/").unwrap()).join("a.torrent");
+        let up = data
+            .join("..")
+            .join("..")
+            .join(outside.strip_prefix("/").unwrap())
+            .join("a.torrent");
         error_text(&add_from_path(&s, &up).await);
         for d in [data, root, outside] {
             let _ = std::fs::remove_dir_all(&d);
@@ -2113,7 +2623,10 @@ mod tests {
             answers.push(error_text(&add_from_path(&s, &p).await));
         }
         // The path itself may be echoed; nothing else may differ.
-        let bare: Vec<String> = answers.iter().map(|a| a.split(": ").last().unwrap().to_string()).collect();
+        let bare: Vec<String> = answers
+            .iter()
+            .map(|a| a.split(": ").last().unwrap().to_string())
+            .collect();
         assert!(bare.iter().all(|a| a == &bare[0]), "{answers:?}");
         for d in [data, root, outside] {
             let _ = std::fs::remove_dir_all(&d);
@@ -2146,7 +2659,10 @@ mod tests {
     }
 
     /// `serve` on another loopback address (the whole 127/8 is this machine).
-    async fn serve_at(ip: &str, reply: Vec<u8>) -> (u16, std::sync::Arc<std::sync::atomic::AtomicBool>) {
+    async fn serve_at(
+        ip: &str,
+        reply: Vec<u8>,
+    ) -> (u16, std::sync::Arc<std::sync::atomic::AtomicBool>) {
         let l = tokio::net::TcpListener::bind((ip, 0)).await.unwrap();
         let port = l.local_addr().unwrap().port();
         let hit = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -2163,7 +2679,11 @@ mod tests {
     }
 
     fn ok_reply(body: &[u8]) -> Vec<u8> {
-        let mut r = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).into_bytes();
+        let mut r = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
         r.extend_from_slice(body);
         r
     }
@@ -2201,7 +2721,10 @@ mod tests {
         let url = format!("http://public.example:{outer}/a.torrent");
         let r = fetch_torrent_via(&direct(), &url, &[("public.example", LOCAL)], only_inner).await;
         assert!(r.is_err(), "{r:?}");
-        assert!(!hit.load(std::sync::atomic::Ordering::SeqCst), "the internal address was asked");
+        assert!(
+            !hit.load(std::sync::atomic::Ordering::SeqCst),
+            "the internal address was asked"
+        );
     }
 
     /// What works stays working: a tracker that sends the fetch to a mirror,
@@ -2210,7 +2733,10 @@ mod tests {
     async fn redirects_that_stay_public_or_start_internal_are_followed() {
         let torrent = torrent_bytes("followed");
         let (inner, _) = serve(ok_reply(&torrent)).await;
-        let (outer, _) = serve(redirect_to(&format!("http://mirror.example:{inner}/t.torrent"))).await;
+        let (outer, _) = serve(redirect_to(&format!(
+            "http://mirror.example:{inner}/t.torrent"
+        )))
+        .await;
         let url = format!("http://public.example:{outer}/a.torrent");
         let hosts = [("public.example", LOCAL), ("mirror.example", LOCAL)];
         let r = fetch_torrent_via(&direct(), &url, &hosts, only_inner).await;
@@ -2218,7 +2744,13 @@ mod tests {
 
         let (inner, _) = serve(ok_reply(&torrent)).await;
         let (outer, _) = serve(redirect_to(&format!("http://127.0.0.1:{inner}/t.torrent"))).await;
-        let r = fetch_torrent_via(&direct(), &format!("http://127.0.0.1:{outer}/a.torrent"), &[], real()).await;
+        let r = fetch_torrent_via(
+            &direct(),
+            &format!("http://127.0.0.1:{outer}/a.torrent"),
+            &[],
+            real(),
+        )
+        .await;
         assert_eq!(r.unwrap(), torrent);
     }
 
@@ -2232,12 +2764,17 @@ mod tests {
 
         // A redirect to the name.
         let (inner, hit) = serve_at("127.0.0.2", ok_reply(&torrent)).await;
-        let (outer, _) = serve(redirect_to(&format!("http://rebind.example:{inner}/t.torrent"))).await;
+        let (outer, _) = serve(redirect_to(&format!(
+            "http://rebind.example:{inner}/t.torrent"
+        )))
+        .await;
         let url = format!("http://public.example:{outer}/a.torrent");
         let r = fetch_torrent_via(&direct(), &url, &hosts, only_inner).await;
         assert!(r.is_err(), "redirect: {:?}", r.map(|b| b.len()));
-        assert!(!hit.load(std::sync::atomic::Ordering::SeqCst), "the internal address was asked");
-
+        assert!(
+            !hit.load(std::sync::atomic::Ordering::SeqCst),
+            "the internal address was asked"
+        );
     }
 
     /// A service name on the local network (`prowlarr`, `jackett`, a tracker
@@ -2254,7 +2791,11 @@ mod tests {
 
         // It may then be sent on to a literal local address as well.
         let (inner, _) = serve_at("127.0.0.2", ok_reply(&torrent)).await;
-        let (outer, _) = serve_at("127.0.0.2", redirect_to(&format!("http://127.0.0.2:{inner}/t.torrent"))).await;
+        let (outer, _) = serve_at(
+            "127.0.0.2",
+            redirect_to(&format!("http://127.0.0.2:{inner}/t.torrent")),
+        )
+        .await;
         let url = format!("http://svc.example:{outer}/dl/t.torrent");
         let r = fetch_torrent_via(&direct(), &url, &[("svc.example", INNER)], only_inner).await;
         assert_eq!(r.unwrap(), torrent, "redirect to a written local address");
@@ -2269,7 +2810,10 @@ mod tests {
         let (s, data, root) = st_roots("mcp-url-routes").await;
         let torrent = torrent_bytes("by-link");
         let (port, _) = serve_at("127.0.0.2", ok_reply(&torrent)).await;
-        TEST_HOSTS.lock().unwrap().push(("svc-routes.p3test".into(), INNER));
+        TEST_HOSTS
+            .lock()
+            .unwrap()
+            .push(("svc-routes.p3test".into(), INNER));
         let url = format!("http://svc-routes.p3test:{port}/dl/t.torrent");
 
         let body = json!({"torrent_url": url, "category": "books", "save_path": "/tmp", "stopped": true, "seed_mode": true});
@@ -2281,8 +2825,16 @@ mod tests {
         let (port2, _) = serve_at("127.0.0.2", ok_reply(&torrent2)).await;
         let url2 = format!("http://svc-routes.p3test:{port2}/dl/t.torrent");
         let mut form = String::new();
-        for (k, v) in [("urls", url2.as_str()), ("category", "books"), ("savepath", "/tmp"), ("paused", "true"), ("skip_checking", "true")] {
-            form.push_str(&format!("--B\r\nContent-Disposition: form-data; name=\"{k}\"\r\n\r\n{v}\r\n"));
+        for (k, v) in [
+            ("urls", url2.as_str()),
+            ("category", "books"),
+            ("savepath", "/tmp"),
+            ("paused", "true"),
+            ("skip_checking", "true"),
+        ] {
+            form.push_str(&format!(
+                "--B\r\nContent-Disposition: form-data; name=\"{k}\"\r\n\r\n{v}\r\n"
+            ));
         }
         form.push_str("--B--\r\n");
         let req = axum::http::Request::builder()
@@ -2293,8 +2845,17 @@ mod tests {
             .body(axum::body::Body::from(form))
             .unwrap();
         let resp = api::router(s.state.clone()).oneshot(req).await.unwrap();
-        let (st2, bytes) = (resp.status(), axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap());
-        assert!(st2.is_success() && &bytes[..] == b"Ok.", "qbit add: {st2} {}", String::from_utf8_lossy(&bytes));
+        let (st2, bytes) = (
+            resp.status(),
+            axum::body::to_bytes(resp.into_body(), 1 << 20)
+                .await
+                .unwrap(),
+        );
+        assert!(
+            st2.is_success() && &bytes[..] == b"Ok.",
+            "qbit add: {st2} {}",
+            String::from_utf8_lossy(&bytes)
+        );
         for d in [data, root] {
             let _ = std::fs::remove_dir_all(&d);
         }
@@ -2306,7 +2867,11 @@ mod tests {
     async fn a_fetch_that_starts_on_an_internal_host_may_go_to_a_name_that_resolves_internal() {
         let torrent = torrent_bytes("lan");
         let (inner, _) = serve_at("127.0.0.2", ok_reply(&torrent)).await;
-        let (outer, _) = serve_at("127.0.0.2", redirect_to(&format!("http://rebind.example:{inner}/t.torrent"))).await;
+        let (outer, _) = serve_at(
+            "127.0.0.2",
+            redirect_to(&format!("http://rebind.example:{inner}/t.torrent")),
+        )
+        .await;
         let url = format!("http://127.0.0.2:{outer}/a.torrent");
         let r = fetch_torrent_via(&direct(), &url, &[("rebind.example", INNER)], real()).await;
         assert_eq!(r.unwrap(), torrent);
@@ -2321,7 +2886,9 @@ mod tests {
         let sent = tokio::spawn(async move {
             let (mut sock, _) = l.accept().await.unwrap();
             read_request(&mut sock).await;
-            let _ = sock.write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n").await;
+            let _ = sock
+                .write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n")
+                .await;
             let chunk = vec![0u8; 1 << 20];
             let mut sent = 0usize;
             for _ in 0..200 {
@@ -2332,9 +2899,21 @@ mod tests {
             }
             sent
         });
-        let r = fetch_torrent_via(&direct(), &format!("http://127.0.0.1:{port}/big.torrent"), &[], real()).await;
+        let r = fetch_torrent_via(
+            &direct(),
+            &format!("http://127.0.0.1:{port}/big.torrent"),
+            &[],
+            real(),
+        )
+        .await;
         assert!(r.is_err(), "{:?}", r.map(|b| b.len()));
-        let sent = tokio::time::timeout(std::time::Duration::from_secs(30), sent).await.unwrap().unwrap();
-        assert!(sent < 100 << 20, "the server was read to the end: {sent} bytes");
+        let sent = tokio::time::timeout(std::time::Duration::from_secs(30), sent)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            sent < 100 << 20,
+            "the server was read to the end: {sent} bytes"
+        );
     }
 }

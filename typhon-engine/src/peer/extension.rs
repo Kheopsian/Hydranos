@@ -8,13 +8,13 @@
 //! On PEX received (extended_id == 1, the id we advertised): bencoded dict
 //! `{added: <compact 6-byte peers>, added.f: <flag bytes>, dropped: <compact peers>}`.
 
+use std::collections::BTreeMap;
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::time::Instant;
-use std::collections::BTreeMap;
 
-use super::bencode::{Bencode, decode, decode_prefix};
+use super::bencode::{decode, decode_prefix, Bencode};
 
 /// Reserved bits handshake byte for LTEP (BEP 10): reserved[5] |= 0x10.
 pub const RESERVED_LTEP: u8 = 0x10;
@@ -83,7 +83,10 @@ pub fn build_extension_handshake(
     if policy.pex() {
         m.insert(b"ut_pex".to_vec(), Bencode::Int(OUR_UT_PEX_ID as i64));
     }
-    m.insert(b"ut_metadata".to_vec(), Bencode::Int(OUR_UT_METADATA_ID as i64));
+    m.insert(
+        b"ut_metadata".to_vec(),
+        Bencode::Int(OUR_UT_METADATA_ID as i64),
+    );
     // BEP 55. Advertised on the same condition as PEX: both are ways of
     // learning about peers outside the tracker, and a private torrent uses
     // neither.
@@ -135,7 +138,11 @@ pub fn parse_extension_handshake_full(payload: &[u8], policy: &PeerPolicy) -> Op
     let m = bv.dict_get(b"m")?.as_dict()?;
     let id_of = |key: &[u8]| -> Option<u8> {
         let id = m.get(key)?.as_int()?;
-        if (1..=255).contains(&id) { Some(id as u8) } else { None }
+        if (1..=255).contains(&id) {
+            Some(id as u8)
+        } else {
+            None
+        }
     };
     let metadata_size = bv
         .dict_get(b"metadata_size")
@@ -149,7 +156,11 @@ pub fn parse_extension_handshake_full(payload: &[u8], policy: &PeerPolicy) -> Op
         ut_metadata_id: id_of(b"ut_metadata"),
         // Same gate as PEX: both are ways of learning peers outside the
         // tracker, and a private torrent uses neither.
-        ut_holepunch_id: if policy.pex() { id_of(b"ut_holepunch") } else { None },
+        ut_holepunch_id: if policy.pex() {
+            id_of(b"ut_holepunch")
+        } else {
+            None
+        },
         metadata_size,
     })
 }
@@ -177,7 +188,12 @@ pub fn parse_metadata_message(payload: &[u8]) -> Option<MetadataMsg> {
         .and_then(|v| v.as_int())
         .filter(|n| *n > 0)
         .map(|n| n as usize);
-    Some(MetadataMsg { msg_type, piece: piece as u32, total_size, data_offset: consumed })
+    Some(MetadataMsg {
+        msg_type,
+        piece: piece as u32,
+        total_size,
+        data_offset: consumed,
+    })
 }
 
 /// Build a BEP 9 request for one block of the info dict.
@@ -378,7 +394,10 @@ impl PeerPolicy {
     /// value changes).
     pub fn set_encryption(&self, mode: &str) {
         let value = mode.trim();
-        let known = matches!(value.to_ascii_lowercase().as_str(), "" | "allow" | "prefer" | "require");
+        let known = matches!(
+            value.to_ascii_lowercase().as_str(),
+            "" | "allow" | "prefer" | "require"
+        );
         if let Ok(mut warned) = self.warned_encryption.lock() {
             if known {
                 *warned = None;
@@ -387,13 +406,18 @@ impl PeerPolicy {
                 *warned = Some(value.to_string());
             }
         }
-        self.encryption.store(Encryption::parse(mode) as u8, Ordering::Relaxed);
+        self.encryption
+            .store(Encryption::parse(mode) as u8, Ordering::Relaxed);
     }
 
     /// Set the idle timeout. 0 means the default; anything under the floor is
     /// raised to it.
     pub fn set_idle_timeout_secs(&self, secs: u64) {
-        let v = if secs == 0 { DEFAULT_PEER_IDLE_TIMEOUT_SECS } else { secs.max(MIN_PEER_IDLE_TIMEOUT_SECS) };
+        let v = if secs == 0 {
+            DEFAULT_PEER_IDLE_TIMEOUT_SECS
+        } else {
+            secs.max(MIN_PEER_IDLE_TIMEOUT_SECS)
+        };
         self.idle_timeout_secs.store(v, Ordering::Relaxed);
     }
 
@@ -438,7 +462,10 @@ pub static DEFAULT_POLICY: std::sync::LazyLock<PeerPolicy> =
 /// Parse a BEP 11 PEX message payload. Returns the peers in `added`, plus
 /// those in `added6` when IPv6 is enabled. `dropped` is still ignored.
 pub fn parse_pex(payload: &[u8], policy: &PeerPolicy) -> Vec<SocketAddr> {
-    let bv = match decode(payload) { Ok(v) => v, Err(_) => return Vec::new() };
+    let bv = match decode(payload) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
     let mut out = match bv.dict_get(b"added").and_then(|v| v.as_bytes()) {
         Some(b) => parse_compact_v4(b),
         None => Vec::new(),
@@ -501,7 +528,9 @@ fn parse_compact_v6(buf: &[u8]) -> Vec<SocketAddr> {
             Some(v4) => SocketAddr::new(IpAddr::V4(v4), port),
             None => SocketAddr::new(IpAddr::V6(ip), port),
         };
-        if !is_plausible_peer(&addr) { continue; }
+        if !is_plausible_peer(&addr) {
+            continue;
+        }
         out.push(addr)
     }
     out
@@ -514,7 +543,9 @@ fn parse_compact_v4(buf: &[u8]) -> Vec<SocketAddr> {
         let ip = Ipv4Addr::new(chunk[0], chunk[1], chunk[2], chunk[3]);
         let port = u16::from_be_bytes([chunk[4], chunk[5]]);
         let addr = SocketAddr::new(IpAddr::V4(ip), port);
-        if !is_plausible_peer(&addr) { continue; }
+        if !is_plausible_peer(&addr) {
+            continue;
+        }
         out.push(addr);
     }
     out
@@ -526,7 +557,10 @@ pub fn build_pex_message(added: &[SocketAddr], dropped: &[SocketAddr]) -> Vec<u8
     let mut root = BTreeMap::new();
     root.insert(b"added".to_vec(), Bencode::Bytes(encode_compact_v4(added)));
     root.insert(b"added.f".to_vec(), Bencode::Bytes(vec![0u8; added.len()]));
-    root.insert(b"dropped".to_vec(), Bencode::Bytes(encode_compact_v4(dropped)));
+    root.insert(
+        b"dropped".to_vec(),
+        Bencode::Bytes(encode_compact_v4(dropped)),
+    );
     Bencode::Dict(root).to_vec()
 }
 
@@ -541,7 +575,6 @@ fn encode_compact_v4(addrs: &[SocketAddr]) -> Vec<u8> {
     out
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -552,7 +585,13 @@ mod tests {
     fn peer_encryption_parses_and_defaults_to_allow() {
         let p = PeerPolicy::default();
         assert_eq!(p.encryption(), Encryption::Allow);
-        for (s, want) in [("prefer", Encryption::Prefer), (" Require ", Encryption::Require), ("allow", Encryption::Allow), ("", Encryption::Allow), ("x", Encryption::Allow)] {
+        for (s, want) in [
+            ("prefer", Encryption::Prefer),
+            (" Require ", Encryption::Require),
+            ("allow", Encryption::Allow),
+            ("", Encryption::Allow),
+            ("x", Encryption::Allow),
+        ] {
             p.set_encryption(s);
             assert_eq!(p.encryption(), want, "{s:?}");
         }
@@ -582,19 +621,27 @@ mod tests {
     /// call site whether anyone listens.
     #[test]
     fn an_unknown_peer_encryption_is_warned_about_once() {
-        const NAME: &str = "peer::extension::tests::an_unknown_peer_encryption_is_warned_about_once";
+        const NAME: &str =
+            "peer::extension::tests::an_unknown_peer_encryption_is_warned_about_once";
         if std::env::var_os("TYPHON_LOG_CHILD").is_none() {
             let out = std::process::Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", NAME, "--nocapture", "--test-threads=1"])
                 .env("TYPHON_LOG_CHILD", "1")
                 .output()
                 .unwrap();
-            let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+            let text = format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
             assert!(out.status.success() && text.contains("1 passed"), "{text}");
             return;
         }
         let out = Captured::default();
-        let sub = tracing_subscriber::fmt().with_max_level(tracing::Level::INFO).with_writer(out.clone()).finish();
+        let sub = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(out.clone())
+            .finish();
         let _g = tracing::subscriber::set_default(sub);
         let p = PeerPolicy::default();
         p.set_encryption("requier");
@@ -603,12 +650,24 @@ mod tests {
         p.set_encryption("");
         p.set_encryption("Require");
         let text = String::from_utf8_lossy(&out.0.lock().unwrap()).into_owned();
-        assert_eq!(text.matches("requier").count(), 1, "one warning naming the value: {text}");
+        assert_eq!(
+            text.matches("requier").count(),
+            1,
+            "one warning naming the value: {text}"
+        );
         assert!(text.contains("allow"), "it says allow is applied: {text}");
-        assert_eq!(text.matches("WARN").count(), 1, "only the unknown value warns: {text}");
+        assert_eq!(
+            text.matches("WARN").count(),
+            1,
+            "only the unknown value warns: {text}"
+        );
         p.set_encryption("requier");
         let text = String::from_utf8_lossy(&out.0.lock().unwrap()).into_owned();
-        assert_eq!(text.matches("requier").count(), 2, "a value set again after a valid one warns again: {text}");
+        assert_eq!(
+            text.matches("requier").count(),
+            2,
+            "a value set again after a valid one warns again: {text}"
+        );
     }
 
     /// ⭐ `peer_timeout`: absent / 0 = the 300 s every session ran before the
@@ -644,7 +703,9 @@ mod tests {
             "PEX on but ut_pex is missing from our handshake"
         );
         assert_eq!(
-            parse_extension_handshake_full(&peer_hs, &on).unwrap().ut_pex_id,
+            parse_extension_handshake_full(&peer_hs, &on)
+                .unwrap()
+                .ut_pex_id,
             Some(OUR_UT_PEX_ID),
             "PEX on but we dropped the peer's ut_pex id"
         );
@@ -659,7 +720,9 @@ mod tests {
             "PEX off must not take ut_metadata down with it"
         );
         assert_eq!(
-            parse_extension_handshake_full(&peer_hs, &off).unwrap().ut_pex_id,
+            parse_extension_handshake_full(&peer_hs, &off)
+                .unwrap()
+                .ut_pex_id,
             None,
             "PEX off but we kept the peer's ut_pex id"
         );
@@ -676,8 +739,12 @@ mod tests {
 
         assert!(race.pex());
         assert!(!hoard.pex());
-        assert!(build_extension_handshake(6881, None, &race).windows(6).any(|w| w == b"ut_pex"));
-        assert!(!build_extension_handshake(6881, None, &hoard).windows(6).any(|w| w == b"ut_pex"));
+        assert!(build_extension_handshake(6881, None, &race)
+            .windows(6)
+            .any(|w| w == b"ut_pex"));
+        assert!(!build_extension_handshake(6881, None, &hoard)
+            .windows(6)
+            .any(|w| w == b"ut_pex"));
     }
 }
 
@@ -790,7 +857,12 @@ mod protocol_tests {
 
         // No dict to serve: the key is left out rather than sent as zero.
         let hs = build_extension_handshake(16171, None, &on);
-        assert_eq!(parse_extension_handshake_full(&hs, &on).unwrap().metadata_size, None);
+        assert_eq!(
+            parse_extension_handshake_full(&hs, &on)
+                .unwrap()
+                .metadata_size,
+            None
+        );
     }
 
     /// BEP 10: an id of zero means the peer is withdrawing an extension it

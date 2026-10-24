@@ -137,11 +137,18 @@ pub fn overlap(mine: &[(PathBuf, u64)], claimants: &[Claimant]) -> Overlap {
             with.push(c.info_hash.clone());
         }
     }
-    let mut unproven: Vec<PathBuf> = unproven.into_iter().filter(|p| !conflicts.contains(p)).collect();
+    let mut unproven: Vec<PathBuf> = unproven
+        .into_iter()
+        .filter(|p| !conflicts.contains(p))
+        .collect();
     let mut conflicts: Vec<PathBuf> = conflicts.into_iter().collect();
     conflicts.sort();
     unproven.sort();
-    Overlap { conflicts, unproven, with }
+    Overlap {
+        conflicts,
+        unproven,
+        with,
+    }
 }
 
 /// What to do with an incoming torrent.
@@ -180,7 +187,8 @@ pub fn decide(ov: &Overlap, foreign: &[PathBuf], mode: Mode, seed_mode: bool) ->
     }
     match mode {
         Mode::Legacy => Decision::Proceed,
-        Mode::Refuse => Decision::Refuse(format!(
+        Mode::Refuse => {
+            Decision::Refuse(format!(
             "{} file(s) of this torrent are already another torrent's with other bytes ({}{}); \
              adding it there would overwrite them",
             ov.conflicts.len() + ov.unproven.len(),
@@ -192,7 +200,8 @@ pub fn decide(ov: &Overlap, foreign: &[PathBuf], mode: Mode, seed_mode: bool) ->
                 .collect::<Vec<_>>()
                 .join(", "),
             if ov.conflicts.len() + ov.unproven.len() > 3 { ", ..." } else { "" },
-        )),
+        ))
+        }
         Mode::Isolate => Decision::Isolate,
     }
 }
@@ -331,7 +340,11 @@ pub fn claimants(
         // No metainfo to compare: assume the worst. Treating it as identical
         // would share a path on a guess.
         let same = blob.map(|b| identical(bytes, &b)).unwrap_or(false);
-        out.push(Claimant { info_hash: hash, identical: same, files });
+        out.push(Claimant {
+            info_hash: hash,
+            identical: same,
+            files,
+        });
     }
     out
 }
@@ -434,7 +447,9 @@ pub fn prove(
             let file = open
                 .entry(op.path.clone())
                 .or_insert_with(|| std::fs::File::open(src_root.join(&op.path)).ok());
-            let Some(file) = file.as_ref() else { continue 'piece };
+            let Some(file) = file.as_ref() else {
+                continue 'piece;
+            };
             let at = data.len();
             data.resize(at + op.length as usize, 0);
             if read_at(file, &mut data[at..], op.file_offset).is_err() {
@@ -527,7 +542,12 @@ pub fn record(engine: &str, info_hash: &str, name: &str, action: &str, detail: S
 
 /// What `record` kept, oldest first.
 pub fn recent() -> Vec<Event> {
-    events().lock().unwrap_or_else(|e| e.into_inner()).iter().cloned().collect()
+    events()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .cloned()
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -574,9 +594,15 @@ pub fn check_add(
     let skip = move |o: &TorrentState| o.meta.info_hash == ih;
     let found = claimants(state, bytes, save, top.as_deref(), &mine, &skip);
     let ov = overlap(&mine, &found);
-    let claimed: HashSet<PathBuf> =
-        found.iter().flat_map(|c| c.files.iter().map(|(p, _)| path_key(p))).collect();
-    let foreign = if ov.is_clear() { foreign_links(&all, &claimed) } else { Vec::new() };
+    let claimed: HashSet<PathBuf> = found
+        .iter()
+        .flat_map(|c| c.files.iter().map(|(p, _)| path_key(p)))
+        .collect();
+    let foreign = if ov.is_clear() {
+        foreign_links(&all, &claimed)
+    } else {
+        Vec::new()
+    };
 
     let mut plan = AddPlan {
         save_path: save_path.to_string(),
@@ -586,7 +612,10 @@ pub fn check_add(
         note: None,
         _reservation: reservation,
     };
-    let rel_of: HashMap<PathBuf, PathBuf> = all.iter().map(|(a, r, _)| (path_key(a), r.clone())).collect();
+    let rel_of: HashMap<PathBuf, PathBuf> = all
+        .iter()
+        .map(|(a, r, _)| (path_key(a), r.clone()))
+        .collect();
     match decide(&ov, &foreign, mode, seed_mode) {
         Decision::Proceed if ov.is_clear() => {}
         // skip_checking over same-size files of another torrent: a cross-seed
@@ -594,8 +623,12 @@ pub fn check_add(
         // uploads what it already seeds). Logged, not an anomaly: the caller
         // vouched for the bytes, and a size conflict never gets here.
         Decision::Proceed if seed_mode => {
-            tracing::info!(engine = engine_id, hash, files = ov.unproven.len(),
-                "path claim: skip_checking over files another torrent holds at the same size");
+            tracing::info!(
+                engine = engine_id,
+                hash,
+                files = ov.unproven.len(),
+                "path claim: skip_checking over files another torrent holds at the same size"
+            );
         }
         Decision::Proceed => {
             record(engine_id, hash, &meta.name, "shared", format!(
@@ -608,7 +641,10 @@ pub fn check_add(
         }
         Decision::ProveInPlace(rel) => {
             plan.hold = true;
-            plan.note = Some(format!("held until {} hardlinked file(s) are proven", rel.len()));
+            plan.note = Some(format!(
+                "held until {} hardlinked file(s) are proven",
+                rel.len()
+            ));
             plan.prove_in_place = Some(rel.into_iter().collect());
         }
         Decision::Refuse(why) => {
@@ -620,14 +656,23 @@ pub fn check_add(
             // The files worth proving are the ones another torrent holds at
             // the right size; a size conflict is a different file by
             // definition.
-            let candidates: HashSet<PathBuf> =
-                ov.unproven.iter().filter_map(|p| rel_of.get(p).cloned()).collect();
-            record(engine_id, hash, &meta.name, "isolated", format!(
-                "{} file(s) already another torrent's ({} of another size), placed in {}",
-                ov.conflicts.len() + ov.unproven.len(),
-                ov.conflicts.len(),
-                to.display()
-            ));
+            let candidates: HashSet<PathBuf> = ov
+                .unproven
+                .iter()
+                .filter_map(|p| rel_of.get(p).cloned())
+                .collect();
+            record(
+                engine_id,
+                hash,
+                &meta.name,
+                "isolated",
+                format!(
+                    "{} file(s) already another torrent's ({} of another size), placed in {}",
+                    ov.conflicts.len() + ov.unproven.len(),
+                    ov.conflicts.len(),
+                    to.display()
+                ),
+            );
             plan.save_path = to.to_string_lossy().into_owned();
             plan.hold = true;
             plan.note = Some(format!("isolated in {}", to.display()));
@@ -643,7 +688,14 @@ pub fn check_add(
 /// Runs on a thread of its own -- it reads gigabytes -- with the runtime
 /// handle the engine's recheck needs. Under test it runs inline, so a test
 /// sees the outcome when the add returns.
-pub fn finish(state: &AppState, engine_id: &str, hash: &str, bytes: &[u8], plan: &AddPlan, resume: bool) {
+pub fn finish(
+    state: &AppState,
+    engine_id: &str,
+    hash: &str,
+    bytes: &[u8],
+    plan: &AddPlan,
+    resume: bool,
+) {
     let job = Job {
         metainfo: Some(bytes.to_vec()),
         state: state.clone(),
@@ -677,9 +729,13 @@ struct Job {
 
 impl Job {
     fn run(self) {
-        let Some(engine) = self.state.engines.get(&self.engine_id) else { return };
+        let Some(engine) = self.state.engines.get(&self.engine_id) else {
+            return;
+        };
         let manager = engine.manager.clone();
-        let Some(ih) = crate::store::hex20(&self.hash) else { return };
+        let Some(ih) = crate::store::hex20(&self.hash) else {
+            return;
+        };
         let Some(t) = manager.get(&ih) else { return };
         let name = t.meta.name.clone();
         let root = root_of(&t.meta, &t.save_path.read().clone());
@@ -700,12 +756,18 @@ impl Job {
                 }
             }
             if !candidates.is_empty() {
-                record(&self.engine_id, &self.hash, &name, "proven", format!(
-                    "{} of {} same-size file(s) proven identical and linked, {} to download",
-                    linked,
-                    candidates.len(),
-                    candidates.len() - linked
-                ));
+                record(
+                    &self.engine_id,
+                    &self.hash,
+                    &name,
+                    "proven",
+                    format!(
+                        "{} of {} same-size file(s) proven identical and linked, {} to download",
+                        linked,
+                        candidates.len(),
+                        candidates.len() - linked
+                    ),
+                );
             }
             self.recheck_and_release(&manager, &ih);
             return;
@@ -727,7 +789,11 @@ impl Job {
         }
     }
 
-    fn recheck_and_release(&self, manager: &Arc<typhon_engine::torrent::TorrentManager>, ih: &[u8; 20]) {
+    fn recheck_and_release(
+        &self,
+        manager: &Arc<typhon_engine::torrent::TorrentManager>,
+        ih: &[u8; 20],
+    ) {
         let _enter = self.rt.as_ref().map(|h| h.enter());
         if self.rt.is_some() {
             let _ = manager.recheck(ih);
@@ -735,7 +801,10 @@ impl Job {
         if self.resume {
             {
                 let store = self.state.store.lock().unwrap_or_else(|e| e.into_inner());
-                crate::store::log_store("set_paused", store.set_paused(&self.hash, &self.engine_id, false));
+                crate::store::log_store(
+                    "set_paused",
+                    store.set_paused(&self.hash, &self.engine_id, false),
+                );
             }
             let _ = manager.start_torrent(ih);
         }
@@ -771,12 +840,21 @@ fn guarded_files(state: &AppState, t: &TorrentState, links: bool) -> HashSet<Pat
     let skip = move |o: &TorrentState| o.meta.info_hash == ih;
     let found = claimants(state, &bytes, &save, top.as_deref(), &mine, &skip);
     let ov = overlap(&mine, &found);
-    let rel_of: HashMap<PathBuf, PathBuf> = all.iter().map(|(a, r, _)| (path_key(a), r.clone())).collect();
-    let mut out: HashSet<PathBuf> =
-        ov.conflicts.iter().chain(&ov.unproven).filter_map(|p| rel_of.get(p).cloned()).collect();
+    let rel_of: HashMap<PathBuf, PathBuf> = all
+        .iter()
+        .map(|(a, r, _)| (path_key(a), r.clone()))
+        .collect();
+    let mut out: HashSet<PathBuf> = ov
+        .conflicts
+        .iter()
+        .chain(&ov.unproven)
+        .filter_map(|p| rel_of.get(p).cloned())
+        .collect();
     if links {
-        let claimed: HashSet<PathBuf> =
-            found.iter().flat_map(|c| c.files.iter().map(|(p, _)| path_key(p))).collect();
+        let claimed: HashSet<PathBuf> = found
+            .iter()
+            .flat_map(|c| c.files.iter().map(|(p, _)| path_key(p)))
+            .collect();
         out.extend(foreign_links(&all, &claimed));
     }
     out
@@ -792,7 +870,11 @@ fn guarded_files(state: &AppState, t: &TorrentState, links: bool) -> HashSet<Pat
 /// no such file, the plain recheck. With one, the torrent is held, those
 /// files are hashed first, and it is rechecked and released only if they all
 /// verify; otherwise it stays paused in error, saying why, and writes nothing.
-pub fn guarded_recheck(state: &AppState, engine_id: &str, t: &Arc<TorrentState>) -> Result<(), String> {
+pub fn guarded_recheck(
+    state: &AppState,
+    engine_id: &str,
+    t: &Arc<TorrentState>,
+) -> Result<(), String> {
     let Some(engine) = state.engines.get(engine_id) else {
         return Err(format!("no engine {engine_id}"));
     };
@@ -844,7 +926,11 @@ pub fn guarded_recheck(state: &AppState, engine_id: &str, t: &Arc<TorrentState>)
 /// to the engine and the download wrote into the other torrent's file. Start
 /// now asks the same question an add does. A torrent that holds everything
 /// writes nothing and starts at once; so does one with nothing to protect.
-pub fn guarded_start(state: &AppState, engine_id: &str, t: &Arc<TorrentState>) -> Result<(), String> {
+pub fn guarded_start(
+    state: &AppState,
+    engine_id: &str,
+    t: &Arc<TorrentState>,
+) -> Result<(), String> {
     let Some(engine) = state.engines.get(engine_id) else {
         return Err(format!("no engine {engine_id}"));
     };
@@ -905,7 +991,10 @@ mod tests {
 
     #[test]
     fn nobody_naming_the_paths_is_clear() {
-        let ov = overlap(&mine(&[("/d/P/a.mkv", 10)]), &[claimant("x", false, &[("/d/Q/a.mkv", 10)])]);
+        let ov = overlap(
+            &mine(&[("/d/P/a.mkv", 10)]),
+            &[claimant("x", false, &[("/d/Q/a.mkv", 10)])],
+        );
         assert!(ov.is_clear());
         assert!(ov.with.is_empty());
     }
@@ -913,7 +1002,10 @@ mod tests {
     #[test]
     fn an_identical_torrent_is_not_in_the_way() {
         // Cross-seeding the same bytes under the same names is the point.
-        let ov = overlap(&mine(&[("/d/P/a.mkv", 10)]), &[claimant("x", true, &[("/d/P/a.mkv", 10)])]);
+        let ov = overlap(
+            &mine(&[("/d/P/a.mkv", 10)]),
+            &[claimant("x", true, &[("/d/P/a.mkv", 10)])],
+        );
         assert!(ov.is_clear());
     }
 
@@ -922,8 +1014,18 @@ mod tests {
         // The production case: the same folder and file names, an encode of
         // another size in all but one episode.
         let ov = overlap(
-            &mine(&[("/d/S02/E01.mkv", 2_000_000_000), ("/d/S02/E04.mkv", 1_600_000_000)]),
-            &[claimant("other", false, &[("/d/S02/E01.mkv", 1_500_000_000), ("/d/S02/E04.mkv", 1_600_000_000)])],
+            &mine(&[
+                ("/d/S02/E01.mkv", 2_000_000_000),
+                ("/d/S02/E04.mkv", 1_600_000_000),
+            ]),
+            &[claimant(
+                "other",
+                false,
+                &[
+                    ("/d/S02/E01.mkv", 1_500_000_000),
+                    ("/d/S02/E04.mkv", 1_600_000_000),
+                ],
+            )],
         );
         assert_eq!(ov.conflicts, vec![PathBuf::from("/d/S02/E01.mkv")]);
         assert_eq!(ov.unproven, vec![PathBuf::from("/d/S02/E04.mkv")]);
@@ -936,7 +1038,10 @@ mod tests {
         // one of them at most, so it is a conflict.
         let ov = overlap(
             &mine(&[("/d/P/a.nfo", 7225)]),
-            &[claimant("a", false, &[("/d/P/a.nfo", 7225)]), claimant("b", false, &[("/d/P/a.nfo", 18793)])],
+            &[
+                claimant("a", false, &[("/d/P/a.nfo", 7225)]),
+                claimant("b", false, &[("/d/P/a.nfo", 18793)]),
+            ],
         );
         assert_eq!(ov.conflicts, vec![PathBuf::from("/d/P/a.nfo")]);
         assert!(ov.unproven.is_empty());
@@ -945,19 +1050,49 @@ mod tests {
 
     #[test]
     fn the_decision_follows_the_mode() {
-        let conflict = Overlap { conflicts: vec!["/d/P/a".into()], unproven: vec![], with: vec!["x".into()] };
-        assert_eq!(decide(&conflict, &[], Mode::Isolate, false), Decision::Isolate);
-        assert!(matches!(decide(&conflict, &[], Mode::Refuse, false), Decision::Refuse(_)));
-        assert_eq!(decide(&conflict, &[], Mode::Legacy, false), Decision::Proceed);
+        let conflict = Overlap {
+            conflicts: vec!["/d/P/a".into()],
+            unproven: vec![],
+            with: vec!["x".into()],
+        };
+        assert_eq!(
+            decide(&conflict, &[], Mode::Isolate, false),
+            Decision::Isolate
+        );
+        assert!(matches!(
+            decide(&conflict, &[], Mode::Refuse, false),
+            Decision::Refuse(_)
+        ));
+        assert_eq!(
+            decide(&conflict, &[], Mode::Legacy, false),
+            Decision::Proceed
+        );
     }
 
     #[test]
     fn skip_checking_vouches_for_bytes_not_for_sizes() {
-        let same_size = Overlap { conflicts: vec![], unproven: vec!["/d/P/a".into()], with: vec!["x".into()] };
-        assert_eq!(decide(&same_size, &[], Mode::Isolate, true), Decision::Proceed);
-        assert_eq!(decide(&same_size, &[], Mode::Isolate, false), Decision::Isolate);
-        let other_size = Overlap { conflicts: vec!["/d/P/a".into()], unproven: vec![], with: vec!["x".into()] };
-        assert_eq!(decide(&other_size, &[], Mode::Isolate, true), Decision::Isolate);
+        let same_size = Overlap {
+            conflicts: vec![],
+            unproven: vec!["/d/P/a".into()],
+            with: vec!["x".into()],
+        };
+        assert_eq!(
+            decide(&same_size, &[], Mode::Isolate, true),
+            Decision::Proceed
+        );
+        assert_eq!(
+            decide(&same_size, &[], Mode::Isolate, false),
+            Decision::Isolate
+        );
+        let other_size = Overlap {
+            conflicts: vec!["/d/P/a".into()],
+            unproven: vec![],
+            with: vec!["x".into()],
+        };
+        assert_eq!(
+            decide(&other_size, &[], Mode::Isolate, true),
+            Decision::Isolate
+        );
     }
 
     #[test]
@@ -968,7 +1103,10 @@ mod tests {
             decide(&clear, &["a.mkv".into()], Mode::Isolate, false),
             Decision::ProveInPlace(vec!["a.mkv".into()])
         );
-        assert_eq!(decide(&clear, &["a.mkv".into()], Mode::Isolate, true), Decision::Proceed);
+        assert_eq!(
+            decide(&clear, &["a.mkv".into()], Mode::Isolate, true),
+            Decision::Proceed
+        );
     }
 
     #[test]
@@ -1002,7 +1140,10 @@ mod tests {
         assert!(t0.elapsed() < Duration::from_millis(1000));
         drop(first);
         let got = waiter.join().unwrap();
-        assert!(got.duration_since(t0) >= Duration::from_millis(150), "the second add did not wait");
+        assert!(
+            got.duration_since(t0) >= Duration::from_millis(150),
+            "the second add did not wait"
+        );
     }
 
     /// A multi-file torrent with real SHA-1 pieces over `files`' contents.
@@ -1016,9 +1157,18 @@ mod tests {
         let mut v = Vec::new();
         v.extend_from_slice(b"d4:infod5:filesl");
         for (path, data) in files {
-            v.extend_from_slice(format!("d6:lengthi{}e4:pathl{}:{path}ee", data.len(), path.len()).as_bytes());
+            v.extend_from_slice(
+                format!("d6:lengthi{}e4:pathl{}:{path}ee", data.len(), path.len()).as_bytes(),
+            );
         }
-        v.extend_from_slice(format!("e4:name{}:{name}12:piece lengthi{piece_len}e6:pieces{}:", name.len(), pieces.len()).as_bytes());
+        v.extend_from_slice(
+            format!(
+                "e4:name{}:{name}12:piece lengthi{piece_len}e6:pieces{}:",
+                name.len(),
+                pieces.len()
+            )
+            .as_bytes(),
+        );
         v.extend_from_slice(&pieces);
         v.extend_from_slice(b"ee");
         v
@@ -1044,17 +1194,30 @@ mod tests {
         std::fs::write(src.join("a.mkv"), &video).unwrap();
         std::fs::write(src.join("a.nfo"), b"team NFO, version one").unwrap();
 
-        let want = torrent_over("Pack", &[("a.mkv", &video), ("a.nfo", b"team NFO, version two")], 16384);
+        let want = torrent_over(
+            "Pack",
+            &[("a.mkv", &video), ("a.nfo", b"team NFO, version two")],
+            16384,
+        );
         let meta = typhon_engine::torrent::metainfo::parse_torrent_bytes(&want).unwrap();
         // Paths start at the save path (`dir`), folder included.
-        let candidates: HashSet<PathBuf> = ["Pack/a.mkv", "Pack/a.nfo"].iter().map(PathBuf::from).collect();
+        let candidates: HashSet<PathBuf> = ["Pack/a.mkv", "Pack/a.nfo"]
+            .iter()
+            .map(PathBuf::from)
+            .collect();
         let proven = prove(&meta, &dir, &candidates, &sha1_verify(&want));
 
         // a.mkv's last piece also covers a.nfo, which fails: a.mkv stays
         // unproven too. Downloading costs bytes; linking a file whose last
         // piece did not verify would cost correctness.
-        assert!(!proven.contains(&PathBuf::from("Pack/a.nfo")), "a same-size impostor was proven");
-        assert!(!proven.contains(&PathBuf::from("Pack/a.mkv")), "a file whose last piece failed was proven");
+        assert!(
+            !proven.contains(&PathBuf::from("Pack/a.nfo")),
+            "a same-size impostor was proven"
+        );
+        assert!(
+            !proven.contains(&PathBuf::from("Pack/a.mkv")),
+            "a file whose last piece failed was proven"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1068,9 +1231,16 @@ mod tests {
         std::fs::write(src.join("b.nfo"), b"old notes 16 B..").unwrap();
 
         // a.mkv ends exactly on a piece boundary: its pieces are its own.
-        let want = torrent_over("Pack", &[("a.mkv", &video), ("b.nfo", b"new notes 16 B..")], 16384);
+        let want = torrent_over(
+            "Pack",
+            &[("a.mkv", &video), ("b.nfo", b"new notes 16 B..")],
+            16384,
+        );
         let meta = typhon_engine::torrent::metainfo::parse_torrent_bytes(&want).unwrap();
-        let candidates: HashSet<PathBuf> = ["Pack/a.mkv", "Pack/b.nfo"].iter().map(PathBuf::from).collect();
+        let candidates: HashSet<PathBuf> = ["Pack/a.mkv", "Pack/b.nfo"]
+            .iter()
+            .map(PathBuf::from)
+            .collect();
         let proven = prove(&meta, &dir, &candidates, &sha1_verify(&want));
         assert!(proven.contains(&PathBuf::from("Pack/a.mkv")));
         assert!(!proven.contains(&PathBuf::from("Pack/b.nfo")));
@@ -1084,17 +1254,39 @@ mod tests {
         let mut v = torrent_over(name, files, piece_len);
         let tail = b"ee".len();
         let at = v.len() - tail;
-        v.splice(at..at, format!("6:x-salt{}:{salt}", salt.len()).into_bytes());
+        v.splice(
+            at..at,
+            format!("6:x-salt{}:{salt}", salt.len()).into_bytes(),
+        );
         v
     }
 
-    fn add(s: &crate::api::testing::TestState, bytes: &[u8], save: &Path, paused: bool, seed: bool) -> Result<String, String> {
-        crate::api::add_torrent_bytes(&s.state, bytes, "", &save.to_string_lossy(), "", paused, seed, "hoard").map(|r| r.0)
+    fn add(
+        s: &crate::api::testing::TestState,
+        bytes: &[u8],
+        save: &Path,
+        paused: bool,
+        seed: bool,
+    ) -> Result<String, String> {
+        crate::api::add_torrent_bytes(
+            &s.state,
+            bytes,
+            "",
+            &save.to_string_lossy(),
+            "",
+            paused,
+            seed,
+            "hoard",
+        )
+        .map(|r| r.0)
     }
 
     fn engine_save_path(s: &crate::api::testing::TestState, hash: &str) -> PathBuf {
         let e = s.state.engines.get("hoard").expect("hoard engine");
-        let t = e.manager.get(&crate::store::hex20(hash).unwrap()).expect("held");
+        let t = e
+            .manager
+            .get(&crate::store::hex20(hash).unwrap())
+            .expect("held");
         let p = t.save_path.read().clone();
         p
     }
@@ -1107,15 +1299,38 @@ mod tests {
         std::fs::create_dir_all(dir.join("Pack")).unwrap();
         let first: Vec<u8> = (0..40_000u32).map(|i| (i % 241) as u8).collect();
         std::fs::write(dir.join("Pack").join("E01.mkv"), &first).unwrap();
-        let a = add(&s, &torrent_over("Pack", &[("E01.mkv", &first)], 16384), &dir, true, true).unwrap();
+        let a = add(
+            &s,
+            &torrent_over("Pack", &[("E01.mkv", &first)], 16384),
+            &dir,
+            true,
+            true,
+        )
+        .unwrap();
 
         let second: Vec<u8> = (0..30_000u32).map(|i| (i % 239) as u8).collect();
-        let b = add(&s, &torrent_over("Pack", &[("E01.mkv", &second)], 16384), &dir, false, false).unwrap();
+        let b = add(
+            &s,
+            &torrent_over("Pack", &[("E01.mkv", &second)], 16384),
+            &dir,
+            false,
+            false,
+        )
+        .unwrap();
 
         assert_eq!(engine_save_path(&s, &a), dir);
-        assert_eq!(engine_save_path(&s, &b), dir.join(format!("Pack [{}]", &b[..8])));
-        assert_eq!(std::fs::read(dir.join("Pack").join("E01.mkv")).unwrap(), first, "the first release was touched");
-        assert!(recent().iter().any(|e| e.info_hash == b && e.action == "isolated"));
+        assert_eq!(
+            engine_save_path(&s, &b),
+            dir.join(format!("Pack [{}]", &b[..8]))
+        );
+        assert_eq!(
+            std::fs::read(dir.join("Pack").join("E01.mkv")).unwrap(),
+            first,
+            "the first release was touched"
+        );
+        assert!(recent()
+            .iter()
+            .any(|e| e.info_hash == b && e.action == "isolated"));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1127,13 +1342,40 @@ mod tests {
         let video: Vec<u8> = (0..32_768u32).map(|i| (i % 251) as u8).collect();
         std::fs::write(dir.join("Film").join("a.mkv"), &video).unwrap();
         std::fs::write(dir.join("Film").join("a.nfo"), b"team notes v1...").unwrap();
-        add(&s, &torrent_over("Film", &[("a.mkv", &video), ("a.nfo", b"team notes v1...")], 16384), &dir, true, true)
-            .unwrap();
+        add(
+            &s,
+            &torrent_over(
+                "Film",
+                &[("a.mkv", &video), ("a.nfo", b"team notes v1...")],
+                16384,
+            ),
+            &dir,
+            true,
+            true,
+        )
+        .unwrap();
 
-        let b = add(&s, &torrent_over("Film", &[("a.mkv", &video), ("a.nfo", b"uploader notes!!")], 16384), &dir, true, false)
-            .unwrap();
+        let b = add(
+            &s,
+            &torrent_over(
+                "Film",
+                &[("a.mkv", &video), ("a.nfo", b"uploader notes!!")],
+                16384,
+            ),
+            &dir,
+            true,
+            false,
+        )
+        .unwrap();
         let root = dir.join(format!("Film [{}]", &b[..8])).join("Film");
-        assert!(root.join("a.mkv").exists(), "the proven video was not linked: {:?}", recent().iter().filter(|e| e.info_hash == b).collect::<Vec<_>>());
+        assert!(
+            root.join("a.mkv").exists(),
+            "the proven video was not linked: {:?}",
+            recent()
+                .iter()
+                .filter(|e| e.info_hash == b)
+                .collect::<Vec<_>>()
+        );
         assert!(!root.join("a.nfo").exists(), "an unproven .nfo was linked");
         #[cfg(unix)]
         {
@@ -1142,17 +1384,37 @@ mod tests {
             let y = std::fs::metadata(root.join("a.mkv")).unwrap();
             assert_eq!(x.ino(), y.ino(), "linked, not copied");
         }
-        assert_eq!(std::fs::read(dir.join("Film").join("a.nfo")).unwrap(), b"team notes v1...");
+        assert_eq!(
+            std::fs::read(dir.join("Film").join("a.nfo")).unwrap(),
+            b"team notes v1..."
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn refuse_mode_refuses_and_says_why() {
-        let s = crate::api::testing::state_from("pathclaim-refuse", "[dedup]\npath_collision = \"refuse\"\n");
+        let s = crate::api::testing::state_from(
+            "pathclaim-refuse",
+            "[dedup]\npath_collision = \"refuse\"\n",
+        );
         let dir = s.dir.join("d");
         std::fs::create_dir_all(dir.join("P")).unwrap();
         std::fs::write(dir.join("P").join("x.bin"), [1u8; 100]).unwrap();
-        add(&s, &torrent_over("P", &[("x.bin", &[1u8; 100])], 16384), &dir, true, true).unwrap();
-        let err = add(&s, &torrent_over("P", &[("x.bin", &[2u8; 120])], 16384), &dir, false, false).unwrap_err();
+        add(
+            &s,
+            &torrent_over("P", &[("x.bin", &[1u8; 100])], 16384),
+            &dir,
+            true,
+            true,
+        )
+        .unwrap();
+        let err = add(
+            &s,
+            &torrent_over("P", &[("x.bin", &[2u8; 120])], 16384),
+            &dir,
+            false,
+            false,
+        )
+        .unwrap_err();
         assert!(err.contains("already another torrent's"), "{err}");
     }
 
@@ -1164,8 +1426,22 @@ mod tests {
         std::fs::create_dir_all(dir.join("P")).unwrap();
         let data = [7u8; 5000];
         std::fs::write(dir.join("P").join("x.bin"), data).unwrap();
-        add(&s, &salted("P", &[("x.bin", &data)], 16384, "one"), &dir, true, true).unwrap();
-        let b = add(&s, &salted("P", &[("x.bin", &data)], 16384, "two"), &dir, true, true).unwrap();
+        add(
+            &s,
+            &salted("P", &[("x.bin", &data)], 16384, "one"),
+            &dir,
+            true,
+            true,
+        )
+        .unwrap();
+        let b = add(
+            &s,
+            &salted("P", &[("x.bin", &data)], 16384, "two"),
+            &dir,
+            true,
+            true,
+        )
+        .unwrap();
         assert_eq!(engine_save_path(&s, &b), dir);
     }
 
@@ -1174,12 +1450,29 @@ mod tests {
         // The state production is already in: two torrents sharing a path
         // with different bytes (legacy mode reproduces it). Verify on the
         // second must hold it, not fetch over the first one's file.
-        let s = crate::api::testing::state_from("pathclaim-guard", "[dedup]\npath_collision = \"legacy\"\n");
+        let s = crate::api::testing::state_from(
+            "pathclaim-guard",
+            "[dedup]\npath_collision = \"legacy\"\n",
+        );
         let dir = s.dir.join("d");
         std::fs::create_dir_all(dir.join("P")).unwrap();
         std::fs::write(dir.join("P").join("x.nfo"), b"the first notes!").unwrap();
-        add(&s, &torrent_over("P", &[("x.nfo", b"the first notes!")], 16384), &dir, true, true).unwrap();
-        let b = add(&s, &torrent_over("P", &[("x.nfo", b"other notes, 16B")], 16384), &dir, true, true).unwrap();
+        add(
+            &s,
+            &torrent_over("P", &[("x.nfo", b"the first notes!")], 16384),
+            &dir,
+            true,
+            true,
+        )
+        .unwrap();
+        let b = add(
+            &s,
+            &torrent_over("P", &[("x.nfo", b"other notes, 16B")], 16384),
+            &dir,
+            true,
+            true,
+        )
+        .unwrap();
         assert_eq!(engine_save_path(&s, &b), dir, "legacy mode shares the path");
 
         let mgr = s.state.engines.get("hoard").unwrap().manager.clone();
@@ -1188,14 +1481,22 @@ mod tests {
         let t = mgr.get(&ih).unwrap();
         assert!(!t.is_paused.load(std::sync::atomic::Ordering::Relaxed));
         guarded_recheck(&s.state, "hoard", &t).unwrap();
-        assert!(t.is_paused.load(std::sync::atomic::Ordering::Relaxed), "it was let loose");
+        assert!(
+            t.is_paused.load(std::sync::atomic::Ordering::Relaxed),
+            "it was let loose"
+        );
         assert_eq!(
             t.status.load(std::sync::atomic::Ordering::Relaxed),
             typhon_engine::torrent::meta::TorrentStatus::Error as u8,
             "held without saying why"
         );
-        assert!(recent().iter().any(|e| e.info_hash == b && e.action == "held"));
-        assert_eq!(std::fs::read(dir.join("P").join("x.nfo")).unwrap(), b"the first notes!");
+        assert!(recent()
+            .iter()
+            .any(|e| e.info_hash == b && e.action == "held"));
+        assert_eq!(
+            std::fs::read(dir.join("P").join("x.nfo")).unwrap(),
+            b"the first notes!"
+        );
     }
 
     #[cfg(unix)]
@@ -1212,17 +1513,49 @@ mod tests {
         std::fs::hard_link(dir.join("P").join("ep.mkv"), lib.join("ep.mkv")).unwrap();
 
         // Other bytes at that path: held, nothing written.
-        let other = add(&s, &torrent_over("P", &[("ep.mkv", &[4u8; 20_000])], 16384), &dir, false, false).unwrap();
-        assert_eq!(engine_save_path(&s, &other), dir, "proven in place, not isolated");
-        let t = s.state.engines.get("hoard").unwrap().manager.get(&crate::store::hex20(&other).unwrap()).unwrap();
-        assert!(t.is_paused.load(std::sync::atomic::Ordering::Relaxed), "asked to run, must stay held");
-        assert!(recent().iter().any(|e| e.info_hash == other && e.action == "held"));
-        assert_eq!(std::fs::read(lib.join("ep.mkv")).unwrap(), vec![3u8; 20_000]);
+        let other = add(
+            &s,
+            &torrent_over("P", &[("ep.mkv", &[4u8; 20_000])], 16384),
+            &dir,
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            engine_save_path(&s, &other),
+            dir,
+            "proven in place, not isolated"
+        );
+        let t = s
+            .state
+            .engines
+            .get("hoard")
+            .unwrap()
+            .manager
+            .get(&crate::store::hex20(&other).unwrap())
+            .unwrap();
+        assert!(
+            t.is_paused.load(std::sync::atomic::Ordering::Relaxed),
+            "asked to run, must stay held"
+        );
+        assert!(recent()
+            .iter()
+            .any(|e| e.info_hash == other && e.action == "held"));
+        assert_eq!(
+            std::fs::read(lib.join("ep.mkv")).unwrap(),
+            vec![3u8; 20_000]
+        );
 
         // Start, as after a restart forgot the proof: asked again, still held.
         crate::api::apply_pause_to_engine(&s.state, "hoard", &other, false);
-        assert!(t.is_paused.load(std::sync::atomic::Ordering::Relaxed), "Start let it write over the library");
-        assert_eq!(std::fs::read(lib.join("ep.mkv")).unwrap(), vec![3u8; 20_000]);
+        assert!(
+            t.is_paused.load(std::sync::atomic::Ordering::Relaxed),
+            "Start let it write over the library"
+        );
+        assert_eq!(
+            std::fs::read(lib.join("ep.mkv")).unwrap(),
+            vec![3u8; 20_000]
+        );
     }
 
     /// A single-file torrent (`length` in the info dict, no `files`).
@@ -1233,7 +1566,15 @@ mod tests {
             pieces.extend_from_slice(&Sha1::digest(chunk));
         }
         let mut v = Vec::new();
-        v.extend_from_slice(format!("d4:infod6:lengthi{}e4:name{}:{name}12:piece lengthi16384e6:pieces{}:", data.len(), name.len(), pieces.len()).as_bytes());
+        v.extend_from_slice(
+            format!(
+                "d4:infod6:lengthi{}e4:name{}:{name}12:piece lengthi16384e6:pieces{}:",
+                data.len(),
+                name.len(),
+                pieces.len()
+            )
+            .as_bytes(),
+        );
         v.extend_from_slice(&pieces);
         v.extend_from_slice(format!("6:x-salt{}:{salt}ee", salt.len()).as_bytes());
         v
@@ -1246,18 +1587,46 @@ mod tests {
     /// its save path (the Internet Archive layout) -- and after a move.
     #[tokio::test(flavor = "multi_thread")]
     async fn the_store_lookup_finds_what_the_full_walk_finds() {
-        let s = crate::api::testing::state_from("pathclaim-index", "[dedup]\npath_collision = \"legacy\"\n");
+        let s = crate::api::testing::state_from(
+            "pathclaim-index",
+            "[dedup]\npath_collision = \"legacy\"\n",
+        );
         let t = s.dir.join("t");
         let lib = t.join("lib");
         std::fs::create_dir_all(&lib).unwrap();
         let fixtures: Vec<(Vec<u8>, PathBuf)> = vec![
-            (torrent_over("Pack", &[("a.mkv", &[1u8; 300]), ("sub/b.nfo", &[2u8; 30])], 16384), lib.clone()),
-            (salted("lib", &[("Pack/a.mkv", &[1u8; 300])], 16384, "above"), t.clone()),
-            (single_over("a.mkv", &[3u8; 400], "inside"), lib.join("Pack")),
-            (single_over("b.nfo", &[4u8; 30], "deep"), lib.join("Pack").join("sub")),
-            (salted("Pack", &[("c.txt", &[5u8; 10])], 16384, "sibling"), lib.clone()),
-            (salted("Other", &[("a.mkv", &[6u8; 300])], 16384, "unrelated"), lib.clone()),
-            (salted("lib", &[("Pack/sub/b.nfo", &[7u8; 30])], 16384, "ia"), t.clone()),
+            (
+                torrent_over(
+                    "Pack",
+                    &[("a.mkv", &[1u8; 300]), ("sub/b.nfo", &[2u8; 30])],
+                    16384,
+                ),
+                lib.clone(),
+            ),
+            (
+                salted("lib", &[("Pack/a.mkv", &[1u8; 300])], 16384, "above"),
+                t.clone(),
+            ),
+            (
+                single_over("a.mkv", &[3u8; 400], "inside"),
+                lib.join("Pack"),
+            ),
+            (
+                single_over("b.nfo", &[4u8; 30], "deep"),
+                lib.join("Pack").join("sub"),
+            ),
+            (
+                salted("Pack", &[("c.txt", &[5u8; 10])], 16384, "sibling"),
+                lib.clone(),
+            ),
+            (
+                salted("Other", &[("a.mkv", &[6u8; 300])], 16384, "unrelated"),
+                lib.clone(),
+            ),
+            (
+                salted("lib", &[("Pack/sub/b.nfo", &[7u8; 30])], 16384, "ia"),
+                t.clone(),
+            ),
         ];
         let mut hashes = Vec::new();
         for (bytes, save) in &fixtures {
@@ -1267,7 +1636,9 @@ mod tests {
         // folder, the engine its parent.
         {
             let store = s.state.store.lock().unwrap();
-            store.set_save_path(&hashes[6], &t.join("lib").to_string_lossy()).unwrap();
+            store
+                .set_save_path(&hashes[6], &t.join("lib").to_string_lossy())
+                .unwrap();
         }
         let mgr = s.state.engines.get("hoard").unwrap().manager.clone();
 
@@ -1275,11 +1646,21 @@ mod tests {
             for h in &hashes {
                 let me = mgr.get(&crate::store::hex20(h).unwrap()).unwrap();
                 let save = me.save_path.read().clone();
-                let mine: HashSet<PathBuf> = files_of(&me.meta, &save).into_iter().map(|(a, _, _)| path_key(&a)).collect();
+                let mine: HashSet<PathBuf> = files_of(&me.meta, &save)
+                    .into_iter()
+                    .map(|(a, _, _)| path_key(&a))
+                    .collect();
                 let top = if me.meta.multi_file {
-                    Path::new(&me.meta.name).components().next().map(|c| c.as_os_str().to_os_string())
+                    Path::new(&me.meta.name)
+                        .components()
+                        .next()
+                        .map(|c| c.as_os_str().to_os_string())
                 } else {
-                    me.meta.files[0].path.components().next().map(|c| c.as_os_str().to_os_string())
+                    me.meta.files[0]
+                        .path
+                        .components()
+                        .next()
+                        .map(|c| c.as_os_str().to_os_string())
                 };
                 let ih = me.meta.info_hash;
                 let skip = move |o: &TorrentState| o.meta.info_hash == ih;
@@ -1294,24 +1675,60 @@ mod tests {
                     v.sort();
                     v
                 };
-                let fast = norm(crate::jobsrun::scan_claims(&s.state, &save, top.as_deref(), &mine, &skip));
-                let full = norm(crate::jobsrun::scan_claims_full(&s.state, &save, top.as_deref(), &mine, &skip));
-                assert_eq!(fast, full, "{label}: lookup and walk disagree for {}", &h[..8]);
+                let fast = norm(crate::jobsrun::scan_claims(
+                    &s.state,
+                    &save,
+                    top.as_deref(),
+                    &mine,
+                    &skip,
+                ));
+                let full = norm(crate::jobsrun::scan_claims_full(
+                    &s.state,
+                    &save,
+                    top.as_deref(),
+                    &mine,
+                    &skip,
+                ));
+                assert_eq!(
+                    fast,
+                    full,
+                    "{label}: lookup and walk disagree for {}",
+                    &h[..8]
+                );
             }
         };
         compare("as added");
         // The case the test exists for must be in the data: above, inside and
         // deep each share a file with the pack.
         let pack = mgr.get(&crate::store::hex20(&hashes[0]).unwrap()).unwrap();
-        let mine: HashSet<PathBuf> = files_of(&pack.meta, &lib).into_iter().map(|(a, _, _)| path_key(&a)).collect();
+        let mine: HashSet<PathBuf> = files_of(&pack.meta, &lib)
+            .into_iter()
+            .map(|(a, _, _)| path_key(&a))
+            .collect();
         let ih = pack.meta.info_hash;
-        let found = crate::jobsrun::scan_claims(&s.state, &lib, Some(std::ffi::OsStr::new("Pack")), &mine, &move |o: &TorrentState| o.meta.info_hash == ih);
-        assert_eq!(found.len(), 4, "above, inside, deep, and the item whose store row spells its root");
+        let found = crate::jobsrun::scan_claims(
+            &s.state,
+            &lib,
+            Some(std::ffi::OsStr::new("Pack")),
+            &mine,
+            &move |o: &TorrentState| o.meta.info_hash == ih,
+        );
+        assert_eq!(
+            found.len(),
+            4,
+            "above, inside, deep, and the item whose store row spells its root"
+        );
 
         // Moved, as a move does it: the engine and the store row together.
         let moved = &hashes[5];
-        mgr.set_save_path(&crate::store::hex20(moved).unwrap(), &t.to_string_lossy()).unwrap();
-        s.state.store.lock().unwrap().set_save_path(moved, &t.to_string_lossy()).unwrap();
+        mgr.set_save_path(&crate::store::hex20(moved).unwrap(), &t.to_string_lossy())
+            .unwrap();
+        s.state
+            .store
+            .lock()
+            .unwrap()
+            .set_save_path(moved, &t.to_string_lossy())
+            .unwrap();
         compare("after a move");
     }
 

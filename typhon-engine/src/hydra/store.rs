@@ -192,7 +192,10 @@ pub enum BulkEdit<'a> {
     /// unpinning clears every copy, as the single-torrent route does.
     Pinned(bool),
     Category(&'a str),
-    Tags { tags: &'a [String], add: bool },
+    Tags {
+        tags: &'a [String],
+        add: bool,
+    },
 }
 
 /// One torrent as an export sees it: its `.torrent` and what the store adds.
@@ -240,7 +243,6 @@ CREATE TABLE IF NOT EXISTS jobs (
     updated_at INTEGER NOT NULL DEFAULT 0);
 ";
 
-
 /// Split a `tags` column into tag names.
 ///
 /// The column is comma-separated, EXCEPT that some rows were written with a
@@ -252,7 +254,9 @@ CREATE TABLE IF NOT EXISTS jobs (
 fn split_tags(raw: &str) -> Vec<String> {
     let trimmed = raw.trim();
     if trimmed.starts_with('[') {
-        if let Ok(serde_json::Value::Array(items)) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        if let Ok(serde_json::Value::Array(items)) =
+            serde_json::from_str::<serde_json::Value>(trimmed)
+        {
             return items
                 .iter()
                 .filter_map(|v| v.as_str())
@@ -269,7 +273,9 @@ fn split_tags(raw: &str) -> Vec<String> {
     let mut out = Vec::new();
     for piece in trimmed.split(',').map(str::trim).filter(|s| !s.is_empty()) {
         if piece.starts_with('[') {
-            if let Ok(serde_json::Value::Array(items)) = serde_json::from_str::<serde_json::Value>(piece) {
+            if let Ok(serde_json::Value::Array(items)) =
+                serde_json::from_str::<serde_json::Value>(piece)
+            {
                 out.extend(
                     items
                         .iter()
@@ -310,7 +316,8 @@ impl std::hash::Hasher for InfoHashHasher {
         for chunk in bytes.chunks(8) {
             let mut word = [0u8; 8];
             word[..chunk.len()].copy_from_slice(chunk);
-            self.0 = (self.0.rotate_left(5) ^ u64::from_le_bytes(word)).wrapping_mul(0x517c_c1b7_2722_0a95);
+            self.0 = (self.0.rotate_left(5) ^ u64::from_le_bytes(word))
+                .wrapping_mul(0x517c_c1b7_2722_0a95);
         }
     }
     fn finish(&self) -> u64 {
@@ -335,14 +342,21 @@ impl SlimFacts {
     fn empty() -> Self {
         // Index 0 is "no category" / "no tags", so the common case stores a
         // zero and never touches the intern tables.
-        SlimFacts { categories: vec![String::new()], ..Default::default() }
+        SlimFacts {
+            categories: vec![String::new()],
+            ..Default::default()
+        }
     }
 
     /// One row of the torrents table as the list pass sees it.
     fn fact_of(&mut self, category: String, tags_raw: &str, paused: i64) -> SlimFact {
         let category_id = self.intern_category(category);
         let tag_bits = self.tag_bits_of(split_tags(tags_raw));
-        SlimFact { category_id, tag_bits, user_paused: paused != 0 }
+        SlimFact {
+            category_id,
+            tag_bits,
+            user_paused: paused != 0,
+        }
     }
 
     fn intern_category(&mut self, category: String) -> u16 {
@@ -385,13 +399,19 @@ impl SlimFacts {
     }
 
     pub fn category(&self, id: u16) -> &str {
-        self.categories.get(id as usize).map(String::as_str).unwrap_or("")
+        self.categories
+            .get(id as usize)
+            .map(String::as_str)
+            .unwrap_or("")
     }
 
     /// The id of a category by name, or None when the library has none such --
     /// which makes a filter on it match nothing, as it should.
     pub fn category_id(&self, name: &str) -> Option<u16> {
-        self.categories.iter().position(|c| c == name).map(|i| i as u16)
+        self.categories
+            .iter()
+            .position(|c| c == name)
+            .map(|i| i as u16)
     }
 
     pub fn tag_bit(&self, name: &str) -> Option<u64> {
@@ -401,7 +421,9 @@ impl SlimFacts {
 
 /// Non-empty and nothing but lowercase hex digits.
 fn is_hex(s: &str) -> bool {
-    !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    !s.is_empty()
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 /// A 40-character hex info hash as its 20 raw bytes.
@@ -561,20 +583,34 @@ impl StoreLock {
     /// what hangs, and a probe that made it hung with it.
     pub fn probe(&self) -> Probe {
         if self.inner.is_poisoned() || self.reader.as_ref().is_some_and(|r| r.is_poisoned()) {
-            return Probe::Error("the store's lock is poisoned: a thread panicked holding it".into());
+            return Probe::Error(
+                "the store's lock is poisoned: a thread panicked holding it".into(),
+            );
         }
         // With a read connection beside it (a local WAL store) a long read is
         // ordinary and the writer is not what is probed; with the shared
         // connection alone, one request holding it for seconds is everything
         // waiting behind it.
         let alone = self.reader.is_none();
-        let held = Self::held_for(if alone { &self.inner_hold } else { &self.reader_hold });
+        let held = Self::held_for(if alone {
+            &self.inner_hold
+        } else {
+            &self.reader_hold
+        });
         if alone {
             if let Some(d) = held {
-                return if d >= UNAVAILABLE_AFTER { Probe::Blocked(d) } else { Probe::Busy };
+                return if d >= UNAVAILABLE_AFTER {
+                    Probe::Blocked(d)
+                } else {
+                    Probe::Busy
+                };
             }
         }
-        let last = self.last_ping.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let last = self
+            .last_ping
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         match last {
             Some((_, Err(e))) => Probe::Error(e),
             Some((_, Ok(()))) if held.is_none() => Probe::Ok,
@@ -604,7 +640,10 @@ impl StoreLock {
     }
 
     fn held_for(slot: &HoldSlot) -> Option<std::time::Duration> {
-        slot.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map(|h| h.since.elapsed())
+        slot.lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|h| h.since.elapsed())
     }
 
     /// Log, once per hold, each connection that has been held for `after` and
@@ -641,16 +680,24 @@ impl StoreLock {
             return;
         }
         let me = self.clone();
-        let spawned = std::thread::Builder::new().name("store-refresh".into()).spawn(move || me.run_claimed(true));
+        let spawned = std::thread::Builder::new()
+            .name("store-refresh".into())
+            .spawn(move || me.run_claimed(true));
         if let Err(e) = spawned {
             tracing::warn!("no store refresh: {e}");
-            self.refreshing.store(false, std::sync::atomic::Ordering::Release);
+            self.refreshing
+                .store(false, std::sync::atomic::Ordering::Release);
         }
     }
 
     fn claim_refresh(&self) -> bool {
         self.refreshing
-            .compare_exchange(false, true, std::sync::atomic::Ordering::AcqRel, std::sync::atomic::Ordering::Acquire)
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
             .is_ok()
     }
 
@@ -659,7 +706,9 @@ impl StoreLock {
         struct Ends<'a>(&'a StoreLock);
         impl Drop for Ends<'_> {
             fn drop(&mut self) {
-                self.0.refreshing.store(false, std::sync::atomic::Ordering::Release);
+                self.0
+                    .refreshing
+                    .store(false, std::sync::atomic::Ordering::Release);
                 self.0.refreshed.send_modify(|n| *n += 1);
             }
         }
@@ -696,7 +745,12 @@ impl StoreLock {
             *last = Some(std::time::Instant::now());
             true
         };
-        let mut beats = vec![Self::heal_one(&self.inner, &self.inner_hold, "writer", &may_reopen)];
+        let mut beats = vec![Self::heal_one(
+            &self.inner,
+            &self.inner_hold,
+            "writer",
+            &may_reopen,
+        )];
         if let Some(r) = &self.reader {
             beats.push(Self::heal_one(r, &self.reader_hold, "reader", &may_reopen));
         }
@@ -709,28 +763,41 @@ impl StoreLock {
         // `probe` says about it, and nothing new is known.
         if broken.is_some() || !held {
             let found = broken.clone().map_or(Ok(()), Err);
-            *self.last_ping.lock().unwrap_or_else(|e| e.into_inner()) = Some((std::time::Instant::now(), found));
+            *self.last_ping.lock().unwrap_or_else(|e| e.into_inner()) =
+                Some((std::time::Instant::now(), found));
         }
         broken.is_none()
     }
 
     #[track_caller]
-    fn heal_one(m: &std::sync::Mutex<Store>, slot: &HoldSlot, which: &str, may_reopen: &dyn Fn() -> bool) -> Beat {
+    fn heal_one(
+        m: &std::sync::Mutex<Store>,
+        slot: &HoldSlot,
+        which: &str,
+        may_reopen: &dyn Fn() -> bool,
+    ) -> Beat {
         // Held through a guard, so a ping or a reopening stuck on a frozen
         // mount shows in `/health` and in the watchdog like any request.
         let mut s = match Self::try_take(m, slot, std::panic::Location::caller()) {
             Ok(s) => s,
             Err(std::sync::TryLockError::WouldBlock) => return Beat::Held,
             Err(std::sync::TryLockError::Poisoned(_)) => {
-                return Beat::Broken("the store's lock is poisoned: a thread panicked holding it".into())
+                return Beat::Broken(
+                    "the store's lock is poisoned: a thread panicked holding it".into(),
+                )
             }
         };
-        let Err(why) = s.ping() else { return Beat::Alive };
+        let Err(why) = s.ping() else {
+            return Beat::Alive;
+        };
         if !may_reopen() {
             return Beat::Broken(why);
         }
         tracing::warn!(connection = which, error = %why, "store connection broken, reopening it");
-        match s.reopen().and_then(|()| s.ping().map_err(anyhow::Error::msg)) {
+        match s
+            .reopen()
+            .and_then(|()| s.ping().map_err(anyhow::Error::msg))
+        {
             Ok(()) => {
                 tracing::info!(connection = which, "store connection reopened");
                 Beat::Alive
@@ -744,7 +811,11 @@ impl StoreLock {
 
     #[track_caller]
     pub fn lock(&self) -> std::sync::LockResult<StoreGuard<'_>> {
-        Self::take(&self.inner, &self.inner_hold, std::panic::Location::caller())
+        Self::take(
+            &self.inner,
+            &self.inner_hold,
+            std::panic::Location::caller(),
+        )
     }
 
     /// The read-only connection when there is one, the shared one otherwise.
@@ -772,7 +843,8 @@ impl StoreLock {
     /// request's thread is not known beforehand). For tests; 0 = off.
     #[cfg(test)]
     pub fn stall_pings_for_tests(&self, ms: u64) {
-        self.ping_stall_ms.store(ms, std::sync::atomic::Ordering::Relaxed);
+        self.ping_stall_ms
+            .store(ms, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// The read connection if it is free right now, `None` if someone holds
@@ -783,8 +855,20 @@ impl StoreLock {
     pub fn try_read(&self) -> Option<Result<StoreGuard<'_>, ()>> {
         let m = self.reader.as_ref().unwrap_or(&self.inner);
         let at = std::panic::Location::caller();
-        let slot = if self.reader.is_some() { &self.reader_hold } else { &self.inner_hold };
-        let wrap = |guard| Self::held(StoreGuard { guard, at, waited: std::time::Duration::ZERO, since: std::time::Instant::now(), slot });
+        let slot = if self.reader.is_some() {
+            &self.reader_hold
+        } else {
+            &self.inner_hold
+        };
+        let wrap = |guard| {
+            Self::held(StoreGuard {
+                guard,
+                at,
+                waited: std::time::Duration::ZERO,
+                since: std::time::Instant::now(),
+                slot,
+            })
+        };
         match m.try_lock() {
             Ok(g) => Some(Ok(wrap(g))),
             Err(std::sync::TryLockError::WouldBlock) => None,
@@ -794,8 +878,11 @@ impl StoreLock {
 
     /// Record the holder of a connection that was just locked.
     fn held(g: StoreGuard<'_>) -> StoreGuard<'_> {
-        *g.slot.lock().unwrap_or_else(|e| e.into_inner()) =
-            Some(Hold { since: g.since, at: g.at, warned: false });
+        *g.slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(Hold {
+            since: g.since,
+            at: g.at,
+            warned: false,
+        });
         g
     }
 
@@ -806,11 +893,21 @@ impl StoreLock {
         slot: &'a HoldSlot,
         at: &'static std::panic::Location<'static>,
     ) -> Result<StoreGuard<'a>, std::sync::TryLockError<()>> {
-        let wrap = |guard| Self::held(StoreGuard { guard, at, waited: std::time::Duration::ZERO, since: std::time::Instant::now(), slot });
+        let wrap = |guard| {
+            Self::held(StoreGuard {
+                guard,
+                at,
+                waited: std::time::Duration::ZERO,
+                since: std::time::Instant::now(),
+                slot,
+            })
+        };
         match m.try_lock() {
             Ok(g) => Ok(wrap(g)),
             Err(std::sync::TryLockError::WouldBlock) => Err(std::sync::TryLockError::WouldBlock),
-            Err(std::sync::TryLockError::Poisoned(_)) => Err(std::sync::TryLockError::Poisoned(std::sync::PoisonError::new(()))),
+            Err(std::sync::TryLockError::Poisoned(_)) => Err(std::sync::TryLockError::Poisoned(
+                std::sync::PoisonError::new(()),
+            )),
         }
     }
 
@@ -820,7 +917,15 @@ impl StoreLock {
         at: &'static std::panic::Location<'static>,
     ) -> std::sync::LockResult<StoreGuard<'a>> {
         let asked = std::time::Instant::now();
-        let wrap = |guard| Self::held(StoreGuard { guard, at, waited: asked.elapsed(), since: std::time::Instant::now(), slot });
+        let wrap = |guard| {
+            Self::held(StoreGuard {
+                guard,
+                at,
+                waited: asked.elapsed(),
+                since: std::time::Instant::now(),
+                slot,
+            })
+        };
         let got = match m.try_lock() {
             Ok(g) => Ok(g),
             Err(std::sync::TryLockError::Poisoned(p)) => Err(p),
@@ -829,7 +934,8 @@ impl StoreLock {
             // to a new thread first, or every request that needs the store
             // takes a worker down with it and nothing else runs -- /health
             // included. Free, the lock costs what it always did.
-            Err(std::sync::TryLockError::WouldBlock) => match tokio::runtime::Handle::try_current() {
+            Err(std::sync::TryLockError::WouldBlock) => match tokio::runtime::Handle::try_current()
+            {
                 Ok(h) if h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
                     tokio::task::block_in_place(|| m.lock())
                 }
@@ -903,19 +1009,23 @@ pub fn log_store<T, E: std::fmt::Display>(what: &str, r: Result<T, E>) -> Option
 /// watchdog that reports it.
 pub fn spawn_watch(lock: std::sync::Arc<StoreLock>) {
     let watcher = lock.clone();
-    let spawned = std::thread::Builder::new().name("store-watch".into()).spawn(move || loop {
-        std::thread::sleep(std::time::Duration::from_secs(2));
-        watcher.watch_holds(LOCK_STUCK_WARN);
-    });
+    let spawned = std::thread::Builder::new()
+        .name("store-watch".into())
+        .spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            watcher.watch_holds(LOCK_STUCK_WARN);
+        });
     if let Err(e) = spawned {
         tracing::warn!("no store watcher: {e}");
     }
-    let spawned = std::thread::Builder::new().name("store-heal".into()).spawn(move || loop {
-        std::thread::sleep(PING_FRESH);
-        if lock.claim_refresh() {
-            lock.run_claimed(true);
-        }
-    });
+    let spawned = std::thread::Builder::new()
+        .name("store-heal".into())
+        .spawn(move || loop {
+            std::thread::sleep(PING_FRESH);
+            if lock.claim_refresh() {
+                lock.run_claimed(true);
+            }
+        });
     if let Err(e) = spawned {
         tracing::warn!("no store reopening check: {e}");
     }
@@ -930,27 +1040,29 @@ pub fn spawn_watch(lock: std::sync::Arc<StoreLock>) {
 /// reader; what it cannot copy this second it copies the next.
 pub fn spawn_checkpointer(path: &Path) {
     let path = path.to_path_buf();
-    let spawned = std::thread::Builder::new().name("store-checkpoint".into()).spawn(move || {
-        let conn = match Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_WRITE) {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!("no checkpointer, SQLite's own will do: {e}");
-                return;
-            }
-        };
-        let mut failing = false;
-        loop {
-            std::thread::sleep(std::time::Duration::from_secs(1));
-            match checkpoint(&conn) {
-                Ok(()) => failing = false,
-                Err(e) if !failing => {
-                    failing = true;
-                    tracing::warn!("checkpoint: {e}");
+    let spawned = std::thread::Builder::new()
+        .name("store-checkpoint".into())
+        .spawn(move || {
+            let conn = match Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_WRITE) {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!("no checkpointer, SQLite's own will do: {e}");
+                    return;
                 }
-                Err(_) => {}
+            };
+            let mut failing = false;
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                match checkpoint(&conn) {
+                    Ok(()) => failing = false,
+                    Err(e) if !failing => {
+                        failing = true;
+                        tracing::warn!("checkpoint: {e}");
+                    }
+                    Err(_) => {}
+                }
             }
-        }
-    });
+        });
     if let Err(e) = spawned {
         tracing::warn!("no checkpointer, SQLite's own will do: {e}");
     }
@@ -1049,7 +1161,10 @@ impl Store {
         if path.parent().map_or(false, crate::platform::is_network_fs) {
             return;
         }
-        match self.conn.query_row("PRAGMA journal_mode=WAL", [], |r| r.get::<_, String>(0)) {
+        match self
+            .conn
+            .query_row("PRAGMA journal_mode=WAL", [], |r| r.get::<_, String>(0))
+        {
             Ok(mode) if mode.eq_ignore_ascii_case("wal") => {
                 // The checkpointer thread keeps the WAL short; SQLite's own
                 // automatic checkpoint, which runs INSIDE the commit that
@@ -1076,13 +1191,17 @@ impl Store {
             if ms > 0 {
                 std::thread::sleep(std::time::Duration::from_millis(ms));
             }
-            let ms = self.ping_stall_ms.load(std::sync::atomic::Ordering::Relaxed);
+            let ms = self
+                .ping_stall_ms
+                .load(std::sync::atomic::Ordering::Relaxed);
             if ms > 0 {
                 std::thread::sleep(std::time::Duration::from_millis(ms));
             }
         }
         self.conn
-            .query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get::<_, i64>(0))
+            .query_row("SELECT count(*) FROM sqlite_master", [], |r| {
+                r.get::<_, i64>(0)
+            })
             .map(|_| ())
             .map_err(|e| e.to_string())
     }
@@ -1099,7 +1218,10 @@ impl Store {
         // fresh store there would answer every ping while the real one is
         // hidden under the mount once it is back.
         if !path.is_file() {
-            anyhow::bail!("{} is not there: not creating a new store in its place", path.display());
+            anyhow::bail!(
+                "{} is not there: not creating a new store in its place",
+                path.display()
+            );
         }
         let flags = if self.read_only {
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI
@@ -1115,7 +1237,10 @@ impl Store {
             |r| r.get(0),
         )?;
         if tables < 2 {
-            anyhow::bail!("{} holds no store (its tables are missing): not reopened", path.display());
+            anyhow::bail!(
+                "{} holds no store (its tables are missing): not reopened",
+                path.display()
+            );
         }
         if !self.read_only {
             new.track_changes();
@@ -1139,10 +1264,17 @@ impl Store {
     }
 
     fn bare(conn: Connection) -> Self {
-        Store { conn, path: None, read_only: false, slim: Default::default(), slim_version: -1, tracks_changes: false,
+        Store {
+            conn,
+            path: None,
+            read_only: false,
+            slim: Default::default(),
+            slim_version: -1,
+            tracks_changes: false,
             #[cfg(test)]
             ping_stall_ms: Default::default(),
-            fresh: Default::default() }
+            fresh: Default::default(),
+        }
     }
 
     /// Create anything missing. Every statement is IF NOT EXISTS, so this is a
@@ -1220,7 +1352,9 @@ impl Store {
                 "SELECT info_hash, session FROM torrents WHERE save_path = ?1 COLLATE NOCASE",
             )?;
             for p in exact {
-                let rows = q.query_map([p], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+                let rows = q.query_map([p], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                })?;
                 for r in rows {
                     out.push(r?);
                 }
@@ -1234,7 +1368,9 @@ impl Store {
             "SELECT info_hash, session FROM torrents
              WHERE save_path >= ?1 COLLATE NOCASE AND save_path < ?2 COLLATE NOCASE",
         )?;
-        let rows = q.query_map([lo, hi], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        let rows = q.query_map([lo, hi], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?;
         for r in rows {
             out.push(r?);
         }
@@ -1331,8 +1467,9 @@ impl Store {
             .prepare("SELECT 1 FROM pragma_table_info('magnets') WHERE name = 'seed_mode'")?
             .exists([])?;
         if !has_seed_mode {
-            self.conn
-                .execute_batch("ALTER TABLE magnets ADD COLUMN seed_mode INTEGER NOT NULL DEFAULT 0;")?;
+            self.conn.execute_batch(
+                "ALTER TABLE magnets ADD COLUMN seed_mode INTEGER NOT NULL DEFAULT 0;",
+            )?;
         }
         // Nor does a 4.4.0-rc store have its options.
         let has_options = self
@@ -1340,8 +1477,9 @@ impl Store {
             .prepare("SELECT 1 FROM pragma_table_info('magnets') WHERE name = 'options'")?
             .exists([])?;
         if !has_options {
-            self.conn
-                .execute_batch("ALTER TABLE magnets ADD COLUMN options TEXT NOT NULL DEFAULT '';")?;
+            self.conn.execute_batch(
+                "ALTER TABLE magnets ADD COLUMN options TEXT NOT NULL DEFAULT '';",
+            )?;
         }
         Ok(())
     }
@@ -1370,10 +1508,11 @@ impl Store {
     /// (a read-only bench copy) answers an error the callers read as "none".
     pub fn share_limits_all(
         &self,
-    ) -> anyhow::Result<std::collections::HashMap<String, crate::sharelimits::TorrentShareLimits>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT info_hash, ratio, seeding_minutes, inactive_minutes FROM share_limits")?;
+    ) -> anyhow::Result<std::collections::HashMap<String, crate::sharelimits::TorrentShareLimits>>
+    {
+        let mut stmt = self.conn.prepare(
+            "SELECT info_hash, ratio, seeding_minutes, inactive_minutes FROM share_limits",
+        )?;
         let rows = stmt.query_map([], |r| {
             Ok((
                 r.get::<_, String>(0)?,
@@ -1434,7 +1573,12 @@ impl Store {
                  AND ratio = -2 AND seeding_minutes = -2 AND inactive_minutes = -2",
             )?;
             for hash in hashes {
-                n += upsert.execute(rusqlite::params![hash, ratio, seeding_minutes, inactive_minutes])?;
+                n += upsert.execute(rusqlite::params![
+                    hash,
+                    ratio,
+                    seeding_minutes,
+                    inactive_minutes
+                ])?;
                 prune.execute([hash])?;
             }
         }
@@ -1449,7 +1593,11 @@ impl Store {
         use rusqlite::OptionalExtension;
         Ok(self
             .conn
-            .query_row("SELECT value FROM app_settings WHERE key = ?1", rusqlite::params![key], |r| r.get(0))
+            .query_row(
+                "SELECT value FROM app_settings WHERE key = ?1",
+                rusqlite::params![key],
+                |r| r.get(0),
+            )
             .optional()?)
     }
 
@@ -1471,13 +1619,18 @@ impl Store {
 
     /// `(ip or range, reason, added_at)`.
     pub fn bans(&self) -> anyhow::Result<Vec<(String, String, i64)>> {
-        let mut stmt = self.conn.prepare("SELECT ip, reason, added_at FROM ip_bans ORDER BY added_at")?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT ip, reason, added_at FROM ip_bans ORDER BY added_at")?;
         let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
         Ok(rows.filter_map(Result::ok).collect())
     }
 
     pub fn delete_ban(&self, ip: &str) -> anyhow::Result<bool> {
-        Ok(self.conn.execute("DELETE FROM ip_bans WHERE ip = ?1", rusqlite::params![ip])? > 0)
+        Ok(self
+            .conn
+            .execute("DELETE FROM ip_bans WHERE ip = ?1", rusqlite::params![ip])?
+            > 0)
     }
 
     pub fn put_magnet(&self, m: &MagnetRow) -> anyhow::Result<()> {
@@ -1487,9 +1640,21 @@ impl Store {
                   added_at, attempts, next_try, state, error, seed_mode, options)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
             rusqlite::params![
-                m.info_hash, m.uri, m.name, m.engine, m.category, m.save_path, m.tags,
-                i64::from(m.paused), m.added_at, m.attempts, m.next_try, m.state, m.error,
-                i64::from(m.seed_mode), m.options
+                m.info_hash,
+                m.uri,
+                m.name,
+                m.engine,
+                m.category,
+                m.save_path,
+                m.tags,
+                i64::from(m.paused),
+                m.added_at,
+                m.attempts,
+                m.next_try,
+                m.state,
+                m.error,
+                i64::from(m.seed_mode),
+                m.options
             ],
         )?;
         Ok(())
@@ -1524,11 +1689,17 @@ impl Store {
     }
 
     pub fn magnet(&self, info_hash: &str) -> anyhow::Result<Option<MagnetRow>> {
-        Ok(self.magnets()?.into_iter().find(|m| m.info_hash == info_hash))
+        Ok(self
+            .magnets()?
+            .into_iter()
+            .find(|m| m.info_hash == info_hash))
     }
 
     pub fn delete_magnet(&self, info_hash: &str) -> anyhow::Result<bool> {
-        Ok(self.conn.execute("DELETE FROM magnets WHERE info_hash = ?1", rusqlite::params![info_hash])? > 0)
+        Ok(self.conn.execute(
+            "DELETE FROM magnets WHERE info_hash = ?1",
+            rusqlite::params![info_hash],
+        )? > 0)
     }
 
     /// Write down that something happened, before anything acts on it.
@@ -1538,7 +1709,12 @@ impl Store {
     /// workflow running would lose it for good -- there is no second
     /// completion to wait for. A row survives all three; it is deleted only
     /// once the workflows have seen it.
-    pub fn push_workflow_event(&self, event: &str, session: &str, info_hash: &str) -> anyhow::Result<()> {
+    pub fn push_workflow_event(
+        &self,
+        event: &str,
+        session: &str,
+        info_hash: &str,
+    ) -> anyhow::Result<()> {
         self.conn.execute(
             "INSERT INTO workflow_events (at, event, session, info_hash) VALUES (?1,?2,?3,?4)",
             rusqlite::params![now_secs(), event, session, info_hash],
@@ -1564,14 +1740,20 @@ impl Store {
     }
 
     pub fn drop_workflow_event(&self, id: i64) -> anyhow::Result<()> {
-        self.conn
-            .execute("DELETE FROM workflow_events WHERE id = ?1", rusqlite::params![id])?;
+        self.conn.execute(
+            "DELETE FROM workflow_events WHERE id = ?1",
+            rusqlite::params![id],
+        )?;
         Ok(())
     }
 
     /// `workflow_facts` for one copy: the event path, where reading the whole
     /// session to answer about one torrent would be a million rows for one.
-    pub fn workflow_facts_of(&self, session: &str, info_hash: &str) -> anyhow::Result<Option<WorkflowFacts>> {
+    pub fn workflow_facts_of(
+        &self,
+        session: &str,
+        info_hash: &str,
+    ) -> anyhow::Result<Option<WorkflowFacts>> {
         use rusqlite::OptionalExtension;
         Ok(self
             .conn
@@ -1800,12 +1982,20 @@ impl Store {
     ///
     /// Returns the number of rows that changed. Callers bound `targets` (cf
     /// `selection::BULK_TX`) so one call never holds the store for long.
-    pub fn bulk_edit(&mut self, targets: &[(String, String)], edit: BulkEdit) -> anyhow::Result<usize> {
+    pub fn bulk_edit(
+        &mut self,
+        targets: &[(String, String)],
+        edit: BulkEdit,
+    ) -> anyhow::Result<usize> {
         if targets.is_empty() {
             return Ok(0);
         }
         let mark: i64 = if self.tracks_changes {
-            self.conn.query_row("SELECT coalesce(max(rowid), 0) FROM temp.slim_dirty", [], |r| r.get(0))?
+            self.conn.query_row(
+                "SELECT coalesce(max(rowid), 0) FROM temp.slim_dirty",
+                [],
+                |r| r.get(0),
+            )?
         } else {
             0
         };
@@ -1832,8 +2022,9 @@ impl Store {
                     }
                 }
                 BulkEdit::Pinned(false) => {
-                    let mut st =
-                        tx.prepare_cached("UPDATE torrents SET pinned = 0 WHERE info_hash = ?1 AND pinned != 0")?;
+                    let mut st = tx.prepare_cached(
+                        "UPDATE torrents SET pinned = 0 WHERE info_hash = ?1 AND pinned != 0",
+                    )?;
                     for (h, _) in targets {
                         changed += st.execute(rusqlite::params![h])?;
                     }
@@ -1848,15 +2039,19 @@ impl Store {
                 }
                 BulkEdit::Tags { tags, add } => {
                     if add {
-                        let mut reg = tx.prepare_cached("INSERT OR IGNORE INTO tag_registry (name) VALUES (?1)")?;
+                        let mut reg = tx.prepare_cached(
+                            "INSERT OR IGNORE INTO tag_registry (name) VALUES (?1)",
+                        )?;
                         for t in tags {
                             reg.execute([t])?;
                         }
                     }
-                    let mut get =
-                        tx.prepare_cached("SELECT tags FROM torrents WHERE info_hash = ?1 AND session = ?2")?;
-                    let mut put =
-                        tx.prepare_cached("UPDATE torrents SET tags = ?3 WHERE info_hash = ?1 AND session = ?2")?;
+                    let mut get = tx.prepare_cached(
+                        "SELECT tags FROM torrents WHERE info_hash = ?1 AND session = ?2",
+                    )?;
+                    let mut put = tx.prepare_cached(
+                        "UPDATE torrents SET tags = ?3 WHERE info_hash = ?1 AND session = ?2",
+                    )?;
                     for (i, (h, s)) in targets.iter().enumerate() {
                         let raw: Option<String> = get
                             .query_row(rusqlite::params![h, s], |r| r.get(0))
@@ -1888,23 +2083,32 @@ impl Store {
         }
 
         if self.tracks_changes {
-            self.conn.execute("DELETE FROM temp.slim_dirty WHERE rowid > ?1", [mark])?;
+            self.conn
+                .execute("DELETE FROM temp.slim_dirty WHERE rowid > ?1", [mark])?;
             // Patch the cached facts of every session this call wrote to.
-            let tags_by_target: std::collections::HashMap<usize, Vec<String>> = new_tags.into_iter().collect();
-            let sessions: std::collections::HashSet<&str> = targets.iter().map(|(_, s)| s.as_str()).collect();
+            let tags_by_target: std::collections::HashMap<usize, Vec<String>> =
+                new_tags.into_iter().collect();
+            let sessions: std::collections::HashSet<&str> =
+                targets.iter().map(|(_, s)| s.as_str()).collect();
             for session in sessions {
-                let Some(cached) = self.slim.get_mut(session) else { continue };
+                let Some(cached) = self.slim.get_mut(session) else {
+                    continue;
+                };
                 let facts = std::sync::Arc::make_mut(cached);
                 for (i, (h, s)) in targets.iter().enumerate() {
                     if s != session {
                         continue;
                     }
                     let Some(key) = hex20(h) else { continue };
-                    let Some(mut fact) = facts.by_hash.get(&key).copied() else { continue };
+                    let Some(mut fact) = facts.by_hash.get(&key).copied() else {
+                        continue;
+                    };
                     match edit {
                         BulkEdit::Paused(p) => fact.user_paused = p,
                         BulkEdit::Pinned(_) => continue,
-                        BulkEdit::Category(c) => fact.category_id = facts.intern_category(c.to_string()),
+                        BulkEdit::Category(c) => {
+                            fact.category_id = facts.intern_category(c.to_string())
+                        }
                         BulkEdit::Tags { .. } => match tags_by_target.get(&i) {
                             Some(list) => fact.tag_bits = facts.tag_bits_of(list.clone()),
                             None => continue,
@@ -1936,7 +2140,9 @@ impl Store {
     /// Rows waiting in the list's re-read queue, for tests.
     #[cfg(test)]
     pub fn dirty_count_for_tests(&self) -> i64 {
-        self.conn.query_row("SELECT count(*) FROM temp.slim_dirty", [], |r| r.get(0)).unwrap_or(-1)
+        self.conn
+            .query_row("SELECT count(*) FROM temp.slim_dirty", [], |r| r.get(0))
+            .unwrap_or(-1)
     }
 
     /// Run raw SQL, for tests that need a row the API would never write.
@@ -2018,9 +2224,9 @@ impl Store {
     }
 
     pub fn nodes(&self) -> anyhow::Result<Vec<Node>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT name, url, api_key, enabled, added_at FROM nodes ORDER BY name",
-        )?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT name, url, api_key, enabled, added_at FROM nodes ORDER BY name")?;
         let rows = stmt.query_map([], |r| {
             Ok(Node {
                 name: r.get(0)?,
@@ -2077,11 +2283,17 @@ impl Store {
     /// rename must never merge two nodes.
     pub fn rename_node(&self, old: &str, new: &str) -> anyhow::Result<bool> {
         let tx = self.conn.unchecked_transaction()?;
-        let taken: i64 = tx.query_row("SELECT COUNT(*) FROM nodes WHERE name = ?1", [new], |r| r.get(0))?;
+        let taken: i64 =
+            tx.query_row("SELECT COUNT(*) FROM nodes WHERE name = ?1", [new], |r| {
+                r.get(0)
+            })?;
         if taken > 0 {
             return Ok(false);
         }
-        let n = tx.execute("UPDATE nodes SET name = ?2 WHERE name = ?1", rusqlite::params![old, new])?;
+        let n = tx.execute(
+            "UPDATE nodes SET name = ?2 WHERE name = ?1",
+            rusqlite::params![old, new],
+        )?;
         if n == 0 {
             return Ok(false);
         }
@@ -2091,12 +2303,17 @@ impl Store {
             rows.filter_map(|r| r.ok()).collect()
         };
         for (id, params) in waiting {
-            let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&params) else { continue };
+            let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&params) else {
+                continue;
+            };
             if v.get("node").and_then(|x| x.as_str()) != Some(old) {
                 continue;
             }
             v["node"] = serde_json::Value::String(new.to_string());
-            tx.execute("UPDATE jobs SET params = ?2 WHERE id = ?1", rusqlite::params![id, v.to_string()])?;
+            tx.execute(
+                "UPDATE jobs SET params = ?2 WHERE id = ?1",
+                rusqlite::params![id, v.to_string()],
+            )?;
         }
         tx.commit()?;
         Ok(true)
@@ -2164,7 +2381,11 @@ impl Store {
         )?;
         // The covering index went with the old table.
         self.ensure_cover_index()?;
-        tracing::warn!(rows, seconds = started.elapsed().as_secs(), "torrents table re-keyed");
+        tracing::warn!(
+            rows,
+            seconds = started.elapsed().as_secs(),
+            "torrents table re-keyed"
+        );
         Ok(())
     }
 
@@ -2245,7 +2466,11 @@ impl Store {
         total_bytes: i64,
     ) -> anyhow::Result<String> {
         let now = now_secs();
-        let id = format!("job{}{}", now, &info_hash.chars().take(6).collect::<String>());
+        let id = format!(
+            "job{}{}",
+            now,
+            &info_hash.chars().take(6).collect::<String>()
+        );
         self.conn.execute(
             "INSERT INTO jobs (id, type, state, info_hash, params, progress_bytes,
                                total_bytes, error, created_at, updated_at)
@@ -2622,7 +2847,10 @@ impl Store {
         // Placeholders rather than an interpolated list: an info hash comes
         // from a torrent file, and a query built by concatenation is one that
         // can be steered by its input.
-        let holes = std::iter::repeat("?").take(hashes.len()).collect::<Vec<_>>().join(",");
+        let holes = std::iter::repeat("?")
+            .take(hashes.len())
+            .collect::<Vec<_>>()
+            .join(",");
         let sql = format!(
             "SELECT info_hash, category, save_path, added_time, completed_time,
                     seeding_time, tags, paused, content_folder
@@ -2704,20 +2932,26 @@ impl Store {
     /// triggers on this connection (a read-only open), another connection
     /// wrote to the file (`data_version` moved), or so many rows changed that
     /// reading them one by one would cost more than reading them all.
-    pub fn slim_facts_current(&mut self, session: &str) -> anyhow::Result<std::sync::Arc<SlimFacts>> {
+    pub fn slim_facts_current(
+        &mut self,
+        session: &str,
+    ) -> anyhow::Result<std::sync::Arc<SlimFacts>> {
         if !self.tracks_changes {
             return Ok(std::sync::Arc::new(self.slim_facts(session)?));
         }
-        let version: i64 = self.conn.query_row("PRAGMA data_version", [], |r| r.get(0))?;
+        let version: i64 = self
+            .conn
+            .query_row("PRAGMA data_version", [], |r| r.get(0))?;
         if version != self.slim_version {
             self.slim.clear();
             self.slim_version = version;
         }
         let dirty: Vec<(String, String)> = {
-            let mut stmt = self.conn.prepare_cached(
-                "SELECT session, info_hash FROM temp.slim_dirty LIMIT ?1",
-            )?;
-            let rows = stmt.query_map([SLIM_REREAD_MAX as i64 + 1], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            let mut stmt = self
+                .conn
+                .prepare_cached("SELECT session, info_hash FROM temp.slim_dirty LIMIT ?1")?;
+            let rows =
+                stmt.query_map([SLIM_REREAD_MAX as i64 + 1], |r| Ok((r.get(0)?, r.get(1)?)))?;
             rows.collect::<Result<_, _>>()?
         };
         if !dirty.is_empty() {
@@ -2730,11 +2964,15 @@ impl Store {
                 "SELECT category, tags, paused FROM torrents WHERE session = ?1 AND info_hash = ?2",
             )?;
             for (sess, hash) in &dirty {
-                let Some(cached) = self.slim.get_mut(sess) else { continue };
+                let Some(cached) = self.slim.get_mut(sess) else {
+                    continue;
+                };
                 let Some(key) = hex20(hash) else { continue };
                 let facts = std::sync::Arc::make_mut(cached);
                 let row: Option<(String, String, i64)> = stmt
-                    .query_row([sess.as_str(), hash.as_str()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                    .query_row([sess.as_str(), hash.as_str()], |r| {
+                        Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+                    })
                     .map(Some)
                     .or_else(|e| match e {
                         rusqlite::Error::QueryReturnedNoRows => Ok(None),
@@ -2836,9 +3074,7 @@ impl Store {
     /// One row of the facts query, shared by the whole-session and the
     /// per-category form so the two can never drift into reading the same
     /// columns differently.
-    fn fact_row(
-        row: &rusqlite::Row<'_>,
-    ) -> rusqlite::Result<(String, crate::row::StoreFacts)> {
+    fn fact_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(String, crate::row::StoreFacts)> {
         let info_hash: String = row.get(0)?;
         let tags: String = row.get(6)?;
         let content_folder: i64 = row.get(8)?;
@@ -2994,7 +3230,9 @@ impl Store {
     /// applied yet still has to appear, or it vanishes from the UI the moment
     /// the last torrent carrying it is removed.
     pub fn registered_tags(&self) -> anyhow::Result<Vec<String>> {
-        let mut stmt = self.conn.prepare("SELECT name FROM tag_registry ORDER BY name")?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT name FROM tag_registry ORDER BY name")?;
         let rows: Vec<String> = stmt
             .query_map([], |r| r.get::<_, String>(0))?
             .collect::<Result<Vec<_>, _>>()?;
@@ -3055,7 +3293,8 @@ impl Store {
         let mut changed = 0usize;
         let tx = self.conn.unchecked_transaction()?;
         {
-            let mut find = tx.prepare("SELECT rowid, tags FROM torrents WHERE tags LIKE '%' || ?1 || '%'")?;
+            let mut find =
+                tx.prepare("SELECT rowid, tags FROM torrents WHERE tags LIKE '%' || ?1 || '%'")?;
             let mut put = tx.prepare("UPDATE torrents SET tags = ?2 WHERE rowid = ?1")?;
             for tag in tags {
                 let rows: Vec<(i64, String)> = find
@@ -3095,7 +3334,11 @@ impl Store {
     pub fn tags_of(&self, info_hash: &str) -> Vec<String> {
         let raw: String = self
             .conn
-            .query_row("SELECT tags FROM torrents WHERE info_hash = ?1 LIMIT 1", [info_hash], |r| r.get(0))
+            .query_row(
+                "SELECT tags FROM torrents WHERE info_hash = ?1 LIMIT 1",
+                [info_hash],
+                |r| r.get(0),
+            )
             .unwrap_or_default();
         split_tags(&raw)
     }
@@ -3117,9 +3360,8 @@ impl Store {
         let tx = self.conn.unchecked_transaction()?;
         let mut n = 0usize;
         {
-            let mut stmt = tx.prepare_cached(
-                "UPDATE torrents SET seeding_time = ?2 WHERE info_hash = ?1",
-            )?;
+            let mut stmt =
+                tx.prepare_cached("UPDATE torrents SET seeding_time = ?2 WHERE info_hash = ?1")?;
             for (hash, secs) in rows {
                 n += stmt.execute(rusqlite::params![hash, secs])?;
             }
@@ -3162,9 +3404,9 @@ impl Store {
     /// human stopped this" from "I parked this myself" -- and will happily
     /// restart the first, which is the bug this exists to prevent.
     pub fn paused_hashes(&self, session: &str) -> anyhow::Result<Vec<String>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT info_hash FROM torrents WHERE session = ?1 AND paused <> 0",
-        )?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT info_hash FROM torrents WHERE session = ?1 AND paused <> 0")?;
         let rows = stmt.query_map(rusqlite::params![session], |r| r.get::<_, String>(0))?;
         Ok(rows.filter_map(Result::ok).collect())
     }
@@ -3202,7 +3444,9 @@ impl Store {
             .conn
             .execute("DELETE FROM torrents WHERE info_hash = ?1", [info_hash])?;
         // Its share limits go with it: a re-add starts on the engine's.
-        let _ = self.conn.execute("DELETE FROM share_limits WHERE info_hash = ?1", [info_hash]);
+        let _ = self
+            .conn
+            .execute("DELETE FROM share_limits WHERE info_hash = ?1", [info_hash]);
         Ok(n > 0)
     }
 
@@ -3347,7 +3591,12 @@ impl Store {
     /// for the store reconcile, which must not take a torrent still on its way
     /// into the engine for one that left it. A row lost that way strands a live
     /// torrent with no metainfo, and every piece it receives is refused.
-    pub fn delete_settled_copy(&self, info_hash: &str, session: &str, grace: std::time::Duration) -> anyhow::Result<bool> {
+    pub fn delete_settled_copy(
+        &self,
+        info_hash: &str,
+        session: &str,
+        grace: std::time::Duration,
+    ) -> anyhow::Result<bool> {
         {
             let mut fresh = self.fresh.lock().unwrap_or_else(|e| e.into_inner());
             fresh.retain(|_, at| at.elapsed() < grace);
@@ -3654,7 +3903,10 @@ impl Store {
     /// owned strings and BLOBs, the table was 0.7 GB at a million torrents,
     /// built again by every summary refresh and every workflow pass. The caller
     /// keeps the rows it can use, and nothing else is ever allocated.
-    pub fn for_each_link_row(&self, mut f: impl FnMut(&str, &str, &str, i64, &[u8])) -> anyhow::Result<()> {
+    pub fn for_each_link_row(
+        &self,
+        mut f: impl FnMut(&str, &str, &str, i64, &[u8]),
+    ) -> anyhow::Result<()> {
         let mut q = self
             .conn
             .prepare("SELECT info_hash, session, save_path, measured_at, stats FROM link_index")?;
@@ -3677,8 +3929,13 @@ impl Store {
     /// copy is known; `workflow_facts` answers that too, with every column of
     /// a million rows (half a gigabyte) behind a yes or no. Index-only, like
     /// `workflow_facts`: `session, info_hash` lead `idx_torrents_cover`.
-    pub fn session_hashes(&self, session: &str) -> anyhow::Result<std::collections::HashSet<[u8; 20]>> {
-        let mut q = self.conn.prepare("SELECT info_hash FROM torrents WHERE session = ?1")?;
+    pub fn session_hashes(
+        &self,
+        session: &str,
+    ) -> anyhow::Result<std::collections::HashSet<[u8; 20]>> {
+        let mut q = self
+            .conn
+            .prepare("SELECT info_hash FROM torrents WHERE session = ?1")?;
         let mut rows = q.query(rusqlite::params![session])?;
         let mut out = std::collections::HashSet::new();
         while let Some(r) = rows.next()? {
@@ -3775,8 +4032,10 @@ impl Store {
     }
 
     pub fn drop_content_key(&self, info_hash: &str) -> anyhow::Result<()> {
-        self.conn
-            .execute("DELETE FROM content_index WHERE info_hash = ?1", [info_hash])?;
+        self.conn.execute(
+            "DELETE FROM content_index WHERE info_hash = ?1",
+            [info_hash],
+        )?;
         Ok(())
     }
 
@@ -3891,7 +4150,9 @@ impl Store {
             .conn
             .prepare("SELECT session, COUNT(*) FROM torrents GROUP BY session ORDER BY session")?;
         let rows = stmt
-            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))?
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     }
@@ -4034,7 +4295,13 @@ impl Store {
 
     /// What a refresh found, and only that: a rename or a new URL saved
     /// while the feed was being fetched is not undone by the fetch ending.
-    pub fn rss_feed_refreshed(&self, id: i64, title: &str, at: i64, error: &str) -> anyhow::Result<()> {
+    pub fn rss_feed_refreshed(
+        &self,
+        id: i64,
+        title: &str,
+        at: i64,
+        error: &str,
+    ) -> anyhow::Result<()> {
         self.conn.execute(
             "UPDATE rss_feeds SET title=CASE WHEN ?2='' THEN title ELSE ?2 END, last_refresh=?3, last_error=?4 WHERE id=?1",
             rusqlite::params![id, title, at, error],
@@ -4052,18 +4319,24 @@ impl Store {
     }
 
     pub fn rss_folders(&self) -> anyhow::Result<Vec<String>> {
-        let mut stmt = self.conn.prepare("SELECT path FROM rss_folders ORDER BY path")?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT path FROM rss_folders ORDER BY path")?;
         let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
     pub fn rss_folder_put(&self, path: &str) -> anyhow::Result<()> {
-        self.conn.execute("INSERT OR IGNORE INTO rss_folders (path) VALUES (?1)", [path])?;
+        self.conn.execute(
+            "INSERT OR IGNORE INTO rss_folders (path) VALUES (?1)",
+            [path],
+        )?;
         Ok(())
     }
 
     pub fn rss_folder_delete(&self, path: &str) -> anyhow::Result<()> {
-        self.conn.execute("DELETE FROM rss_folders WHERE path=?1", [path])?;
+        self.conn
+            .execute("DELETE FROM rss_folders WHERE path=?1", [path])?;
         Ok(())
     }
 
@@ -4095,7 +4368,12 @@ impl Store {
     /// Articles of one refresh: the new ones go in unread, the known ones keep
     /// their read flag, and only the newest `keep` stay. The guids that were
     /// new, in the order given.
-    pub fn rss_articles_merge(&self, feed_id: i64, articles: &[RssArticleRow], keep: i64) -> anyhow::Result<Vec<String>> {
+    pub fn rss_articles_merge(
+        &self,
+        feed_id: i64,
+        articles: &[RssArticleRow],
+        keep: i64,
+    ) -> anyhow::Result<Vec<String>> {
         let tx = self.conn.unchecked_transaction()?;
         let mut fresh = Vec::new();
         {
@@ -4137,7 +4415,12 @@ impl Store {
         let mut stmt = self.conn.prepare(
             "SELECT feed_id, COUNT(*), SUM(CASE WHEN is_read=0 THEN 1 ELSE 0 END) FROM rss_articles GROUP BY feed_id",
         )?;
-        let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, (r.get::<_, i64>(1)?, r.get::<_, i64>(2)?))))?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                (r.get::<_, i64>(1)?, r.get::<_, i64>(2)?),
+            ))
+        })?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
@@ -4148,15 +4431,18 @@ impl Store {
                 "UPDATE rss_articles SET is_read=1 WHERE feed_id=?1 AND guid=?2 AND is_read=0",
                 rusqlite::params![feed_id, g],
             )?,
-            None => self
-                .conn
-                .execute("UPDATE rss_articles SET is_read=1 WHERE feed_id=?1 AND is_read=0", [feed_id])?,
+            None => self.conn.execute(
+                "UPDATE rss_articles SET is_read=1 WHERE feed_id=?1 AND is_read=0",
+                [feed_id],
+            )?,
         })
     }
 
     /// Every rule: name and qBittorrent document, by name.
     pub fn rss_rules(&self) -> anyhow::Result<Vec<(String, String)>> {
-        let mut stmt = self.conn.prepare("SELECT name, def FROM rss_rules ORDER BY name")?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT name, def FROM rss_rules ORDER BY name")?;
         let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
@@ -4171,19 +4457,32 @@ impl Store {
 
     /// False when there is no such rule; an error when the new name is taken.
     pub fn rss_rule_rename(&self, old: &str, new: &str) -> anyhow::Result<bool> {
-        Ok(self.conn.execute("UPDATE rss_rules SET name=?2 WHERE name=?1", rusqlite::params![old, new])? > 0)
+        Ok(self.conn.execute(
+            "UPDATE rss_rules SET name=?2 WHERE name=?1",
+            rusqlite::params![old, new],
+        )? > 0)
     }
 
     pub fn rss_rule_delete(&self, name: &str) -> anyhow::Result<bool> {
-        Ok(self.conn.execute("DELETE FROM rss_rules WHERE name=?1", [name])? > 0)
+        Ok(self
+            .conn
+            .execute("DELETE FROM rss_rules WHERE name=?1", [name])?
+            > 0)
     }
 
     /// What took the first of these keys that was taken, if any.
     pub fn rss_taken(&self, keys: &[&str]) -> anyhow::Result<Option<RssTaken>> {
-        let mut stmt = self.conn.prepare_cached("SELECT rule, at, info_hash, outcome FROM rss_taken WHERE key=?1")?;
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT rule, at, info_hash, outcome FROM rss_taken WHERE key=?1")?;
         for k in keys.iter().filter(|k| !k.is_empty()) {
             let row = stmt.query_row([k], |r| {
-                Ok(RssTaken { rule: r.get(0)?, at: r.get(1)?, info_hash: r.get(2)?, outcome: r.get(3)? })
+                Ok(RssTaken {
+                    rule: r.get(0)?,
+                    at: r.get(1)?,
+                    info_hash: r.get(2)?,
+                    outcome: r.get(3)?,
+                })
             });
             match row {
                 Ok(t) => return Ok(Some(t)),
@@ -4214,11 +4513,23 @@ mod rss_store_tests {
     use super::*;
 
     fn feed(path: &str, url: &str) -> RssFeedRow {
-        RssFeedRow { uid: "{u}".into(), path: path.into(), url: url.into(), refresh_secs: 1800, ..Default::default() }
+        RssFeedRow {
+            uid: "{u}".into(),
+            path: path.into(),
+            url: url.into(),
+            refresh_secs: 1800,
+            ..Default::default()
+        }
     }
 
     fn art(guid: &str, date: i64) -> RssArticleRow {
-        RssArticleRow { guid: guid.into(), title: guid.into(), date, seen_at: 1, ..Default::default() }
+        RssArticleRow {
+            guid: guid.into(),
+            title: guid.into(),
+            date,
+            seen_at: 1,
+            ..Default::default()
+        }
     }
 
     /// Everything RSS keeps is still there after the store is closed and
@@ -4232,13 +4543,27 @@ mod rss_store_tests {
         let path = dir.join("hydra.db");
         {
             let s = Store::open(&path, false).unwrap();
-            let id = s.rss_feed_insert(&feed("Folder\\Tracker", "https://t.example/rss?passkey=x")).unwrap();
+            let id = s
+                .rss_feed_insert(&feed("Folder\\Tracker", "https://t.example/rss?passkey=x"))
+                .unwrap();
             s.rss_folder_put("Folder").unwrap();
-            assert_eq!(s.rss_articles_merge(id, &[art("a", 10), art("b", 20)], 200).unwrap(), vec!["a", "b"]);
+            assert_eq!(
+                s.rss_articles_merge(id, &[art("a", 10), art("b", 20)], 200)
+                    .unwrap(),
+                vec!["a", "b"]
+            );
             s.rss_mark_read(id, Some("a")).unwrap();
             s.rss_rule_put("tv", "{\"enabled\":true}").unwrap();
-            s.rss_take(&["a", "https://t.example/a.torrent"], &RssTaken { rule: "tv".into(), at: 5, info_hash: "h".into(), outcome: "added".into() })
-                .unwrap();
+            s.rss_take(
+                &["a", "https://t.example/a.torrent"],
+                &RssTaken {
+                    rule: "tv".into(),
+                    at: 5,
+                    info_hash: "h".into(),
+                    outcome: "added".into(),
+                },
+            )
+            .unwrap();
         }
         let s = Store::open(&path, false).unwrap();
         let feeds = s.rss_feeds().unwrap();
@@ -4246,9 +4571,20 @@ mod rss_store_tests {
         assert_eq!(feeds[0].path, "Folder\\Tracker");
         assert_eq!(s.rss_folders().unwrap(), vec!["Folder"]);
         let arts = s.rss_articles(feeds[0].id).unwrap();
-        assert_eq!(arts.iter().map(|a| (a.guid.as_str(), a.is_read)).collect::<Vec<_>>(), vec![("b", false), ("a", true)]);
-        assert_eq!(s.rss_rules().unwrap(), vec![("tv".to_string(), "{\"enabled\":true}".to_string())]);
-        let t = s.rss_taken(&["nope", "https://t.example/a.torrent"]).unwrap().expect("taken by its link");
+        assert_eq!(
+            arts.iter()
+                .map(|a| (a.guid.as_str(), a.is_read))
+                .collect::<Vec<_>>(),
+            vec![("b", false), ("a", true)]
+        );
+        assert_eq!(
+            s.rss_rules().unwrap(),
+            vec![("tv".to_string(), "{\"enabled\":true}".to_string())]
+        );
+        let t = s
+            .rss_taken(&["nope", "https://t.example/a.torrent"])
+            .unwrap()
+            .expect("taken by its link");
         assert_eq!((t.rule.as_str(), t.outcome.as_str()), ("tv", "added"));
         drop(s);
         let _ = std::fs::remove_dir_all(&dir);
@@ -4259,14 +4595,28 @@ mod rss_store_tests {
         let s = Store::open_in_memory().unwrap();
         s.ensure_schema().unwrap();
         let id = s.rss_feed_insert(&feed("F", "u")).unwrap();
-        s.rss_articles_merge(id, &[art("old", 1), art("mid", 2)], 2).unwrap();
+        s.rss_articles_merge(id, &[art("old", 1), art("mid", 2)], 2)
+            .unwrap();
         s.rss_mark_read(id, None).unwrap();
-        let fresh = s.rss_articles_merge(id, &[art("mid", 2), art("new", 3)], 2).unwrap();
+        let fresh = s
+            .rss_articles_merge(id, &[art("mid", 2), art("new", 3)], 2)
+            .unwrap();
         assert_eq!(fresh, vec!["new"], "a known guid is not new");
         let arts = s.rss_articles(id).unwrap();
-        assert_eq!(arts.iter().map(|a| (a.guid.as_str(), a.is_read)).collect::<Vec<_>>(), vec![("new", false), ("mid", true)]);
-        assert!(s.rss_feed_insert(&feed("F", "other")).is_err(), "a path is unique");
-        assert!(s.rss_feed_insert(&feed("G", "u")).is_err(), "a URL is unique");
+        assert_eq!(
+            arts.iter()
+                .map(|a| (a.guid.as_str(), a.is_read))
+                .collect::<Vec<_>>(),
+            vec![("new", false), ("mid", true)]
+        );
+        assert!(
+            s.rss_feed_insert(&feed("F", "other")).is_err(),
+            "a path is unique"
+        );
+        assert!(
+            s.rss_feed_insert(&feed("G", "u")).is_err(),
+            "a URL is unique"
+        );
         s.rss_feed_delete(id).unwrap();
         assert!(s.rss_articles(id).unwrap().is_empty());
     }
@@ -4276,7 +4626,9 @@ mod rss_store_tests {
 mod composite_key_tests {
     use super::*;
 
-    fn blob() -> Vec<u8> { b"d4:infod6:lengthi1eee".to_vec() }
+    fn blob() -> Vec<u8> {
+        b"d4:infod6:lengthi1eee".to_vec()
+    }
 
     /// A second add of a torrent already held must NOT look like a first one.
     ///
@@ -4313,21 +4665,37 @@ mod composite_key_tests {
     #[test]
     fn the_rebuild_keeps_every_row_and_re_keys_the_table() {
         let s = Store::open_in_memory().unwrap();
-        s.insert_torrent("aa", "hoard", &blob(), "/data", "movies", 1.0, false, "x").unwrap();
-        s.insert_torrent("bb", "race", &blob(), "/race", "", 2.0, true, "").unwrap();
+        s.insert_torrent("aa", "hoard", &blob(), "/data", "movies", 1.0, false, "x")
+            .unwrap();
+        s.insert_torrent("bb", "race", &blob(), "/race", "", 2.0, true, "")
+            .unwrap();
 
         s.migrate_composite_key().unwrap();
 
-        let sql: String = s.conn.query_row(
-            "SELECT sql FROM sqlite_master WHERE type='table' AND name='torrents'", [], |r| r.get(0),
-        ).unwrap();
+        let sql: String = s
+            .conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='torrents'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert!(sql.contains("PRIMARY KEY (info_hash, session)"), "{sql}");
 
-        let n: i64 = s.conn.query_row("SELECT COUNT(*) FROM torrents", [], |r| r.get(0)).unwrap();
+        let n: i64 = s
+            .conn
+            .query_row("SELECT COUNT(*) FROM torrents", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(n, 2, "a row was lost in the rebuild");
         // Columns came across, not just the keys.
-        let cat: String = s.conn.query_row(
-            "SELECT category FROM torrents WHERE info_hash='aa'", [], |r| r.get(0)).unwrap();
+        let cat: String = s
+            .conn
+            .query_row(
+                "SELECT category FROM torrents WHERE info_hash='aa'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(cat, "movies");
         assert_eq!(s.torrent_blob("aa").unwrap().unwrap(), blob());
     }
@@ -4336,10 +4704,14 @@ mod composite_key_tests {
     #[test]
     fn migrating_an_already_migrated_table_does_nothing() {
         let s = Store::open_in_memory().unwrap();
-        s.insert_torrent("aa", "hoard", &blob(), "/data", "", 1.0, false, "").unwrap();
+        s.insert_torrent("aa", "hoard", &blob(), "/data", "", 1.0, false, "")
+            .unwrap();
         s.migrate_composite_key().unwrap();
         s.migrate_composite_key().unwrap();
-        let n: i64 = s.conn.query_row("SELECT COUNT(*) FROM torrents", [], |r| r.get(0)).unwrap();
+        let n: i64 = s
+            .conn
+            .query_row("SELECT COUNT(*) FROM torrents", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(n, 1);
     }
 
@@ -4348,8 +4720,10 @@ mod composite_key_tests {
     fn one_torrent_can_live_in_two_engines() {
         let s = Store::open_in_memory().unwrap();
         s.migrate_composite_key().unwrap();
-        s.insert_torrent("aa", "hoard", &blob(), "/data", "movies", 1.0, false, "").unwrap();
-        s.insert_torrent("aa", "vpn1", &blob(), "/data", "movies", 1.0, false, "").unwrap();
+        s.insert_torrent("aa", "hoard", &blob(), "/data", "movies", 1.0, false, "")
+            .unwrap();
+        s.insert_torrent("aa", "vpn1", &blob(), "/data", "movies", 1.0, false, "")
+            .unwrap();
         assert_eq!(s.sessions_of("aa"), vec!["hoard", "vpn1"]);
     }
 
@@ -4359,14 +4733,20 @@ mod composite_key_tests {
     fn pausing_one_copy_leaves_the_other_running() {
         let s = Store::open_in_memory().unwrap();
         s.migrate_composite_key().unwrap();
-        s.insert_torrent("aa", "hoard", &blob(), "/data", "", 1.0, false, "").unwrap();
-        s.insert_torrent("aa", "vpn1", &blob(), "/data", "", 1.0, false, "").unwrap();
+        s.insert_torrent("aa", "hoard", &blob(), "/data", "", 1.0, false, "")
+            .unwrap();
+        s.insert_torrent("aa", "vpn1", &blob(), "/data", "", 1.0, false, "")
+            .unwrap();
 
         s.set_paused("aa", "hoard", true).unwrap();
         let paused = |sess: &str| -> i64 {
-            s.conn.query_row(
-                "SELECT paused FROM torrents WHERE info_hash='aa' AND session=?1",
-                [sess], |r| r.get(0)).unwrap()
+            s.conn
+                .query_row(
+                    "SELECT paused FROM torrents WHERE info_hash='aa' AND session=?1",
+                    [sess],
+                    |r| r.get(0),
+                )
+                .unwrap()
         };
         assert_eq!(paused("hoard"), 1);
         assert_eq!(paused("vpn1"), 0, "the other copy was paused too");
@@ -4380,8 +4760,10 @@ mod composite_key_tests {
     fn deleting_one_copy_leaves_the_other() {
         let s = Store::open_in_memory().unwrap();
         s.migrate_composite_key().unwrap();
-        s.insert_torrent("aa", "hoard", &blob(), "/data", "", 1.0, false, "").unwrap();
-        s.insert_torrent("aa", "vpn1", &blob(), "/data", "", 1.0, false, "").unwrap();
+        s.insert_torrent("aa", "hoard", &blob(), "/data", "", 1.0, false, "")
+            .unwrap();
+        s.insert_torrent("aa", "vpn1", &blob(), "/data", "", 1.0, false, "")
+            .unwrap();
         assert!(s.delete_copy("aa", "hoard").unwrap());
         assert_eq!(s.sessions_of("aa"), vec!["vpn1"]);
         assert!(!s.delete_copy("aa", "hoard").unwrap(), "already gone");
@@ -4392,8 +4774,10 @@ mod composite_key_tests {
     fn moving_a_copy_moves_only_that_copy() {
         let s = Store::open_in_memory().unwrap();
         s.migrate_composite_key().unwrap();
-        s.insert_torrent("aa", "hoard", &blob(), "/data", "", 1.0, false, "").unwrap();
-        s.insert_torrent("aa", "vpn1", &blob(), "/data", "", 1.0, false, "").unwrap();
+        s.insert_torrent("aa", "hoard", &blob(), "/data", "", 1.0, false, "")
+            .unwrap();
+        s.insert_torrent("aa", "vpn1", &blob(), "/data", "", 1.0, false, "")
+            .unwrap();
         s.set_session("aa", "hoard", "vpn2").unwrap();
         assert_eq!(s.sessions_of("aa"), vec!["vpn1", "vpn2"]);
     }
@@ -4417,8 +4801,14 @@ mod enrol_tests {
     fn a_token_can_only_be_spent_once() {
         let s = store();
         let (token, _) = s.create_enrol_token(1800).unwrap();
-        assert!(s.consume_enrol_token(&token).unwrap(), "first use must work");
-        assert!(!s.consume_enrol_token(&token).unwrap(), "second use must not");
+        assert!(
+            s.consume_enrol_token(&token).unwrap(),
+            "first use must work"
+        );
+        assert!(
+            !s.consume_enrol_token(&token).unwrap(),
+            "second use must not"
+        );
     }
 
     #[test]
@@ -4442,10 +4832,13 @@ mod enrol_tests {
         let (a, _) = s.create_enrol_token(60).unwrap();
         let (b, _) = s.create_enrol_token(60).unwrap();
         assert_ne!(a, b);
-        assert_eq!(a.len(), 32, "short enough to paste, long enough not to guess");
+        assert_eq!(
+            a.len(),
+            32,
+            "short enough to paste, long enough not to guess"
+        );
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -4463,7 +4856,9 @@ mod tests {
         let a = "a".repeat(40);
 
         let start = store.write_mark();
-        store.insert_torrent(&a, "hoard", b"x", "", "", 0.0, false, "").unwrap();
+        store
+            .insert_torrent(&a, "hoard", b"x", "", "", 0.0, false, "")
+            .unwrap();
         let after_insert = store.write_mark();
         assert!(after_insert > start, "an insert must move the mark");
 
@@ -4479,7 +4874,10 @@ mod tests {
         assert_eq!(store.write_mark(), after_update, "a read must not move it");
 
         store.delete_torrent(&a).unwrap();
-        assert!(store.write_mark() > after_update, "a delete must move the mark");
+        assert!(
+            store.write_mark() > after_update,
+            "a delete must move the mark"
+        );
     }
 
     /// The bug this whole mechanism exists to prevent.
@@ -4493,7 +4891,9 @@ mod tests {
         let store = fresh();
         let a = "a".repeat(40);
         let b = "b".repeat(40);
-        store.insert_torrent(&a, "hoard", b"x", "", "", 0.0, false, "").unwrap();
+        store
+            .insert_torrent(&a, "hoard", b"x", "", "", 0.0, false, "")
+            .unwrap();
         let keys = vec![
             "global".to_string(),
             Store::tracker_counter_key("hoard", "tk.example.net"),
@@ -4508,10 +4908,16 @@ mod tests {
         // A second removal ACCUMULATES rather than overwrites. `set_counter`
         // would have passed the first assertion and silently lost this one --
         // that is the difference between a carry-over and a gauge.
-        store.insert_torrent(&b, "hoard", b"y", "", "", 0.0, false, "").unwrap();
+        store
+            .insert_torrent(&b, "hoard", b"y", "", "", 0.0, false, "")
+            .unwrap();
         assert!(store.delete_absorb(&b, None, &keys, 5, 5).unwrap());
         for key in &keys {
-            assert_eq!(store.counter(key), (1005, 105), "counter {key} after the second");
+            assert_eq!(
+                store.counter(key),
+                (1005, 105),
+                "counter {key} after the second"
+            );
         }
     }
 
@@ -4520,10 +4926,18 @@ mod tests {
     fn a_removal_with_no_bytes_still_drops_the_row() {
         let store = fresh();
         let a = "a".repeat(40);
-        store.insert_torrent(&a, "hoard", b"x", "", "", 0.0, false, "").unwrap();
-        assert!(store.delete_absorb(&a, None, &["global".to_string()], 0, 0).unwrap());
+        store
+            .insert_torrent(&a, "hoard", b"x", "", "", 0.0, false, "")
+            .unwrap();
+        assert!(store
+            .delete_absorb(&a, None, &["global".to_string()], 0, 0)
+            .unwrap());
         assert!(!store.has_torrent_blob(&a));
-        assert_eq!(store.counter("global"), (0, 0), "nothing to fold, nothing folded");
+        assert_eq!(
+            store.counter("global"),
+            (0, 0),
+            "nothing to fold, nothing folded"
+        );
     }
 
     /// Naming a session drops THAT copy only: two engines seeding one payload
@@ -4536,10 +4950,16 @@ mod tests {
         let store = Store::open_in_memory().unwrap();
         store.migrate_composite_key().unwrap();
         let a = "a".repeat(40);
-        store.insert_torrent(&a, "hoard", b"x", "", "", 0.0, false, "").unwrap();
-        store.insert_torrent(&a, "race", b"x", "", "", 0.0, false, "").unwrap();
+        store
+            .insert_torrent(&a, "hoard", b"x", "", "", 0.0, false, "")
+            .unwrap();
+        store
+            .insert_torrent(&a, "race", b"x", "", "", 0.0, false, "")
+            .unwrap();
 
-        assert!(store.delete_absorb(&a, Some("hoard"), &["global".to_string()], 7, 3).unwrap());
+        assert!(store
+            .delete_absorb(&a, Some("hoard"), &["global".to_string()], 7, 3)
+            .unwrap());
         assert_eq!(store.sessions_of(&a), vec!["race".to_string()]);
         assert_eq!(store.counter("global"), (7, 3));
     }
@@ -4552,8 +4972,12 @@ mod tests {
         let store = fresh();
         let a = "a".repeat(40);
         let b = "b".repeat(40);
-        store.insert_torrent(&a, "hoard", b"x", "/data/one", "movies", 11.0, false, "").unwrap();
-        store.insert_torrent(&b, "hoard", b"x", "/data/two", "series", 22.0, true, "").unwrap();
+        store
+            .insert_torrent(&a, "hoard", b"x", "/data/one", "movies", 11.0, false, "")
+            .unwrap();
+        store
+            .insert_torrent(&b, "hoard", b"x", "/data/two", "series", 22.0, true, "")
+            .unwrap();
 
         let whole = store.facts_by_session("hoard").unwrap();
         let narrowed = store.facts_in_category("hoard", "movies").unwrap();
@@ -4580,10 +5004,16 @@ mod tests {
         let a = "a".repeat(40);
         let b = "b".repeat(40);
         let c = "c".repeat(40);
-        store.insert_torrent(&a, "hoard", b"x", "", "", 0.0, true, "").unwrap();
-        store.insert_torrent(&b, "hoard", b"x", "", "", 0.0, false, "").unwrap();
+        store
+            .insert_torrent(&a, "hoard", b"x", "", "", 0.0, true, "")
+            .unwrap();
+        store
+            .insert_torrent(&b, "hoard", b"x", "", "", 0.0, false, "")
+            .unwrap();
         // Same decision, different engine: asking for hoard must not return it.
-        store.insert_torrent(&c, "race", b"x", "", "", 0.0, true, "").unwrap();
+        store
+            .insert_torrent(&c, "race", b"x", "", "", 0.0, true, "")
+            .unwrap();
 
         let mut paused = store.paused_hashes("hoard").unwrap();
         paused.sort();
@@ -4683,7 +5113,6 @@ mod tests {
             vec![("hoard".to_string(), 2), ("race".to_string(), 1)]
         );
     }
-
 }
 
 /// The batched pause/resume added after the 2026-09-16 bulk-start incident.
@@ -4705,8 +5134,17 @@ mod paused_batch_tests {
         let s = Store::open_in_memory().expect("in-memory store");
         s.ensure_schema().expect("schema");
         for (hash, session) in [(A, "hoard"), (B, "hoard"), (A, "race")] {
-            s.insert_torrent(hash, session, b"d4:infod4:name4:teseee", "/data", "cat", 1.0, false, "")
-                .expect("insert");
+            s.insert_torrent(
+                hash,
+                session,
+                b"d4:infod4:name4:teseee",
+                "/data",
+                "cat",
+                1.0,
+                false,
+                "",
+            )
+            .expect("insert");
         }
         s
     }
@@ -4737,7 +5175,9 @@ mod paused_batch_tests {
     #[test]
     fn the_per_session_batch_leaves_the_other_copy_alone() {
         let store = three_copies();
-        let n = store.set_paused_batch(&[A.to_string()], "hoard", true).unwrap();
+        let n = store
+            .set_paused_batch(&[A.to_string()], "hoard", true)
+            .unwrap();
         assert_eq!(n, 1);
         assert_eq!(paused_of(&store, A, "hoard"), 1);
         // The race copy of the same content keeps running: pause describes an
@@ -4765,7 +5205,10 @@ mod paused_batch_tests {
         let n = store
             .set_paused_everywhere_batch(&[A.to_string(), nope, B.to_string()], true)
             .unwrap();
-        assert_eq!(n, 3, "two copies of A plus B; the unknown hash matches nothing");
+        assert_eq!(
+            n, 3,
+            "two copies of A plus B; the unknown hash matches nothing"
+        );
         assert_eq!(paused_of(&store, B, "hoard"), 1);
     }
 
@@ -4778,10 +5221,28 @@ mod paused_batch_tests {
     fn facts_are_read_per_copy_not_per_content() {
         let s = Store::open_in_memory().expect("in-memory store");
         s.ensure_schema().expect("schema");
-        s.insert_torrent(A, "hoard", b"d4:infod4:name4:teseee", "/data/tv", "series", 1.0, false, "")
-            .expect("hoard copy");
-        s.insert_torrent(A, "race", b"d4:infod4:name4:teseee", "/race/torrents", "Race", 1.0, false, "")
-            .expect("race copy");
+        s.insert_torrent(
+            A,
+            "hoard",
+            b"d4:infod4:name4:teseee",
+            "/data/tv",
+            "series",
+            1.0,
+            false,
+            "",
+        )
+        .expect("hoard copy");
+        s.insert_torrent(
+            A,
+            "race",
+            b"d4:infod4:name4:teseee",
+            "/race/torrents",
+            "Race",
+            1.0,
+            false,
+            "",
+        )
+        .expect("race copy");
 
         let hashes = vec![A.to_string()];
         let hoard = s.facts_for_hashes(&hashes, "hoard").expect("hoard facts");
@@ -4789,7 +5250,10 @@ mod paused_batch_tests {
 
         let h = hoard.get(A).expect("the hoard copy is found");
         let r = race.get(A).expect("the race copy is found");
-        assert_eq!(h.category, "series", "the hoard row must not wear the race category");
+        assert_eq!(
+            h.category, "series",
+            "the hoard row must not wear the race category"
+        );
         assert_eq!(h.save_path, "/data/tv");
         assert_eq!(r.category, "Race", "and the race row keeps its own");
         assert_eq!(r.save_path, "/race/torrents");
@@ -4801,10 +5265,24 @@ mod paused_batch_tests {
     fn a_session_without_the_torrent_gets_no_facts() {
         let s = Store::open_in_memory().expect("in-memory store");
         s.ensure_schema().expect("schema");
-        s.insert_torrent(A, "race", b"d4:infod4:name4:teseee", "/race/torrents", "Race", 1.0, false, "")
-            .expect("race copy");
-        let facts = s.facts_for_hashes(&[A.to_string()], "hoard").expect("facts");
-        assert!(facts.is_empty(), "hoard holds no copy, so it has no facts to show");
+        s.insert_torrent(
+            A,
+            "race",
+            b"d4:infod4:name4:teseee",
+            "/race/torrents",
+            "Race",
+            1.0,
+            false,
+            "",
+        )
+        .expect("race copy");
+        let facts = s
+            .facts_for_hashes(&[A.to_string()], "hoard")
+            .expect("facts");
+        assert!(
+            facts.is_empty(),
+            "hoard holds no copy, so it has no facts to show"
+        );
     }
 
     #[test]
@@ -4833,8 +5311,17 @@ mod absorb_and_copies_tests {
     const H2: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
     fn add(s: &Store, hash: &str, session: &str) {
-        s.insert_torrent(hash, session, b"d4:infod4:name4:teseee", "/data", "cat", 1.0, false, "")
-            .expect("insert");
+        s.insert_torrent(
+            hash,
+            session,
+            b"d4:infod4:name4:teseee",
+            "/data",
+            "cat",
+            1.0,
+            false,
+            "",
+        )
+        .expect("insert");
     }
 
     /// ⭐⭐ THE regression of 14/09: removing a torrent used to take its bytes
@@ -4848,9 +5335,15 @@ mod absorb_and_copies_tests {
         let keys = vec!["global".to_string(), "race:tracker.example".to_string()];
 
         assert_eq!(s.counter("global"), (0, 0));
-        assert!(s.delete_absorb(H, Some("race"), &keys, 5_000, 1_200).unwrap());
+        assert!(s
+            .delete_absorb(H, Some("race"), &keys, 5_000, 1_200)
+            .unwrap());
 
-        assert_eq!(s.counter("global"), (5_000, 1_200), "the bytes outlived the torrent");
+        assert_eq!(
+            s.counter("global"),
+            (5_000, 1_200),
+            "the bytes outlived the torrent"
+        );
         assert_eq!(s.counter("race:tracker.example"), (5_000, 1_200));
         assert!(s.sessions_of(H).is_empty(), "and the row is gone");
     }
@@ -4874,9 +5367,15 @@ mod absorb_and_copies_tests {
     fn a_torrent_that_moved_nothing_is_still_deleted() {
         let s = store();
         add(&s, H, "race");
-        assert!(s.delete_absorb(H, Some("race"), &["global".to_string()], 0, 0).unwrap());
+        assert!(s
+            .delete_absorb(H, Some("race"), &["global".to_string()], 0, 0)
+            .unwrap());
         assert!(s.sessions_of(H).is_empty());
-        assert_eq!(s.counter("global"), (0, 0), "no row was written for zero bytes");
+        assert_eq!(
+            s.counter("global"),
+            (0, 0),
+            "no row was written for zero bytes"
+        );
     }
 
     /// Deleting a copy from ONE engine must leave the other engine's copy
@@ -4886,10 +5385,18 @@ mod absorb_and_copies_tests {
         let s = store();
         add(&s, H, "race");
         add(&s, H, "hoard");
-        assert_eq!(s.sessions_of(H), vec!["hoard".to_string(), "race".to_string()]);
+        assert_eq!(
+            s.sessions_of(H),
+            vec!["hoard".to_string(), "race".to_string()]
+        );
 
-        s.delete_absorb(H, Some("race"), &["global".to_string()], 7, 3).unwrap();
-        assert_eq!(s.sessions_of(H), vec!["hoard".to_string()], "hoard still holds it");
+        s.delete_absorb(H, Some("race"), &["global".to_string()], 7, 3)
+            .unwrap();
+        assert_eq!(
+            s.sessions_of(H),
+            vec!["hoard".to_string()],
+            "hoard still holds it"
+        );
         assert_eq!(s.counter("global"), (7, 3));
     }
 
@@ -4899,7 +5406,9 @@ mod absorb_and_copies_tests {
         let s = store();
         add(&s, H, "race");
         add(&s, H, "hoard");
-        assert!(s.delete_absorb(H, None, &["global".to_string()], 1, 1).unwrap());
+        assert!(s
+            .delete_absorb(H, None, &["global".to_string()], 1, 1)
+            .unwrap());
         assert!(s.sessions_of(H).is_empty());
     }
 
@@ -4908,7 +5417,9 @@ mod absorb_and_copies_tests {
     #[test]
     fn absorbing_a_torrent_that_is_not_here_reports_false() {
         let s = store();
-        assert!(!s.delete_absorb(H, Some("race"), &["global".to_string()], 9, 9).unwrap());
+        assert!(!s
+            .delete_absorb(H, Some("race"), &["global".to_string()], 9, 9)
+            .unwrap());
     }
 
     /// ⭐ `insert_torrent` is INSERT OR IGNORE, so it would leave the session
@@ -4927,7 +5438,11 @@ mod absorb_and_copies_tests {
         let s = store();
         add(&s, H, "race");
         s.set_session(H, "hoard", "other").unwrap();
-        assert_eq!(s.sessions_of(H), vec!["race".to_string()], "the race copy is untouched");
+        assert_eq!(
+            s.sessions_of(H),
+            vec!["race".to_string()],
+            "the race copy is untouched"
+        );
     }
 
     #[test]
@@ -4935,7 +5450,10 @@ mod absorb_and_copies_tests {
         let s = store();
         add(&s, H, "race");
         assert!(s.delete_copy(H, "race").unwrap());
-        assert!(!s.delete_copy(H, "race").unwrap(), "the second call has nothing to drop");
+        assert!(
+            !s.delete_copy(H, "race").unwrap(),
+            "the second call has nothing to drop"
+        );
     }
 
     /// 13/10/2026: a torrent added during a reconcile pass had its row taken
@@ -4947,9 +5465,16 @@ mod absorb_and_copies_tests {
         let s = store();
         add(&s, H, "hoard");
         let grace = std::time::Duration::from_secs(600);
-        assert!(!s.delete_settled_copy(H, "hoard", grace).unwrap(), "just written: kept");
+        assert!(
+            !s.delete_settled_copy(H, "hoard", grace).unwrap(),
+            "just written: kept"
+        );
         assert_eq!(s.sessions_of(H), vec!["hoard".to_string()]);
-        assert!(s.delete_settled_copy(H, "hoard", std::time::Duration::ZERO).unwrap(), "settled: dropped");
+        assert!(
+            s.delete_settled_copy(H, "hoard", std::time::Duration::ZERO)
+                .unwrap(),
+            "settled: dropped"
+        );
         assert!(s.sessions_of(H).is_empty());
     }
 
@@ -4963,11 +5488,22 @@ mod absorb_and_copies_tests {
         add(&s, H, "race");
         s.create_job("graduate", H, "{}", 100).unwrap();
         let running = s.claim_next_job().expect("claimed");
-        assert!(!s.delete_settled_copy(H, "race", std::time::Duration::ZERO).unwrap(), "moving: kept");
-        assert!(s.torrent_blob(H).unwrap().is_some(), "the metainfo is still there");
+        assert!(
+            !s.delete_settled_copy(H, "race", std::time::Duration::ZERO)
+                .unwrap(),
+            "moving: kept"
+        );
+        assert!(
+            s.torrent_blob(H).unwrap().is_some(),
+            "the metainfo is still there"
+        );
 
         s.job_finish(&running.id, "").unwrap();
-        assert!(s.delete_settled_copy(H, "race", std::time::Duration::ZERO).unwrap(), "done: dropped");
+        assert!(
+            s.delete_settled_copy(H, "race", std::time::Duration::ZERO)
+                .unwrap(),
+            "done: dropped"
+        );
     }
 
     #[test]
@@ -4981,7 +5517,11 @@ mod absorb_and_copies_tests {
         let s = store();
         s.set_counter("k", 10, 20).unwrap();
         s.set_counter("k", 3, 4).unwrap();
-        assert_eq!(s.counter("k"), (3, 4), "set replaces, unlike absorb which adds");
+        assert_eq!(
+            s.counter("k"),
+            (3, 4),
+            "set replaces, unlike absorb which adds"
+        );
     }
 
     /// The key carries the engine as well as the host: two engines seeding to
@@ -5000,7 +5540,10 @@ mod absorb_and_copies_tests {
         let s = store();
         add(&s, H, "race");
         assert!(s.has_torrent_blob(H));
-        assert_eq!(s.torrent_blob(H).unwrap().as_deref(), Some(&b"d4:infod4:name4:teseee"[..]));
+        assert_eq!(
+            s.torrent_blob(H).unwrap().as_deref(),
+            Some(&b"d4:infod4:name4:teseee"[..])
+        );
         assert!(!s.has_torrent_blob(H2));
         assert!(s.torrent_blob(H2).unwrap().is_none());
     }
@@ -5021,16 +5564,32 @@ mod absorb_and_copies_tests {
     fn tags_stored_as_json_read_as_tags_and_survive_an_edit() {
         let s = store();
         add(&s, H, "race");
-        s.conn.execute("UPDATE torrents SET tags = '[\"cross-seed\"]' WHERE info_hash = ?1", [H]).unwrap();
+        s.conn
+            .execute(
+                "UPDATE torrents SET tags = '[\"cross-seed\"]' WHERE info_hash = ?1",
+                [H],
+            )
+            .unwrap();
         assert_eq!(s.tags_of(H), vec!["cross-seed".to_string()]);
         // What a tag action does: read, append, write back.
         let mut tags = s.tags_of(H);
         tags.push("noHL".into());
         s.set_tags(H, &tags).unwrap();
-        assert_eq!(s.tags_of(H), vec!["cross-seed".to_string(), "noHL".to_string()]);
+        assert_eq!(
+            s.tags_of(H),
+            vec!["cross-seed".to_string(), "noHL".to_string()]
+        );
         // And the rows the old read already damaged come back whole.
-        s.conn.execute("UPDATE torrents SET tags = '[\"cross-seed\"],noHL' WHERE info_hash = ?1", [H]).unwrap();
-        assert_eq!(s.tags_of(H), vec!["cross-seed".to_string(), "noHL".to_string()]);
+        s.conn
+            .execute(
+                "UPDATE torrents SET tags = '[\"cross-seed\"],noHL' WHERE info_hash = ?1",
+                [H],
+            )
+            .unwrap();
+        assert_eq!(
+            s.tags_of(H),
+            vec!["cross-seed".to_string(), "noHL".to_string()]
+        );
     }
 
     #[test]
@@ -5040,7 +5599,10 @@ mod absorb_and_copies_tests {
         add(&s, H, "hoard");
         s.set_paused(H, "race", true).unwrap();
         assert_eq!(s.paused_hashes("race").unwrap(), vec![H.to_string()]);
-        assert!(s.paused_hashes("hoard").unwrap().is_empty(), "the hoard copy still runs");
+        assert!(
+            s.paused_hashes("hoard").unwrap().is_empty(),
+            "the hoard copy still runs"
+        );
     }
 
     #[test]
@@ -5058,9 +5620,16 @@ mod absorb_and_copies_tests {
         let s = store();
         add(&s, H, "race");
         s.set_save_path(H, "/data/moved").unwrap();
-        assert_eq!(s.all_hashes("race").unwrap(), vec![H.to_string()],
-            "the torrent is still listed under its engine after the move");
-        assert_eq!(s.category_of(H, "race").as_deref(), Some("cat"), "and keeps its category");
+        assert_eq!(
+            s.all_hashes("race").unwrap(),
+            vec![H.to_string()],
+            "the torrent is still listed under its engine after the move"
+        );
+        assert_eq!(
+            s.category_of(H, "race").as_deref(),
+            Some("cat"),
+            "and keeps its category"
+        );
     }
 
     /// ⭐ A write must not relabel the other engine's copy either.
@@ -5075,7 +5644,11 @@ mod absorb_and_copies_tests {
         add(&s, H, "hoard");
         s.set_category_in(H, "hoard", "movies").unwrap();
         assert_eq!(s.category_of(H, "hoard").as_deref(), Some("movies"));
-        assert_eq!(s.category_of(H, "race").as_deref(), Some("cat"), "the race copy is untouched");
+        assert_eq!(
+            s.category_of(H, "race").as_deref(),
+            Some("cat"),
+            "the race copy is untouched"
+        );
     }
 
     /// The qBit shim has no engine to name, so its write stays torrent-wide --
@@ -5122,7 +5695,11 @@ mod absorb_and_copies_tests {
         let s = store();
         let before = s.write_mark();
         add(&s, H, "race");
-        assert_ne!(s.write_mark(), before, "the facts cache must see this as stale");
+        assert_ne!(
+            s.write_mark(),
+            before,
+            "the facts cache must see this as stale"
+        );
     }
 }
 
@@ -5146,7 +5723,10 @@ mod jobs_nodes_drain_tests {
         let s = store();
         assert!(!s.job_pending_for("graduate", H), "nothing is pending yet");
         s.create_job("graduate", H, "{}", 100).unwrap();
-        assert!(s.job_pending_for("graduate", H), "the queued job is pending");
+        assert!(
+            s.job_pending_for("graduate", H),
+            "the queued job is pending"
+        );
     }
 
     /// The gate is per KIND and per TORRENT: a move must not be blocked by a
@@ -5155,8 +5735,14 @@ mod jobs_nodes_drain_tests {
     fn the_pending_gate_is_per_kind_and_per_torrent() {
         let s = store();
         s.create_job("graduate", H, "{}", 100).unwrap();
-        assert!(!s.job_pending_for("move", H), "a different kind is not pending");
-        assert!(!s.job_pending_for("graduate", H2), "another torrent is not this one");
+        assert!(
+            !s.job_pending_for("move", H),
+            "a different kind is not pending"
+        );
+        assert!(
+            !s.job_pending_for("graduate", H2),
+            "another torrent is not this one"
+        );
     }
 
     /// A queued job is cancelled outright and never claimed; a running one
@@ -5187,7 +5773,10 @@ mod jobs_nodes_drain_tests {
         let claimed = s.claim_next_job().expect("the queued job is claimable");
         assert_eq!(claimed.id, id);
         s.job_finish(&id, "").unwrap();
-        assert!(!s.job_pending_for("graduate", H), "a finished job is not in flight");
+        assert!(
+            !s.job_pending_for("graduate", H),
+            "a finished job is not in flight"
+        );
     }
 
     /// A job is claimed ONCE. Two workers claiming the same job would do the
@@ -5237,7 +5826,10 @@ mod jobs_nodes_drain_tests {
         assert!(s.claim_next_job().is_none(), "nothing left queued");
 
         assert_eq!(s.requeue_running_jobs(), 1);
-        assert!(s.claim_next_job().is_some(), "it is claimable again after the requeue");
+        assert!(
+            s.claim_next_job().is_some(),
+            "it is claimable again after the requeue"
+        );
     }
 
     #[test]
@@ -5250,7 +5842,8 @@ mod jobs_nodes_drain_tests {
     fn the_job_listing_is_bounded_by_its_limit() {
         let s = store();
         for i in 0..5 {
-            s.create_job("move", &format!("{i}{}", &H[1..]), "{}", 1).unwrap();
+            s.create_job("move", &format!("{i}{}", &H[1..]), "{}", 1)
+                .unwrap();
         }
         assert_eq!(s.list_jobs(3).unwrap().len(), 3);
         assert!(s.list_jobs(100).unwrap().len() >= 5);
@@ -5272,7 +5865,8 @@ mod jobs_nodes_drain_tests {
     #[test]
     fn a_node_round_trips_with_its_key() {
         let s = store();
-        s.put_node(&node("heracles", "http://10.0.0.5:8199")).unwrap();
+        s.put_node(&node("heracles", "http://10.0.0.5:8199"))
+            .unwrap();
         let back = s.node("heracles").unwrap().expect("the node is stored");
         assert_eq!(back.url, "http://10.0.0.5:8199");
         assert_eq!(back.api_key, "remote-key");
@@ -5282,8 +5876,10 @@ mod jobs_nodes_drain_tests {
     #[test]
     fn putting_a_node_twice_updates_it_rather_than_duplicating_it() {
         let s = store();
-        s.put_node(&node("heracles", "http://10.0.0.5:8199")).unwrap();
-        s.put_node(&node("heracles", "http://10.0.0.9:8199")).unwrap();
+        s.put_node(&node("heracles", "http://10.0.0.5:8199"))
+            .unwrap();
+        s.put_node(&node("heracles", "http://10.0.0.9:8199"))
+            .unwrap();
         let all = s.nodes().unwrap();
         assert_eq!(all.len(), 1, "one name is one node");
         assert_eq!(all[0].url, "http://10.0.0.9:8199", "the newer address wins");
@@ -5292,9 +5888,13 @@ mod jobs_nodes_drain_tests {
     #[test]
     fn deleting_a_node_reports_whether_there_was_one() {
         let s = store();
-        s.put_node(&node("heracles", "http://10.0.0.5:8199")).unwrap();
+        s.put_node(&node("heracles", "http://10.0.0.5:8199"))
+            .unwrap();
         assert!(s.delete_node("heracles").unwrap());
-        assert!(!s.delete_node("heracles").unwrap(), "the second call has nothing to delete");
+        assert!(
+            !s.delete_node("heracles").unwrap(),
+            "the second call has nothing to delete"
+        );
         assert!(s.nodes().unwrap().is_empty());
     }
 
@@ -5309,13 +5909,18 @@ mod jobs_nodes_drain_tests {
     #[test]
     fn a_waiting_job_is_not_claimed_by_the_runner_and_survives_a_requeue() {
         let s = store();
-        let id = s.create_waiting_job("handoff", H, r#"{"node":"n1"}"#, 10).unwrap();
+        let id = s
+            .create_waiting_job("handoff", H, r#"{"node":"n1"}"#, 10)
+            .unwrap();
         assert_eq!(s.job(&id).unwrap().state, "waiting");
         assert!(s.claim_next_job().is_none(), "the runner leaves it alone");
         assert_eq!(s.requeue_running_jobs(), 0, "a restart does not requeue it");
         assert_eq!(s.job(&id).unwrap().state, "waiting");
         assert_eq!(s.waiting_jobs("handoff").len(), 1);
-        assert!(s.job_pending_for("handoff", H), "a second handoff of the same hash is refused");
+        assert!(
+            s.job_pending_for("handoff", H),
+            "a second handoff of the same hash is refused"
+        );
     }
 
     /// ⭐ A cancel between the watcher's poll and its verdict wins: the
@@ -5326,10 +5931,15 @@ mod jobs_nodes_drain_tests {
         let id = s.create_waiting_job("handoff", H, "{}", 0).unwrap();
         assert_eq!(s.cancel_job(&id).as_deref(), Some("waiting"));
         assert_eq!(s.job(&id).unwrap().state, "cancelled");
-        assert!(!s.settle_waiting_job(&id, "done", ""), "too late: it was cancelled");
+        assert!(
+            !s.settle_waiting_job(&id, "done", ""),
+            "too late: it was cancelled"
+        );
         assert_eq!(s.job(&id).unwrap().state, "cancelled");
 
-        let id2 = s.create_waiting_job("handoff", &format!("b{}", &H[1..]), "{}", 0).unwrap();
+        let id2 = s
+            .create_waiting_job("handoff", &format!("b{}", &H[1..]), "{}", 0)
+            .unwrap();
         assert!(s.settle_waiting_job(&id2, "done", ""));
         assert!(!s.settle_waiting_job(&id2, "failed", "x"), "settled once");
         assert_eq!(s.job(&id2).unwrap().state, "done");
@@ -5342,7 +5952,9 @@ mod jobs_nodes_drain_tests {
         let s = store();
         s.put_node(&node("alpha", "http://10.0.0.5:8199")).unwrap();
         s.put_node(&node("beta", "http://10.0.0.6:8199")).unwrap();
-        let id = s.create_waiting_job("handoff", H, r#"{"node":"alpha","engine":"vpn1"}"#, 0).unwrap();
+        let id = s
+            .create_waiting_job("handoff", H, r#"{"node":"alpha","engine":"vpn1"}"#, 0)
+            .unwrap();
 
         assert!(!s.rename_node("alpha", "beta").unwrap(), "beta is taken");
         assert!(!s.rename_node("nobody", "gamma").unwrap(), "no such node");
@@ -5361,8 +5973,14 @@ mod jobs_nodes_drain_tests {
     fn an_enrolment_token_is_spent_exactly_once() {
         let s = store();
         let (token, _expiry) = s.create_enrol_token(3600).unwrap();
-        assert!(s.consume_enrol_token(&token).unwrap(), "the first use works");
-        assert!(!s.consume_enrol_token(&token).unwrap(), "the second use does not");
+        assert!(
+            s.consume_enrol_token(&token).unwrap(),
+            "the first use works"
+        );
+        assert!(
+            !s.consume_enrol_token(&token).unwrap(),
+            "the second use does not"
+        );
     }
 
     #[test]
@@ -5376,14 +5994,19 @@ mod jobs_nodes_drain_tests {
     fn an_expired_token_is_refused() {
         let s = store();
         let (token, _) = s.create_enrol_token(-1).unwrap();
-        assert!(!s.consume_enrol_token(&token).unwrap(), "already past its expiry");
+        assert!(
+            !s.consume_enrol_token(&token).unwrap(),
+            "already past its expiry"
+        );
     }
 
     #[test]
     fn a_drain_pass_is_recorded_and_comes_back_newest_first() {
         let s = store();
-        s.record_drain(100, "/mnt/race", 95.0, 80.0, 3, 1, 0, 1 << 30).unwrap();
-        s.record_drain(200, "/mnt/race", 92.0, 79.0, 2, 0, 1, 1 << 29).unwrap();
+        s.record_drain(100, "/mnt/race", 95.0, 80.0, 3, 1, 0, 1 << 30)
+            .unwrap();
+        s.record_drain(200, "/mnt/race", 92.0, 79.0, 2, 0, 1, 1 << 29)
+            .unwrap();
         let hist = s.drain_history(10).unwrap();
         assert_eq!(hist.len(), 2);
         // The SQL column is `at`; the key served to the UI is `timestamp`.
@@ -5397,11 +6020,16 @@ mod jobs_nodes_drain_tests {
     #[test]
     fn a_drain_pass_counts_graduations_as_removals_too() {
         let s = store();
-        s.record_drain(100, "/mnt/race", 95.0, 80.0, 3, 2, 1, 1 << 30).unwrap();
+        s.record_drain(100, "/mnt/race", 95.0, 80.0, 3, 2, 1, 1 << 30)
+            .unwrap();
         let hist = s.drain_history(1).unwrap();
         assert_eq!(hist[0]["deleted"].as_i64(), Some(3));
         assert_eq!(hist[0]["graduated"].as_i64(), Some(2));
-        assert_eq!(hist[0]["removed_count"].as_i64(), Some(5), "3 deleted + 2 graduated");
+        assert_eq!(
+            hist[0]["removed_count"].as_i64(),
+            Some(5),
+            "3 deleted + 2 graduated"
+        );
         assert_eq!(hist[0]["stuck"].as_i64(), Some(1));
     }
 
@@ -5409,7 +6037,8 @@ mod jobs_nodes_drain_tests {
     fn the_drain_history_is_bounded_by_its_limit() {
         let s = store();
         for at in 0..5 {
-            s.record_drain(at, "/mnt/race", 90.0, 80.0, 1, 0, 0, 1).unwrap();
+            s.record_drain(at, "/mnt/race", 90.0, 80.0, 1, 0, 0, 1)
+                .unwrap();
         }
         assert_eq!(s.drain_history(2).unwrap().len(), 2);
     }
@@ -5484,7 +6113,11 @@ mod jobs_nodes_drain_tests {
             })
             .unwrap();
         }
-        assert_eq!(s.prune_workflow_activity(300).unwrap(), 1, "only the old one goes");
+        assert_eq!(
+            s.prune_workflow_activity(300).unwrap(),
+            1,
+            "only the old one goes"
+        );
         let rows = s.workflow_activity(10).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].at, 500);
@@ -5521,8 +6154,17 @@ mod jobs_nodes_drain_tests {
     #[test]
     fn a_bulk_seeding_time_write_reports_what_it_touched() {
         let s = store();
-        s.insert_torrent(H, "race", b"d4:infod4:name1:aee", "/data", "", 1.0, false, "")
-            .unwrap();
+        s.insert_torrent(
+            H,
+            "race",
+            b"d4:infod4:name1:aee",
+            "/data",
+            "",
+            1.0,
+            false,
+            "",
+        )
+        .unwrap();
         let touched = s.update_seeding_times(&[(H.to_string(), 3600)]).unwrap();
         assert_eq!(touched, 1);
 
@@ -5556,7 +6198,10 @@ mod slim_current_tests {
                     .collect::<std::collections::BTreeSet<_>>()
                     .into_iter()
                     .collect();
-                (*k, (f.category(v.category_id).to_string(), tags, v.user_paused))
+                (
+                    *k,
+                    (f.category(v.category_id).to_string(), tags, v.user_paused),
+                )
             })
             .collect()
     }
@@ -5577,7 +6222,11 @@ mod slim_current_tests {
     fn agrees(s: &mut Store, session: &str) {
         let kept = s.slim_facts_current(session).unwrap();
         let read = s.slim_facts(session).unwrap();
-        assert_eq!(canon(&kept), canon(&read), "the kept copy says what a full read says");
+        assert_eq!(
+            canon(&kept),
+            canon(&read),
+            "the kept copy says what a full read says"
+        );
     }
 
     /// ⭐ Every kind of write the store makes reaches the kept copy: an add, a
@@ -5587,7 +6236,13 @@ mod slim_current_tests {
     fn the_kept_copy_follows_every_write() {
         let mut s = Store::open_in_memory().unwrap();
         for n in 1..=20 {
-            add(&s, n, "hoard", if n % 2 == 0 { "Books" } else { "" }, if n % 3 == 0 { "a,b" } else { "" });
+            add(
+                &s,
+                n,
+                "hoard",
+                if n % 2 == 0 { "Books" } else { "" },
+                if n % 3 == 0 { "a,b" } else { "" },
+            );
         }
         add(&s, 21, "race", "Race", "");
         agrees(&mut s, "hoard");
@@ -5604,14 +6259,25 @@ mod slim_current_tests {
         s.delete_torrent(&hash(5)).unwrap();
         agrees(&mut s, "hoard");
         s.conn
-            .execute("UPDATE torrents SET session = 'race' WHERE info_hash = ?1", [hash(6)])
+            .execute(
+                "UPDATE torrents SET session = 'race' WHERE info_hash = ?1",
+                [hash(6)],
+            )
             .unwrap();
         agrees(&mut s, "hoard");
         agrees(&mut s, "race");
         s.conn
-            .execute("UPDATE torrents SET total_uploaded = 99 WHERE info_hash = ?1", [hash(7)])
+            .execute(
+                "UPDATE torrents SET total_uploaded = 99 WHERE info_hash = ?1",
+                [hash(7)],
+            )
             .unwrap();
-        let before = s.conn.query_row("SELECT count(*) FROM temp.slim_dirty", [], |r| r.get::<_, i64>(0)).unwrap();
+        let before = s
+            .conn
+            .query_row("SELECT count(*) FROM temp.slim_dirty", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .unwrap();
         assert_eq!(before, 0, "a column the list does not read is not a change");
         agrees(&mut s, "hoard");
     }
@@ -5653,7 +6319,10 @@ mod slim_current_tests {
         agrees(&mut s, "hoard");
         let other = Connection::open(&path).unwrap();
         other
-            .execute("UPDATE torrents SET category = 'Films' WHERE info_hash = ?1", [hash(1)])
+            .execute(
+                "UPDATE torrents SET category = 'Films' WHERE info_hash = ?1",
+                [hash(1)],
+            )
             .unwrap();
         let kept = s.slim_facts_current("hoard").unwrap();
         assert_eq!(canon(&kept).values().next().unwrap().0, "Films");
@@ -5700,7 +6369,10 @@ mod wal_tests {
         let path = tmp("mode");
         let s = Store::open(&path, false).unwrap();
         assert_eq!(s.journal_mode(), "wal");
-        let sync: i64 = s.conn.query_row("PRAGMA synchronous", [], |r| r.get(0)).unwrap();
+        let sync: i64 = s
+            .conn
+            .query_row("PRAGMA synchronous", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(sync, 1, "NORMAL");
         drop(s);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
@@ -5723,9 +6395,15 @@ mod wal_tests {
             )
             .unwrap();
         let held = lock.read().unwrap();
-        assert_eq!(held.tags_of_session("hoard").unwrap(), vec!["a".to_string()]);
+        assert_eq!(
+            held.tags_of_session("hoard").unwrap(),
+            vec!["a".to_string()]
+        );
         // The shared connection is not the one being read on.
-        assert!(lock.inner.try_lock().is_ok(), "a read must not take the writer's lock");
+        assert!(
+            lock.inner.try_lock().is_ok(),
+            "a read must not take the writer's lock"
+        );
         drop(held);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
@@ -5745,7 +6423,11 @@ mod wal_tests {
         assert_eq!(lock.watch_holds(after), 0, "released");
         let held = lock.lock().unwrap();
         std::thread::sleep(std::time::Duration::from_millis(400));
-        assert_eq!(lock.watch_holds(after), 1, "the next hold is reported again");
+        assert_eq!(
+            lock.watch_holds(after),
+            1,
+            "the next hold is reported again"
+        );
         drop(held);
     }
 
@@ -5764,7 +6446,9 @@ mod wal_tests {
     fn a_checkpoint_empties_the_wal() {
         let path = tmp("ckpt");
         let s = Store::open(&path, false).unwrap();
-        s.conn.execute_batch("PRAGMA wal_autocheckpoint=0;").unwrap();
+        s.conn
+            .execute_batch("PRAGMA wal_autocheckpoint=0;")
+            .unwrap();
         for i in 0..200 {
             s.conn
                 .execute(
@@ -5776,7 +6460,9 @@ mod wal_tests {
         let other = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_WRITE).unwrap();
         checkpoint(&other).unwrap();
         let (_, log, done): (i64, i64, i64) = other
-            .query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
             .unwrap();
         assert_eq!(log, done, "everything in the WAL is back in the database");
         drop((s, other));
@@ -5809,13 +6495,26 @@ mod resolve_tests {
         add(&s, &b, "hoard");
         add(&s, &f, "race");
         assert_eq!(s.resolve_hash_in("hoard", &a).as_deref(), Some(a.as_str()));
-        assert_eq!(s.resolve_hash_in("hoard", &a.to_uppercase()).as_deref(), Some(a.as_str()));
-        assert_eq!(s.resolve_hash_in("hoard", "abc").as_deref(), Some(b.as_str()));
+        assert_eq!(
+            s.resolve_hash_in("hoard", &a.to_uppercase()).as_deref(),
+            Some(a.as_str())
+        );
+        assert_eq!(
+            s.resolve_hash_in("hoard", "abc").as_deref(),
+            Some(b.as_str())
+        );
         assert!(s.resolve_hash_in("hoard", "ab").is_some());
-        assert_eq!(s.resolve_hash_in("hoard", "ff"), None, "the race copy is not the hoard's");
+        assert_eq!(
+            s.resolve_hash_in("hoard", "ff"),
+            None,
+            "the race copy is not the hoard's"
+        );
         assert_eq!(s.resolve_hash_in("race", "fe").as_deref(), Some(f.as_str()));
         assert_eq!(s.resolve_hash_in("hoard", "ac"), None);
-        assert_eq!(s.resolve_hash(&f.to_uppercase()).as_deref(), Some(f.as_str()));
+        assert_eq!(
+            s.resolve_hash(&f.to_uppercase()).as_deref(),
+            Some(f.as_str())
+        );
         assert_eq!(s.resolve_hash("0"), None);
     }
 
@@ -5833,7 +6532,10 @@ mod resolve_tests {
             .collect::<Result<_, _>>()
             .unwrap();
         let plan = plan.join(" | ");
-        assert!(plan.contains("SEARCH") && plan.contains("info_hash>?"), "{plan}");
+        assert!(
+            plan.contains("SEARCH") && plan.contains("info_hash>?"),
+            "{plan}"
+        );
     }
 }
 
@@ -5862,7 +6564,8 @@ mod link_index_tests {
     #[test]
     fn a_measurement_is_stored_per_copy_and_replaced_not_duplicated() {
         let s = store();
-        s.put_link_rows(&[row("a", "hoard", 10, 2, 0), row("a", "race", 11, 2, 0)]).unwrap();
+        s.put_link_rows(&[row("a", "hoard", 10, 2, 0), row("a", "race", 11, 2, 0)])
+            .unwrap();
         s.put_link_rows(&[row("a", "hoard", 20, 3, 1)]).unwrap();
         let meta = s.link_index_meta().unwrap();
         assert_eq!(meta.len(), 2, "one row per (hash, session)");
@@ -5870,11 +6573,17 @@ mod link_index_tests {
         assert_eq!(meta[&("a".into(), "hoard".into())].files, 3);
         let mut stats = std::collections::HashMap::new();
         s.for_each_link_row(|h, sess, sp, at, blob| {
-            stats.insert((h.to_string(), sess.to_string()), (sp.to_string(), at, blob.to_vec()));
+            stats.insert(
+                (h.to_string(), sess.to_string()),
+                (sp.to_string(), at, blob.to_vec()),
+            );
         })
         .unwrap();
         assert_eq!(stats.len(), 2);
-        assert_eq!(stats[&("a".into(), "race".into())], ("/data/x".to_string(), 11, vec![7, 7]));
+        assert_eq!(
+            stats[&("a".into(), "race".into())],
+            ("/data/x".to_string(), 11, vec![7, 7])
+        );
     }
 
     #[test]
@@ -5898,8 +6607,13 @@ mod link_index_tests {
     #[test]
     fn dropped_rows_are_gone_and_only_those() {
         let s = store();
-        s.put_link_rows(&[row("a", "hoard", 1, 1, 0), row("b", "hoard", 1, 1, 0)]).unwrap();
-        assert_eq!(s.drop_link_rows(&[("a".into(), "hoard".into()), ("zz".into(), "hoard".into())]).unwrap(), 1);
+        s.put_link_rows(&[row("a", "hoard", 1, 1, 0), row("b", "hoard", 1, 1, 0)])
+            .unwrap();
+        assert_eq!(
+            s.drop_link_rows(&[("a".into(), "hoard".into()), ("zz".into(), "hoard".into())])
+                .unwrap(),
+            1
+        );
         let meta = s.link_index_meta().unwrap();
         assert!(meta.contains_key(&("b".into(), "hoard".into())));
         assert_eq!(meta.len(), 1);

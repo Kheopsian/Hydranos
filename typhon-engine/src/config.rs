@@ -253,17 +253,39 @@ pub struct EngineConfig {
     session_peer_id: std::sync::OnceLock<[u8; 20]>,
 }
 
-fn default_true() -> bool { true }
-fn default_webseed_concurrency() -> usize { 48 }
-fn default_resume_fast_secs() -> u64 { crate::session::RESUME_FAST_SECS }
-fn default_data_dir() -> String { "/configs".into() }
-fn default_listen_port() -> u16 { 16172 }
-fn default_max_connections() -> usize { 12000 }
-fn default_max_dials_per_sec() -> f64 { 50.0 }
-fn default_max_uploads_per_torrent() -> i32 { -1 }
-fn default_peer_timeout() -> u64 { 300 }
-fn default_file_pool_size() -> usize { 5000 }
-fn default_socks5_port() -> u16 { 1080 }
+fn default_true() -> bool {
+    true
+}
+fn default_webseed_concurrency() -> usize {
+    48
+}
+fn default_resume_fast_secs() -> u64 {
+    crate::session::RESUME_FAST_SECS
+}
+fn default_data_dir() -> String {
+    "/configs".into()
+}
+fn default_listen_port() -> u16 {
+    16172
+}
+fn default_max_connections() -> usize {
+    12000
+}
+fn default_max_dials_per_sec() -> f64 {
+    50.0
+}
+fn default_max_uploads_per_torrent() -> i32 {
+    -1
+}
+fn default_peer_timeout() -> u64 {
+    300
+}
+fn default_file_pool_size() -> usize {
+    5000
+}
+fn default_socks5_port() -> u16 {
+    1080
+}
 
 /// Percent-encode a SOCKS5 user name or password for a URL's userinfo. A
 /// password holding `@`, `:` or `/` would otherwise be cut at that character
@@ -273,7 +295,9 @@ pub fn userinfo_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
         match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
             _ => out.push_str(&format!("%{b:02X}")),
         }
     }
@@ -329,14 +353,22 @@ fn default_peer_fingerprint() -> String {
 /// the field the right width AND the version true.
 pub fn peer_fingerprint_for(version: &str) -> String {
     fn b36(n: u32) -> char {
-        char::from_digit(n.min(35), 36).unwrap_or('0').to_ascii_uppercase()
+        char::from_digit(n.min(35), 36)
+            .unwrap_or('0')
+            .to_ascii_uppercase()
     }
     let mut parts = version.split('.').map(|p| p.parse::<u32>().unwrap_or(0));
     let major = parts.next().unwrap_or(0);
     let minor = parts.next().unwrap_or(0);
     let patch = parts.next().unwrap_or(0);
     let build = parts.next().unwrap_or(0);
-    format!("-HY{}{}{}{}-", b36(major), b36(minor), b36(patch), b36(build))
+    format!(
+        "-HY{}{}{}{}-",
+        b36(major),
+        b36(minor),
+        b36(patch),
+        b36(build)
+    )
 }
 
 #[cfg(test)]
@@ -356,7 +388,11 @@ mod peer_id_tests {
         let c = config();
         let first = c.peer_id();
         assert_eq!(c.peer_id(), first, "a second call must not draw again");
-        assert_eq!(c.clone().peer_id(), first, "a clone carries the identity with it");
+        assert_eq!(
+            c.clone().peer_id(),
+            first,
+            "a clone carries the identity with it"
+        );
         let legacy = c.resolved_bindings();
         assert!(!legacy.is_empty());
         for b in &legacy {
@@ -377,7 +413,11 @@ mod peer_id_tests {
         let c = config();
         let id = c.peer_id();
         assert_eq!(&id[..8], c.peer_fingerprint.as_bytes());
-        assert!(id[8..].iter().all(|b| b.is_ascii_alphanumeric()), "{:?}", &id[8..]);
+        assert!(
+            id[8..].iter().all(|b| b.is_ascii_alphanumeric()),
+            "{:?}",
+            &id[8..]
+        );
     }
 }
 
@@ -418,7 +458,9 @@ mod fingerprint_tests {
         assert_eq!(fp, "-HY0000-");
     }
 }
-fn default_user_agent() -> String { user_agent() }
+fn default_user_agent() -> String {
+    user_agent()
+}
 
 impl EngineConfig {
     /// Whether this engine opens a peer listening port at all.
@@ -515,7 +557,10 @@ impl EngineConfig {
         let auth = if self.socks5_outbound_user.is_empty() {
             None
         } else {
-            Some((self.socks5_outbound_user.clone(), self.socks5_outbound_pass.clone()))
+            Some((
+                self.socks5_outbound_user.clone(),
+                self.socks5_outbound_pass.clone(),
+            ))
         };
         Some(std::sync::Arc::new((
             self.socks5_outbound_host.clone(),
@@ -534,7 +579,10 @@ impl EngineConfig {
         if !self.enable_ipv6 || out.iter().any(|b| b.addr.is_ipv6()) {
             return out;
         }
-        let port = out.first().map(|b| b.addr.port()).unwrap_or(self.listen_port);
+        let port = out
+            .first()
+            .map(|b| b.addr.port())
+            .unwrap_or(self.listen_port);
         let advertised = out.first().map(|b| b.advertised_port).unwrap_or(port);
         let addr = std::net::SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, port));
         let next_id = out.iter().map(|b| b.id).max().map(|m| m + 1).unwrap_or(0);
@@ -543,7 +591,10 @@ impl EngineConfig {
             addr,
             // Same peer_id as the v4 listener: one engine, one identity. The
             // CSV multi-interface path already shares it the same way.
-            peer_id: out.first().map(|b| b.peer_id).unwrap_or_else(|| self.peer_id()),
+            peer_id: out
+                .first()
+                .map(|b| b.peer_id)
+                .unwrap_or_else(|| self.peer_id()),
             egress: out.first().map(|b| b.egress.clone()).unwrap_or_default(),
             advertised_port: advertised,
             only_v6: true,
@@ -577,7 +628,11 @@ impl EngineConfig {
                     p[..n].copy_from_slice(&bytes[..n]);
                     p
                 };
-                let advertised = if b.announce_port != 0 { b.announce_port } else { b.listen_port };
+                let advertised = if b.announce_port != 0 {
+                    b.announce_port
+                } else {
+                    b.listen_port
+                };
                 out.push(ResolvedBinding {
                     id: b.id,
                     addr,
@@ -597,17 +652,43 @@ impl EngineConfig {
         let global_pid = self.peer_id();
         let mut out = Vec::new();
         if self.listen_interfaces.is_empty() {
-            if let Ok(addr) = format!("0.0.0.0:{}", self.listen_port).parse::<std::net::SocketAddr>() {
+            if let Ok(addr) =
+                format!("0.0.0.0:{}", self.listen_port).parse::<std::net::SocketAddr>()
+            {
                 let port = addr.port();
-                out.push(ResolvedBinding { id: 0, addr, peer_id: global_pid, egress: crate::netpin::Egress { fwmark: 0, device: self.bind_device.clone(), socks5: self.socks5_outbound() }, advertised_port: port, only_v6: false });
+                out.push(ResolvedBinding {
+                    id: 0,
+                    addr,
+                    peer_id: global_pid,
+                    egress: crate::netpin::Egress {
+                        fwmark: 0,
+                        device: self.bind_device.clone(),
+                        socks5: self.socks5_outbound(),
+                    },
+                    advertised_port: port,
+                    only_v6: false,
+                });
             }
         } else {
             for (i, part) in self.listen_interfaces.split(',').enumerate() {
                 let s = part.trim();
-                if s.is_empty() { continue; }
+                if s.is_empty() {
+                    continue;
+                }
                 if let Ok(addr) = s.parse::<std::net::SocketAddr>() {
                     let port = addr.port();
-                    out.push(ResolvedBinding { id: i as u32, addr, peer_id: global_pid, egress: crate::netpin::Egress { fwmark: 0, device: self.bind_device.clone(), socks5: self.socks5_outbound() }, advertised_port: port, only_v6: false });
+                    out.push(ResolvedBinding {
+                        id: i as u32,
+                        addr,
+                        peer_id: global_pid,
+                        egress: crate::netpin::Egress {
+                            fwmark: 0,
+                            device: self.bind_device.clone(),
+                            socks5: self.socks5_outbound(),
+                        },
+                        advertised_port: port,
+                        only_v6: false,
+                    });
                 }
             }
         }
@@ -661,19 +742,33 @@ mod proxy_tests {
 
     #[test]
     fn an_explicit_announce_proxy_wins() {
-        let c = config(r#"{"socks5_outbound_host":"10.0.0.1","announce_proxy":"socks5h://10.9.9.9:9050"}"#);
+        let c = config(
+            r#"{"socks5_outbound_host":"10.0.0.1","announce_proxy":"socks5h://10.9.9.9:9050"}"#,
+        );
         assert_eq!(c.http_proxy(), "socks5h://10.9.9.9:9050");
-        assert_eq!(c.socks5_url(), "socks5h://10.0.0.1:1080", "the peers keep theirs");
+        assert_eq!(
+            c.socks5_url(),
+            "socks5h://10.0.0.1:1080",
+            "the peers keep theirs"
+        );
     }
 
     /// A password with URL syntax in it must survive the trip into a URL, or
     /// the proxy refuses every announce with an error that names nothing.
     #[test]
     fn credentials_are_escaped_and_v6_hosts_bracketed() {
-        let c = config(r#"{"socks5_outbound_host":"fd00::1","socks5_outbound_port":1081,
-            "socks5_outbound_user":"me","socks5_outbound_pass":"p@ss:w/rd"}"#);
-        assert_eq!(c.http_proxy(), "socks5h://me:p%40ss%3Aw%2Frd@[fd00::1]:1081");
-        assert!(reqwest::Proxy::all(c.http_proxy()).is_ok(), "reqwest accepts it");
+        let c = config(
+            r#"{"socks5_outbound_host":"fd00::1","socks5_outbound_port":1081,
+            "socks5_outbound_user":"me","socks5_outbound_pass":"p@ss:w/rd"}"#,
+        );
+        assert_eq!(
+            c.http_proxy(),
+            "socks5h://me:p%40ss%3Aw%2Frd@[fd00::1]:1081"
+        );
+        assert!(
+            reqwest::Proxy::all(c.http_proxy()).is_ok(),
+            "reqwest accepts it"
+        );
     }
 
     /// Every binding carries the proxy: there is no "v6 only" any more.

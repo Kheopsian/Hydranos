@@ -80,7 +80,10 @@ fn info_hash_hex(torrent: &[u8]) -> String {
 /// Our own address on the shared network, as qBittorrent will dial it: the
 /// source address the kernel picks to reach qBittorrent.
 fn our_address_towards(peer: &str) -> std::net::IpAddr {
-    let target: SocketAddr = std::net::ToSocketAddrs::to_socket_addrs(peer).unwrap().next().unwrap();
+    let target: SocketAddr = std::net::ToSocketAddrs::to_socket_addrs(peer)
+        .unwrap()
+        .next()
+        .unwrap();
     let s = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
     s.connect(target).unwrap();
     s.local_addr().unwrap().ip()
@@ -130,7 +133,10 @@ struct Qbit {
 
 impl Qbit {
     fn new() -> Qbit {
-        Qbit { base: env("HYDRANOS_INTEROP_QBIT"), http: reqwest::Client::new() }
+        Qbit {
+            base: env("HYDRANOS_INTEROP_QBIT"),
+            http: reqwest::Client::new(),
+        }
     }
 
     async fn set_prefs(&self, json: &str) {
@@ -186,7 +192,10 @@ impl Qbit {
 
     async fn peers(&self, hash: &str) -> serde_json::Value {
         self.http
-            .get(format!("{}/api/v2/sync/torrentPeers?hash={hash}&rid=0", self.base))
+            .get(format!(
+                "{}/api/v2/sync/torrentPeers?hash={hash}&rid=0",
+                self.base
+            ))
             .send()
             .await
             .unwrap()
@@ -220,7 +229,10 @@ impl Qbit {
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        panic!("{what}: qBittorrent never completed; last state {}", self.info(hash).await);
+        panic!(
+            "{what}: qBittorrent never completed; last state {}",
+            self.info(hash).await
+        );
     }
 }
 
@@ -273,7 +285,12 @@ async fn libtorrent_downloads_from_us(tag: &str, private: bool, seed: u32) {
     std::fs::write(us.root.join("data").join(&name), &data).unwrap();
     let (ih, _) = us
         .mgr
-        .add_torrent_bytes(&torrent, &us.root.join("data").to_string_lossy(), false, true)
+        .add_torrent_bytes(
+            &torrent,
+            &us.root.join("data").to_string_lossy(),
+            false,
+            true,
+        )
         .expect("we seed it");
     let port = 16000 + (seed % 1000) as u16;
     let pid = peer_id();
@@ -281,7 +298,11 @@ async fn libtorrent_downloads_from_us(tag: &str, private: bool, seed: u32) {
 
     let peer = env("HYDRANOS_INTEROP_QBIT_PEER");
     let me = SocketAddr::new(our_address_towards(&peer), port);
-    q.add(&torrent, &format!("{}/qbit-{tag}", env("HYDRANOS_INTEROP_QBIT_SHARED"))).await;
+    q.add(
+        &torrent,
+        &format!("{}/qbit-{tag}", env("HYDRANOS_INTEROP_QBIT_SHARED")),
+    )
+    .await;
     tokio::time::sleep(Duration::from_millis(500)).await;
     q.add_peer(&hash, me).await;
 
@@ -307,22 +328,33 @@ async fn we_download_from_libtorrent(tag: &str, seed: u32) {
     let q = Qbit::new();
 
     // qBittorrent's copy, on the shared volume, then checked by qBittorrent.
-    let shared = std::path::PathBuf::from(env("HYDRANOS_INTEROP_SHARED")).join(format!("qseed-{tag}"));
+    let shared =
+        std::path::PathBuf::from(env("HYDRANOS_INTEROP_SHARED")).join(format!("qseed-{tag}"));
     std::fs::create_dir_all(&shared).unwrap();
     std::fs::write(shared.join(&name), &data).unwrap();
-    q.add(&torrent, &format!("{}/qseed-{tag}", env("HYDRANOS_INTEROP_QBIT_SHARED"))).await;
+    q.add(
+        &torrent,
+        &format!("{}/qseed-{tag}", env("HYDRANOS_INTEROP_QBIT_SHARED")),
+    )
+    .await;
     q.wait_complete(&hash, "qBittorrent's own recheck").await;
 
     let us = engine(tag, torrent.clone());
     let (ih, _) = us
         .mgr
-        .add_torrent_bytes(&torrent, &us.root.join("data").to_string_lossy(), false, false)
+        .add_torrent_bytes(
+            &torrent,
+            &us.root.join("data").to_string_lossy(),
+            false,
+            false,
+        )
         .expect("we leech it");
     let t = us.mgr.get(&ih).unwrap();
-    let peer: SocketAddr = std::net::ToSocketAddrs::to_socket_addrs(&env("HYDRANOS_INTEROP_QBIT_PEER").as_str())
-        .unwrap()
-        .next()
-        .unwrap();
+    let peer: SocketAddr =
+        std::net::ToSocketAddrs::to_socket_addrs(&env("HYDRANOS_INTEROP_QBIT_PEER").as_str())
+            .unwrap()
+            .next()
+            .unwrap();
     let pid = peer_id();
 
     // Dial, and dial again while nothing is connected -- what a tracker's next
@@ -336,7 +368,16 @@ async fn we_download_from_libtorrent(tag: &str, seed: u32) {
             let t = t.clone();
             let disk = us.disk.clone();
             tokio::spawn(async move {
-                typhon_engine::tracker::dial_peer(peer, t, disk, pid, None, 16999, &Egress::default()).await;
+                typhon_engine::tracker::dial_peer(
+                    peer,
+                    t,
+                    disk,
+                    pid,
+                    None,
+                    16999,
+                    &Egress::default(),
+                )
+                .await;
             });
         }
         if seen_client.is_empty() {
@@ -370,7 +411,10 @@ async fn we_download_from_libtorrent(tag: &str, seed: u32) {
             tr::DIAL_HANDSHAKE_FAIL.load(Ordering::Relaxed),
         );
         eprintln!("[interop] {tag}: qBittorrent says {}", q.info(&hash).await);
-        eprintln!("[interop] {tag}: qBittorrent peers {}", q.peers(&hash).await);
+        eprintln!(
+            "[interop] {tag}: qBittorrent peers {}",
+            q.peers(&hash).await
+        );
         eprintln!(
             "[interop] {tag}: our status={} peers_connected={} got={}",
             t.status.load(Ordering::Relaxed),
@@ -378,8 +422,16 @@ async fn we_download_from_libtorrent(tag: &str, seed: u32) {
             typhon_engine::tracker::BT_GOT_PIECE.load(Ordering::Relaxed)
         );
     }
-    assert!(got == data, "{tag}: the file never matched (downloaded {} bytes)", t.total_downloaded.load(Ordering::Relaxed));
-    assert_eq!(t.total_downloaded.load(Ordering::Relaxed), TOTAL as u64, "verified payload, counted once");
+    assert!(
+        got == data,
+        "{tag}: the file never matched (downloaded {} bytes)",
+        t.total_downloaded.load(Ordering::Relaxed)
+    );
+    assert_eq!(
+        t.total_downloaded.load(Ordering::Relaxed),
+        TOTAL as u64,
+        "verified payload, counted once"
+    );
     q.delete(&hash).await;
 }
 
@@ -430,18 +482,24 @@ async fn interop_hydranos_resolves_a_magnet_from_libtorrent() {
     let torrent = build_torrent(&name, &data, false);
     let hash = info_hash_hex(&torrent);
     let q = Qbit::new();
-    let shared = std::path::PathBuf::from(env("HYDRANOS_INTEROP_SHARED")).join(format!("qseed-{tag}"));
+    let shared =
+        std::path::PathBuf::from(env("HYDRANOS_INTEROP_SHARED")).join(format!("qseed-{tag}"));
     std::fs::create_dir_all(&shared).unwrap();
     std::fs::write(shared.join(&name), &data).unwrap();
-    q.add(&torrent, &format!("{}/qseed-{tag}", env("HYDRANOS_INTEROP_QBIT_SHARED"))).await;
+    q.add(
+        &torrent,
+        &format!("{}/qseed-{tag}", env("HYDRANOS_INTEROP_QBIT_SHARED")),
+    )
+    .await;
     q.wait_complete(&hash, "qBittorrent's own recheck").await;
 
     // An engine that has never seen the torrent: no blob, no .torrent.
     let us = engine(tag, Vec::new());
-    let peer: SocketAddr = std::net::ToSocketAddrs::to_socket_addrs(&env("HYDRANOS_INTEROP_QBIT_PEER").as_str())
-        .unwrap()
-        .next()
-        .unwrap();
+    let peer: SocketAddr =
+        std::net::ToSocketAddrs::to_socket_addrs(&env("HYDRANOS_INTEROP_QBIT_PEER").as_str())
+            .unwrap()
+            .next()
+            .unwrap();
     let ih = typhon_engine::torrent::hex_decode(&hash).unwrap();
     let cfg: typhon_engine::config::EngineConfig = serde_json::from_str("{}").unwrap();
     // libtorrent refuses connections to a torrent it is still checking. A
@@ -450,7 +508,12 @@ async fn interop_hydranos_resolves_a_magnet_from_libtorrent() {
     let mut dict = None;
     let mut last = String::new();
     'attempts: for _ in 0..15 {
-        assert!(us.mgr.magnet().start(ih, Vec::new(), vec![peer], &cfg, None, None), "a resolution starts");
+        assert!(
+            us.mgr
+                .magnet()
+                .start(ih, Vec::new(), vec![peer], &cfg, None, None),
+            "a resolution starts"
+        );
         for _ in 0..400 {
             match us.mgr.magnet().state_of(&ih) {
                 Some(typhon_engine::magnet::JobState::Done(d)) => {
@@ -469,8 +532,21 @@ async fn interop_hydranos_resolves_a_magnet_from_libtorrent() {
     }
     if dict.is_none() {
         let b = &cfg.resolved_bindings()[0];
-        let direct = typhon_engine::peer::metadata::fetch_from_peer(peer, ih, b.peer_id, None, b.advertised_port, b.egress.clone(), us.mgr.policy().clone()).await;
-        eprintln!("[interop] magnet: last failure {last:?}; asked directly: {:?}; qBittorrent says {}", direct.map(|d| d.len()), q.info(&hash).await);
+        let direct = typhon_engine::peer::metadata::fetch_from_peer(
+            peer,
+            ih,
+            b.peer_id,
+            None,
+            b.advertised_port,
+            b.egress.clone(),
+            us.mgr.policy().clone(),
+        )
+        .await;
+        eprintln!(
+            "[interop] magnet: last failure {last:?}; asked directly: {:?}; qBittorrent says {}",
+            direct.map(|d| d.len()),
+            q.info(&hash).await
+        );
     }
     let dict = dict.expect("the metadata arrived within a minute");
     let got: [u8; 20] = Sha1::digest(&dict).into();
@@ -494,13 +570,28 @@ async fn interop_a_blocked_libtorrent_is_cut_off_and_kept_out() {
     // We seed, qBittorrent downloads: a connection to cut.
     let us = engine(tag, torrent.clone());
     std::fs::write(us.root.join("data").join(&name), &data).unwrap();
-    let (ih, _) = us.mgr.add_torrent_bytes(&torrent, &us.root.join("data").to_string_lossy(), false, true).unwrap();
+    let (ih, _) = us
+        .mgr
+        .add_torrent_bytes(
+            &torrent,
+            &us.root.join("data").to_string_lossy(),
+            false,
+            true,
+        )
+        .unwrap();
     let port = 16911;
     wait_listening(&listen(&us, port, peer_id())).await;
     let peer_env = env("HYDRANOS_INTEROP_QBIT_PEER");
-    let qaddr: SocketAddr = std::net::ToSocketAddrs::to_socket_addrs(&peer_env.as_str()).unwrap().next().unwrap();
+    let qaddr: SocketAddr = std::net::ToSocketAddrs::to_socket_addrs(&peer_env.as_str())
+        .unwrap()
+        .next()
+        .unwrap();
     let me = SocketAddr::new(our_address_towards(&peer_env), port);
-    q.add(&torrent, &format!("{}/qbit-{tag}", env("HYDRANOS_INTEROP_QBIT_SHARED"))).await;
+    q.add(
+        &torrent,
+        &format!("{}/qbit-{tag}", env("HYDRANOS_INTEROP_QBIT_SHARED")),
+    )
+    .await;
     tokio::time::sleep(Duration::from_millis(500)).await;
     // Slowed to 32 KiB/s, so the connection is still downloading when the
     // ban lands: finished, libtorrent would close a seed-to-seed link itself
@@ -519,7 +610,10 @@ async fn interop_a_blocked_libtorrent_is_cut_off_and_kept_out() {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    assert!(t.peers_connected.load(Ordering::Relaxed) > 0, "libtorrent is connected before the ban");
+    assert!(
+        t.peers_connected.load(Ordering::Relaxed) > 0,
+        "libtorrent is connected before the ban"
+    );
 
     // 1. Cut off: blocked while connected, woken, gone.
     use typhon_engine::ipfilter as f;
@@ -531,7 +625,11 @@ async fn interop_a_blocked_libtorrent_is_cut_off_and_kept_out() {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    assert_eq!(t.peers_connected.load(Ordering::Relaxed), 0, "the blocked peer is disconnected");
+    assert_eq!(
+        t.peers_connected.load(Ordering::Relaxed),
+        0,
+        "the blocked peer is disconnected"
+    );
     assert!(f::DROPPED.load(Ordering::Relaxed) >= 1);
 
     // 2. Kept out: a fresh copy on its side -- libtorrent backs off a peer
@@ -539,7 +637,11 @@ async fn interop_a_blocked_libtorrent_is_cut_off_and_kept_out() {
     let before_in = f::BLOCKED_IN.load(Ordering::Relaxed);
     q.delete(&hash).await;
     tokio::time::sleep(Duration::from_millis(500)).await;
-    q.add(&torrent, &format!("{}/qbit-{tag}-2", env("HYDRANOS_INTEROP_QBIT_SHARED"))).await;
+    q.add(
+        &torrent,
+        &format!("{}/qbit-{tag}-2", env("HYDRANOS_INTEROP_QBIT_SHARED")),
+    )
+    .await;
     tokio::time::sleep(Duration::from_millis(500)).await;
     q.add_peer(&hash, me).await;
     for _ in 0..100 {
@@ -548,13 +650,28 @@ async fn interop_a_blocked_libtorrent_is_cut_off_and_kept_out() {
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    assert!(f::BLOCKED_IN.load(Ordering::Relaxed) > before_in, "its inbound attempt is refused");
+    assert!(
+        f::BLOCKED_IN.load(Ordering::Relaxed) > before_in,
+        "its inbound attempt is refused"
+    );
     assert_eq!(t.peers_connected.load(Ordering::Relaxed), 0);
 
     // 3. Not dialled: we do not open a connection to it either.
     let before_out = f::BLOCKED_OUT.load(Ordering::Relaxed);
-    typhon_engine::tracker::dial_peer(qaddr, t.clone(), us.disk.clone(), peer_id(), None, port, &Egress::default()).await;
-    assert!(f::BLOCKED_OUT.load(Ordering::Relaxed) > before_out, "the dial is refused before connecting");
+    typhon_engine::tracker::dial_peer(
+        qaddr,
+        t.clone(),
+        us.disk.clone(),
+        peer_id(),
+        None,
+        port,
+        &Egress::default(),
+    )
+    .await;
+    assert!(
+        f::BLOCKED_OUT.load(Ordering::Relaxed) > before_out,
+        "the dial is refused before connecting"
+    );
     assert_eq!(t.peers_connected.load(Ordering::Relaxed), 0);
 
     f::install(None);
@@ -568,7 +685,12 @@ async fn interop_a_blocked_libtorrent_is_cut_off_and_kept_out() {
 fn v2_payload(dir: &std::path::Path) -> Vec<(String, Vec<u8>)> {
     let mk = |n: usize, seed: u32| -> Vec<u8> {
         let mut x = seed;
-        (0..n).map(|_| { x = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223); (x >> 24) as u8 }).collect()
+        (0..n)
+            .map(|_| {
+                x = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (x >> 24) as u8
+            })
+            .collect()
     };
     let files = vec![
         ("a/tiny.txt".to_string(), mk(100, 1)),
@@ -589,7 +711,15 @@ impl Qbit {
     /// that libtorrent computes the same hash we do.
     async fn id_of(&self, ours: &str, format: &str) -> String {
         for _ in 0..100 {
-            let all: serde_json::Value = self.http.get(format!("{}/api/v2/torrents/info", self.base)).send().await.unwrap().json().await.unwrap();
+            let all: serde_json::Value = self
+                .http
+                .get(format!("{}/api/v2/torrents/info", self.base))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
             for t in all.as_array().into_iter().flatten() {
                 let v1 = t["infohash_v1"].as_str().unwrap_or("");
                 let v2 = t["infohash_v2"].as_str().unwrap_or("");
@@ -603,7 +733,15 @@ impl Qbit {
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        let all: serde_json::Value = self.http.get(format!("{}/api/v2/torrents/info", self.base)).send().await.unwrap().json().await.unwrap();
+        let all: serde_json::Value = self
+            .http
+            .get(format!("{}/api/v2/torrents/info", self.base))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
         panic!("{format}: no torrent in qBittorrent has our hash {ours}: {all}");
     }
 
@@ -612,7 +750,12 @@ impl Qbit {
         let r: serde_json::Value = self
             .http
             .post(format!("{}/api/v2/torrentcreator/addTask", self.base))
-            .form(&[("sourcePath", source), ("format", format), ("pieceSize", "65536"), ("startSeeding", "false")])
+            .form(&[
+                ("sourcePath", source),
+                ("format", format),
+                ("pieceSize", "65536"),
+                ("startSeeding", "false"),
+            ])
             .send()
             .await
             .unwrap()
@@ -623,7 +766,10 @@ impl Qbit {
         for _ in 0..300 {
             let st: serde_json::Value = self
                 .http
-                .get(format!("{}/api/v2/torrentcreator/status?taskID={id}", self.base))
+                .get(format!(
+                    "{}/api/v2/torrentcreator/status?taskID={id}",
+                    self.base
+                ))
                 .send()
                 .await
                 .unwrap()
@@ -638,7 +784,10 @@ impl Qbit {
         }
         let bytes = self
             .http
-            .get(format!("{}/api/v2/torrentcreator/torrentFile?taskID={id}", self.base))
+            .get(format!(
+                "{}/api/v2/torrentcreator/torrentFile?taskID={id}",
+                self.base
+            ))
             .send()
             .await
             .unwrap()
@@ -646,7 +795,12 @@ impl Qbit {
             .await
             .unwrap()
             .to_vec();
-        let _ = self.http.post(format!("{}/api/v2/torrentcreator/deleteTask", self.base)).form(&[("taskID", id.as_str())]).send().await;
+        let _ = self
+            .http
+            .post(format!("{}/api/v2/torrentcreator/deleteTask", self.base))
+            .form(&[("taskID", id.as_str())])
+            .send()
+            .await;
         bytes
     }
 }
@@ -657,47 +811,92 @@ impl Qbit {
 async fn v2_download_from_libtorrent(format: &str) {
     let tag = format!("v2dl-{format}");
     let q = Qbit::new();
-    let shared = std::path::PathBuf::from(env("HYDRANOS_INTEROP_SHARED")).join(format!("qsrc-{tag}"));
+    let shared =
+        std::path::PathBuf::from(env("HYDRANOS_INTEROP_SHARED")).join(format!("qsrc-{tag}"));
     let _ = std::fs::remove_dir_all(&shared);
     let root = shared.join("bookset");
     let files = v2_payload(&root);
     let src_for_qbit = format!("{}/qsrc-{tag}/bookset", env("HYDRANOS_INTEROP_QBIT_SHARED"));
     let torrent = q.create(&src_for_qbit, format).await;
 
-    let meta = typhon_engine::torrent::metainfo::parse_torrent_bytes(&torrent).expect("we read libtorrent's torrent");
-    assert_eq!(meta.v2, format == "v2", "{format}: read as v2 only when it is");
+    let meta = typhon_engine::torrent::metainfo::parse_torrent_bytes(&torrent)
+        .expect("we read libtorrent's torrent");
+    assert_eq!(
+        meta.v2,
+        format == "v2",
+        "{format}: read as v2 only when it is"
+    );
     let hash = typhon_engine::torrent::hex_encode(&meta.info_hash);
-    q.add(&torrent, &format!("{}/qsrc-{tag}", env("HYDRANOS_INTEROP_QBIT_SHARED"))).await;
+    q.add(
+        &torrent,
+        &format!("{}/qsrc-{tag}", env("HYDRANOS_INTEROP_QBIT_SHARED")),
+    )
+    .await;
     // Our 20 bytes against libtorrent's own: the v1 hash of a hybrid, the
     // SHA-256 of a v2 truncated to 20 bytes. qBittorrent's API id is not
     // always either, so the torrent is looked up and its hashes compared.
     let qid = q.id_of(&hash, format).await;
-    q.wait_complete(&qid, &format!("{format}: qBittorrent seeding")).await;
+    q.wait_complete(&qid, &format!("{format}: qBittorrent seeding"))
+        .await;
 
     let us = engine(&tag, torrent.clone());
     let data = us.root.join("data");
-    let (ih, _) = us.mgr.add_torrent_bytes(&torrent, &data.to_string_lossy(), false, false).expect("we leech it");
+    let (ih, _) = us
+        .mgr
+        .add_torrent_bytes(&torrent, &data.to_string_lossy(), false, false)
+        .expect("we leech it");
     let t = us.mgr.get(&ih).unwrap();
-    let peer: SocketAddr = std::net::ToSocketAddrs::to_socket_addrs(&env("HYDRANOS_INTEROP_QBIT_PEER").as_str()).unwrap().next().unwrap();
+    let peer: SocketAddr =
+        std::net::ToSocketAddrs::to_socket_addrs(&env("HYDRANOS_INTEROP_QBIT_PEER").as_str())
+            .unwrap()
+            .next()
+            .unwrap();
     let pid = peer_id();
-    let same = |root: &std::path::Path| files.iter().all(|(p, d)| std::fs::read(root.join("bookset").join(p)).ok().as_deref() == Some(d.as_slice()));
+    let same = |root: &std::path::Path| {
+        files.iter().all(|(p, d)| {
+            std::fs::read(root.join("bookset").join(p)).ok().as_deref() == Some(d.as_slice())
+        })
+    };
     let mut done = false;
     for tick in 0..600 {
         if tick % 20 == 0 && t.peers_connected.load(Ordering::Relaxed) == 0 {
             let (t, disk) = (t.clone(), us.disk.clone());
             tokio::spawn(async move {
-                typhon_engine::tracker::dial_peer(peer, t, disk, pid, None, 16998, &Egress::default()).await;
+                typhon_engine::tracker::dial_peer(
+                    peer,
+                    t,
+                    disk,
+                    pid,
+                    None,
+                    16998,
+                    &Egress::default(),
+                )
+                .await;
             });
         }
-        if same(&data) && t.status.load(Ordering::Relaxed) == typhon_engine::torrent::meta::TorrentStatus::Seeding as u8 {
+        if same(&data)
+            && t.status.load(Ordering::Relaxed)
+                == typhon_engine::torrent::meta::TorrentStatus::Seeding as u8
+        {
             done = true;
             break;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    assert!(done, "{format}: the files never matched (status {}, got {} bytes)", t.status.load(Ordering::Relaxed), t.total_downloaded.load(Ordering::Relaxed));
-    let pads: Vec<_> = walk(&data).into_iter().filter(|p| p.to_string_lossy().contains(".pad")).collect();
-    assert!(pads.is_empty(), "{format}: pad files written to disk: {pads:?}");
+    assert!(
+        done,
+        "{format}: the files never matched (status {}, got {} bytes)",
+        t.status.load(Ordering::Relaxed),
+        t.total_downloaded.load(Ordering::Relaxed)
+    );
+    let pads: Vec<_> = walk(&data)
+        .into_iter()
+        .filter(|p| p.to_string_lossy().contains(".pad"))
+        .collect();
+    assert!(
+        pads.is_empty(),
+        "{format}: pad files written to disk: {pads:?}"
+    );
     q.delete(&qid).await;
 }
 
@@ -735,20 +934,31 @@ async fn interop_hydranos_downloads_a_hybrid_torrent_from_libtorrent_without_pad
 async fn interop_libtorrent_downloads_a_v2_torrent_from_hydranos() {
     let tag = "v2up";
     let q = Qbit::new();
-    let shared = std::path::PathBuf::from(env("HYDRANOS_INTEROP_SHARED")).join(format!("qsrc-{tag}"));
+    let shared =
+        std::path::PathBuf::from(env("HYDRANOS_INTEROP_SHARED")).join(format!("qsrc-{tag}"));
     let _ = std::fs::remove_dir_all(&shared);
     let files = v2_payload(&shared.join("bookset"));
-    let torrent = q.create(&format!("{}/qsrc-{tag}/bookset", env("HYDRANOS_INTEROP_QBIT_SHARED")), "v2").await;
+    let torrent = q
+        .create(
+            &format!("{}/qsrc-{tag}/bookset", env("HYDRANOS_INTEROP_QBIT_SHARED")),
+            "v2",
+        )
+        .await;
     let meta = typhon_engine::torrent::metainfo::parse_torrent_bytes(&torrent).unwrap();
     let ours = typhon_engine::torrent::hex_encode(&meta.info_hash);
 
     // We seed from the folder the files are in, after checking them.
     let us = engine(tag, torrent.clone());
-    let (ih, _) = us.mgr.add_torrent_bytes(&torrent, &shared.to_string_lossy(), false, false).unwrap();
+    let (ih, _) = us
+        .mgr
+        .add_torrent_bytes(&torrent, &shared.to_string_lossy(), false, false)
+        .unwrap();
     us.mgr.recheck(&ih).unwrap();
     let t = us.mgr.get(&ih).unwrap();
     for _ in 0..200 {
-        if t.status.load(Ordering::Relaxed) == typhon_engine::torrent::meta::TorrentStatus::Seeding as u8 {
+        if t.status.load(Ordering::Relaxed)
+            == typhon_engine::torrent::meta::TorrentStatus::Seeding as u8
+        {
             break;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -762,14 +972,25 @@ async fn interop_libtorrent_downloads_a_v2_torrent_from_hydranos() {
     wait_listening(&listen(&us, port, peer_id())).await;
     let peer = env("HYDRANOS_INTEROP_QBIT_PEER");
     let me = SocketAddr::new(our_address_towards(&peer), port);
-    q.add(&torrent, &format!("{}/qdst-{tag}", env("HYDRANOS_INTEROP_QBIT_SHARED"))).await;
+    q.add(
+        &torrent,
+        &format!("{}/qdst-{tag}", env("HYDRANOS_INTEROP_QBIT_SHARED")),
+    )
+    .await;
     let hash = q.id_of(&ours, "v2").await;
     tokio::time::sleep(Duration::from_millis(500)).await;
     q.add_peer(&hash, me).await;
-    q.wait_complete(&hash, "libtorrent downloading our v2 torrent").await;
-    let dst = std::path::PathBuf::from(env("HYDRANOS_INTEROP_SHARED")).join(format!("qdst-{tag}")).join("bookset");
+    q.wait_complete(&hash, "libtorrent downloading our v2 torrent")
+        .await;
+    let dst = std::path::PathBuf::from(env("HYDRANOS_INTEROP_SHARED"))
+        .join(format!("qdst-{tag}"))
+        .join("bookset");
     for (p, d) in &files {
-        assert_eq!(std::fs::read(dst.join(p)).ok().as_deref(), Some(d.as_slice()), "{p} as libtorrent wrote it");
+        assert_eq!(
+            std::fs::read(dst.join(p)).ok().as_deref(),
+            Some(d.as_slice()),
+            "{p} as libtorrent wrote it"
+        );
     }
     q.delete(&hash).await;
 }

@@ -23,7 +23,9 @@ fn single(name: &str) -> Vec<u8> {
     info.extend_from_slice(&piece);
     info.push(b'e');
     let mut out = Vec::new();
-    out.extend_from_slice(b"d7:comment9:a comment10:created by4:mk1213:creation datei1600000000e4:info");
+    out.extend_from_slice(
+        b"d7:comment9:a comment10:created by4:mk1213:creation datei1600000000e4:info",
+    );
     out.extend_from_slice(&info);
     out.push(b'e');
     out
@@ -50,7 +52,9 @@ fn multi(name: &str) -> Vec<u8> {
 fn enc(v: &str) -> String {
     v.bytes()
         .map(|b| match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (b as char).to_string(),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
+            }
             _ => format!("%{b:02X}"),
         })
         .collect()
@@ -71,7 +75,9 @@ async fn call(s: &TestState, method: &str, uri: &str, form: &str) -> (StatusCode
         .unwrap();
     let resp = super::router(s.state.clone()).oneshot(req).await.unwrap();
     let status = resp.status();
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
     (status, String::from_utf8_lossy(&bytes).into_owned())
 }
 
@@ -80,7 +86,10 @@ async fn add(s: &TestState, torrent: &[u8], fields: &[(&str, &str)]) -> (StatusC
     let b = "shimboundary";
     let mut body: Vec<u8> = Vec::new();
     for (k, v) in fields {
-        body.extend_from_slice(format!("--{b}\r\nContent-Disposition: form-data; name=\"{k}\"\r\n\r\n{v}\r\n").as_bytes());
+        body.extend_from_slice(
+            format!("--{b}\r\nContent-Disposition: form-data; name=\"{k}\"\r\n\r\n{v}\r\n")
+                .as_bytes(),
+        );
     }
     body.extend_from_slice(
         format!("--{b}\r\nContent-Disposition: form-data; name=\"torrents\"; filename=\"t.torrent\"\r\nContent-Type: application/x-bittorrent\r\n\r\n").as_bytes(),
@@ -96,11 +105,16 @@ async fn add(s: &TestState, torrent: &[u8], fields: &[(&str, &str)]) -> (StatusC
         .unwrap();
     let resp = super::router(s.state.clone()).oneshot(req).await.unwrap();
     let status = resp.status();
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
     (status, String::from_utf8_lossy(&bytes).into_owned())
 }
 
-fn held(s: &TestState, hash: &str) -> Option<std::sync::Arc<typhon_engine::torrent::meta::TorrentState>> {
+fn held(
+    s: &TestState,
+    hash: &str,
+) -> Option<std::sync::Arc<typhon_engine::torrent::meta::TorrentState>> {
     find_torrent(&s.state, hash).map(|(_, t)| t)
 }
 
@@ -134,7 +148,10 @@ async fn none_of_the_added_routes_answers_404_any_more() {
         // filePrio and rename look the torrent up: a missing one is the
         // qBittorrent 404 "not found", answered by the route, not the router.
         if code == StatusCode::NOT_FOUND {
-            assert!(uri.ends_with("filePrio") || uri.ends_with("rename"), "{uri} is not registered: {body}");
+            assert!(
+                uri.ends_with("filePrio") || uri.ends_with("rename"),
+                "{uri} is not registered: {body}"
+            );
         }
     }
 }
@@ -177,15 +194,41 @@ async fn file_priority_zero_is_refused_and_normal_is_accepted() {
     let (code, _) = add(&s, &t, &[("savepath", &data(&s))]).await;
     assert_eq!(code, StatusCode::OK);
     let h = hash_of(&t);
-    let (code, body) = call(&s, "POST", "/api/v2/torrents/filePrio", &format!("hash={h}&id=0&priority=0")).await;
+    let (code, body) = call(
+        &s,
+        "POST",
+        "/api/v2/torrents/filePrio",
+        &format!("hash={h}&id=0&priority=0"),
+    )
+    .await;
     assert_eq!(code, StatusCode::CONFLICT, "{body}");
     assert!(body.contains("whole torrent"), "{body}");
-    assert_eq!(held(&s, &h).unwrap().stored_download_order(), None, "a refused 0 stores nothing");
-    let (code, _) = call(&s, "POST", "/api/v2/torrents/filePrio", &format!("hash={h}&id=0|1&priority=1")).await;
+    assert_eq!(
+        held(&s, &h).unwrap().stored_download_order(),
+        None,
+        "a refused 0 stores nothing"
+    );
+    let (code, _) = call(
+        &s,
+        "POST",
+        "/api/v2/torrents/filePrio",
+        &format!("hash={h}&id=0|1&priority=1"),
+    )
+    .await;
     assert_eq!(code, StatusCode::OK);
-    assert_eq!(held(&s, &h).unwrap().stored_download_order(), None, "all normal is the default");
+    assert_eq!(
+        held(&s, &h).unwrap().stored_download_order(),
+        None,
+        "all normal is the default"
+    );
     // In the query rather than the body, as some clients send it.
-    let (code, _) = call(&s, "POST", &format!("/api/v2/torrents/filePrio?hash={h}&id=1&priority=7"), "").await;
+    let (code, _) = call(
+        &s,
+        "POST",
+        &format!("/api/v2/torrents/filePrio?hash={h}&id=1&priority=7"),
+        "",
+    )
+    .await;
     assert_eq!(code, StatusCode::OK);
     let (_, body) = call(&s, "POST", "/api/v2/torrents/files", &format!("hash={h}")).await;
     let files: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -193,18 +236,41 @@ async fn file_priority_zero_is_refused_and_normal_is_accepted() {
     assert_eq!(files[1]["priority"], 7);
     let t = held(&s, &h).unwrap();
     assert_eq!(t.download_order().file_prio, vec![1, 7]);
-    assert!(t.picker.get().unwrap().lock().unwrap().has_order(), "the picker orders by it");
-    let (code, _) = call(&s, "POST", "/api/v2/torrents/filePrio", &format!("hash={h}&id=7&priority=1")).await;
+    assert!(
+        t.picker.get().unwrap().lock().unwrap().has_order(),
+        "the picker orders by it"
+    );
+    let (code, _) = call(
+        &s,
+        "POST",
+        "/api/v2/torrents/filePrio",
+        &format!("hash={h}&id=7&priority=1"),
+    )
+    .await;
     assert_eq!(code, StatusCode::CONFLICT, "no file 7");
-    let (code, _) = call(&s, "POST", "/api/v2/torrents/filePrio", &format!("hash={h}&id=0&priority=3")).await;
+    let (code, _) = call(
+        &s,
+        "POST",
+        "/api/v2/torrents/filePrio",
+        &format!("hash={h}&id=0&priority=3"),
+    )
+    .await;
     assert_eq!(code, StatusCode::BAD_REQUEST);
-    let (code, _) = call(&s, "POST", "/api/v2/torrents/filePrio", &format!("hash={}&id=0&priority=1", "0".repeat(40))).await;
+    let (code, _) = call(
+        &s,
+        "POST",
+        "/api/v2/torrents/filePrio",
+        &format!("hash={}&id=0&priority=1", "0".repeat(40)),
+    )
+    .await;
     assert_eq!(code, StatusCode::NOT_FOUND);
 }
 
 fn info_row(body: &str, h: &str) -> serde_json::Value {
     let rows: Vec<serde_json::Value> = serde_json::from_str(body).unwrap();
-    rows.into_iter().find(|r| r["hash"] == h).unwrap_or_else(|| panic!("{h} not listed: {body}"))
+    rows.into_iter()
+        .find(|r| r["hash"] == h)
+        .unwrap_or_else(|| panic!("{h} not listed: {body}"))
 }
 
 /// The two toggles flip each torrent from what it is, POST only, `hashes`
@@ -217,11 +283,26 @@ async fn sequential_and_first_last_toggle_and_are_listed() {
     let h = hash_of(&t);
     let row = |b: &str| info_row(b, &h);
     let (_, b) = call(&s, "GET", "/api/v2/torrents/info", "").await;
-    assert_eq!((row(&b)["seq_dl"].clone(), row(&b)["f_l_piece_prio"].clone()), (false.into(), false.into()));
+    assert_eq!(
+        (row(&b)["seq_dl"].clone(), row(&b)["f_l_piece_prio"].clone()),
+        (false.into(), false.into())
+    );
 
-    let (code, _) = call(&s, "POST", "/api/v2/torrents/toggleSequentialDownload", &format!("hashes={h}")).await;
+    let (code, _) = call(
+        &s,
+        "POST",
+        "/api/v2/torrents/toggleSequentialDownload",
+        &format!("hashes={h}"),
+    )
+    .await;
     assert_eq!(code, StatusCode::OK);
-    let (code, _) = call(&s, "POST", "/api/v2/torrents/toggleFirstLastPiecePrio?hashes=all", "").await;
+    let (code, _) = call(
+        &s,
+        "POST",
+        "/api/v2/torrents/toggleFirstLastPiecePrio?hashes=all",
+        "",
+    )
+    .await;
     assert_eq!(code, StatusCode::OK);
     let (_, b) = call(&s, "GET", "/api/v2/torrents/info", "").await;
     assert_eq!(row(&b)["seq_dl"], true);
@@ -231,12 +312,24 @@ async fn sequential_and_first_last_toggle_and_are_listed() {
     assert_eq!(st.download_order_flags(), (true, true));
     assert!(st.picker.get().unwrap().lock().unwrap().has_order());
 
-    call(&s, "POST", "/api/v2/torrents/toggleSequentialDownload", &format!("hashes={h}")).await;
+    call(
+        &s,
+        "POST",
+        "/api/v2/torrents/toggleSequentialDownload",
+        &format!("hashes={h}"),
+    )
+    .await;
     let (_, b) = call(&s, "GET", "/api/v2/torrents/info", "").await;
     assert_eq!(row(&b)["seq_dl"], false, "a toggle flips back");
     assert_eq!(row(&b)["f_l_piece_prio"], true);
 
-    let (code, _) = call(&s, "GET", &format!("/api/v2/torrents/toggleSequentialDownload?hashes={h}"), "").await;
+    let (code, _) = call(
+        &s,
+        "GET",
+        &format!("/api/v2/torrents/toggleSequentialDownload?hashes={h}"),
+        "",
+    )
+    .await;
     assert_eq!(code, StatusCode::METHOD_NOT_ALLOWED);
 }
 
@@ -249,7 +342,11 @@ async fn add_applies_sequential_and_first_last() {
     let (code, _) = add(
         &s,
         &t,
-        &[("savepath", &data(&s)), ("sequentialDownload", "true"), ("firstLastPiecePrio", "true")],
+        &[
+            ("savepath", &data(&s)),
+            ("sequentialDownload", "true"),
+            ("firstLastPiecePrio", "true"),
+        ],
     )
     .await;
     assert_eq!(code, StatusCode::OK);
@@ -260,7 +357,10 @@ async fn add_applies_sequential_and_first_last() {
     // Without them, nothing is stored.
     let u = single("plain-add");
     add(&s, &u, &[("savepath", &data(&s))]).await;
-    assert_eq!(held(&s, &hash_of(&u)).unwrap().stored_download_order(), None);
+    assert_eq!(
+        held(&s, &hash_of(&u)).unwrap().stored_download_order(),
+        None
+    );
 }
 
 /// The native route: the three settings, 0 refused, every file shown with
@@ -283,7 +383,11 @@ async fn native_download_order_route() {
     let (code, _) = post(r#"{"file_ids":[5],"priority":6}"#).await;
     assert_eq!(code, StatusCode::BAD_REQUEST, "no file 5");
     let (code, _) = post(r#"{"priority":6}"#).await;
-    assert_eq!(code, StatusCode::BAD_REQUEST, "ids and priority go together");
+    assert_eq!(
+        code,
+        StatusCode::BAD_REQUEST,
+        "ids and priority go together"
+    );
     let (code, _) = post(r#"{"skip":true}"#).await;
     assert_eq!(code, StatusCode::BAD_REQUEST);
     let (code, body) = post(r#"{"file_ids":[1],"priority":6,"sequential":true}"#).await;
@@ -295,7 +399,15 @@ async fn native_download_order_route() {
     let (_, body) = call(&s, "GET", &format!("/api/torrents/{h}/files"), "").await;
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(v["sequential"], true);
-    let by_index = |i: u64| v["files"].as_array().unwrap().iter().find(|f| f["index"] == i).unwrap().clone();
+    let by_index = |i: u64| {
+        v["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["index"] == i)
+            .unwrap()
+            .clone()
+    };
     assert_eq!(by_index(1)["priority"], 6);
     assert_eq!(by_index(0)["priority"], 1);
     let (code, body) = call(&s, "GET", &format!("/api/torrents/{h}/download-order"), "").await;
@@ -305,17 +417,41 @@ async fn native_download_order_route() {
     // A seed: accepted, shown, nothing to act on.
     let u = single("native-seed");
     // skip_checking stats the file it vouches for: it has to be there.
-    std::fs::write(std::path::Path::new(&data(&s)).join("native-seed"), vec![0u8; 16384]).unwrap();
-    add(&s, &u, &[("savepath", &data(&s)), ("skip_checking", "true")]).await;
+    std::fs::write(
+        std::path::Path::new(&data(&s)).join("native-seed"),
+        vec![0u8; 16384],
+    )
+    .unwrap();
+    add(
+        &s,
+        &u,
+        &[("savepath", &data(&s)), ("skip_checking", "true")],
+    )
+    .await;
     let hu = hash_of(&u);
-    let (code, body) = call(&s, "POST", &format!("/api/torrents/{hu}/download-order"), r#"{"first_last_piece":true}"#).await;
+    let (code, body) = call(
+        &s,
+        "POST",
+        &format!("/api/torrents/{hu}/download-order"),
+        r#"{"first_last_piece":true}"#,
+    )
+    .await;
     assert_eq!(code, StatusCode::OK, "{body}");
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(v["copies"][0]["first_last_piece"], true);
     assert_eq!(v["copies"][0]["complete"], true);
     let seed = held(&s, &hu).unwrap();
-    assert!(seed.picker.get().is_none(), "a seed builds no picker for an order");
-    let (code, _) = call(&s, "POST", &format!("/api/torrents/{}/download-order", "0".repeat(40)), r#"{"sequential":true}"#).await;
+    assert!(
+        seed.picker.get().is_none(),
+        "a seed builds no picker for an order"
+    );
+    let (code, _) = call(
+        &s,
+        "POST",
+        &format!("/api/torrents/{}/download-order", "0".repeat(40)),
+        r#"{"sequential":true}"#,
+    )
+    .await;
     assert_eq!(code, StatusCode::NOT_FOUND);
 }
 
@@ -324,12 +460,21 @@ async fn rename_and_queue_positions_are_refused_with_the_reason() {
     let s = st("shim-refusals", "");
     let t = single("rename-alpha");
     add(&s, &t, &[("savepath", &data(&s))]).await;
-    let (code, body) = call(&s, "POST", "/api/v2/torrents/rename", &format!("hash={}&name=x", hash_of(&t))).await;
+    let (code, body) = call(
+        &s,
+        "POST",
+        "/api/v2/torrents/rename",
+        &format!("hash={}&name=x", hash_of(&t)),
+    )
+    .await;
     assert_eq!(code, StatusCode::CONFLICT);
     assert!(body.contains("not supported"), "{body}");
     let (code, body) = call(&s, "POST", "/api/v2/torrents/topPrio", "hashes=all").await;
     assert_eq!(code, StatusCode::CONFLICT);
-    assert_eq!(body, "Torrent queueing is not enabled", "qBittorrent's own answer");
+    assert_eq!(
+        body, "Torrent queueing is not enabled",
+        "qBittorrent's own answer"
+    );
 }
 
 /// `setForceStart`: a start, and under a queue a forced one the queue leaves
@@ -340,24 +485,59 @@ async fn force_start_starts_a_stopped_torrent_even_under_a_queue() {
     let t = single("force-alpha");
     add(&s, &t, &[("savepath", &data(&s)), ("paused", "true")]).await;
     let h = hash_of(&t);
-    assert!(held(&s, &h).unwrap().is_paused.load(std::sync::atomic::Ordering::Relaxed));
-    let (code, _) = call(&s, "POST", "/api/v2/torrents/setForceStart", &format!("hashes={h}&value=true")).await;
+    assert!(held(&s, &h)
+        .unwrap()
+        .is_paused
+        .load(std::sync::atomic::Ordering::Relaxed));
+    let (code, _) = call(
+        &s,
+        "POST",
+        "/api/v2/torrents/setForceStart",
+        &format!("hashes={h}&value=true"),
+    )
+    .await;
     assert_eq!(code, StatusCode::OK);
-    assert!(!held(&s, &h).unwrap().is_paused.load(std::sync::atomic::Ordering::Relaxed), "started");
+    assert!(
+        !held(&s, &h)
+            .unwrap()
+            .is_paused
+            .load(std::sync::atomic::Ordering::Relaxed),
+        "started"
+    );
 
     let q = st("shim-force-queued", "[race]\nactive_downloads = 2\n");
     let t = single("force-beta");
     add(&q, &t, &[("savepath", &data(&q)), ("paused", "true")]).await;
     let h = hash_of(&t);
-    let (code, body) = call(&q, "POST", "/api/v2/torrents/setForceStart", &format!("hashes={h}&value=true")).await;
+    let (code, body) = call(
+        &q,
+        "POST",
+        "/api/v2/torrents/setForceStart",
+        &format!("hashes={h}&value=true"),
+    )
+    .await;
     assert_eq!(code, StatusCode::OK, "{body}");
-    assert!(!held(&q, &h).unwrap().is_paused.load(std::sync::atomic::Ordering::Relaxed), "started");
+    assert!(
+        !held(&q, &h)
+            .unwrap()
+            .is_paused
+            .load(std::sync::atomic::Ordering::Relaxed),
+        "started"
+    );
     let forced = |q: &TestState| {
         let store = q.state.store.lock().unwrap();
-        ["race", "hoard"].iter().any(|e| store.pinned(e).unwrap_or_default().contains(&h))
+        ["race", "hoard"]
+            .iter()
+            .any(|e| store.pinned(e).unwrap_or_default().contains(&h))
     };
     assert!(forced(&q), "marked forced, so the queue leaves it running");
-    let (code, _) = call(&q, "POST", "/api/v2/torrents/setForceStart", &format!("hashes={h}&value=false")).await;
+    let (code, _) = call(
+        &q,
+        "POST",
+        "/api/v2/torrents/setForceStart",
+        &format!("hashes={h}&value=false"),
+    )
+    .await;
     assert_eq!(code, StatusCode::OK);
     assert!(!forced(&q), "value=false lifts it");
 }
@@ -369,13 +549,30 @@ async fn set_location_needs_an_absolute_location() {
     let t = single("loc-alpha");
     add(&s, &t, &[("savepath", &data(&s))]).await;
     let h = hash_of(&t);
-    let (code, _) = call(&s, "POST", "/api/v2/torrents/setLocation", &format!("hashes={h}")).await;
+    let (code, _) = call(
+        &s,
+        "POST",
+        "/api/v2/torrents/setLocation",
+        &format!("hashes={h}"),
+    )
+    .await;
     assert_eq!(code, StatusCode::BAD_REQUEST);
-    let (code, body) = call(&s, "POST", "/api/v2/torrents/setLocation", &format!("hashes={h}&location=relative/dir")).await;
+    let (code, body) = call(
+        &s,
+        "POST",
+        "/api/v2/torrents/setLocation",
+        &format!("hashes={h}&location=relative/dir"),
+    )
+    .await;
     assert_eq!(code, StatusCode::CONFLICT, "{body}");
     let dest = s.dir.join("moved");
-    let (code, body) =
-        call(&s, "POST", "/api/v2/torrents/setLocation", &format!("hashes={h}&location={}", dest.display())).await;
+    let (code, body) = call(
+        &s,
+        "POST",
+        "/api/v2/torrents/setLocation",
+        &format!("hashes={h}&location={}", dest.display()),
+    )
+    .await;
     assert_eq!(code, StatusCode::OK, "{body}");
 }
 
@@ -388,14 +585,27 @@ async fn content_layout_subfolder_gives_a_single_file_its_folder() {
     let s = st("shim-subfolder", "");
     let base = data(&s);
     let t = single("layout-alpha.mkv");
-    let (code, _) = add(&s, &t, &[("savepath", &base), ("contentLayout", "Subfolder")]).await;
+    let (code, _) = add(
+        &s,
+        &t,
+        &[("savepath", &base), ("contentLayout", "Subfolder")],
+    )
+    .await;
     assert_eq!(code, StatusCode::OK);
     let got = held(&s, &hash_of(&t)).unwrap().save_path.read().clone();
     assert_eq!(got, std::path::Path::new(&base).join("layout-alpha"));
 
     let t = single("layout-beta.mkv");
-    add(&s, &t, &[("savepath", &base), ("contentLayout", "Original")]).await;
-    assert_eq!(*held(&s, &hash_of(&t)).unwrap().save_path.read(), std::path::PathBuf::from(&base));
+    add(
+        &s,
+        &t,
+        &[("savepath", &base), ("contentLayout", "Original")],
+    )
+    .await;
+    assert_eq!(
+        *held(&s, &hash_of(&t)).unwrap().save_path.read(),
+        std::path::PathBuf::from(&base)
+    );
 }
 
 /// ⭐ NoSubfolder on a multi-file torrent is refused: the engine writes it
@@ -405,7 +615,12 @@ async fn content_layout_subfolder_gives_a_single_file_its_folder() {
 async fn content_layout_no_subfolder_on_a_multi_file_torrent_is_refused() {
     let s = st("shim-nosub", "");
     let t = multi("nosub-multi");
-    let (code, body) = add(&s, &t, &[("savepath", &data(&s)), ("contentLayout", "NoSubfolder")]).await;
+    let (code, body) = add(
+        &s,
+        &t,
+        &[("savepath", &data(&s)), ("contentLayout", "NoSubfolder")],
+    )
+    .await;
     assert_eq!((code, body.as_str()), (StatusCode::BAD_REQUEST, "Fails."));
     assert!(held(&s, &hash_of(&t)).is_none());
     // The old boolean says the same.
@@ -413,7 +628,12 @@ async fn content_layout_no_subfolder_on_a_multi_file_torrent_is_refused() {
     assert_eq!(code, StatusCode::BAD_REQUEST);
     // On a single file it is what happens anyway.
     let one = single("nosub-single");
-    let (code, _) = add(&s, &one, &[("savepath", &data(&s)), ("contentLayout", "NoSubfolder")]).await;
+    let (code, _) = add(
+        &s,
+        &one,
+        &[("savepath", &data(&s)), ("contentLayout", "NoSubfolder")],
+    )
+    .await;
     assert_eq!(code, StatusCode::OK);
 }
 
@@ -427,13 +647,25 @@ async fn auto_tmm_lets_the_category_decide_and_stop_condition_adds_stopped() {
     let (code, _) = add(
         &s,
         &t,
-        &[("category", "films"), ("savepath", "/somewhere/else"), ("autoTMM", "true"), ("stopCondition", "FilesChecked")],
+        &[
+            ("category", "films"),
+            ("savepath", "/somewhere/else"),
+            ("autoTMM", "true"),
+            ("stopCondition", "FilesChecked"),
+        ],
     )
     .await;
     assert_eq!(code, StatusCode::OK);
     let torrent = held(&s, &hash_of(&t)).unwrap();
-    assert_eq!(*torrent.save_path.read(), cat, "the category's folder, not the one sent");
-    assert!(torrent.is_paused.load(std::sync::atomic::Ordering::Relaxed), "stopped as asked");
+    assert_eq!(
+        *torrent.save_path.read(),
+        cat,
+        "the category's folder, not the one sent"
+    );
+    assert!(
+        torrent.is_paused.load(std::sync::atomic::Ordering::Relaxed),
+        "stopped as asked"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -459,7 +691,10 @@ async fn posting_back_the_preferences_page_changes_nothing() {
     let page = prefs(&s).await;
     let (code, _) = set_prefs(&s, page).await;
     assert_eq!(code, StatusCode::OK);
-    assert_eq!(std::fs::read_to_string(&s.state.config_path).unwrap(), before);
+    assert_eq!(
+        std::fs::read_to_string(&s.state.config_path).unwrap(),
+        before
+    );
 }
 
 #[tokio::test]
@@ -491,26 +726,50 @@ async fn set_preferences_applies_rates_dht_pex_active_downloads_and_save_path() 
     let t = single("default-path");
     let (code, _) = add(&s, &t, &[]).await;
     assert_eq!(code, StatusCode::OK);
-    assert_eq!(*held(&s, &hash_of(&t)).unwrap().save_path.read(), std::path::PathBuf::from(&dest));
+    assert_eq!(
+        *held(&s, &hash_of(&t)).unwrap().save_path.read(),
+        std::path::PathBuf::from(&dest)
+    );
 }
 
 #[tokio::test]
 async fn a_relative_save_path_is_refused_and_writes_nothing() {
     let s = st("shim-prefs-relative", "");
     let before = std::fs::read_to_string(&s.state.config_path).unwrap();
-    let (code, _) = set_prefs(&s, serde_json::json!({"save_path": "relative", "dht": false})).await;
+    let (code, _) = set_prefs(
+        &s,
+        serde_json::json!({"save_path": "relative", "dht": false}),
+    )
+    .await;
     assert_eq!(code, StatusCode::BAD_REQUEST);
-    assert_eq!(std::fs::read_to_string(&s.state.config_path).unwrap(), before, "nothing written");
+    assert_eq!(
+        std::fs::read_to_string(&s.state.config_path).unwrap(),
+        before,
+        "nothing written"
+    );
 }
 
 /// Under queueing, the two queue ceilings are written too.
 #[tokio::test]
 async fn under_queueing_the_queue_ceilings_are_written() {
-    let s = st("shim-prefs-queue", "[race]\nqueueing = true\nactive_seeds = 10\n");
-    let (code, _) = set_prefs(&s, serde_json::json!({"max_active_uploads": 4, "max_active_torrents": 9})).await;
+    let s = st(
+        "shim-prefs-queue",
+        "[race]\nqueueing = true\nactive_seeds = 10\n",
+    );
+    let (code, _) = set_prefs(
+        &s,
+        serde_json::json!({"max_active_uploads": 4, "max_active_torrents": 9}),
+    )
+    .await;
     assert_eq!(code, StatusCode::OK);
     let p = prefs(&s).await;
-    assert_eq!((p["max_active_uploads"].as_i64(), p["max_active_torrents"].as_i64()), (Some(4), Some(9)));
+    assert_eq!(
+        (
+            p["max_active_uploads"].as_i64(),
+            p["max_active_torrents"].as_i64()
+        ),
+        (Some(4), Some(9))
+    );
 }
 
 /// The slow-torrent rule round-trips through the qBittorrent page, and a
@@ -521,21 +780,39 @@ async fn the_slow_torrent_rule_is_read_and_written_like_qbittorrent() {
     let p = prefs(&s).await;
     assert_eq!(p["dont_count_slow_torrents"], false);
     assert_eq!(
-        (p["slow_torrent_dl_rate_threshold"].as_i64(), p["slow_torrent_ul_rate_threshold"].as_i64(), p["slow_torrent_inactive_timer"].as_i64()),
+        (
+            p["slow_torrent_dl_rate_threshold"].as_i64(),
+            p["slow_torrent_ul_rate_threshold"].as_i64(),
+            p["slow_torrent_inactive_timer"].as_i64()
+        ),
         (Some(2), Some(2), Some(60)),
         "qBittorrent's defaults"
     );
     let before = std::fs::read_to_string(&s.state.config_path).unwrap();
     let (code, _) = set_prefs(&s, p.clone()).await;
     assert_eq!(code, StatusCode::OK);
-    assert_eq!(std::fs::read_to_string(&s.state.config_path).unwrap(), before, "the page posted back changes nothing");
+    assert_eq!(
+        std::fs::read_to_string(&s.state.config_path).unwrap(),
+        before,
+        "the page posted back changes nothing"
+    );
 
     let (code, _) = set_prefs(&s, serde_json::json!({"dont_count_slow_torrents": true, "slow_torrent_dl_rate_threshold": 5, "slow_torrent_inactive_timer": 120})).await;
     assert_eq!(code, StatusCode::OK);
     let p = prefs(&s).await;
     assert_eq!(p["dont_count_slow_torrents"], true);
-    assert_eq!((p["slow_torrent_dl_rate_threshold"].as_i64(), p["slow_torrent_inactive_timer"].as_i64()), (Some(5), Some(120)));
-    assert_eq!(p["slow_torrent_ul_rate_threshold"].as_i64(), Some(2), "untouched");
+    assert_eq!(
+        (
+            p["slow_torrent_dl_rate_threshold"].as_i64(),
+            p["slow_torrent_inactive_timer"].as_i64()
+        ),
+        (Some(5), Some(120))
+    );
+    assert_eq!(
+        p["slow_torrent_ul_rate_threshold"].as_i64(),
+        Some(2),
+        "untouched"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -547,16 +824,37 @@ async fn properties_read_the_torrent_file_and_the_swarm() {
     let s = st("shim-props", "");
     let t = single("props-alpha");
     add(&s, &t, &[("savepath", &data(&s))]).await;
-    let (code, body) = call(&s, "GET", &format!("/api/v2/torrents/properties?hash={}", hash_of(&t)), "").await;
+    let (code, body) = call(
+        &s,
+        "GET",
+        &format!("/api/v2/torrents/properties?hash={}", hash_of(&t)),
+        "",
+    )
+    .await;
     assert_eq!(code, StatusCode::OK);
     let p: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(p["creation_date"], 1_600_000_000, "from the file, not the addition date");
+    assert_eq!(
+        p["creation_date"], 1_600_000_000,
+        "from the file, not the addition date"
+    );
     assert_eq!(p["created_by"], "mk12");
     assert_eq!(p["comment"], "a comment");
-    for k in ["nb_connections", "peers", "peers_total", "seeds_total", "dl_speed_avg", "up_speed_avg", "eta", "last_seen"] {
+    for k in [
+        "nb_connections",
+        "peers",
+        "peers_total",
+        "seeds_total",
+        "dl_speed_avg",
+        "up_speed_avg",
+        "eta",
+        "last_seen",
+    ] {
         assert!(p[k].is_i64(), "{k} is a number: {p}");
     }
-    assert_eq!(p["last_seen"], -1, "an incomplete torrent nobody seeds: never seen complete");
+    assert_eq!(
+        p["last_seen"], -1,
+        "an incomplete torrent nobody seeds: never seen complete"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -567,7 +865,9 @@ async fn properties_read_the_torrent_file_and_the_swarm() {
 async fn an_import_that_added_torrents_is_recorded_and_served() {
     use std::sync::atomic::Ordering;
     let s = st("shim-provenance", "");
-    let before = body_json(super::get_provenance(State(s.state.clone()), RawQuery(None), keyed(KEY)).await).await;
+    let before =
+        body_json(super::get_provenance(State(s.state.clone()), RawQuery(None), keyed(KEY)).await)
+            .await;
     assert_eq!(before["present"], false);
 
     let p = crate::importer::Progress::default();
@@ -576,7 +876,9 @@ async fn an_import_that_added_torrents_is_recorded_and_served() {
     p.carried_uploaded.store(4096, Ordering::Relaxed);
     super::record_provenance(&s.state, "qBittorrent", &p);
 
-    let v = body_json(super::get_provenance(State(s.state.clone()), RawQuery(None), keyed(KEY)).await).await;
+    let v =
+        body_json(super::get_provenance(State(s.state.clone()), RawQuery(None), keyed(KEY)).await)
+            .await;
     assert_eq!(v["present"], true);
     assert_eq!(v["source_client"], "qBittorrent");
     assert_eq!(v["imported_count"], 3);
@@ -586,7 +888,9 @@ async fn an_import_that_added_torrents_is_recorded_and_served() {
     // An import that added nothing claims nothing.
     let empty = crate::importer::Progress::default();
     super::record_provenance(&s.state, "Transmission", &empty);
-    let v = body_json(super::get_provenance(State(s.state.clone()), RawQuery(None), keyed(KEY)).await).await;
+    let v =
+        body_json(super::get_provenance(State(s.state.clone()), RawQuery(None), keyed(KEY)).await)
+            .await;
     assert_eq!(v["source_client"], "qBittorrent");
 }
 
@@ -598,7 +902,11 @@ async fn an_import_that_added_torrents_is_recorded_and_served() {
 async fn a_skip_checking_add_on_the_wrong_folder_shows_the_missing_path() {
     let s = st("skip-wrong-folder", "");
     let t = single("book");
-    std::fs::write(std::path::Path::new(&data(&s)).join("book"), vec![0u8; 16384]).unwrap();
+    std::fs::write(
+        std::path::Path::new(&data(&s)).join("book"),
+        vec![0u8; 16384],
+    )
+    .unwrap();
     // The data one folder up from where the add says it is.
     let wrong = format!("{}/book-dir", data(&s));
     let (code, body) = add(&s, &t, &[("savepath", &wrong), ("skip_checking", "true")]).await;
@@ -610,5 +918,8 @@ async fn a_skip_checking_add_on_the_wrong_folder_shows_the_missing_path() {
     assert_eq!(v["state"], "error", "{body}");
     assert_eq!(v["torrent_error"], true);
     let msg = v["torrent_error_msg"].as_str().unwrap_or("");
-    assert!(msg.contains("missing file") && msg.contains("book-dir/book"), "{msg}");
+    assert!(
+        msg.contains("missing file") && msg.contains("book-dir/book"),
+        "{msg}"
+    );
 }

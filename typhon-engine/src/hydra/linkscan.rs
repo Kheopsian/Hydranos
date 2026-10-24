@@ -102,8 +102,10 @@ pub fn orphans(
     cat: &[CatalogueEntry],
     meta: &HashMap<(String, String), LinkRowMeta>,
 ) -> Vec<(String, String)> {
-    let held: std::collections::HashSet<(&str, &str)> =
-        cat.iter().map(|c| (c.info_hash.as_str(), &*c.session)).collect();
+    let held: std::collections::HashSet<(&str, &str)> = cat
+        .iter()
+        .map(|c| (c.info_hash.as_str(), &*c.session))
+        .collect();
     meta.keys()
         .filter(|(h, s)| !held.contains(&(h.as_str(), s.as_str())))
         .cloned()
@@ -137,7 +139,10 @@ pub fn refresh_summary(engines: &EngineHost, store: &StoreLock) -> Option<usize>
     engines.publish_link_summary(summary);
     // Here and not in `links_from_store`: a workflow pass reads that one too,
     // and has no use for a second walk over every file.
-    engines.publish_catalogue_usage(crate::linkindex::usage(&got.entries), crate::store::now_secs());
+    engines.publish_catalogue_usage(
+        crate::linkindex::usage(&got.entries),
+        crate::store::now_secs(),
+    );
     Some(n)
 }
 
@@ -161,7 +166,10 @@ fn run(engines: Arc<EngineHost>, store: Arc<StoreLock>) {
         // resolves its own -- so keeping it for the sweep costs ~90 bytes a
         // torrent, not the 1.7 GB it did.
         let snapshot = store.read().ok().map(|s| {
-            (rulesrun::stored_copies(&engines, &s), s.link_index_meta().unwrap_or_default())
+            (
+                rulesrun::stored_copies(&engines, &s),
+                s.link_index_meta().unwrap_or_default(),
+            )
         });
         let Some((stored, meta)) = snapshot else {
             std::thread::sleep(IDLE);
@@ -170,7 +178,9 @@ fn run(engines: Arc<EngineHost>, store: Arc<StoreLock>) {
         // Walked after the connection is released.
         let cat = rulesrun::catalogue_from(&engines, &stored);
         drop(stored);
-        PROGRESS.catalogue.store(cat.len() as i64, Ordering::Relaxed);
+        PROGRESS
+            .catalogue
+            .store(cat.len() as i64, Ordering::Relaxed);
 
         let gone = orphans(&cat, &meta);
         // A removed torrent's names leave the count: another torrent that
@@ -202,9 +212,13 @@ fn run(engines: Arc<EngineHost>, store: Arc<StoreLock>) {
 fn sweep(cat: &[CatalogueEntry], order: &[usize], store: &StoreLock, engines: &EngineHost) {
     let started = std::time::Instant::now();
     let mut summarised = std::time::Instant::now();
-    PROGRESS.sweep_total.store(order.len() as i64, Ordering::Relaxed);
+    PROGRESS
+        .sweep_total
+        .store(order.len() as i64, Ordering::Relaxed);
     PROGRESS.sweep_done.store(0, Ordering::Relaxed);
-    PROGRESS.sweep_started.store(crate::store::now_secs(), Ordering::Relaxed);
+    PROGRESS
+        .sweep_started
+        .store(crate::store::now_secs(), Ordering::Relaxed);
     let (mut files, mut missing, mut done) = (0usize, 0usize, 0usize);
 
     for chunk in order.chunks(BATCH) {
@@ -243,7 +257,9 @@ fn sweep(cat: &[CatalogueEntry], order: &[usize], store: &StoreLock, engines: &E
         let secs = t0.elapsed().as_secs_f64().max(0.001);
         PROGRESS.sweep_done.store(done as i64, Ordering::Relaxed);
         PROGRESS.last_batch_at.store(now, Ordering::Relaxed);
-        PROGRESS.files_per_sec.store((batch_files as f64 / secs) as i64, Ordering::Relaxed);
+        PROGRESS
+            .files_per_sec
+            .store((batch_files as f64 / secs) as i64, Ordering::Relaxed);
         if summarised.elapsed() >= SUMMARY_EVERY {
             refresh_summary(engines, store);
             summarised = std::time::Instant::now();
@@ -272,12 +288,18 @@ mod tests {
             hash,
             "hoard",
             save_path,
-            (0..files).map(|i| std::path::PathBuf::from(format!("{save_path}/{i}"))).collect(),
+            (0..files)
+                .map(|i| std::path::PathBuf::from(format!("{save_path}/{i}")))
+                .collect(),
         )
     }
 
     fn m(save_path: &str, measured_at: i64, files: i64) -> LinkRowMeta {
-        LinkRowMeta { save_path: save_path.into(), measured_at, files }
+        LinkRowMeta {
+            save_path: save_path.into(),
+            measured_at,
+            files,
+        }
     }
 
     #[test]
@@ -299,11 +321,22 @@ mod tests {
         meta.insert(k("moved"), m("/old", now - 60, 1));
         meta.insert(k("regrown"), m("/d", now - 60, 1));
 
-        let order: Vec<&str> = due(&cat, &meta, now).iter().map(|&i| cat[i].info_hash.as_str()).collect();
-        assert_eq!(&order[3..], &["older", "old"], "stale ones after, oldest first");
+        let order: Vec<&str> = due(&cat, &meta, now)
+            .iter()
+            .map(|&i| cat[i].info_hash.as_str())
+            .collect();
+        assert_eq!(
+            &order[3..],
+            &["older", "old"],
+            "stale ones after, oldest first"
+        );
         let mut first: Vec<&str> = order[..3].to_vec();
         first.sort();
-        assert_eq!(first, vec!["moved", "never", "regrown"], "anything without a valid row first");
+        assert_eq!(
+            first,
+            vec!["moved", "never", "regrown"],
+            "anything without a valid row first"
+        );
         assert!(!order.contains(&"fresh"));
     }
 
@@ -318,7 +351,10 @@ mod tests {
         gone.sort();
         assert_eq!(
             gone,
-            vec![("kept".to_string(), "race".to_string()), ("removed".to_string(), "hoard".to_string())],
+            vec![
+                ("kept".to_string(), "race".to_string()),
+                ("removed".to_string(), "hoard".to_string())
+            ],
             "the copy in another engine is its own row"
         );
     }

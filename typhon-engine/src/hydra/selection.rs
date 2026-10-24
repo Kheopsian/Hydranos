@@ -111,7 +111,11 @@ impl Target {
             None if self.is_local() => self.mode.clone(),
             // Only a guess without the node list; `split_remote` is the
             // authority for a remote row.
-            None => self.agent.rsplit_once('-').map(|(_, e)| e.to_string()).unwrap_or_default(),
+            None => self
+                .agent
+                .rsplit_once('-')
+                .map(|(_, e)| e.to_string())
+                .unwrap_or_default(),
         }
     }
 }
@@ -129,7 +133,10 @@ pub struct Refusal {
 
 impl Refusal {
     fn bad(msg: impl Into<String>) -> Self {
-        Refusal { status: StatusCode::BAD_REQUEST, body: json!({"error": msg.into()}) }
+        Refusal {
+            status: StatusCode::BAD_REQUEST,
+            body: json!({"error": msg.into()}),
+        }
     }
 }
 
@@ -254,25 +261,62 @@ pub async fn resolve(state: &AppState, sel: &Selection) -> Result<Vec<Target>, R
 pub enum Action {
     Pause(bool),
     Pin(bool),
-    Tags { tags: Vec<String>, op: String },
-    Category { category: String, move_files: bool, allow_breaking_hardlinks: bool },
-    Location { location: String, allow_breaking_hardlinks: bool },
+    Tags {
+        tags: Vec<String>,
+        op: String,
+    },
+    Category {
+        category: String,
+        move_files: bool,
+        allow_breaking_hardlinks: bool,
+    },
+    Location {
+        location: String,
+        allow_breaking_hardlinks: bool,
+    },
     Reannounce,
     Recheck,
-    Remove { delete_files: bool },
-    Copy { engine: String },
-    MoveEngine { engine: String },
-    Handoff { node: String, engine: String, then: String },
-    NodeFetch { node: String, from_engine: String, engine: String },
-    NodeMove { node: String, engine: String },
+    Remove {
+        delete_files: bool,
+    },
+    Copy {
+        engine: String,
+    },
+    MoveEngine {
+        engine: String,
+    },
+    Handoff {
+        node: String,
+        engine: String,
+        then: String,
+    },
+    NodeFetch {
+        node: String,
+        from_engine: String,
+        engine: String,
+    },
+    NodeMove {
+        node: String,
+        engine: String,
+    },
     /// Rate caps, KiB/s; `None` keeps a direction, 0 lifts it.
-    Limits { up_kib: Option<i64>, down_kib: Option<i64> },
+    Limits {
+        up_kib: Option<i64>,
+        down_kib: Option<i64>,
+    },
     /// Share limits, `setShareLimits`' encoding (-2 follow the engine, -1
     /// none, minutes); `None` keeps a field.
-    ShareLimits { ratio: Option<f64>, seeding: Option<i64>, inactive: Option<i64> },
+    ShareLimits {
+        ratio: Option<f64>,
+        seeding: Option<i64>,
+        inactive: Option<i64>,
+    },
     /// Download order flags; `None` keeps one. File priorities are per
     /// torrent (file ids mean nothing across a selection).
-    DownloadOrder { sequential: Option<bool>, first_last_piece: Option<bool> },
+    DownloadOrder {
+        sequential: Option<bool>,
+        first_last_piece: Option<bool>,
+    },
 }
 
 fn params<T: serde::de::DeserializeOwned>(v: &Value) -> Result<T, Refusal> {
@@ -394,7 +438,10 @@ impl Action {
                 if t.tags.iter().all(|x| x.trim().is_empty()) {
                     return Err(Refusal::bad("params.tags is empty"));
                 }
-                Action::Tags { tags: t.tags, op: t.op }
+                Action::Tags {
+                    tags: t.tags,
+                    op: t.op,
+                }
             }
             "category" => {
                 let c: CategoryParams = params(p)?;
@@ -409,7 +456,10 @@ impl Action {
                 if l.location.trim().is_empty() {
                     return Err(Refusal::bad("params.location is empty"));
                 }
-                Action::Location { location: l.location, allow_breaking_hardlinks: l.allow_breaking_hardlinks }
+                Action::Location {
+                    location: l.location,
+                    allow_breaking_hardlinks: l.allow_breaking_hardlinks,
+                }
             }
             "reannounce" => {
                 params::<NoParams>(p)?;
@@ -419,30 +469,52 @@ impl Action {
                 params::<NoParams>(p)?;
                 Action::Recheck
             }
-            "remove" => Action::Remove { delete_files: params::<RemoveParams>(p)?.delete_files },
-            "copy" => Action::Copy { engine: params::<EngineParams>(p)?.engine },
-            "move-engine" => Action::MoveEngine { engine: params::<EngineParams>(p)?.engine },
+            "remove" => Action::Remove {
+                delete_files: params::<RemoveParams>(p)?.delete_files,
+            },
+            "copy" => Action::Copy {
+                engine: params::<EngineParams>(p)?.engine,
+            },
+            "move-engine" => Action::MoveEngine {
+                engine: params::<EngineParams>(p)?.engine,
+            },
             "handoff" => {
                 let h: HandoffParams = params(p)?;
                 if h.then != "keep" && h.then != "remove" {
                     return Err(Refusal::bad("params.then must be \"keep\" or \"remove\""));
                 }
-                Action::Handoff { node: h.node, engine: h.engine, then: h.then }
+                Action::Handoff {
+                    node: h.node,
+                    engine: h.engine,
+                    then: h.then,
+                }
             }
             "node-fetch" => {
                 let f: FetchParams = params(p)?;
-                Action::NodeFetch { node: f.node, from_engine: f.from_engine, engine: f.engine }
+                Action::NodeFetch {
+                    node: f.node,
+                    from_engine: f.from_engine,
+                    engine: f.engine,
+                }
             }
             "limits" => {
                 let l: LimitParams = params(p)?;
                 if l.up_kib.is_none() && l.down_kib.is_none() {
-                    return Err(Refusal::bad("params needs up_kib and/or down_kib (KiB/s, 0 = unlimited)"));
+                    return Err(Refusal::bad(
+                        "params needs up_kib and/or down_kib (KiB/s, 0 = unlimited)",
+                    ));
                 }
-                Action::Limits { up_kib: l.up_kib, down_kib: l.down_kib }
+                Action::Limits {
+                    up_kib: l.up_kib,
+                    down_kib: l.down_kib,
+                }
             }
             "share_limits" => {
                 let l: ShareLimitParams = params(p)?;
-                if l.ratio_limit.is_none() && l.seeding_time_limit.is_none() && l.inactive_seeding_time_limit.is_none() {
+                if l.ratio_limit.is_none()
+                    && l.seeding_time_limit.is_none()
+                    && l.inactive_seeding_time_limit.is_none()
+                {
                     return Err(Refusal::bad(
                         "params needs ratio_limit, seeding_time_limit and/or inactive_seeding_time_limit \
                          (-2 = the engine's, -1 = none, times in minutes)",
@@ -457,13 +529,21 @@ impl Action {
             "download_order" => {
                 let d: DownloadOrderParams = params(p)?;
                 if d.sequential.is_none() && d.first_last_piece.is_none() {
-                    return Err(Refusal::bad("params needs sequential and/or first_last_piece"));
+                    return Err(Refusal::bad(
+                        "params needs sequential and/or first_last_piece",
+                    ));
                 }
-                Action::DownloadOrder { sequential: d.sequential, first_last_piece: d.first_last_piece }
+                Action::DownloadOrder {
+                    sequential: d.sequential,
+                    first_last_piece: d.first_last_piece,
+                }
             }
             "node-move" => {
                 let m: NodeMoveParams = params(p)?;
-                Action::NodeMove { node: m.node, engine: m.engine }
+                Action::NodeMove {
+                    node: m.node,
+                    engine: m.engine,
+                }
             }
             other => {
                 return Err(Refusal {
@@ -521,7 +601,8 @@ pub struct Job {
 
 type Shared = Arc<Mutex<Job>>;
 
-static JOBS: LazyLock<Mutex<HashMap<String, Shared>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+static JOBS: LazyLock<Mutex<HashMap<String, Shared>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 fn new_job(action: &str, total: usize) -> Shared {
     let id = format!("sel{:012x}", rand::random::<u64>() & 0xFFFF_FFFF_FFFF);
@@ -542,7 +623,10 @@ fn new_job(action: &str, total: usize) -> Shared {
 }
 
 fn get_job(id: &str) -> Option<Shared> {
-    JOBS.lock().unwrap_or_else(|p| p.into_inner()).get(id).cloned()
+    JOBS.lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(id)
+        .cloned()
 }
 
 /// What one torrent came to.
@@ -554,13 +638,21 @@ struct Outcome {
 
 impl Outcome {
     fn ok(key: &str) -> Self {
-        Outcome { key: key.into(), error: None, consent: None }
+        Outcome {
+            key: key.into(),
+            error: None,
+            consent: None,
+        }
     }
     fn skip(key: &str) -> Self {
         Outcome::ok(key)
     }
     fn failed(hash: &str, why: String) -> Self {
-        Outcome { key: "failed".into(), error: Some(format!("{}: {why}", &hash[..hash.len().min(8)])), consent: None }
+        Outcome {
+            key: "failed".into(),
+            error: Some(format!("{}: {why}", &hash[..hash.len().min(8)])),
+            consent: None,
+        }
     }
 }
 
@@ -594,7 +686,10 @@ struct Caller {
 impl Caller {
     async fn call(&self, method: Method, uri: &str, body: Option<Value>) -> (StatusCode, Value) {
         use tower::ServiceExt;
-        let mut req = axum::http::Request::builder().method(method).uri(uri).header("X-Api-Key", &self.key);
+        let mut req = axum::http::Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("X-Api-Key", &self.key);
         let body = match body {
             Some(v) => {
                 req = req.header(axum::http::header::CONTENT_TYPE, "application/json");
@@ -603,21 +698,33 @@ impl Caller {
             None => axum::body::Body::empty(),
         };
         let Ok(req) = req.body(body) else {
-            return (StatusCode::BAD_REQUEST, json!({"error": "unbuildable request"}));
+            return (
+                StatusCode::BAD_REQUEST,
+                json!({"error": "unbuildable request"}),
+            );
         };
         let resp = match self.router.clone().oneshot(req).await {
             Ok(r) => r,
             Err(never) => match never {},
         };
         let status = resp.status();
-        let bytes = axum::body::to_bytes(resp.into_body(), 16 << 20).await.unwrap_or_default();
+        let bytes = axum::body::to_bytes(resp.into_body(), 16 << 20)
+            .await
+            .unwrap_or_default();
         let v = serde_json::from_slice(&bytes)
             .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&bytes).into_owned()));
         (status, v)
     }
 
     /// The route answered; say how, or why not.
-    async fn simple(&self, method: Method, uri: &str, body: Option<Value>, hash: &str, ok: &str) -> Outcome {
+    async fn simple(
+        &self,
+        method: Method,
+        uri: &str,
+        body: Option<Value>,
+        hash: &str,
+        ok: &str,
+    ) -> Outcome {
         let (s, v) = self.call(method, uri, body).await;
         if s.is_success() {
             Outcome::ok(ok)
@@ -656,7 +763,11 @@ fn split_remote(state: &AppState, agent: &str) -> Option<(crate::store::Node, St
     let nodes = state.store.lock().ok()?.nodes().ok()?;
     nodes
         .into_iter()
-        .filter(|n| agent.len() > n.name.len() + 1 && agent.starts_with(&n.name) && agent.as_bytes()[n.name.len()] == b'-')
+        .filter(|n| {
+            agent.len() > n.name.len() + 1
+                && agent.starts_with(&n.name)
+                && agent.as_bytes()[n.name.len()] == b'-'
+        })
         .max_by_key(|n| n.name.len())
         .map(|n| {
             let engine = agent[n.name.len() + 1..].to_string();
@@ -678,18 +789,37 @@ async fn remote_action(state: &AppState, t: &Target, action: &Action) -> Outcome
     let mode = if t.mode == "race" { "race" } else { "hoard" };
     let e = enc(&engine);
     let (method, path, body) = match action {
-        Action::Category { category, move_files, allow_breaking_hardlinks } => (
+        Action::Category {
+            category,
+            move_files,
+            allow_breaking_hardlinks,
+        } => (
             reqwest::Method::POST,
             format!("/api/{mode}/torrents/{h}/category?engine={e}"),
-            Some(json!({"category": category, "move_files": move_files, "allow_breaking_hardlinks": allow_breaking_hardlinks})),
+            Some(
+                json!({"category": category, "move_files": move_files, "allow_breaking_hardlinks": allow_breaking_hardlinks}),
+            ),
         ),
-        Action::Location { location, allow_breaking_hardlinks } => (
+        Action::Location {
+            location,
+            allow_breaking_hardlinks,
+        } => (
             reqwest::Method::POST,
             format!("/api/{mode}/torrents/{h}/location?engine={e}"),
-            Some(json!({"location": location, "allow_breaking_hardlinks": allow_breaking_hardlinks})),
+            Some(
+                json!({"location": location, "allow_breaking_hardlinks": allow_breaking_hardlinks}),
+            ),
         ),
-        Action::Reannounce => (reqwest::Method::POST, format!("/api/torrents/{h}/reannounce?engine={e}"), None),
-        Action::Recheck => (reqwest::Method::POST, format!("/api/hoard/torrents/{h}/verify?engine={e}"), None),
+        Action::Reannounce => (
+            reqwest::Method::POST,
+            format!("/api/torrents/{h}/reannounce?engine={e}"),
+            None,
+        ),
+        Action::Recheck => (
+            reqwest::Method::POST,
+            format!("/api/hoard/torrents/{h}/verify?engine={e}"),
+            None,
+        ),
         Action::Pause(p) => (
             reqwest::Method::POST,
             format!("/api/engines/{e}/pause"),
@@ -700,7 +830,10 @@ async fn remote_action(state: &AppState, t: &Target, action: &Action) -> Outcome
             format!("/api/torrents/{h}/limits?engine={e}"),
             Some(json!({"up_kib": up_kib, "down_kib": down_kib})),
         ),
-        Action::DownloadOrder { sequential, first_last_piece } => (
+        Action::DownloadOrder {
+            sequential,
+            first_last_piece,
+        } => (
             reqwest::Method::POST,
             format!("/api/torrents/{h}/download-order?engine={e}"),
             Some(download_order_body(*sequential, *first_last_piece)),
@@ -726,7 +859,11 @@ async fn remote_action(state: &AppState, t: &Target, action: &Action) -> Outcome
         }
         Ok((status, bytes, _)) => {
             let v: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-            let msg = v.get("error").and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| status.to_string());
+            let msg = v
+                .get("error")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .unwrap_or_else(|| status.to_string());
             Outcome::failed(h, format!("{}: {msg}", node.name))
         }
         Err(e) => Outcome::failed(h, format!("{}: {e}", node.name)),
@@ -748,14 +885,21 @@ fn download_order_body(sequential: Option<bool>, first_last_piece: Option<bool>)
 
 fn category_of(state: &AppState, hash: &str) -> String {
     let store = state.store.read().unwrap_or_else(|p| p.into_inner());
-    store.export_rows(&[hash.to_string()]).ok().and_then(|r| r.into_iter().next()).map(|r| r.category).unwrap_or_default()
+    store
+        .export_rows(&[hash.to_string()])
+        .ok()
+        .and_then(|r| r.into_iter().next())
+        .map(|r| r.category)
+        .unwrap_or_default()
 }
 
 async fn one(state: &AppState, c: &Caller, action: &Action, t: &Target) -> Outcome {
     let h = t.hash.as_str();
     match action {
         Action::Pause(_) => unreachable!("set-based"),
-        Action::Pin(_) | Action::Tags { .. } | Action::ShareLimits { .. } => unreachable!("set-based"),
+        Action::Pin(_) | Action::Tags { .. } | Action::ShareLimits { .. } => {
+            unreachable!("set-based")
+        }
         Action::Category { .. } | Action::Location { .. } => {
             // A row from another node is that node's torrent; the local
             // routes would act on this node's copy of the same hash. Relayed
@@ -765,15 +909,28 @@ async fn one(state: &AppState, c: &Caller, action: &Action, t: &Target) -> Outco
             }
             let mode = if t.mode == "race" { "race" } else { "hoard" };
             let (route, body) = match action {
-                Action::Category { category, move_files, allow_breaking_hardlinks } => ("category", json!({
-                    "category": category,
-                    "move_files": move_files,
-                    "allow_breaking_hardlinks": allow_breaking_hardlinks,
-                })),
-                Action::Location { location, allow_breaking_hardlinks } => ("location", json!({
-                    "location": location,
-                    "allow_breaking_hardlinks": allow_breaking_hardlinks,
-                })),
+                Action::Category {
+                    category,
+                    move_files,
+                    allow_breaking_hardlinks,
+                } => (
+                    "category",
+                    json!({
+                        "category": category,
+                        "move_files": move_files,
+                        "allow_breaking_hardlinks": allow_breaking_hardlinks,
+                    }),
+                ),
+                Action::Location {
+                    location,
+                    allow_breaking_hardlinks,
+                } => (
+                    "location",
+                    json!({
+                        "location": location,
+                        "allow_breaking_hardlinks": allow_breaking_hardlinks,
+                    }),
+                ),
                 _ => unreachable!("matched above"),
             };
             // The copy the row is: an extra engine's row named no engine, and
@@ -785,17 +942,43 @@ async fn one(state: &AppState, c: &Caller, action: &Action, t: &Target) -> Outco
                 .filter(|e| !e.is_empty())
                 .map(|e| format!("?engine={}", enc(e)))
                 .unwrap_or_default();
-            let (s, v) = c.call(Method::POST, &format!("/api/{mode}/torrents/{h}/{route}{engine_q}"), Some(body)).await;
-            if s == StatusCode::CONFLICT && v.get("reason").and_then(Value::as_str) == Some("hardlinks") {
-                let files = v.get("hardlinked_files").and_then(Value::as_u64).unwrap_or(0);
-                let bytes = v.get("hardlinked_bytes").and_then(Value::as_u64).unwrap_or(0);
-                let item = Item { hash: t.hash.clone(), agent: t.agent.clone(), mode: t.mode.clone() };
-                return Outcome { key: "needs_consent".into(), error: None, consent: Some((item, files, bytes)) };
+            let (s, v) = c
+                .call(
+                    Method::POST,
+                    &format!("/api/{mode}/torrents/{h}/{route}{engine_q}"),
+                    Some(body),
+                )
+                .await;
+            if s == StatusCode::CONFLICT
+                && v.get("reason").and_then(Value::as_str) == Some("hardlinks")
+            {
+                let files = v
+                    .get("hardlinked_files")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                let bytes = v
+                    .get("hardlinked_bytes")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                let item = Item {
+                    hash: t.hash.clone(),
+                    agent: t.agent.clone(),
+                    mode: t.mode.clone(),
+                };
+                return Outcome {
+                    key: "needs_consent".into(),
+                    error: None,
+                    consent: Some((item, files, bytes)),
+                };
             }
             match s {
                 // A graduation changes engine: the torrent stops seeding
                 // while its data is copied. Told apart so the UI can say so.
-                StatusCode::ACCEPTED if v.get("kind").and_then(Value::as_str) == Some("graduate") => Outcome::ok("graduating"),
+                StatusCode::ACCEPTED
+                    if v.get("kind").and_then(Value::as_str) == Some("graduate") =>
+                {
+                    Outcome::ok("graduating")
+                }
                 StatusCode::ACCEPTED => Outcome::ok("moving"),
                 s if s.is_success() => Outcome::ok("ok"),
                 s => Outcome::failed(h, error_of(s, &v)),
@@ -805,7 +988,9 @@ async fn one(state: &AppState, c: &Caller, action: &Action, t: &Target) -> Outco
             if !t.is_local() {
                 return remote_action(state, t, action).await;
             }
-            let (s, v) = c.call(Method::POST, &format!("/api/torrents/{h}/reannounce"), None).await;
+            let (s, v) = c
+                .call(Method::POST, &format!("/api/torrents/{h}/reannounce"), None)
+                .await;
             let status = v.get("status").and_then(Value::as_str).map(str::to_string);
             match status.as_deref() {
                 Some(k @ ("ok" | "in_flight" | "cooldown" | "queued")) => Outcome::ok(k),
@@ -819,7 +1004,14 @@ async fn one(state: &AppState, c: &Caller, action: &Action, t: &Target) -> Outco
             if !t.is_local() {
                 return remote_action(state, t, action).await;
             }
-            c.simple(Method::POST, &format!("/api/hoard/torrents/{h}/verify?engine={}", enc(&t.engine())), None, h, "ok").await
+            c.simple(
+                Method::POST,
+                &format!("/api/hoard/torrents/{h}/verify?engine={}", enc(&t.engine())),
+                None,
+                h,
+                "ok",
+            )
+            .await
         }
         Action::Remove { delete_files } => {
             if !t.is_local() {
@@ -827,7 +1019,10 @@ async fn one(state: &AppState, c: &Caller, action: &Action, t: &Target) -> Outco
             }
             c.simple(
                 Method::DELETE,
-                &format!("/api/torrents/{h}?delete_files={delete_files}&agent={}", enc(&t.agent)),
+                &format!(
+                    "/api/torrents/{h}?delete_files={delete_files}&agent={}",
+                    enc(&t.agent)
+                ),
                 None,
                 h,
                 "ok",
@@ -838,7 +1033,14 @@ async fn one(state: &AppState, c: &Caller, action: &Action, t: &Target) -> Outco
             if !t.is_local() {
                 return Outcome::skip("not_here");
             }
-            c.simple(Method::POST, &format!("/api/torrents/{h}/copy"), Some(json!({"engine": engine})), h, "ok").await
+            c.simple(
+                Method::POST,
+                &format!("/api/torrents/{h}/copy"),
+                Some(json!({"engine": engine})),
+                h,
+                "ok",
+            )
+            .await
         }
         Action::MoveEngine { engine } => {
             if !t.is_local() {
@@ -862,7 +1064,11 @@ async fn one(state: &AppState, c: &Caller, action: &Action, t: &Target) -> Outco
             // A move is not done when the node took the metainfo: the local
             // copy goes once the node holds all of it, a job on the Jobs tab.
             // 4.3 counted it "done" here.
-            let key = if then == "remove" { "waiting_node" } else { "ok" };
+            let key = if then == "remove" {
+                "waiting_node"
+            } else {
+                "ok"
+            };
             c.simple(
                 Method::POST,
                 &format!("/api/nodes/{}/handoff", enc(node)),
@@ -872,12 +1078,22 @@ async fn one(state: &AppState, c: &Caller, action: &Action, t: &Target) -> Outco
             )
             .await
         }
-        Action::NodeFetch { node, from_engine, engine } => {
-            let from = if from_engine.is_empty() { t.engine() } else { from_engine.clone() };
+        Action::NodeFetch {
+            node,
+            from_engine,
+            engine,
+        } => {
+            let from = if from_engine.is_empty() {
+                t.engine()
+            } else {
+                from_engine.clone()
+            };
             c.simple(
                 Method::POST,
                 &format!("/api/nodes/{}/fetch", enc(node)),
-                Some(json!({"info_hash": h, "engine": engine, "from_engine": from, "category": ""})),
+                Some(
+                    json!({"info_hash": h, "engine": engine, "from_engine": from, "category": ""}),
+                ),
                 h,
                 "ok",
             )
@@ -898,14 +1114,20 @@ async fn one(state: &AppState, c: &Caller, action: &Action, t: &Target) -> Outco
             )
             .await
         }
-        Action::DownloadOrder { sequential, first_last_piece } => {
+        Action::DownloadOrder {
+            sequential,
+            first_last_piece,
+        } => {
             if !t.is_local() {
                 return remote_action(state, t, action).await;
             }
             // The copy the row is, like the caps.
             c.simple(
                 Method::POST,
-                &format!("/api/torrents/{h}/download-order?engine={}", enc(&t.engine())),
+                &format!(
+                    "/api/torrents/{h}/download-order?engine={}",
+                    enc(&t.engine())
+                ),
                 Some(download_order_body(*sequential, *first_last_piece)),
                 h,
                 "ok",
@@ -939,9 +1161,16 @@ enum SetEdit {
     Paused(bool),
     Pinned(bool),
     Category(String),
-    Tags { tags: Vec<String>, add: bool },
+    Tags {
+        tags: Vec<String>,
+        add: bool,
+    },
     /// One row per TORRENT, not per copy: the limits are the torrent's.
-    ShareLimits { ratio: Option<f64>, seeding: Option<i64>, inactive: Option<i64> },
+    ShareLimits {
+        ratio: Option<f64>,
+        seeding: Option<i64>,
+        inactive: Option<i64>,
+    },
 }
 
 impl SetEdit {
@@ -952,16 +1181,30 @@ impl SetEdit {
             Action::Pause(p) => Some(SetEdit::Paused(*p)),
             Action::Pin(on) => Some(SetEdit::Pinned(*on)),
             Action::Tags { tags, op } => Some(SetEdit::Tags {
-                tags: tags.iter().map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect(),
+                tags: tags
+                    .iter()
+                    .map(|t| t.trim().to_string())
+                    .filter(|t| !t.is_empty())
+                    .collect(),
                 add: op == "add",
             }),
             // A relabel only. Moving files is real work per torrent, and a
             // category of the OTHER mode hands the torrent over: both stay on
             // the per-torrent route, which decides between them.
-            Action::Category { category, move_files: false, .. } => Some(SetEdit::Category(category.clone())),
-            Action::ShareLimits { ratio, seeding, inactive } => {
-                Some(SetEdit::ShareLimits { ratio: *ratio, seeding: *seeding, inactive: *inactive })
-            }
+            Action::Category {
+                category,
+                move_files: false,
+                ..
+            } => Some(SetEdit::Category(category.clone())),
+            Action::ShareLimits {
+                ratio,
+                seeding,
+                inactive,
+            } => Some(SetEdit::ShareLimits {
+                ratio: *ratio,
+                seeding: *seeding,
+                inactive: *inactive,
+            }),
             _ => None,
         }
     }
@@ -995,7 +1238,11 @@ async fn set_based(state: &AppState, c: &Caller, job: &Shared, edit: SetEdit, ta
             if cancelled(job) {
                 return;
             }
-            let relabel = Action::Category { category: cat.clone(), move_files: false, allow_breaking_hardlinks: false };
+            let relabel = Action::Category {
+                category: cat.clone(),
+                move_files: false,
+                allow_breaking_hardlinks: false,
+            };
             let o = remote_action(state, t, &relabel).await;
             record(job, 1, o);
         } else {
@@ -1008,15 +1255,22 @@ async fn set_based(state: &AppState, c: &Caller, job: &Shared, edit: SetEdit, ta
         }
         let (st, rows, e) = (state.clone(), chunk.to_vec(), edit.clone());
         let res = tokio::task::spawn_blocking(move || {
-            if let SetEdit::ShareLimits { ratio, seeding, inactive } = &e {
+            if let SetEdit::ShareLimits {
+                ratio,
+                seeding,
+                inactive,
+            } = &e
+            {
                 let mut hashes: Vec<String> = rows.iter().map(|(h, _)| h.clone()).collect();
                 hashes.sort();
                 hashes.dedup();
                 // Counted per row, like the other set-based edits: every copy
                 // of a torrent now has these limits.
-                return crate::sharelimits::set_torrent_limits(&st, &hashes, *ratio, *seeding, *inactive)
-                    .map(|_| rows.len())
-                    .map_err(|e| anyhow::anyhow!(e));
+                return crate::sharelimits::set_torrent_limits(
+                    &st, &hashes, *ratio, *seeding, *inactive,
+                )
+                .map(|_| rows.len())
+                .map_err(|e| anyhow::anyhow!(e));
             }
             let changed = {
                 let mut store = st.store.lock().unwrap_or_else(|p| p.into_inner());
@@ -1032,7 +1286,9 @@ async fn set_based(state: &AppState, c: &Caller, job: &Shared, edit: SetEdit, ta
                 // start does: a pin alone left one the user had stopped
                 // stopped, forced in name only.
                 if changed.is_ok() && matches!(e, SetEdit::Pinned(true)) {
-                    store.bulk_edit(&rows, crate::store::BulkEdit::Paused(false)).and(changed)
+                    store
+                        .bulk_edit(&rows, crate::store::BulkEdit::Paused(false))
+                        .and(changed)
                 } else {
                     changed
                 }
@@ -1064,14 +1320,33 @@ async fn set_based(state: &AppState, c: &Caller, job: &Shared, edit: SetEdit, ta
                     record(job, chunk.len() - changed, Outcome::ok("unchanged"));
                 }
             }
-            Ok(Err(e)) => record(job, chunk.len(), Outcome { key: "failed".into(), error: Some(format!("store: {e}")), consent: None }),
-            Err(e) => record(job, chunk.len(), Outcome { key: "failed".into(), error: Some(format!("store: {e}")), consent: None }),
+            Ok(Err(e)) => record(
+                job,
+                chunk.len(),
+                Outcome {
+                    key: "failed".into(),
+                    error: Some(format!("store: {e}")),
+                    consent: None,
+                },
+            ),
+            Err(e) => record(
+                job,
+                chunk.len(),
+                Outcome {
+                    key: "failed".into(),
+                    error: Some(format!("store: {e}")),
+                    consent: None,
+                },
+            ),
         }
     }
 }
 
 async fn run(state: AppState, job: Shared, action: Action, targets: Vec<Target>) {
-    let caller = Caller { router: crate::api::router(state.clone()), key: state.cfg().daemon.api_key.clone() };
+    let caller = Caller {
+        router: crate::api::router(state.clone()),
+        key: state.cfg().daemon.api_key.clone(),
+    };
     match SetEdit::of(&action) {
         Some(edit) => set_based(&state, &caller, &job, edit, &targets).await,
         None => {
@@ -1096,7 +1371,10 @@ async fn run(state: AppState, job: Shared, action: Action, targets: Vec<Target>)
     j.finished = true;
     j.cancelled = j.cancel;
     j.ended = Some(std::time::Instant::now());
-    j.elapsed_ms = j.started.map(|s| s.elapsed().as_millis() as u64).unwrap_or(0);
+    j.elapsed_ms = j
+        .started
+        .map(|s| s.elapsed().as_millis() as u64)
+        .unwrap_or(0);
     tracing::info!(
         job = %j.id, action = %j.action, total = j.total, done = j.done, failed = j.failed,
         cancelled = j.cancelled, ms = j.elapsed_ms, "selection action finished"
@@ -1116,7 +1394,11 @@ struct ActionBody {
 }
 
 fn unauthorised() -> Response {
-    (StatusCode::UNAUTHORIZED, Json(json!({"error": "unauthorized"}))).into_response()
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(json!({"error": "unauthorized"})),
+    )
+        .into_response()
 }
 
 /// `POST /api/selection/:action` -- resolve, answer 202 with the job, work in
@@ -1134,7 +1416,9 @@ async fn post_action(
     }
     let req: ActionBody = match serde_json::from_str(&body) {
         Ok(r) => r,
-        Err(e) => return Refusal::bad(format!("expected {{selection, params}}: {e}")).into_response(),
+        Err(e) => {
+            return Refusal::bad(format!("expected {{selection, params}}: {e}")).into_response()
+        }
     };
     let action = match Action::parse(&name, &req.params) {
         Ok(a) => a,
@@ -1149,7 +1433,11 @@ async fn post_action(
     tracing::info!(job = %id, action = %name, total = targets.len(),
         by_filter = req.selection.filter.is_some(), "selection action started");
     tokio::spawn(run(state.clone(), job, action, targets.clone()));
-    (StatusCode::ACCEPTED, Json(json!({"job": id, "total": targets.len()}))).into_response()
+    (
+        StatusCode::ACCEPTED,
+        Json(json!({"job": id, "total": targets.len()})),
+    )
+        .into_response()
 }
 
 async fn get_job_route(
@@ -1166,7 +1454,10 @@ async fn get_job_route(
         Some(j) => {
             let mut v = j.lock().unwrap_or_else(|p| p.into_inner()).clone();
             if !v.finished {
-                v.elapsed_ms = v.started.map(|s| s.elapsed().as_millis() as u64).unwrap_or(0);
+                v.elapsed_ms = v
+                    .started
+                    .map(|s| s.elapsed().as_millis() as u64)
+                    .unwrap_or(0);
             }
             Json(v).into_response()
         }
@@ -1222,8 +1513,17 @@ mod tests {
         let s = state_from(tag, &format!("[daemon]\napi_key = \"{KEY}\"\n"));
         let mut hashes = Vec::new();
         for (name, cat) in [("m1", "movies"), ("m2", "movies"), ("s1", "series")] {
-            let (h, _) = crate::api::add_torrent_bytes(&s.state, &torrent(name), cat, "/tmp", "", false, true, "hoard")
-                .expect("added");
+            let (h, _) = crate::api::add_torrent_bytes(
+                &s.state,
+                &torrent(name),
+                cat,
+                "/tmp",
+                "",
+                false,
+                true,
+                "hoard",
+            )
+            .expect("added");
             hashes.push(h);
         }
         (s, hashes)
@@ -1252,46 +1552,86 @@ mod tests {
     #[tokio::test]
     async fn items_and_filter_together_or_a_filter_without_expect_are_refused() {
         let (s, h) = library("sel-both");
-        let both = sel(json!({"items": [{"hash": h[0]}], "filter": "category=movies", "expect": 2}));
-        assert_eq!(resolve(&s.state, &both).await.unwrap_err().status, StatusCode::BAD_REQUEST);
+        let both =
+            sel(json!({"items": [{"hash": h[0]}], "filter": "category=movies", "expect": 2}));
+        assert_eq!(
+            resolve(&s.state, &both).await.unwrap_err().status,
+            StatusCode::BAD_REQUEST
+        );
         let no_expect = sel(json!({"filter": "category=movies"}));
-        assert_eq!(resolve(&s.state, &no_expect).await.unwrap_err().status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            resolve(&s.state, &no_expect).await.unwrap_err().status,
+            StatusCode::BAD_REQUEST
+        );
     }
 
     #[tokio::test]
     async fn a_filter_resolves_like_the_list_minus_its_exceptions() {
         let (s, h) = library("sel-filter");
-        let got = resolve(&s.state, &sel(json!({"filter": "category=movies", "expect": 2}))).await.unwrap();
+        let got = resolve(
+            &s.state,
+            &sel(json!({"filter": "category=movies", "expect": 2})),
+        )
+        .await
+        .unwrap();
         let mut hashes: Vec<_> = got.iter().map(|t| t.hash.clone()).collect();
         hashes.sort();
         let mut want = vec![h[0].clone(), h[1].clone()];
         want.sort();
         assert_eq!(hashes, want);
-        assert!(got.iter().all(|t| t.agent == "local-hoard" && t.mode == "hoard"));
+        assert!(got
+            .iter()
+            .all(|t| t.agent == "local-hoard" && t.mode == "hoard"));
 
-        let minus = sel(json!({"filter": "category=movies", "exclude": [{"hash": h[0], "agent": "local"}], "expect": 2}));
+        let minus = sel(
+            json!({"filter": "category=movies", "exclude": [{"hash": h[0], "agent": "local"}], "expect": 2}),
+        );
         let got = resolve(&s.state, &minus).await.unwrap();
-        assert_eq!(got.iter().map(|t| t.hash.clone()).collect::<Vec<_>>(), vec![h[1].clone()]);
+        assert_eq!(
+            got.iter().map(|t| t.hash.clone()).collect::<Vec<_>>(),
+            vec![h[1].clone()]
+        );
 
         // "" is the whole list, and has to be said.
-        let all = resolve(&s.state, &sel(json!({"filter": "", "expect": 3}))).await.unwrap();
+        let all = resolve(&s.state, &sel(json!({"filter": "", "expect": 3})))
+            .await
+            .unwrap();
         assert_eq!(all.len(), 3);
     }
 
     #[tokio::test]
     async fn a_filter_that_grew_past_what_was_confirmed_is_refused_with_the_new_count() {
         let (s, _) = library("sel-grew");
-        let r = resolve(&s.state, &sel(json!({"filter": "", "expect": 2}))).await.unwrap_err();
+        let r = resolve(&s.state, &sel(json!({"filter": "", "expect": 2})))
+            .await
+            .unwrap_err();
         assert_eq!(r.status, StatusCode::CONFLICT);
         assert_eq!(r.body["count"], 3);
         // Fewer than confirmed is fine: nothing unconfirmed is touched.
-        assert_eq!(resolve(&s.state, &sel(json!({"filter": "", "expect": 10}))).await.unwrap().len(), 3);
+        assert_eq!(
+            resolve(&s.state, &sel(json!({"filter": "", "expect": 10})))
+                .await
+                .unwrap()
+                .len(),
+            3
+        );
     }
 
     async fn wait(s: &TestState, id: &str) -> Value {
         for _ in 0..200 {
-            let r = get_job_route(State(s.state.clone()), Path(id.to_string()), RawQuery(None), keyed(KEY)).await;
-            let v: Value = serde_json::from_slice(&axum::body::to_bytes(r.into_body(), usize::MAX).await.unwrap()).unwrap();
+            let r = get_job_route(
+                State(s.state.clone()),
+                Path(id.to_string()),
+                RawQuery(None),
+                keyed(KEY),
+            )
+            .await;
+            let v: Value = serde_json::from_slice(
+                &axum::body::to_bytes(r.into_body(), usize::MAX)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
             if v["finished"] == true {
                 return v;
             }
@@ -1301,14 +1641,33 @@ mod tests {
     }
 
     async fn start(s: &TestState, action: &str, body: Value) -> (StatusCode, Value) {
-        let r = post_action(State(s.state.clone()), Path(action.into()), RawQuery(None), keyed(KEY), body.to_string()).await;
+        let r = post_action(
+            State(s.state.clone()),
+            Path(action.into()),
+            RawQuery(None),
+            keyed(KEY),
+            body.to_string(),
+        )
+        .await;
         let status = r.status();
-        (status, serde_json::from_slice(&axum::body::to_bytes(r.into_body(), usize::MAX).await.unwrap()).unwrap())
+        (
+            status,
+            serde_json::from_slice(
+                &axum::body::to_bytes(r.into_body(), usize::MAX)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap(),
+        )
     }
 
     fn tags_of(s: &TestState, hash: &str) -> Vec<String> {
         let store = s.state.store.read().unwrap();
-        store.export_rows(&[hash.to_string()]).unwrap().remove(0).tags
+        store
+            .export_rows(&[hash.to_string()])
+            .unwrap()
+            .remove(0)
+            .tags
     }
 
     #[tokio::test]
@@ -1327,7 +1686,10 @@ mod tests {
         assert_eq!(j["failed"], 0, "{j}");
         assert!(tags_of(&s, &h[0]).contains(&"noHL".to_string()));
         assert!(tags_of(&s, &h[1]).contains(&"noHL".to_string()));
-        assert!(!tags_of(&s, &h[2]).contains(&"noHL".to_string()), "series was not selected");
+        assert!(
+            !tags_of(&s, &h[2]).contains(&"noHL".to_string()),
+            "series was not selected"
+        );
     }
 
     /// ⭐ `limits` by filter caps exactly the filtered torrents, in the engine
@@ -1336,7 +1698,12 @@ mod tests {
     #[tokio::test]
     async fn limits_by_filter_cap_exactly_the_filtered_torrents() {
         let (s, h) = library("sel-limits");
-        let (st, _) = start(&s, "limits", json!({"selection": {"filter": "category=movies", "expect": 2}, "params": {}})).await;
+        let (st, _) = start(
+            &s,
+            "limits",
+            json!({"selection": {"filter": "category=movies", "expect": 2}, "params": {}}),
+        )
+        .await;
         assert_eq!(st, StatusCode::BAD_REQUEST, "no direction given");
         let (st, v) = start(
             &s,
@@ -1346,10 +1713,18 @@ mod tests {
         .await;
         assert_eq!(st, StatusCode::ACCEPTED, "{v}");
         let j = wait(&s, v["job"].as_str().unwrap()).await;
-        assert_eq!((j["done"].as_u64(), j["failed"].as_u64()), (Some(2), Some(0)), "{j}");
+        assert_eq!(
+            (j["done"].as_u64(), j["failed"].as_u64()),
+            (Some(2), Some(0)),
+            "{j}"
+        );
         let hoard = s.state.engines.get("hoard").unwrap();
         let caps = |hash: &str| {
-            hoard.manager.get(&typhon_engine::torrent::hex_decode(hash).unwrap()).unwrap().rate_limits()
+            hoard
+                .manager
+                .get(&typhon_engine::torrent::hex_decode(hash).unwrap())
+                .unwrap()
+                .rate_limits()
         };
         assert_eq!(caps(&h[0]), (102_400, 0));
         assert_eq!(caps(&h[1]), (102_400, 0));
@@ -1361,15 +1736,26 @@ mod tests {
     #[tokio::test]
     async fn download_order_by_filter_reaches_exactly_the_filtered_torrents() {
         let (s, h) = library("sel-order");
-        let (st, _) = start(&s, "download_order", json!({"selection": {"filter": "category=movies", "expect": 2}, "params": {}})).await;
+        let (st, _) = start(
+            &s,
+            "download_order",
+            json!({"selection": {"filter": "category=movies", "expect": 2}, "params": {}}),
+        )
+        .await;
         assert_eq!(st, StatusCode::BAD_REQUEST);
         let hoard = s.state.engines.get("hoard").unwrap();
         let flags = |hash: &str| {
-            hoard.manager.get(&typhon_engine::torrent::hex_decode(hash).unwrap()).unwrap().download_order_flags()
+            hoard
+                .manager
+                .get(&typhon_engine::torrent::hex_decode(hash).unwrap())
+                .unwrap()
+                .download_order_flags()
         };
         hoard
             .manager
-            .update_download_order(&typhon_engine::torrent::hex_decode(&h[0]).unwrap(), |o| o.first_last = true)
+            .update_download_order(&typhon_engine::torrent::hex_decode(&h[0]).unwrap(), |o| {
+                o.first_last = true
+            })
             .unwrap();
         let (st, v) = start(
             &s,
@@ -1379,7 +1765,11 @@ mod tests {
         .await;
         assert_eq!(st, StatusCode::ACCEPTED, "{v}");
         let j = wait(&s, v["job"].as_str().unwrap()).await;
-        assert_eq!((j["done"].as_u64(), j["failed"].as_u64()), (Some(2), Some(0)), "{j}");
+        assert_eq!(
+            (j["done"].as_u64(), j["failed"].as_u64()),
+            (Some(2), Some(0)),
+            "{j}"
+        );
         assert_eq!(flags(&h[0]), (true, true), "first/last kept");
         assert_eq!(flags(&h[1]), (true, false));
         assert_eq!(flags(&h[2]), (false, false), "series was not selected");
@@ -1390,7 +1780,12 @@ mod tests {
     #[tokio::test]
     async fn share_limits_by_filter_reach_exactly_the_filtered_torrents() {
         let (s, h) = library("sel-share");
-        let (st, _) = start(&s, "share_limits", json!({"selection": {"filter": "category=movies", "expect": 2}, "params": {}})).await;
+        let (st, _) = start(
+            &s,
+            "share_limits",
+            json!({"selection": {"filter": "category=movies", "expect": 2}, "params": {}}),
+        )
+        .await;
         assert_eq!(st, StatusCode::BAD_REQUEST);
         let (st, v) = start(
             &s,
@@ -1400,26 +1795,52 @@ mod tests {
         .await;
         assert_eq!(st, StatusCode::ACCEPTED, "{v}");
         let j = wait(&s, v["job"].as_str().unwrap()).await;
-        assert_eq!((j["done"].as_u64(), j["failed"].as_u64()), (Some(2), Some(0)), "{j}");
+        assert_eq!(
+            (j["done"].as_u64(), j["failed"].as_u64()),
+            (Some(2), Some(0)),
+            "{j}"
+        );
         let own = |hash: &str| s.store.read().unwrap().share_limits_of(hash);
-        assert_eq!((own(&h[0]).ratio, own(&h[0]).seeding_minutes, own(&h[0]).inactive_minutes), (2.5, -1, -2));
+        assert_eq!(
+            (
+                own(&h[0]).ratio,
+                own(&h[0]).seeding_minutes,
+                own(&h[0]).inactive_minutes
+            ),
+            (2.5, -1, -2)
+        );
         assert_eq!(own(&h[1]).ratio, 2.5);
-        assert_eq!(own(&h[2]), crate::sharelimits::TorrentShareLimits::default(), "series was not selected");
+        assert_eq!(
+            own(&h[2]),
+            crate::sharelimits::TorrentShareLimits::default(),
+            "series was not selected"
+        );
     }
 
     #[tokio::test]
     async fn a_stop_by_filter_is_one_store_write_and_reports_what_applied() {
         let (s, h) = library("sel-stop");
-        let (st, v) = start(&s, "stop", json!({"selection": {"filter": "category=series", "expect": 1}})).await;
+        let (st, v) = start(
+            &s,
+            "stop",
+            json!({"selection": {"filter": "category=series", "expect": 1}}),
+        )
+        .await;
         assert_eq!(st, StatusCode::ACCEPTED, "{v}");
         let j = wait(&s, v["job"].as_str().unwrap()).await;
         assert_eq!(j["done"], 1, "{j}");
         assert_eq!(j["failed"], 0, "{j}");
         let paused: i64 = {
             let store = s.state.store.read().unwrap();
-            store.paused_hashes("hoard").map(|p| p.contains(&h[2]) as i64 + 2 * p.contains(&h[0]) as i64).unwrap_or(-1)
+            store
+                .paused_hashes("hoard")
+                .map(|p| p.contains(&h[2]) as i64 + 2 * p.contains(&h[0]) as i64)
+                .unwrap_or(-1)
         };
-        assert_eq!(paused, 1, "the series torrent is stopped, the movies are not");
+        assert_eq!(
+            paused, 1,
+            "the series torrent is stopped, the movies are not"
+        );
     }
 
     /// ⭐ Force download STARTS a torrent the user stopped, as qBittorrent's
@@ -1429,16 +1850,38 @@ mod tests {
     async fn force_download_starts_a_stopped_torrent() {
         use tower::ServiceExt;
         let (s, h) = library("sel-force");
-        let (_, v) = start(&s, "stop", json!({"selection": {"filter": "category=movies", "expect": 2}})).await;
+        let (_, v) = start(
+            &s,
+            "stop",
+            json!({"selection": {"filter": "category=movies", "expect": 2}}),
+        )
+        .await;
         wait(&s, v["job"].as_str().unwrap()).await;
         let engine_paused = |hash: &str| {
             let (_, t) = crate::api::find_torrent(&s.state, hash).expect("held");
             t.is_paused.load(std::sync::atomic::Ordering::Relaxed)
         };
-        let stored_paused = |hash: &str| s.state.store.read().unwrap().paused_hashes("hoard").unwrap().iter().any(|p| p == hash);
-        assert!(engine_paused(&h[0]) && stored_paused(&h[0]), "stopped first");
+        let stored_paused = |hash: &str| {
+            s.state
+                .store
+                .read()
+                .unwrap()
+                .paused_hashes("hoard")
+                .unwrap()
+                .iter()
+                .any(|p| p == hash)
+        };
+        assert!(
+            engine_paused(&h[0]) && stored_paused(&h[0]),
+            "stopped first"
+        );
 
-        let (st, v) = start(&s, "pin", json!({"selection": {"items": [{"hash": h[0], "agent": "local-hoard"}]}})).await;
+        let (st, v) = start(
+            &s,
+            "pin",
+            json!({"selection": {"items": [{"hash": h[0], "agent": "local-hoard"}]}}),
+        )
+        .await;
         assert_eq!(st, StatusCode::ACCEPTED, "{v}");
         let j = wait(&s, v["job"].as_str().unwrap()).await;
         assert_eq!(j["failed"], 0, "{j}");
@@ -1452,24 +1895,59 @@ mod tests {
             .header("X-API-Key", KEY)
             .body(axum::body::Body::empty())
             .unwrap();
-        let r = crate::api::router(s.state.clone()).oneshot(req).await.unwrap();
+        let r = crate::api::router(s.state.clone())
+            .oneshot(req)
+            .await
+            .unwrap();
         assert_eq!(r.status(), StatusCode::OK);
-        assert!(!stored_paused(&h[1]) && !engine_paused(&h[1]), "the single route starts it too");
-        assert!(s.state.store.read().unwrap().pinned("hoard").unwrap().contains(&h[1]));
+        assert!(
+            !stored_paused(&h[1]) && !engine_paused(&h[1]),
+            "the single route starts it too"
+        );
+        assert!(s
+            .state
+            .store
+            .read()
+            .unwrap()
+            .pinned("hoard")
+            .unwrap()
+            .contains(&h[1]));
     }
 
     #[tokio::test]
     async fn explicit_items_still_work_and_an_unknown_action_or_param_is_refused() {
         let (s, h) = library("sel-items");
-        let (st, v) = start(&s, "remove", json!({"selection": {"items": [{"hash": h[2], "agent": "local-hoard"}]}})).await;
+        let (st, v) = start(
+            &s,
+            "remove",
+            json!({"selection": {"items": [{"hash": h[2], "agent": "local-hoard"}]}}),
+        )
+        .await;
         assert_eq!(st, StatusCode::ACCEPTED, "{v}");
         let j = wait(&s, v["job"].as_str().unwrap()).await;
         assert_eq!(j["tally"]["ok"], 1, "{j}");
-        assert!(s.state.store.read().unwrap().export_rows(&[h[2].clone()]).unwrap().is_empty());
+        assert!(s
+            .state
+            .store
+            .read()
+            .unwrap()
+            .export_rows(&[h[2].clone()])
+            .unwrap()
+            .is_empty());
 
-        let (st, _) = start(&s, "explode", json!({"selection": {"items": [{"hash": h[0]}]}})).await;
+        let (st, _) = start(
+            &s,
+            "explode",
+            json!({"selection": {"items": [{"hash": h[0]}]}}),
+        )
+        .await;
         assert_eq!(st, StatusCode::NOT_FOUND);
-        let (st, v) = start(&s, "remove", json!({"selection": {"items": [{"hash": h[0]}]}, "params": {"delete": true}})).await;
+        let (st, v) = start(
+            &s,
+            "remove",
+            json!({"selection": {"items": [{"hash": h[0]}]}, "params": {"delete": true}}),
+        )
+        .await;
         assert_eq!(st, StatusCode::BAD_REQUEST);
         assert!(v["error"].as_str().unwrap().contains("delete"), "{v}");
     }
@@ -1486,7 +1964,13 @@ mod tests {
         )
         .await;
         assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
-        let r = get_job_route(State(s.state.clone()), Path("x".into()), RawQuery(None), HeaderMap::new()).await;
+        let r = get_job_route(
+            State(s.state.clone()),
+            Path("x".into()),
+            RawQuery(None),
+            HeaderMap::new(),
+        )
+        .await;
         assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
     }
 
@@ -1524,11 +2008,25 @@ mod tests {
         assert_eq!(dirty_rows(&s), 0);
         let (_, v) = start(&s, "tags", json!({"selection": {"filter": "category=movies", "expect": 2}, "params": {"tags": ["x"], "op": "add"}})).await;
         wait(&s, v["job"].as_str().unwrap()).await;
-        let (_, v) = start(&s, "stop", json!({"selection": {"filter": "category=movies", "expect": 2}})).await;
+        let (_, v) = start(
+            &s,
+            "stop",
+            json!({"selection": {"filter": "category=movies", "expect": 2}}),
+        )
+        .await;
         wait(&s, v["job"].as_str().unwrap()).await;
-        let (_, v) = start(&s, "category", json!({"selection": {"items": [{"hash": h[2]}]}, "params": {"category": "movies"}})).await;
+        let (_, v) = start(
+            &s,
+            "category",
+            json!({"selection": {"items": [{"hash": h[2]}]}, "params": {"category": "movies"}}),
+        )
+        .await;
         wait(&s, v["job"].as_str().unwrap()).await;
-        assert_eq!(dirty_rows(&s), 0, "the writes left rows for the list to re-read");
+        assert_eq!(
+            dirty_rows(&s),
+            0,
+            "the writes left rows for the list to re-read"
+        );
         let page = crate::api::fleet_page(&s.state, "hoard", "fields=hash&tag=x").await;
         assert_eq!(page["filtered"], 2);
         let page = crate::api::fleet_page(&s.state, "hoard", "fields=hash&category=movies").await;
@@ -1543,10 +2041,20 @@ mod tests {
     async fn a_location_is_queued_per_torrent_and_an_empty_one_refused() {
         let (s, h) = library("sel-location");
         let to = std::env::temp_dir().join(format!("hydra-sel-location-{}", std::process::id()));
-        let (st, _) = start(&s, "location", json!({"selection": {"items": [{"hash": h[0]}]}, "params": {"location": " "}})).await;
+        let (st, _) = start(
+            &s,
+            "location",
+            json!({"selection": {"items": [{"hash": h[0]}]}, "params": {"location": " "}}),
+        )
+        .await;
         assert_eq!(st, StatusCode::BAD_REQUEST);
-        let (st, v) = start(&s, "location", json!({"selection": {"items": [{"hash": h[0]}, {"hash": h[1]}]},
-                                                   "params": {"location": to.to_string_lossy()}})).await;
+        let (st, v) = start(
+            &s,
+            "location",
+            json!({"selection": {"items": [{"hash": h[0]}, {"hash": h[1]}]},
+                                                   "params": {"location": to.to_string_lossy()}}),
+        )
+        .await;
         assert_eq!(st, StatusCode::ACCEPTED, "{v}");
         let j = wait(&s, v["job"].as_str().unwrap()).await;
         assert_eq!(j["tally"]["moving"], 2, "{j}");
@@ -1556,7 +2064,12 @@ mod tests {
     async fn a_second_identical_write_is_reported_unchanged_not_done() {
         let (s, _) = library("sel-unchanged");
         for expected in ["ok", "unchanged"] {
-            let (_, v) = start(&s, "stop", json!({"selection": {"filter": "", "expect": 3}})).await;
+            let (_, v) = start(
+                &s,
+                "stop",
+                json!({"selection": {"filter": "", "expect": 3}}),
+            )
+            .await;
             let j = wait(&s, v["job"].as_str().unwrap()).await;
             assert_eq!(j["tally"][expected], 3, "{j}");
         }
@@ -1565,17 +2078,37 @@ mod tests {
     // ---- Target and the small pure helpers ----------------------------------
 
     fn target(hash: &str, agent: &str, mode: &str) -> Target {
-        Target { hash: hash.into(), agent: agent.into(), mode: mode.into() }
+        Target {
+            hash: hash.into(),
+            agent: agent.into(),
+            mode: mode.into(),
+        }
     }
 
     /// Which engine a copy sits in, from whatever the row said.
     #[test]
     fn a_target_names_the_engine_its_agent_or_mode_points_at() {
-        assert_eq!(target("h", "local-vpn1", "hoard").engine(), "vpn1", "the agent wins over the mode");
-        assert_eq!(target("h", "", "race").engine(), "race", "an empty agent is this node, in the row's mode");
+        assert_eq!(
+            target("h", "local-vpn1", "hoard").engine(),
+            "vpn1",
+            "the agent wins over the mode"
+        );
+        assert_eq!(
+            target("h", "", "race").engine(),
+            "race",
+            "an empty agent is this node, in the row's mode"
+        );
         assert_eq!(target("h", "local", "hoard").engine(), "hoard");
-        assert_eq!(target("h", "nas-race", "hoard").engine(), "race", "a remote row: the part after the last hyphen");
-        assert_eq!(target("h", "nas", "hoard").engine(), "", "no hyphen, no guess");
+        assert_eq!(
+            target("h", "nas-race", "hoard").engine(),
+            "race",
+            "a remote row: the part after the last hyphen"
+        );
+        assert_eq!(
+            target("h", "nas", "hoard").engine(),
+            "",
+            "no hyphen, no guess"
+        );
     }
 
     #[test]
@@ -1596,7 +2129,14 @@ mod tests {
         assert_eq!(clean_hash(&format!("  {v1}\n")), Some(v1.to_lowercase()));
         let v2 = "0f".repeat(32);
         assert_eq!(clean_hash(&v2), Some(v2.clone()));
-        for bad in ["", "abc", &"a".repeat(39), &"a".repeat(41), &"g".repeat(40), &format!("{}z", "a".repeat(39))] {
+        for bad in [
+            "",
+            "abc",
+            &"a".repeat(39),
+            &"a".repeat(41),
+            &"g".repeat(40),
+            &format!("{}z", "a".repeat(39)),
+        ] {
             assert_eq!(clean_hash(bad), None, "{bad:?}");
         }
     }
@@ -1612,10 +2152,25 @@ mod tests {
     /// field, a bare string, then the bare status.
     #[test]
     fn an_error_is_read_from_the_field_then_the_string_then_the_status() {
-        assert_eq!(error_of(StatusCode::CONFLICT, &json!({"error": "taken"})), "taken");
-        assert_eq!(error_of(StatusCode::BAD_GATEWAY, &Value::String("upstream down".into())), "upstream down");
-        assert_eq!(error_of(StatusCode::BAD_GATEWAY, &Value::String(String::new())), "HTTP 502");
-        assert_eq!(error_of(StatusCode::NOT_FOUND, &json!({"detail": "x"})), "HTTP 404");
+        assert_eq!(
+            error_of(StatusCode::CONFLICT, &json!({"error": "taken"})),
+            "taken"
+        );
+        assert_eq!(
+            error_of(
+                StatusCode::BAD_GATEWAY,
+                &Value::String("upstream down".into())
+            ),
+            "upstream down"
+        );
+        assert_eq!(
+            error_of(StatusCode::BAD_GATEWAY, &Value::String(String::new())),
+            "HTTP 502"
+        );
+        assert_eq!(
+            error_of(StatusCode::NOT_FOUND, &json!({"detail": "x"})),
+            "HTTP 404"
+        );
         assert_eq!(error_of(StatusCode::NOT_FOUND, &Value::Null), "HTTP 404");
     }
 
@@ -1624,9 +2179,18 @@ mod tests {
     #[test]
     fn the_download_order_body_carries_only_the_flags_that_were_given() {
         assert_eq!(download_order_body(None, None), json!({}));
-        assert_eq!(download_order_body(Some(true), None), json!({"sequential": true}));
-        assert_eq!(download_order_body(None, Some(false)), json!({"first_last_piece": false}));
-        assert_eq!(download_order_body(Some(false), Some(true)), json!({"sequential": false, "first_last_piece": true}));
+        assert_eq!(
+            download_order_body(Some(true), None),
+            json!({"sequential": true})
+        );
+        assert_eq!(
+            download_order_body(None, Some(false)),
+            json!({"first_last_piece": false})
+        );
+        assert_eq!(
+            download_order_body(Some(false), Some(true)),
+            json!({"sequential": false, "first_last_piece": true})
+        );
     }
 
     #[test]
@@ -1634,7 +2198,11 @@ mod tests {
         let o = Outcome::failed("0123456789abcdef", "boom".into());
         assert_eq!(o.key, "failed");
         assert_eq!(o.error.as_deref(), Some("01234567: boom"));
-        assert_eq!(Outcome::failed("abc", "x".into()).error.as_deref(), Some("abc: x"), "a short hash does not panic");
+        assert_eq!(
+            Outcome::failed("abc", "x".into()).error.as_deref(),
+            Some("abc: x"),
+            "a short hash does not panic"
+        );
         assert_eq!(Outcome::skip("not_here").key, "not_here");
         assert!(Outcome::skip("not_here").error.is_none());
     }
@@ -1647,29 +2215,68 @@ mod tests {
 
     #[test]
     fn the_simple_actions_take_no_params_and_a_null_is_an_empty_object() {
-        assert!(matches!(Action::parse("stop", &Value::Null), Ok(Action::Pause(true))));
-        assert!(matches!(Action::parse("start", &json!({})), Ok(Action::Pause(false))));
-        assert!(matches!(Action::parse("pin", &Value::Null), Ok(Action::Pin(true))));
-        assert!(matches!(Action::parse("unpin", &Value::Null), Ok(Action::Pin(false))));
-        assert!(matches!(Action::parse("reannounce", &Value::Null), Ok(Action::Reannounce)));
-        assert!(matches!(Action::parse("recheck", &Value::Null), Ok(Action::Recheck)));
+        assert!(matches!(
+            Action::parse("stop", &Value::Null),
+            Ok(Action::Pause(true))
+        ));
+        assert!(matches!(
+            Action::parse("start", &json!({})),
+            Ok(Action::Pause(false))
+        ));
+        assert!(matches!(
+            Action::parse("pin", &Value::Null),
+            Ok(Action::Pin(true))
+        ));
+        assert!(matches!(
+            Action::parse("unpin", &Value::Null),
+            Ok(Action::Pin(false))
+        ));
+        assert!(matches!(
+            Action::parse("reannounce", &Value::Null),
+            Ok(Action::Reannounce)
+        ));
+        assert!(matches!(
+            Action::parse("recheck", &Value::Null),
+            Ok(Action::Recheck)
+        ));
         for name in ["stop", "start", "pin", "unpin", "reannounce", "recheck"] {
             let r = refused(name, json!({"force": true}));
             assert_eq!(r.status, StatusCode::BAD_REQUEST, "{name}");
             let msg = r.body["error"].as_str().unwrap();
-            assert!(msg.starts_with("params:") && msg.contains("force"), "{name}: {msg}");
+            assert!(
+                msg.starts_with("params:") && msg.contains("force"),
+                "{name}: {msg}"
+            );
         }
     }
 
     #[test]
     fn tags_need_an_op_and_at_least_one_real_tag() {
         match Action::parse("tags", &json!({"tags": ["a", "b"], "op": "remove"})) {
-            Ok(Action::Tags { tags, op }) => assert_eq!((tags, op), (vec!["a".to_string(), "b".to_string()], "remove".to_string())),
+            Ok(Action::Tags { tags, op }) => assert_eq!(
+                (tags, op),
+                (vec!["a".to_string(), "b".to_string()], "remove".to_string())
+            ),
             other => panic!("{other:?}"),
         }
-        assert!(refused("tags", json!({"tags": ["a"], "op": "set"})).body["error"].as_str().unwrap().contains("add"));
-        assert!(refused("tags", json!({"tags": [], "op": "add"})).body["error"].as_str().unwrap().contains("empty"));
-        assert!(refused("tags", json!({"tags": ["  ", ""], "op": "add"})).body["error"].as_str().unwrap().contains("empty"));
+        assert!(
+            refused("tags", json!({"tags": ["a"], "op": "set"})).body["error"]
+                .as_str()
+                .unwrap()
+                .contains("add")
+        );
+        assert!(
+            refused("tags", json!({"tags": [], "op": "add"})).body["error"]
+                .as_str()
+                .unwrap()
+                .contains("empty")
+        );
+        assert!(
+            refused("tags", json!({"tags": ["  ", ""], "op": "add"})).body["error"]
+                .as_str()
+                .unwrap()
+                .contains("empty")
+        );
         refused("tags", json!({"tags": ["a"]}));
         refused("tags", Value::Null);
     }
@@ -1677,50 +2284,110 @@ mod tests {
     #[test]
     fn category_location_and_remove_default_their_flags_to_off() {
         match Action::parse("category", &json!({"category": "movies"})) {
-            Ok(Action::Category { category, move_files, allow_breaking_hardlinks }) => {
-                assert_eq!((category.as_str(), move_files, allow_breaking_hardlinks), ("movies", false, false))
+            Ok(Action::Category {
+                category,
+                move_files,
+                allow_breaking_hardlinks,
+            }) => {
+                assert_eq!(
+                    (category.as_str(), move_files, allow_breaking_hardlinks),
+                    ("movies", false, false)
+                )
             }
             other => panic!("{other:?}"),
         }
-        match Action::parse("category", &json!({"category": "", "move_files": true, "allow_breaking_hardlinks": true})) {
-            Ok(Action::Category { category, move_files, allow_breaking_hardlinks }) => {
-                assert_eq!((category.as_str(), move_files, allow_breaking_hardlinks), ("", true, true), "an empty category clears it")
+        match Action::parse(
+            "category",
+            &json!({"category": "", "move_files": true, "allow_breaking_hardlinks": true}),
+        ) {
+            Ok(Action::Category {
+                category,
+                move_files,
+                allow_breaking_hardlinks,
+            }) => {
+                assert_eq!(
+                    (category.as_str(), move_files, allow_breaking_hardlinks),
+                    ("", true, true),
+                    "an empty category clears it"
+                )
             }
             other => panic!("{other:?}"),
         }
         refused("category", json!({}));
         match Action::parse("location", &json!({"location": "/data/x"})) {
-            Ok(Action::Location { location, allow_breaking_hardlinks }) => assert_eq!((location.as_str(), allow_breaking_hardlinks), ("/data/x", false)),
+            Ok(Action::Location {
+                location,
+                allow_breaking_hardlinks,
+            }) => assert_eq!(
+                (location.as_str(), allow_breaking_hardlinks),
+                ("/data/x", false)
+            ),
             other => panic!("{other:?}"),
         }
-        assert!(refused("location", json!({"location": "   "})).body["error"].as_str().unwrap().contains("empty"));
-        assert!(matches!(Action::parse("remove", &Value::Null), Ok(Action::Remove { delete_files: false })));
-        assert!(matches!(Action::parse("remove", &json!({"delete_files": true})), Ok(Action::Remove { delete_files: true })));
+        assert!(
+            refused("location", json!({"location": "   "})).body["error"]
+                .as_str()
+                .unwrap()
+                .contains("empty")
+        );
+        assert!(matches!(
+            Action::parse("remove", &Value::Null),
+            Ok(Action::Remove {
+                delete_files: false
+            })
+        ));
+        assert!(matches!(
+            Action::parse("remove", &json!({"delete_files": true})),
+            Ok(Action::Remove { delete_files: true })
+        ));
     }
 
     #[test]
     fn engine_and_node_actions_need_their_targets_named() {
-        assert!(matches!(Action::parse("copy", &json!({"engine": "race"})), Ok(Action::Copy { engine }) if engine == "race"));
-        assert!(matches!(Action::parse("move-engine", &json!({"engine": "hoard"})), Ok(Action::MoveEngine { engine }) if engine == "hoard"));
+        assert!(
+            matches!(Action::parse("copy", &json!({"engine": "race"})), Ok(Action::Copy { engine }) if engine == "race")
+        );
+        assert!(
+            matches!(Action::parse("move-engine", &json!({"engine": "hoard"})), Ok(Action::MoveEngine { engine }) if engine == "hoard")
+        );
         refused("copy", json!({}));
         refused("move-engine", Value::Null);
 
-        match Action::parse("handoff", &json!({"node": "nas", "engine": "race", "then": "remove"})) {
-            Ok(Action::Handoff { node, engine, then }) => assert_eq!((node.as_str(), engine.as_str(), then.as_str()), ("nas", "race", "remove")),
+        match Action::parse(
+            "handoff",
+            &json!({"node": "nas", "engine": "race", "then": "remove"}),
+        ) {
+            Ok(Action::Handoff { node, engine, then }) => assert_eq!(
+                (node.as_str(), engine.as_str(), then.as_str()),
+                ("nas", "race", "remove")
+            ),
             other => panic!("{other:?}"),
         }
-        assert!(refused("handoff", json!({"node": "nas", "engine": "race", "then": "delete"})).body["error"]
+        assert!(refused(
+            "handoff",
+            json!({"node": "nas", "engine": "race", "then": "delete"})
+        )
+        .body["error"]
             .as_str()
             .unwrap()
             .contains("keep"));
         refused("handoff", json!({"node": "nas", "engine": "race"}));
 
         match Action::parse("node-fetch", &json!({"node": "nas", "engine": "race"})) {
-            Ok(Action::NodeFetch { node, from_engine, engine }) => assert_eq!((node.as_str(), from_engine.as_str(), engine.as_str()), ("nas", "", "race")),
+            Ok(Action::NodeFetch {
+                node,
+                from_engine,
+                engine,
+            }) => assert_eq!(
+                (node.as_str(), from_engine.as_str(), engine.as_str()),
+                ("nas", "", "race")
+            ),
             other => panic!("{other:?}"),
         }
         match Action::parse("node-move", &json!({"node": "nas", "engine": "vpn1"})) {
-            Ok(Action::NodeMove { node, engine }) => assert_eq!((node.as_str(), engine.as_str()), ("nas", "vpn1")),
+            Ok(Action::NodeMove { node, engine }) => {
+                assert_eq!((node.as_str(), engine.as_str()), ("nas", "vpn1"))
+            }
             other => panic!("{other:?}"),
         }
         refused("node-move", json!({"node": "nas"}));
@@ -1735,19 +2402,32 @@ mod tests {
         refused("download_order", Value::Null);
         assert!(matches!(
             Action::parse("limits", &json!({"up_kib": 0})),
-            Ok(Action::Limits { up_kib: Some(0), down_kib: None })
+            Ok(Action::Limits {
+                up_kib: Some(0),
+                down_kib: None
+            })
         ));
         assert!(matches!(
             Action::parse("limits", &json!({"down_kib": 50})),
-            Ok(Action::Limits { up_kib: None, down_kib: Some(50) })
+            Ok(Action::Limits {
+                up_kib: None,
+                down_kib: Some(50)
+            })
         ));
         match Action::parse("share_limits", &json!({"inactive_seeding_time_limit": 30})) {
-            Ok(Action::ShareLimits { ratio, seeding, inactive }) => assert_eq!((ratio, seeding, inactive), (None, None, Some(30))),
+            Ok(Action::ShareLimits {
+                ratio,
+                seeding,
+                inactive,
+            }) => assert_eq!((ratio, seeding, inactive), (None, None, Some(30))),
             other => panic!("{other:?}"),
         }
         assert!(matches!(
             Action::parse("download_order", &json!({"first_last_piece": true})),
-            Ok(Action::DownloadOrder { sequential: None, first_last_piece: Some(true) })
+            Ok(Action::DownloadOrder {
+                sequential: None,
+                first_last_piece: Some(true)
+            })
         ));
     }
 
@@ -1761,7 +2441,12 @@ mod tests {
     #[test]
     fn only_a_reannounce_runs_eight_at_a_time() {
         assert_eq!(Action::Reannounce.concurrency(), 8);
-        for a in [Action::Recheck, Action::Pause(true), Action::Remove { delete_files: true }, Action::Copy { engine: "x".into() }] {
+        for a in [
+            Action::Recheck,
+            Action::Pause(true),
+            Action::Remove { delete_files: true },
+            Action::Copy { engine: "x".into() },
+        ] {
             assert_eq!(a.concurrency(), 1, "{a:?}");
         }
     }
@@ -1770,27 +2455,63 @@ mod tests {
 
     #[test]
     fn a_relabel_is_a_set_edit_but_moving_the_files_is_not() {
-        let relabel = Action::Category { category: "movies".into(), move_files: false, allow_breaking_hardlinks: false };
+        let relabel = Action::Category {
+            category: "movies".into(),
+            move_files: false,
+            allow_breaking_hardlinks: false,
+        };
         assert!(matches!(SetEdit::of(&relabel), Some(SetEdit::Category(c)) if c == "movies"));
-        let moving = Action::Category { category: "movies".into(), move_files: true, allow_breaking_hardlinks: false };
-        assert!(SetEdit::of(&moving).is_none(), "moving files is real work per torrent");
-        for a in [Action::Recheck, Action::Reannounce, Action::Remove { delete_files: false }, Action::Limits { up_kib: Some(1), down_kib: None }] {
+        let moving = Action::Category {
+            category: "movies".into(),
+            move_files: true,
+            allow_breaking_hardlinks: false,
+        };
+        assert!(
+            SetEdit::of(&moving).is_none(),
+            "moving files is real work per torrent"
+        );
+        for a in [
+            Action::Recheck,
+            Action::Reannounce,
+            Action::Remove {
+                delete_files: false,
+            },
+            Action::Limits {
+                up_kib: Some(1),
+                down_kib: None,
+            },
+        ] {
             assert!(SetEdit::of(&a).is_none(), "{a:?}");
         }
-        assert!(matches!(SetEdit::of(&Action::Pause(true)), Some(SetEdit::Paused(true))));
-        assert!(matches!(SetEdit::of(&Action::Pin(false)), Some(SetEdit::Pinned(false))));
+        assert!(matches!(
+            SetEdit::of(&Action::Pause(true)),
+            Some(SetEdit::Paused(true))
+        ));
+        assert!(matches!(
+            SetEdit::of(&Action::Pin(false)),
+            Some(SetEdit::Pinned(false))
+        ));
     }
 
     /// Tags are trimmed and blanks dropped before they reach the store; `op`
     /// decides add or remove.
     #[test]
     fn tags_are_trimmed_and_the_op_picks_add_or_remove() {
-        let a = Action::Tags { tags: vec![" keep ".into(), "  ".into(), "x".into()], op: "add".into() };
+        let a = Action::Tags {
+            tags: vec![" keep ".into(), "  ".into(), "x".into()],
+            op: "add".into(),
+        };
         match SetEdit::of(&a) {
-            Some(SetEdit::Tags { tags, add }) => assert_eq!((tags, add), (vec!["keep".to_string(), "x".to_string()], true)),
+            Some(SetEdit::Tags { tags, add }) => assert_eq!(
+                (tags, add),
+                (vec!["keep".to_string(), "x".to_string()], true)
+            ),
             _ => panic!("tags are a set edit"),
         }
-        match SetEdit::of(&Action::Tags { tags: vec!["x".into()], op: "remove".into() }) {
+        match SetEdit::of(&Action::Tags {
+            tags: vec!["x".into()],
+            op: "remove".into(),
+        }) {
             Some(SetEdit::Tags { add, .. }) => assert!(!add),
             _ => panic!("tags are a set edit"),
         }
@@ -1802,11 +2523,25 @@ mod tests {
     fn pins_and_tags_apply_to_hoard_rows_only() {
         let hoard = target("h", "local-hoard", "hoard");
         let race = target("h", "local-race", "race");
-        for e in [SetEdit::Pinned(true), SetEdit::Tags { tags: vec![], add: true }] {
+        for e in [
+            SetEdit::Pinned(true),
+            SetEdit::Tags {
+                tags: vec![],
+                add: true,
+            },
+        ] {
             assert!(e.applies(&hoard));
             assert!(!e.applies(&race));
         }
-        for e in [SetEdit::Paused(true), SetEdit::Category("c".into()), SetEdit::ShareLimits { ratio: None, seeding: None, inactive: None }] {
+        for e in [
+            SetEdit::Paused(true),
+            SetEdit::Category("c".into()),
+            SetEdit::ShareLimits {
+                ratio: None,
+                seeding: None,
+                inactive: None,
+            },
+        ] {
             assert!(e.applies(&hoard) && e.applies(&race));
         }
     }
@@ -1830,12 +2565,21 @@ mod tests {
         )
         .await
         .unwrap();
-        let got: Vec<(String, String, String)> = got.into_iter().map(|t| (t.hash, t.agent, t.mode)).collect();
+        let got: Vec<(String, String, String)> =
+            got.into_iter().map(|t| (t.hash, t.agent, t.mode)).collect();
         assert_eq!(
             got,
             vec![
-                (a.to_lowercase(), "local-race".to_string(), "race".to_string()),
-                (a.to_lowercase(), "local-hoard".to_string(), "hoard".to_string()),
+                (
+                    a.to_lowercase(),
+                    "local-race".to_string(),
+                    "race".to_string()
+                ),
+                (
+                    a.to_lowercase(),
+                    "local-hoard".to_string(),
+                    "hoard".to_string()
+                ),
                 (b.clone(), "nas-race".to_string(), "race".to_string()),
             ],
             "three spellings of one copy collapse; the same hash in another engine stays"
@@ -1845,14 +2589,35 @@ mod tests {
     #[tokio::test]
     async fn an_item_that_is_not_a_hash_or_a_view_that_is_not_an_engine_is_refused() {
         let (s, _) = library("sel-items-bad");
-        let r = resolve(&s.state, &sel(json!({"items": [{"hash": "not-a-hash"}]}))).await.unwrap_err();
+        let r = resolve(&s.state, &sel(json!({"items": [{"hash": "not-a-hash"}]})))
+            .await
+            .unwrap_err();
         assert_eq!(r.status, StatusCode::BAD_REQUEST);
-        assert!(r.body["error"].as_str().unwrap().contains("`not-a-hash` is not an info hash"));
-        let r = resolve(&s.state, &sel(json!({"view": "nope", "items": [{"hash": "aa".repeat(20)}]}))).await.unwrap_err();
+        assert!(r.body["error"]
+            .as_str()
+            .unwrap()
+            .contains("`not-a-hash` is not an info hash"));
+        let r = resolve(
+            &s.state,
+            &sel(json!({"view": "nope", "items": [{"hash": "aa".repeat(20)}]})),
+        )
+        .await
+        .unwrap_err();
         assert_eq!(r.status, StatusCode::BAD_REQUEST);
-        assert!(r.body["error"].as_str().unwrap().contains("no engine `nope`"));
-        let r = resolve(&s.state, &sel(json!({"filter": "limit=5", "expect": 1}))).await.unwrap_err();
-        assert!(r.body["error"].as_str().unwrap().contains("`limit` is not a filter"), "an unknown filter key is refused through resolve too");
+        assert!(r.body["error"]
+            .as_str()
+            .unwrap()
+            .contains("no engine `nope`"));
+        let r = resolve(&s.state, &sel(json!({"filter": "limit=5", "expect": 1})))
+            .await
+            .unwrap_err();
+        assert!(
+            r.body["error"]
+                .as_str()
+                .unwrap()
+                .contains("`limit` is not a filter"),
+            "an unknown filter key is refused through resolve too"
+        );
     }
 
     /// An excluded copy is matched by hash AND agent, with the same
@@ -1871,7 +2636,10 @@ mod tests {
         hashes.sort();
         let mut want = vec![h[1].clone(), h[2].clone()];
         want.sort();
-        assert_eq!(hashes, want, "h0 excluded as local-hoard; h1's exclusion names the race copy, which is not selected");
+        assert_eq!(
+            hashes, want,
+            "h0 excluded as local-hoard; h1's exclusion names the race copy, which is not selected"
+        );
     }
 
     // ---- jobs --------------------------------------------------------------------
@@ -1880,7 +2648,11 @@ mod tests {
     fn a_job_keeps_the_exact_failure_count_and_only_the_first_hundred_errors() {
         let job = new_job("test", 150);
         for i in 0..150 {
-            record(&job, 1, Outcome::failed(&format!("{i:040x}"), "boom".into()));
+            record(
+                &job,
+                1,
+                Outcome::failed(&format!("{i:040x}"), "boom".into()),
+            );
         }
         record(&job, 3, Outcome::ok("ok"));
         let j = job.lock().unwrap();
@@ -1895,11 +2667,30 @@ mod tests {
     fn consent_requests_accumulate_with_their_file_and_byte_counts() {
         let job = new_job("category", 2);
         for (hash, files, bytes) in [("a", 3u64, 1000u64), ("b", 2, 500)] {
-            let item = Item { hash: hash.into(), agent: "local-hoard".into(), mode: "hoard".into() };
-            record(&job, 1, Outcome { key: "needs_consent".into(), error: None, consent: Some((item, files, bytes)) });
+            let item = Item {
+                hash: hash.into(),
+                agent: "local-hoard".into(),
+                mode: "hoard".into(),
+            };
+            record(
+                &job,
+                1,
+                Outcome {
+                    key: "needs_consent".into(),
+                    error: None,
+                    consent: Some((item, files, bytes)),
+                },
+            );
         }
         let j = job.lock().unwrap();
-        assert_eq!(j.consent.items.iter().map(|i| i.hash.as_str()).collect::<Vec<_>>(), vec!["a", "b"]);
+        assert_eq!(
+            j.consent
+                .items
+                .iter()
+                .map(|i| i.hash.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a", "b"]
+        );
         assert_eq!((j.consent.files, j.consent.bytes), (5, 1500));
         assert_eq!(j.failed, 0, "waiting for a yes is not a failure");
     }
@@ -1917,7 +2708,10 @@ mod tests {
             recent.lock().unwrap().id.clone(),
         );
         let now = std::time::Instant::now();
-        old.lock().unwrap().ended = Some(now.checked_sub(JOB_TTL + std::time::Duration::from_secs(5)).expect("host up long enough"));
+        old.lock().unwrap().ended = Some(
+            now.checked_sub(JOB_TTL + std::time::Duration::from_secs(5))
+                .expect("host up long enough"),
+        );
         recent.lock().unwrap().ended = Some(now);
         let _next = new_job("next", 1);
         assert!(get_job(&old_id).is_none(), "swept");
@@ -1937,48 +2731,114 @@ mod tests {
     #[tokio::test]
     async fn a_cancelled_job_does_nothing_more_and_says_it_was_cancelled() {
         let (s, h) = library("sel-cancel-run");
-        let targets: Vec<Target> = h.iter().map(|x| target(x, "local-hoard", "hoard")).collect();
+        let targets: Vec<Target> = h
+            .iter()
+            .map(|x| target(x, "local-hoard", "hoard"))
+            .collect();
         for action in [Action::Recheck, Action::Pause(true), Action::Reannounce] {
             let job = new_job("test", targets.len());
             job.lock().unwrap().cancel = true;
             run(s.state.clone(), job.clone(), action, targets.clone()).await;
             let j = job.lock().unwrap();
-            assert!(j.finished && j.cancelled, "finished, and flagged as cancelled");
+            assert!(
+                j.finished && j.cancelled,
+                "finished, and flagged as cancelled"
+            );
             assert_eq!((j.done, j.failed), (0, 0), "nothing was touched");
         }
-        assert!(s.state.store.read().unwrap().paused_hashes("hoard").unwrap().is_empty(), "no pause was written");
+        assert!(
+            s.state
+                .store
+                .read()
+                .unwrap()
+                .paused_hashes("hoard")
+                .unwrap()
+                .is_empty(),
+            "no pause was written"
+        );
     }
 
     #[tokio::test]
     async fn the_job_routes_answer_unknown_ids_and_cancel_a_known_one() {
         let (s, _) = library("sel-job-routes");
-        let r = get_job_route(State(s.state.clone()), Path("sel-nope".into()), RawQuery(None), keyed(KEY)).await;
+        let r = get_job_route(
+            State(s.state.clone()),
+            Path("sel-nope".into()),
+            RawQuery(None),
+            keyed(KEY),
+        )
+        .await;
         assert_eq!(r.status(), StatusCode::NOT_FOUND);
-        let r = cancel_job(State(s.state.clone()), Path("sel-nope".into()), RawQuery(None), keyed(KEY)).await;
+        let r = cancel_job(
+            State(s.state.clone()),
+            Path("sel-nope".into()),
+            RawQuery(None),
+            keyed(KEY),
+        )
+        .await;
         assert_eq!(r.status(), StatusCode::NOT_FOUND);
-        let r = cancel_job(State(s.state.clone()), Path("sel-nope".into()), RawQuery(None), HeaderMap::new()).await;
+        let r = cancel_job(
+            State(s.state.clone()),
+            Path("sel-nope".into()),
+            RawQuery(None),
+            HeaderMap::new(),
+        )
+        .await;
         assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
 
         let job = new_job("test", 1);
         let id = job.lock().unwrap().id.clone();
-        let r = cancel_job(State(s.state.clone()), Path(id.clone()), RawQuery(None), HeaderMap::new()).await;
+        let r = cancel_job(
+            State(s.state.clone()),
+            Path(id.clone()),
+            RawQuery(None),
+            HeaderMap::new(),
+        )
+        .await;
         assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
-        assert!(!job.lock().unwrap().cancel, "a caller with no key cancels nothing");
-        let r = cancel_job(State(s.state.clone()), Path(id.clone()), RawQuery(None), keyed(KEY)).await;
+        assert!(
+            !job.lock().unwrap().cancel,
+            "a caller with no key cancels nothing"
+        );
+        let r = cancel_job(
+            State(s.state.clone()),
+            Path(id.clone()),
+            RawQuery(None),
+            keyed(KEY),
+        )
+        .await;
         assert_eq!(r.status(), StatusCode::OK);
         assert!(job.lock().unwrap().cancel);
         // A running job reads its elapsed time live.
         let r = get_job_route(State(s.state.clone()), Path(id), RawQuery(None), keyed(KEY)).await;
-        let v: Value = serde_json::from_slice(&axum::body::to_bytes(r.into_body(), usize::MAX).await.unwrap()).unwrap();
-        assert_eq!((v["finished"].clone(), v["total"].clone()), (json!(false), json!(1)));
-        assert!(v.get("cancel").is_none() && v.get("started").is_none(), "internals are not serialised");
+        let v: Value = serde_json::from_slice(
+            &axum::body::to_bytes(r.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            (v["finished"].clone(), v["total"].clone()),
+            (json!(false), json!(1))
+        );
+        assert!(
+            v.get("cancel").is_none() && v.get("started").is_none(),
+            "internals are not serialised"
+        );
     }
 
     #[tokio::test]
     async fn a_malformed_request_is_refused_before_a_job_exists() {
         let (s, h) = library("sel-malformed");
         for body in ["not json", "{}", r#"{"selection": {"items": []}}"#] {
-            let r = post_action(State(s.state.clone()), Path("stop".into()), RawQuery(None), keyed(KEY), body.into()).await;
+            let r = post_action(
+                State(s.state.clone()),
+                Path("stop".into()),
+                RawQuery(None),
+                keyed(KEY),
+                body.into(),
+            )
+            .await;
             assert_eq!(r.status(), StatusCode::BAD_REQUEST, "{body}");
         }
         let r = post_action(
@@ -1989,7 +2849,11 @@ mod tests {
             json!({"selection": {"items": [{"hash": h[0]}]}, "extra": 1}).to_string(),
         )
         .await;
-        assert_eq!(r.status(), StatusCode::BAD_REQUEST, "an unknown top-level key is named, not dropped");
+        assert_eq!(
+            r.status(),
+            StatusCode::BAD_REQUEST,
+            "an unknown top-level key is named, not dropped"
+        );
         let r = post_action(
             State(s.state.clone()),
             Path("stop".into()),
@@ -1998,10 +2862,35 @@ mod tests {
             json!({"selection": {"filter": "", "expect": 1}}).to_string(),
         )
         .await;
-        assert_eq!(r.status(), StatusCode::CONFLICT, "3 torrents against 1 confirmed");
-        let v: Value = serde_json::from_slice(&axum::body::to_bytes(r.into_body(), usize::MAX).await.unwrap()).unwrap();
-        assert_eq!((v["reason"].clone(), v["count"].clone(), v["expected"].clone()), (json!("grew"), json!(3), json!(1)));
-        assert!(s.state.store.read().unwrap().paused_hashes("hoard").unwrap().is_empty(), "the refusal touched nothing");
+        assert_eq!(
+            r.status(),
+            StatusCode::CONFLICT,
+            "3 torrents against 1 confirmed"
+        );
+        let v: Value = serde_json::from_slice(
+            &axum::body::to_bytes(r.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                v["reason"].clone(),
+                v["count"].clone(),
+                v["expected"].clone()
+            ),
+            (json!("grew"), json!(3), json!(1))
+        );
+        assert!(
+            s.state
+                .store
+                .read()
+                .unwrap()
+                .paused_hashes("hoard")
+                .unwrap()
+                .is_empty(),
+            "the refusal touched nothing"
+        );
     }
 
     // ---- a node that holds some of the copies ------------------------------------------
@@ -2054,9 +2943,17 @@ mod tests {
         let url = format!("http://{}", listener.local_addr().unwrap());
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
         tokio::spawn(async move {
-            let _ = axum::serve(listener, app).with_graceful_shutdown(async { let _ = rx.await; }).await;
+            let _ = axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = rx.await;
+                })
+                .await;
         });
-        Nas { url, calls, _stop: tx }
+        Nas {
+            url,
+            calls,
+            _stop: tx,
+        }
     }
 
     fn declare_nas(s: &TestState, url: &str) {
@@ -2064,7 +2961,13 @@ mod tests {
             .store
             .lock()
             .unwrap()
-            .put_node(&crate::store::Node { name: "nas".into(), url: url.into(), api_key: "node-key".into(), enabled: true, added_at: 0 })
+            .put_node(&crate::store::Node {
+                name: "nas".into(),
+                url: url.into(),
+                api_key: "node-key".into(),
+                enabled: true,
+                added_at: 0,
+            })
             .unwrap();
     }
 
@@ -2074,7 +2977,13 @@ mod tests {
             .unwrap()
             .iter()
             .filter(|(_, pq, _)| !pq.starts_with("/api/hoard/page"))
-            .map(|(m, pq, b)| (m.clone(), pq.clone(), serde_json::from_str(b).unwrap_or(Value::Null)))
+            .map(|(m, pq, b)| {
+                (
+                    m.clone(),
+                    pq.clone(),
+                    serde_json::from_str(b).unwrap_or(Value::Null),
+                )
+            })
             .collect()
     }
 
@@ -2089,8 +2998,14 @@ mod tests {
         let (s, h) = library("sel-fleet-filter");
         let n = nas().await;
         declare_nas(&s, &n.url);
-        let got = resolve(&s.state, &sel(json!({"filter": "category=movies", "expect": 3}))).await.unwrap();
-        let mut copies: Vec<(String, String)> = got.into_iter().map(|t| (t.hash, t.agent)).collect();
+        let got = resolve(
+            &s.state,
+            &sel(json!({"filter": "category=movies", "expect": 3})),
+        )
+        .await
+        .unwrap();
+        let mut copies: Vec<(String, String)> =
+            got.into_iter().map(|t| (t.hash, t.agent)).collect();
         copies.sort();
         let mut want = vec![
             (h[0].clone(), "local-hoard".to_string()),
@@ -2101,10 +3016,21 @@ mod tests {
         assert_eq!(copies, want);
         let asked = n.calls.lock().unwrap().clone();
         assert_eq!(asked.len(), 1);
-        assert_eq!(asked[0].1, "/api/hoard/page?fields=hash&category=movies", "the filter travels to the node as written");
+        assert_eq!(
+            asked[0].1, "/api/hoard/page?fields=hash&category=movies",
+            "the filter travels to the node as written"
+        );
         // Fewer than confirmed is fine; more is refused with the count.
-        let r = resolve(&s.state, &sel(json!({"filter": "category=movies", "expect": 2}))).await.unwrap_err();
-        assert_eq!((r.status, r.body["count"].clone()), (StatusCode::CONFLICT, json!(3)));
+        let r = resolve(
+            &s.state,
+            &sel(json!({"filter": "category=movies", "expect": 2})),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            (r.status, r.body["count"].clone()),
+            (StatusCode::CONFLICT, json!(3))
+        );
     }
 
     /// Every kind of answer a node gives is a distinct outcome, and a refusal
@@ -2114,7 +3040,11 @@ mod tests {
         let (s, _) = library("sel-remote-answers");
         let n = nas().await;
         declare_nas(&s, &n.url);
-        let action = Action::Category { category: "movies".into(), move_files: true, allow_breaking_hardlinks: true };
+        let action = Action::Category {
+            category: "movies".into(),
+            move_files: true,
+            allow_breaking_hardlinks: true,
+        };
         let targets = vec![
             remote("aa", "hoard", "hoard"),
             remote("bb", "hoard", "hoard"),
@@ -2129,12 +3059,31 @@ mod tests {
         assert_eq!(j.tally.get("moving"), Some(&1), "202 alone");
         assert_eq!(j.tally.get("failed"), Some(&2));
         assert_eq!(j.failed, 2);
-        assert!(j.errors.iter().any(|e| e == &format!("{}: nas: disk full", "dddddddd")), "{:?}", j.errors);
-        assert!(j.errors.iter().any(|e| e.starts_with("eeeeeeee: nas: 502")), "a bare status when the node sent no reason: {:?}", j.errors);
+        assert!(
+            j.errors
+                .iter()
+                .any(|e| e == &format!("{}: nas: disk full", "dddddddd")),
+            "{:?}",
+            j.errors
+        );
+        assert!(
+            j.errors.iter().any(|e| e.starts_with("eeeeeeee: nas: 502")),
+            "a bare status when the node sent no reason: {:?}",
+            j.errors
+        );
         let calls = calls_of(&n);
         assert_eq!(calls[0].0, "POST");
-        assert_eq!(calls[0].1, format!("/api/hoard/torrents/{}/category?engine=hoard", "aa".repeat(20)));
-        assert_eq!(calls[0].2, json!({"category": "movies", "move_files": true, "allow_breaking_hardlinks": true}));
+        assert_eq!(
+            calls[0].1,
+            format!(
+                "/api/hoard/torrents/{}/category?engine=hoard",
+                "aa".repeat(20)
+            )
+        );
+        assert_eq!(
+            calls[0].2,
+            json!({"category": "movies", "move_files": true, "allow_breaking_hardlinks": true})
+        );
     }
 
     /// Each action has its own route on the node, built for THAT copy: the
@@ -2148,14 +3097,29 @@ mod tests {
         let race = remote("aa", "vpn 1", "race");
         let cases: Vec<(Action, Target, &str, String, Value)> = vec![
             (
-                Action::Location { location: "/srv/x".into(), allow_breaking_hardlinks: false },
+                Action::Location {
+                    location: "/srv/x".into(),
+                    allow_breaking_hardlinks: false,
+                },
                 race.clone(),
                 "POST",
                 format!("/api/race/torrents/{h}/location?engine=vpn%201"),
                 json!({"location": "/srv/x", "allow_breaking_hardlinks": false}),
             ),
-            (Action::Reannounce, race.clone(), "POST", format!("/api/torrents/{h}/reannounce?engine=vpn%201"), Value::Null),
-            (Action::Recheck, race.clone(), "POST", format!("/api/hoard/torrents/{h}/verify?engine=vpn%201"), Value::Null),
+            (
+                Action::Reannounce,
+                race.clone(),
+                "POST",
+                format!("/api/torrents/{h}/reannounce?engine=vpn%201"),
+                Value::Null,
+            ),
+            (
+                Action::Recheck,
+                race.clone(),
+                "POST",
+                format!("/api/hoard/torrents/{h}/verify?engine=vpn%201"),
+                Value::Null,
+            ),
             (
                 Action::Pause(true),
                 race.clone(),
@@ -2164,14 +3128,20 @@ mod tests {
                 json!({"hashes": [h], "paused": true}),
             ),
             (
-                Action::Limits { up_kib: Some(10), down_kib: None },
+                Action::Limits {
+                    up_kib: Some(10),
+                    down_kib: None,
+                },
                 race.clone(),
                 "POST",
                 format!("/api/torrents/{h}/limits?engine=vpn%201"),
                 json!({"up_kib": 10, "down_kib": null}),
             ),
             (
-                Action::DownloadOrder { sequential: Some(true), first_last_piece: None },
+                Action::DownloadOrder {
+                    sequential: Some(true),
+                    first_last_piece: None,
+                },
                 race.clone(),
                 "POST",
                 format!("/api/torrents/{h}/download-order?engine=vpn%201"),
@@ -2188,17 +3158,38 @@ mod tests {
         for (action, t, method, path, body) in cases {
             let before = calls_of(&n).len();
             let j = run_to_end(&s, action.clone(), vec![t]).await;
-            assert_eq!(j.tally.get("ok"), Some(&1), "{action:?}: {:?} {:?}", j.tally, j.errors);
+            assert_eq!(
+                j.tally.get("ok"),
+                Some(&1),
+                "{action:?}: {:?} {:?}",
+                j.tally,
+                j.errors
+            );
             let calls = calls_of(&n);
             assert_eq!(calls.len(), before + 1, "{action:?}: exactly one call");
             let (m, pq, b) = calls.last().unwrap();
-            assert_eq!((m.as_str(), pq.as_str()), (method, path.as_str()), "{action:?}");
+            assert_eq!(
+                (m.as_str(), pq.as_str()),
+                (method, path.as_str()),
+                "{action:?}"
+            );
             assert_eq!(b, &body, "{action:?}");
         }
         // A copy that is not a race row goes to the hoard's routes.
         let h2 = "aa".repeat(20);
-        run_to_end(&s, Action::Location { location: "/y".into(), allow_breaking_hardlinks: true }, vec![remote("aa", "hoard", "hoard")]).await;
-        assert_eq!(calls_of(&n).last().unwrap().1, format!("/api/hoard/torrents/{h2}/location?engine=hoard"));
+        run_to_end(
+            &s,
+            Action::Location {
+                location: "/y".into(),
+                allow_breaking_hardlinks: true,
+            },
+            vec![remote("aa", "hoard", "hoard")],
+        )
+        .await;
+        assert_eq!(
+            calls_of(&n).last().unwrap().1,
+            format!("/api/hoard/torrents/{h2}/location?engine=hoard")
+        );
     }
 
     /// What has no relay is reported as not here, and a copy whose node is
@@ -2209,9 +3200,17 @@ mod tests {
         let n = nas().await;
         declare_nas(&s, &n.url);
         for action in [
-            Action::Copy { engine: "race".into() },
-            Action::MoveEngine { engine: "race".into() },
-            Action::Handoff { node: "nas".into(), engine: "race".into(), then: "keep".into() },
+            Action::Copy {
+                engine: "race".into(),
+            },
+            Action::MoveEngine {
+                engine: "race".into(),
+            },
+            Action::Handoff {
+                node: "nas".into(),
+                engine: "race".into(),
+                then: "keep".into(),
+            },
         ] {
             let j = run_to_end(&s, action.clone(), vec![remote("aa", "hoard", "hoard")]).await;
             assert_eq!(j.tally.get("not_here"), Some(&1), "{action:?}");
@@ -2221,9 +3220,20 @@ mod tests {
         let ghost = target(&"aa".repeat(20), "elsewhere-hoard", "hoard");
         let j = run_to_end(&s, Action::Reannounce, vec![ghost]).await;
         assert_eq!(j.failed, 1);
-        assert_eq!(j.errors, vec!["aaaaaaaa: no declared node holds elsewhere-hoard".to_string()]);
+        assert_eq!(
+            j.errors,
+            vec!["aaaaaaaa: no declared node holds elsewhere-hoard".to_string()]
+        );
         // A set action that has no relay on a node is reported, not dropped.
-        let j = run_to_end(&s, Action::Tags { tags: vec!["x".into()], op: "add".into() }, vec![remote("aa", "hoard", "hoard")]).await;
+        let j = run_to_end(
+            &s,
+            Action::Tags {
+                tags: vec!["x".into()],
+                op: "add".into(),
+            },
+            vec![remote("aa", "hoard", "hoard")],
+        )
+        .await;
         assert_eq!(j.tally.get("not_here"), Some(&1));
         assert!(calls_of(&n).is_empty());
     }
@@ -2236,12 +3246,23 @@ mod tests {
         let (s, h) = library("sel-handoff-then");
         let n = nas().await;
         declare_nas(&s, &n.url);
-        for (then, want, other) in [("remove", "waiting_node", "ok"), ("keep", "ok", "waiting_node")] {
-            let action = Action::Handoff { node: "nas".into(), engine: "race".into(), then: then.into() };
+        for (then, want, other) in [
+            ("remove", "waiting_node", "ok"),
+            ("keep", "ok", "waiting_node"),
+        ] {
+            let action = Action::Handoff {
+                node: "nas".into(),
+                engine: "race".into(),
+                then: then.into(),
+            };
             let j = run_to_end(&s, action, vec![target(&h[0], "local-hoard", "hoard")]).await;
             assert_eq!((j.done, j.failed), (1, 0), "{then}: {:?}", j.errors);
             assert_eq!(j.tally.get(want), Some(&1), "{then}: {:?}", j.tally);
-            assert!(j.tally.get(other).is_none(), "{then}: only {want}: {:?}", j.tally);
+            assert!(
+                j.tally.get(other).is_none(),
+                "{then}: only {want}: {:?}",
+                j.tally
+            );
         }
     }
 
@@ -2251,13 +3272,19 @@ mod tests {
     async fn a_node_that_is_down_fails_only_its_own_copies() {
         let (s, h) = library("sel-remote-down");
         declare_nas(&s, "http://127.0.0.1:1");
-        let targets = vec![target(&h[0], "local-hoard", "hoard"), remote("aa", "hoard", "hoard")];
+        let targets = vec![
+            target(&h[0], "local-hoard", "hoard"),
+            remote("aa", "hoard", "hoard"),
+        ];
         let j = run_to_end(&s, Action::Pause(true), targets).await;
         assert_eq!(j.done, 2);
         assert_eq!(j.errors, vec!["aaaaaaaa: nas: injoignable".to_string()]);
         assert_eq!(j.tally.get("ok"), Some(&1));
         let (_, t) = crate::api::find_torrent(&s.state, &h[0]).unwrap();
-        assert!(t.is_paused.load(std::sync::atomic::Ordering::Relaxed), "the local copy was stopped");
+        assert!(
+            t.is_paused.load(std::sync::atomic::Ordering::Relaxed),
+            "the local copy was stopped"
+        );
     }
 
     /// Set-based edits over a mixed selection: a pause and a relabel are
@@ -2271,23 +3298,48 @@ mod tests {
         let local = target(&h[2], "local-hoard", "hoard");
         let node_copy = remote("aa", "hoard", "hoard");
 
-        let j = run_to_end(&s, Action::Pause(true), vec![local.clone(), node_copy.clone()]).await;
+        let j = run_to_end(
+            &s,
+            Action::Pause(true),
+            vec![local.clone(), node_copy.clone()],
+        )
+        .await;
         assert_eq!((j.done, j.failed), (2, 0), "{:?}", j.errors);
         assert_eq!(j.tally.get("ok"), Some(&2));
         assert_eq!(calls_of(&n)[0].1, "/api/engines/hoard/pause");
 
-        let relabel = Action::Category { category: "movies".into(), move_files: false, allow_breaking_hardlinks: false };
+        let relabel = Action::Category {
+            category: "movies".into(),
+            move_files: false,
+            allow_breaking_hardlinks: false,
+        };
         let j = run_to_end(&s, relabel, vec![local.clone(), node_copy.clone()]).await;
         assert_eq!(j.tally.get("ok"), Some(&2), "{:?}", j.tally);
         let c = calls_of(&n);
-        assert_eq!(c[1].1, format!("/api/hoard/torrents/{}/category?engine=hoard", "aa".repeat(20)));
-        assert_eq!(c[1].2, json!({"category": "movies", "move_files": false, "allow_breaking_hardlinks": false}));
+        assert_eq!(
+            c[1].1,
+            format!(
+                "/api/hoard/torrents/{}/category?engine=hoard",
+                "aa".repeat(20)
+            )
+        );
+        assert_eq!(
+            c[1].2,
+            json!({"category": "movies", "move_files": false, "allow_breaking_hardlinks": false})
+        );
 
-        let tags = Action::Tags { tags: vec!["t".into()], op: "add".into() };
+        let tags = Action::Tags {
+            tags: vec!["t".into()],
+            op: "add".into(),
+        };
         let race_row = target(&h[0], "local-race", "race");
         let j = run_to_end(&s, tags, vec![local, node_copy, race_row]).await;
         assert_eq!(j.tally.get("ok"), Some(&1), "the local hoard row");
-        assert_eq!(j.tally.get("not_here"), Some(&1), "the node's copy has no tag relay");
+        assert_eq!(
+            j.tally.get("not_here"),
+            Some(&1),
+            "the node's copy has no tag relay"
+        );
         assert_eq!(j.tally.get("skipped"), Some(&1), "tags are the hoard's");
         assert_eq!(calls_of(&n).len(), 2, "no tag call was made");
         assert!(tags_of(&s, &h[2]).contains(&"t".to_string()));
@@ -2301,7 +3353,16 @@ mod tests {
         declare_nas(&s, &n.url);
         let job = new_job("test", 2);
         job.lock().unwrap().cancel = true;
-        run(s.state.clone(), job.clone(), Action::Pause(true), vec![remote("aa", "hoard", "hoard"), remote("bb", "hoard", "hoard")]).await;
+        run(
+            s.state.clone(),
+            job.clone(),
+            Action::Pause(true),
+            vec![
+                remote("aa", "hoard", "hoard"),
+                remote("bb", "hoard", "hoard"),
+            ],
+        )
+        .await;
         assert_eq!(job.lock().unwrap().done, 0);
         assert!(calls_of(&n).is_empty());
     }
@@ -2316,20 +3377,51 @@ mod tests {
         // to or fetching from a node nobody declared: each torrent fails with
         // its own reason, none succeeds by accident.
         for action in [
-            Action::Copy { engine: "no-such-engine".into() },
-            Action::MoveEngine { engine: "no-such-engine".into() },
-            Action::NodeMove { node: "ghost".into(), engine: "race".into() },
-            Action::NodeFetch { node: "ghost".into(), from_engine: String::new(), engine: "race".into() },
-            Action::Handoff { node: "ghost".into(), engine: "race".into(), then: "remove".into() },
+            Action::Copy {
+                engine: "no-such-engine".into(),
+            },
+            Action::MoveEngine {
+                engine: "no-such-engine".into(),
+            },
+            Action::NodeMove {
+                node: "ghost".into(),
+                engine: "race".into(),
+            },
+            Action::NodeFetch {
+                node: "ghost".into(),
+                from_engine: String::new(),
+                engine: "race".into(),
+            },
+            Action::Handoff {
+                node: "ghost".into(),
+                engine: "race".into(),
+                then: "remove".into(),
+            },
         ] {
             let j = run_to_end(&s, action.clone(), vec![t(0), t(1)]).await;
             assert_eq!((j.done, j.failed), (2, 2), "{action:?}: {:?}", j.tally);
             assert_eq!(j.tally.get("failed"), Some(&2), "{action:?}");
-            assert!(j.errors.iter().all(|e| e.starts_with(&h[0][..8]) || e.starts_with(&h[1][..8])), "{:?}", j.errors);
-            assert!(j.tally.get("ok").is_none() && j.tally.get("waiting_node").is_none(), "{action:?}");
+            assert!(
+                j.errors
+                    .iter()
+                    .all(|e| e.starts_with(&h[0][..8]) || e.starts_with(&h[1][..8])),
+                "{:?}",
+                j.errors
+            );
+            assert!(
+                j.tally.get("ok").is_none() && j.tally.get("waiting_node").is_none(),
+                "{action:?}"
+            );
         }
         // Nothing was copied or moved on the way.
-        assert!(s.state.engines.get("race").unwrap().manager.all().is_empty());
+        assert!(s
+            .state
+            .engines
+            .get("race")
+            .unwrap()
+            .manager
+            .all()
+            .is_empty());
         assert_eq!(s.state.engines.get("hoard").unwrap().manager.all().len(), 3);
     }
 
@@ -2337,12 +3429,35 @@ mod tests {
     #[tokio::test]
     async fn a_copy_to_another_engine_adds_it_there_and_keeps_the_original() {
         let (s, h) = library("sel-local-copy");
-        let j = run_to_end(&s, Action::Copy { engine: "race".into() }, vec![target(&h[0], "local-hoard", "hoard")]).await;
-        assert_eq!((j.failed, j.tally.get("ok").copied()), (0, Some(1)), "{:?}", j.errors);
+        let j = run_to_end(
+            &s,
+            Action::Copy {
+                engine: "race".into(),
+            },
+            vec![target(&h[0], "local-hoard", "hoard")],
+        )
+        .await;
+        assert_eq!(
+            (j.failed, j.tally.get("ok").copied()),
+            (0, Some(1)),
+            "{:?}",
+            j.errors
+        );
         let race = s.state.engines.get("race").unwrap();
-        assert!(race.manager.get(&typhon_engine::torrent::hex_decode(&h[0]).unwrap()).is_some(), "now in race");
+        assert!(
+            race.manager
+                .get(&typhon_engine::torrent::hex_decode(&h[0]).unwrap())
+                .is_some(),
+            "now in race"
+        );
         let hoard = s.state.engines.get("hoard").unwrap();
-        assert!(hoard.manager.get(&typhon_engine::torrent::hex_decode(&h[0]).unwrap()).is_some(), "and still in hoard");
+        assert!(
+            hoard
+                .manager
+                .get(&typhon_engine::torrent::hex_decode(&h[0]).unwrap())
+                .is_some(),
+            "and still in hoard"
+        );
     }
 
     /// A hash this node does not hold fails on the local routes with the
@@ -2351,7 +3466,16 @@ mod tests {
     async fn a_torrent_this_node_does_not_hold_fails_with_the_routes_reason() {
         let (s, _) = library("sel-local-unknown");
         let stranger = target(&"9f".repeat(20), "local-hoard", "hoard");
-        for action in [Action::Recheck, Action::Remove { delete_files: false }, Action::Limits { up_kib: Some(1), down_kib: None }] {
+        for action in [
+            Action::Recheck,
+            Action::Remove {
+                delete_files: false,
+            },
+            Action::Limits {
+                up_kib: Some(1),
+                down_kib: None,
+            },
+        ] {
             let j = run_to_end(&s, action.clone(), vec![stranger.clone()]).await;
             assert_eq!(j.failed, 1, "{action:?}: {:?}", j.tally);
             assert!(j.errors[0].starts_with("9f9f9f9f: "), "{:?}", j.errors);
@@ -2412,11 +3536,21 @@ mod tests {
                 }
             }
         });
-        (Caller { router, key: KEY.into() }, calls)
+        (
+            Caller {
+                router,
+                key: KEY.into(),
+            },
+            calls,
+        )
     }
 
     fn category_move() -> Action {
-        Action::Category { category: "movies".into(), move_files: true, allow_breaking_hardlinks: false }
+        Action::Category {
+            category: "movies".into(),
+            move_files: true,
+            allow_breaking_hardlinks: false,
+        }
     }
 
     /// Every answer a local category or location route gives is its own
@@ -2427,21 +3561,51 @@ mod tests {
     async fn a_local_category_or_location_move_reports_each_answer_of_the_route() {
         let (s, _) = library("sel-one-answers");
         let (caller, _) = stub_caller();
-        let move_location = Action::Location { location: "/srv/x".into(), allow_breaking_hardlinks: false };
+        let move_location = Action::Location {
+            location: "/srv/x".into(),
+            allow_breaking_hardlinks: false,
+        };
         for action in [category_move(), move_location] {
-            for (pair, key) in [("aa", "ok"), ("bb", "graduating"), ("cc", "moving"), ("dd", "failed"), ("ee", "needs_consent"), ("ff", "failed"), ("11", "ok")] {
-                let o = one(&s.state, &caller, &action, &target(&pair.repeat(20), "local-hoard", "hoard")).await;
+            for (pair, key) in [
+                ("aa", "ok"),
+                ("bb", "graduating"),
+                ("cc", "moving"),
+                ("dd", "failed"),
+                ("ee", "needs_consent"),
+                ("ff", "failed"),
+                ("11", "ok"),
+            ] {
+                let o = one(
+                    &s.state,
+                    &caller,
+                    &action,
+                    &target(&pair.repeat(20), "local-hoard", "hoard"),
+                )
+                .await;
                 assert_eq!(o.key, key, "{action:?} on {pair}");
                 match pair {
-                    "dd" => assert_eq!(o.error.as_deref(), Some(format!("{}: disk full", &pair.repeat(4)).as_str())),
+                    "dd" => assert_eq!(
+                        o.error.as_deref(),
+                        Some(format!("{}: disk full", &pair.repeat(4)).as_str())
+                    ),
                     "ff" => assert_eq!(o.error.as_deref(), Some("ffffffff: not enough free space")),
                     "ee" => {
                         let (item, files, bytes) = o.consent.expect("the operator is asked");
-                        assert_eq!((item.hash, item.agent, item.mode), ("ee".repeat(20), "local-hoard".to_string(), "hoard".to_string()));
+                        assert_eq!(
+                            (item.hash, item.agent, item.mode),
+                            (
+                                "ee".repeat(20),
+                                "local-hoard".to_string(),
+                                "hoard".to_string()
+                            )
+                        );
                         assert_eq!((files, bytes), (3, 4096));
                         assert!(o.error.is_none(), "waiting for a yes is not a failure");
                     }
-                    _ => assert!(o.consent.is_none() && (o.key == "failed") == o.error.is_some(), "{pair}"),
+                    _ => assert!(
+                        o.consent.is_none() && (o.key == "failed") == o.error.is_some(),
+                        "{pair}"
+                    ),
                 }
             }
         }
@@ -2457,16 +3621,59 @@ mod tests {
         let (caller, calls) = stub_caller();
         let h = "aa".repeat(20);
         let cat = category_move();
-        let loc = Action::Location { location: "/srv/x".into(), allow_breaking_hardlinks: true };
+        let loc = Action::Location {
+            location: "/srv/x".into(),
+            allow_breaking_hardlinks: true,
+        };
         let cases = [
-            (&cat, "local-hoard", "hoard", format!("/api/hoard/torrents/{h}/category?engine=hoard")),
-            (&cat, "local-race", "race", format!("/api/race/torrents/{h}/category?engine=race")),
-            (&cat, "local-vpn 1", "hoard", format!("/api/hoard/torrents/{h}/category?engine=vpn%201")),
-            (&cat, "local-", "race", format!("/api/race/torrents/{h}/category")),
-            (&cat, "local", "hoard", format!("/api/hoard/torrents/{h}/category")),
-            (&cat, "", "hoard", format!("/api/hoard/torrents/{h}/category")),
-            (&loc, "local-race", "race", format!("/api/race/torrents/{h}/location?engine=race")),
-            (&loc, "local-", "hoard", format!("/api/hoard/torrents/{h}/location")),
+            (
+                &cat,
+                "local-hoard",
+                "hoard",
+                format!("/api/hoard/torrents/{h}/category?engine=hoard"),
+            ),
+            (
+                &cat,
+                "local-race",
+                "race",
+                format!("/api/race/torrents/{h}/category?engine=race"),
+            ),
+            (
+                &cat,
+                "local-vpn 1",
+                "hoard",
+                format!("/api/hoard/torrents/{h}/category?engine=vpn%201"),
+            ),
+            (
+                &cat,
+                "local-",
+                "race",
+                format!("/api/race/torrents/{h}/category"),
+            ),
+            (
+                &cat,
+                "local",
+                "hoard",
+                format!("/api/hoard/torrents/{h}/category"),
+            ),
+            (
+                &cat,
+                "",
+                "hoard",
+                format!("/api/hoard/torrents/{h}/category"),
+            ),
+            (
+                &loc,
+                "local-race",
+                "race",
+                format!("/api/race/torrents/{h}/location?engine=race"),
+            ),
+            (
+                &loc,
+                "local-",
+                "hoard",
+                format!("/api/hoard/torrents/{h}/location"),
+            ),
         ];
         for (action, agent, mode, want) in cases {
             calls.lock().unwrap().clear();
@@ -2474,12 +3681,22 @@ mod tests {
             assert_eq!(o.key, "ok", "{agent:?} {mode}");
             let sent = calls.lock().unwrap().clone();
             assert_eq!(sent.len(), 1, "exactly one call");
-            assert_eq!((sent[0].0.as_str(), sent[0].1.as_str()), ("POST", want.as_str()), "{agent:?} {mode}");
+            assert_eq!(
+                (sent[0].0.as_str(), sent[0].1.as_str()),
+                ("POST", want.as_str()),
+                "{agent:?} {mode}"
+            );
             let body: Value = serde_json::from_str(&sent[0].2).unwrap();
             if std::ptr::eq(action, &cat) {
-                assert_eq!(body, json!({"category": "movies", "move_files": true, "allow_breaking_hardlinks": false}));
+                assert_eq!(
+                    body,
+                    json!({"category": "movies", "move_files": true, "allow_breaking_hardlinks": false})
+                );
             } else {
-                assert_eq!(body, json!({"location": "/srv/x", "allow_breaking_hardlinks": true}));
+                assert_eq!(
+                    body,
+                    json!({"location": "/srv/x", "allow_breaking_hardlinks": true})
+                );
             }
         }
     }
@@ -2491,12 +3708,24 @@ mod tests {
         let (s, _) = library("sel-one-consent");
         let (caller, _) = stub_caller();
         async fn ask(s: &TestState, caller: &Caller, pair: &str) -> Outcome {
-            one(&s.state, caller, &category_move(), &target(&pair.repeat(20), "local-hoard", "hoard")).await
+            one(
+                &s.state,
+                caller,
+                &category_move(),
+                &target(&pair.repeat(20), "local-hoard", "hoard"),
+            )
+            .await
         }
         assert!(ask(&s, &caller, "ee").await.consent.is_some());
-        assert!(ask(&s, &caller, "ff").await.consent.is_none(), "a conflict over space is a failure");
+        assert!(
+            ask(&s, &caller, "ff").await.consent.is_none(),
+            "a conflict over space is a failure"
+        );
         assert_eq!(ask(&s, &caller, "ff").await.key, "failed");
-        assert!(ask(&s, &caller, "11").await.consent.is_none(), "a 200 is not a conflict");
+        assert!(
+            ask(&s, &caller, "11").await.consent.is_none(),
+            "a 200 is not a conflict"
+        );
         assert!(ask(&s, &caller, "aa").await.consent.is_none());
     }
 
@@ -2507,13 +3736,31 @@ mod tests {
     async fn a_reannounce_is_told_by_the_routes_status_word_then_by_its_code() {
         let (s, _) = library("sel-one-reannounce");
         let (caller, calls) = stub_caller();
-        for (pair, key) in [("33", "cooldown"), ("44", "in_flight"), ("55", "queued"), ("66", "ok"), ("77", "ok"), ("88", "failed"), ("dd", "failed"), ("aa", "ok")] {
-            let o = one(&s.state, &caller, &Action::Reannounce, &target(&pair.repeat(20), "local-hoard", "hoard")).await;
+        for (pair, key) in [
+            ("33", "cooldown"),
+            ("44", "in_flight"),
+            ("55", "queued"),
+            ("66", "ok"),
+            ("77", "ok"),
+            ("88", "failed"),
+            ("dd", "failed"),
+            ("aa", "ok"),
+        ] {
+            let o = one(
+                &s.state,
+                &caller,
+                &Action::Reannounce,
+                &target(&pair.repeat(20), "local-hoard", "hoard"),
+            )
+            .await;
             assert_eq!(o.key, key, "{pair}");
             assert_eq!(o.error.is_some(), key == "failed", "{pair}: {:?}", o.error);
         }
         let h = "33".repeat(20);
-        assert_eq!(calls.lock().unwrap()[0].1, format!("/api/torrents/{h}/reannounce"));
+        assert_eq!(
+            calls.lock().unwrap()[0].1,
+            format!("/api/torrents/{h}/reannounce")
+        );
     }
 
     /// A node's 202 is a graduation only when its body says so; the same
@@ -2524,7 +3771,11 @@ mod tests {
         let n = nas().await;
         declare_nas(&s, &n.url);
         for (pair, key) in [("aa", "ok"), ("bb", "graduating"), ("cc", "moving")] {
-            let action = Action::Category { category: "movies".into(), move_files: true, allow_breaking_hardlinks: false };
+            let action = Action::Category {
+                category: "movies".into(),
+                move_files: true,
+                allow_breaking_hardlinks: false,
+            };
             let j = run_to_end(&s, action, vec![remote(pair, "hoard", "hoard")]).await;
             assert_eq!(j.tally.len(), 1, "{pair}: {:?}", j.tally);
             assert_eq!(j.tally.get(key), Some(&1), "{pair}: {:?}", j.tally);
@@ -2537,15 +3788,30 @@ mod tests {
     async fn a_partly_changed_set_edit_counts_what_changed_and_what_did_not() {
         let (s, h) = library("sel-partial");
         let tally = |j: &Job| serde_json::to_value(&j.tally).unwrap();
-        let all: Vec<Target> = h.iter().map(|x| target(x, "local-hoard", "hoard")).collect();
+        let all: Vec<Target> = h
+            .iter()
+            .map(|x| target(x, "local-hoard", "hoard"))
+            .collect();
         let series = vec![all[2].clone()];
 
         let j = run_to_end(&s, Action::Pause(true), series).await;
-        assert_eq!((tally(&j), j.done), (json!({"ok": 1}), 1), "everything changed: no `unchanged` entry");
+        assert_eq!(
+            (tally(&j), j.done),
+            (json!({"ok": 1}), 1),
+            "everything changed: no `unchanged` entry"
+        );
         let j = run_to_end(&s, Action::Pause(true), all.clone()).await;
-        assert_eq!((tally(&j), j.done), (json!({"ok": 2, "unchanged": 1}), 3), "two changed, one was already stopped");
+        assert_eq!(
+            (tally(&j), j.done),
+            (json!({"ok": 2, "unchanged": 1}), 3),
+            "two changed, one was already stopped"
+        );
         let j = run_to_end(&s, Action::Pause(true), all.clone()).await;
-        assert_eq!((tally(&j), j.done), (json!({"unchanged": 3}), 3), "nothing changed: no `ok` entry");
+        assert_eq!(
+            (tally(&j), j.done),
+            (json!({"unchanged": 3}), 3),
+            "nothing changed: no `ok` entry"
+        );
         let j = run_to_end(&s, Action::Pause(false), all).await;
         assert_eq!(tally(&j), json!({"ok": 3}));
     }
@@ -2569,19 +3835,29 @@ mod tests {
             let st = s.state.clone();
             async move {
                 let r = get_job_route(State(st), Path(id), RawQuery(None), keyed(KEY)).await;
-                serde_json::from_slice::<Value>(&axum::body::to_bytes(r.into_body(), usize::MAX).await.unwrap()).unwrap()
+                serde_json::from_slice::<Value>(
+                    &axum::body::to_bytes(r.into_body(), usize::MAX)
+                        .await
+                        .unwrap(),
+                )
+                .unwrap()
             }
         };
         let v = read(&running).await;
-        assert_eq!((v["action"].as_str(), v["total"].as_u64()), (Some("category"), Some(4)));
+        assert_eq!(
+            (v["action"].as_str(), v["total"].as_u64()),
+            (Some("category"), Some(4))
+        );
         let ms = v["elapsed_ms"].as_u64().unwrap();
-        assert!((50..60_000).contains(&ms), "a running job reads its clock: {ms}");
+        assert!(
+            (50..60_000).contains(&ms),
+            "a running job reads its clock: {ms}"
+        );
         let v = read(&finished).await;
         assert_eq!(v["elapsed_ms"], 7, "a finished job keeps the time it took");
         assert_eq!(v["action"], "stop");
     }
 }
-
 
 #[cfg(test)]
 mod remote_tests {

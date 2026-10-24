@@ -10,7 +10,10 @@
 use std::path::{Path, PathBuf};
 
 fn sources(dir: &Path, out: &mut String) {
-    for entry in std::fs::read_dir(dir).expect("readable source tree").flatten() {
+    for entry in std::fs::read_dir(dir)
+        .expect("readable source tree")
+        .flatten()
+    {
         let p = entry.path();
         if p.is_dir() {
             if p.file_name().map_or(false, |n| n == "target") {
@@ -48,7 +51,11 @@ fn named_tests(doc: &str) -> Vec<String> {
             continue;
         }
         for piece in last.split('`').skip(1).step_by(2) {
-            if !piece.is_empty() && piece.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_') {
+            if !piece.is_empty()
+                && piece
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+            {
                 out.push(piece.to_string());
             }
         }
@@ -66,10 +73,17 @@ fn every_test_the_conformance_document_names_exists() {
     sources(&crate_dir.join("tests"), &mut code);
 
     let names = named_tests(&doc);
-    assert!(names.len() > 100, "the parser found only {} names -- it is the parser that broke", names.len());
+    assert!(
+        names.len() > 100,
+        "the parser found only {} names -- it is the parser that broke",
+        names.len()
+    );
     let missing: Vec<&String> = names
         .iter()
         .filter(|n| !code.contains(&format!("fn {n}(")))
         .collect();
-    assert!(missing.is_empty(), "the document names tests that do not exist: {missing:?}");
+    assert!(
+        missing.is_empty(),
+        "the document names tests that do not exist: {missing:?}"
+    );
 }

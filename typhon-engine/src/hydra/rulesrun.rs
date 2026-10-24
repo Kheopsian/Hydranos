@@ -95,8 +95,7 @@ pub fn gather(
     let now = crate::store::now_secs() as f64;
     // statvfs once per distinct save_path, not once per torrent: a catalogue
     // shares a handful of them, and the syscall is the same answer every time.
-    let mut free_by_path: std::collections::HashMap<String, f64> =
-        std::collections::HashMap::new();
+    let mut free_by_path: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
 
     engine
         .manager
@@ -130,16 +129,37 @@ fn free_space_at(save_path: &str) -> f64 {
 /// in the session, a million of them, to answer about one that just finished.
 /// This is one engine lookup and one indexed row. `None` when either side has
 /// never heard of the torrent.
-pub fn gather_one(host: &EngineHost, store: &Store, engine_id: &str, info_hash: &str) -> Option<Facts> {
+pub fn gather_one(
+    host: &EngineHost,
+    store: &Store,
+    engine_id: &str,
+    info_hash: &str,
+) -> Option<Facts> {
     let engine = host.engines().iter().find(|e| e.id == engine_id)?;
     let t = engine.manager.get(&crate::store::hex20(info_hash)?)?;
-    let s = store.workflow_facts_of(engine_id, info_hash).ok().flatten()?;
-    let free_space = if s.save_path.is_empty() { rules::NEVER } else { free_space_at(&s.save_path) };
+    let s = store
+        .workflow_facts_of(engine_id, info_hash)
+        .ok()
+        .flatten()?;
+    let free_space = if s.save_path.is_empty() {
+        rules::NEVER
+    } else {
+        free_space_at(&s.save_path)
+    };
     let now = crate::store::now_secs() as f64;
     // No link facts: an event workflow may not ask for them (see
     // `CompileError::LinkFieldOnEvent`), so NEVER is the honest answer.
     // One torrent: its tracker list costs nothing worth saving.
-    Some(facts_of(&t, info_hash.to_string(), s, engine_id, None, free_space, now, true))
+    Some(facts_of(
+        &t,
+        info_hash.to_string(),
+        s,
+        engine_id,
+        None,
+        free_space,
+        now,
+        true,
+    ))
 }
 
 /// One torrent's facts, from the engine's live state and the store's row.
@@ -296,7 +316,9 @@ pub fn torrent_files(
     save_path: &str,
 ) -> Vec<std::path::PathBuf> {
     let base = std::path::Path::new(save_path);
-    (0..t.meta.files.len()).map(|i| t.meta.disk_path(base, i)).collect()
+    (0..t.meta.files.len())
+        .map(|i| t.meta.disk_path(base, i))
+        .collect()
 }
 
 /// Where a catalogue entry's files come from.
@@ -337,7 +359,12 @@ pub struct CatalogueEntry {
 impl CatalogueEntry {
     /// An entry with its paths spelled out, no engine behind it.
     #[cfg(test)]
-    pub fn fixed(info_hash: &str, session: &str, save_path: &str, paths: Vec<std::path::PathBuf>) -> Self {
+    pub fn fixed(
+        info_hash: &str,
+        session: &str,
+        save_path: &str,
+        paths: Vec<std::path::PathBuf>,
+    ) -> Self {
         CatalogueEntry {
             info_hash: info_hash.to_string(),
             session: session.into(),
@@ -367,7 +394,12 @@ pub fn stored_copies(
 ) -> Vec<(String, std::collections::HashSet<[u8; 20]>)> {
     host.engines()
         .iter()
-        .map(|e| (e.id.clone(), store.session_hashes(&e.id).unwrap_or_default()))
+        .map(|e| {
+            (
+                e.id.clone(),
+                store.session_hashes(&e.id).unwrap_or_default(),
+            )
+        })
         .collect()
 }
 
@@ -379,7 +411,8 @@ pub fn catalogue_from(
     known: &[(String, std::collections::HashSet<[u8; 20]>)],
 ) -> Vec<CatalogueEntry> {
     let mut out = Vec::new();
-    let mut folders: std::collections::HashMap<String, std::sync::Arc<str>> = std::collections::HashMap::new();
+    let mut folders: std::collections::HashMap<String, std::sync::Arc<str>> =
+        std::collections::HashMap::new();
     for engine in host.engines().iter() {
         let Some((_, stored)) = known.iter().find(|(id, _)| *id == engine.id) else {
             continue;
@@ -394,12 +427,19 @@ pub fn catalogue_from(
             if save_path.is_empty() {
                 continue;
             }
-            let save_path = folders.entry(save_path).or_insert_with_key(|k| k.as_str().into()).clone();
+            let save_path = folders
+                .entry(save_path)
+                .or_insert_with_key(|k| k.as_str().into())
+                .clone();
             out.push(CatalogueEntry {
                 info_hash: t.info_hash.iter().map(|b| format!("{b:02x}")).collect(),
                 session: session.clone(),
                 save_path,
-                files: if t.meta.multi_file { t.meta.files.len() } else { 1 },
+                files: if t.meta.multi_file {
+                    t.meta.files.len()
+                } else {
+                    1
+                },
                 source: CatalogueFiles::Torrent(std::sync::Arc::downgrade(&t)),
             });
         }
@@ -422,18 +462,37 @@ pub struct RowMatcher<'a> {
 
 impl<'a> RowMatcher<'a> {
     pub fn new(cat: &'a [CatalogueEntry]) -> Self {
-        let index = cat.iter().enumerate().map(|(i, c)| ((c.info_hash.as_str(), &*c.session), i)).collect();
-        RowMatcher { cat, index, got: Vec::new() }
+        let index = cat
+            .iter()
+            .enumerate()
+            .map(|(i, c)| ((c.info_hash.as_str(), &*c.session), i))
+            .collect();
+        RowMatcher {
+            cat,
+            index,
+            got: Vec::new(),
+        }
     }
 
     /// One stored row, kept if it measures a copy of the catalogue as it is.
-    pub fn offer(&mut self, info_hash: &str, session: &str, save_path: &str, measured_at: i64, blob: &[u8]) {
-        let Some(&i) = self.index.get(&(info_hash, session)) else { return };
+    pub fn offer(
+        &mut self,
+        info_hash: &str,
+        session: &str,
+        save_path: &str,
+        measured_at: i64,
+        blob: &[u8],
+    ) {
+        let Some(&i) = self.index.get(&(info_hash, session)) else {
+            return;
+        };
         let c = &self.cat[i];
         if save_path != &*c.save_path {
             return;
         }
-        let Some(stats) = linkindex::unpack(blob) else { return };
+        let Some(stats) = linkindex::unpack(blob) else {
+            return;
+        };
         if stats.len() != c.files {
             return;
         }
@@ -498,17 +557,28 @@ pub fn links_from_measured(cat: &[CatalogueEntry], m: Measured) -> StoredLinks {
     let mut origin = Vec::with_capacity(m.origin.len());
     let mut measured_at = Vec::with_capacity(m.origin.len());
     for ((i, at), stats) in m.origin.into_iter().zip(m.measured_at).zip(m.stats) {
-        let Some(paths) = cat[i].paths() else { continue };
+        let Some(paths) = cat[i].paths() else {
+            continue;
+        };
         if paths.len() != stats.len() {
             continue;
         }
-        let files = paths.iter().map(|p| linkindex::path_key(p)).zip(stats).collect();
+        let files = paths
+            .iter()
+            .map(|p| linkindex::path_key(p))
+            .zip(stats)
+            .collect();
         entries.push((cat[i].info_hash.clone(), files));
         origin.push(i);
         measured_at.push(at);
     }
     let links = linkindex::compute(&entries);
-    StoredLinks { entries, origin, measured_at, links }
+    StoredLinks {
+        entries,
+        origin,
+        measured_at,
+        links,
+    }
 }
 
 /// What the list shows, from what a pass or the scanner just computed.
@@ -528,17 +598,24 @@ pub fn link_summary(
         let (Some(f), Some(raw)) = (links.get(hash), crate::store::hex20(hash)) else {
             continue;
         };
-        out.insert(raw, linkindex::Cached {
-            external_links: f.external_links,
-            link_count: f.link_count,
-            measured_at: at,
-        });
+        out.insert(
+            raw,
+            linkindex::Cached {
+                external_links: f.external_links,
+                link_count: f.link_count,
+                measured_at: at,
+            },
+        );
     }
     out
 }
 
 /// The store row for one measured copy.
-pub fn link_row(c: &CatalogueEntry, stats: &[Option<crate::platform::FileId>], now: i64) -> crate::store::LinkRow {
+pub fn link_row(
+    c: &CatalogueEntry,
+    stats: &[Option<crate::platform::FileId>],
+    now: i64,
+) -> crate::store::LinkRow {
     crate::store::LinkRow {
         info_hash: c.info_hash.clone(),
         session: c.session.to_string(),
@@ -602,7 +679,9 @@ pub fn stat_plan_with(
                         // Locked only to hand out the next item, never across
                         // the syscalls that follow.
                         let next = queue.lock().unwrap().next();
-                        let Some((i, (hash, paths))) = next else { break };
+                        let Some((i, (hash, paths))) = next else {
+                            break;
+                        };
                         let stats = paths
                             .into_iter()
                             .map(|p| {
@@ -699,7 +778,11 @@ pub fn evaluate(w: &Workflow, facts: &[Facts]) -> Result<(Vec<Match>, PassReport
             name: f.name.clone(),
             engine: f.engine.clone(),
             total_size: f.total_size,
-            payload: if todo.iter().any(Action::is_webhook) { Some(webhook_payload(w, f)) } else { None },
+            payload: if todo.iter().any(Action::is_webhook) {
+                Some(webhook_payload(w, f))
+            } else {
+                None
+            },
             actions: todo,
         });
     }
@@ -720,7 +803,13 @@ pub fn webhook_payload(w: &Workflow, f: &Facts) -> serde_json::Value {
         rules::Trigger::Added => format!("{} added ({gib:.2} GiB)", f.name),
         rules::Trigger::Schedule => format!("{}: {} ({gib:.2} GiB)", w.name, f.name),
     };
-    let num = |x: f64| if x.is_finite() { serde_json::json!(x) } else { serde_json::Value::Null };
+    let num = |x: f64| {
+        if x.is_finite() {
+            serde_json::json!(x)
+        } else {
+            serde_json::Value::Null
+        }
+    };
     serde_json::json!({
         "event": event,
         "workflow": w.name,
@@ -760,18 +849,35 @@ pub fn send_webhook(url: &str, payload: &serde_json::Value) -> Result<(), String
         if wait > 0 {
             std::thread::sleep(std::time::Duration::from_secs(wait));
         }
-        match client.post(url).timeout(std::time::Duration::from_secs(10)).json(payload).send() {
+        match client
+            .post(url)
+            .timeout(std::time::Duration::from_secs(10))
+            .json(payload)
+            .send()
+        {
             Ok(r) if r.status().is_success() => return Ok(()),
             // A 4xx will not get better by asking again: the URL or the body
             // is wrong. Only a 5xx or no answer is retried.
             Ok(r) if r.status().is_client_error() => {
                 return Err(format!("webhook: HTTP {}", r.status().as_u16()));
             }
-            Ok(r) => last = format!("webhook: HTTP {} after {} tries", r.status().as_u16(), attempt + 1),
+            Ok(r) => {
+                last = format!(
+                    "webhook: HTTP {} after {} tries",
+                    r.status().as_u16(),
+                    attempt + 1
+                )
+            }
             Err(e) => {
                 last = format!(
                     "webhook: {} after {} tries",
-                    if e.is_timeout() { "timed out" } else if e.is_connect() { "could not connect" } else { "request failed" },
+                    if e.is_timeout() {
+                        "timed out"
+                    } else if e.is_connect() {
+                        "could not connect"
+                    } else {
+                        "request failed"
+                    },
                     attempt + 1
                 )
             }
@@ -808,20 +914,17 @@ pub fn is_due(w: &crate::store::StoredWorkflow, now: i64) -> bool {
 /// ⚠️ Deliberately not a re-evaluation of the whole rule. The condition may
 /// have stopped holding for a dozen reasons between the pass and the action;
 /// this guards the one whose cost is irreversible.
-pub fn link_guard(
-    host: &EngineHost,
-    m: &Match,
-    cached: &LinkFacts,
-) -> Result<(), String> {
+pub fn link_guard(host: &EngineHost, m: &Match, cached: &LinkFacts) -> Result<(), String> {
     let Some(engine) = host.engines().iter().find(|e| e.id == m.engine) else {
         return Err(format!("engine {} is not running here", m.engine));
     };
-    let Some(t) = engine
-        .manager
-        .all()
-        .into_iter()
-        .find(|t| t.info_hash.iter().map(|b| format!("{b:02x}")).collect::<String>() == m.info_hash)
-    else {
+    let Some(t) = engine.manager.all().into_iter().find(|t| {
+        t.info_hash
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+            == m.info_hash
+    }) else {
         return Err("torrent is no longer in the engine".into());
     };
     let save_path = engine_save_path(&t);
@@ -936,8 +1039,16 @@ pub fn apply(
                 let payload = m.payload.clone().unwrap_or(serde_json::Value::Null);
                 send_webhook(url, &payload)?;
             }
-            Action::SetLocation { to, allow_breaking_hardlinks } => {
-                move_hook(&m.engine, &m.info_hash, to.trim(), *allow_breaking_hardlinks)?;
+            Action::SetLocation {
+                to,
+                allow_breaking_hardlinks,
+            } => {
+                move_hook(
+                    &m.engine,
+                    &m.info_hash,
+                    to.trim(),
+                    *allow_breaking_hardlinks,
+                )?;
             }
             Action::AddTrackers { urls, list_url } => {
                 // Checked again here, on the engine's own copy of the flag,
@@ -1004,7 +1115,10 @@ mod tests {
         for (hash, facts) in &one {
             assert_eq!(
                 format!("{:?}", facts),
-                format!("{:?}", many.get(hash).expect("torrent missing from threaded scan")),
+                format!(
+                    "{:?}",
+                    many.get(hash).expect("torrent missing from threaded scan")
+                ),
                 "torrent {hash} answered differently"
             );
         }
@@ -1040,7 +1154,9 @@ mod tests {
         let out = run_scan_with(
             vec![(
                 "b".repeat(40),
-                vec![std::path::PathBuf::from("/nonexistent/hydranos/scan/file.bin")],
+                vec![std::path::PathBuf::from(
+                    "/nonexistent/hydranos/scan/file.bin",
+                )],
             )],
             4,
         );
@@ -1056,7 +1172,12 @@ mod tests {
     }
 
     fn cat(hash: &str, session: &str, save_path: &str, paths: &[&str]) -> CatalogueEntry {
-        CatalogueEntry::fixed(hash, session, save_path, paths.iter().map(std::path::PathBuf::from).collect())
+        CatalogueEntry::fixed(
+            hash,
+            session,
+            save_path,
+            paths.iter().map(std::path::PathBuf::from).collect(),
+        )
     }
 
     /// Stored rows as `Store::for_each_link_row` hands them over, matched and
@@ -1073,7 +1194,12 @@ mod tests {
     }
 
     fn fid(index: u64, links: u64) -> Option<crate::platform::FileId> {
-        Some(crate::platform::FileId { volume: 1, index, links, size: 10 })
+        Some(crate::platform::FileId {
+            volume: 1,
+            index,
+            links,
+            size: 10,
+        })
     }
 
     /// Only a row that describes the files the torrent has NOW is used.
@@ -1095,8 +1221,15 @@ mod tests {
         let got = from_rows(&catalogue, &rows);
         assert_eq!(got.origin, vec![0], "and it says where it came from");
         let hashes: Vec<&str> = got.entries.iter().map(|(h, _)| h.as_str()).collect();
-        assert_eq!(hashes, vec!["fresh"], "moved, regrown, never and the race copy have no valid row");
-        assert_eq!(got.entries[0].1, vec![(linkindex::path_key(std::path::Path::new("/d/a")), fid(1, 1))]);
+        assert_eq!(
+            hashes,
+            vec!["fresh"],
+            "moved, regrown, never and the race copy have no valid row"
+        );
+        assert_eq!(
+            got.entries[0].1,
+            vec![(linkindex::path_key(std::path::Path::new("/d/a")), fid(1, 1))]
+        );
     }
 
     /// Rows come out of the store in no particular order; the answer must not
@@ -1146,7 +1279,12 @@ mod tests {
     /// pick up a torrent that was never re-measured in its place.
     #[test]
     fn a_candidate_the_fresh_measurement_contradicts_drops_out() {
-        let lf = |ext: u64| LinkFacts { external_links: ext, link_count: ext + 1, freeable_bytes: 0, data_missing: false };
+        let lf = |ext: u64| LinkFacts {
+            external_links: ext,
+            link_count: ext + 1,
+            freeable_bytes: 0,
+            data_missing: false,
+        };
         let mut facts = facts(3);
         let h: Vec<String> = facts.iter().map(|f| f.info_hash.clone()).collect();
         let mut indexed = HashMapFacts::new();
@@ -1156,14 +1294,24 @@ mod tests {
         let want_all: std::collections::HashSet<String> = h.iter().cloned().collect();
         patch_link_facts(&mut facts, &indexed, &want_all);
 
-        let mut w = wf(vec![Action::AddTags { tags: vec!["noHL".into()] }], 500);
-        w.when = Node::Cond(Cond { field: "external_links".into(), op: Op::Eq, value: "0".into() });
+        let mut w = wf(
+            vec![Action::AddTags {
+                tags: vec!["noHL".into()],
+            }],
+            500,
+        );
+        w.when = Node::Cond(Cond {
+            field: "external_links".into(),
+            op: Op::Eq,
+            value: "0".into(),
+        });
         let (first, _) = evaluate(&w, &facts).unwrap();
         assert_eq!(first.len(), 2);
 
         // Fresh: torrent 0 gained an outside name; torrent 2 LOST its outside
         // name but was not a candidate, so it must not be let in.
-        let want: std::collections::HashSet<String> = first.iter().map(|m| m.info_hash.clone()).collect();
+        let want: std::collections::HashSet<String> =
+            first.iter().map(|m| m.info_hash.clone()).collect();
         let mut fresh = HashMapFacts::new();
         fresh.insert(h[0].clone(), lf(1));
         fresh.insert(h[1].clone(), lf(0));
@@ -1199,22 +1347,38 @@ mod tests {
             cat("lib", "hoard", &s(&root), &[&s(&lib)]),
             cat("gone", "hoard", &s(&root), &[&s(&root.join("gone.bin"))]),
         ];
-        let plan = catalogue.iter().map(|c| (c.info_hash.clone(), c.paths().unwrap())).collect();
+        let plan = catalogue
+            .iter()
+            .map(|c| (c.info_hash.clone(), c.paths().unwrap()))
+            .collect();
         let measured = stat_plan_with(plan, 4);
         let direct = linkindex::compute(&measured);
 
         let mut rows = Vec::new();
         for (c, (_, files)) in catalogue.iter().zip(&measured) {
             let stats: Vec<_> = files.iter().map(|(_, st)| *st).collect();
-            rows.push((c.info_hash.as_str(), &*c.session, &*c.save_path, 1, linkindex::pack(&stats)));
+            rows.push((
+                c.info_hash.as_str(),
+                &*c.session,
+                &*c.save_path,
+                1,
+                linkindex::pack(&stats),
+            ));
         }
         let stored = from_rows(&catalogue, &rows).links;
 
-        assert_eq!(direct.len(), stored.len(), "every measured torrent comes back");
+        assert_eq!(
+            direct.len(),
+            stored.len(),
+            "every measured torrent comes back"
+        );
         for (h, f) in &direct {
             assert_eq!(stored.get(h), Some(f), "{h} read back differently");
         }
-        assert_eq!(stored["ours"].external_links, 0, "a cross-seed of ours is not an outsider");
+        assert_eq!(
+            stored["ours"].external_links, 0,
+            "a cross-seed of ours is not an outsider"
+        );
         assert_eq!(stored["lib"].external_links, 1, "the library holds a name");
         assert!(stored["gone"].data_missing);
         let _ = std::fs::remove_dir_all(&root);
@@ -1282,15 +1446,36 @@ mod tests {
     /// torrent: sent in the pass that tags it, never again once it is tagged.
     #[test]
     fn a_scheduled_webhook_goes_out_once_with_the_change_that_converges() {
-        let hook = Action::Webhook { url: "https://hooks.example/x".into() };
-        let w = wf(vec![Action::AddTags { tags: vec!["told".into()] }, hook.clone()], 500);
+        let hook = Action::Webhook {
+            url: "https://hooks.example/x".into(),
+        };
+        let w = wf(
+            vec![
+                Action::AddTags {
+                    tags: vec!["told".into()],
+                },
+                hook.clone(),
+            ],
+            500,
+        );
         let mut f = facts(1);
         let (m, _) = evaluate(&w, &f).unwrap();
-        assert_eq!(m[0].actions, vec![Action::AddTags { tags: vec!["told".into()] }, hook]);
+        assert_eq!(
+            m[0].actions,
+            vec![
+                Action::AddTags {
+                    tags: vec!["told".into()]
+                },
+                hook
+            ]
+        );
         let p = m[0].payload.as_ref().expect("a payload for a webhook");
         assert_eq!(p["torrent"]["name"], "t0");
         assert_eq!(p["event"], "matched");
-        assert!(p["content"].as_str().unwrap().contains("t0"), "Discord reads `content`");
+        assert!(
+            p["content"].as_str().unwrap().contains("t0"),
+            "Discord reads `content`"
+        );
 
         f[0].tags.push("told".into());
         let (m, r) = evaluate(&w, &f).unwrap();
@@ -1302,11 +1487,25 @@ mod tests {
     /// have nothing to change: the event itself happens once.
     #[test]
     fn a_completion_webhook_goes_out_even_if_nothing_else_changes() {
-        let hook = Action::Webhook { url: "https://hooks.example/x".into() };
-        let mut w = wf(vec![Action::SetCategory { to: "in-progress".into() }, hook.clone()], 500);
+        let hook = Action::Webhook {
+            url: "https://hooks.example/x".into(),
+        };
+        let mut w = wf(
+            vec![
+                Action::SetCategory {
+                    to: "in-progress".into(),
+                },
+                hook.clone(),
+            ],
+            500,
+        );
         w.trigger = rules::Trigger::Completed;
         let (m, _) = evaluate(&w, &facts(1)).unwrap();
-        assert_eq!(m[0].actions, vec![hook], "already in the category, still told");
+        assert_eq!(
+            m[0].actions,
+            vec![hook],
+            "already in the category, still told"
+        );
         assert_eq!(m[0].payload.as_ref().unwrap()["event"], "completed");
         // And no payload is built where no webhook asks for one.
         let plain = wf(vec![Action::SetCategory { to: "done".into() }], 500);

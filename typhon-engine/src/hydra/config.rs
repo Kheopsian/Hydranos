@@ -123,12 +123,18 @@ impl Daemon {
 
     /// The memory ceiling in bytes, 0 = off.
     pub fn memory_alert_bytes(&self) -> u64 {
-        u64::try_from(self.memory_alert_mb).unwrap_or(0).saturating_mul(1 << 20)
+        u64::try_from(self.memory_alert_mb)
+            .unwrap_or(0)
+            .saturating_mul(1 << 20)
     }
 
     pub fn exit_probe_url(&self) -> String {
         let u = self.exit_probe_url.trim();
-        if u.is_empty() { DEFAULT_EXIT_PROBE_URL.to_string() } else { u.to_string() }
+        if u.is_empty() {
+            DEFAULT_EXIT_PROBE_URL.to_string()
+        } else {
+            u.to_string()
+        }
     }
 }
 
@@ -429,7 +435,10 @@ impl Session {
     /// `(upload, download)` caps as the engine takes them: bytes/s, a
     /// negative value read as 0 (unlimited).
     pub fn rate_caps(&self) -> (u64, u64) {
-        (self.upload_rate_limit.max(0) as u64, self.download_rate_limit.max(0) as u64)
+        (
+            self.upload_rate_limit.max(0) as u64,
+            self.download_rate_limit.max(0) as u64,
+        )
     }
 }
 
@@ -813,7 +822,8 @@ mod tests {
     use super::*;
 
     fn write_tmp(name: &str, body: &str) -> std::path::PathBuf {
-        let path = std::env::temp_dir().join(format!("hydra-cfgtest-{name}-{}.toml", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("hydra-cfgtest-{name}-{}.toml", std::process::id()));
         std::fs::write(&path, body).unwrap();
         path
     }
@@ -823,9 +833,15 @@ mod tests {
     /// no key at all -- the whole API, unauthenticated, on a fresh install.
     #[test]
     fn a_fresh_install_generates_and_persists_a_key() {
-        let path = write_tmp("fresh", "[daemon]\napi_key = \"\"\ndata_dir = \"/config\"\n");
+        let path = write_tmp(
+            "fresh",
+            "[daemon]\napi_key = \"\"\ndata_dir = \"/config\"\n",
+        );
         let mut cfg = Config::load(&path).unwrap();
-        assert!(ensure_api_key(&mut cfg, &path), "an empty key must be filled");
+        assert!(
+            ensure_api_key(&mut cfg, &path),
+            "an empty key must be filled"
+        );
         assert_eq!(cfg.daemon.api_key.len(), 48, "24 random bytes, hex encoded");
 
         // Persisted, not just in memory: a key that lived only in this process
@@ -842,9 +858,15 @@ mod tests {
     #[test]
     fn a_missing_dial_cap_defaults_to_50_and_explicit_zero_stays_unlimited() {
         let upgraded: Session = toml::from_str("max_connections = 4000\n").unwrap();
-        assert_eq!(upgraded.max_dials_per_sec, 50.0, "absent key must bound to 50");
+        assert_eq!(
+            upgraded.max_dials_per_sec, 50.0,
+            "absent key must bound to 50"
+        );
         let explicit: Session = toml::from_str("max_dials_per_sec = 0.0\n").unwrap();
-        assert_eq!(explicit.max_dials_per_sec, 0.0, "explicit 0 keeps unlimited");
+        assert_eq!(
+            explicit.max_dials_per_sec, 0.0,
+            "explicit 0 keeps unlimited"
+        );
     }
 
     /// A file with no [race]/[hoard] section at all goes through
@@ -852,8 +874,14 @@ mod tests {
     #[test]
     fn a_missing_engine_section_defaults_the_dial_cap_to_50() {
         let cfg: Config = toml::from_str("").unwrap();
-        assert_eq!(cfg.race.max_dials_per_sec, 50.0, "absent [race] must bound to 50");
-        assert_eq!(cfg.hoard.max_dials_per_sec, 50.0, "absent [hoard] must bound to 50");
+        assert_eq!(
+            cfg.race.max_dials_per_sec, 50.0,
+            "absent [race] must bound to 50"
+        );
+        assert_eq!(
+            cfg.hoard.max_dials_per_sec, 50.0,
+            "absent [hoard] must bound to 50"
+        );
     }
 
     /// `memory_alert_mb`: absent and 0 are both "off", a positive value is the
@@ -865,18 +893,25 @@ mod tests {
         assert_eq!(absent.daemon.memory_alert_bytes(), 0);
         let zero = Config::load(&write_tmp("mem-zero", "[daemon]\nmemory_alert_mb = 0\n")).unwrap();
         assert_eq!(zero.daemon.memory_alert_bytes(), 0);
-        let set = Config::load(&write_tmp("mem-set", "[daemon]\nmemory_alert_mb = 2048\n")).unwrap();
+        let set =
+            Config::load(&write_tmp("mem-set", "[daemon]\nmemory_alert_mb = 2048\n")).unwrap();
         assert_eq!(set.daemon.memory_alert_bytes(), 2048 << 20);
         let err = Config::load(&write_tmp("mem-neg", "[daemon]\nmemory_alert_mb = -1\n"))
             .expect_err("a negative ceiling must be refused")
             .to_string();
-        assert!(err.contains("memory_alert_mb") && err.contains("-1"), "{err}");
+        assert!(
+            err.contains("memory_alert_mb") && err.contains("-1"),
+            "{err}"
+        );
     }
 
     /// The placeholder is published in this repository, so it is not a secret.
     #[test]
     fn the_published_placeholder_is_replaced() {
-        let path = write_tmp("placeholder", &format!("[daemon]\napi_key = \"{PLACEHOLDER_API_KEY}\"\n"));
+        let path = write_tmp(
+            "placeholder",
+            &format!("[daemon]\napi_key = \"{PLACEHOLDER_API_KEY}\"\n"),
+        );
         let mut cfg = Config::load(&path).unwrap();
         assert!(ensure_api_key(&mut cfg, &path));
         assert_ne!(cfg.daemon.api_key, PLACEHOLDER_API_KEY);
@@ -982,8 +1017,16 @@ impl Config {
 
     fn local_engines_as_written(&self) -> Vec<LocalEngine> {
         let mut out = vec![
-            LocalEngine { id: "race".into(), role: "race".into(), session: self.race.clone() },
-            LocalEngine { id: "hoard".into(), role: "hoard".into(), session: self.hoard.clone() },
+            LocalEngine {
+                id: "race".into(),
+                role: "race".into(),
+                session: self.race.clone(),
+            },
+            LocalEngine {
+                id: "hoard".into(),
+                role: "hoard".into(),
+                session: self.hoard.clone(),
+            },
         ];
 
         for agent in self.agent.iter().chain(self.engine.iter()) {
@@ -1037,7 +1080,11 @@ impl Config {
             if extra && !agent.session.contains_key("allow_direct") {
                 session.allow_direct = false;
             }
-            let engine = LocalEngine { id: id.clone(), role: agent.role.trim().to_string(), session };
+            let engine = LocalEngine {
+                id: id.clone(),
+                role: agent.role.trim().to_string(),
+                session,
+            };
             match out.iter().position(|e| e.id == id) {
                 Some(i) => out[i] = engine,
                 None => out.push(engine),
@@ -1092,10 +1139,8 @@ mod agent_tests {
     /// the moment one existed, silently disabling the rest of a config.
     #[test]
     fn a_local_agent_adds_an_engine_without_removing_the_others() {
-        let c = cfg(
-            "[race]\nlisten_port = 1\n\n[hoard]\nlisten_port = 2\n\n\
-             [[agent]]\nname = \"vpn7\"\nrole = \"race\"\n[agent.session]\nlisten_port = 26991\n",
-        );
+        let c = cfg("[race]\nlisten_port = 1\n\n[hoard]\nlisten_port = 2\n\n\
+             [[agent]]\nname = \"vpn7\"\nrole = \"race\"\n[agent.session]\nlisten_port = 26991\n");
         let engines = c.local_engines();
         let ids: Vec<String> = engines.iter().map(|e| e.id.clone()).collect();
         assert_eq!(ids, ["race", "hoard", "vpn7"]);
@@ -1112,9 +1157,16 @@ mod agent_tests {
              [hoard]\nlisten_port = 2\n\n\
              [[agent]]\nname = \"vpn7\"\nrole = \"race\"\n[agent.session]\nlisten_port = 26991\n",
         );
-        let vpn7 = c.local_engines().into_iter().find(|e| e.id == "vpn7").unwrap();
+        let vpn7 = c
+            .local_engines()
+            .into_iter()
+            .find(|e| e.id == "vpn7")
+            .unwrap();
         assert_eq!(vpn7.session.listen_port, 26991, "what the entry says");
-        assert_eq!(vpn7.session.max_connections, 500, "what it does not, from the profile");
+        assert_eq!(
+            vpn7.session.max_connections, 500,
+            "what it does not, from the profile"
+        );
         assert!(vpn7.session.enable_dht);
     }
 
@@ -1122,11 +1174,9 @@ mod agent_tests {
     /// turns a remote node into a local one, silently.
     #[test]
     fn a_remote_agent_and_a_roleless_one_start_nothing_here() {
-        let c = cfg(
-            "[race]\nlisten_port = 1\n\n[hoard]\nlisten_port = 2\n\n\
+        let c = cfg("[race]\nlisten_port = 1\n\n[hoard]\nlisten_port = 2\n\n\
              [[agent]]\nname = \"far\"\naddr = \"10.0.0.9:7000\"\nrole = \"race\"\n\n\
-             [[agent]]\nname = \"nameless\"\n",
-        );
+             [[agent]]\nname = \"nameless\"\n");
         let ids: Vec<String> = c.local_engines().iter().map(|e| e.id.clone()).collect();
         assert_eq!(ids, ["race", "hoard"]);
     }
@@ -1145,11 +1195,20 @@ mod agent_tests {
         );
         let e = c.local_engines();
         let vpn7 = e.iter().find(|e| e.id == "vpn7").unwrap();
-        assert_eq!(vpn7.session.socks5_outbound_host, "10.0.0.1", "the way out is shared");
-        assert_eq!(vpn7.session.listen_port_proxy_v2, 0, "the relay port is not");
+        assert_eq!(
+            vpn7.session.socks5_outbound_host, "10.0.0.1",
+            "the way out is shared"
+        );
+        assert_eq!(
+            vpn7.session.listen_port_proxy_v2, 0,
+            "the relay port is not"
+        );
         assert!(!vpn7.session.gluetun_port_forward, "nor the forwarded port");
         let vpn8 = e.iter().find(|e| e.id == "vpn8").unwrap();
-        assert_eq!(vpn8.session.listen_port_proxy_v2, 16281, "unless the engine names its own");
+        assert_eq!(
+            vpn8.session.listen_port_proxy_v2, 16281,
+            "unless the engine names its own"
+        );
         let race = e.iter().find(|e| e.id == "race").unwrap();
         assert_eq!(race.session.listen_port_proxy_v2, 16271);
     }
@@ -1177,13 +1236,18 @@ mod default_tests {
     /// a real port for every engine, none shared.
     #[test]
     fn an_unwritten_key_takes_the_documented_default() {
-        let cfg: Config = toml::from_str("[race]\n[[agent]]\nname = \"vpn1\"\nrole = \"race\"\n").unwrap();
+        let cfg: Config =
+            toml::from_str("[race]\n[[agent]]\nname = \"vpn1\"\nrole = \"race\"\n").unwrap();
         assert!(cfg.race.enable_dht && cfg.race.enable_pex && cfg.race.enable_webseed);
         assert!(cfg.hoard.enable_dht, "a missing section too");
         // LSD: race on, hoard off, when the file says nothing (`lsd_on`).
         assert!(cfg.race.lsd_on("race") && !cfg.hoard.lsd_on("hoard"));
-        let off: Config = toml::from_str("[race]\nenable_lsd = false\n[hoard]\nenable_lsd = true\n").unwrap();
-        assert!(!off.race.lsd_on("race") && off.hoard.lsd_on("hoard"), "a written key wins");
+        let off: Config =
+            toml::from_str("[race]\nenable_lsd = false\n[hoard]\nenable_lsd = true\n").unwrap();
+        assert!(
+            !off.race.lsd_on("race") && off.hoard.lsd_on("hoard"),
+            "a written key wins"
+        );
         let engines = cfg.local_engines();
         let ports: Vec<u16> = engines.iter().map(|e| e.session.listen_port).collect();
         assert_eq!(&ports[..2], &[16171, 16172]);
@@ -1191,6 +1255,10 @@ mod default_tests {
         let mut unique = ports.clone();
         unique.sort();
         unique.dedup();
-        assert_eq!(unique.len(), ports.len(), "no two engines share a port: {ports:?}");
+        assert_eq!(
+            unique.len(),
+            ports.len(),
+            "no two engines share a port: {ports:?}"
+        );
     }
 }

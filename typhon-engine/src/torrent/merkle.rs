@@ -101,7 +101,11 @@ mod tests {
     #[test]
     fn alignment_padding_is_not_hashed() {
         let d = vec![1u8; BLOCK + 10];
-        let c = PieceCheck { hash: root(&d, 4), data_len: d.len() as u32, leaves: 4 };
+        let c = PieceCheck {
+            hash: root(&d, 4),
+            data_len: d.len() as u32,
+            leaves: 4,
+        };
         let mut padded = d.clone();
         padded.resize(4 * BLOCK, 0);
         assert!(c.matches(&padded));

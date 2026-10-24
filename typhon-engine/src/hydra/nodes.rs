@@ -70,13 +70,17 @@ pub async fn probe(url: &str, api_key: &str) -> Health {
                     "injoignable".into()
                 },
                 ..Default::default()
-            }
+            };
         }
     };
     if res.status() == reqwest::StatusCode::UNAUTHORIZED
         || res.status() == reqwest::StatusCode::FORBIDDEN
     {
-        return Health { online: false, error: "cle API refusee".into(), ..Default::default() };
+        return Health {
+            online: false,
+            error: "cle API refusee".into(),
+            ..Default::default()
+        };
     }
     if !res.status().is_success() {
         return Health {
@@ -186,7 +190,11 @@ pub async fn forward(
             .body(body);
     }
     let res = req.send().await.map_err(|e| {
-        if e.is_timeout() { "timeout".to_string() } else { "injoignable".to_string() }
+        if e.is_timeout() {
+            "timeout".to_string()
+        } else {
+            "injoignable".to_string()
+        }
     })?;
     let status = res.status();
     let ctype = res
@@ -195,7 +203,10 @@ pub async fn forward(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("application/json")
         .to_string();
-    let bytes = res.bytes().await.map_err(|_| "corps illisible".to_string())?;
+    let bytes = res
+        .bytes()
+        .await
+        .map_err(|_| "corps illisible".to_string())?;
     Ok((status, bytes.to_vec(), ctype))
 }
 
@@ -328,7 +339,10 @@ pub async fn handoff(
         .await
         .map_err(|_| "the node did not accept the metainfo".to_string())?;
     if !res.status().is_success() {
-        return Err(format!("the node refused the torrent: HTTP {}", res.status().as_u16()));
+        return Err(format!(
+            "the node refused the torrent: HTTP {}",
+            res.status().as_u16()
+        ));
     }
 
     // 2. Where to fetch it from. Without this the torrent sits there knowing
@@ -389,7 +403,12 @@ pub async fn remote_progress(
             .await
             .map_err(|_| "the node's engine list did not parse".to_string())?;
         list.as_array()
-            .map(|a| a.iter().filter_map(|e| e.get("id").and_then(|v| v.as_str())).map(String::from).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|e| e.get("id").and_then(|v| v.as_str()))
+                    .map(String::from)
+                    .collect()
+            })
             .unwrap_or_default()
     } else {
         vec![engine.to_string()]
@@ -398,7 +417,9 @@ pub async fn remote_progress(
     let mut answered = false;
     for e in &engines {
         let res = client()
-            .get(format!("{base}/api/engines/{e}/page?limit=1&search={info_hash}"))
+            .get(format!(
+                "{base}/api/engines/{e}/page?limit=1&search={info_hash}"
+            ))
             .header("X-API-Key", api_key)
             .send()
             .await;
@@ -406,13 +427,18 @@ pub async fn remote_progress(
         if !res.status().is_success() {
             continue;
         }
-        let Ok(body) = res.json::<serde_json::Value>().await else { continue };
+        let Ok(body) = res.json::<serde_json::Value>().await else {
+            continue;
+        };
         answered = true;
         // The search also matches names, so the row must carry OUR hash: a
         // torrent whose name happens to contain these hex digits is not ours.
         let row = body.get("rows").and_then(|r| r.as_array()).and_then(|a| {
             a.iter().find(|r| {
-                r.get("info_hash").and_then(|h| h.as_str()).map(|h| h.eq_ignore_ascii_case(info_hash)).unwrap_or(false)
+                r.get("info_hash")
+                    .and_then(|h| h.as_str())
+                    .map(|h| h.eq_ignore_ascii_case(info_hash))
+                    .unwrap_or(false)
             })
         });
         if let Some(row) = row {
@@ -444,7 +470,8 @@ pub async fn remote_progress(
 /// How long a pending key waits for its confirmation.
 pub const PENDING_KEY_TTL: Duration = Duration::from_secs(600);
 
-static PENDING_KEY: std::sync::Mutex<Option<(String, std::time::Instant)>> = std::sync::Mutex::new(None);
+static PENDING_KEY: std::sync::Mutex<Option<(String, std::time::Instant)>> =
+    std::sync::Mutex::new(None);
 
 /// The pending key is process-wide, so a test that mints one (here, or through
 /// the rotation routes) holds this for its whole length.
@@ -454,7 +481,8 @@ pub(crate) static PENDING_KEY_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::M
 /// Node side: mint a pending key, replacing any earlier one.
 pub fn begin_local_rotation() -> String {
     let key = crate::config::fresh_api_key();
-    *PENDING_KEY.lock().unwrap_or_else(|p| p.into_inner()) = Some((key.clone(), std::time::Instant::now()));
+    *PENDING_KEY.lock().unwrap_or_else(|p| p.into_inner()) =
+        Some((key.clone(), std::time::Instant::now()));
     key
 }
 
@@ -485,12 +513,21 @@ pub async fn rotate_key(url: &str, old_key: &str) -> Result<String, String> {
         .map_err(|_| "the node is unreachable".to_string())?;
     match res.status().as_u16() {
         200 => {}
-        401 | 403 => return Err("the node refused the current key: declare it again with its key".into()),
+        401 | 403 => {
+            return Err("the node refused the current key: declare it again with its key".into())
+        }
         404 | 405 => return Err("the node is too old to rotate its key (needs 4.4)".into()),
         s => return Err(format!("the node refused the rotation: HTTP {s}")),
     }
-    let v: serde_json::Value = res.json().await.map_err(|_| "the node's answer did not parse".to_string())?;
-    let new_key = v.get("pending_key").and_then(|k| k.as_str()).unwrap_or_default().to_string();
+    let v: serde_json::Value = res
+        .json()
+        .await
+        .map_err(|_| "the node's answer did not parse".to_string())?;
+    let new_key = v
+        .get("pending_key")
+        .and_then(|k| k.as_str())
+        .unwrap_or_default()
+        .to_string();
     if new_key.len() < 16 {
         return Err("the node answered no usable key".into());
     }
@@ -499,7 +536,9 @@ pub async fn rotate_key(url: &str, old_key: &str) -> Result<String, String> {
         .header("X-API-Key", &new_key)
         .send()
         .await
-        .map_err(|_| "the node stopped answering before the confirmation; it keeps its old key".to_string())?;
+        .map_err(|_| {
+            "the node stopped answering before the confirmation; it keeps its old key".to_string()
+        })?;
     if !res.status().is_success() {
         return Err(format!(
             "the node did not confirm the new key (HTTP {}); it keeps its old key",
@@ -584,7 +623,9 @@ mod relay_tests {
     }
 
     async fn fake_node(app: Router) -> FakeNode {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
         let addr = listener.local_addr().expect("addr");
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
         tokio::spawn(async move {
@@ -594,7 +635,10 @@ mod relay_tests {
                 })
                 .await;
         });
-        FakeNode { url: format!("http://{addr}"), _shutdown: tx }
+        FakeNode {
+            url: format!("http://{addr}"),
+            _shutdown: tx,
+        }
     }
 
     /// A node that answers a proper status.
@@ -686,10 +730,15 @@ mod relay_tests {
             }),
         );
         let node = fake_node(app).await;
-        let (status, body, _ctype) =
-            forward(&node.url, "the-remote-key", reqwest::Method::GET, "/api/engines", vec![])
-                .await
-                .expect("the relay reached the node");
+        let (status, body, _ctype) = forward(
+            &node.url,
+            "the-remote-key",
+            reqwest::Method::GET,
+            "/api/engines",
+            vec![],
+        )
+        .await
+        .expect("the relay reached the node");
         assert!(status.is_success());
         let v: serde_json::Value = serde_json::from_slice(&body).expect("json");
         assert_eq!(v["seen_key"], serde_json::json!("the-remote-key"));
@@ -715,10 +764,7 @@ mod relay_tests {
     /// on nothing.
     #[tokio::test]
     async fn the_relay_carries_the_body_it_was_given() {
-        let app = Router::new().route(
-            "/api/echo",
-            post(|body: String| async move { body }),
-        );
+        let app = Router::new().route("/api/echo", post(|body: String| async move { body }));
         let node = fake_node(app).await;
         let (status, body, _ct) = forward(
             &node.url,
@@ -737,9 +783,18 @@ mod relay_tests {
     /// fleet page would merge as "this node has nothing".
     #[tokio::test]
     async fn relaying_to_a_node_that_is_not_there_is_an_error() {
-        let out =
-            forward("http://127.0.0.1:1", "k", reqwest::Method::GET, "/api/engines", vec![]).await;
-        assert!(out.is_err(), "an unreachable node must not look like an empty one");
+        let out = forward(
+            "http://127.0.0.1:1",
+            "k",
+            reqwest::Method::GET,
+            "/api/engines",
+            vec![],
+        )
+        .await;
+        assert!(
+            out.is_err(),
+            "an unreachable node must not look like an empty one"
+        );
     }
 
     /// Fetching a metainfo the node does not have is a reported failure, never
@@ -840,7 +895,11 @@ mod relay_tests {
         let node = fake_node(app).await;
         let h = probe(&node.url, "key").await;
         assert!(h.online);
-        assert_eq!(h.engines, vec!["hoard", "race", "vpn2"], "sorted, entries without an id skipped");
+        assert_eq!(
+            h.engines,
+            vec!["hoard", "race", "vpn2"],
+            "sorted, entries without an id skipped"
+        );
         assert_eq!(h.torrents, 15);
         assert_eq!(h.version, "4.30.0");
     }
@@ -849,7 +908,11 @@ mod relay_tests {
     /// is still legible through the sections of /api/status.
     #[tokio::test]
     async fn an_old_node_falls_back_to_the_shape_of_its_status() {
-        for engines_route in [Some(serde_json::json!([])), Some(serde_json::json!({"not": "a list"})), None] {
+        for engines_route in [
+            Some(serde_json::json!([])),
+            Some(serde_json::json!({"not": "a list"})),
+            None,
+        ] {
             let mut app = Router::new().route(
                 "/api/status",
                 get(|| async {
@@ -874,7 +937,10 @@ mod relay_tests {
             assert!(h.online);
             assert_eq!(h.engines, vec!["hoard", "race"]);
             assert_eq!(h.torrents, 5);
-            assert!(h.version.is_empty(), "no version declared is an empty one, not a guess");
+            assert!(
+                h.version.is_empty(),
+                "no version declared is an empty one, not a guess"
+            );
         }
     }
 
@@ -889,8 +955,16 @@ mod relay_tests {
             move |uri: axum::http::Uri, headers: axum::http::HeaderMap| {
                 let seen = seen.clone();
                 async move {
-                    let k = headers.get("x-api-key").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
-                    seen.lock().unwrap().push((uri.path().to_string(), uri.query().unwrap_or("").to_string(), k));
+                    let k = headers
+                        .get("x-api-key")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("")
+                        .to_string();
+                    seen.lock().unwrap().push((
+                        uri.path().to_string(),
+                        uri.query().unwrap_or("").to_string(),
+                        k,
+                    ));
                     axum::Json(serde_json::json!({"hoard": {"total_torrents": 1}}))
                 }
             }
@@ -912,8 +986,16 @@ mod relay_tests {
     /// without version or engines, only with its reason.
     #[test]
     fn an_offline_health_omits_what_it_does_not_know() {
-        let v = serde_json::to_value(Health { online: false, error: "timeout".into(), ..Default::default() }).unwrap();
-        assert_eq!(v, serde_json::json!({"online": false, "torrents": 0, "error": "timeout"}));
+        let v = serde_json::to_value(Health {
+            online: false,
+            error: "timeout".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({"online": false, "torrents": 0, "error": "timeout"})
+        );
         let v = serde_json::to_value(Health {
             online: true,
             version: "1".into(),
@@ -922,7 +1004,10 @@ mod relay_tests {
             error: String::new(),
         })
         .unwrap();
-        assert_eq!(v, serde_json::json!({"online": true, "version": "1", "engines": ["race"], "torrents": 3}));
+        assert_eq!(
+            v,
+            serde_json::json!({"online": true, "version": "1", "engines": ["race"], "torrents": 3})
+        );
     }
 
     // ---- forward ------------------------------------------------------------
@@ -934,16 +1019,30 @@ mod relay_tests {
         let app = Router::new().route(
             "/api/ct",
             post(|headers: axum::http::HeaderMap, body: String| async move {
-                let ct = headers.get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("none").to_string();
+                let ct = headers
+                    .get("content-type")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("none")
+                    .to_string();
                 axum::Json(serde_json::json!({"ct": ct, "len": body.len()}))
             }),
         );
         let node = fake_node(app).await;
-        let (_, body, _) = forward(&node.url, "k", reqwest::Method::POST, "api/ct", b"{}".to_vec()).await.unwrap();
+        let (_, body, _) = forward(
+            &node.url,
+            "k",
+            reqwest::Method::POST,
+            "api/ct",
+            b"{}".to_vec(),
+        )
+        .await
+        .unwrap();
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(v["ct"], "application/json");
         assert_eq!(v["len"], 2);
-        let (_, body, _) = forward(&node.url, "k", reqwest::Method::POST, "/api/ct", vec![]).await.unwrap();
+        let (_, body, _) = forward(&node.url, "k", reqwest::Method::POST, "/api/ct", vec![])
+            .await
+            .unwrap();
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(v["ct"], "none");
         assert_eq!(v["len"], 0);
@@ -953,15 +1052,25 @@ mod relay_tests {
     /// that names none is taken for JSON.
     #[tokio::test]
     async fn the_relay_returns_the_content_type_of_the_answer() {
-        let app = Router::new().route("/text", get(|| async { "plain words" })).route(
-            "/bare",
-            get(|| async { axum::http::Response::builder().body(axum::body::Body::from("{}")).unwrap() }),
-        );
+        let app = Router::new()
+            .route("/text", get(|| async { "plain words" }))
+            .route(
+                "/bare",
+                get(|| async {
+                    axum::http::Response::builder()
+                        .body(axum::body::Body::from("{}"))
+                        .unwrap()
+                }),
+            );
         let node = fake_node(app).await;
-        let (_, body, ct) = forward(&node.url, "k", reqwest::Method::GET, "/text", vec![]).await.unwrap();
+        let (_, body, ct) = forward(&node.url, "k", reqwest::Method::GET, "/text", vec![])
+            .await
+            .unwrap();
         assert_eq!(body, b"plain words");
         assert!(ct.starts_with("text/plain"), "{ct}");
-        let (_, _, ct) = forward(&node.url, "k", reqwest::Method::GET, "/bare", vec![]).await.unwrap();
+        let (_, _, ct) = forward(&node.url, "k", reqwest::Method::GET, "/bare", vec![])
+            .await
+            .unwrap();
         assert_eq!(ct, "application/json");
     }
 
@@ -970,8 +1079,14 @@ mod relay_tests {
     async fn the_relay_joins_url_and_path_with_exactly_one_slash() {
         let app = Router::new().route("/a/b", get(|| async { "ok" }));
         let node = fake_node(app).await;
-        for (url, path) in [(node.url.clone(), "/a/b"), (format!("{}/", node.url), "a/b"), (format!("{}/", node.url), "//a/b")] {
-            let (status, _, _) = forward(&url, "k", reqwest::Method::GET, path, vec![]).await.unwrap();
+        for (url, path) in [
+            (node.url.clone(), "/a/b"),
+            (format!("{}/", node.url), "a/b"),
+            (format!("{}/", node.url), "//a/b"),
+        ] {
+            let (status, _, _) = forward(&url, "k", reqwest::Method::GET, path, vec![])
+                .await
+                .unwrap();
             assert!(status.is_success(), "{url} + {path}");
         }
     }
@@ -995,7 +1110,12 @@ mod relay_tests {
         let upload_key: Arc<Mutex<String>> = Arc::default();
         let peers: Arc<Mutex<Vec<String>>> = Arc::default();
         let categories_asked = Arc::new(AtomicUsize::new(0));
-        let (u, uk, p, ca) = (uploads.clone(), upload_key.clone(), peers.clone(), categories_asked.clone());
+        let (u, uk, p, ca) = (
+            uploads.clone(),
+            upload_key.clone(),
+            peers.clone(),
+            categories_asked.clone(),
+        );
         let app = Router::new()
             .route(
                 "/api/categories",
@@ -1009,20 +1129,28 @@ mod relay_tests {
             )
             .route(
                 "/api/torrents/upload",
-                post(move |headers: axum::http::HeaderMap, mut mp: axum::extract::Multipart| {
-                    let (u, uk) = (u.clone(), uk.clone());
-                    async move {
-                        *uk.lock().unwrap() =
-                            headers.get("x-api-key").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
-                        while let Some(f) = mp.next_field().await.unwrap() {
-                            let name = f.name().unwrap_or("").to_string();
-                            let file = f.file_name().map(String::from);
-                            let data = f.bytes().await.unwrap().to_vec();
-                            u.lock().unwrap().push((name, file, data));
+                post(
+                    move |headers: axum::http::HeaderMap, mut mp: axum::extract::Multipart| {
+                        let (u, uk) = (u.clone(), uk.clone());
+                        async move {
+                            *uk.lock().unwrap() = headers
+                                .get("x-api-key")
+                                .and_then(|v| v.to_str().ok())
+                                .unwrap_or("")
+                                .to_string();
+                            while let Some(f) = mp.next_field().await.unwrap() {
+                                let name = f.name().unwrap_or("").to_string();
+                                let file = f.file_name().map(String::from);
+                                let data = f.bytes().await.unwrap().to_vec();
+                                u.lock().unwrap().push((name, file, data));
+                            }
+                            (
+                                axum::http::StatusCode::from_u16(upload_status).unwrap(),
+                                "x",
+                            )
                         }
-                        (axum::http::StatusCode::from_u16(upload_status).unwrap(), "x")
-                    }
-                }),
+                    },
+                ),
             )
             .route(
                 "/api/torrents/:hash/peers",
@@ -1034,7 +1162,13 @@ mod relay_tests {
                     }
                 }),
             );
-        Receiver { node: fake_node(app).await, uploads, upload_key, peers, categories_asked }
+        Receiver {
+            node: fake_node(app).await,
+            uploads,
+            upload_key,
+            peers,
+            categories_asked,
+        }
     }
 
     const HASH: &str = "0123456789abcdef0123456789abcdef01234567";
@@ -1044,10 +1178,27 @@ mod relay_tests {
     /// work, and nothing is uploaded -- it could land in the wrong tier.
     #[tokio::test]
     async fn a_handoff_to_an_unknown_category_is_refused_before_anything_is_sent() {
-        let r = receiver(serde_json::json!([{"name": "movies"}, {"name": "series"}, {"nope": 1}]), 200).await;
-        let err = handoff(&r.node.url, "k", HASH, b"meta".to_vec(), "192.0.2.7:16171", "books", "").await.unwrap_err();
+        let r = receiver(
+            serde_json::json!([{"name": "movies"}, {"name": "series"}, {"nope": 1}]),
+            200,
+        )
+        .await;
+        let err = handoff(
+            &r.node.url,
+            "k",
+            HASH,
+            b"meta".to_vec(),
+            "192.0.2.7:16171",
+            "books",
+            "",
+        )
+        .await
+        .unwrap_err();
         assert!(err.contains("no category books"), "{err}");
-        assert!(err.contains("movies, series"), "lists what would work: {err}");
+        assert!(
+            err.contains("movies, series"),
+            "lists what would work: {err}"
+        );
         assert!(r.uploads.lock().unwrap().is_empty(), "nothing was uploaded");
         assert!(r.peers.lock().unwrap().is_empty());
     }
@@ -1057,20 +1208,42 @@ mod relay_tests {
     #[tokio::test]
     async fn a_handoff_uploads_the_metainfo_then_names_the_sender_as_a_peer() {
         let r = receiver(serde_json::json!([{"name": "movies"}]), 200).await;
-        let out = handoff(&r.node.url, "remote-key", HASH, b"METAINFO".to_vec(), "192.0.2.7:16171", "movies", "vpn1")
-            .await
-            .expect("handed off");
+        let out = handoff(
+            &r.node.url,
+            "remote-key",
+            HASH,
+            b"METAINFO".to_vec(),
+            "192.0.2.7:16171",
+            "movies",
+            "vpn1",
+        )
+        .await
+        .expect("handed off");
         assert_eq!(out["status"], "ok");
         assert_eq!(out["info_hash"], HASH);
         assert_eq!(out["from"], "192.0.2.7:16171");
-        assert_eq!(out["peer"], serde_json::json!({"added": 1}), "the node's answer to the peer call comes back");
+        assert_eq!(
+            out["peer"],
+            serde_json::json!({"added": 1}),
+            "the node's answer to the peer call comes back"
+        );
         assert_eq!(*r.upload_key.lock().unwrap(), "remote-key");
 
         let up = r.uploads.lock().unwrap();
-        let torrents = up.iter().find(|(n, _, _)| n == "torrents").expect("the metainfo part");
-        assert_eq!(torrents.1.as_deref(), Some(format!("{HASH}.torrent").as_str()));
+        let torrents = up
+            .iter()
+            .find(|(n, _, _)| n == "torrents")
+            .expect("the metainfo part");
+        assert_eq!(
+            torrents.1.as_deref(),
+            Some(format!("{HASH}.torrent").as_str())
+        );
         assert_eq!(torrents.2, b"METAINFO");
-        let text = |n: &str| up.iter().find(|(k, _, _)| k == n).map(|(_, _, d)| String::from_utf8_lossy(d).into_owned());
+        let text = |n: &str| {
+            up.iter()
+                .find(|(k, _, _)| k == n)
+                .map(|(_, _, d)| String::from_utf8_lossy(d).into_owned())
+        };
         assert_eq!(text("category").as_deref(), Some("movies"));
         assert_eq!(text("engine").as_deref(), Some("vpn1"));
         let peers = r.peers.lock().unwrap();
@@ -1088,7 +1261,9 @@ mod relay_tests {
     #[tokio::test]
     async fn a_handoff_with_no_category_asks_nothing_and_sends_neither_field() {
         let r = receiver(serde_json::json!([]), 200).await;
-        handoff(&r.node.url, "k", HASH, b"m".to_vec(), "192.0.2.7:1", "", "").await.expect("handed off");
+        handoff(&r.node.url, "k", HASH, b"m".to_vec(), "192.0.2.7:1", "", "")
+            .await
+            .expect("handed off");
         assert_eq!(r.categories_asked.load(Ordering::SeqCst), 0);
         let up = r.uploads.lock().unwrap();
         assert!(
@@ -1103,9 +1278,23 @@ mod relay_tests {
     #[tokio::test]
     async fn a_node_with_an_empty_category_list_does_not_block_the_handoff() {
         let r = receiver(serde_json::json!([]), 200).await;
-        handoff(&r.node.url, "k", HASH, b"m".to_vec(), "192.0.2.7:1", "anything", "").await.expect("handed off");
+        handoff(
+            &r.node.url,
+            "k",
+            HASH,
+            b"m".to_vec(),
+            "192.0.2.7:1",
+            "anything",
+            "",
+        )
+        .await
+        .expect("handed off");
         assert_eq!(r.categories_asked.load(Ordering::SeqCst), 1);
-        assert_eq!(r.uploads.lock().unwrap().len(), 2, "torrent part + category");
+        assert_eq!(
+            r.uploads.lock().unwrap().len(),
+            2,
+            "torrent part + category"
+        );
     }
 
     /// The far side refusing the upload is reported with its code, and the
@@ -1113,7 +1302,9 @@ mod relay_tests {
     #[tokio::test]
     async fn a_refused_upload_stops_the_handoff_with_the_status() {
         let r = receiver(serde_json::json!([]), 503).await;
-        let err = handoff(&r.node.url, "k", HASH, b"m".to_vec(), "192.0.2.7:1", "", "").await.unwrap_err();
+        let err = handoff(&r.node.url, "k", HASH, b"m".to_vec(), "192.0.2.7:1", "", "")
+            .await
+            .unwrap_err();
         assert_eq!(err, "the node refused the torrent: HTTP 503");
         assert!(r.peers.lock().unwrap().is_empty());
     }
@@ -1121,7 +1312,17 @@ mod relay_tests {
     /// A node that is gone reads as one that did not accept the metainfo.
     #[tokio::test]
     async fn a_handoff_to_a_node_that_is_gone_says_the_metainfo_was_not_accepted() {
-        let err = handoff("http://127.0.0.1:1", "k", HASH, b"m".to_vec(), "192.0.2.7:1", "", "").await.unwrap_err();
+        let err = handoff(
+            "http://127.0.0.1:1",
+            "k",
+            HASH,
+            b"m".to_vec(),
+            "192.0.2.7:1",
+            "",
+            "",
+        )
+        .await
+        .unwrap_err();
         assert_eq!(err, "the node did not accept the metainfo");
     }
 
@@ -1130,9 +1331,16 @@ mod relay_tests {
     /// A node whose engines each answer a page with `rows`, as
     /// `/api/engines/<id>/page` does. `None` for an engine = answers 500.
     async fn paged_node(engines: Vec<(&'static str, Option<serde_json::Value>)>) -> FakeNode {
-        let ids: Vec<serde_json::Value> = engines.iter().map(|(id, _)| serde_json::json!({"id": id})).collect();
-        let pages: Arc<std::collections::HashMap<String, Option<serde_json::Value>>> =
-            Arc::new(engines.into_iter().map(|(id, p)| (id.to_string(), p)).collect());
+        let ids: Vec<serde_json::Value> = engines
+            .iter()
+            .map(|(id, _)| serde_json::json!({"id": id}))
+            .collect();
+        let pages: Arc<std::collections::HashMap<String, Option<serde_json::Value>>> = Arc::new(
+            engines
+                .into_iter()
+                .map(|(id, p)| (id.to_string(), p))
+                .collect(),
+        );
         let app = Router::new()
             .route(
                 "/api/engines",
@@ -1148,7 +1356,10 @@ mod relay_tests {
                     async move {
                         match pages.get(&id).cloned().flatten() {
                             Some(v) => (axum::http::StatusCode::OK, axum::Json(v)),
-                            None => (axum::http::StatusCode::INTERNAL_SERVER_ERROR, axum::Json(serde_json::json!({}))),
+                            None => (
+                                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                                axum::Json(serde_json::json!({})),
+                            ),
                         }
                     }
                 }),
@@ -1166,11 +1377,17 @@ mod relay_tests {
     async fn the_furthest_engine_copy_is_the_progress() {
         let node = paged_node(vec![
             ("race", Some(serde_json::json!({"rows": [row(HASH, 0.25)]}))),
-            ("hoard", Some(serde_json::json!({"rows": [row(HASH, 0.75)]}))),
+            (
+                "hoard",
+                Some(serde_json::json!({"rows": [row(HASH, 0.75)]})),
+            ),
             ("vpn1", Some(serde_json::json!({"rows": []}))),
         ])
         .await;
-        assert_eq!(remote_progress(&node.url, "k", HASH, "").await, Ok(Some(0.75)));
+        assert_eq!(
+            remote_progress(&node.url, "k", HASH, "").await,
+            Ok(Some(0.75))
+        );
     }
 
     /// The page search also matches names: a row that is not this hash is
@@ -1178,27 +1395,55 @@ mod relay_tests {
     #[tokio::test]
     async fn a_row_with_another_hash_is_not_our_torrent() {
         let other = "ffffffffffffffffffffffffffffffffffffffff";
-        let node = paged_node(vec![("race", Some(serde_json::json!({"rows": [row(other, 1.0)]})))]).await;
-        assert_eq!(remote_progress(&node.url, "k", HASH, "race").await, Ok(None), "answered, but nothing of ours yet");
-        let node =
-            paged_node(vec![("race", Some(serde_json::json!({"rows": [row(other, 1.0), row(&HASH.to_uppercase(), 0.5)]})))]).await;
-        assert_eq!(remote_progress(&node.url, "k", HASH, "race").await, Ok(Some(0.5)));
+        let node = paged_node(vec![(
+            "race",
+            Some(serde_json::json!({"rows": [row(other, 1.0)]})),
+        )])
+        .await;
+        assert_eq!(
+            remote_progress(&node.url, "k", HASH, "race").await,
+            Ok(None),
+            "answered, but nothing of ours yet"
+        );
+        let node = paged_node(vec![(
+            "race",
+            Some(serde_json::json!({"rows": [row(other, 1.0), row(&HASH.to_uppercase(), 0.5)]})),
+        )])
+        .await;
+        assert_eq!(
+            remote_progress(&node.url, "k", HASH, "race").await,
+            Ok(Some(0.5))
+        );
     }
 
     /// A row with no progress figure counts as nothing downloaded -- not as
     /// complete, which would delete the local copy.
     #[tokio::test]
     async fn a_row_without_progress_is_not_a_finished_copy() {
-        let node = paged_node(vec![("race", Some(serde_json::json!({"rows": [{"info_hash": HASH}]})))]).await;
-        assert_eq!(remote_progress(&node.url, "k", HASH, "race").await, Ok(Some(0.0)));
+        let node = paged_node(vec![(
+            "race",
+            Some(serde_json::json!({"rows": [{"info_hash": HASH}]})),
+        )])
+        .await;
+        assert_eq!(
+            remote_progress(&node.url, "k", HASH, "race").await,
+            Ok(Some(0.0))
+        );
     }
 
     /// One engine failing does not hide another's answer; every engine
     /// failing is an error, not "not there yet".
     #[tokio::test]
     async fn an_engine_that_fails_is_skipped_unless_all_do() {
-        let node = paged_node(vec![("race", None), ("hoard", Some(serde_json::json!({"rows": [row(HASH, 0.5)]})))]).await;
-        assert_eq!(remote_progress(&node.url, "k", HASH, "").await, Ok(Some(0.5)));
+        let node = paged_node(vec![
+            ("race", None),
+            ("hoard", Some(serde_json::json!({"rows": [row(HASH, 0.5)]}))),
+        ])
+        .await;
+        assert_eq!(
+            remote_progress(&node.url, "k", HASH, "").await,
+            Ok(Some(0.5))
+        );
         let node = paged_node(vec![("race", None), ("hoard", None)]).await;
         assert_eq!(
             remote_progress(&node.url, "k", HASH, "").await,
@@ -1219,7 +1464,10 @@ mod relay_tests {
             Err("the node's engine list did not parse".to_string())
         );
         // A list that is not an array means no engine to ask.
-        let app = Router::new().route("/api/engines", get(|| async { axum::Json(serde_json::json!({"x": 1})) }));
+        let app = Router::new().route(
+            "/api/engines",
+            get(|| async { axum::Json(serde_json::json!({"x": 1})) }),
+        );
         let node = fake_node(app).await;
         assert_eq!(
             remote_progress(&node.url, "k", HASH, "").await,
@@ -1229,13 +1477,22 @@ mod relay_tests {
 
     // ---- key rotation ------------------------------------------------------------
 
-    fn rotation_node(rotate: (u16, serde_json::Value), confirm: u16, confirm_seen: Arc<Mutex<Vec<String>>>) -> Router {
+    fn rotation_node(
+        rotate: (u16, serde_json::Value),
+        confirm: u16,
+        confirm_seen: Arc<Mutex<Vec<String>>>,
+    ) -> Router {
         Router::new()
             .route(
                 "/api/auth/api-key/rotate",
                 post(move || {
                     let (code, body) = rotate.clone();
-                    async move { (axum::http::StatusCode::from_u16(code).unwrap(), axum::Json(body)) }
+                    async move {
+                        (
+                            axum::http::StatusCode::from_u16(code).unwrap(),
+                            axum::Json(body),
+                        )
+                    }
                 }),
             )
             .route(
@@ -1243,7 +1500,11 @@ mod relay_tests {
                 post(move |headers: axum::http::HeaderMap| {
                     let seen = confirm_seen.clone();
                     async move {
-                        let k = headers.get("x-api-key").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+                        let k = headers
+                            .get("x-api-key")
+                            .and_then(|v| v.to_str().ok())
+                            .unwrap_or("")
+                            .to_string();
                         seen.lock().unwrap().push(k);
                         (axum::http::StatusCode::from_u16(confirm).unwrap(), "x")
                     }
@@ -1258,7 +1519,12 @@ mod relay_tests {
     #[tokio::test]
     async fn rotation_confirms_with_the_key_it_was_given() {
         let seen: Arc<Mutex<Vec<String>>> = Arc::default();
-        let node = fake_node(rotation_node((200, serde_json::json!({"pending_key": NEW_KEY})), 200, seen.clone())).await;
+        let node = fake_node(rotation_node(
+            (200, serde_json::json!({"pending_key": NEW_KEY})),
+            200,
+            seen.clone(),
+        ))
+        .await;
         assert_eq!(rotate_key(&node.url, "old").await, Ok(NEW_KEY.to_string()));
         assert_eq!(*seen.lock().unwrap(), vec![NEW_KEY.to_string()]);
     }
@@ -1268,17 +1534,35 @@ mod relay_tests {
     #[tokio::test]
     async fn a_refused_rotation_says_why_and_never_confirms() {
         let cases: [(u16, &str); 5] = [
-            (401, "the node refused the current key: declare it again with its key"),
-            (403, "the node refused the current key: declare it again with its key"),
+            (
+                401,
+                "the node refused the current key: declare it again with its key",
+            ),
+            (
+                403,
+                "the node refused the current key: declare it again with its key",
+            ),
             (404, "the node is too old to rotate its key (needs 4.4)"),
             (405, "the node is too old to rotate its key (needs 4.4)"),
             (500, "the node refused the rotation: HTTP 500"),
         ];
         for (code, want) in cases {
             let seen: Arc<Mutex<Vec<String>>> = Arc::default();
-            let node = fake_node(rotation_node((code, serde_json::json!({})), 200, seen.clone())).await;
-            assert_eq!(rotate_key(&node.url, "old").await, Err(want.to_string()), "{code}");
-            assert!(seen.lock().unwrap().is_empty(), "{code}: no confirmation was attempted");
+            let node = fake_node(rotation_node(
+                (code, serde_json::json!({})),
+                200,
+                seen.clone(),
+            ))
+            .await;
+            assert_eq!(
+                rotate_key(&node.url, "old").await,
+                Err(want.to_string()),
+                "{code}"
+            );
+            assert!(
+                seen.lock().unwrap().is_empty(),
+                "{code}: no confirmation was attempted"
+            );
         }
     }
 
@@ -1286,15 +1570,25 @@ mod relay_tests {
     /// same: nothing is confirmed.
     #[tokio::test]
     async fn a_pending_key_that_is_unusable_is_not_confirmed() {
-        for body in [serde_json::json!({"pending_key": "short"}), serde_json::json!({}), serde_json::json!({"pending_key": 7})] {
+        for body in [
+            serde_json::json!({"pending_key": "short"}),
+            serde_json::json!({}),
+            serde_json::json!({"pending_key": 7}),
+        ] {
             let seen: Arc<Mutex<Vec<String>>> = Arc::default();
             let node = fake_node(rotation_node((200, body), 200, seen.clone())).await;
-            assert_eq!(rotate_key(&node.url, "old").await, Err("the node answered no usable key".to_string()));
+            assert_eq!(
+                rotate_key(&node.url, "old").await,
+                Err("the node answered no usable key".to_string())
+            );
             assert!(seen.lock().unwrap().is_empty());
         }
         let app = Router::new().route("/api/auth/api-key/rotate", post(|| async { "not json" }));
         let node = fake_node(app).await;
-        assert_eq!(rotate_key(&node.url, "old").await, Err("the node's answer did not parse".to_string()));
+        assert_eq!(
+            rotate_key(&node.url, "old").await,
+            Err("the node's answer did not parse".to_string())
+        );
     }
 
     /// The length floor is exact: a 16-character key is the shortest adopted
@@ -1304,27 +1598,57 @@ mod relay_tests {
         let shortest = "0123456789abcdef";
         assert_eq!(shortest.len(), 16);
         let seen: Arc<Mutex<Vec<String>>> = Arc::default();
-        let node = fake_node(rotation_node((200, serde_json::json!({"pending_key": shortest})), 200, seen.clone())).await;
+        let node = fake_node(rotation_node(
+            (200, serde_json::json!({"pending_key": shortest})),
+            200,
+            seen.clone(),
+        ))
+        .await;
         assert_eq!(rotate_key(&node.url, "old").await, Ok(shortest.to_string()));
-        assert_eq!(*seen.lock().unwrap(), vec![shortest.to_string()], "confirmed with itself");
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![shortest.to_string()],
+            "confirmed with itself"
+        );
 
         let too_short = &shortest[..15];
         let seen: Arc<Mutex<Vec<String>>> = Arc::default();
-        let node = fake_node(rotation_node((200, serde_json::json!({"pending_key": too_short})), 200, seen.clone())).await;
-        assert_eq!(rotate_key(&node.url, "old").await, Err("the node answered no usable key".to_string()));
-        assert!(seen.lock().unwrap().is_empty(), "a 15-character key is never confirmed");
+        let node = fake_node(rotation_node(
+            (200, serde_json::json!({"pending_key": too_short})),
+            200,
+            seen.clone(),
+        ))
+        .await;
+        assert_eq!(
+            rotate_key(&node.url, "old").await,
+            Err("the node answered no usable key".to_string())
+        );
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "a 15-character key is never confirmed"
+        );
     }
 
     /// A node that does not confirm keeps its old key, and the error says so.
     #[tokio::test]
     async fn a_failed_confirmation_is_reported_as_keeping_the_old_key() {
         let seen: Arc<Mutex<Vec<String>>> = Arc::default();
-        let node = fake_node(rotation_node((200, serde_json::json!({"pending_key": NEW_KEY})), 401, seen)).await;
+        let node = fake_node(rotation_node(
+            (200, serde_json::json!({"pending_key": NEW_KEY})),
+            401,
+            seen,
+        ))
+        .await;
         assert_eq!(
             rotate_key(&node.url, "old").await,
-            Err("the node did not confirm the new key (HTTP 401); it keeps its old key".to_string())
+            Err(
+                "the node did not confirm the new key (HTTP 401); it keeps its old key".to_string()
+            )
         );
-        assert_eq!(rotate_key("http://127.0.0.1:1", "old").await, Err("the node is unreachable".to_string()));
+        assert_eq!(
+            rotate_key("http://127.0.0.1:1", "old").await,
+            Err("the node is unreachable".to_string())
+        );
     }
 
     /// The node side: a pending key is single-use, exact, and expires.
@@ -1336,7 +1660,11 @@ mod relay_tests {
         assert!(k.len() >= 16, "a usable key: {k}");
         assert_eq!(take_pending_key(""), None, "empty never matches");
         assert_eq!(take_pending_key("not-it"), None);
-        assert_eq!(take_pending_key(&format!("{k}x")), None, "a longer string is not the key");
+        assert_eq!(
+            take_pending_key(&format!("{k}x")),
+            None,
+            "a longer string is not the key"
+        );
         assert_eq!(take_pending_key(&k), Some(k.clone()));
         assert_eq!(take_pending_key(&k), None, "consumed: a replay is refused");
 
@@ -1354,7 +1682,10 @@ mod relay_tests {
             .expect("the host has been up longer than the TTL");
         *PENDING_KEY.lock().unwrap() = Some((stale.clone(), aged));
         assert_eq!(take_pending_key(&stale), None);
-        assert!(PENDING_KEY.lock().unwrap().is_none(), "an expired key is dropped");
+        assert!(
+            PENDING_KEY.lock().unwrap().is_none(),
+            "an expired key is dropped"
+        );
         assert_eq!(take_pending_key(&stale), None);
     }
 
@@ -1387,28 +1718,45 @@ mod relay_tests {
         let (blob, port) = fetch_metainfo(&node.url, "k", HASH, "vpn1").await.unwrap();
         assert_eq!(blob, vec![0x64, 0x65, 0x00, 0xff]);
         assert_eq!(port, 16380);
-        assert_eq!(fetch_metainfo(&node.url, "k", HASH, "race").await.unwrap().1, 16171);
+        assert_eq!(
+            fetch_metainfo(&node.url, "k", HASH, "race")
+                .await
+                .unwrap()
+                .1,
+            16171
+        );
     }
 
     #[tokio::test]
     async fn a_fetch_names_the_engine_or_port_it_cannot_use() {
-        let node = fake_node(metainfo_node(serde_json::json!([{"id": "race", "listen_port": 0}, {"id": "hoard"}]))).await;
+        let node = fake_node(metainfo_node(
+            serde_json::json!([{"id": "race", "listen_port": 0}, {"id": "hoard"}]),
+        ))
+        .await;
         assert_eq!(
-            fetch_metainfo(&node.url, "k", HASH, "vpn9").await.unwrap_err(),
+            fetch_metainfo(&node.url, "k", HASH, "vpn9")
+                .await
+                .unwrap_err(),
             "the node has no engine named vpn9"
         );
         assert_eq!(
-            fetch_metainfo(&node.url, "k", HASH, "race").await.unwrap_err(),
+            fetch_metainfo(&node.url, "k", HASH, "race")
+                .await
+                .unwrap_err(),
             "race has no listening port on that node"
         );
         assert_eq!(
-            fetch_metainfo(&node.url, "k", HASH, "hoard").await.unwrap_err(),
+            fetch_metainfo(&node.url, "k", HASH, "hoard")
+                .await
+                .unwrap_err(),
             "the node has no engine named hoard",
             "no port field is no engine we can dial"
         );
         let node = fake_node(metainfo_node(serde_json::json!({"not": "a list"}))).await;
         assert_eq!(
-            fetch_metainfo(&node.url, "k", HASH, "race").await.unwrap_err(),
+            fetch_metainfo(&node.url, "k", HASH, "race")
+                .await
+                .unwrap_err(),
             "the node has no engine named race"
         );
     }
@@ -1423,11 +1771,15 @@ mod relay_tests {
         );
         let node = fake_node(app).await;
         assert_eq!(
-            fetch_metainfo(&node.url, "k", HASH, "race").await.unwrap_err(),
+            fetch_metainfo(&node.url, "k", HASH, "race")
+                .await
+                .unwrap_err(),
             "the node has no .torrent for 01234567: HTTP 404"
         );
         assert_eq!(
-            fetch_metainfo(&node.url, "k", "abc", "race").await.unwrap_err(),
+            fetch_metainfo(&node.url, "k", "abc", "race")
+                .await
+                .unwrap_err(),
             "the node has no .torrent for abc: HTTP 404"
         );
     }
@@ -1440,7 +1792,9 @@ mod relay_tests {
             .route("/api/engines", get(|| async { "<html>" }));
         let node = fake_node(app).await;
         assert_eq!(
-            fetch_metainfo(&node.url, "k", HASH, "race").await.unwrap_err(),
+            fetch_metainfo(&node.url, "k", HASH, "race")
+                .await
+                .unwrap_err(),
             "the node's engine list did not parse"
         );
     }

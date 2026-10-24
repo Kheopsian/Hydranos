@@ -157,8 +157,15 @@ mod tests {
     fn an_info_hash_is_escaped_byte_by_byte() {
         // 'A' is 0x41 and printable, and is still escaped: the tracker log has
         // to read the same as 3.x wrote it.
-        assert_eq!(hex_to_url_encoded(&"41".repeat(20)).unwrap(), "%41".repeat(20));
-        assert_eq!(hex_to_url_encoded("00").is_none(), true, "40 characters or nothing");
+        assert_eq!(
+            hex_to_url_encoded(&"41".repeat(20)).unwrap(),
+            "%41".repeat(20)
+        );
+        assert_eq!(
+            hex_to_url_encoded("00").is_none(),
+            true,
+            "40 characters or nothing"
+        );
         assert!(hex_to_url_encoded(&"zz".repeat(20)).is_none());
     }
 
@@ -187,9 +194,15 @@ mod tests {
             tracker_id: None,
         };
         let u = build(&a).unwrap();
-        assert!(u.contains("&numwant=0"), "a complete torrent wants no peers: {u}");
+        assert!(
+            u.contains("&numwant=0"),
+            "a complete torrent wants no peers: {u}"
+        );
         assert!(u.starts_with("https://tr4ker.net/announce/KEY?info_hash=%AB"));
-        assert!(!u.contains("&event="), "a periodic announce carries no event");
+        assert!(
+            !u.contains("&event="),
+            "a periodic announce carries no event"
+        );
     }
 
     #[test]
@@ -209,10 +222,12 @@ mod tests {
         };
         let u = build(&a).unwrap();
         assert!(u.starts_with("https://tr4ker.net/announce?passkey=SECRET&info_hash="));
-        assert!(u.contains("&numwant=200"), "a leeching torrent asks for peers");
+        assert!(
+            u.contains("&numwant=200"),
+            "a leeching torrent asks for peers"
+        );
         assert!(u.ends_with("&event=started&ip=203.0.113.7"));
     }
-
 }
 
 /// Conformance of the announce URL to the specifications, one rule per test.
@@ -262,7 +277,10 @@ mod bep_rules {
     }
 
     fn value_of(url: &str, name: &str) -> Option<String> {
-        params(url).into_iter().find(|(k, _)| k == name).map(|(_, v)| v)
+        params(url)
+            .into_iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v)
     }
 
     /// Decode a percent-encoded query value back to bytes.
@@ -311,7 +329,14 @@ mod bep_rules {
     fn bep3_every_mandatory_parameter_is_emitted() {
         let url = build(&seeding()).expect("a valid announce builds");
         let names: Vec<String> = params(&url).into_iter().map(|(k, _)| k).collect();
-        for required in ["info_hash", "peer_id", "port", "uploaded", "downloaded", "left"] {
+        for required in [
+            "info_hash",
+            "peer_id",
+            "port",
+            "uploaded",
+            "downloaded",
+            "left",
+        ] {
             assert!(
                 names.iter().any(|n| n == required),
                 "BEP 3 requires `{required}`; the query carries {names:?}"
@@ -435,7 +460,10 @@ mod bep_rules {
         let url = build(&seeding()).unwrap();
         assert!(!url.contains("&ip="), "nothing to declare, nothing sent");
 
-        let a = Announce { public_ip: "203.0.113.7", ..seeding() };
+        let a = Announce {
+            public_ip: "203.0.113.7",
+            ..seeding()
+        };
         let url = build(&a).unwrap();
         assert_eq!(value_of(&url, "ip").as_deref(), Some("203.0.113.7"));
     }
@@ -445,10 +473,19 @@ mod bep_rules {
     /// thousands of idle sockets to the same few seedboxes.
     #[test]
     fn a_seeding_torrent_asks_for_no_peers_and_a_leeching_one_does() {
-        assert_eq!(value_of(&build(&seeding()).unwrap(), "numwant").as_deref(), Some("0"));
+        assert_eq!(
+            value_of(&build(&seeding()).unwrap(), "numwant").as_deref(),
+            Some("0")
+        );
 
-        let a = Announce { left: 1024, ..seeding() };
-        assert_eq!(value_of(&build(&a).unwrap(), "numwant").as_deref(), Some("200"));
+        let a = Announce {
+            left: 1024,
+            ..seeding()
+        };
+        assert_eq!(
+            value_of(&build(&a).unwrap(), "numwant").as_deref(),
+            Some("200")
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -469,7 +506,10 @@ mod bep_rules {
         assert!(
             key.is_some(),
             "every major client sends `key`; ours sends {:?}",
-            params(&url).iter().map(|(k, _)| k.clone()).collect::<Vec<_>>()
+            params(&url)
+                .iter()
+                .map(|(k, _)| k.clone())
+                .collect::<Vec<_>>()
         );
         let key = key.unwrap();
         assert!(
@@ -515,8 +555,14 @@ mod bep_rules {
     #[test]
     fn bep3_a_tracker_id_is_echoed_back() {
         assert!(!build(&seeding()).unwrap().contains("trackerid"));
-        let a = Announce { tracker_id: Some("abc 1"), ..seeding() };
-        assert_eq!(value_of(&build(&a).unwrap(), "trackerid").as_deref(), Some("abc+1"));
+        let a = Announce {
+            tracker_id: Some("abc 1"),
+            ..seeding()
+        };
+        assert_eq!(
+            value_of(&build(&a).unwrap(), "trackerid").as_deref(),
+            Some("abc+1")
+        );
     }
 
     /// The key must not be derivable from the peer id: peers read our peer id
@@ -530,14 +576,21 @@ mod bep_rules {
             h ^= b as u32;
             h = h.wrapping_mul(0x0100_0193);
         }
-        assert_ne!(key, format!("{h:08x}"), "anyone holding our peer id could compute that");
+        assert_ne!(
+            key,
+            format!("{h:08x}"),
+            "anyone holding our peer id could compute that"
+        );
     }
 
     /// An info hash that is not forty hex characters produces no URL at all,
     /// rather than a request the tracker will answer about nothing.
     #[test]
     fn a_malformed_info_hash_builds_no_url() {
-        let a = Announce { info_hash: "not-a-hash", ..seeding() };
+        let a = Announce {
+            info_hash: "not-a-hash",
+            ..seeding()
+        };
         assert!(build(&a).is_none());
     }
 }
