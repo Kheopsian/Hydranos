@@ -172,8 +172,7 @@ async fn a_round_that_cannot_bind_one_binding_holds_none() {
     let busy = squatter.local_addr().unwrap().port();
     let free = free_port();
     let err = bind_round(&[binding(1, "127.0.0.1", free), binding(2, "127.0.0.1", busy)])
-        .err()
-        .expect("the second binding is busy");
+        .expect_err("the second binding is busy");
     assert!(
         err.contains(&format!("cannot bind 127.0.0.1:{busy}")),
         "{err}"

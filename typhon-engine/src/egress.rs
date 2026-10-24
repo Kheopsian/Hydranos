@@ -755,7 +755,7 @@ mod tests {
     #[test]
     fn a_missing_interface_refuses_with_its_name() {
         let r = Route::new("", 0, "", "", "hydranos-nope0", false);
-        let e = client_for(&r).err().expect("refused");
+        let e = client_for(&r).expect_err("refused");
         assert!(e.contains("hydranos-nope0"), "{e}");
     }
 

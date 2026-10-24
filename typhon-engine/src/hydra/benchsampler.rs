@@ -302,7 +302,7 @@ pub fn spawn(engines: Arc<EngineHost>, bench: Shared, store: Arc<crate::store::S
             // runtime's workers for all of it. Not awaited, so the 5 s samples
             // keep their spacing; never two at once, so a slow pass is skipped
             // rather than stacked.
-            if n % TRACKER_EVERY == 0 && !tracker_pass_running.swap(true, Ordering::AcqRel) {
+            if n.is_multiple_of(TRACKER_EVERY) && !tracker_pass_running.swap(true, Ordering::AcqRel) {
                 let (engines, bench, store) = (engines.clone(), bench.clone(), store.clone());
                 let running = tracker_pass_running.clone();
                 tokio::task::spawn_blocking(move || {

@@ -143,7 +143,7 @@ pub async fn measure(
             ),
         };
 
-        let mut r = row(&engine, bound.is_some(), v4, v6);
+        let mut r = row(engine, bound.is_some(), v4, v6);
         if !probe.enabled && engine.blocked.get().is_none() {
             mark_unknown(&mut r);
         }

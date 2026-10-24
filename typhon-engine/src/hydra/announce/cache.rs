@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 /// same tracker to an operator.
 pub(crate) fn host_of(tracker: &str) -> String {
     let s = tracker.split("://").nth(1).unwrap_or(tracker);
-    s.split(|c| c == '/' || c == ':')
+    s.split(['/', ':'])
         .next()
         .unwrap_or("")
         .to_string()

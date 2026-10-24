@@ -293,7 +293,7 @@ pub fn pack(stats: &[Option<FileId>]) -> Vec<u8> {
 /// files: a truncated measurement is treated as no measurement, never as a
 /// shorter torrent whose missing tail would read as "no names of ours".
 pub fn unpack(blob: &[u8]) -> Option<Vec<Option<FileId>>> {
-    if blob.len() % PACKED_FILE != 0 {
+    if !blob.len().is_multiple_of(PACKED_FILE) {
         return None;
     }
     let word = |c: &[u8], i: usize| u64::from_le_bytes(c[1 + i * 8..9 + i * 8].try_into().unwrap());

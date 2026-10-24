@@ -17,7 +17,6 @@
 
 use std::sync::{Arc, Mutex};
 
-use tracing;
 use typhon_engine::torrent::piece_picker::PieceMem;
 
 /// Each engine's pieces-in-flight counters, for the five-minute line.

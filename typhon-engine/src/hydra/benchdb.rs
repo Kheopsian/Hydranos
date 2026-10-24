@@ -467,7 +467,7 @@ pub struct BenchDb {
 /// that mutex queued too. Same reasoning and same exception as the store, cf
 /// `Store::prefer_wal`.
 fn prefer_wal(conn: &Connection, path: &Path) {
-    if path.parent().map_or(false, crate::platform::is_network_fs) {
+    if path.parent().is_some_and(crate::platform::is_network_fs) {
         return;
     }
     match conn.query_row("PRAGMA journal_mode=WAL", [], |r| r.get::<_, String>(0)) {

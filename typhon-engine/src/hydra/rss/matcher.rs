@@ -404,7 +404,7 @@ fn episode_in(ranges: &[EpisodeRange], title: &str) -> bool {
     };
     ranges
         .iter()
-        .any(|r| ep >= r.from && r.to.map_or(true, |to| ep <= to))
+        .any(|r| ep >= r.from && r.to.is_none_or(|to| ep <= to))
 }
 
 /// The (season, episode) a title names: `S01E05`, `s1.e5`, `S01 E05`, `1x05`.

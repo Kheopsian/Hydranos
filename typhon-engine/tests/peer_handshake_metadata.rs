@@ -351,8 +351,7 @@ async fn a_dict_that_does_not_hash_to_the_info_hash_is_refused() {
     let addr = peer_in_mode(&dict, Mode::Tampered).await;
     let err = ask(addr, sha1_of(&dict))
         .await
-        .err()
-        .expect("tampered bytes must not pass");
+        .expect_err("tampered bytes must not pass");
     assert!(err.contains("does not hash"), "{err}");
 }
 
@@ -364,8 +363,7 @@ async fn a_genuine_dict_of_another_torrent_is_refused() {
     let addr = peer_in_mode(&dict, Mode::Good).await;
     let err = ask(addr, [0x11; 20])
         .await
-        .err()
-        .expect("another torrent's dict");
+        .expect_err("another torrent's dict");
     // The fake peer's handshake answers with the hash it was built for; the
     // dial fails on the mismatch before any metadata moves.
     assert_eq!(err, "no connection");
@@ -379,8 +377,7 @@ async fn a_block_of_the_wrong_length_is_an_error() {
     let addr = peer_in_mode(&dict, Mode::ShortBlock).await;
     let err = ask(addr, sha1_of(&dict))
         .await
-        .err()
-        .expect("a short last block");
+        .expect_err("a short last block");
     assert_eq!(err, "block 1 is 499 bytes, expected 500");
 }
 
@@ -389,7 +386,7 @@ async fn a_block_of_the_wrong_length_is_an_error() {
 async fn a_rejected_block_ends_the_attempt() {
     let dict = dict_of(20_000);
     let addr = peer_in_mode(&dict, Mode::Reject).await;
-    let err = ask(addr, sha1_of(&dict)).await.err().expect("rejected");
+    let err = ask(addr, sha1_of(&dict)).await.expect_err("rejected");
     assert!(err.starts_with("peer rejected block"), "{err}");
 }
 
@@ -418,7 +415,7 @@ async fn a_peer_that_cannot_serve_metadata_says_why() {
 async fn a_claimed_size_over_the_cap_is_refused_before_allocating() {
     let dict = dict_of(20_000);
     let addr = peer_in_mode(&dict, Mode::TooBig).await;
-    let err = ask(addr, sha1_of(&dict)).await.err().expect("over the cap");
+    let err = ask(addr, sha1_of(&dict)).await.expect_err("over the cap");
     assert_eq!(
         err,
         format!(

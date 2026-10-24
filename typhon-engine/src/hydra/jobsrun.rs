@@ -216,7 +216,7 @@ fn graduate(state: &AppState, job: &crate::store::Job) -> Result<(), String> {
     let hash = job.info_hash.clone();
 
     let src = state.engines.get(&from).ok_or("source engine is gone")?;
-    let ih = typhon_engine::torrent::hex_decode(&hash).map_err(|e| e)?;
+    let ih = typhon_engine::torrent::hex_decode(&hash)?;
     let dst = state.engines.get(&to).ok_or("target engine is gone")?;
     // The metainfo must be reachable before anything moves: the target
     // adopts by reading it from the store.
@@ -1395,7 +1395,7 @@ fn record_had_data(
         return false;
     }
     let hex = record.bitfield.as_bytes();
-    if hex.len() % 2 != 0 || !hex.iter().all(u8::is_ascii_hexdigit) {
+    if !hex.len().is_multiple_of(2) || !hex.iter().all(u8::is_ascii_hexdigit) {
         return false;
     }
     let selected = record

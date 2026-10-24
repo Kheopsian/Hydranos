@@ -232,7 +232,7 @@ pub fn scan_engine(
         // nothing else can see it.
         if status == TorrentStatus::Downloading as u8 || status == TorrentStatus::Seeding as u8 {
             let save_path = t.save_path.read().clone();
-            if save_path.as_os_str().len() > 0 {
+            if !save_path.as_os_str().is_empty() {
                 let exists = match report.ghost_dirs.get(&save_path) {
                     Some(e) => *e,
                     None => {
@@ -704,7 +704,7 @@ mod scan_tests {
         t.is_paused.store(false, Ordering::Relaxed);
 
         let mut r = Report::default();
-        scan_engine("race", &[t.clone()], |_| 12, no_outage, &mut r);
+        scan_engine("race", std::slice::from_ref(&t), |_| 12, no_outage, &mut r);
         assert!(
             kinds(&r).contains(&STARVED.to_string()),
             "got {:?}",
@@ -714,7 +714,7 @@ mod scan_tests {
         // Connected to someone: not starved, whatever the swarm holds.
         t.peers_connected.store(3, Ordering::Relaxed);
         let mut r2 = Report::default();
-        scan_engine("race", &[t.clone()], |_| 12, no_outage, &mut r2);
+        scan_engine("race", std::slice::from_ref(&t), |_| 12, no_outage, &mut r2);
         assert!(!kinds(&r2).contains(&STARVED.to_string()));
 
         // Paused on purpose: having no peer is the point, not a fault.
