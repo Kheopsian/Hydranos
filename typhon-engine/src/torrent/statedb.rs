@@ -299,19 +299,22 @@ impl StateDb {
     /// are. Rolling back to a build that predates this module is then just a
     /// matter of running it -- it finds its directory untouched. Cleaning up is
     /// a separate, deliberate act once the operator is satisfied.
-    pub fn import_legacy(&self, resume_dir: &str) -> usize {
-        let records = super::fastresume::load_all(resume_dir);
+    ///
+    /// Returns how many were imported, and the name of every file that could
+    /// not be read: those torrents are not imported, and not gone.
+    pub fn import_legacy(&self, resume_dir: &str) -> (usize, Vec<String>) {
+        let (records, unreadable) = super::fastresume::load_all_reporting(resume_dir);
         if records.is_empty() {
-            return 0;
+            return (0, unreadable);
         }
         match self.put_batch(&records) {
             Ok(n) => {
                 info!("[statedb] imported {} legacy resume records (JSON files left in place)", n);
-                n
+                (n, unreadable)
             }
             Err(e) => {
                 warn!("[statedb] legacy import failed: {}", e);
-                0
+                (0, unreadable)
             }
         }
     }
