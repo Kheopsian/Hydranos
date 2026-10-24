@@ -14627,6 +14627,9 @@ async fn post_password(
         )
             .into_response();
     }
+    // Every cookie was opened with the old password. One that outlives the
+    // change keeps whoever holds it in, for as long as it is used.
+    state.sessions.revoke_all();
     tracing::info!("admin password changed");
     Json(serde_json::json!({"status": "ok"})).into_response()
 }

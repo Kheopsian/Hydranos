@@ -100,6 +100,11 @@ impl Sessions {
         map.remove(sid);
     }
 
+    /// Drop every session: the password they were opened with is gone.
+    pub fn revoke_all(&self) {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    }
+
     #[cfg(test)]
     fn len(&self) -> usize {
         self.inner.lock().unwrap_or_else(|e| e.into_inner()).len()

@@ -240,3 +240,36 @@ async fn every_route_but_the_open_ones_refuses_a_caller_with_no_key() {
 fn the_code_opens_exactly_the_listed_paths() {
     assert_eq!(OPEN_PATHS, OPEN);
 }
+
+/// A session cookie, as the *arr stack carries it.
+fn cookie_of(s: &AppState) -> String {
+    format!("SID={}", s.sessions.create())
+}
+
+/// Changing the password ends every session. A cookie that was valid a moment
+/// ago is how whoever held it keeps their access past the change, and the
+/// session lives an hour from its last use however often it is used.
+#[tokio::test]
+async fn changing_the_password_ends_every_session() {
+    let old = bcrypt::hash("old-password", 4).unwrap();
+    let s = state_from(
+        "pw-sessions",
+        &format!("[daemon]\napi_key = \"{KEY}\"\n\n[auth]\nusername = \"admin\"\npassword_hash = \"{old}\"\n"),
+    );
+    let cookie = cookie_of(&s.state);
+    let mut h = axum::http::HeaderMap::new();
+    h.insert(axum::http::header::COOKIE, cookie.parse().unwrap());
+    assert!(authorised(&s.state, &h, ""), "the session is live before the change");
+
+    let r = post_password(
+        State(s.state.clone()),
+        RawQuery(None),
+        keyed(KEY),
+        r#"{"password":"new-password"}"#.into(),
+    )
+    .await;
+    assert_eq!(r.status(), StatusCode::OK);
+
+    assert!(!authorised(&s.state, &h, ""), "the session did not survive the change");
+    assert!(authorised(&s.state, &keyed(KEY), ""), "the key is not a session and still works");
+}
