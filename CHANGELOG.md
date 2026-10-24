@@ -103,6 +103,9 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   engine's state store cannot write its record, before anything is inserted,
   so the files go back and the source keeps the torrent, instead of the
   target holding it in memory only.
+- A torrent add whose record the engine's state store cannot write is
+  refused, on every add route, with nothing left in the engine or the store,
+  instead of running in memory until the next start forgets it.
 - The interface no longer puts the API key in an address. The live streams
   (torrents, logs, qBittorrent import), the selection export and the node
   link authenticate with the session cookie the page opens when it loads; the

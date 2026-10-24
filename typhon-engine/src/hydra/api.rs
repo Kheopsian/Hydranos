@@ -22370,6 +22370,25 @@ mod write_path_tests {
         assert_eq!(*race.manager.get(&ih).unwrap().live_trackers.read(), trackers_before);
     }
 
+    /// An add the engine's state store refused is answered with an error, and
+    /// leaves no torrent in the engine and no row in the hub's store. Every
+    /// add route (native, qBittorrent shim, MCP, magnets) goes through this.
+    #[tokio::test]
+    async fn an_add_the_engine_store_did_not_keep_is_refused() {
+        let s = state_from("add-store-down", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+        let conn = rusqlite::Connection::open(s.dir.join("race").join("state.db")).unwrap();
+        conn.execute("DROP TABLE torrent_state", []).unwrap();
+        drop(conn);
+
+        let bytes = torrent_bytes("alpha");
+        let ih = typhon_engine::torrent::metainfo::parse_torrent_bytes(&bytes).unwrap().info_hash;
+        let r = add_torrent_bytes(&s.state, &bytes, "", "/tmp", "", true, true, "race");
+        assert!(r.is_err(), "the engine's store refused the record, so the answer is no: {r:?}");
+        assert!(s.state.engines.get("race").unwrap().manager.get(&ih).is_none(), "no torrent is left in the engine");
+        let hash = typhon_engine::torrent::hex_encode(&ih);
+        assert!(!s.state.store.lock().unwrap().has_torrent_blob(&hash), "nor a row in the hub's store");
+    }
+
     /// A job created by the daemon is listed and can be read back by id -- the
     /// UI polls on exactly this.
     #[tokio::test]
