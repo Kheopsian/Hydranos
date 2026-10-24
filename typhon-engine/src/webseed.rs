@@ -417,7 +417,12 @@ fn reserve_run(
     };
     let mut run = Vec::new();
     let mut bytes = meta.piece_size(first) as u64;
-    p.start_piece(first, meta.piece_size(first), BLOCK_SIZE, owner);
+    // The engine's download memory is the peers' as much as the mirror's:
+    // with it spent, start nothing, and grow the run only as far as it admits.
+    // The check and the reservation are one step (see `start_piece_within_budget`).
+    if p.start_piece_within_budget(first, meta.piece_size(first), BLOCK_SIZE, owner).is_none() {
+        return Vec::new();
+    }
     run.push(first);
 
     let mut next = first + 1;
@@ -430,7 +435,9 @@ fn reserve_run(
             break;
         }
         let sz = meta.piece_size(next);
-        p.start_piece(next, sz, BLOCK_SIZE, owner);
+        if p.start_piece_within_budget(next, sz, BLOCK_SIZE, owner).is_none() {
+            break;
+        }
         run.push(next);
         bytes += sz as u64;
         next += 1;
@@ -449,7 +456,6 @@ async fn drive_torrent(
     // Availability is deliberately NOT incremented anywhere for a webseed:
     // the swarm availability figure describes peers, and an HTTP mirror is
     // not one.
-    let num_pieces = t.meta.num_pieces();
     let mut done = 0u32;
     let mut budget = MAX_PIECES_PER_CLAIM;
     // This run's identity on the picker, as a peer session has one: its
@@ -475,6 +481,9 @@ async fn drive_torrent(
             reserve_run(&mut p, &t.meta, owner, budget)
         };
         if run.is_empty() {
+            // Nothing missing, or the engine's budget is spent: come back when
+            // pieces in flight have been written, not in a tight loop.
+            tokio::time::sleep(Duration::from_millis(500)).await;
             break;
         }
 
@@ -1083,6 +1092,38 @@ mod tests {
             "http://h/a%20b/dir/%C3%A9%20f.txt"
         );
     }
+
+    /// A four-piece torrent whose picker counts in an engine budget of `budget` bytes.
+    fn budgeted(budget: u64) -> (TorrentMeta, crate::torrent::piece_picker::PiecePicker) {
+        use crate::torrent::piece_picker::{PieceMem, PiecePicker};
+        let mut m = meta(false, "w", vec![("a.bin", 4 * 16384)]);
+        m.num_pieces = 4;
+        let mem = Arc::new(PieceMem::default());
+        mem.set_budget(budget);
+        let mut p = PiecePicker::new(4);
+        p.attach_mem(mem);
+        (m, p)
+    }
+
+    /// ⭐ A webseed spends the same download memory a peer does: with the
+    /// engine's budget used up by a piece in flight, it starts nothing.
+    #[test]
+    fn a_webseed_starts_no_piece_when_the_budget_is_spent() {
+        let (m, mut p) = budgeted(16384);
+        assert!(p.start_piece_within_budget(3, 16384, BLOCK_SIZE, 1).is_some());
+        let run = reserve_run(&mut p, &m, 2, 64);
+        assert!(run.is_empty(), "no room, no run: {run:?}");
+        assert!(!p.is_pending(0), "and nothing was reserved behind its back");
+    }
+
+    /// ⭐ A run stops growing where the budget runs out, instead of reserving
+    /// every piece up to the byte target regardless of it.
+    #[test]
+    fn a_webseed_run_stops_where_the_budget_runs_out() {
+        let (m, mut p) = budgeted(2 * 16384);
+        let run = reserve_run(&mut p, &m, 2, 64);
+        assert_eq!(run, vec![0, 1], "two pieces fit the budget, not four");
+    }
 }
 
 #[cfg(test)]
@@ -1309,4 +1350,5 @@ mod gate_tests {
     fn unreserved_characters_are_left_alone() {
         assert_eq!(enc_segment("A-Z_a-z.0-9~"), "A-Z_a-z.0-9~");
     }
+
 }
