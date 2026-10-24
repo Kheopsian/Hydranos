@@ -1040,6 +1040,10 @@ pub fn spawn(state: AppState) {
             tokio::select! {
                 _ = tokio::time::sleep(TICK) => {}
                 _ = wake().notified() => {}
+                _ = typhon_engine::stop::global().wait() => return,
+            }
+            if crate::shutdown::stopping() {
+                return;
             }
             tick(&state).await;
         }

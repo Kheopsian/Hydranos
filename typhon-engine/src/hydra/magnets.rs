@@ -574,7 +574,9 @@ pub fn routes() -> axum::Router<AppState> {
 pub fn spawn(state: AppState) {
     tokio::spawn(async move {
         loop {
-            tokio::time::sleep(Duration::from_secs(2)).await;
+            if !crate::shutdown::sleep(Duration::from_secs(2)).await {
+                return;
+            }
             let st = state.clone();
             let _ = tokio::task::spawn_blocking(move || drive(&st)).await;
         }

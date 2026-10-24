@@ -48,7 +48,9 @@ pub async fn choking_loop(torrent_mgr: Arc<TorrentManager>) {
     ticker.tick().await;
     let mut was_active = false;
     loop {
-        ticker.tick().await;
+        if !crate::stop::global().tick(&mut ticker).await {
+            return;
+        }
         was_active = choke_pass(torrent_mgr.policy(), || torrent_mgr.all(), was_active);
     }
 }

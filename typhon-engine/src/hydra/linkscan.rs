@@ -150,6 +150,11 @@ fn run(engines: Arc<EngineHost>, store: Arc<StoreLock>) {
     let mut summary_stale = refresh_summary(&engines, &store).is_none();
     std::thread::sleep(SETTLE);
     loop {
+        // Between two passes, and between two batches in `sweep`: a batch
+        // that has started is written whole.
+        if crate::shutdown::stopping() {
+            return;
+        }
         // One snapshot per sweep, not per batch: reading a million rows and
         // walking a million torrents is seconds, not something to redo every
         // two thousand torrents. The catalogue holds no paths -- each batch
@@ -242,6 +247,9 @@ fn sweep(cat: &[CatalogueEntry], order: &[usize], store: &StoreLock, engines: &E
         if summarised.elapsed() >= SUMMARY_EVERY {
             refresh_summary(engines, store);
             summarised = std::time::Instant::now();
+        }
+        if crate::shutdown::stopping() {
+            return;
         }
         std::thread::sleep(PAUSE);
     }

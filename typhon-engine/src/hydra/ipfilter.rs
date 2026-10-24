@@ -228,7 +228,9 @@ pub fn spawn(state: AppState) {
         reload(&state).await;
         let mut last = crate::store::now_secs();
         loop {
-            tokio::time::sleep(Duration::from_secs(60)).await;
+            if !crate::shutdown::sleep(Duration::from_secs(60)).await {
+                return;
+            }
             let s = settings(&state);
             let changed = LOADED
                 .lock()
