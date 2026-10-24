@@ -869,20 +869,23 @@ mod tests {
     fn a_tracker_pass_is_published_and_stored() {
         let s = state_from("bs-pass", "");
         add(&s, "race", "p1", Some("https://pass-only.example/announce"));
-        let bench = memory_bench();
         // The published rows are process-wide and another test's sampler task
         // may publish its own pass between ours and the read: take another
-        // pass until the rows read back are the ones we just made.
-        let mut live = None;
+        // pass until the rows read back are the ones we just made. Each try
+        // stores into a fresh bench, so what is stored is that one pass, not
+        // two passes that landed in the same second.
+        let mut found = None;
         for _ in 0..50 {
+            let bench = memory_bench();
             sample_trackers(&s.engines, &bench, &s.store).expect("pass");
-            live = latest_trackers()
-                .filter(|rows| rows.iter().any(|r| r.tracker == "pass-only.example"));
-            if live.is_some() {
+            if let Some(rows) = latest_trackers()
+                .filter(|rows| rows.iter().any(|r| r.tracker == "pass-only.example"))
+            {
+                found = Some((rows, bench));
                 break;
             }
         }
-        let live = live
+        let (live, bench) = found
             .expect("the live table shows the pass just made, not nothing or a placeholder row");
         let row = live
             .iter()
