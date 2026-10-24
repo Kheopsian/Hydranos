@@ -522,7 +522,18 @@ const RUNTIME_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
 /// queued again at the next start (`requeue_running_jobs`), a store
 /// transaction cut short is rolled back whole, and a periodic pass is redone.
 fn finish_runtime(runtime: tokio::runtime::Runtime, grace: std::time::Duration) {
+    let started = std::time::Instant::now();
     runtime.shutdown_timeout(grace);
+    // Taking the whole grace means blocking work was still running and was
+    // let go of; finishing early means nothing was.
+    if started.elapsed() >= grace {
+        tracing::warn!(
+            grace_s = grace.as_secs_f64(),
+            "blocking work still running {} s after the final flush was abandoned; \
+             a job that was running is resumed at the next start",
+            grace.as_secs_f64()
+        );
+    }
 }
 
 async fn async_main(workers: usize) -> anyhow::Result<()> {
@@ -1637,6 +1648,62 @@ mod runtime_exit_tests {
         assert!(
             done.load(Ordering::SeqCst),
             "the runtime closed on a write that was still running"
+        );
+    }
+
+    #[derive(Clone, Default)]
+    struct Captured(Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for Captured {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// The log lines `finish_runtime` writes with `blocking_secs` of blocking
+    /// work still running when the grace is 200 ms.
+    fn logged_closing(blocking: Duration) -> String {
+        let rt = runtime();
+        let (started_tx, started_rx) = std::sync::mpsc::channel::<()>();
+        rt.spawn_blocking(move || {
+            let _ = started_tx.send(());
+            std::thread::sleep(blocking);
+        });
+        started_rx.recv().unwrap();
+        let out = Captured::default();
+        let sink = out.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || sink.clone())
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            finish_runtime(rt, Duration::from_millis(200));
+        });
+        let text = String::from_utf8_lossy(&out.0.lock().unwrap()).into_owned();
+        text
+    }
+
+    /// ⭐ When the grace runs out on work that is still running, the log says
+    /// so, with the grace and what becomes of the work.
+    #[test]
+    fn abandoned_blocking_work_is_said_in_the_log() {
+        let log = logged_closing(Duration::from_secs(2));
+        assert!(
+            log.contains("WARN") && log.contains("abandoned") && log.contains("next start"),
+            "nothing says the work was abandoned: {log:?}"
+        );
+    }
+
+    /// No line when everything finished in time.
+    #[test]
+    fn nothing_is_logged_when_the_blocking_work_ends_in_time() {
+        let log = logged_closing(Duration::from_millis(20));
+        assert!(
+            !log.contains("abandoned"),
+            "a line for work that finished: {log:?}"
         );
     }
 }
