@@ -26,17 +26,18 @@ pub fn restart_requested() -> bool {
     RESTART.load(Ordering::SeqCst)
 }
 
-static STOPPING: AtomicBool = AtomicBool::new(false);
-
 /// The stop has begun. Set when the drain starts, so the streams that never
 /// end on their own (the event stream, the log tail) end themselves instead
 /// of holding the drain for its whole 5 s budget.
+///
+/// It is the signal of `typhon_engine::stop`, so the same call also ends the
+/// background loops between two iterations and closes the peer listeners.
 pub fn begin_stop() {
-    STOPPING.store(true, Ordering::SeqCst);
+    typhon_engine::stop::global().begin();
 }
 
 pub fn stopping() -> bool {
-    STOPPING.load(Ordering::SeqCst)
+    typhon_engine::stop::global().is_set()
 }
 
 /// Leave with the restart code. On Windows nothing supervises the process,

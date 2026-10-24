@@ -645,7 +645,7 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
     if shutdown::stopping() {
         tracing::warn!("stop requested during startup; flushing and leaving");
         engine_host.depart_all(std::time::Duration::from_secs(5)).await;
-        flush_on_shutdown(&engine_host, stop_budget);
+        flush_on_shutdown(&engine_host, stop_budget).await;
         let _ = engine_host.wireguard_down().await;
         return Ok(());
     }
@@ -1091,7 +1091,7 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
     // stop_tracker_timeout: trackers stop sending leechers to a client that
     // is going away. 4.3 sent none.
     engines_for_shutdown.depart_all(std::time::Duration::from_secs(5)).await;
-    flush_on_shutdown(&engines_for_shutdown, stop_budget);
+    flush_on_shutdown(&engines_for_shutdown, stop_budget).await;
     // After the flush, not before: the departures above leave through the
     // tunnels. Under --network host the devices would outlive the process.
     let tunnels = engines_for_shutdown.wireguard_down().await;
@@ -1333,7 +1333,7 @@ mod stop_timeout_tests {
 ///
 /// Engines are flushed on threads of their own: one slow disk must not spend
 /// another engine's share of the budget.
-fn flush_on_shutdown(engines: &std::sync::Arc<engines::EngineHost>, budget: std::time::Duration) {
+async fn flush_on_shutdown(engines: &std::sync::Arc<engines::EngineHost>, budget: std::time::Duration) {
     let started = std::time::Instant::now();
 
     let handles: Vec<_> = engines
@@ -1351,11 +1351,21 @@ fn flush_on_shutdown(engines: &std::sync::Arc<engines::EngineHost>, budget: std:
         })
         .collect();
 
-    // The budget is enforced here: past it, the process leaves with what is
-    // written. 4.3 joined every thread unconditionally, so the variable only
-    // chose which log line to print. Each engine's resume store commits a
-    // few thousand rows at a time, so leaving mid-sweep loses the unwritten
-    // rest, not the written part.
+    wait_for_flush(handles, started, budget).await;
+}
+
+/// Wait for the flush threads, until `budget` has gone by since `started`.
+///
+/// The budget is enforced here: past it, the process leaves with what is
+/// written. 4.3 joined every thread unconditionally, so the variable only
+/// chose which log line to print. Each engine's resume store commits a
+/// few thousand rows at a time, so leaving mid-sweep loses the unwritten
+/// rest, not the written part.
+async fn wait_for_flush(
+    handles: Vec<std::thread::JoinHandle<()>>,
+    started: std::time::Instant,
+    budget: std::time::Duration,
+) {
     for h in handles {
         while !h.is_finished() && started.elapsed() < budget {
             std::thread::sleep(std::time::Duration::from_millis(50));
