@@ -305,11 +305,12 @@ impl EngineHost {
     /// mode is saved. Engines pinned to them reach nobody until restarted,
     /// which is the point -- they must not fall back to the default route.
     pub async fn wireguard_down(&self) -> usize {
-        let reg = self.wireguard.clone();
-        let dir = self.wireguard_dir.clone();
-        tokio::task::spawn_blocking(move || {
-            crate::wgtunnel::down_all(&mut crate::wgtunnel::System, &dir, &reg)
-        })
+        crate::wgtunnel::down_all_within(
+            crate::wgtunnel::DOWN_BUDGET,
+            crate::wgtunnel::System,
+            self.wireguard_dir.clone(),
+            self.wireguard.clone(),
+        )
         .await
         .unwrap_or(0)
     }
