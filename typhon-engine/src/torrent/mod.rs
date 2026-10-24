@@ -1018,7 +1018,11 @@ impl TorrentManager {
             down_limit: 0,
             download_order: None,
         };
-        self.persist(&ih, &rd);
+        // The record first, then the torrent: a store that refuses it refuses
+        // the add, with nothing inserted and the error going back to the
+        // caller. Only an add pays this: startup reads its records from the
+        // store through its own loader and never comes through here.
+        self.persist_before_insert(&ih, &rd)?;
 
         let state_arc = Arc::new(state);
         let total_size = state_arc.meta.total_size;
@@ -4440,6 +4444,26 @@ mod manager_tests {
         assert!(src.get(&ih).is_some(), "the source still holds it");
         let _ = std::fs::remove_dir_all(root);
         let _ = std::fs::remove_dir_all(root2);
+    }
+
+    /// An add the state store refused is refused: the torrent is in no
+    /// catalogue, counted under no folder and left as no file, instead of
+    /// running in memory until a restart forgets it.
+    #[test]
+    fn an_add_the_store_did_not_keep_is_refused() {
+        let (mgr, root) = manager("add-store-down");
+        let conn = rusqlite::Connection::open(root.join("state.db")).unwrap();
+        conn.execute("DROP TABLE torrent_state", []).unwrap();
+        drop(conn);
+
+        let bytes = torrent_bytes("alpha", &["https://tracker.example/announce"]);
+        let ih = metainfo::parse_torrent_bytes(&bytes).unwrap().info_hash;
+        let r = mgr.add_torrent_bytes(&bytes, &root.join("data").to_string_lossy(), true, false);
+        assert!(r.is_err(), "the store refused the record, so the answer is no: {r:?}");
+        assert!(mgr.get(&ih).is_none(), "and no torrent is in the catalogue");
+        assert!(mgr.save_paths().is_empty(), "nor counted under a folder");
+        assert!(!root.join("resume").join(format!("{}.json", hex_encode(&ih))).exists(), "nor left as a file a later start would read");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// A tracker list the state store could not keep is not acknowledged: the
