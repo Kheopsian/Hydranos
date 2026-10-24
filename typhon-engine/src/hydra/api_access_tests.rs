@@ -486,6 +486,7 @@ fn the_repair_screen_asks_for_the_key_not_a_login() {
     assert!(!screen.contains("promptLogin("), "promptLogin posts to /api/login, which rescue mode does not serve");
     assert!(screen.matches("promptApiKey(").count() >= 2, "the restart answers a 401 the same way");
 }
+
 async fn rescue_json(app: &Router, method: &str, uri: &str, key: Option<&str>) -> (StatusCode, serde_json::Value) {
     let mut b = axum::http::Request::builder().method(method).uri(uri);
     if let Some(k) = key {
@@ -570,6 +571,81 @@ async fn the_repair_answer_carries_what_the_screen_reads() {
     assert_eq!(done["repaired"], true, "{done}");
     assert!(done["results"][0]["error"].is_null(), "{done}");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn password_change_over(tag: &str) -> TestState {
+    let hash = bcrypt::hash("old-password", 4).unwrap();
+    state_from(
+        tag,
+        &format!("[daemon]\napi_key = \"{KEY}\"\n\n[auth]\nusername = \"admin\"\npassword_hash = \"{hash}\"\n"),
+    )
+}
+
+async fn change_password(s: &AppState, ip: &str, body: serde_json::Value) -> StatusCode {
+    let req = axum::http::Request::builder()
+        .method("POST")
+        .uri("/api/auth/password")
+        .header("x-api-key", KEY)
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(body.to_string()))
+        .unwrap();
+    call(s, ip, req).await.status()
+}
+
+fn stored_accepts(s: &AppState, password: &str) -> bool {
+    bcrypt::verify(password, &s.cfg().auth.password_hash).unwrap()
+}
+
+/// `old_password` is optional. Given and wrong, nothing changes; given and
+/// right, or left out, the change goes through as it always did.
+#[tokio::test]
+async fn a_wrong_old_password_changes_nothing() {
+    let s = password_change_over("oldpw-wrong");
+    let code = change_password(&s, "10.0.0.7", serde_json::json!({"password": "new-password", "old_password": "nope"})).await;
+    assert_eq!(code, StatusCode::FORBIDDEN);
+    assert!(stored_accepts(&s, "old-password"), "the old password still works");
+    assert!(!stored_accepts(&s, "new-password"));
+
+    let code = change_password(&s, "10.0.0.7", serde_json::json!({"password": "new-password", "old_password": ""})).await;
+    assert_eq!(code, StatusCode::FORBIDDEN, "an empty old password is a wrong one");
+    assert!(stored_accepts(&s, "old-password"));
+}
+
+#[tokio::test]
+async fn the_right_old_password_or_none_lets_the_change_through() {
+    let s = password_change_over("oldpw-right");
+    let code = change_password(&s, "10.0.0.7", serde_json::json!({"password": "new-password", "old_password": "old-password"})).await;
+    assert_eq!(code, StatusCode::OK);
+    assert!(stored_accepts(&s, "new-password"));
+
+    let s = password_change_over("oldpw-absent");
+    let code = change_password(&s, "10.0.0.7", serde_json::json!({"password": "new-password"})).await;
+    assert_eq!(code, StatusCode::OK, "no old password: the behaviour is the one it was");
+    assert!(stored_accepts(&s, "new-password"));
+}
+
+/// A wrong old password is a failed login: five of them from one caller block
+/// it on every route that counts, the login included, and a right one is
+/// refused while it lasts.
+#[tokio::test]
+async fn a_wrong_old_password_counts_in_the_failed_login_limit() {
+    let s = password_change_over("oldpw-limit");
+    for _ in 0..5 {
+        let code = change_password(&s, "10.0.0.7", serde_json::json!({"password": "new-password", "old_password": "nope"})).await;
+        assert_eq!(code, StatusCode::FORBIDDEN);
+    }
+    let code = change_password(&s, "10.0.0.7", serde_json::json!({"password": "new-password", "old_password": "old-password"})).await;
+    assert_eq!(code, StatusCode::TOO_MANY_REQUESTS, "blocked, even with the right one");
+    assert!(stored_accepts(&s, "old-password"));
+    let login = axum::http::Request::builder()
+        .method("POST")
+        .uri("/api/login")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(r#"{"username":"admin","password":"old-password"}"#))
+        .unwrap();
+    assert_eq!(call(&s, "10.0.0.7", login).await.status(), StatusCode::TOO_MANY_REQUESTS, "the same limit as the login");
+    let code = change_password(&s, "10.0.0.8", serde_json::json!({"password": "new-password", "old_password": "old-password"})).await;
+    assert_eq!(code, StatusCode::OK, "another caller is untouched");
 }
 
 fn rpc_post(
@@ -687,4 +763,3 @@ async fn the_uri_authority_stands_in_for_a_missing_host_header() {
     let r = call(&s.state, "10.0.0.7", h2("/api/hoard/pause-all", "http://hydra.lan:8199")).await;
     assert_eq!(r.status(), StatusCode::FORBIDDEN, "no host and no authority: no match");
 }
-

@@ -35,6 +35,10 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   on, so the screen is shown instead of a page that never loads. The repair
   answer carries `repaired` (true when the conversion worked), the field the
   screen reads to go on to the restart; `ran` is unchanged.
+- `POST /api/auth/password` takes an optional `old_password`. When it is
+  given and wrong, nothing changes (403) and the failure counts in the
+  failed-login limit; a blocked caller gets 429. Left out, the change is what
+  it was: the API key is enough.
 - Rescue mode (the database cannot be opened): `POST /api/store/repair` and
   `POST /api/settings/restart` want the API key of the config file in
   `X-Api-Key`; they used to answer anyone. A script that calls them sends the
