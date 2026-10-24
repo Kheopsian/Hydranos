@@ -1213,7 +1213,14 @@ async function showStoreRepairModal() {
         btn = fresh;
         btn.addEventListener("click", async () => {
             btn.disabled = true;
-            try { await fetch("/api/settings/restart", { method: "POST", headers: { "X-Api-Key": API_KEY } }); } catch (_) {}
+            try {
+                const r = await fetch("/api/settings/restart", { method: "POST", headers: { "X-Api-Key": API_KEY } });
+                if (r.status === 401) {
+                    ov.remove();
+                    promptApiKey(t("Enter the API key of the config file to restart Hydranos."));
+                    return;
+                }
+            } catch (_) {}
             msg.textContent = t("Hydranos is stopping. Under Docker or systemd it comes back on its own; if you started it by hand, start it again.");
             setTimeout(() => location.reload(), 8000);
         });
@@ -1245,10 +1252,11 @@ async function showStoreRepairModal() {
             // Step aside rather than stacking a second full-screen overlay on
             // the first: both carry the same z-index, so which one takes the
             // clicks is a matter of DOM order, and a login box you cannot type
-            // into is worse than no login box. Signing in ends in a reload,
-            // which brings this screen straight back, key in hand.
+            // into is worse than no login box. Saving the key ends in a reload,
+            // which brings this screen straight back, key in hand. The key
+            // itself, not a login: the rescue surface has no /api/login.
             ov.remove();
-            promptLogin(t("Signing in lets Hydranos repair the database."));
+            promptApiKey(t("Hydranos needs the API key of the config file ([daemon] api_key) to repair the database."));
             return;
         }
         const results = body.results || [];
@@ -1256,7 +1264,7 @@ async function showStoreRepairModal() {
         if (!body.repaired || failed.length) {
             msg.style.color = "var(--accent-red)";
             msg.innerHTML = failed.map(r => t("{name}: {err}", { name: esc(r.name), err: esc(r.error) })).join("<br>")
-                || t("The conversion did not complete.");
+                || esc(body.error || "") || t("The conversion did not complete.");
             btn.disabled = false;
             return;
         }

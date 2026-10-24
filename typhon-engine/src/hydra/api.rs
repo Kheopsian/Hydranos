@@ -16062,9 +16062,9 @@ pub struct RescueState {
     pub config_path: std::path::PathBuf,
 }
 
-async fn rescue_status(State(state): State<RescueState>) -> Response {
+fn rescue_status_json(state: &RescueState) -> serde_json::Value {
     let d = &state.diagnosis;
-    Json(serde_json::json!({
+    serde_json::json!({
         "needed": d.needs_repair(),
         "targets": [{"name": "store", "path": d.path}],
         "on_network": d.on_network,
@@ -16075,12 +16075,44 @@ async fn rescue_status(State(state): State<RescueState>) -> Response {
         // checkpointed on a filesystem that can lock it first.
         "hot_wal": d.hot_wal,
         "ran": false,
+        "repaired": false,
         "results": serde_json::Value::Null,
-    }))
-    .into_response()
+    })
 }
 
-async fn rescue_repair(State(state): State<RescueState>) -> Response {
+async fn rescue_status(State(state): State<RescueState>) -> Response {
+    Json(rescue_status_json(&state)).into_response()
+}
+
+/// `GET /api/setup` in rescue mode: the same explanation, plus the flag the
+/// interface opens its repair screen on. The normal `/api/setup` says `false`
+/// there; only a daemon that could not open its store says `true`.
+async fn rescue_setup(State(state): State<RescueState>) -> Response {
+    let mut json = rescue_status_json(&state);
+    json["store_repair"] = serde_json::Value::Bool(true);
+    Json(json).into_response()
+}
+
+/// The key of the config file, in `X-Api-Key`. The store is not open in rescue
+/// mode, so the file is the one place the key is kept; it is read per request
+/// so a key rotated by hand is the one that counts. No key in the file, or a
+/// file that cannot be read, opens nothing. The header only: no address.
+fn rescue_authorised(state: &RescueState, headers: &HeaderMap) -> bool {
+    let Ok(cfg) = Config::load(&state.config_path) else {
+        return false;
+    };
+    let expected = cfg.daemon.api_key;
+    let provided = headers
+        .get("X-Api-Key")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    !expected.is_empty() && !provided.is_empty() && constant_time_eq(provided.as_bytes(), expected.as_bytes())
+}
+
+async fn rescue_repair(State(state): State<RescueState>, headers: HeaderMap) -> Response {
+    if !rescue_authorised(&state, &headers) {
+        return unauthorised();
+    }
     let d = &state.diagnosis;
     if !d.needs_repair() {
         return rescue_status(State(state.clone())).await;
@@ -16105,6 +16137,7 @@ async fn rescue_repair(State(state): State<RescueState>) -> Response {
     match crate::walrepair::convert(path) {
         Ok(method) => Json(serde_json::json!({
             "ran": true,
+            "repaired": true,
             "results": [{"name": "store", "backup": backup, "method": method}],
         }))
         .into_response(),
@@ -16115,6 +16148,7 @@ async fn rescue_repair(State(state): State<RescueState>) -> Response {
             if d.hot_wal { StatusCode::CONFLICT } else { StatusCode::INTERNAL_SERVER_ERROR },
             Json(serde_json::json!({
                 "ran": true,
+                "repaired": false,
                 "results": [{"name": "store", "backup": backup, "error": e}],
             })),
         )
@@ -16122,7 +16156,10 @@ async fn rescue_repair(State(state): State<RescueState>) -> Response {
     }
 }
 
-async fn rescue_restart() -> Response {
+async fn rescue_restart(State(state): State<RescueState>, headers: HeaderMap) -> Response {
+    if !rescue_authorised(&state, &headers) {
+        return unauthorised();
+    }
     // Rescue mode runs no engine: nothing to flush, but the exit code must
     // still read as "bring me back" to systemd.
     tokio::spawn(async {
@@ -16132,12 +16169,13 @@ async fn rescue_restart() -> Response {
     Json(serde_json::json!({"status": "restarting"})).into_response()
 }
 
-/// The rescue surface. Six routes, no more.
+/// The rescue surface. Six routes, no more. The two that act (repair and
+/// restart) want the key of the config file; the rest only explain.
 pub fn rescue_router(state: RescueState) -> Router {
     Router::new()
         .route("/health", get(|| async { "ok" }))
         .route("/", get(|| async { "hydra: the store could not be opened" }))
-        .route("/api/setup", get(rescue_status))
+        .route("/api/setup", get(rescue_setup))
         .route("/api/store/repair", get(rescue_status).post(rescue_repair))
         .route("/api/settings/restart", axum::routing::post(rescue_restart))
         .with_state(state)

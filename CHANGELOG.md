@@ -30,6 +30,17 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 - `/mcp` is opened by the API key or a bearer token only, no longer by the
   session cookie. The interface never calls it, and a form posted by a page of
   the same site could otherwise have driven its tools with the cookie.
+- Rescue mode (the database cannot be opened): `GET /api/setup` says
+  `store_repair: true`, which is what the interface opens its repair screen
+  on, so the screen is shown instead of a page that never loads. The repair
+  answer carries `repaired` (true when the conversion worked), the field the
+  screen reads to go on to the restart; `ran` is unchanged.
+- Rescue mode (the database cannot be opened): `POST /api/store/repair` and
+  `POST /api/settings/restart` want the API key of the config file in
+  `X-Api-Key`; they used to answer anyone. A script that calls them sends the
+  header. The page, `/health` and `GET /api/setup` stay open. The repair screen
+  asks for that key when it is refused, instead of a login the rescue surface
+  does not serve.
 - **MIGRATION: the API key in the address (`?apikey=`) is refused by default.**
   A client that sends the key that way (a scraper, a script, a stream that
   cannot set a header) now gets 401, or 403 on `/api/v2/`. Send it in the
