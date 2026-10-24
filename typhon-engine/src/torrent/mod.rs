@@ -638,6 +638,16 @@ impl TorrentManager {
     /// here, so there is exactly one place that decides which backend is
     /// authoritative and whether the legacy mirror is being kept.
     fn persist(&self, ih: &InfoHash, rd: &fastresume::ResumeData) {
+        // A background save has nobody to tell: the failure is logged, and the
+        // next sweep writes the record again.
+        let _ = self.try_persist(ih, rd);
+    }
+
+    /// `persist`, saying whether the record is now where the next start will
+    /// read it. A caller that answers a user's action must not acknowledge a
+    /// change the store did not keep: the JSON fallback below is not read
+    /// while the table has rows, so it does not count as kept.
+    fn try_persist(&self, ih: &InfoHash, rd: &fastresume::ResumeData) -> Result<(), String> {
         match &self.state_db {
             Some(db) => {
                 if let Err(e) = db.put(rd) {
@@ -646,7 +656,7 @@ impl TorrentManager {
                     // next start still knows how to read.
                     warn!("[statedb] put {} failed: {} -- writing JSON instead", &rd.info_hash[..8.min(rd.info_hash.len())], e);
                     fastresume::save(&self.resume_dir, ih, rd);
-                    return;
+                    return Err(format!("the state store did not keep the change: {e}"));
                 }
                 // Record what is now on disk so the next sweep can tell this
                 // torrent apart from one that has since moved. Absent during
@@ -658,8 +668,12 @@ impl TorrentManager {
                 if self.mirror_json {
                     fastresume::save(&self.resume_dir, ih, rd);
                 }
+                Ok(())
             }
-            None => fastresume::save(&self.resume_dir, ih, rd),
+            None => fastresume::try_save(&self.resume_dir, ih, rd).map_err(|e| {
+                warn!("[resume] {}", e);
+                e
+            }),
         }
     }
 
@@ -2069,11 +2083,17 @@ impl TorrentManager {
         edit: impl FnOnce(&mut piece_picker::DownloadOrder),
     ) -> Result<piece_picker::DownloadOrder, String> {
         let t = self.get(info_hash).ok_or("torrent not found")?;
-        let mut order = t.download_order();
+        let before = t.download_order();
+        let mut order = before.clone();
         edit(&mut order);
         if t.set_download_order(order) {
             let rd = Self::build_resume_data(&t);
-            self.persist(info_hash, &rd);
+            if let Err(e) = self.try_persist(info_hash, &rd) {
+                // Not kept: the engine must not go on following an order the
+                // next start will not know, nor tell the caller it took.
+                t.set_download_order(before);
+                return Err(e);
+            }
         }
         Ok(t.download_order())
     }
@@ -4275,6 +4295,24 @@ mod manager_tests {
         assert!(dst.startup_issues().1.is_empty());
         let _ = std::fs::remove_dir_all(root);
         let _ = std::fs::remove_dir_all(root2);
+    }
+
+    /// ⭐ A download order the state store could not keep is not acknowledged.
+    /// The write failed and fell back to a JSON file the next start does not
+    /// read, while the caller was told it had worked; now the change is
+    /// refused and the engine goes on with the order it had.
+    #[test]
+    fn a_download_order_the_store_did_not_keep_is_refused() {
+        let (mgr, root) = manager("order-store-down");
+        let ih = add(&mgr, "alpha");
+        let conn = rusqlite::Connection::open(root.join("state.db")).unwrap();
+        conn.execute("DROP TABLE torrent_state", []).unwrap();
+        drop(conn);
+
+        let r = mgr.update_download_order(&ih, |o| o.sequential = true);
+        assert!(r.is_err(), "the store refused the write, so the answer is no: {r:?}");
+        assert!(!mgr.get(&ih).unwrap().download_order().sequential, "and the engine does not follow what the disk lacks");
+        let _ = std::fs::remove_dir_all(root);
     }
 }
 
