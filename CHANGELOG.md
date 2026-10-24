@@ -34,6 +34,9 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   any file moves. It used to copy every file over, be refused at the end, copy
   them all back, and be queued again on the next drain; the drain now counts
   it as stuck and logs which categories hold a copy on both sides.
+- A web seed starts a piece only when the engine's download memory budget
+  admits it, as a peer does; with the budget spent it waits instead of
+  reserving a run of pieces past it.
 
 ### Security
 
