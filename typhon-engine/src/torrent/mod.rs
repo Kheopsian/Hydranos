@@ -2161,6 +2161,14 @@ impl TorrentManager {
         Ok(t.download_order())
     }
 
+    /// `try_persist` for a torrent the engine does not hold yet: the record
+    /// is written BEFORE the torrent is inserted anywhere, and when the store
+    /// refuses it the JSON fallback it left behind goes too, so a refused
+    /// torrent leaves nothing for a later start to find.
+    fn persist_before_insert(&self, ih: &InfoHash, rd: &fastresume::ResumeData) -> Result<(), String> {
+        self.try_persist(ih, rd).inspect_err(|_| fastresume::remove(&self.resume_dir, ih))
+    }
+
     /// Swap the in-memory save_path for a running torrent and flush
     /// fastresume so the change survives a crash before the next
     /// periodic save. Caller (hydra-go) must have stopped the torrent
@@ -2294,6 +2302,12 @@ impl TorrentManager {
             return Err("torrent already present in this engine".into());
         }
 
+        // The record first: a store that refuses it refuses the adoption, and
+        // nothing has been inserted anywhere. The caller moves files only after
+        // an Ok, and lets the source go only after one, so a refusal here
+        // leaves the torrent where it was.
+        self.persist_before_insert(&ih, rd)?;
+
         let resume_bits = hex_decode_bytes(&rd.bitfield);
         // As at startup: a bitfield that is there and cannot be used is not
         // "nothing downloaded". The torrent is adopted, and the disk says what
@@ -2358,9 +2372,6 @@ impl TorrentManager {
         }
         self.insert_counted(ih, state.clone());
         self.track_in_dht(state);
-        // Durable here before the source is told to let go, so a crash in the
-        // middle leaves the torrent in both engines rather than in neither.
-        self.persist(&ih, rd);
         self.bus.publish(crate::rpc::events::Event::TorrentAdded {
             info_hash: hex_encode(&ih),
             name: name.clone(),
@@ -4404,6 +4415,31 @@ mod manager_tests {
         assert!(r.is_err(), "the store refused the write, so the answer is no: {r:?}");
         assert!(!mgr.get(&ih).unwrap().download_order().sequential, "and the engine does not follow what the disk lacks");
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// An adoption the state store refused is refused: nothing is in the
+    /// catalogue, so the caller puts its files back and the source keeps the
+    /// torrent, instead of a torrent held in memory that a restart loses.
+    #[test]
+    fn an_adoption_the_store_did_not_keep_is_refused() {
+        let (src, root) = manager("adopt-src");
+        let (dst, root2) = manager("adopt-store-down");
+        let blob = torrent_bytes("alpha", &["https://tracker.example/announce"]);
+        dst.set_blob_source(Arc::new(move |_hash: &str| Some(blob.clone())));
+        let ih = add(&src, "alpha");
+        let rd = src.export_state(&ih).expect("exported");
+        let conn = rusqlite::Connection::open(root2.join("state.db")).unwrap();
+        conn.execute("DROP TABLE torrent_state", []).unwrap();
+        drop(conn);
+
+        let r = dst.import_state(&rd);
+        assert!(r.is_err(), "the store refused the record, so the answer is no: {r:?}");
+        assert!(dst.get(&ih).is_none(), "and nothing is in the catalogue");
+        assert!(dst.save_paths().is_empty(), "nor counted under a folder");
+        assert!(!root2.join("resume").join(format!("{}.json", hex_encode(&ih))).exists(), "nor left as a file a later start would read");
+        assert!(src.get(&ih).is_some(), "the source still holds it");
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(root2);
     }
 
     /// A tracker list the state store could not keep is not acknowledged: the
