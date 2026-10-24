@@ -43,6 +43,9 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 - A torrent adopted from another engine with a bitfield that cannot be used is
   rechecked against the disk and listed among the startup issues, as it is at
   startup, instead of starting as an empty download.
+- A file priority or download order that the state store could not write is
+  refused with the error, and the engine keeps the order it had, instead of
+  being acknowledged as applied while the next start would not know it.
 
 ### Security
 
