@@ -480,11 +480,17 @@ fn main() -> anyhow::Result<()> {
 /// stop sequence is over (the resume state is flushed by then).
 const RUNTIME_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// Close the runtime. Dropping it waits for every blocking task, however
-/// long; this is called when `async_main` has returned, so everything that
-/// had to be written has been.
-fn finish_runtime(runtime: tokio::runtime::Runtime, _grace: std::time::Duration) {
-    drop(runtime);
+/// Close the runtime, waiting at most `grace` for blocking work.
+///
+/// Dropping it waits for every blocking task, however long: a file move that
+/// takes minutes held the exit past the supervisor's stop period, and the kill
+/// that followed was a kill like any other. Called when `async_main` has
+/// returned, AFTER the final flush, so nothing the stop sequence had to write is
+/// at stake. What is abandoned here is resumed: a job that was running is
+/// queued again at the next start (`requeue_running_jobs`), a store
+/// transaction cut short is rolled back whole, and a periodic pass is redone.
+fn finish_runtime(runtime: tokio::runtime::Runtime, grace: std::time::Duration) {
+    runtime.shutdown_timeout(grace);
 }
 
 async fn async_main(workers: usize) -> anyhow::Result<()> {
@@ -1454,6 +1460,56 @@ mod flush_wait_tests {
         wait_for_flush(vec![stuck], started, Duration::from_millis(200)).await;
         release.store(true, Ordering::SeqCst);
         assert!(started.elapsed() < Duration::from_secs(3), "{:?}", started.elapsed());
+    }
+}
+
+#[cfg(test)]
+mod runtime_exit_tests {
+    use super::finish_runtime;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    fn runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap()
+    }
+
+    /// ⭐ Blocking work that does not end (a file move that takes minutes)
+    /// does not hold the exit past the grace: dropping the runtime waited for
+    /// it for as long as it ran, past the supervisor's own patience.
+    #[test]
+    fn a_blocking_task_does_not_hold_the_exit_past_the_grace() {
+        let rt = runtime();
+        let (release, rx) = std::sync::mpsc::channel::<()>();
+        let (started_tx, started_rx) = std::sync::mpsc::channel::<()>();
+        rt.spawn_blocking(move || {
+            let _ = started_tx.send(());
+            let _ = rx.recv_timeout(Duration::from_secs(5));
+        });
+        started_rx.recv().unwrap();
+        let t = Instant::now();
+        finish_runtime(rt, Duration::from_millis(200));
+        let took = t.elapsed();
+        drop(release);
+        assert!(took < Duration::from_secs(3), "the exit waited {took:?} for a blocking task");
+    }
+
+    /// Blocking work that ends inside the grace is waited for: a write that
+    /// had started is finished, not cut.
+    #[test]
+    fn a_blocking_task_that_ends_inside_the_grace_is_waited_for() {
+        let rt = runtime();
+        let done = Arc::new(AtomicBool::new(false));
+        let d = done.clone();
+        let (started_tx, started_rx) = std::sync::mpsc::channel::<()>();
+        rt.spawn_blocking(move || {
+            let _ = started_tx.send(());
+            std::thread::sleep(Duration::from_millis(300));
+            d.store(true, Ordering::SeqCst);
+        });
+        started_rx.recv().unwrap();
+        finish_runtime(rt, Duration::from_secs(10));
+        assert!(done.load(Ordering::SeqCst), "the runtime closed on a write that was still running");
     }
 }
 
