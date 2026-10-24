@@ -281,6 +281,25 @@ const DEFAULT_API_KEY: &str = "change-me-in-production";
 /// `==` returns as soon as two bytes differ, which leaks its prefix to anyone
 /// willing to time enough requests.
 pub fn authorised(state: &AppState, headers: &HeaderMap, query: &str) -> bool {
+    // No key, no instance: a cookie cannot open what has no owner either.
+    if state.cfg().daemon.api_key.is_empty() {
+        return false;
+    }
+    if key_authorised(state, headers, query) {
+        return true;
+    }
+
+    // A caller that logged in carries a cookie instead. This is the only path
+    // the *arr stack has: its qBittorrent form holds a username and a password
+    // and has nowhere to put a key.
+    match session_of(headers) {
+        Some(sid) => state.sessions.validate(&sid),
+        None => false,
+    }
+}
+
+/// Whether the request carries the API key, in the header or the query.
+pub(crate) fn key_authorised(state: &AppState, headers: &HeaderMap, query: &str) -> bool {
     let cfg = state.cfg();
     let expected = cfg.daemon.api_key.as_str();
 
@@ -296,17 +315,7 @@ pub fn authorised(state: &AppState, headers: &HeaderMap, query: &str) -> bool {
         .or_else(|| query_param(query, "apikey"))
         .unwrap_or_default();
 
-    if !provided.is_empty() && constant_time_eq(provided.as_bytes(), expected.as_bytes()) {
-        return true;
-    }
-
-    // A caller that logged in carries a cookie instead. This is the only path
-    // the *arr stack has: its qBittorrent form holds a username and a password
-    // and has nowhere to put a key.
-    match session_of(headers) {
-        Some(sid) => state.sessions.validate(&sid),
-        None => false,
-    }
+    !provided.is_empty() && constant_time_eq(provided.as_bytes(), expected.as_bytes())
 }
 
 /// The session id this request carries, if it carries one.
@@ -16653,7 +16662,8 @@ fn router_with(state: AppState, extra: Router<AppState>) -> Router {
 /// layer cannot read: `/health` and `/metrics` decide by their config switch,
 /// `/api/nodes/register` by its enrolment token, `/api/auth/api-key/confirm`
 /// by the pending key of a rotation (which is not yet THE key), `/mcp` by key
-/// or bearer token. The handlers behind them keep their own checks.
+/// or bearer token and never by the session cookie (this layer would not stop
+/// a cross-origin write there, so the handler must not take the cookie). The handlers behind them keep their own checks.
 ///
 /// Adding a path here opens it to the world, and
 /// `api_access_tests` pins the list.
@@ -16689,12 +16699,66 @@ async fn refuse_by_default(
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Response {
-    if !is_open_path(req.uri().path())
-        && !authorised(&state, req.headers(), req.uri().query().unwrap_or_default())
-    {
-        return unauthorised();
+    if !is_open_path(req.uri().path()) {
+        let query = req.uri().query().unwrap_or_default();
+        if !authorised(&state, req.headers(), query) {
+            return unauthorised();
+        }
+        // A cookie rides along on whatever the browser sends to this host, a
+        // page of another origin's included, and the browser names that
+        // origin. A change asked for that way, with no key to show, is
+        // refused. Callers that send no Origin (the *arr stack, scripts) are
+        // not pages and are untouched.
+        let safe = matches!(
+            *req.method(),
+            axum::http::Method::GET | axum::http::Method::HEAD | axum::http::Method::OPTIONS
+        );
+        if !safe
+            && !key_authorised(&state, req.headers(), query)
+            && !same_origin(req.headers(), req.uri().authority(), &state.cfg().daemon.public_url)
+        {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"error": "cross-origin request refused"})),
+            )
+                .into_response();
+        }
     }
     next.run(req).await
+}
+
+/// True when the request names no Origin, or names an address this daemon is
+/// reached on: the `Host` it was sent to (or, over HTTP/2, which may send no
+/// such header, the authority of the request's own URI), the first `X-Forwarded-Host` (a
+/// reverse proxy that rewrites Host forwards the page's own), or the
+/// authority of `[daemon] public_url`. A page of another origin sets none of
+/// these: Origin is the browser's, and a form cannot add a header. A default
+/// port counts as none (`https://h` is `h:443`).
+fn same_origin(
+    headers: &HeaderMap,
+    uri_authority: Option<&axum::http::uri::Authority>,
+    public_url: &str,
+) -> bool {
+    let Some(origin) = headers.get(axum::http::header::ORIGIN) else {
+        return true;
+    };
+    let Some((scheme, named)) = origin.to_str().ok().and_then(|o| o.split_once("://")) else {
+        return false;
+    };
+    let bare = |authority: &str| -> String {
+        let a = authority.trim().to_ascii_lowercase();
+        let default = if scheme.eq_ignore_ascii_case("https") { ":443" } else { ":80" };
+        a.strip_suffix(default).map(str::to_string).unwrap_or(a)
+    };
+    let named = bare(named);
+    let header = |name: &str| headers.get(name).and_then(|h| h.to_str().ok());
+    let candidates = [
+        header("host").map(str::to_string),
+        uri_authority.map(|a| a.as_str().to_string()),
+        header("x-forwarded-host").and_then(|f| f.split(',').next()).map(str::to_string),
+        public_url.split_once("://").and_then(|(_, rest)| rest.split('/').next()).map(str::to_string),
+    ];
+    candidates.iter().flatten().any(|c| !c.trim().is_empty() && bare(c) == named)
 }
 
 /// Answer an unauthenticated qBittorrent call the way qBittorrent answers it.

@@ -273,3 +273,223 @@ async fn changing_the_password_ends_every_session() {
     assert!(!authorised(&s.state, &h, ""), "the session did not survive the change");
     assert!(authorised(&s.state, &keyed(KEY), ""), "the key is not a session and still works");
 }
+
+fn write_with(
+    uri: &str,
+    method: &str,
+    host: &str,
+    origin: Option<&str>,
+    credential: (&str, &str),
+) -> axum::http::Request<axum::body::Body> {
+    let mut b = axum::http::Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("host", host)
+        .header(credential.0, credential.1);
+    if let Some(o) = origin {
+        b = b.header("origin", o);
+    }
+    b.body(axum::body::Body::empty()).unwrap()
+}
+
+/// A session cookie does not authorise a change asked for by a page of another
+/// origin. A cookie rides along on any request the browser makes to this host,
+/// so a page served from another port of the same machine can drive the API
+/// with it; the browser says where the page came from, and a request that
+/// names another origin is refused. Callers that name none (the *arr stack,
+/// scripts) and callers that carry the key, which a page cannot attach, are
+/// untouched, and so are reads.
+#[tokio::test]
+async fn a_cookie_does_not_authorise_a_write_from_another_origin() {
+    let s = state_from("origin", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+    let cookie = cookie_of(&s.state);
+    let host = "hydra.lan:8199";
+    let cookie = ("cookie", cookie.as_str());
+    let write = "/api/hoard/pause-all";
+
+    for foreign in ["http://evil.example", "http://hydra.lan:9999", "http://hydra.lan", "null"] {
+        let r = call(&s.state, "10.0.0.7", write_with(write, "POST", host, Some(foreign), cookie)).await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN, "origin {foreign}");
+    }
+    for ok in [Some("http://hydra.lan:8199"), Some("HTTP://HYDRA.LAN:8199"), None] {
+        let r = call(&s.state, "10.0.0.7", write_with(write, "POST", host, ok, cookie)).await;
+        assert_eq!(r.status(), StatusCode::OK, "origin {ok:?}");
+    }
+    // The key is a header a page of another origin cannot set.
+    let r = call(
+        &s.state,
+        "10.0.0.7",
+        write_with(write, "POST", host, Some("http://evil.example"), ("x-api-key", KEY)),
+    )
+    .await;
+    assert_eq!(r.status(), StatusCode::OK, "the key is not what the cookie attack rides on");
+    // A read changes nothing.
+    let r = call(&s.state, "10.0.0.7", write_with("/api/status", "GET", host, Some("http://evil.example"), cookie)).await;
+    assert_eq!(r.status(), StatusCode::OK);
+}
+
+fn proxied_write(
+    host: &str,
+    origin: &str,
+    forwarded: Option<&str>,
+    cookie: &str,
+) -> axum::http::Request<axum::body::Body> {
+    let mut b = axum::http::Request::builder()
+        .method("POST")
+        .uri("/api/hoard/pause-all")
+        .header("host", host)
+        .header("origin", origin)
+        .header("cookie", cookie);
+    if let Some(f) = forwarded {
+        b = b.header("x-forwarded-host", f);
+    }
+    b.body(axum::body::Body::empty()).unwrap()
+}
+
+/// Behind a reverse proxy that rewrites Host, the page's own origin is the one
+/// the proxy forwards, or the one `public_url` names. A page of another origin
+/// can set neither: Origin is the browser's, and a form cannot add a header.
+/// Whatever matches none of them stays refused, and a default port is the
+/// same as none.
+#[tokio::test]
+async fn a_cookie_write_from_the_proxied_origin_is_accepted() {
+    let s = state_from("origin-proxy", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+    let cookie = cookie_of(&s.state);
+    let go = |req| call(&s.state, "10.0.0.7", req);
+
+    let r = go(proxied_write("hydranos:8080", "https://hydra.example.net", Some("hydra.example.net"), &cookie)).await;
+    assert_eq!(r.status(), StatusCode::OK, "the forwarded host is the page's origin");
+    let r = go(proxied_write("hydranos:8080", "https://hydra.example.net", Some("Hydra.Example.Net, proxy.lan"), &cookie)).await;
+    assert_eq!(r.status(), StatusCode::OK, "the first forwarded host counts");
+    let r = go(proxied_write("hydranos:8080", "https://hydra.example.net", Some("proxy.lan, hydra.example.net"), &cookie)).await;
+    assert_eq!(r.status(), StatusCode::FORBIDDEN, "a later one does not");
+    let r = go(proxied_write("hydranos:8080", "https://evil.example", Some("hydra.example.net"), &cookie)).await;
+    assert_eq!(r.status(), StatusCode::FORBIDDEN, "an origin that matches nothing is refused");
+    let r = go(proxied_write("hydranos:8080", "https://hydra.example.net", None, &cookie)).await;
+    assert_eq!(r.status(), StatusCode::FORBIDDEN, "no forwarded host, no match");
+    let r = go(proxied_write("h:443", "https://h", None, &cookie)).await;
+    assert_eq!(r.status(), StatusCode::OK, "https://h is h:443");
+    let r = go(proxied_write("h", "http://h:80", None, &cookie)).await;
+    assert_eq!(r.status(), StatusCode::OK, "http://h:80 is h");
+    let r = go(proxied_write("h:443", "http://h", None, &cookie)).await;
+    assert_eq!(r.status(), StatusCode::FORBIDDEN, "443 is not the default port of http");
+
+    let s = state_from(
+        "origin-public",
+        &format!("[daemon]\napi_key = \"{KEY}\"\npublic_url = \"https://hydra.example.net:9443/\"\n"),
+    );
+    let cookie = cookie_of(&s.state);
+    let go = |req| call(&s.state, "10.0.0.7", req);
+    let r = go(proxied_write("hydranos:8080", "https://hydra.example.net:9443", None, &cookie)).await;
+    assert_eq!(r.status(), StatusCode::OK, "public_url names the origin");
+    let r = go(proxied_write("hydranos:8080", "https://evil.example", None, &cookie)).await;
+    assert_eq!(r.status(), StatusCode::FORBIDDEN);
+}
+fn rpc_post(
+    uri: &str,
+    headers: &[(&str, &str)],
+) -> axum::http::Request<axum::body::Body> {
+    let mut b = axum::http::Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("host", "hydra.lan:8199")
+        // What a cross-site form can send: no JSON content type.
+        .header("content-type", "text/plain");
+    for (k, v) in headers {
+        b = b.header(*k, *v);
+    }
+    b.body(axum::body::Body::from(r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#)).unwrap()
+}
+
+/// `/mcp` answers to the key or the bearer token, never to the session cookie:
+/// the cookie is set on every sign-in, a page of the same site can post a form
+/// of any content type, and the tools write.
+#[tokio::test]
+async fn mcp_is_opened_by_the_key_or_a_bearer_and_never_by_the_cookie() {
+    let s = state_from("mcp-cookie", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+    let cookie = cookie_of(&s.state);
+    let go = |req| call(&s.state, "10.0.0.7", req);
+
+    let r = go(rpc_post("/mcp", &[("cookie", &cookie), ("origin", "http://hydra.lan:9999")])).await;
+    assert_eq!(r.status(), StatusCode::UNAUTHORIZED, "a cookie from another origin");
+    let r = go(rpc_post("/mcp", &[("cookie", &cookie)])).await;
+    assert_eq!(r.status(), StatusCode::UNAUTHORIZED, "a cookie from anywhere");
+    let r = go(rpc_post("/mcp", &[])).await;
+    assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+
+    let r = go(rpc_post("/mcp", &[("x-api-key", KEY)])).await;
+    assert_eq!(r.status(), StatusCode::OK, "the key");
+    let bearer = format!("Bearer {KEY}");
+    let r = go(rpc_post("/mcp", &[("authorization", &bearer)])).await;
+    assert_eq!(r.status(), StatusCode::OK, "the bearer token");
+    let r = go(rpc_post("/mcp", &[("authorization", "Bearer wrong")])).await;
+    assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+
+}
+
+/// No open path takes a write on the strength of a session cookie alone,
+/// from another origin or any. The open paths answer to a credential of their
+/// own or to none; a cookie is not one of them.
+///
+/// Two exceptions, both harmless. `/api/v2/auth/logout` ends the session the
+/// request carries and returns 200 whatever it carries; forging it only logs
+/// the caller out of a session the forger could not use. `/api/v2/auth/login`
+/// reads no cookie: it answers 200 with the body `Fails.` to credentials it
+/// does not accept, as qBittorrent does, and the clients parse the body.
+#[tokio::test]
+async fn no_open_path_takes_a_write_on_a_cookie_alone() {
+    const KNOWN_HARMLESS: [&str; 2] = ["/api/v2/auth/logout", "/api/v2/auth/login"];
+    let s = state_from("open-cookie", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+    let cookie = cookie_of(&s.state);
+    let mut paths: Vec<&str> = OPEN.to_vec();
+    paths.push("/static/app.js");
+    let mut accepted = Vec::new();
+    for path in paths {
+        if KNOWN_HARMLESS.contains(&path) {
+            continue;
+        }
+        for method in ["POST", "PUT", "PATCH", "DELETE"] {
+            let mut b = axum::http::Request::builder()
+                .method(method)
+                .uri(path)
+                .header("host", "hydra.lan:8199")
+                .header("origin", "http://hydra.lan:9999")
+                .header("content-type", "text/plain")
+                .header("cookie", &cookie);
+            let req = b
+                .body(axum::body::Body::from(r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#))
+                .unwrap();
+            let r = call(&s.state, "10.0.0.7", req).await;
+            if r.status().is_success() {
+                accepted.push(format!("{method} {path} -> {}", r.status()));
+            }
+        }
+    }
+    assert!(accepted.is_empty(), "open paths that took a write on a cookie alone:\n{}", accepted.join("\n"));
+}
+
+/// HTTP/2 carries the host in `:authority` and may send no `host` header: the
+/// request's own URI names it then.
+#[tokio::test]
+async fn the_uri_authority_stands_in_for_a_missing_host_header() {
+    let s = state_from("origin-h2", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+    let cookie = cookie_of(&s.state);
+    let h2 = |uri: &str, origin: &str| {
+        axum::http::Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("origin", origin)
+            .header("cookie", &cookie)
+            .body(axum::body::Body::empty())
+            .unwrap()
+    };
+    let r = call(&s.state, "10.0.0.7", h2("https://hydra.lan/api/hoard/pause-all", "https://hydra.lan")).await;
+    assert_eq!(r.status(), StatusCode::OK, "the authority is the origin");
+    let r = call(&s.state, "10.0.0.7", h2("http://hydra.lan:8199/api/hoard/pause-all", "http://hydra.lan:8199")).await;
+    assert_eq!(r.status(), StatusCode::OK);
+    let r = call(&s.state, "10.0.0.7", h2("http://hydra.lan:8199/api/hoard/pause-all", "http://evil.example")).await;
+    assert_eq!(r.status(), StatusCode::FORBIDDEN, "another origin is still refused");
+    let r = call(&s.state, "10.0.0.7", h2("/api/hoard/pause-all", "http://hydra.lan:8199")).await;
+    assert_eq!(r.status(), StatusCode::FORBIDDEN, "no host and no authority: no match");
+}
+
