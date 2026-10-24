@@ -3259,7 +3259,7 @@ mod tests {
             assert_eq!((j.done, j.failed), (1, 0), "{then}: {:?}", j.errors);
             assert_eq!(j.tally.get(want), Some(&1), "{then}: {:?}", j.tally);
             assert!(
-                j.tally.get(other).is_none(),
+                !j.tally.contains_key(other),
                 "{then}: only {want}: {:?}",
                 j.tally
             );
@@ -3409,7 +3409,7 @@ mod tests {
                 j.errors
             );
             assert!(
-                j.tally.get("ok").is_none() && j.tally.get("waiting_node").is_none(),
+                !j.tally.contains_key("ok") && !j.tally.contains_key("waiting_node"),
                 "{action:?}"
             );
         }

@@ -3755,9 +3755,9 @@ pub(crate) async fn engine_page_value(
                     if f.tag_bits == 0 {
                         n_untagged += 1;
                     } else {
-                        for i in 0..64 {
+                        for (i, n) in f_tag.iter_mut().enumerate().take(64) {
                             if f.tag_bits & (1u64 << i) != 0 {
-                                f_tag[i] += 1;
+                                *n += 1;
                             }
                         }
                     }
@@ -6941,7 +6941,7 @@ fn arc_stats() -> ArcStats {
     let Ok(text) = std::fs::read_to_string("/proc/spl/kstat/zfs/arcstats") else {
         return ArcStats::default();
     };
-    let mut field = |name: &str| -> f64 {
+    let field = |name: &str| -> f64 {
         text.lines()
             .find(|l| l.split_whitespace().next() == Some(name))
             .and_then(|l| l.split_whitespace().nth(2))
@@ -13521,7 +13521,7 @@ struct ClientBulk {
     user_agent: String,
 }
 
-/// Apply one client identity to several trackers at once.
+// Apply one client identity to several trackers at once.
 
 // The validation-only block that stood here is gone: its last two routes, the
 // managed WireGuard uploads, have their success path (`post_wireguard_*`).
@@ -15830,12 +15830,12 @@ async fn post_settings_reset(
     Json(serde_json::json!({"backup": backup, "preserved": kept, "status": "ok"})).into_response()
 }
 
-/// Start a qBittorrent import.
-///
-/// ⚠ The import itself is not ported: this records the job so the UI has
-/// something to poll, and the worker that fills it belongs to the import slice.
-/// The id carries nanoseconds, as 3.x does -- two imports started in the same
-/// second must not collide.
+// Start a qBittorrent import.
+//
+// ⚠ The import itself is not ported: this records the job so the UI has
+// something to poll, and the worker that fills it belongs to the import slice.
+// The id carries nanoseconds, as 3.x does -- two imports started in the same
+// second must not collide.
 // --- Import from another client -------------------------------------------
 //
 // One job at a time, kept in `state.imports` under `imp-<nanos>`; the wizard
@@ -18265,6 +18265,7 @@ async fn move_preview(
 ///  * no bench database at all answers `[]`, because there is nothing to say;
 ///  * a database with no rows in the window answers `null`, because Go
 ///    marshals the nil slice its query returns rather than an empty one.
+///
 /// They look interchangeable and are not -- the chart branches on it.
 async fn get_race_events(
     State(state): State<AppState>,
@@ -20393,7 +20394,6 @@ mod tests {
     /// hash-check data already on disk. The `!paused` gate that used to live
     /// here left a complete 184 GB torrent reporting 0%, with a Verify button
     /// that was itself a stub -- the two holes covered each other.
-    #[test]
     fn a_paused_add_still_checks_the_data_on_disk() {
         // The case that regressed: paused is simply not an input.
         assert!(add_recheck_wanted(false, true));
@@ -28273,7 +28273,7 @@ mod delete_spares_shared_files_tests {
         let hash = seed_copy(&s, "race", &race);
         seed_copy(&s, "hoard", &hoard);
 
-        remove_torrent_everywhere(&s.state, &hash, true);
+        let _ = remove_torrent_everywhere(&s.state, &hash, true);
         assert!(!race.join("book.epub").exists());
         assert!(!hoard.join("book.epub").exists());
     }

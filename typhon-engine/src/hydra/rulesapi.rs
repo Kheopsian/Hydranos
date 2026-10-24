@@ -261,7 +261,7 @@ fn parse(body: &str) -> Result<Workflow, String> {
     // Compiled before it is stored. A rule that cannot compile is a rule that
     // would fail silently every interval forever, and the operator would find
     // out by noticing nothing happened.
-    rules::compile_workflow(&w).map_err(|e| e.to_string())?;
+    let _ = rules::compile_workflow(&w).map_err(|e| e.to_string())?;
     Ok(w)
 }
 

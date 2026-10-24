@@ -465,8 +465,10 @@ async fn bind_utp(port: u16, device: Option<&str>) -> Result<UtpLive, String> {
     // with thousands of peers — new uTP dials get rejected with
     // TooManyActiveConnections. Bumped to 4096 (2026-04-17 investigation: 70%
     // of uTP fails were "error"=saturated).
-    let mut opts = librqbit_utp::SocketOpts::default();
-    opts.max_live_vsocks = std::num::NonZeroUsize::new(4096);
+    let opts = librqbit_utp::SocketOpts {
+        max_live_vsocks: std::num::NonZeroUsize::new(4096),
+        ..Default::default()
+    };
     let cancel = opts.cancellation_token.clone();
     // uTP is raw UDP and gets the same device pin as everything else.
     // Without it the tunnel steering would hold for TCP and leak for uTP,

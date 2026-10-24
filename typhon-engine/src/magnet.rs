@@ -712,6 +712,6 @@ mod tests {
     #[test]
     fn the_job_ceiling_is_wider_than_the_discovery_budget() {
         assert!(JOB_TIMEOUT > DISCOVERY_BUDGET);
-        assert!(MAX_PEERS > 0);
+        const { assert!(MAX_PEERS > 0) };
     }
 }

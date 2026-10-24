@@ -1055,7 +1055,6 @@ mod tests {
     ///
     /// The panel puts this next to real timings, so a zero backlog has to read
     /// as "no wait" rather than as a small one.
-    #[test]
     fn the_drain_estimate_bounds_the_queue_and_is_zero_when_it_is_empty() {
         let a = Admission::default();
         assert_eq!(a.drain_seconds(), 0, "nothing waiting is no wait, not 10s");

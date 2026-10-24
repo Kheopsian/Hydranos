@@ -307,8 +307,10 @@ mod identity_tests {
     /// anything else it reports.
     #[test]
     fn the_peer_id_does_not_depend_on_the_tracker() {
-        let mut p = Policy::default();
-        p.peer_id = "-HY4R00-abcdefghijkl".into();
+        let p = Policy {
+            peer_id: "-HY4R00-abcdefghijkl".into(),
+            ..Default::default()
+        };
 
         let a = announced_peer_id(&p, &tiers(&["https://tracker.example.org/announce"]));
         let b = announced_peer_id(&p, &tiers(&["https://other.example.net/announce"]));

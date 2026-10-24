@@ -360,7 +360,7 @@ fn enforce_queue(
     if manage_downloads {
         // Most seeders first: the torrent likeliest to finish gets the slot, so a
         // slot is held for the shortest time and freed for the next one.
-        incomplete.sort_by(|a, b| b.1.cmp(&a.1));
+        incomplete.sort_by_key(|a| std::cmp::Reverse(a.1));
         let ceiling = limits
             .downloads
             .unwrap_or(usize::MAX)

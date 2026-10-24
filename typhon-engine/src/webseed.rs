@@ -128,7 +128,7 @@ fn add_ns(c: &std::sync::atomic::AtomicU64, t: std::time::Instant) {
     c.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
 }
 
-/// info_hash -> (consecutive failures, unix time before which not to retry)
+// info_hash -> (consecutive failures, unix time before which not to retry)
 
 fn now_secs() -> u64 {
     SystemTime::now()
@@ -746,7 +746,7 @@ async fn worker(mgr: Arc<TorrentManager>, disk: Arc<DiskManager>, client: reqwes
     }
 }
 
-/// Work waiting to be claimed, filled by the scanner, drained by the workers.
+// Work waiting to be claimed, filled by the scanner, drained by the workers.
 
 /// Refill the queue when it runs low, in ONE walk of the catalogue.
 ///

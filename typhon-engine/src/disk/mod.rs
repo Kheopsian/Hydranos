@@ -75,6 +75,8 @@ fn get_or_open_rw(path: &PathBuf) -> std::io::Result<Arc<File>> {
             .read(true)
             .write(true)
             .create(true)
+            // Never truncate: the file may already hold pieces.
+            .truncate(false)
             .open(path)?,
     );
     let mut cache = fd_cache().lock();
@@ -1282,6 +1284,9 @@ mod disk_tests {
                 .set_len(content.len() as u64)
                 .unwrap();
 
+            // Held across the awaits on purpose: the test freezes the read and the write
+            // behind the cache lock to line them up.
+            #[allow(clippy::await_holding_lock)]
             let held = fd_cache().lock();
             let (disk, t) = (f.disk.clone(), f.torrent.clone());
             let reader = tokio::spawn(async move { disk.read_block(&t, 0, 0, 16).await });

@@ -318,6 +318,45 @@ pub fn missing_files(stats: &[Option<FileId>]) -> usize {
     stats.iter().filter(|s| s.is_none()).count()
 }
 
+/// Re-measure ONE torrent, against the catalogue the scan already counted.
+///
+/// ⭐ The guard for irreversible actions. `owned` cannot be recomputed for one
+/// torrent alone -- it is a property of the whole catalogue -- so the cached
+/// count is reused while the `nlink` values are read fresh. A name added since
+/// the scan raises `nlink`, which raises `external_links`, which is the
+/// direction that stops a deletion. A name REMOVED since the scan lowers it,
+/// and there the stale count is the conservative one anyway.
+pub fn recheck(files: &[PathBuf], cached: &LinkFacts) -> LinkFacts {
+    let mut out = LinkFacts {
+        data_missing: true,
+        ..Default::default()
+    };
+    let mut any_unknown = false;
+    for p in files {
+        let Some(id) = crate::platform::file_id(p) else {
+            continue;
+        };
+        out.data_missing = false;
+        out.link_count = out.link_count.max(id.links);
+        if id.links == 1 {
+            out.freeable_bytes += id.size;
+        }
+        // How many of this inode's names the catalogue held at scan time. The
+        // cached torrent-level count is the best available: if it looks
+        // impossible against the live nlink, say "someone else holds this".
+        let held = cached.link_count.saturating_sub(cached.external_links);
+        if held > id.links || held == 0 {
+            any_unknown = true;
+        }
+        let ext = if held > id.links { 1 } else { id.links - held };
+        out.external_links = out.external_links.max(ext);
+    }
+    if any_unknown && out.external_links == 0 {
+        out.external_links = 1;
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -621,43 +660,4 @@ mod tests {
             "two names on a one-link inode is incoherent, so keep"
         );
     }
-}
-
-/// Re-measure ONE torrent, against the catalogue the scan already counted.
-///
-/// ⭐ The guard for irreversible actions. `owned` cannot be recomputed for one
-/// torrent alone -- it is a property of the whole catalogue -- so the cached
-/// count is reused while the `nlink` values are read fresh. A name added since
-/// the scan raises `nlink`, which raises `external_links`, which is the
-/// direction that stops a deletion. A name REMOVED since the scan lowers it,
-/// and there the stale count is the conservative one anyway.
-pub fn recheck(files: &[PathBuf], cached: &LinkFacts) -> LinkFacts {
-    let mut out = LinkFacts {
-        data_missing: true,
-        ..Default::default()
-    };
-    let mut any_unknown = false;
-    for p in files {
-        let Some(id) = crate::platform::file_id(p) else {
-            continue;
-        };
-        out.data_missing = false;
-        out.link_count = out.link_count.max(id.links);
-        if id.links == 1 {
-            out.freeable_bytes += id.size;
-        }
-        // How many of this inode's names the catalogue held at scan time. The
-        // cached torrent-level count is the best available: if it looks
-        // impossible against the live nlink, say "someone else holds this".
-        let held = cached.link_count.saturating_sub(cached.external_links);
-        if held > id.links || held == 0 {
-            any_unknown = true;
-        }
-        let ext = if held > id.links { 1 } else { id.links - held };
-        out.external_links = out.external_links.max(ext);
-    }
-    if any_unknown && out.external_links == 0 {
-        out.external_links = 1;
-    }
-    out
 }

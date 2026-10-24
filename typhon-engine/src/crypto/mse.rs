@@ -5,7 +5,7 @@
 //!   2. Recv: Yb (96 bytes) + PadB (0-512 random)
 //!   3. Compute S = Yb^Xa mod P
 //!   4. Send: HASH('req1', S) + HASH('req2', SKEY) XOR HASH('req3', S)
-//!          + RC4(VC + crypto_provide + len(padC) + padC + len(IA) + IA)
+//!      + RC4(VC + crypto_provide + len(padC) + padC + len(IA) + IA)
 //!   5. Recv: RC4(VC + crypto_select + len(padD) + padD)
 //!
 //! Receiver (incoming):
@@ -424,7 +424,7 @@ pub async fn handshake_incoming_with(
     };
 
     // Read HASH('req1', S) - 20 bytes
-    let mut req1_buf = [0u8; 20];
+    let req1_buf = [0u8; 20];
     // May need to skip PadA first — but we don't know its length.
     // Read bytes until we find req1 hash match.
     // Strategy: read 20 bytes at a time, check if it matches HASH('req1', S).
