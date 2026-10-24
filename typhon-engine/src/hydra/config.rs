@@ -52,10 +52,17 @@ pub struct Daemon {
     /// startup screen reads that progress without a key.
     #[serde(default)]
     pub health_detail_requires_key: bool,
-    /// `/metrics` needs the API key (`X-Api-Key`, or `?apikey=`). Off by
-    /// default: it is public, as a Prometheus scrape without a key expects.
+    /// `/metrics` needs the API key (`X-Api-Key`; `?apikey=` too when
+    /// `api_key_in_query` is on). Off by default: it is public, as a
+    /// Prometheus scrape without a key expects.
     #[serde(default)]
     pub metrics_require_key: bool,
+    /// Accept the API key as an `?apikey=` query parameter. Off by default:
+    /// an address ends up in proxy access logs, browser history and the
+    /// Referer, and the key is the whole instance. The `X-Api-Key` header is
+    /// always accepted. Turn it on for a client that cannot set a header.
+    #[serde(default)]
+    pub api_key_in_query: bool,
     /// The address this daemon is reached on, as a node being enrolled should
     /// use it (`https://hydra.example.net:9443`). Empty = the caller's `Host`
     /// header, as before.
