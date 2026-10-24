@@ -69,22 +69,22 @@ pub struct ResumeData {
 /// invisible. rename(2) inside a directory is atomic: a reader sees either
 /// the old record or the new one, never a half-written one.
 pub fn save(resume_dir: &str, info_hash: &InfoHash, data: &ResumeData) {
+    if let Err(e) = try_save(resume_dir, info_hash, data) {
+        warn!("[resume] {}", e);
+    }
+}
+
+/// `save`, saying whether the record is on disk now.
+pub fn try_save(resume_dir: &str, info_hash: &InfoHash, data: &ResumeData) -> Result<(), String> {
     let hex = super::hex_encode(info_hash);
     let path = format!("{}/{}.json", resume_dir, hex);
     let tmp = format!("{}/{}.json.tmp", resume_dir, hex);
-    match serde_json::to_string(data) {
-        Ok(json) => {
-            if let Err(e) = std::fs::write(&tmp, json) {
-                warn!("[resume] failed to write {}: {}", tmp, e);
-                return;
-            }
-            if let Err(e) = std::fs::rename(&tmp, &path) {
-                warn!("[resume] failed to rename {} -> {}: {}", tmp, path, e);
-                std::fs::remove_file(&tmp).ok();
-            }
-        }
-        Err(e) => warn!("[resume] failed to serialize: {}", e),
-    }
+    let json = serde_json::to_string(data).map_err(|e| format!("failed to serialize: {}", e))?;
+    std::fs::write(&tmp, json).map_err(|e| format!("failed to write {}: {}", tmp, e))?;
+    std::fs::rename(&tmp, &path).map_err(|e| {
+        std::fs::remove_file(&tmp).ok();
+        format!("failed to rename {} -> {}: {}", tmp, path, e)
+    })
 }
 
 /// Load all resume data from a directory.
