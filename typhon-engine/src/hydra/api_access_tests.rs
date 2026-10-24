@@ -420,6 +420,158 @@ async fn the_option_brings_the_key_in_the_address_back() {
     assert_eq!(status_of(&s, "/api/status", None).await, StatusCode::UNAUTHORIZED);
     assert_eq!(status_of(&s, "/api/status", Some(KEY)).await, StatusCode::OK, "the header still works");
 }
+
+/// The rescue router over a config file of this test's own.
+fn rescue_over(tag: &str, toml_src: &str) -> (Router, std::path::PathBuf) {
+    let path = std::env::temp_dir().join(format!("hydra-rescue-{}-{tag}.toml", std::process::id()));
+    std::fs::write(&path, toml_src).unwrap();
+    let state = RescueState { diagnosis: Default::default(), config_path: path.clone() };
+    (rescue_router(state), path)
+}
+
+async fn rescue_call(app: &Router, method: &str, uri: &str, key: Option<&str>) -> StatusCode {
+    let mut b = axum::http::Request::builder().method(method).uri(uri);
+    if let Some(k) = key {
+        b = b.header("x-api-key", k);
+    }
+    app.clone().oneshot(b.body(axum::body::Body::empty()).unwrap()).await.unwrap().status()
+}
+
+/// In rescue mode the repair and the restart want the key of the config file
+/// (the store is not open, so the file is the only place it is kept). What the
+/// page needs to explain the problem stays open.
+#[tokio::test]
+async fn the_rescue_router_wants_the_key_for_repair_and_restart() {
+    let (app, path) = rescue_over("keyed", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+    for uri in ["/api/store/repair", "/api/settings/restart"] {
+        assert_eq!(rescue_call(&app, "POST", uri, None).await, StatusCode::UNAUTHORIZED, "{uri}: no key");
+        assert_eq!(rescue_call(&app, "POST", uri, Some("wrong")).await, StatusCode::UNAUTHORIZED, "{uri}: wrong key");
+        assert_eq!(
+            rescue_call(&app, "POST", &format!("{uri}?apikey={KEY}"), None).await,
+            StatusCode::UNAUTHORIZED,
+            "{uri}: a key in the address is not accepted"
+        );
+    }
+    // The right key reaches the repair (nothing to repair here: it says so).
+    assert_eq!(rescue_call(&app, "POST", "/api/store/repair", Some(KEY)).await, StatusCode::OK);
+    // Open: the explanation, the probe and the page.
+    for uri in ["/health", "/", "/api/setup", "/api/store/repair"] {
+        assert_eq!(rescue_call(&app, "GET", uri, None).await, StatusCode::OK, "{uri}");
+    }
+    let _ = std::fs::remove_file(&path);
+}
+
+/// A config with no key, or none that can be read, opens nothing.
+#[tokio::test]
+async fn the_rescue_router_with_no_key_to_check_refuses_everyone() {
+    let (app, path) = rescue_over("nokey", "[daemon]\napi_key = \"\"\n");
+    for key in [None, Some(""), Some("guess")] {
+        assert_eq!(rescue_call(&app, "POST", "/api/store/repair", key).await, StatusCode::UNAUTHORIZED, "{key:?}");
+        assert_eq!(rescue_call(&app, "POST", "/api/settings/restart", key).await, StatusCode::UNAUTHORIZED, "{key:?}");
+    }
+    let _ = std::fs::remove_file(&path);
+    let (app, path) = rescue_over("unreadable", "this is [not toml");
+    assert_eq!(rescue_call(&app, "POST", "/api/store/repair", Some(KEY)).await, StatusCode::UNAUTHORIZED);
+    let _ = std::fs::remove_file(&path);
+}
+
+/// The repair screen asks for the key when the daemon refuses it. The rescue
+/// router has no `/api/login`, so the box has to take the key itself.
+#[test]
+fn the_repair_screen_asks_for_the_key_not_a_login() {
+    let js = include_str!("../../../web/static/app.js");
+    let from = js.find("async function showStoreRepairModal").expect("repair screen");
+    let screen = &js[from..from + js[from..].find("\n}\n").unwrap()];
+    assert!(screen.contains("promptApiKey("), "a 401 on the repair screen opens the key box");
+    assert!(!screen.contains("promptLogin("), "promptLogin posts to /api/login, which rescue mode does not serve");
+    assert!(screen.matches("promptApiKey(").count() >= 2, "the restart answers a 401 the same way");
+}
+async fn rescue_json(app: &Router, method: &str, uri: &str, key: Option<&str>) -> (StatusCode, serde_json::Value) {
+    let mut b = axum::http::Request::builder().method(method).uri(uri);
+    if let Some(k) = key {
+        b = b.header("x-api-key", k);
+    }
+    let resp = app.clone().oneshot(b.body(axum::body::Body::empty()).unwrap()).await.unwrap();
+    let code = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+    (code, serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null))
+}
+
+/// A rescue router over a database that needs the repair, and which the repair
+/// can really convert: a file whose header says WAL, on a "network" mount.
+fn rescue_repairable(tag: &str) -> (Router, std::path::PathBuf) {
+    let dir = std::env::temp_dir().join(format!("hydra-rescue-db-{}-{tag}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = dir.join("hydra.db");
+    let mut hdr = vec![0u8; 100];
+    hdr[..16].copy_from_slice(b"SQLite format 3\0");
+    hdr[16..18].copy_from_slice(&4096u16.to_be_bytes());
+    hdr[18] = 2;
+    hdr[19] = 2;
+    std::fs::write(&db, &hdr).unwrap();
+    let cfg = dir.join("config.toml");
+    std::fs::write(&cfg, format!("[daemon]\napi_key = \"{KEY}\"\n")).unwrap();
+    let diagnosis = crate::walrepair::Diagnosis {
+        path: db.display().to_string(),
+        on_network: true,
+        in_wal: true,
+        hot_wal: false,
+    };
+    (rescue_router(RescueState { diagnosis, config_path: cfg }), dir)
+}
+
+/// The interface opens its repair screen on `store_repair` in `GET /api/setup`.
+/// The rescue router is the one that serves that route when the database does
+/// not open, so it is the one that has to say so.
+#[tokio::test]
+async fn the_rescue_setup_announces_the_repair_screen() {
+    let (app, path) = rescue_over("setup-flag", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+    let (code, body) = rescue_json(&app, "GET", "/api/setup", None).await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(body["store_repair"], true, "the page opens the repair screen on this: {body}");
+    let _ = std::fs::remove_file(&path);
+}
+
+/// The repair screen reads the verdict of the repair from the answer. Every
+/// field it reads is one the daemon sends, and a repair that worked says so
+/// in the field the screen tests.
+#[tokio::test]
+async fn the_repair_answer_carries_what_the_screen_reads() {
+    let js = include_str!("../../../web/static/app.js");
+    let from = js.find("async function showStoreRepairModal").expect("repair screen");
+    let screen = &js[from..from + js[from..].find("\n}\n").unwrap()];
+    let mut read: Vec<&str> = Vec::new();
+    for var in ["body.", "st."] {
+        let mut rest = screen;
+        while let Some(i) = rest.find(var) {
+            let before = rest[..i].chars().last().unwrap_or(' ');
+            rest = &rest[i + var.len()..];
+            if before.is_alphanumeric() || before == '_' || before == '.' {
+                continue;
+            }
+            let end = rest.find(|c: char| !(c.is_alphanumeric() || c == '_')).unwrap_or(rest.len());
+            read.push(&rest[..end]);
+        }
+    }
+    assert!(read.contains(&"repaired"), "the screen reads a verdict on the repair: {read:?}");
+
+    let (app, dir) = rescue_repairable("answer");
+    let (code, done) = rescue_json(&app, "POST", "/api/store/repair", Some(KEY)).await;
+    assert_eq!(code, StatusCode::OK, "{done}");
+    let (_, status) = rescue_json(&app, "GET", "/api/store/repair", None).await;
+    for field in read {
+        // `filesystem` is read with a fallback, and `error` is only there when
+        // the repair could not even take its backup (a 500, not this case).
+        assert!(
+            done.get(field).is_some() || status.get(field).is_some() || ["filesystem", "error"].contains(&field),
+            "the screen reads `{field}`, which the daemon does not send: {done} / {status}"
+        );
+    }
+    assert_eq!(done["repaired"], true, "{done}");
+    assert!(done["results"][0]["error"].is_null(), "{done}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 fn rpc_post(
     uri: &str,
     headers: &[(&str, &str)],
