@@ -79,6 +79,13 @@ pub fn spawn(state: AppState) {
             }
         }
         loop {
+            // Between two jobs, never in the middle of one: a job that has
+            // started runs to its end or is queued again at the next start
+            // (`requeue_running_jobs`), but none is claimed once the stop
+            // has begun.
+            if crate::shutdown::stopping() {
+                return;
+            }
             let job = {
                 let store = match state.store.lock() {
                     Ok(s) => s,
@@ -87,7 +94,9 @@ pub fn spawn(state: AppState) {
                 store.claim_next_job()
             };
             let Some(job) = job else {
-                tokio::time::sleep(Duration::from_secs(5)).await;
+                if !crate::shutdown::sleep(Duration::from_secs(5)).await {
+                    return;
+                }
                 continue;
             };
             let id = job.id.clone();

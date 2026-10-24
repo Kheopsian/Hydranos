@@ -1024,7 +1024,9 @@ pub fn spawn_handoff_watcher(state: AppState) {
     tokio::spawn(async move {
         loop {
             handoff_watch_once(&state).await;
-            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            if !crate::shutdown::sleep(std::time::Duration::from_secs(30)).await {
+                return;
+            }
         }
     });
 }

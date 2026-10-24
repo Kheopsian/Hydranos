@@ -270,7 +270,9 @@ pub fn spawn(engine: String, manager: std::sync::Arc<typhon_engine::torrent::Tor
             // Sleep, but wake as soon as the engine moves to another port.
             let until = tokio::time::Instant::now() + wait;
             while tokio::time::Instant::now() < until {
-                tokio::time::sleep(PORT_WATCH.min(until - tokio::time::Instant::now())).await;
+                if !crate::shutdown::sleep(PORT_WATCH.min(until - tokio::time::Instant::now())).await {
+                    return;
+                }
                 if manager.listen_port_now(configured_port) != internal_port {
                     break;
                 }

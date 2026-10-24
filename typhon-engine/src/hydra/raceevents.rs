@@ -76,7 +76,9 @@ pub fn spawn(engines: Arc<crate::engines::EngineHost>, bench: crate::benchdb::Sh
     tokio::spawn(async move {
         let mut recorder = crate::benchdb::RaceRecorder::new(started_at);
         loop {
-            tokio::time::sleep(TICK).await;
+            if !crate::shutdown::sleep(TICK).await {
+                return;
+            }
 
             let Some(engine) = engines.get("race") else {
                 continue;

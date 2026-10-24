@@ -248,7 +248,9 @@ const STUCK_AFTER: Duration = Duration::from_secs(60);
 pub fn spawn(state: AppState) {
     tokio::spawn(async move {
         loop {
-            tokio::time::sleep(SCAN_EVERY).await;
+            if !crate::shutdown::sleep(SCAN_EVERY).await {
+                return;
+            }
             for f in folders(&state).into_iter().filter(|f| f.enabled) {
                 let busy_since = {
                     let mut g = IN_FLIGHT.lock().unwrap_or_else(|e| e.into_inner());

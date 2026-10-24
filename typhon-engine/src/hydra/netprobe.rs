@@ -60,7 +60,9 @@ pub fn spawn(
         loop {
             let probe = Probe::from_config(&config.read().unwrap_or_else(|e| e.into_inner()).clone());
             measure(&engines, &snapshot, &public_ip, &probe).await;
-            tokio::time::sleep(INTERVAL).await;
+            if !crate::shutdown::sleep(INTERVAL).await {
+                return;
+            }
         }
     });
 }

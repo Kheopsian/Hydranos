@@ -816,9 +816,13 @@ pub fn spawn(state: AppState) {
     tokio::spawn(async move {
         // Long enough for the catalogue to be loaded. Firing a workflow against
         // a half-loaded engine would let a "no seeders" rule match everything.
-        tokio::time::sleep(std::time::Duration::from_secs(120)).await;
+        if !crate::shutdown::sleep(std::time::Duration::from_secs(120)).await {
+            return;
+        }
         loop {
-            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            if !crate::shutdown::sleep(std::time::Duration::from_secs(60)).await {
+                return;
+            }
             tick(&state, crate::store::now_secs()).await;
         }
     });
@@ -905,7 +909,12 @@ pub fn spawn_events(
     let woken = state.clone();
     tokio::spawn(async move {
         loop {
-            EVENT_WAKE.notified().await;
+            // The events are rows in the store: one not run now is run at the
+            // next start.
+            tokio::select! {
+                _ = EVENT_WAKE.notified() => {}
+                _ = typhon_engine::stop::global().wait() => return,
+            }
             let st = woken.clone();
             let _ = tokio::task::spawn_blocking(move || run_events(&st)).await;
         }

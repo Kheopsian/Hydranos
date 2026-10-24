@@ -36,11 +36,15 @@ pub fn spawn_verify_throttle(manager: Arc<TorrentManager>) {
 
 /// `spawn_verify_throttle` with the stop signal given, so a test can end it
 /// without raising the process-wide one.
-fn spawn_verify_throttle_until(manager: Arc<TorrentManager>, _stop: typhon_engine::stop::Stop) {
+fn spawn_verify_throttle_until(manager: Arc<TorrentManager>, stop: typhon_engine::stop::Stop) {
     tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(5)).await;
+        if !stop.sleep(Duration::from_secs(5)).await {
+            return;
+        }
         loop {
-            tokio::time::sleep(VERIFY_INTERVAL).await;
+            if !stop.sleep(VERIFY_INTERVAL).await {
+                return;
+            }
             // Counted in place. `all()` copied the whole catalogue every ten
             // seconds for exactly as long as the boot lasts -- the window in
             // which the header was frozen.
@@ -96,7 +100,9 @@ pub fn spawn_download_slots(
         tracing::info!(engine = %engine_id, "queue: no ceiling configured, every torrent may run");
     }
     tokio::spawn(async move {
-        tokio::time::sleep(SETTLE).await;
+        if !crate::shutdown::sleep(SETTLE).await {
+            return;
+        }
         if !first.is_empty() {
             tracing::info!(engine = %engine_id, downloads = ?first.downloads, seeds = ?first.seeds,
                 total = ?first.total, "queue manager started");
@@ -108,7 +114,9 @@ pub fn spawn_download_slots(
         // Since when each running torrent has been under its slow threshold.
         let mut slow_since: SlowClock = Default::default();
         loop {
-            tokio::time::sleep(DOWNLOAD_SLOT_INTERVAL).await;
+            if !crate::shutdown::sleep(DOWNLOAD_SLOT_INTERVAL).await {
+                return;
+            }
             let limits = limits_now();
             if limits.is_empty() && parked.is_empty() {
                 continue;
@@ -432,7 +440,9 @@ pub fn spawn_share_limits(
     engine_id: String,
 ) {
     tokio::spawn(async move {
-        tokio::time::sleep(SETTLE + Duration::from_secs(60)).await;
+        if !crate::shutdown::sleep(SETTLE + Duration::from_secs(60)).await {
+            return;
+        }
         let book = Arc::new(std::sync::Mutex::new(ShareLimitBook::default()));
         loop {
             let cfg = match cfg_handle.read() {
@@ -446,7 +456,9 @@ pub fn spawn_share_limits(
                 share_limits_pass(&st, &mgr, &cfg, &id, typhon_engine::torrent::meta::now_secs(), &mut b)
             })
             .await;
-            tokio::time::sleep(SHARE_LIMIT_INTERVAL).await;
+            if !crate::shutdown::sleep(SHARE_LIMIT_INTERVAL).await {
+                return;
+            }
         }
     });
 }
@@ -806,10 +818,14 @@ pub fn spawn_health_scan(engines: Arc<crate::engines::EngineHost>) {
     tokio::spawn(async move {
         // Not at boot: the first minutes of a process are the announce burst
         // and the store's busiest, and nothing here is urgent.
-        tokio::time::sleep(Duration::from_secs(120)).await;
+        if !crate::shutdown::sleep(Duration::from_secs(120)).await {
+            return;
+        }
         let mut tick = tokio::time::interval(Duration::from_secs(5 * 60));
         loop {
-            tick.tick().await;
+            if !crate::shutdown::tick(&mut tick).await {
+                return;
+            }
             let engines = engines.clone();
             let _ = tokio::task::spawn_blocking(move || health_pass(&engines)).await;
         }
@@ -822,7 +838,9 @@ pub fn spawn_volume_fault_scan(engines: Arc<crate::engines::EngineHost>) {
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_secs(30));
         loop {
-            tick.tick().await;
+            if !crate::shutdown::tick(&mut tick).await {
+                return;
+            }
             let engines = engines.clone();
             let _ = tokio::task::spawn_blocking(move || crate::obs::refresh_volume_faults(&engines)).await;
         }
@@ -901,7 +919,9 @@ pub fn spawn_seed_time_sync(
         let mut last: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
         // Not at boot: the first pass rewrites every row (nothing is known of
         // the last one), and a restart is when the store is busiest.
-        tokio::time::sleep(SEED_SYNC_FIRST).await;
+        if !crate::shutdown::sleep(SEED_SYNC_FIRST).await {
+            return;
+        }
         loop {
             let now = typhon_engine::torrent::meta::now_secs();
             let mut rows: Vec<(String, i64)> = Vec::new();
@@ -944,12 +964,16 @@ pub fn spawn_seed_time_sync(
                 }
                 // Hands the lock to whoever is waiting before taking it again,
                 // long enough that the others get most of the time.
-                tokio::time::sleep(SEED_SYNC_YIELD).await;
+                if !crate::shutdown::sleep(SEED_SYNC_YIELD).await {
+                    return;
+                }
             }
             if wrote_total > 0 && !failed {
                 tracing::info!(engine = %engine_id, rows = wrote_total, "seed time synced");
             }
-            tokio::time::sleep(SEED_SYNC_EVERY).await;
+            if !crate::shutdown::sleep(SEED_SYNC_EVERY).await {
+                return;
+            }
         }
     });
 }
@@ -979,7 +1003,9 @@ pub fn spawn_transit_sweep(
     engine_id: String,
 ) {
     tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(90)).await;
+        if !crate::shutdown::sleep(Duration::from_secs(90)).await {
+            return;
+        }
         loop {
             let cfg = match cfg_handle.read() {
                 Ok(g) => g.clone(),
@@ -1023,7 +1049,9 @@ pub fn spawn_transit_sweep(
                     tracing::info!(engine = %engine_id, removed, "transit sweep");
                 }
             }
-            tokio::time::sleep(Duration::from_secs(300)).await;
+            if !crate::shutdown::sleep(Duration::from_secs(300)).await {
+                return;
+            }
         }
     });
 }
@@ -1076,14 +1104,18 @@ pub fn spawn_race_drain(
         Duration::from_secs(300)
     };
     tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(10)).await;
+        if !crate::shutdown::sleep(Duration::from_secs(10)).await {
+            return;
+        }
         tracing::info!(
             engine = %engine_id,
             check_interval_s = interval.as_secs(),
             "race drain started, one pass per volume"
         );
         loop {
-            tokio::time::sleep(interval).await;
+            if !crate::shutdown::sleep(interval).await {
+                return;
+            }
             // Re-read every tick: an obligation typed into the UI has to apply
             // to the NEXT pass, not to the next restart. Volumes are rediscovered
             // for the same reason -- a disk added today is a disk watched today.
@@ -1465,7 +1497,9 @@ fn watch_memory(limit_bytes: u64, mut read: impl FnMut() -> Option<u64> + Send +
     tokio::spawn(async move {
         let mut over = false;
         loop {
-            tokio::time::sleep(Duration::from_secs(30)).await;
+            if !crate::shutdown::sleep(Duration::from_secs(30)).await {
+                return;
+            }
             let Some(rss) = read() else { continue };
             if rss > limit_bytes && !over {
                 // Edge-triggered: a process sitting over the line for an hour
@@ -1537,7 +1571,9 @@ pub fn spawn_stagger_start(manager: Arc<TorrentManager>) {
             }
             if (i + 1) % BATCH == 0 && i + 1 < total {
                 tracing::info!(started, total, pct = started * 100 / total, "stagger start");
-                tokio::time::sleep(PAUSE).await;
+                if !crate::shutdown::sleep(PAUSE).await {
+                    return;
+                }
             }
         }
         tracing::info!(started, total, "stagger start done");
@@ -1649,7 +1685,9 @@ pub fn spawn_store_reconcile(
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_secs(5 * 60));
         loop {
-            tick.tick().await;
+            if !crate::shutdown::tick(&mut tick).await {
+                return;
+            }
             // A listing of up to a million rows and a delete per orphan:
             // blocking work, off the async workers.
             let (engines, store) = (engines.clone(), store.clone());
@@ -2794,6 +2832,39 @@ mod decision_tests {
         mgr.get(&ih).unwrap().status.store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
         after(10).await;
         assert_eq!(alive_tasks(), base);
+    }
+
+    /// ⭐ A background loop ends when the stop begins, wherever it is in its
+    /// wait: it does not sit out the minutes until its next pass while the
+    /// departures are sent and the resume state is written. The signal is the
+    /// test's own, not the process-wide one other tests share.
+    #[tokio::test(start_paused = true)]
+    async fn a_background_loop_ends_when_the_stop_begins() {
+        let s = st("dec-verify-stop", "");
+        let mgr = engine_manager(&s, "race");
+        let (ih, _) = mgr.add_torrent_bytes(&torrent_bytes("checking-stop"), "/tmp", true, false).unwrap();
+        mgr.get(&ih).unwrap().status.store(TorrentStatus::Checking as u8, Ordering::Relaxed);
+        let base = alive_tasks();
+        let stop = typhon_engine::stop::Stop::new();
+
+        // In its first wait.
+        spawn_verify_throttle_until(mgr.clone(), stop.clone());
+        after(0).await;
+        assert_eq!(alive_tasks(), base + 1);
+        stop.begin();
+        after(0).await;
+        assert_eq!(alive_tasks(), base, "the loop outlived the stop in its first wait");
+
+        // And in the wait between two passes, with a torrent still checking.
+        let stop = typhon_engine::stop::Stop::new();
+        spawn_verify_throttle_until(mgr.clone(), stop.clone());
+        after(0).await;
+        after(5).await;
+        after(10).await;
+        assert_eq!(alive_tasks(), base + 1, "a torrent is still checking: it keeps watching");
+        stop.begin();
+        after(0).await;
+        assert_eq!(alive_tasks(), base, "the loop outlived the stop between two passes");
     }
 
     /// No ceiling, no watcher.

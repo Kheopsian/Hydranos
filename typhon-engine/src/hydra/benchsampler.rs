@@ -257,7 +257,9 @@ pub fn spawn(engines: Arc<EngineHost>, bench: Shared, store: Arc<crate::store::S
         let mut n: u64 = 0;
         let tracker_pass_running = Arc::new(std::sync::atomic::AtomicBool::new(false));
         loop {
-            tick.tick().await;
+            if !crate::shutdown::tick(&mut tick).await {
+                return;
+            }
             if let Err(e) = sample_once(&engines, &bench, &store, &mut previous, &mut system) {
                 tracing::warn!("bench sample failed: {e}");
             }
