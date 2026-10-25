@@ -25,6 +25,7 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 
 ### Added
 
+- The store keeps the date each tag was set on each torrent (`tag_since`), and the torrent detail routes carry it as `tag_since: {tag: epoch}`. A tag already worn when the table is created reads as the instant of that migration ("at least since"); no row is written for it. Setting, adding or removing a tag from the shim, the UI, a workflow, MCP or a selection keeps the dates, and removing a torrent drops them.
 - `GET /api/fs/list?path=` and the shim's `app/getDirectoryContent` list a folder for a tool that cannot see this host's disk, limited to the download folders Hydranos knows (default save path, categories, torrents' folders), never the data folder; anything outside them, by `..` or a symbolic link too, is a 403.
 - A stopped torrent's files can be renamed: `POST /api/torrents/:info_hash/files/rename`
   (`{"from","to"}`) and the qBittorrent `torrents/renameFile` point a file at

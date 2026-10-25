@@ -1690,6 +1690,20 @@ mod tests {
             !tags_of(&s, &h[2]).contains(&"noHL".to_string()),
             "series was not selected"
         );
+        // The bulk write dated the tag, on the torrents it tagged only.
+        let dated = |i: usize| {
+            s.state
+                .store
+                .read()
+                .unwrap()
+                .tag_since_rows(&h[i])
+                .into_iter()
+                .map(|r| r.0)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(dated(0), ["noHL"]);
+        assert_eq!(dated(1), ["noHL"]);
+        assert!(dated(2).is_empty());
     }
 
     /// ⭐ `limits` by filter caps exactly the filtered torrents, in the engine

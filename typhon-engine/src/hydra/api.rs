@@ -13770,6 +13770,14 @@ fn detail_payload(
             &state.store.read().map(|s| s.share_limits_of(hash)).unwrap_or_default(),
             &crate::sharelimits::engine_limits(state, engine_id),
         ),
+        // When each tag was set, epoch seconds. A tag older than the dates
+        // reads as the instant they began to be kept.
+        "tag_since": state
+            .store
+            .read()
+            .ok()
+            .and_then(|s| s.tag_since(hash).ok())
+            .unwrap_or_default(),
     })
 }
 
@@ -23590,6 +23598,76 @@ mod category_lifecycle_tests {
         assert_eq!(v[0]["save_path"], "/data");
     }
 
+    /// The qBittorrent shim (addTags, removeTags, deleteTags) and the native
+    /// tags route (the UI editor, MCP `set_tags`) keep the date of each tag.
+    #[tokio::test]
+    async fn the_shim_and_the_native_route_keep_the_dates_of_the_tags() {
+        let s = state_from(
+            "tag-since-shim",
+            &format!("[daemon]\napi_key = \"{KEY}\"\n"),
+        );
+        let h = "d".repeat(40);
+        labelled(&s, &h, "films");
+        s.state
+            .store
+            .lock()
+            .unwrap()
+            .put_meta("tag_since_migrated_at", "1000")
+            .unwrap();
+        let form = |pairs: &[(&str, &str)]| -> Form<Fields> {
+            Form(
+                pairs
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
+            )
+        };
+        let rows = || s.state.store.lock().unwrap().tag_since_rows(&h);
+        let names = || rows().into_iter().map(|r| r.0).collect::<Vec<_>>();
+
+        let r = qbit_add_tags(
+            State(s.state.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            form(&[("hashes", h.as_str()), ("tags", "x,y")]),
+        )
+        .await;
+        assert!(r.status().is_success());
+        assert_eq!(names(), ["x", "y"], "addTags");
+        assert!(rows().iter().all(|r| r.1 > 1000));
+
+        let r = qbit_remove_tags(
+            State(s.state.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            form(&[("hashes", h.as_str()), ("tags", "x")]),
+        )
+        .await;
+        assert!(r.status().is_success());
+        assert_eq!(names(), ["y"], "removeTags");
+
+        let r = set_torrent_tags(
+            State(s.state.clone()),
+            Path(h.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            r#"{"tags":["z"]}"#.into(),
+        )
+        .await;
+        assert!(r.status().is_success());
+        assert_eq!(names(), ["z"], "the native route replaces the set");
+
+        let r = qbit_delete_tags(
+            State(s.state.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            form(&[("tags", "z")]),
+        )
+        .await;
+        assert!(r.status().is_success());
+        assert!(rows().is_empty(), "deleteTags");
+    }
+
     /// A write the store refused is never acknowledged. Every statement that
     /// changes a category, a tag, a pause or a pin fails here with the error a
     /// dead network mount gives ("database disk image is malformed"); the route
@@ -30036,6 +30114,12 @@ mod detail_panel_tests {
                 &state.store.read().map(|s| s.share_limits_of(hash)).unwrap_or_default(),
                 &crate::sharelimits::engine_limits(state, engine_id),
             ),
+            "tag_since": state
+                .store
+                .read()
+                .ok()
+                .and_then(|s| s.tag_since(hash).ok())
+                .unwrap_or_default(),
         })
     }
 
@@ -30464,6 +30548,41 @@ mod detail_panel_tests {
             "the new panel differs from the old one"
         );
         assert_sources(&now, &t, &hash, "alpha", "movies", true);
+    }
+
+    /// The detail carries the date of each tag as `tag_since`, and adds
+    /// nothing else to the panel.
+    #[tokio::test]
+    async fn the_detail_carries_the_date_of_each_tag() {
+        let s = state_from(
+            "detail-tag-since",
+            &format!("[daemon]\napi_key = \"{KEY}\"\n"),
+        );
+        let (hash, _t, _) = fixture(&s, "hoard", "gamma", "books", false).await;
+        let uri = format!("/api/hoard/torrents/{hash}");
+        // The fixture arrived with tags: dated when it was added.
+        assert_eq!(
+            get(&s, &uri).await["tag_since"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .collect::<Vec<_>>(),
+            ["x", "y"]
+        );
+        {
+            let store = s.state.store.lock().unwrap();
+            store.put_meta("tag_since_migrated_at", "1000").unwrap();
+            store.set_tags(&hash, &["kept".to_string()]).unwrap();
+            // A tag worn before the dates: a column with no row behind it.
+            store.execute_batch_for_tests("UPDATE torrents SET tags = 'old'");
+            store
+                .set_tags(&hash, &["old".to_string(), "fresh".to_string()])
+                .unwrap();
+        }
+        let v = get(&s, &uri).await;
+        assert_eq!(v["tag_since"]["old"], 1000, "worn before the dates");
+        assert!(v["tag_since"]["fresh"].as_i64().unwrap() > 1000);
+        assert!(v["tag_since"].get("kept").is_none(), "no longer worn");
     }
 
     /// A torrent stopped by the user: no peer, no rate, the row's seed time and

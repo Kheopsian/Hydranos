@@ -1848,6 +1848,36 @@ mod tests {
         );
     }
 
+    /// MCP `set_tags` dates the tags it sets and drops those it removes.
+    #[tokio::test]
+    async fn set_tags_keeps_the_dates_of_the_tags() {
+        let s = state_from("mcp-tag-since", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+        let h = add(&s, "hotel");
+        s.state
+            .store
+            .lock()
+            .unwrap()
+            .put_meta("tag_since_migrated_at", "1000")
+            .unwrap();
+        let out = ok_call(
+            &s,
+            "set_tags",
+            json!({"info_hashes": [h], "tags": ["one", "two"]}),
+        )
+        .await;
+        assert_eq!(out["ok"], 1, "{out}");
+        let rows = s.state.store.lock().unwrap().tag_since_rows(&h);
+        assert_eq!(
+            rows.iter().map(|r| r.0.as_str()).collect::<Vec<_>>(),
+            ["one", "two"]
+        );
+        assert!(rows.iter().all(|r| r.1 > 1000));
+        let out = ok_call(&s, "set_tags", json!({"info_hashes": [h], "tags": ["two"]})).await;
+        assert_eq!(out["ok"], 1, "{out}");
+        let again = s.state.store.lock().unwrap().tag_since_rows(&h);
+        assert_eq!(again, rows[1..], "`two` kept its date, `one` lost its row");
+    }
+
     #[tokio::test]
     async fn add_torrent_needs_a_known_category_and_one_source() {
         let s = st("mcp-add");

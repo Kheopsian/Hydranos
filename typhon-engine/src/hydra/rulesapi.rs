@@ -1689,6 +1689,25 @@ mod event_tests {
         assert_eq!(run_events(&s.state), 0, "nothing to replay");
     }
 
+    /// A workflow's add_tags dates the tag it sets, and leaves the date of a
+    /// tag the torrent already wore.
+    #[tokio::test]
+    async fn a_workflow_tag_is_dated_when_it_is_set() {
+        let s = st("wf-tag-since");
+        s.state
+            .store
+            .lock()
+            .unwrap()
+            .put_meta("tag_since_migrated_at", "1000")
+            .unwrap();
+        save_wf(&s, "added", "new").await;
+        let hash = add(&s, "arrival");
+        assert_eq!(run_events(&s.state), 1);
+        let got = s.state.store.lock().unwrap().tag_since(&hash).unwrap();
+        assert_eq!(got.keys().collect::<Vec<_>>(), ["new"]);
+        assert!(got["new"] > 1000, "set by the workflow just now");
+    }
+
     /// Taking a library over is not a stream of arrivals: the import wizard's
     /// adds fire no "on add" workflow.
     #[tokio::test]
