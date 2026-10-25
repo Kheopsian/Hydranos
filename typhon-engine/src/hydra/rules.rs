@@ -16,6 +16,7 @@
 //! is the difference between a background task and a stall.
 
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 /// Everything a condition may look at, flattened.
 ///
@@ -118,6 +119,13 @@ pub struct Cond {
     pub op: Op,
     #[serde(default)]
     pub value: String,
+    /// "For at least": the condition counts only once it has held this long,
+    /// without a break (`7d`, `36h`, `90m`, or a bare count of seconds), like
+    /// the `for:` of a Prometheus alert. JSON key `for`. Absent -- every
+    /// workflow saved before it existed -- the condition is judged on the
+    /// torrent as it is now, exactly as it always was. See `Timing`.
+    #[serde(rename = "for", default, skip_serializing_if = "Option::is_none")]
+    pub hold: Option<String>,
 }
 
 /// A condition tree.
@@ -316,6 +324,9 @@ pub enum CompileError {
     BadTracker(String),
     /// Add trackers with neither a tracker nor a list.
     NoTrackers,
+    /// A `for` on an event workflow. An event fires once, at the moment it
+    /// happens: there is no stretch of time for a condition to have held.
+    ForOnEvent,
 }
 
 impl std::fmt::Display for CompileError {
@@ -339,6 +350,10 @@ impl std::fmt::Display for CompileError {
             CompileError::BadLocation(x) => write!(f, "{x:?} is not an absolute folder (no `..`)"),
             CompileError::BadTracker(x) => write!(f, "{x:?} is not an http://, https:// or udp:// announce URL"),
             CompileError::NoTrackers => write!(f, "add trackers needs at least one tracker or the URL of a list"),
+            CompileError::ForOnEvent => write!(
+                f,
+                "\"for\" needs a schedule: an event fires once, there is no time for a condition to have held"
+            ),
             CompileError::LinkFieldOnEvent(x) => write!(
                 f,
                 "{x:?} cannot be used when a download completes: the hardlink index has not measured the torrent yet"
@@ -653,33 +668,288 @@ fn compile_cond(c: &Cond) -> Result<Matcher, CompileError> {
     }
 }
 
+/// One condition judged on the torrent as it is now, its `for` ignored.
+pub fn compile_raw(c: &Cond) -> Result<Matcher, CompileError> {
+    compile_cond(c)
+}
+
 /// Compile a condition tree into one closure.
+///
+/// A condition carrying `for` can only be judged against a `Timing`; compiled
+/// without one it never holds, which is the safe answer (nothing acts on a
+/// duration nobody measured).
+#[cfg(test)]
 pub fn compile(node: &Node) -> Result<Matcher, CompileError> {
+    compile_in(node, None)
+}
+
+/// `compile`, with the record of how long each condition has held.
+pub fn compile_in(node: &Node, timing: Option<&Arc<Timing>>) -> Result<Matcher, CompileError> {
     match node {
-        Node::Cond(c) => compile_cond(c),
+        Node::Cond(c) => {
+            let raw = compile_cond(c)?;
+            let Some(secs) = hold_secs(c)? else {
+                return Ok(raw);
+            };
+            let (key, timing) = (condition_key(c), timing.cloned());
+            Ok(Box::new(move |f: &Facts| {
+                raw(f)
+                    && timing
+                        .as_ref()
+                        .is_some_and(|t| t.held(&key, &f.info_hash, secs))
+            }))
+        }
         Node::Not { of } => {
-            let inner = compile(of)?;
+            let inner = compile_in(of, timing)?;
             Ok(Box::new(move |f: &Facts| !inner(f)))
         }
         Node::All { of } => {
             if of.is_empty() {
                 return Err(CompileError::Empty);
             }
-            let parts: Vec<Matcher> = of.iter().map(compile).collect::<Result<_, _>>()?;
+            let parts: Vec<Matcher> = of
+                .iter()
+                .map(|n| compile_in(n, timing))
+                .collect::<Result<_, _>>()?;
             Ok(Box::new(move |f: &Facts| parts.iter().all(|p| p(f))))
         }
         Node::Any { of } => {
             if of.is_empty() {
                 return Err(CompileError::Empty);
             }
-            let parts: Vec<Matcher> = of.iter().map(compile).collect::<Result<_, _>>()?;
+            let parts: Vec<Matcher> = of
+                .iter()
+                .map(|n| compile_in(n, timing))
+                .collect::<Result<_, _>>()?;
             Ok(Box::new(move |f: &Facts| parts.iter().any(|p| p(f))))
         }
     }
 }
 
+// ---------------------------------------------------------------------------
+// Durations of state: "for at least"
+// ---------------------------------------------------------------------------
+//
+// "Paused for more than 7 days", "no hardlink for 3 days", "in error for 5
+// days" are not events: nothing happens when a hardlink is absent, and nothing
+// logs it. The only way to know is to remember WHEN a condition became true.
+//
+// One row, `rule_since(workflow, condition key, info hash, since)`, exists
+// for every torrent on which a `for` condition is true right now. A pass
+// writes only the TRANSITIONS: a torrent that just became true gets a row, a
+// torrent that just became false loses it, an unchanged one is not touched --
+// at a million torrents the table can hold a million rows, so a pass that
+// rewrote them would be the load. The action waits until `now - since >=
+// for`. The resolution is the pass cadence: a condition seen true at 10:00
+// and `for: 1h` fires on the first pass at or after 11:00.
+//
+// ⭐ The condition KEY derives from the condition's content (field, operator,
+// value), never from its position, so reordering the conditions of a workflow
+// keeps every date. Editing the field, operator or value is a different
+// condition and starts from zero, on purpose. The duration itself is NOT in
+// the key: lengthening or shortening `for` keeps the date the condition has
+// been true since, which is what the person means.
+//
+// Safe default: a database that has no rows has nothing to go on, so a new
+// `for` condition counts from the first pass that sees it. Nothing is ever
+// assumed to have held "since before".
+//
+// ⚠️ Where a field that is a time per TAG ("tag older than...") will go: it
+// needs no row here. Its date is the tag's own (the `tag_since` table), so it
+// becomes a `Facts` number filled by the row builder and an entry in FIELDS,
+// compared like `added_age`. It would also take a `for`, which then counts
+// the time the comparison has held, a different thing from the tag's age.
+
+/// `for` of a condition in seconds. None: absent, blank or zero, which all
+/// mean "judge it now".
+pub fn hold_secs(c: &Cond) -> Result<Option<i64>, CompileError> {
+    let Some(text) = c.hold.as_deref().filter(|t| !t.trim().is_empty()) else {
+        return Ok(None);
+    };
+    match parse_duration(text) {
+        Some(s) if s.is_finite() && s >= 0.0 => Ok((s >= 1.0).then_some(s.round() as i64)),
+        _ => Err(CompileError::BadValue {
+            field: "for".into(),
+            value: text.to_string(),
+        }),
+    }
+}
+
+/// The identity of a condition across saves: sixteen hex digits derived from
+/// field, operator and value. See the section comment for why not its index.
+pub fn condition_key(c: &Cond) -> String {
+    use sha1::{Digest, Sha1};
+    let op = serde_json::to_string(&c.op).unwrap_or_default();
+    let mut h = Sha1::new();
+    h.update(c.field.as_bytes());
+    h.update([0]);
+    h.update(op.as_bytes());
+    h.update([0]);
+    h.update(c.value.trim().as_bytes());
+    h.finalize()[..8]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// A condition of a workflow that carries a `for`.
+#[derive(Debug, Clone)]
+pub struct TimedCond {
+    pub key: String,
+    pub secs: i64,
+    pub cond: Cond,
+}
+
+/// Every `for` condition of a tree, one per distinct key.
+pub fn timed_conditions(n: &Node) -> Result<Vec<TimedCond>, CompileError> {
+    fn walk(n: &Node, out: &mut Vec<TimedCond>) -> Result<(), CompileError> {
+        match n {
+            Node::All { of } | Node::Any { of } => of.iter().try_for_each(|c| walk(c, out)),
+            Node::Not { of } => walk(of, out),
+            Node::Cond(c) => {
+                if let Some(secs) = hold_secs(c)? {
+                    let key = condition_key(c);
+                    if !out.iter().any(|t| t.key == key) {
+                        out.push(TimedCond {
+                            key,
+                            secs,
+                            cond: c.clone(),
+                        });
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(n, &mut out)?;
+    Ok(out)
+}
+
+/// condition key -> info hash -> unix seconds it has been true since.
+pub type SinceRows = std::collections::HashMap<String, std::collections::HashMap<String, i64>>;
+
+/// How long each `for` condition has held, as of one pass.
+///
+/// A torrent with no row on a condition that is true has just become true:
+/// its date is the pass itself (`origin`), whether or not the row has been
+/// written yet. That makes a first pass, a preview and a pass whose write
+/// failed all answer the same: not yet.
+pub struct Timing {
+    now: std::sync::atomic::AtomicI64,
+    origin: i64,
+    ungated: bool,
+    rows: Arc<SinceRows>,
+}
+
+impl Timing {
+    pub fn new(now: i64, rows: SinceRows) -> Self {
+        Timing {
+            now: now.into(),
+            origin: now,
+            ungated: false,
+            rows: Arc::new(rows),
+        }
+    }
+    /// The same record, answering "held long enough" to everything: what a
+    /// preview needs to find the torrents that are only waiting on time.
+    pub fn ungated(&self) -> Self {
+        Timing {
+            now: self.now.load(std::sync::atomic::Ordering::Relaxed).into(),
+            origin: self.origin,
+            ungated: true,
+            rows: self.rows.clone(),
+        }
+    }
+    /// Move the clock, to ask when a torrent will be due. Only a preview does.
+    pub fn set_now(&self, t: i64) {
+        self.now.store(t, std::sync::atomic::Ordering::Relaxed);
+    }
+    /// The pass's own time: what a torrent with no row counts from.
+    pub fn origin(&self) -> i64 {
+        self.origin
+    }
+    /// The date of the row, if the torrent has one.
+    pub fn recorded(&self, key: &str, hash: &str) -> Option<i64> {
+        self.rows.get(key).and_then(|m| m.get(hash)).copied()
+    }
+    fn since(&self, key: &str, hash: &str) -> i64 {
+        self.recorded(key, hash).unwrap_or(self.origin)
+    }
+    pub fn held(&self, key: &str, hash: &str, secs: i64) -> bool {
+        self.ungated
+            || self.now.load(std::sync::atomic::Ordering::Relaxed) - self.since(key, hash) >= secs
+    }
+    /// When a condition true since its row (or this pass) has held `secs`.
+    pub fn due(&self, key: &str, hash: &str, secs: i64) -> i64 {
+        self.since(key, hash).saturating_add(secs)
+    }
+}
+
+/// What a pass changes in the record: the transitions and nothing else.
+#[derive(Debug, Default)]
+pub struct SinceDelta<'a> {
+    /// (index into the timed conditions, info hash): became true.
+    pub put: Vec<(usize, &'a str)>,
+    /// (condition key, info hash): became false, or its condition is gone.
+    pub del: Vec<(String, String)>,
+}
+
+/// Compare what is true now with what the record says, and return the
+/// difference. Reads `rows` once, writes nothing.
+///
+/// Every `for` condition is judged on its own, whatever the rest of the tree
+/// says: a condition skipped because a sibling was false must still keep or
+/// lose its row.
+pub fn since_delta<'a>(
+    timed: &[TimedCond],
+    facts: &'a [Facts],
+    rows: &SinceRows,
+) -> Result<SinceDelta<'a>, CompileError> {
+    let mut out = SinceDelta::default();
+    for (i, t) in timed.iter().enumerate() {
+        let raw = compile_cond(&t.cond)?;
+        let have = rows.get(&t.key);
+        let mut kept: std::collections::HashSet<&str> = Default::default();
+        let mut lost: Vec<&str> = Vec::new();
+        for f in facts {
+            let on = raw(f);
+            let has = have.is_some_and(|m| m.contains_key(f.info_hash.as_str()));
+            match (on, has) {
+                (true, false) => out.put.push((i, f.info_hash.as_str())),
+                (true, true) => {
+                    kept.insert(f.info_hash.as_str());
+                }
+                (false, true) => lost.push(f.info_hash.as_str()),
+                (false, false) => {}
+            }
+        }
+        // A hash held by two engines is one row: it stays while any copy holds.
+        for h in lost {
+            if !kept.contains(h) {
+                out.del.push((t.key.clone(), h.to_string()));
+            }
+        }
+    }
+    // A condition edited or removed leaves rows nobody reads.
+    for (key, m) in rows {
+        if !timed.iter().any(|t| &t.key == key) {
+            out.del.extend(m.keys().map(|h| (key.clone(), h.clone())));
+        }
+    }
+    Ok(out)
+}
+
 /// Compile a whole workflow, refusing the shapes that are always mistakes.
 pub fn compile_workflow(w: &Workflow) -> Result<Matcher, CompileError> {
+    compile_workflow_in(w, None)
+}
+
+/// `compile_workflow`, judging `for` conditions against `timing`.
+pub fn compile_workflow_in(
+    w: &Workflow,
+    timing: Option<&Arc<Timing>>,
+) -> Result<Matcher, CompileError> {
     if w.then.is_empty() {
         return Err(CompileError::NoActions);
     }
@@ -743,6 +1013,9 @@ pub fn compile_workflow(w: &Workflow) -> Result<Matcher, CompileError> {
         return Err(CompileError::WebhookAlone);
     }
     if w.trigger.is_event() {
+        if !timed_conditions(&w.when)?.is_empty() {
+            return Err(CompileError::ForOnEvent);
+        }
         if let Some(f) = LINK_FIELDS.iter().find(|f| uses_field(&w.when, f)) {
             return Err(CompileError::LinkFieldOnEvent(f.to_string()));
         }
@@ -753,7 +1026,7 @@ pub fn compile_workflow(w: &Workflow) -> Result<Matcher, CompileError> {
             return Ok(Box::new(|_: &Facts| true));
         }
     }
-    compile(&w.when)
+    compile_in(&w.when, timing)
 }
 
 /// Is this torrent already how the action would leave it?
@@ -810,6 +1083,7 @@ mod tests {
                 field: "data_missing".into(),
                 op: Op::Eq,
                 value: v.into(),
+                hold: None,
             })
         };
         let m = compile(&cond("true")).unwrap();
@@ -877,6 +1151,7 @@ mod tests {
                 field: f.into(),
                 op: Op::Eq,
                 value: "0".into(),
+                hold: None,
             })
         };
         let tree = Node::All {
@@ -926,6 +1201,7 @@ mod tests {
             field: field.into(),
             op,
             value: value.into(),
+            hold: None,
         })
     }
 

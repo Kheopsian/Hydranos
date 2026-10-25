@@ -735,7 +735,203 @@ pub type HashMapFacts = std::collections::HashMap<String, LinkFacts>;
 /// Also used verbatim by preview, which is the point -- a preview that ran
 /// different code from the pass would be a preview of something else.
 pub fn evaluate(w: &Workflow, facts: &[Facts]) -> Result<(Vec<Match>, PassReport), String> {
-    let matcher = rules::compile_workflow(w).map_err(|e| e.to_string())?;
+    evaluate_with(w, facts, None)
+}
+
+/// How many rows of `rule_since` one transaction writes. A first pass over a
+/// million torrents is a million inserts: in batches, the store's writer is
+/// free between them (c816fd29) and no single commit is long.
+pub const SINCE_BATCH: usize = 5000;
+
+/// One pass's view of the `for` conditions of a workflow.
+pub struct TimedPass {
+    pub timed: Vec<rules::TimedCond>,
+    pub timing: Arc<rules::Timing>,
+    /// Rows this pass inserted or deleted (0 when nothing changed).
+    pub written: usize,
+}
+
+/// Read the record of a workflow's `for` conditions, work out the
+/// transitions on `facts`, and -- for a real pass, `persist` -- write them in
+/// batches. None when no condition carries a `for`: such a workflow reads and
+/// writes nothing more than it ever did.
+///
+/// Blocking store work: call it from `spawn_blocking`, like the rest of a pass.
+pub fn track_since(
+    store: &Arc<crate::store::StoreLock>,
+    w: &Workflow,
+    facts: &[Facts],
+    now: i64,
+    persist: bool,
+) -> Result<Option<TimedPass>, String> {
+    let timed = rules::timed_conditions(&w.when).map_err(|e| e.to_string())?;
+    // A workflow that stopped carrying any `for` still has rows to clear.
+    let rows = {
+        let s = store.read().map_err(|_| "store lock")?;
+        s.rule_since_rows(&w.id).map_err(|e| e.to_string())?
+    };
+    if timed.is_empty() && rows.is_empty() {
+        return Ok(None);
+    }
+    let delta = rules::since_delta(&timed, facts, &rows).map_err(|e| e.to_string())?;
+    let mut written = 0;
+    if persist {
+        for chunk in delta.put.chunks(SINCE_BATCH) {
+            let put: Vec<(&str, &str)> = chunk
+                .iter()
+                .map(|&(i, hash)| (timed[i].key.as_str(), hash))
+                .collect();
+            written += write_since(store, &w.id, &put, &[], now)?;
+        }
+        for chunk in delta.del.chunks(SINCE_BATCH) {
+            let del: Vec<(&str, &str)> = chunk
+                .iter()
+                .map(|(k, h)| (k.as_str(), h.as_str()))
+                .collect();
+            written += write_since(store, &w.id, &[], &del, now)?;
+        }
+    }
+    drop(delta);
+    if timed.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(TimedPass {
+        timed,
+        timing: Arc::new(rules::Timing::new(now, rows)),
+        written,
+    }))
+}
+
+/// One batch, the writer held for its transaction and no longer.
+fn write_since(
+    store: &Arc<crate::store::StoreLock>,
+    workflow_id: &str,
+    put: &[(&str, &str)],
+    del: &[(&str, &str)],
+    now: i64,
+) -> Result<usize, String> {
+    let s = store.lock().map_err(|_| "store lock")?;
+    s.rule_since_write(workflow_id, put, del, now)
+        .map_err(|e| e.to_string())
+}
+
+/// One condition of a workflow that has held (or is holding) long enough,
+/// for the preview.
+#[derive(Debug, serde::Serialize)]
+pub struct Held {
+    pub field: String,
+    pub op: serde_json::Value,
+    pub value: String,
+    pub for_secs: i64,
+    /// Unix seconds the condition has been true since. None: it just became
+    /// true, so it counts from this pass ("from now on").
+    pub since: Option<i64>,
+    /// When the condition will have held long enough.
+    pub due: i64,
+}
+
+/// A torrent the condition describes but whose time has not come.
+#[derive(Debug, serde::Serialize)]
+pub struct Pending {
+    pub info_hash: String,
+    pub name: String,
+    pub engine: String,
+    pub total_size: f64,
+    pub waiting: Vec<Held>,
+    /// When the whole rule will first match, if every `for` keeps holding.
+    pub fires_at: Option<i64>,
+}
+
+impl TimedPass {
+    fn held_of(&self, t: &rules::TimedCond, hash: &str) -> Held {
+        Held {
+            field: t.cond.field.clone(),
+            op: serde_json::to_value(t.cond.op).unwrap_or_default(),
+            value: t.cond.value.clone(),
+            for_secs: t.secs,
+            since: self.timing.recorded(&t.key, hash),
+            due: self.timing.due(&t.key, hash, t.secs),
+        }
+    }
+
+    /// The `for` conditions this torrent has a date for.
+    pub fn held_for(&self, hash: &str) -> Vec<Held> {
+        self.timed
+            .iter()
+            .filter(|t| self.timing.recorded(&t.key, hash).is_some())
+            .map(|t| self.held_of(t, hash))
+            .collect()
+    }
+}
+
+/// The torrents the rule would act on if only time were not in the way: the
+/// whole count, and the first `sample` of them with what they wait for.
+pub fn pending(
+    w: &Workflow,
+    facts: &[Facts],
+    tp: &TimedPass,
+    sample: usize,
+) -> Result<(usize, Vec<Pending>), String> {
+    let gated = rules::compile_workflow_in(w, Some(&tp.timing)).map_err(|e| e.to_string())?;
+    let free = Arc::new(tp.timing.ungated());
+    let ungated = rules::compile_workflow_in(w, Some(&free)).map_err(|e| e.to_string())?;
+    let raws: Vec<rules::Matcher> = tp
+        .timed
+        .iter()
+        .map(|t| rules::compile_raw(&t.cond).map_err(|e| e.to_string()))
+        .collect::<Result<_, _>>()?;
+    let origin = tp.timing.origin();
+    let (mut total, mut out) = (0, Vec::new());
+    for f in facts {
+        if !ungated(f) || gated(f) {
+            continue;
+        }
+        if w.then
+            .iter()
+            .all(|a| a.is_webhook() || rules::already_satisfied(a, f))
+        {
+            continue;
+        }
+        total += 1;
+        if out.len() >= sample {
+            continue;
+        }
+        let waiting: Vec<Held> = tp
+            .timed
+            .iter()
+            .zip(&raws)
+            .filter(|(t, raw)| raw(f) && !tp.timing.held(&t.key, &f.info_hash, t.secs))
+            .map(|(t, _)| tp.held_of(t, &f.info_hash))
+            .collect();
+        // The rule is monotone in time unless it says `not`: the first moment
+        // it holds is one of the moments a condition comes due.
+        let mut dues: Vec<i64> = waiting.iter().map(|h| h.due).collect();
+        dues.sort_unstable();
+        let fires_at = dues.into_iter().find(|&t| {
+            tp.timing.set_now(t);
+            gated(f)
+        });
+        tp.timing.set_now(origin);
+        out.push(Pending {
+            info_hash: f.info_hash.clone(),
+            name: f.name.clone(),
+            engine: f.engine.clone(),
+            total_size: f.total_size,
+            waiting,
+            fires_at,
+        });
+    }
+    Ok((total, out))
+}
+
+/// `evaluate`, judging `for` conditions on the pass's record of them.
+pub fn evaluate_with(
+    w: &Workflow,
+    facts: &[Facts],
+    timed: Option<&TimedPass>,
+) -> Result<(Vec<Match>, PassReport), String> {
+    let matcher =
+        rules::compile_workflow_in(w, timed.map(|t| &t.timing)).map_err(|e| e.to_string())?;
     let mut report = PassReport {
         workflow_id: w.id.clone(),
         workflow_name: w.name.clone(),
@@ -1310,6 +1506,7 @@ mod tests {
             field: "external_links".into(),
             op: Op::Eq,
             value: "0".into(),
+            hold: None,
         });
         let (first, _) = evaluate(&w, &facts).unwrap();
         assert_eq!(first.len(), 2);
@@ -1417,6 +1614,7 @@ mod tests {
                 field: "progress".into(),
                 op: Op::Ge,
                 value: "100".into(),
+                hold: None,
             }),
             then,
             cap,
@@ -1568,6 +1766,7 @@ mod tests {
             field: "nonesuch".into(),
             op: Op::Eq,
             value: "x".into(),
+            hold: None,
         });
         assert!(evaluate(&w, &facts(1)).unwrap_err().contains("nonesuch"));
     }

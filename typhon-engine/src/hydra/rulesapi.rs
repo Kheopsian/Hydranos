@@ -294,6 +294,13 @@ pub async fn save(
             return bad(e);
         }
     }
+    // A workflow switched off is not watched: what it knew about how long
+    // things have held goes stale, and switching it on again must not act on
+    // dates from before. It starts from zero.
+    if !w.enabled {
+        let (st, id) = (state.clone(), w.id.clone());
+        let _ = tokio::task::spawn_blocking(move || purge_since(&st, Some(&id))).await;
+    }
     Json(to_json(&stored)).into_response()
 }
 
@@ -319,7 +326,30 @@ pub async fn remove(
         )
             .into_response();
     }
+    // Its record of `for` conditions goes with it, a batch at a time: it may
+    // hold a row per torrent, and one DELETE of a million would hold the
+    // writer for the whole of it.
+    let st = state.clone();
+    let _ = tokio::task::spawn_blocking(move || purge_since(&st, None)).await;
     Json(serde_json::json!({"status": "ok"})).into_response()
+}
+
+/// Clear the rows of one workflow, or of workflows that no longer exist
+/// (`None`), in batches.
+fn purge_since(state: &AppState, workflow: Option<&str>) {
+    let limit = rulesrun::SINCE_BATCH as i64;
+    loop {
+        let n = match state.store.lock() {
+            Ok(store) => match workflow {
+                Some(id) => store.rule_since_purge_workflow(id, limit),
+                None => store.rule_since_purge_orphans(limit),
+            },
+            Err(_) => return,
+        };
+        if !matches!(n, Ok(n) if n > 0) {
+            return;
+        }
+    }
 }
 
 /// What this workflow WOULD do, right now, changing nothing.
@@ -355,12 +385,15 @@ pub async fn preview(
         };
     }
 
-    let decided = tokio::task::spawn_blocking(move || decide(&state, &w)).await;
+    // A preview never writes the record of `for` conditions.
+    let decided = tokio::task::spawn_blocking(move || decide(&state, &w, false)).await;
     let Decision {
         matches,
         report,
         rechecked,
         no_longer,
+        timed,
+        pending,
         ..
     } = match decided {
         Ok(Ok(d)) => d,
@@ -371,15 +404,19 @@ pub async fn preview(
         .iter()
         .take(200)
         .map(|m| {
-            serde_json::json!({
+            let mut v = serde_json::json!({
                 "info_hash": m.info_hash,
                 "name": m.name,
                 "engine": m.engine,
                 "total_size": m.total_size,
-            })
+            });
+            if let Some(tp) = &timed {
+                v["held"] = serde_json::json!(tp.held_for(&m.info_hash));
+            }
+            v
         })
         .collect();
-    Json(serde_json::json!({
+    let mut out = serde_json::json!({
         "matched": report.matched,
         "would_apply": matches.len(),
         "skipped": report.skipped,
@@ -388,8 +425,15 @@ pub async fn preview(
         "rechecked": rechecked,
         "no_longer_true": no_longer,
         "sample": sample,
-    }))
-    .into_response()
+    });
+    // A rule with a `for`: the torrents that satisfy it but have not held
+    // long enough, with since when (null: from this very moment) and when the
+    // rule will fire on them.
+    if timed.is_some() {
+        out["waiting"] = pending.0.into();
+        out["waiting_sample"] = serde_json::json!(pending.1);
+    }
+    Json(out).into_response()
 }
 
 /// What a completion workflow would do to the downloads under way now.
@@ -477,7 +521,15 @@ struct Decision {
     /// measurement no longer justified.
     rechecked: usize,
     no_longer: usize,
+    /// The `for` conditions of the workflow, when it has any.
+    timed: Option<rulesrun::TimedPass>,
+    /// Torrents waiting on time alone: (how many, the first few). Only a dry
+    /// decision looks for them.
+    pending: (usize, Vec<rulesrun::Pending>),
 }
+
+/// How many waiting torrents a preview describes.
+const PENDING_SAMPLE: usize = 200;
 
 /// Decide what a workflow would do. The single path the timer, the run
 /// button and the preview all take.
@@ -490,16 +542,25 @@ struct Decision {
 /// again NOW, written back, and the rule is evaluated once more on that. A
 /// candidate whose files changed since the index saw them drops out here,
 /// before anything is done to it.
-fn decide(state: &AppState, w: &Workflow) -> Result<Decision, String> {
+///
+/// `persist` is a real pass: it writes the transitions of the workflow's `for`
+/// conditions (batched, see `rulesrun::track_since`). A preview or a dry run
+/// reads the record and writes nothing.
+fn decide(state: &AppState, w: &Workflow, persist: bool) -> Result<Decision, String> {
+    let now = crate::store::now_secs();
     if !rules::needs_link_scan(&w.when) {
         let facts = gather_all(state, rulesrun::Want::of(w));
-        let (matches, report) = rulesrun::evaluate(w, &facts)?;
+        let timed = rulesrun::track_since(&state.store, w, &facts, now, persist)?;
+        let (matches, report) = rulesrun::evaluate_with(w, &facts, timed.as_ref())?;
+        let pending = pending_of(w, &facts, timed.as_ref(), persist)?;
         return Ok(Decision {
             matches,
             report,
             links: Default::default(),
             rechecked: 0,
             no_longer: 0,
+            timed,
+            pending,
         });
     }
 
@@ -524,7 +585,8 @@ fn decide(state: &AppState, w: &Workflow) -> Result<Decision, String> {
         links,
     } = rulesrun::links_from_measured(&cat, measured);
     let mut facts = gather_all_with(state, &links, rulesrun::Want::of(w));
-    let (first, _) = rulesrun::evaluate(w, &facts)?;
+    let timed = rulesrun::track_since(&state.store, w, &facts, now, persist)?;
+    let (first, _) = rulesrun::evaluate_with(w, &facts, timed.as_ref())?;
 
     let want: std::collections::HashSet<String> =
         first.iter().map(|m| m.info_hash.clone()).collect();
@@ -534,7 +596,6 @@ fn decide(state: &AppState, w: &Workflow) -> Result<Decision, String> {
         .filter_map(|i| Some((i, (entries[i].0.clone(), cat[origin[i]].paths()?))))
         .unzip();
     let fresh = rulesrun::stat_plan_with(plan, rulesrun::scan_threads());
-    let now = crate::store::now_secs();
     let mut rows = Vec::with_capacity(picked.len());
     for (&i, e) in picked.iter().zip(fresh) {
         let stats: Vec<_> = e.1.iter().map(|(_, st)| *st).collect();
@@ -557,18 +618,35 @@ fn decide(state: &AppState, w: &Workflow) -> Result<Decision, String> {
         .engines
         .publish_link_summary(rulesrun::link_summary(&cat, &origin, &measured_at, &links));
     rulesrun::patch_link_facts(&mut facts, &links, &want);
-    let (second, report) = rulesrun::evaluate(w, &facts)?;
+    let (second, report) = rulesrun::evaluate_with(w, &facts, timed.as_ref())?;
     let matches: Vec<_> = second
         .into_iter()
         .filter(|m| want.contains(&m.info_hash))
         .collect();
+    let pending = pending_of(w, &facts, timed.as_ref(), persist)?;
     Ok(Decision {
         no_longer: first.len().saturating_sub(matches.len()),
         rechecked: picked.len(),
         matches,
         report,
         links,
+        timed,
+        pending,
     })
+}
+
+/// The torrents a dry decision finds waiting on time alone. A real pass has
+/// no use for them and does not look.
+fn pending_of(
+    w: &Workflow,
+    facts: &[rules::Facts],
+    timed: Option<&rulesrun::TimedPass>,
+    persist: bool,
+) -> Result<(usize, Vec<rulesrun::Pending>), String> {
+    match timed {
+        Some(tp) if !persist => rulesrun::pending(w, facts, tp, PENDING_SAMPLE),
+        _ => Ok((0, Vec::new())),
+    }
 }
 
 fn gather_all_with(
@@ -645,7 +723,9 @@ pub fn run_one(state: &AppState, w: &Workflow, dry: bool) -> serde_json::Value {
         links,
         rechecked,
         no_longer,
-    } = match decide(state, w) {
+        timed,
+        pending,
+    } = match decide(state, w, !dry) {
         Ok(d) => d,
         Err(e) => {
             return serde_json::json!({"error": e});
@@ -664,7 +744,7 @@ pub fn run_one(state: &AppState, w: &Workflow, dry: bool) -> serde_json::Value {
                 ..Default::default()
             });
         }
-        return serde_json::json!({
+        let mut out = serde_json::json!({
             "dry_run": true,
             "matched": report.matched,
             "would_apply": matches.len(),
@@ -673,6 +753,10 @@ pub fn run_one(state: &AppState, w: &Workflow, dry: bool) -> serde_json::Value {
             "rechecked": rechecked,
             "no_longer_true": no_longer,
         });
+        if timed.is_some() {
+            out["waiting"] = pending.0.into();
+        }
+        return out;
     }
 
     apply_matches(state, w, &matches, &links, &mut report);
@@ -681,7 +765,7 @@ pub fn run_one(state: &AppState, w: &Workflow, dry: bool) -> serde_json::Value {
         let store = state.store.lock().unwrap();
         let _ = store.mark_workflow_run(&w.id, crate::store::now_secs());
     }
-    serde_json::json!({
+    let mut out = serde_json::json!({
         "matched": report.matched,
         "applied": report.applied,
         "skipped": report.skipped,
@@ -689,7 +773,11 @@ pub fn run_one(state: &AppState, w: &Workflow, dry: bool) -> serde_json::Value {
         "capped": report.capped,
         "rechecked": rechecked,
         "no_longer_true": no_longer,
-    })
+    });
+    if let Some(tp) = &timed {
+        out["since_rows_written"] = tp.written.into();
+    }
+    out
 }
 
 /// Phase two for a set of matches: carry each out, log each outcome.
@@ -2516,7 +2604,7 @@ mod one_number_tests {
             .to_string(),
         )
         .expect("a valid workflow");
-        let d = decide(&s.state, &w).expect("decided");
+        let d = decide(&s.state, &w, false).expect("decided");
 
         // Torrent by torrent: the column's value is the workflow's value.
         for (hash, row) in &col {
@@ -2564,3 +2652,7 @@ mod one_number_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "rulesapi_since_tests.rs"]
+mod since_tests;
