@@ -165,16 +165,19 @@ jobs:
       # Ubuntu 26.04 ships an AppArmor profile for /usr/bin/wg, in enforce mode,
       # that refuses `wg set private-key <file>` the open of the key (kernel:
       # apparmor="DENIED" profile="wg", strace: EACCES), in a 0700 directory
-      # and by /dev/stdin alike. The test writes its key under /tmp, where the
-      # profile does not let wg read. Complain mode keeps the profile loaded and
+      # and by /dev/stdin alike. The refusal is proven for the key file the test
+      # writes under /tmp, not for all of /tmp: the profile itself is printed by
+      # the diagnostic step below. Complain mode keeps the profile loaded and
       # logs instead of refusing; the runner is a throwaway VM and only this job
       # is touched, never the engine.
       - name: Let wg read the test key (AppArmor complain mode)
         run: |
           if command -v aa-complain >/dev/null 2>&1; then
             sudo aa-complain /usr/bin/wg
+            echo "wg profile: complain mode"
           elif [ -f /etc/apparmor.d/wg ]; then
             sudo apparmor_parser -R /etc/apparmor.d/wg
+            echo "wg profile: unloaded (no aa-complain)"
           else
             echo "no wg AppArmor profile to relax"
           fi
