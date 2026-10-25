@@ -166,6 +166,34 @@ jobs:
       # skips it. Without the flag this step ran zero tests and passed.
       - name: Bring a tunnel up for real
         run: sudo HYDRANOS_WG_ROOT_TEST=1 ./wgtun.test --test-threads=1 --ignored wgtunnel::root
+      # The step above started failing with `fopen: Permission denied` from
+      # `wg set private-key`, on a path that is not ours (a fresh 0700 directory
+      # fails the same). Say what the runner is, once, instead of guessing.
+      - name: Why wg could not read the key
+        if: failure()
+        run: |
+          set +e
+          grep -E '^(PRETTY_NAME|VERSION_ID)=' /etc/os-release
+          uname -r
+          sudo sysctl fs.protected_regular fs.protected_symlinks kernel.apparmor_restrict_unprivileged_userns
+          command -v wg && wg --version && ls -l "$(command -v wg)" && readlink -f "$(command -v wg)"
+          sudo aa-status 2>&1 | head -30
+          sudo sh -c '
+            d=$(mktemp -d); wg genkey > "$d/k"; ls -ld "$d"; ls -l "$d/k"
+            ip netns add dbg && ip -n dbg link add wgp type wireguard
+            ip netns exec dbg ls -l "$d/k"
+            ip netns exec dbg wc -c < "$d/k"
+            ip netns exec dbg wg set wgp private-key "$d/k"; echo "wg set: $?"
+            wg set wgp private-key "$d/k" 2>&1 | head -2
+            # The same key, by stdin instead of a file: if this one works the
+            # job has a way round whatever refuses the file.
+            ip netns exec dbg wg set wgp private-key /dev/stdin < "$d/k"; echo "wg set by stdin: $?"
+            command -v strace >/dev/null || apt-get install -y --no-install-recommends strace >/dev/null 2>&1
+            strace -f -e trace=openat -o /tmp/wg.strace ip netns exec dbg wg set wgp private-key "$d/k"
+            grep -E "EACCES|EPERM" /tmp/wg.strace | head
+            ip netns del dbg; rm -rf "$d"
+          '
+          sudo dmesg 2>&1 | grep -i -E 'apparmor|denied|wg' | tail -10
 
   rust:
     runs-on: ubuntu-latest
