@@ -162,6 +162,22 @@ jobs:
             | python3 -c "import json,sys;print([json.loads(l)['executable'] for l in sys.stdin if l.strip().startswith('{') and json.loads(l).get('executable')][-1])" \
             > /tmp/wgtun-test-path
           cp "$(cat /tmp/wgtun-test-path)" ../wgtun.test
+      # Ubuntu 26.04 ships an AppArmor profile for /usr/bin/wg, in enforce mode,
+      # that refuses `wg set private-key <file>` the open of the key (kernel:
+      # apparmor="DENIED" profile="wg", strace: EACCES), in a 0700 directory
+      # and by /dev/stdin alike. The test writes its key under /tmp, where the
+      # profile does not let wg read. Complain mode keeps the profile loaded and
+      # logs instead of refusing; the runner is a throwaway VM and only this job
+      # is touched, never the engine.
+      - name: Let wg read the test key (AppArmor complain mode)
+        run: |
+          if command -v aa-complain >/dev/null 2>&1; then
+            sudo aa-complain /usr/bin/wg
+          elif [ -f /etc/apparmor.d/wg ]; then
+            sudo apparmor_parser -R /etc/apparmor.d/wg
+          else
+            echo "no wg AppArmor profile to relax"
+          fi
       # --ignored: the root test is #[ignore] so an unprivileged `cargo test`
       # skips it. Without the flag this step ran zero tests and passed.
       - name: Bring a tunnel up for real
@@ -178,6 +194,7 @@ jobs:
           sudo sysctl fs.protected_regular fs.protected_symlinks kernel.apparmor_restrict_unprivileged_userns
           command -v wg && wg --version && ls -l "$(command -v wg)" && readlink -f "$(command -v wg)"
           sudo aa-status 2>&1 | head -30
+          cat /etc/apparmor.d/wg 2>&1 | head -60
           sudo sh -c '
             d=$(mktemp -d); wg genkey > "$d/k"; ls -ld "$d"; ls -l "$d/k"
             ip netns add dbg && ip -n dbg link add wgp type wireguard
