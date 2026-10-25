@@ -127,7 +127,7 @@ Status: ✓ works · ◐ works with a caveat. Stub routes appear only in *Routes
 | `/api/torrents/:info_hash/graduate` | POST | `{"engine","category","save_path","allow_breaking_hardlinks":false}`: queue a `graduate` job (data move + engine change). `save_path` defaults to the category's. Same checks as a category change (unsafe path, shared files, hardlinks, free space: 409 with `reason`); a failure moves the files back. | ✓ |
 | `/api/torrents/add-defaults` | GET | `{"create_subfolder","skip_recheck"}`: the defaults the Add tab starts from (`create_subfolder` is `[daemon] create_torrent_folder`). | ✓ |
 | `/api/torrents/export` | POST form | `format=zip\|txt\|csv`, `selection` (JSON) **or** `hashes`, `strip_trackers=1`. Streams a download. | ✓ |
-| `/api/{hoard,race}/torrents/:info_hash` | GET | One row with live detail. | ✓ |
+| `/api/{hoard,race}/torrents/:info_hash` | GET | One row with live detail. Carries `tag_since`: `{"<tag>": <epoch seconds>}`, when each tag the torrent wears was set. A tag worn before dates were kept reads as the instant of that migration ("at least since"). | ✓ |
 | `/api/{hoard,race}/torrents/:info_hash/category` | POST | `{"category","move_files":false,"allow_breaking_hardlinks":false}`. With `move_files`, `202` + job (or a graduation if the mode differs). | ✓ |
 | `/api/{hoard,race}/torrents/:info_hash/location` | POST | **Set location**: `{"location":"/abs/path","allow_breaking_hardlinks":false}`. `202` + job when bytes move, `200 "moved":false` if already there. | ✓ |
 | `/api/{hoard,race}/torrents/:info_hash/move-preview` | GET | What a move would do, without doing it. | ✓ |

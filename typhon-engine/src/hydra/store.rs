@@ -220,6 +220,43 @@ pub fn now_secs() -> i64 {
         .unwrap_or(0)
 }
 
+/// Bring the dates of one torrent's tags in line with an edit of its tag list.
+///
+/// A tag in `after` and not in `before` is new: dated `now` (replacing any
+/// stale row). A tag in both is left alone, row or no row -- a tag without a
+/// row reads as the migration instant, and writing `now` for it here would
+/// make an old tag young. A tag in `before` and not in `after` loses its row,
+/// unless `others` (what the torrent's other copies wear) still has it.
+fn retag_since(
+    conn: &Connection,
+    info_hash: &str,
+    before: &[String],
+    after: &[String],
+    others: &[String],
+    now: i64,
+) -> rusqlite::Result<()> {
+    for t in after {
+        if !before.contains(t) && !others.contains(t) {
+            conn.prepare_cached(
+                "INSERT OR REPLACE INTO tag_since (info_hash, tag, since) VALUES (?1, ?2, ?3)",
+            )?
+            .execute(rusqlite::params![info_hash, t, now])?;
+        }
+    }
+    for t in before {
+        if !after.contains(t) && !others.contains(t) {
+            conn.prepare_cached("DELETE FROM tag_since WHERE info_hash = ?1 AND tag = ?2")?
+                .execute(rusqlite::params![info_hash, t])?;
+        }
+    }
+    Ok(())
+}
+
+/// `meta` key holding the instant the `tag_since` table was first created on
+/// this database. A tag worn by a torrent without a `tag_since` row is read as
+/// set at that instant: "at least since then".
+pub const TAG_SINCE_MIGRATED_KEY: &str = "tag_since_migrated_at";
+
 /// The frozen schema, as the production database has it.
 pub const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS torrents (
@@ -234,6 +271,9 @@ CREATE TABLE IF NOT EXISTS torrents (
 CREATE TABLE IF NOT EXISTS counters (key TEXT PRIMARY KEY, ul INTEGER NOT NULL DEFAULT 0, dl INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS tag_registry (name TEXT PRIMARY KEY);
+CREATE TABLE IF NOT EXISTS tag_since (
+    info_hash TEXT NOT NULL, tag TEXT NOT NULL, since INTEGER NOT NULL,
+    PRIMARY KEY (info_hash, tag));
 CREATE TABLE IF NOT EXISTS drain_history (
     id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, volume TEXT NOT NULL,
     before_pct REAL NOT NULL DEFAULT 0, after_pct REAL NOT NULL DEFAULT 0,
@@ -1093,6 +1133,9 @@ pub struct Store {
     slim: std::collections::HashMap<String, std::sync::Arc<SlimFacts>>,
     slim_version: i64,
     tracks_changes: bool,
+    /// When this connection was opened: what a tag without a date reads as on
+    /// a store that never recorded its migration instant.
+    opened_at: i64,
     /// Make this store's `ping` sleep this many ms first, from whichever
     /// thread pings it. For tests; 0 = off.
     #[cfg(test)]
@@ -1279,6 +1322,7 @@ impl Store {
             slim: Default::default(),
             slim_version: -1,
             tracks_changes: false,
+            opened_at: now_secs(),
             #[cfg(test)]
             ping_stall_ms: Default::default(),
             fresh: Default::default(),
@@ -1289,6 +1333,15 @@ impl Store {
     /// no-op against a database that already has the tables -- including one
     /// written by 3.x, which is the whole point.
     pub fn ensure_schema(&self) -> anyhow::Result<()> {
+        // Asked BEFORE the schema runs, which creates the table.
+        let had_tag_since = self
+            .conn
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='tag_since'",
+                [],
+                |_| Ok(()),
+            )
+            .is_ok();
         self.conn.execute_batch(SCHEMA)?;
         self.ensure_cover_index()?;
         self.ensure_nodes_table()?;
@@ -1300,6 +1353,14 @@ impl Store {
         self.ensure_rss_tables()?;
         // After the tables exist, and before anything reads them.
         self.migrate_composite_key()?;
+        if !had_tag_since {
+            // No row is written for the tags already worn: a library has
+            // millions of them. One instant stands for all, cf `tag_since`.
+            self.conn.execute(
+                "INSERT OR IGNORE INTO meta (key, value) VALUES (?1, ?2)",
+                rusqlite::params![TAG_SINCE_MIGRATED_KEY, now_secs().to_string()],
+            )?;
+        }
         Ok(())
     }
 
@@ -2055,21 +2116,23 @@ impl Store {
                         }
                     }
                     let mut get = tx.prepare_cached(
-                        "SELECT tags FROM torrents WHERE info_hash = ?1 AND session = ?2",
+                        "SELECT session, tags FROM torrents WHERE info_hash = ?1",
                     )?;
                     let mut put = tx.prepare_cached(
                         "UPDATE torrents SET tags = ?3 WHERE info_hash = ?1 AND session = ?2",
                     )?;
+                    let now = now_secs();
                     for (i, (h, s)) in targets.iter().enumerate() {
-                        let raw: Option<String> = get
-                            .query_row(rusqlite::params![h, s], |r| r.get(0))
-                            .map(Some)
-                            .or_else(|e| match e {
-                                rusqlite::Error::QueryReturnedNoRows => Ok(None),
-                                e => Err(e),
-                            })?;
-                        let Some(raw) = raw else { continue };
-                        let mut list = split_tags(&raw);
+                        // One read for the torrent's copies: the dates are
+                        // per torrent, so a tag another copy still wears
+                        // keeps its date.
+                        let copies: Vec<(String, String)> = get
+                            .query_map(rusqlite::params![h], |r| Ok((r.get(0)?, r.get(1)?)))?
+                            .collect::<Result<_, _>>()?;
+                        let Some(raw) = copies.iter().find(|(c, _)| c == s).map(|(_, t)| t) else {
+                            continue;
+                        };
+                        let mut list = split_tags(raw);
                         let before = list.clone();
                         if add {
                             for t in tags {
@@ -2082,6 +2145,12 @@ impl Store {
                         }
                         if list != before {
                             changed += put.execute(rusqlite::params![h, s, list.join(",")])?;
+                            let others: Vec<String> = copies
+                                .iter()
+                                .filter(|(c, _)| c != s)
+                                .flat_map(|(_, t)| split_tags(t))
+                                .collect();
+                            retag_since(&tx, h, &before, &list, &others, now)?;
                             new_tags.push((i, list));
                         }
                     }
@@ -3204,6 +3273,12 @@ impl Store {
             )?,
             None => tx.execute("DELETE FROM torrents WHERE info_hash = ?1", [info_hash])?,
         };
+        // The dates are the torrent's: they go with its last copy.
+        tx.execute(
+            "DELETE FROM tag_since WHERE info_hash = ?1
+             AND NOT EXISTS (SELECT 1 FROM torrents WHERE info_hash = ?1)",
+            [info_hash],
+        )?;
         tx.commit()?;
         Ok(n > 0)
     }
@@ -3319,6 +3394,8 @@ impl Store {
                     put.execute(rusqlite::params![rowid, kept.join(",")])?;
                     changed += 1;
                 }
+                // Every date of the tag, whoever wore it.
+                tx.execute("DELETE FROM tag_since WHERE tag = ?1", [tag])?;
             }
         }
         tx.commit()?;
@@ -3379,12 +3456,128 @@ impl Store {
         Ok(n)
     }
 
+    /// Replace a torrent's tags. The date of each tag (`tag_since`) follows in
+    /// the same transaction: a new tag is dated now, a kept one keeps its date
+    /// (or the lack of one, which reads as the migration instant), a removed
+    /// one loses its row.
     pub fn set_tags(&self, info_hash: &str, tags: &[String]) -> anyhow::Result<()> {
-        self.conn.execute(
+        let tx = self.conn.unchecked_transaction()?;
+        let joined = tags.join(",");
+        let before = tx
+            .query_row(
+                "SELECT tags FROM torrents WHERE info_hash = ?1 LIMIT 1",
+                [info_hash],
+                |r| r.get::<_, String>(0),
+            )
+            .map(|raw| split_tags(&raw))
+            .unwrap_or_default();
+        let n = tx.execute(
             "UPDATE torrents SET tags = ?2 WHERE info_hash = ?1",
-            rusqlite::params![info_hash, tags.join(",")],
+            rusqlite::params![info_hash, joined],
         )?;
+        // No row, no dates: a row for a torrent the store does not hold
+        // would be an orphan.
+        if n > 0 {
+            retag_since(
+                &tx,
+                info_hash,
+                &before,
+                &split_tags(&joined),
+                &[],
+                now_secs(),
+            )?;
+        }
+        tx.commit()?;
         Ok(())
+    }
+
+    /// The raw `tag_since` rows of one torrent, sorted, for tests: unlike
+    /// `tag_since` it does not fill in the migration instant.
+    #[cfg(test)]
+    pub fn tag_since_rows(&self, info_hash: &str) -> Vec<(String, i64)> {
+        let mut st = self
+            .conn
+            .prepare("SELECT tag, since FROM tag_since WHERE info_hash = ?1 ORDER BY tag")
+            .unwrap();
+        st.query_map([info_hash], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    }
+
+    /// When each tag of one torrent was set, as seconds since the epoch. A tag
+    /// the torrent wears without a date was there when dates began to be kept:
+    /// it reads as the migration instant ("at least since").
+    pub fn tag_since(
+        &self,
+        info_hash: &str,
+    ) -> anyhow::Result<std::collections::HashMap<String, i64>> {
+        Ok(self
+            .tag_since_bulk(&[info_hash])?
+            .remove(info_hash)
+            .unwrap_or_default())
+    }
+
+    /// `tag_since` for many torrents: a read of the tags and a read of the
+    /// dates per 900 hashes, not one per torrent. Torrents without tags are
+    /// absent from the answer. Only tags the torrent wears now are reported.
+    pub fn tag_since_bulk(
+        &self,
+        info_hashes: &[&str],
+    ) -> anyhow::Result<std::collections::HashMap<String, std::collections::HashMap<String, i64>>>
+    {
+        use std::collections::HashMap;
+        let mut out: HashMap<String, HashMap<String, i64>> = HashMap::new();
+        if info_hashes.is_empty() {
+            return Ok(out);
+        }
+        let floor: i64 = self
+            .meta_doc(TAG_SINCE_MIGRATED_KEY)
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(self.opened_at);
+        for chunk in info_hashes.chunks(900) {
+            let marks = vec!["?"; chunk.len()].join(",");
+            let mut worn: HashMap<String, Vec<String>> = HashMap::new();
+            let mut stmt = self.conn.prepare(&format!(
+                "SELECT info_hash, tags FROM torrents WHERE tags <> '' AND info_hash IN ({marks})"
+            ))?;
+            let rows = stmt.query_map(rusqlite::params_from_iter(chunk.iter()), |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })?;
+            for row in rows {
+                let (h, raw) = row?;
+                worn.entry(h).or_default().extend(split_tags(&raw));
+            }
+            if worn.is_empty() {
+                continue;
+            }
+            // A store opened read-only from before this table has none: every
+            // tag then reads as the floor.
+            let mut dated: HashMap<(String, String), i64> = HashMap::new();
+            if let Ok(mut stmt) = self.conn.prepare(&format!(
+                "SELECT info_hash, tag, since FROM tag_since WHERE info_hash IN ({marks})"
+            )) {
+                let rows = stmt.query_map(rusqlite::params_from_iter(chunk.iter()), |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, i64>(2)?,
+                    ))
+                })?;
+                for row in rows {
+                    let (h, t, at) = row?;
+                    dated.insert((h, t), at);
+                }
+            }
+            for (h, tags) in worn {
+                let map = out.entry(h.clone()).or_default();
+                for t in tags {
+                    let at = dated.get(&(h.clone(), t.clone())).copied().unwrap_or(floor);
+                    map.insert(t, at);
+                }
+            }
+        }
+        Ok(out)
     }
 
     /// Per COPY: a torrent seeded from two engines can be paused in one and
@@ -3456,6 +3649,8 @@ impl Store {
         let _ = self
             .conn
             .execute("DELETE FROM share_limits WHERE info_hash = ?1", [info_hash]);
+        self.conn
+            .execute("DELETE FROM tag_since WHERE info_hash = ?1", [info_hash])?;
         Ok(n > 0)
     }
 
@@ -3570,7 +3765,8 @@ impl Store {
         paused: bool,
         tags: &str,
     ) -> anyhow::Result<bool> {
-        let n = self.conn.execute(
+        let tx = self.conn.unchecked_transaction()?;
+        let n = tx.execute(
             "INSERT OR IGNORE INTO torrents
                  (info_hash, session, torrent, save_path, category, added_time, paused, tags)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
@@ -3585,6 +3781,23 @@ impl Store {
                 tags
             ],
         )?;
+        if n > 0 && !tags.is_empty() {
+            // Tags a torrent arrives with are set now, whatever date the
+            // client it comes from gave the torrent. A second copy of a
+            // torrent already tagged adds nothing to its dates.
+            let mut others = Vec::new();
+            let mut sib = tx.prepare_cached(
+                "SELECT tags FROM torrents WHERE info_hash = ?1 AND session <> ?2",
+            )?;
+            for raw in sib.query_map(rusqlite::params![info_hash, session], |r| {
+                r.get::<_, String>(0)
+            })? {
+                others.extend(split_tags(&raw?));
+            }
+            drop(sib);
+            retag_since(&tx, info_hash, &[], &split_tags(tags), &others, now_secs())?;
+        }
+        tx.commit()?;
         if n > 0 {
             self.mark_fresh(info_hash, session);
         }
@@ -3673,6 +3886,11 @@ impl Store {
              AND NOT EXISTS (SELECT 1 FROM torrents WHERE info_hash = ?1)",
             [info_hash],
         );
+        self.conn.execute(
+            "DELETE FROM tag_since WHERE info_hash = ?1
+             AND NOT EXISTS (SELECT 1 FROM torrents WHERE info_hash = ?1)",
+            [info_hash],
+        )?;
         Ok(n > 0)
     }
 
@@ -6631,5 +6849,394 @@ mod link_index_tests {
         let meta = s.link_index_meta().unwrap();
         assert!(meta.contains_key(&("b".into(), "hoard".into())));
         assert_eq!(meta.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod tag_since_tests {
+    use super::*;
+
+    /// The frozen schema as a store from before `tag_since` had it.
+    fn old_schema() -> String {
+        let table = "CREATE TABLE IF NOT EXISTS tag_since (
+    info_hash TEXT NOT NULL, tag TEXT NOT NULL, since INTEGER NOT NULL,
+    PRIMARY KEY (info_hash, tag));";
+        assert!(
+            SCHEMA.contains(table),
+            "the fixture must really drop the table"
+        );
+        SCHEMA.replace(table, "")
+    }
+
+    fn hash(n: u8) -> String {
+        format!("{:02x}", n).repeat(20)
+    }
+
+    fn tags(l: &[&str]) -> Vec<String> {
+        l.iter().map(|t| t.to_string()).collect()
+    }
+
+    fn add(s: &Store, n: u8, session: &str, tags: &str) {
+        assert!(s
+            .insert_torrent(&hash(n), session, b"x", "", "", 0.0, false, tags)
+            .unwrap());
+    }
+
+    /// Dates are only readable apart from the migration instant if that
+    /// instant is far from "now".
+    fn migrated_long_ago(s: &Store) {
+        s.put_meta(TAG_SINCE_MIGRATED_KEY, "1000").unwrap();
+    }
+
+    fn near_now(at: i64) -> bool {
+        (now_secs() - at).abs() < 30
+    }
+
+    fn names(rows: &[(String, i64)]) -> Vec<&str> {
+        rows.iter().map(|r| r.0.as_str()).collect()
+    }
+
+    #[test]
+    fn a_new_tag_is_dated_now() {
+        let s = Store::open_in_memory().unwrap();
+        migrated_long_ago(&s);
+        add(&s, 1, "hoard", "");
+        s.set_tags(&hash(1), &tags(&["a"])).unwrap();
+        let rows = s.tag_since_rows(&hash(1));
+        assert_eq!(names(&rows), ["a"]);
+        assert!(near_now(rows[0].1), "{rows:?}");
+        assert_eq!(s.tag_since(&hash(1)).unwrap()["a"], rows[0].1);
+    }
+
+    #[test]
+    fn a_removed_tag_loses_its_row() {
+        let s = Store::open_in_memory().unwrap();
+        add(&s, 1, "hoard", "");
+        s.set_tags(&hash(1), &tags(&["a", "b"])).unwrap();
+        s.set_tags(&hash(1), &tags(&["b"])).unwrap();
+        assert_eq!(names(&s.tag_since_rows(&hash(1))), ["b"]);
+        s.set_tags(&hash(1), &[]).unwrap();
+        assert!(s.tag_since_rows(&hash(1)).is_empty());
+        assert!(s.tag_since(&hash(1)).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_kept_tag_keeps_its_date() {
+        let s = Store::open_in_memory().unwrap();
+        add(&s, 1, "hoard", "");
+        s.set_tags(&hash(1), &tags(&["a"])).unwrap();
+        s.conn
+            .execute("UPDATE tag_since SET since = 5000 WHERE tag = 'a'", [])
+            .unwrap();
+        s.set_tags(&hash(1), &tags(&["a", "b"])).unwrap();
+        let got = s.tag_since(&hash(1)).unwrap();
+        assert_eq!(got["a"], 5000, "a tag that stays is not re-dated");
+        assert!(near_now(got["b"]));
+    }
+
+    /// A tag worn before the dates were kept has no row, and a set_tags that
+    /// keeps it must not give it one: that would turn "at least since the
+    /// migration" into "since now", and an age rule would never fire.
+    #[test]
+    fn a_kept_old_tag_stays_without_a_row_and_reads_as_the_migration() {
+        let s = Store::open_in_memory().unwrap();
+        migrated_long_ago(&s);
+        add(&s, 1, "hoard", "");
+        s.conn
+            .execute("UPDATE torrents SET tags = 'old'", [])
+            .unwrap();
+        s.set_tags(&hash(1), &tags(&["old", "new"])).unwrap();
+        assert_eq!(names(&s.tag_since_rows(&hash(1))), ["new"]);
+        let got = s.tag_since(&hash(1)).unwrap();
+        assert_eq!(got["old"], 1000);
+        assert!(near_now(got["new"]));
+    }
+
+    #[test]
+    fn tags_set_on_a_torrent_the_store_does_not_hold_leave_no_row() {
+        let s = Store::open_in_memory().unwrap();
+        s.set_tags(&hash(9), &tags(&["ghost"])).unwrap();
+        assert!(s.tag_since_rows(&hash(9)).is_empty());
+    }
+
+    #[test]
+    fn a_torrent_added_with_tags_dates_them_now() {
+        let s = Store::open_in_memory().unwrap();
+        migrated_long_ago(&s);
+        add(&s, 1, "hoard", "x,y");
+        let got = s.tag_since(&hash(1)).unwrap();
+        assert!(near_now(got["x"]) && near_now(got["y"]), "{got:?}");
+        // A second copy arriving with the same tag does not re-date it.
+        s.conn
+            .execute("UPDATE tag_since SET since = 7000", [])
+            .unwrap();
+        add(&s, 1, "race", "x");
+        assert_eq!(s.tag_since(&hash(1)).unwrap()["x"], 7000);
+    }
+
+    /// Opening a store that has tags and no table writes no row for them:
+    /// they read as the instant of the migration.
+    #[test]
+    fn opening_an_existing_store_dates_its_tags_at_the_migration_without_rows() {
+        let dir = std::env::temp_dir().join(format!("tagsince-mig-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("hydra.db");
+        let _ = std::fs::remove_file(&path);
+        {
+            let c = Connection::open(&path).unwrap();
+            c.execute_batch(&old_schema()).unwrap();
+            assert!(
+                c.prepare("SELECT 1 FROM tag_since").is_err(),
+                "the fixture has no tag_since"
+            );
+            for n in 1..=3u8 {
+                c.execute(
+                    "INSERT INTO torrents (info_hash, session, torrent, tags) VALUES (?1, 'hoard', x'00', 'a,b')",
+                    [hash(n)],
+                )
+                .unwrap();
+            }
+        }
+        let before = now_secs();
+        let s = Store::open(&path, false).unwrap();
+        let after = now_secs();
+        let rows: i64 = s
+            .conn
+            .query_row("SELECT count(*) FROM tag_since", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 0, "no row is written for the tags already worn");
+        let instant: i64 = s
+            .meta_doc(TAG_SINCE_MIGRATED_KEY)
+            .expect("the instant is recorded")
+            .parse()
+            .unwrap();
+        assert!((before..=after).contains(&instant));
+        for n in 1..=3u8 {
+            let got = s.tag_since(&hash(n)).unwrap();
+            assert_eq!(got.len(), 2);
+            assert!(got.values().all(|&v| v == instant), "{got:?}");
+        }
+        // A second open does not move the instant.
+        drop(s);
+        let s = Store::open(&path, false).unwrap();
+        assert_eq!(
+            s.meta_doc(TAG_SINCE_MIGRATED_KEY).unwrap(),
+            instant.to_string()
+        );
+        drop(s);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_tag_added_after_the_migration_has_its_own_date() {
+        let s = Store::open_in_memory().unwrap();
+        migrated_long_ago(&s);
+        add(&s, 1, "hoard", "");
+        s.conn
+            .execute("UPDATE torrents SET tags = 'old'", [])
+            .unwrap();
+        s.set_tags(&hash(1), &tags(&["old", "fresh"])).unwrap();
+        let got = s.tag_since(&hash(1)).unwrap();
+        assert_eq!(got["old"], 1000);
+        assert!(got["fresh"] > 1000);
+    }
+
+    #[test]
+    fn removing_a_torrent_leaves_no_row_whichever_path_removes_it() {
+        let s = Store::open_in_memory().unwrap();
+        let rows = |n: u8| s.tag_since_rows(&hash(n)).len();
+        for n in 1..=3u8 {
+            add(&s, n, "hoard", "");
+            s.set_tags(&hash(n), &tags(&["a", "b"])).unwrap();
+        }
+        assert_eq!(rows(1), 2);
+        assert!(s.delete_torrent(&hash(1)).unwrap());
+        assert_eq!(rows(1), 0, "delete_torrent");
+        assert!(s.delete_copy(&hash(2), "hoard").unwrap());
+        assert_eq!(rows(2), 0, "delete_copy of the last copy");
+        assert!(s.delete_absorb(&hash(3), None, &[], 0, 0).unwrap());
+        assert_eq!(rows(3), 0, "delete_absorb");
+        let orphans: i64 = s
+            .conn
+            .query_row(
+                "SELECT count(*) FROM tag_since
+                 WHERE info_hash NOT IN (SELECT info_hash FROM torrents)",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(orphans, 0);
+    }
+
+    #[test]
+    fn the_dates_outlive_all_but_the_last_copy() {
+        let s = Store::open_in_memory().unwrap();
+        add(&s, 1, "hoard", "");
+        add(&s, 1, "race", "");
+        s.set_tags(&hash(1), &tags(&["a"])).unwrap();
+        assert!(s.delete_copy(&hash(1), "race").unwrap());
+        assert_eq!(s.tag_since_rows(&hash(1)).len(), 1, "a copy is left");
+        assert!(s.delete_absorb(&hash(1), Some("hoard"), &[], 0, 0).unwrap());
+        assert!(s.tag_since_rows(&hash(1)).is_empty());
+    }
+
+    #[test]
+    fn a_bulk_edit_dates_what_it_adds_and_drops_what_it_removes() {
+        let mut s = Store::open_in_memory().unwrap();
+        migrated_long_ago(&s);
+        add(&s, 1, "hoard", "");
+        s.conn
+            .execute("UPDATE torrents SET tags = 'old'", [])
+            .unwrap();
+        add(&s, 2, "hoard", "");
+        let targets = vec![
+            (hash(1), "hoard".to_string()),
+            (hash(2), "hoard".to_string()),
+        ];
+        let n = tags(&["new"]);
+        let edit = |add| BulkEdit::Tags { tags: &n, add };
+        s.bulk_edit(&targets, edit(true)).unwrap();
+        let one = s.tag_since(&hash(1)).unwrap();
+        assert_eq!(one["old"], 1000, "the old tag is not touched");
+        assert!(near_now(one["new"]));
+        assert!(near_now(s.tag_since(&hash(2)).unwrap()["new"]));
+        s.bulk_edit(&targets, edit(false)).unwrap();
+        assert!(s.tag_since_rows(&hash(1)).is_empty());
+        assert!(s.tag_since_rows(&hash(2)).is_empty());
+        assert_eq!(s.tag_since(&hash(1)).unwrap().len(), 1, "`old` still worn");
+    }
+
+    #[test]
+    fn a_bulk_removal_on_one_copy_keeps_the_date_while_another_copy_wears_the_tag() {
+        let mut s = Store::open_in_memory().unwrap();
+        add(&s, 1, "hoard", "a");
+        add(&s, 1, "race", "a");
+        s.conn
+            .execute(
+                "INSERT OR REPLACE INTO tag_since VALUES (?1, 'a', 4000)",
+                [hash(1)],
+            )
+            .unwrap();
+        let a = tags(&["a"]);
+        s.bulk_edit(
+            &[(hash(1), "hoard".to_string())],
+            BulkEdit::Tags {
+                tags: &a,
+                add: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(s.tag_since(&hash(1)).unwrap()["a"], 4000);
+    }
+
+    #[test]
+    fn deleting_a_tag_everywhere_drops_its_dates() {
+        let s = Store::open_in_memory().unwrap();
+        add(&s, 1, "hoard", "");
+        add(&s, 2, "hoard", "");
+        s.set_tags(&hash(1), &tags(&["a", "b"])).unwrap();
+        s.set_tags(&hash(2), &tags(&["a"])).unwrap();
+        s.strip_tags(&tags(&["a"])).unwrap();
+        assert_eq!(s.tag_since_rows(&hash(1)).len(), 1);
+        assert!(s.tag_since_rows(&hash(2)).is_empty());
+    }
+
+    #[test]
+    fn the_bulk_read_answers_every_torrent_and_only_tagged_ones() {
+        let s = Store::open_in_memory().unwrap();
+        migrated_long_ago(&s);
+        add(&s, 1, "hoard", "");
+        s.conn
+            .execute(
+                "UPDATE torrents SET tags = 'old' WHERE info_hash = ?1",
+                [hash(1)],
+            )
+            .unwrap();
+        add(&s, 2, "hoard", "");
+        add(&s, 3, "hoard", "");
+        s.set_tags(&hash(3), &tags(&["x"])).unwrap();
+        let (h1, h2, h3) = (hash(1), hash(2), hash(3));
+        let got = s
+            .tag_since_bulk(&[h1.as_str(), h2.as_str(), h3.as_str(), "nope"])
+            .unwrap();
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[&h1]["old"], 1000);
+        assert!(near_now(got[&h3]["x"]));
+        assert!(s.tag_since_bulk(&[]).unwrap().is_empty());
+    }
+
+    /// Measures, asserts no bound:
+    /// `cargo test --lib measure_migration -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn measure_migration_and_bulk_read_at_100k() {
+        let dir = std::env::temp_dir().join(format!("tagsince-100k-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("hydra.db");
+        let _ = std::fs::remove_file(&path);
+        {
+            let c = Connection::open(&path).unwrap();
+            c.execute_batch(&old_schema()).unwrap();
+            c.execute_batch("BEGIN").unwrap();
+            {
+                let mut st = c
+                    .prepare("INSERT INTO torrents (info_hash, session, torrent, tags) VALUES (?1, 'hoard', x'00', ?2)")
+                    .unwrap();
+                for n in 0..100_000u32 {
+                    st.execute(rusqlite::params![
+                        format!("{n:040x}"),
+                        format!("t{},u{},v{}", n % 7, n % 13, n % 101)
+                    ])
+                    .unwrap();
+                }
+            }
+            c.execute_batch("COMMIT").unwrap();
+        }
+        let t = std::time::Instant::now();
+        let mut s = Store::open(&path, false).unwrap();
+        println!("open+migrate 100k torrents: {:?}", t.elapsed());
+        // What the same open costs with nothing to migrate: the rest of the
+        // open (here, the covering index a fixture without one builds) is not
+        // the table's.
+        let t = std::time::Instant::now();
+        drop(Store::open(&path, false).unwrap());
+        println!("second open, nothing to migrate: {:?}", t.elapsed());
+        // The migration alone: the table dropped from a store that has every
+        // other index, as production does.
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch(&format!(
+                "DROP TABLE tag_since; DELETE FROM meta WHERE key = '{TAG_SINCE_MIGRATED_KEY}';"
+            ))
+            .unwrap();
+        let t = std::time::Instant::now();
+        drop(Store::open(&path, false).unwrap());
+        println!("open that migrates tag_since only: {:?}", t.elapsed());
+        let hashes: Vec<String> = (0..100_000u32).map(|n| format!("{n:040x}")).collect();
+        let refs: Vec<&str> = hashes.iter().map(String::as_str).collect();
+        let t = std::time::Instant::now();
+        let got = s.tag_since_bulk(&refs).unwrap();
+        println!(
+            "tag_since_bulk 100k torrents: {:?} ({} answered)",
+            t.elapsed(),
+            got.len()
+        );
+        let targets: Vec<(String, String)> = hashes[..10_000]
+            .iter()
+            .map(|x| (x.clone(), "hoard".into()))
+            .collect();
+        let n = vec!["fresh".to_string()];
+        let t = std::time::Instant::now();
+        s.bulk_edit(
+            &targets,
+            BulkEdit::Tags {
+                tags: &n,
+                add: true,
+            },
+        )
+        .unwrap();
+        println!("bulk_edit add one tag on 10000 torrents: {:?}", t.elapsed());
+        drop(s);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
