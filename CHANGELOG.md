@@ -21,7 +21,33 @@ decided when the release is cut, by looking at what went in: whoever tags it
 renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 `HYDRANOS_VERSION` in the same commit.
 
-## Unreleased -- a graduated torrent's history is not throughput
+## v4.6.0 -- the API asks for its key, and a workflow can wait
+
+### Upgrading
+
+Five changes need an action from an install that relied on the old behaviour.
+None touches the database or the configuration file.
+
+1. **`?apikey=` in the address is refused.** A client that sends the key that
+   way gets 401, or 403 on `/api/v2/`. Send it in the `X-Api-Key` header, or
+   put `api_key_in_query = true` under `[daemon]` to bring the old behaviour
+   back.
+2. **A script that creates the admin account through `POST /api/setup` must
+   send `setup_code`**, printed in the log at startup. Or set the password with
+   `hydranos reset-password`. Installs that already have an account are not
+   affected.
+3. **Rescue mode: `POST /api/store/repair` and `POST /api/settings/restart`
+   want the API key of the config file** in `X-Api-Key`.
+4. **A write authorised by the session cookie alone is refused when it names
+   another origin than the host it was sent to.** An Origin equal to `Host`, to
+   the first `X-Forwarded-Host` or to the authority of `[daemon] public_url`
+   is accepted. Requests with the API key are untouched.
+5. **`/mcp` is opened by the API key or a bearer token only**, no longer by the
+   session cookie. There is no setting to bring it back.
+
+Not a break, but visible: without a key, a native route that is not open now
+answers 401 where it used to answer 404, 405 or 400. The qBittorrent
+compatibility surface still answers 403.
 
 ### Added
 
