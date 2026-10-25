@@ -11337,6 +11337,7 @@ function addCondRow(cond, wrap) {
         <button class="btn-cancel wf-row-del" onclick="this.parentElement.remove()" title="Remove this condition">Remove</button>`;
     wrap.appendChild(div);
     if (cond) div.querySelector(".wf-c-op").dataset.want = cond.op;
+    if (cond && cond.tag) div.dataset.wantTag = cond.tag;
     syncCondOps(div.querySelector(".wf-c-field"));
 }
 
@@ -11427,6 +11428,9 @@ function wfCollectNode(groupEl) {
             // sent exactly as before.
             const forN = parseFloat(el.querySelector(".wf-c-for-n")?.value);
             if (forN > 0) cond.for = `${forN}${el.querySelector(".wf-c-for-u").value}`;
+            // The tag of a field that is about one (`tag_age`).
+            const tagArg = el.querySelector(".wf-c-arg");
+            if (tagArg && tagArg.value.trim()) cond.tag = tagArg.value.trim();
             of.push(cond);
         }
     }
@@ -11471,6 +11475,31 @@ function syncCondOps(el) {
     const carried = list && !list.includes(keep) ? "" : keep;
     if (oldUnit) oldUnit.remove();
     if (old) old.outerHTML = _wfValueControl(f, carried);
+
+    // A field with an argument (`tag_age`: which tag) draws it beside the
+    // field; any other field takes it away.
+    const oldArg = row.querySelector(".wf-c-arg");
+    const keepArg = oldArg ? oldArg.value : (row.dataset.wantTag || "");
+    if (oldArg) oldArg.remove();
+    delete row.dataset.wantTag;
+    if (f.arg) {
+        const holder = document.createElement("span");
+        holder.innerHTML = _wfArgControl(f, keepArg);
+        row.querySelector(".wf-c-field").after(holder.firstElementChild);
+    }
+}
+
+// The argument of a field: the tag of `tag_age`, from the tags that exist
+// (a typed name that matches no tag is a rule that never matches).
+function _wfArgControl(f, value) {
+    const list = ((_wfChoices && _wfChoices.tags) || []).slice();
+    if (value && !list.includes(value)) list.push(value);
+    if (list.length) {
+        return `<select class="wf-c-arg" title="${esc(t(f.arg.label || "tag"))}">`
+            + list.map(o => `<option value="${esc(o)}" ${o === value ? "selected" : ""}>${esc(o)}</option>`).join("")
+            + `</select>`;
+    }
+    return `<input type="text" class="wf-c-arg" placeholder="${esc(t(f.arg.label || "tag"))}" value="${esc(value || "")}" autocomplete="off">`;
 }
 
 const WF_ACTIONS = [

@@ -229,6 +229,8 @@ Meaning of each setting: [Trackers and Announces](https://github.com/Kheopsian/H
 - Precision is the pass cadence (`interval_secs`, 15 minutes by default): `"for": "1h"` seen true at 10:00 acts on the first pass at or after 11:00.
 - Preview (`POST /api/workflows/preview`) of such a workflow adds `waiting` (torrents that satisfy the rule but whose time has not come) and `waiting_sample`: for each, `waiting[]` (`field`, `op`, `value`, `for_secs`, `since` as unix seconds or `null` for "from now on", `due`) and `fires_at`. Already-due entries of `sample` carry `held[]`. A preview and `?dry=1` write nothing. A real run answers `since_rows_written`.
 
+**The age of a tag.** The field `tag_age` is the one field that takes an argument: the tag goes in `"tag"`, and `value` is a duration as for `added_age` (`gt` = set more than that long ago): `{"kind":"cond","field":"tag_age","op":"gt","value":"7d","tag":"keep"}`. A torrent that does not wear the tag has no age and matches no operator (`ne` and "newer than" included). A tag worn before the dates were kept (`tag_since`) counts from the migration instant. The condition keeps a `for` like any other, and the tag is part of its key. `GET /api/workflows/fields` describes it with `"arg": {"key":"tag", ...}`. The dates are read only when a workflow of the pass uses the field, for the torrents wearing the tag. Refused on an event workflow.
+
 Bodies: [Workflows](https://github.com/Kheopsian/Hydranos/wiki/Workflows), [Jobs, Bulk Actions and Moving Data](https://github.com/Kheopsian/Hydranos/wiki/Jobs-and-Moving-Data).
 
 ## Race drain

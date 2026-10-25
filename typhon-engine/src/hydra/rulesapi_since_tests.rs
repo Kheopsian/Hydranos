@@ -19,6 +19,7 @@ fn cond(field: &str, op: Op, value: &str, hold: Option<&str>) -> Node {
         op,
         value: value.into(),
         hold: hold.map(String::from),
+        tag: None,
     })
 }
 
