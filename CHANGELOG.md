@@ -42,6 +42,7 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 
 ### Fixed
 
+- A workflow with a "for" condition reads its record of dates in slices of 20,000 rows, letting go of the read connection between two, instead of holding it for the whole table (about 1 s at a million torrents; the longest hold is now about 13 ms).
 - The cross-origin check on a cookie write also takes the authority of the
   request's own address when there is no `Host` header, as over HTTP/2.
 - `/mcp` is opened by the API key or a bearer token only, no longer by the

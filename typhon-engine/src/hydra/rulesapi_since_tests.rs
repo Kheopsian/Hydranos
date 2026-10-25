@@ -573,6 +573,35 @@ async fn switching_a_workflow_off_clears_what_it_knew() {
 
 // ----------------------------------------------------------------- the scale
 
+/// Reading the record in small slices gives exactly what one query gives,
+/// whatever the slice size, across several conditions and torrents.
+#[test]
+fn a_sliced_read_returns_what_one_read_returns() {
+    let store = store_lock();
+    {
+        let s = store.lock().unwrap();
+        let hs = hashes(23);
+        let put: Vec<(&str, &str)> = ["ka", "kb", "kc"]
+            .iter()
+            .flat_map(|k| hs.iter().map(move |h| (*k, h.as_str())))
+            .collect();
+        s.rule_since_write("w", &put, &[], 42).unwrap();
+        // Another workflow's rows are never mixed in.
+        s.rule_since_write("other", &[("ka", "zz")], &[], 1)
+            .unwrap();
+    }
+    let whole = store.read().unwrap().rule_since_rows("w").unwrap();
+    assert_eq!(whole.values().map(|m| m.len()).sum::<usize>(), 69);
+    // 1 and 7 do not divide 69, 23 splits it by condition, 69 is exactly one
+    // full slice (so a last, empty one), 1000 is a single slice.
+    for slice in [1, 2, 7, 23, 69, 70, 1000] {
+        let (sliced, _) = rulesrun::read_since(&store, "w", slice).unwrap();
+        assert_eq!(sliced, whole, "slice of {slice}");
+    }
+    let (none, _) = rulesrun::read_since(&store, "nobody", 5).unwrap();
+    assert!(none.is_empty());
+}
+
 /// ⭐ The cost at a million torrents, for `state = seeding for 7d`. Not run by
 /// default: `cargo test --release since_at_a_million -- --ignored --nocapture`.
 /// The store is a real file (WAL) in `SINCE_BENCH_DIR`, or the temp dir.
@@ -618,6 +647,16 @@ fn since_at_a_million_torrents() {
         );
     };
     pass(&facts, 1_000, "1st pass, all seeding   ");
+    // The reader is shared with every list of the UI: how long is it held?
+    let t = Instant::now();
+    let (rows, longest) = rulesrun::read_since(&lock, "bench", rulesrun::SINCE_READ_SLICE).unwrap();
+    println!(
+        "read of the record: {:.2?} in slices of {}, LONGEST reader hold {:.2?} ({} conditions)",
+        t.elapsed(),
+        rulesrun::SINCE_READ_SLICE,
+        longest,
+        rows.len()
+    );
     pass(&facts, 2_000, "2nd pass, no change     ");
     let one_percent = n / 100;
     for f in facts.iter_mut().take(one_percent) {

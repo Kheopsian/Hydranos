@@ -257,8 +257,8 @@ fn retag_since(
 /// set at that instant: "at least since then".
 pub const TAG_SINCE_MIGRATED_KEY: &str = "tag_since_migrated_at";
 
-/// How many times `tag_since_bulk` ran on this thread: a test asserts that a
-/// pass with no `tag_age` condition never reads the dates.
+// How many times `tag_since_bulk` ran on this thread: a test asserts that a
+// pass with no `tag_age` condition never reads the dates.
 #[cfg(test)]
 thread_local! {
     pub static TAG_SINCE_BULK_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -1953,8 +1953,31 @@ impl Store {
         Ok(())
     }
 
-    /// Everything the record holds for one workflow, in one query:
+    /// One slice of a workflow's record, in key order, after `after` (the last
+    /// (condition key, info hash) of the previous slice; None for the first).
+    /// The reader is held for one slice, not for a million rows.
+    pub fn rule_since_page(
+        &self,
+        workflow_id: &str,
+        after: Option<(&str, &str)>,
+        limit: usize,
+    ) -> anyhow::Result<Vec<(String, String, i64)>> {
+        let (k, h) = after.unwrap_or(("", ""));
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT condition_key, info_hash, since FROM rule_since
+             WHERE workflow_id = ?1 AND (condition_key, info_hash) > (?2, ?3)
+             ORDER BY condition_key, info_hash LIMIT ?4",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![workflow_id, k, h, limit as i64], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Everything the record holds for one workflow, in one query: the
+    /// reference the sliced read (`rule_since_page`) is checked against.
     /// condition key -> info hash -> since.
+    #[cfg(test)]
     pub fn rule_since_rows(
         &self,
         workflow_id: &str,
