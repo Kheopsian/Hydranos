@@ -1821,11 +1821,15 @@ mod root {
         let kb = sh("wg genkey").trim().to_string();
         let pa = sh(&format!("echo {ka} | wg pubkey")).trim().to_string();
         let pb = sh(&format!("echo {kb} | wg pubkey")).trim().to_string();
-        // The provider side, by hand: 10.66.0.1 behind its own wg device.
+        // The provider side, by hand: 10.66.0.1 behind its own wg device. The
+        // key goes in a directory of its own (mktemp -d is 0700), not a fixed
+        // path in /tmp that `wg` may be refused, and the trap removes it
+        // whether or not a step fails.
         sh(&format!(
-            "ip -n {b} link add wgp type wireguard && \
-             echo {kb} > /tmp/hy-wgt-kb && ip netns exec {b} wg set wgp private-key /tmp/hy-wgt-kb listen-port 51820 peer {pa} allowed-ips 10.66.0.2/32 && \
-             ip -n {b} addr add 10.66.0.1/24 dev wgp && ip -n {b} link set wgp up && rm -f /tmp/hy-wgt-kb"
+            "d=$(mktemp -d) && trap 'rm -rf \"$d\"' EXIT && \
+             ip -n {b} link add wgp type wireguard && \
+             echo {kb} > \"$d/kb\" && ip netns exec {b} wg set wgp private-key \"$d/kb\" listen-port 51820 peer {pa} allowed-ips 10.66.0.2/32 && \
+             ip -n {b} addr add 10.66.0.1/24 dev wgp && ip -n {b} link set wgp up"
         ));
         let before_route = sh(&format!("ip -n {a} route; ip -n {a} -6 route"));
         let before_rule = sh(&format!("ip -n {a} rule; ip -n {a} -6 rule"));
