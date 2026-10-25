@@ -109,6 +109,13 @@ pub async fn fields(
                 // there is one. Typing a category by hand is how a rule ends up
                 // pointing at a category that does not exist, matching nothing,
                 // and looking perfectly correct while it does it.
+                // The one field with an argument: which tag. Sent as `tag` in
+                // the condition; the editor draws a list of the existing tags.
+                "arg": if *name == "tag_age" {
+                    serde_json::json!({"key": "tag", "label": "tag", "choices_from": "tags"})
+                } else {
+                    serde_json::Value::Null
+                },
                 "choices_from": match *name {
                     "category" => "categories",
                     "tags" => "tags",
@@ -131,6 +138,7 @@ pub async fn fields(
                     "external_links" => "0 means only Hydranos points at these files, so deleting them loses nothing",
                     "freeable_bytes" => "only files nothing else points at; deleting a shared one frees nothing",
                     "data_missing" => "the torrent is seeding data it cannot read",
+                    "tag_age" => "how long ago the chosen tag was set on the torrent; a torrent without that tag never matches. A tag set before dates were kept counts from the day they began",
                     "seeding_time" => "time actually spent seeding since the torrent completed; stopped time is not counted",
                     "ratio" => "uploaded divided by downloaded, or by the data held when under 1% of it was downloaded (a cross-seed); 0 when nothing is held or downloaded",
                     _ => match kind {
@@ -190,6 +198,7 @@ fn field_label(name: &str) -> String {
         "external_links" => "hardlinks from outside Hydranos",
         "freeable_bytes" => "space deleting would really free",
         "data_missing" => "its files are missing from disk",
+        "tag_age" => "time since a tag was set",
         // A field added to FIELDS without a label still works; it
         // just reads as the engine spells it.
         other => return other.to_string(),
@@ -549,7 +558,8 @@ const PENDING_SAMPLE: usize = 200;
 fn decide(state: &AppState, w: &Workflow, persist: bool) -> Result<Decision, String> {
     let now = crate::store::now_secs();
     if !rules::needs_link_scan(&w.when) {
-        let facts = gather_all(state, rulesrun::Want::of(w));
+        let mut facts = gather_all(state, rulesrun::Want::of(w));
+        rulesrun::fill_tag_ages(&state.store, &w.when, &mut facts, now)?;
         let timed = rulesrun::track_since(&state.store, w, &facts, now, persist)?;
         let (matches, report) = rulesrun::evaluate_with(w, &facts, timed.as_ref())?;
         let pending = pending_of(w, &facts, timed.as_ref(), persist)?;
@@ -585,6 +595,7 @@ fn decide(state: &AppState, w: &Workflow, persist: bool) -> Result<Decision, Str
         links,
     } = rulesrun::links_from_measured(&cat, measured);
     let mut facts = gather_all_with(state, &links, rulesrun::Want::of(w));
+    rulesrun::fill_tag_ages(&state.store, &w.when, &mut facts, now)?;
     let timed = rulesrun::track_since(&state.store, w, &facts, now, persist)?;
     let (first, _) = rulesrun::evaluate_with(w, &facts, timed.as_ref())?;
 
@@ -2656,3 +2667,7 @@ mod one_number_tests {
 #[cfg(test)]
 #[path = "rulesapi_since_tests.rs"]
 mod since_tests;
+
+#[cfg(test)]
+#[path = "rulesapi_tagage_tests.rs"]
+mod tagage_tests;

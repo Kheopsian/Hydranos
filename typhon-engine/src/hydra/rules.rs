@@ -81,6 +81,11 @@ pub struct Facts {
     /// Not one of the torrent's files could be read. A seeding torrent in this
     /// state announces data it cannot serve.
     pub data_missing: bool,
+    /// Seconds since each tag the torrent wears was set, `(tag, age)`. Filled
+    /// only for the tags a condition on `tag_age` names, and only when one
+    /// exists (see `tag_ages_used`): reading the dates is a store query a pass
+    /// does not pay for otherwise. A tag not listed is a tag not worn.
+    pub tag_ages: Vec<(String, f64)>,
 }
 
 /// The value of a duration that has not happened yet.
@@ -126,6 +131,11 @@ pub struct Cond {
     /// torrent as it is now, exactly as it always was. See `Timing`.
     #[serde(rename = "for", default, skip_serializing_if = "Option::is_none")]
     pub hold: Option<String>,
+    /// The argument of a field that is about one tag (`tag_age`): which tag.
+    /// `value` stays what the field compares to (a duration), so the editor's
+    /// duration box and its units work unchanged. Ignored by every other field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
 }
 
 /// A condition tree.
@@ -327,6 +337,9 @@ pub enum CompileError {
     /// A `for` on an event workflow. An event fires once, at the moment it
     /// happens: there is no stretch of time for a condition to have held.
     ForOnEvent,
+    /// A `tag_age` condition on an event workflow: the age of a tag is read by
+    /// the timer's pass, not at the moment of an event.
+    TagAgeOnEvent,
 }
 
 impl std::fmt::Display for CompileError {
@@ -350,6 +363,10 @@ impl std::fmt::Display for CompileError {
             CompileError::BadLocation(x) => write!(f, "{x:?} is not an absolute folder (no `..`)"),
             CompileError::BadTracker(x) => write!(f, "{x:?} is not an http://, https:// or udp:// announce URL"),
             CompileError::NoTrackers => write!(f, "add trackers needs at least one tracker or the URL of a list"),
+            CompileError::TagAgeOnEvent => write!(
+                f,
+                "\"tag age\" needs a schedule: an event fires at the moment it happens, not on the dates of the tags"
+            ),
             CompileError::ForOnEvent => write!(
                 f,
                 "\"for\" needs a schedule: an event fires once, there is no time for a condition to have held"
@@ -436,7 +453,33 @@ pub const FIELDS: &[(&str, Kind)] = &[
     ("external_links", Kind::Number),
     ("freeable_bytes", Kind::Size),
     ("data_missing", Kind::Bool),
+    // How long ago a tag was set on the torrent. The one field that takes an
+    // argument: the tag, in `Cond::tag`. Its date comes from `tag_since`.
+    ("tag_age", Kind::Duration),
 ];
+
+/// The tags the `tag_age` conditions of a tree name, distinct. Empty when the
+/// tree has none -- which is the whole catalogue of workflows that exist, and
+/// is what keeps a pass from reading `tag_since` for nothing.
+pub fn tag_ages_used(n: &Node) -> Vec<String> {
+    fn walk(n: &Node, out: &mut Vec<String>) {
+        match n {
+            Node::All { of } | Node::Any { of } => of.iter().for_each(|c| walk(c, out)),
+            Node::Not { of } => walk(of, out),
+            Node::Cond(c) => {
+                if let (true, Some(t)) = (c.field == "tag_age", c.tag.as_deref()) {
+                    let t = t.trim().to_string();
+                    if !t.is_empty() && !out.contains(&t) {
+                        out.push(t);
+                    }
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(n, &mut out);
+    out
+}
 
 /// Does any condition of this tree read `field`?
 pub fn uses_field(n: &Node, field: &str) -> bool {
@@ -604,6 +647,30 @@ fn compile_cond(c: &Cond) -> Result<Matcher, CompileError> {
     let kind = kind_of(&c.field).ok_or_else(|| CompileError::UnknownField(c.field.clone()))?;
     let field = c.field.clone();
     let op = c.op;
+
+    // The age of ONE tag. A torrent that does not wear it has no age at all:
+    // false for every operator (NaN's rule, and `ne` included), never an
+    // infinite one that "older than" would match.
+    if field == "tag_age" {
+        let tag = c.tag.as_deref().map(str::trim).unwrap_or_default();
+        if tag.is_empty() {
+            return Err(CompileError::BadValue {
+                field: "tag".into(),
+                value: String::new(),
+            });
+        }
+        let want = parse_duration(&c.value).ok_or_else(|| CompileError::BadValue {
+            field: field.clone(),
+            value: c.value.clone(),
+        })?;
+        let tag = tag.to_string();
+        return Ok(Box::new(move |f: &Facts| {
+            f.tag_ages
+                .iter()
+                .find(|(t, _)| *t == tag)
+                .is_some_and(|(_, age)| cmp_num(op, *age, want))
+        }));
+    }
 
     match kind {
         Kind::Number | Kind::Duration | Kind::Size | Kind::Percent => {
@@ -786,6 +853,12 @@ pub fn condition_key(c: &Cond) -> String {
     h.update(op.as_bytes());
     h.update([0]);
     h.update(c.value.trim().as_bytes());
+    // The tag is part of what the condition says: two tags are two conditions.
+    // Only when there is one, so the key of every other condition is unchanged.
+    if let Some(tag) = c.tag.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+        h.update([0]);
+        h.update(tag.as_bytes());
+    }
     h.finalize()[..8]
         .iter()
         .map(|b| format!("{b:02x}"))
@@ -1016,6 +1089,9 @@ pub fn compile_workflow_in(
         if !timed_conditions(&w.when)?.is_empty() {
             return Err(CompileError::ForOnEvent);
         }
+        if uses_field(&w.when, "tag_age") {
+            return Err(CompileError::TagAgeOnEvent);
+        }
         if let Some(f) = LINK_FIELDS.iter().find(|f| uses_field(&w.when, f)) {
             return Err(CompileError::LinkFieldOnEvent(f.to_string()));
         }
@@ -1084,6 +1160,7 @@ mod tests {
                 op: Op::Eq,
                 value: v.into(),
                 hold: None,
+                tag: None,
             })
         };
         let m = compile(&cond("true")).unwrap();
@@ -1152,6 +1229,7 @@ mod tests {
                 op: Op::Eq,
                 value: "0".into(),
                 hold: None,
+                tag: None,
             })
         };
         let tree = Node::All {
@@ -1202,6 +1280,7 @@ mod tests {
             op,
             value: value.into(),
             hold: None,
+            tag: None,
         })
     }
 

@@ -281,6 +281,8 @@ fn facts_of(
         external_links: l.map(|x| x.external_links as f64).unwrap_or(rules::NEVER),
         freeable_bytes: l.map(|x| x.freeable_bytes as f64).unwrap_or(rules::NEVER),
         data_missing: l.is_some_and(|x| x.data_missing),
+        // Filled by `fill_tag_ages`, and only for a rule that reads it.
+        tag_ages: Vec::new(),
         // ⚠️⚠️ NO `..Default::default()` here, deliberately. It is what
         // let thirteen fields read 0 or "" for every torrent while the
         // picker offered them: `num_peers == 0` matched EVERYTHING, a
@@ -736,6 +738,44 @@ pub type HashMapFacts = std::collections::HashMap<String, LinkFacts>;
 /// different code from the pass would be a preview of something else.
 pub fn evaluate(w: &Workflow, facts: &[Facts]) -> Result<(Vec<Match>, PassReport), String> {
     evaluate_with(w, facts, None)
+}
+
+/// Give each torrent the age of the tags a `tag_age` condition names.
+///
+/// Reads `tag_since` only when a condition uses the field, and then only for
+/// the torrents that wear one of the named tags (the facts already say which),
+/// in slices, the reader's lock let go between two. A torrent not wearing the
+/// tag gets no age, so the condition is false for it.
+pub fn fill_tag_ages(
+    store: &Arc<crate::store::StoreLock>,
+    when: &rules::Node,
+    facts: &mut [Facts],
+    now: i64,
+) -> Result<(), String> {
+    let used = rules::tag_ages_used(when);
+    if used.is_empty() {
+        return Ok(());
+    }
+    let wearing: Vec<usize> = (0..facts.len())
+        .filter(|&i| facts[i].tags.iter().any(|t| used.contains(t)))
+        .collect();
+    for slice in wearing.chunks(5000) {
+        let dates = {
+            let hashes: Vec<&str> = slice.iter().map(|&i| facts[i].info_hash.as_str()).collect();
+            let s = store.read().map_err(|_| "store lock")?;
+            s.tag_since_bulk(&hashes).map_err(|e| e.to_string())?
+        };
+        for &i in slice {
+            let Some(m) = dates.get(&facts[i].info_hash) else {
+                continue;
+            };
+            facts[i].tag_ages = used
+                .iter()
+                .filter_map(|t| m.get(t).map(|&at| (t.clone(), (now - at).max(0) as f64)))
+                .collect();
+        }
+    }
+    Ok(())
 }
 
 /// How many rows of `rule_since` one transaction writes. A first pass over a
@@ -1507,6 +1547,7 @@ mod tests {
             op: Op::Eq,
             value: "0".into(),
             hold: None,
+            tag: None,
         });
         let (first, _) = evaluate(&w, &facts).unwrap();
         assert_eq!(first.len(), 2);
@@ -1615,6 +1656,7 @@ mod tests {
                 op: Op::Ge,
                 value: "100".into(),
                 hold: None,
+                tag: None,
             }),
             then,
             cap,
@@ -1767,6 +1809,7 @@ mod tests {
             op: Op::Eq,
             value: "x".into(),
             hold: None,
+            tag: None,
         });
         assert!(evaluate(&w, &facts(1)).unwrap_err().contains("nonesuch"));
     }
