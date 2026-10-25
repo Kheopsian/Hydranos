@@ -98,5 +98,11 @@
   "just now": "zojuist",
   "{n} min ago": "{n} min geleden",
   "{n} h ago": "{n} u geleden",
-  "{n} d ago": "{n} d geleden"
+  "{n} d ago": "{n} d geleden",
+  "for at least": "gedurende minstens",
+  "hours": "uur",
+  "days": "dagen",
+  "The condition counts only once it has held this long without a break. Empty: judged on the torrent as it is now.": "De voorwaarde telt pas als ze zo lang onafgebroken heeft gegolden. Leeg: beoordeeld op de torrent zoals die nu is.",
+  "{n} waiting for their time": "{n} wachten op hun termijn",
+  ", the first on {d}": ", de eerste op {d}"
 }

@@ -1146,5 +1146,10 @@
   "Port of the iperf3 server (5201 when not set).": "Port du serveur iperf3 (5201 s'il n'est pas indiqué).",
   "Run the speed test on its own every this many seconds. 0 = never (Run now only). A run saturates the link for its duration.": "Lance le test de débit tout seul toutes les N secondes. 0 = jamais (seulement « Lancer maintenant »). Un test sature le lien pendant toute sa durée.",
   "How long one run measures, in seconds (10 when not set, 1 to 60).": "Durée d'une mesure, en secondes (10 si non indiquée, de 1 à 60).",
-  "The network goes back to Direct and the kill switch is turned off: until you set them again, the engines connect from this machine's own address.": "Le réseau repasse en Direct et le kill switch est désactivé : tant que vous ne les avez pas réglés à nouveau, les moteurs se connectent depuis l'adresse de cette machine."
+  "The network goes back to Direct and the kill switch is turned off: until you set them again, the engines connect from this machine's own address.": "Le réseau repasse en Direct et le kill switch est désactivé : tant que vous ne les avez pas réglés à nouveau, les moteurs se connectent depuis l'adresse de cette machine.",
+  "for at least": "pendant au moins",
+  "days": "jours",
+  "The condition counts only once it has held this long without a break. Empty: judged on the torrent as it is now.": "La condition ne compte qu'une fois vraie sans interruption pendant cette durée. Vide : jugée sur le torrent tel qu'il est maintenant.",
+  "{n} waiting for their time": "{n} en attente de leur délai",
+  ", the first on {d}": ", le premier le {d}"
 }

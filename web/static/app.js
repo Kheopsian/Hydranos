@@ -11285,6 +11285,31 @@ function _wfValueControl(f, value) {
     return `<input type="text" class="wf-c-val" placeholder="value" value="${esc(value == null ? "" : value)}" autocomplete="off">`;
 }
 
+// "For at least": any condition may be required to have held this long. Empty
+// is the condition as it always was, judged on the torrent as it is now.
+// Hours or days only: the engine writes `36h` / `7d`, and a pass runs every
+// quarter hour, so a finer unit would promise a precision it does not have.
+// Hidden on an event workflow (.wf-schedule-only): an event fires once.
+function _wfForControl(value) {
+    let num = "", unit = "d";
+    const m = String(value == null ? "" : value).trim().match(/^([\d.]+)\s*([smhd]?)$/i);
+    if (m) {
+        // Seconds and minutes are valid for the engine; the box shows hours.
+        const secs = parseFloat(m[1]) * ({ s: 1, m: 60, h: 3600, d: 86400 }[(m[2] || "s").toLowerCase()]);
+        if (secs > 0) {
+            unit = secs % 86400 === 0 ? "d" : "h";
+            num = String(Math.round((secs / (unit === "d" ? 86400 : 3600)) * 100) / 100);
+        }
+    }
+    return `<span class="wf-c-for wf-schedule-only" title="${esc(t("The condition counts only once it has held this long without a break. Empty: judged on the torrent as it is now."))}">`
+        + `<span class="sr-desc">${esc(t("for at least"))}</span>`
+        + `<input type="number" step="any" min="0" class="wf-c-for-n" placeholder="0" value="${esc(num)}" autocomplete="off">`
+        + `<select class="wf-c-for-u">`
+        + [["h", t("hours")], ["d", t("days")]].map(([u, lbl]) =>
+            `<option value="${u}" ${u === unit ? "selected" : ""}>${esc(lbl)}</option>`).join("")
+        + `</select></span>`;
+}
+
 function _wfChoiceList(f) {
     if (!f) return null;
     if (Array.isArray(f.choices) && f.choices.length) return f.choices;
@@ -11307,6 +11332,7 @@ function addCondRow(cond, wrap) {
         <select class="wf-c-field" onchange="syncCondOps(this)">${opts}</select>
         <select class="wf-c-op"></select>
         ${_wfValueControl(f0, cond ? cond.value : "")}
+        ${_wfForControl(cond ? cond.for : "")}
         <span class="sr-desc wf-c-hint"></span>
         <button class="btn-cancel wf-row-del" onclick="this.parentElement.remove()" title="Remove this condition">Remove</button>`;
     wrap.appendChild(div);
@@ -11390,13 +11416,18 @@ function wfCollectNode(groupEl) {
         } else if (el.classList.contains("wf-row")) {
             const unit = el.querySelector(".wf-c-unit");
             const raw = el.querySelector(".wf-c-val").value;
-            of.push({
+            const cond = {
                 kind: "cond",
                 field: el.querySelector(".wf-c-field").value,
                 op: el.querySelector(".wf-c-op").value,
                 // The unit belongs to the value: the engine parses "500GiB".
                 value: unit && raw !== "" ? `${raw}${unit.value}` : raw,
-            });
+            };
+            // Only when filled and positive: a condition without "for" is
+            // sent exactly as before.
+            const forN = parseFloat(el.querySelector(".wf-c-for-n")?.value);
+            if (forN > 0) cond.for = `${forN}${el.querySelector(".wf-c-for-u").value}`;
+            of.push(cond);
         }
     }
     if (!of.length) return null;
@@ -11608,13 +11639,21 @@ async function previewWorkflow() {
                 .replace("{n}", d.recent).replace("{m}", d.would_apply).replace("{s}", d.skipped)
             : `${d.matched} matched, ${d.would_apply} would change, ${d.skipped} already as asked`;
         if (d.capped) msg += " (capped)";
+        // A "for at least" rule: the torrents that fit but whose time has not
+        // come, and when the first of them will be acted on (`since` null: it
+        // counts from this very moment).
+        if (d.waiting > 0) {
+            const next = (d.waiting_sample || []).map(w => w.fires_at).filter(x => x).sort((a, b) => a - b)[0];
+            msg += " -- " + t("{n} waiting for their time").replace("{n}", d.waiting);
+            if (next) msg += t(", the first on {d}").replace("{d}", new Date(next * 1000).toLocaleString());
+        }
         if (d.freed_bytes > 0) msg += ` -- would free ${(d.freed_bytes / 1e9).toFixed(1)} GB`;
         // Nothing matched is a RESULT, not a failure -- but it is almost always
         // a rule that does not say what its author meant, so it does not get
         // the same green as a rule that found work to do.
         // No download under way is not a mistake in the rule, so it is not
         // painted as one; nothing matching among several downloads may be.
-        const fine = d.matched > 0 || (d.trigger === "completed" && !d.downloading)
+        const fine = d.matched > 0 || d.waiting > 0 || (d.trigger === "completed" && !d.downloading)
             || (d.trigger === "added" && !d.recent);
         _wfSay(out, msg + (names ? ` :: ${names}` : ""), fine ? "success" : "error");
     } catch (e) {

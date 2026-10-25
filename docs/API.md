@@ -221,6 +221,14 @@ Meaning of each setting: [Trackers and Announces](https://github.com/Kheopsian/H
 | `/api/jobs`, `/api/jobs/:id` | GET | Persistent jobs (`?limit=`, default 100); one job. | ✓ |
 | `/api/jobs/:id` | DELETE | Cancel. A queued job → `{"status":"cancelled"}`; a `waiting` move to a node → `"cancelled"`, both copies kept; a running graduation stops between two files and is rolled back (`"cancelling"`); another running move → 409 (it finishes); unknown id → 404. | ✓ |
 
+**A condition held for a duration.** Any condition of a scheduled workflow may carry `"for"`, a duration in the format of the duration fields (`"7d"`, `"36h"`, `"90m"`, or seconds): `{"kind":"cond","field":"user_paused","op":"eq","value":"true","for":"7d"}` counts only once it has been true for 7 days without a break. Absent, empty or zero: judged on the torrent as it is now, as before. An event workflow (`completed`, `added`) refuses it.
+
+- State: one row per torrent and `for` condition while it is true, `rule_since(workflow_id, condition_key, info_hash, since)`. A pass notes the time when the condition is true and the row is absent, deletes the row when it is false, and acts when `now - since >= for`; it writes only those transitions, in batches, and a pass with nothing changed writes nothing. It survives a restart. Removing a torrent or a workflow, or switching a workflow off, deletes its rows.
+- The condition's key is derived from its content (field, operator, value), not its position: reordering conditions keeps the dates, editing a condition starts it again from zero, changing only the `for` duration keeps the date.
+- Safe default: a condition with no row counts from the first pass that sees it. A torrent paused for a month before the workflow existed is not deleted by the first pass of "paused for 7 days"; it is acted on 7 days after that pass, if still paused.
+- Precision is the pass cadence (`interval_secs`, 15 minutes by default): `"for": "1h"` seen true at 10:00 acts on the first pass at or after 11:00.
+- Preview (`POST /api/workflows/preview`) of such a workflow adds `waiting` (torrents that satisfy the rule but whose time has not come) and `waiting_sample`: for each, `waiting[]` (`field`, `op`, `value`, `for_secs`, `since` as unix seconds or `null` for "from now on", `due`) and `fires_at`. Already-due entries of `sample` carry `held[]`. A preview and `?dry=1` write nothing. A real run answers `since_rows_written`.
+
 Bodies: [Workflows](https://github.com/Kheopsian/Hydranos/wiki/Workflows), [Jobs, Bulk Actions and Moving Data](https://github.com/Kheopsian/Hydranos/wiki/Jobs-and-Moving-Data).
 
 ## Race drain

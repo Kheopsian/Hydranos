@@ -1347,6 +1347,7 @@ impl Store {
         self.ensure_nodes_table()?;
         self.ensure_enrol_table()?;
         self.ensure_workflows_table()?;
+        self.ensure_rule_since_table()?;
         self.ensure_content_index()?;
         self.ensure_link_index()?;
         self.ensure_share_limits_table()?;
@@ -1927,6 +1928,121 @@ impl Store {
             .conn
             .execute("DELETE FROM workflows WHERE id = ?1", rusqlite::params![id])?;
         Ok(n > 0)
+    }
+
+    /// `rule_since`: since when a workflow's `for` condition has been true of a
+    /// torrent. SPARSE -- a row only while the condition holds -- and written as
+    /// transitions only (see `rules::since_delta`). Keyed by hash, not by copy.
+    fn ensure_rule_since_table(&self) -> anyhow::Result<()> {
+        self.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS rule_since (
+                 workflow_id TEXT NOT NULL,
+                 condition_key TEXT NOT NULL,
+                 info_hash TEXT NOT NULL,
+                 since INTEGER NOT NULL,
+                 PRIMARY KEY (workflow_id, condition_key, info_hash)) WITHOUT ROWID;
+             CREATE INDEX IF NOT EXISTS idx_rule_since_hash ON rule_since(info_hash);",
+        )?;
+        Ok(())
+    }
+
+    /// Everything the record holds for one workflow, in one query:
+    /// condition key -> info hash -> since.
+    pub fn rule_since_rows(
+        &self,
+        workflow_id: &str,
+    ) -> anyhow::Result<std::collections::HashMap<String, std::collections::HashMap<String, i64>>>
+    {
+        let mut stmt = self.conn.prepare(
+            "SELECT condition_key, info_hash, since FROM rule_since WHERE workflow_id = ?1",
+        )?;
+        let mut out: std::collections::HashMap<String, std::collections::HashMap<String, i64>> =
+            Default::default();
+        let mut rows = stmt.query([workflow_id])?;
+        while let Some(r) = rows.next()? {
+            out.entry(r.get(0)?)
+                .or_default()
+                .insert(r.get(1)?, r.get(2)?);
+        }
+        Ok(out)
+    }
+
+    /// One batch of transitions, in one transaction. A row that exists keeps
+    /// its date (a second writer racing this one cannot move it). Returns the
+    /// number of rows really inserted or deleted.
+    pub fn rule_since_write(
+        &self,
+        workflow_id: &str,
+        put: &[(&str, &str)],
+        del: &[(&str, &str)],
+        now: i64,
+    ) -> anyhow::Result<usize> {
+        let tx = self.conn.unchecked_transaction()?;
+        let mut n = 0;
+        {
+            let mut ins = tx.prepare_cached(
+                "INSERT OR IGNORE INTO rule_since (workflow_id, condition_key, info_hash, since)
+                 VALUES (?1, ?2, ?3, ?4)",
+            )?;
+            for (key, hash) in put {
+                n += ins.execute(rusqlite::params![workflow_id, key, hash, now])?;
+            }
+            let mut rm = tx.prepare_cached(
+                "DELETE FROM rule_since
+                 WHERE workflow_id = ?1 AND condition_key = ?2 AND info_hash = ?3",
+            )?;
+            for (key, hash) in del {
+                n += rm.execute(rusqlite::params![workflow_id, key, hash])?;
+            }
+        }
+        tx.commit()?;
+        Ok(n)
+    }
+
+    /// Drop up to `limit` rows of rule_since whose workflow no longer exists;
+    /// returns how many went. A caller loops until 0, one short hold of the
+    /// writer per call: deleting a workflow that had a million rows must not
+    /// be one statement.
+    pub fn rule_since_purge_orphans(&self, limit: i64) -> anyhow::Result<usize> {
+        Ok(self.conn.execute(
+            "DELETE FROM rule_since WHERE (workflow_id, condition_key, info_hash) IN (
+                 SELECT workflow_id, condition_key, info_hash FROM rule_since
+                 WHERE workflow_id NOT IN (SELECT id FROM workflows) LIMIT ?1)",
+            [limit],
+        )?)
+    }
+
+    /// `rule_since_purge_orphans` for one workflow that still exists: a
+    /// workflow switched off stops being watched, so what it knew goes stale.
+    pub fn rule_since_purge_workflow(
+        &self,
+        workflow_id: &str,
+        limit: i64,
+    ) -> anyhow::Result<usize> {
+        Ok(self.conn.execute(
+            "DELETE FROM rule_since WHERE (workflow_id, condition_key, info_hash) IN (
+                 SELECT workflow_id, condition_key, info_hash FROM rule_since
+                 WHERE workflow_id = ?1 LIMIT ?2)",
+            rusqlite::params![workflow_id, limit],
+        )?)
+    }
+
+    #[cfg(test)]
+    pub fn rule_since_count(&self, workflow_id: &str) -> anyhow::Result<i64> {
+        Ok(self.conn.query_row(
+            "SELECT count(*) FROM rule_since WHERE workflow_id = ?1",
+            [workflow_id],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// The torrent's rows go with its last copy.
+    fn forget_rule_since(&self, info_hash: &str) {
+        let _ = self.conn.execute(
+            "DELETE FROM rule_since WHERE info_hash = ?1
+             AND NOT EXISTS (SELECT 1 FROM torrents WHERE info_hash = ?1)",
+            [info_hash],
+        );
     }
 
     /// Stamp a workflow as having run, so its own interval is measured from
@@ -3279,6 +3395,12 @@ impl Store {
              AND NOT EXISTS (SELECT 1 FROM torrents WHERE info_hash = ?1)",
             [info_hash],
         )?;
+        // Never a reason to keep a removed torrent: a missing table is not an error here.
+        let _ = tx.execute(
+            "DELETE FROM rule_since WHERE info_hash = ?1
+             AND NOT EXISTS (SELECT 1 FROM torrents WHERE info_hash = ?1)",
+            [info_hash],
+        );
         tx.commit()?;
         Ok(n > 0)
     }
@@ -3651,6 +3773,7 @@ impl Store {
             .execute("DELETE FROM share_limits WHERE info_hash = ?1", [info_hash]);
         self.conn
             .execute("DELETE FROM tag_since WHERE info_hash = ?1", [info_hash])?;
+        self.forget_rule_since(info_hash);
         Ok(n > 0)
     }
 
@@ -3891,6 +4014,7 @@ impl Store {
              AND NOT EXISTS (SELECT 1 FROM torrents WHERE info_hash = ?1)",
             [info_hash],
         )?;
+        self.forget_rule_since(info_hash);
         Ok(n > 0)
     }
 

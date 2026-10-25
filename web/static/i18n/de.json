@@ -98,5 +98,11 @@
   "just now": "gerade eben",
   "{n} min ago": "vor {n} Min.",
   "{n} h ago": "vor {n} Std.",
-  "{n} d ago": "vor {n} T."
+  "{n} d ago": "vor {n} T.",
+  "for at least": "seit mindestens",
+  "hours": "Stunden",
+  "days": "Tage",
+  "The condition counts only once it has held this long without a break. Empty: judged on the torrent as it is now.": "Die Bedingung zählt erst, wenn sie so lange ohne Unterbrechung gegolten hat. Leer: wird am Torrent im aktuellen Zustand beurteilt.",
+  "{n} waiting for their time": "{n} warten auf ihre Frist",
+  ", the first on {d}": ", der erste am {d}"
 }
