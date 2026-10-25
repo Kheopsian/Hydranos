@@ -99,5 +99,11 @@
   "just now": "ahora mismo",
   "{n} min ago": "hace {n} min",
   "{n} h ago": "hace {n} h",
-  "{n} d ago": "hace {n} d"
+  "{n} d ago": "hace {n} d",
+  "for at least": "durante al menos",
+  "hours": "horas",
+  "days": "días",
+  "The condition counts only once it has held this long without a break. Empty: judged on the torrent as it is now.": "La condición solo cuenta cuando se ha cumplido sin interrupción durante este tiempo. Vacío: se juzga con el torrent tal como está ahora.",
+  "{n} waiting for their time": "{n} esperando su plazo",
+  ", the first on {d}": ", el primero el {d}"
 }
