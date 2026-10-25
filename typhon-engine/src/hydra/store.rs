@@ -257,6 +257,13 @@ fn retag_since(
 /// set at that instant: "at least since then".
 pub const TAG_SINCE_MIGRATED_KEY: &str = "tag_since_migrated_at";
 
+/// How many times `tag_since_bulk` ran on this thread: a test asserts that a
+/// pass with no `tag_age` condition never reads the dates.
+#[cfg(test)]
+thread_local! {
+    pub static TAG_SINCE_BULK_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// The frozen schema, as the production database has it.
 pub const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS torrents (
@@ -3613,6 +3620,22 @@ impl Store {
         Ok(())
     }
 
+    /// Write (`Some`) or delete (`None`) the date of one tag directly, for tests.
+    #[cfg(test)]
+    pub fn put_tag_since_for_tests(&self, info_hash: &str, tag: &str, at: Option<i64>) {
+        match at {
+            Some(at) => self.conn.execute(
+                "INSERT OR REPLACE INTO tag_since (info_hash, tag, since) VALUES (?1, ?2, ?3)",
+                rusqlite::params![info_hash, tag, at],
+            ),
+            None => self.conn.execute(
+                "DELETE FROM tag_since WHERE info_hash = ?1 AND tag = ?2",
+                rusqlite::params![info_hash, tag],
+            ),
+        }
+        .unwrap();
+    }
+
     /// The raw `tag_since` rows of one torrent, sorted, for tests: unlike
     /// `tag_since` it does not fill in the migration instant.
     #[cfg(test)]
@@ -3653,6 +3676,8 @@ impl Store {
         if info_hashes.is_empty() {
             return Ok(out);
         }
+        #[cfg(test)]
+        TAG_SINCE_BULK_CALLS.with(|c| c.set(c.get() + 1));
         let floor: i64 = self
             .meta_doc(TAG_SINCE_MIGRATED_KEY)
             .and_then(|v| v.parse().ok())

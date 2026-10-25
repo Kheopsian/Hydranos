@@ -105,5 +105,6 @@
   "days": "días",
   "The condition counts only once it has held this long without a break. Empty: judged on the torrent as it is now.": "La condición solo cuenta cuando se ha cumplido sin interrupción durante este tiempo. Vacío: se juzga con el torrent tal como está ahora.",
   "{n} waiting for their time": "{n} esperando su plazo",
-  ", the first on {d}": ", el primero el {d}"
+  ", the first on {d}": ", el primero el {d}",
+  "tag": "etiqueta"
 }
