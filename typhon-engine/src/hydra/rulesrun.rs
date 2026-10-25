@@ -806,10 +806,7 @@ pub fn track_since(
 ) -> Result<Option<TimedPass>, String> {
     let timed = rules::timed_conditions(&w.when).map_err(|e| e.to_string())?;
     // A workflow that stopped carrying any `for` still has rows to clear.
-    let rows = {
-        let s = store.read().map_err(|_| "store lock")?;
-        s.rule_since_rows(&w.id).map_err(|e| e.to_string())?
-    };
+    let (rows, _) = read_since(store, &w.id, SINCE_READ_SLICE)?;
     if timed.is_empty() && rows.is_empty() {
         return Ok(None);
     }
@@ -840,6 +837,51 @@ pub fn track_since(
         timing: Arc::new(rules::Timing::new(now, rows)),
         written,
     }))
+}
+
+/// Rows of the record read under one hold of the reader.
+pub const SINCE_READ_SLICE: usize = 20_000;
+
+/// A workflow's record, read in slices of `slice` rows in key order. The
+/// reader connection is the one every list and route of the UI reads on: it is
+/// let go between two slices, and no hold lasts longer than one slice. Returns
+/// the record and the longest time the reader was held. The assembled result is
+/// exactly what one query would give.
+pub fn read_since(
+    store: &Arc<crate::store::StoreLock>,
+    workflow_id: &str,
+    slice: usize,
+) -> Result<(rules::SinceRows, std::time::Duration), String> {
+    let mut rows = rules::SinceRows::new();
+    let mut longest = std::time::Duration::ZERO;
+    let mut after: Option<(String, String)> = None;
+    loop {
+        let t = std::time::Instant::now();
+        let page = {
+            let s = store.read().map_err(|_| "store lock")?;
+            let page = s
+                .rule_since_page(
+                    workflow_id,
+                    after.as_ref().map(|(k, h)| (k.as_str(), h.as_str())),
+                    slice.max(1),
+                )
+                .map_err(|e| e.to_string())?;
+            // Counted with the lock still held: the hold is the query and the
+            // rows it handed back.
+            longest = longest.max(t.elapsed());
+            page
+        };
+        let full = page.len() >= slice.max(1);
+        if let Some((k, h, _)) = page.last() {
+            after = Some((k.clone(), h.clone()));
+        }
+        for (k, h, since) in page {
+            rows.entry(k).or_default().insert(h, since);
+        }
+        if !full {
+            return Ok((rows, longest));
+        }
+    }
 }
 
 /// One batch, the writer held for its transaction and no longer.
