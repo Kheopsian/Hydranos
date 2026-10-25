@@ -193,7 +193,15 @@ jobs:
             grep -E "EACCES|EPERM" /tmp/wg.strace | head
             ip netns del dbg; rm -rf "$d"
           '
-          sudo dmesg 2>&1 | grep -i -E 'apparmor|denied|wg' | tail -10
+          # dmesg may be refused to the runner user: say so instead of printing nothing.
+          if out=$(sudo dmesg 2>&1); then
+            echo "$out" | grep -i -E 'apparmor|denied|wg' | tail -10
+            [ -n "$out" ] || echo "dmesg: empty"
+          else
+            echo "dmesg: refused: $out"
+          fi
+          sudo journalctl -k --no-pager 2>&1 | grep -i -E 'apparmor|denied|wg' | tail -10
+          cat /proc/self/attr/current 2>&1
 
   rust:
     runs-on: ubuntu-latest
