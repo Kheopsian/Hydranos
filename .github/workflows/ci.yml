@@ -166,8 +166,8 @@ jobs:
       # that refuses `wg set private-key <file>` the open of the key (kernel:
       # apparmor="DENIED" profile="wg", strace: EACCES), in a 0700 directory
       # and by /dev/stdin alike. The refusal is proven for the key file the test
-      # writes under /tmp, not for all of /tmp: the profile itself is printed by
-      # the diagnostic step below. Complain mode keeps the profile loaded and
+      # writes under /tmp, not for all of /tmp (the profile was read once while
+      # diagnosing; it is no longer printed). Complain mode keeps the profile loaded and
       # logs instead of refusing; the runner is a throwaway VM and only this job
       # is touched, never the engine.
       - name: Let wg read the test key (AppArmor complain mode)
@@ -179,7 +179,7 @@ jobs:
             sudo apparmor_parser -R /etc/apparmor.d/wg
             echo "wg profile: unloaded (no aa-complain)"
           else
-            echo "no wg AppArmor profile to relax"
+            echo "no /etc/apparmor.d/wg: nothing to relax"
           fi
       # --ignored: the root test is #[ignore] so an unprivileged `cargo test`
       # skips it. Without the flag this step ran zero tests and passed.
@@ -197,7 +197,6 @@ jobs:
           sudo sysctl fs.protected_regular fs.protected_symlinks kernel.apparmor_restrict_unprivileged_userns
           command -v wg && wg --version && ls -l "$(command -v wg)" && readlink -f "$(command -v wg)"
           sudo aa-status 2>&1 | head -30
-          cat /etc/apparmor.d/wg 2>&1 | head -60
           sudo sh -c '
             d=$(mktemp -d); wg genkey > "$d/k"; ls -ld "$d"; ls -l "$d/k"
             ip netns add dbg && ip -n dbg link add wgp type wireguard
