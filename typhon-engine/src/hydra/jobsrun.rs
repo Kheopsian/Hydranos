@@ -2367,6 +2367,210 @@ mod graduate_tests {
         );
     }
 
+    /// A graduation that names no target engine is refused before anything
+    /// moves, even with a save path: the check needs BOTH, not one of them.
+    #[test]
+    fn a_graduation_without_a_target_engine_is_refused_before_anything_moves() {
+        let (s, hash, src, dst) = setup("grad-no-target");
+        let ih = typhon_engine::torrent::hex_decode(&hash).unwrap();
+        let mut j = job(&hash, &dst);
+        j.params = serde_json::json!({
+            "from_engine": "race", "to_engine": "", "to_category": "",
+            "save_path": dst.display().to_string(),
+        })
+        .to_string();
+
+        let err = graduate(&s.state, &j).expect_err("no target engine");
+        assert_eq!(err, "graduation needs a target engine and a save path");
+        assert_eq!(std::fs::read(src.join("grad")).unwrap(), vec![7u8; 16384]);
+        assert!(!dst.exists(), "nothing was created at the destination");
+        assert!(
+            s.state
+                .engines
+                .get("race")
+                .unwrap()
+                .manager
+                .get(&ih)
+                .is_some(),
+            "still in race"
+        );
+    }
+
+    /// Room for exactly the bytes to copy is room enough: the refusal is for
+    /// a disk with less, not one with just as much.
+    #[test]
+    fn a_graduation_that_exactly_fits_the_free_space_goes_through() {
+        let (s, hash, src, dst) = setup("grad-room-exact");
+        let ih = typhon_engine::torrent::hex_decode(&hash).unwrap();
+        let _full = FullDisk::copying();
+
+        crate::jobs::FREE_SPACE.with(|c| c.set(Some(16383)));
+        let err = graduate(&s.state, &job(&hash, &dst)).expect_err("one byte short");
+        assert!(err.contains("16384 bytes to copy, 16383 free"), "{err}");
+
+        crate::jobs::FREE_SPACE.with(|c| c.set(Some(16384)));
+        graduate(&s.state, &job(&hash, &dst)).expect("16384 bytes fit in 16384");
+        assert_eq!(std::fs::read(dst.join("grad")).unwrap(), vec![7u8; 16384]);
+        assert!(!src.join("grad").exists());
+        assert!(s
+            .state
+            .engines
+            .get("hoard")
+            .unwrap()
+            .manager
+            .get(&ih)
+            .is_some());
+    }
+
+    /// The job's progress counts every byte moved, file after file, and
+    /// ends at the size of the whole torrent.
+    #[test]
+    fn a_graduation_reports_the_bytes_it_moved_as_its_progress() {
+        let s = state_from("grad-progress", "");
+        let src = s.dir.join("race-data");
+        let dst = s.dir.join("hoard-data");
+        std::fs::create_dir_all(src.join("pair")).unwrap();
+        std::fs::write(src.join("pair").join("a"), vec![1u8; 16384]).unwrap();
+        std::fs::write(src.join("pair").join("b"), vec![2u8; 16384]).unwrap();
+        let (hash, _) = crate::api::add_torrent_bytes(
+            &s.state,
+            &files_torrent_bytes(&[("a", 16384), ("b", 16384)]),
+            "",
+            &src.display().to_string(),
+            "",
+            true,
+            true,
+            "race",
+        )
+        .expect("added");
+        let running = {
+            let store = s.state.store.lock().unwrap();
+            store
+                .create_job("graduate", &hash, &job(&hash, &dst).params, 32768)
+                .unwrap();
+            store.claim_next_job().expect("claimed")
+        };
+
+        graduate(&s.state, &running).expect("graduated");
+        let after = s.state.store.lock().unwrap().job(&running.id).unwrap();
+        assert_eq!(after.progress_bytes, 32768, "both files counted");
+    }
+
+    /// A graduation to a category labels the copy in the target engine; one
+    /// that names no category leaves the label the torrent already wears.
+    #[test]
+    fn a_graduation_sets_its_category_and_an_empty_one_keeps_the_old() {
+        for (asked, expected) in [("series", "series"), ("", "old")] {
+            let (s, hash, _src, dst) = setup(&format!("grad-category-{expected}"));
+            s.state
+                .store
+                .lock()
+                .unwrap()
+                .set_category_in(&hash, "race", "old")
+                .unwrap();
+            let mut j = job(&hash, &dst);
+            j.params = serde_json::json!({
+                "from_engine": "race", "to_engine": "hoard", "to_category": asked,
+                "save_path": dst.display().to_string(),
+            })
+            .to_string();
+
+            graduate(&s.state, &j).expect("graduated");
+            assert_eq!(
+                s.state
+                    .store
+                    .lock()
+                    .unwrap()
+                    .category_of(&hash, "hoard")
+                    .as_deref(),
+                Some(expected),
+                "category after a graduation asking for {asked:?}"
+            );
+        }
+    }
+
+    /// ⭐ A rollback that could not put every file back says so, and which:
+    /// "as before" would send the operator looking in the source for data
+    /// that is still at the destination.
+    #[test]
+    fn a_rollback_that_leaves_a_file_behind_names_it() {
+        // Two files in two folders: pair/x/a, then pair/y/b.
+        let info = format!(
+            "d5:filesl{}{}e4:name4:pair12:piece lengthi16384e6:pieces40:{}e",
+            "d6:lengthi16384e4:pathl1:x1:aee",
+            "d6:lengthi16384e4:pathl1:y1:bee",
+            "G".repeat(40)
+        );
+        let announce = "https://tracker.example/announce";
+        let blob = format!("d8:announce{}:{announce}4:info{info}e", announce.len()).into_bytes();
+        let s = state_from("grad-rollback-short", "");
+        let src = s.dir.join("race-data");
+        let dst = s.dir.join("hoard-data");
+        let (sa, sb) = (src.join("pair/x/a"), src.join("pair/y/b"));
+        let (da, db) = (dst.join("pair/x/a"), dst.join("pair/y/b"));
+        std::fs::create_dir_all(sa.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(sb.parent().unwrap()).unwrap();
+        std::fs::write(&sa, vec![1u8; 16384]).unwrap();
+        std::fs::write(&sb, vec![2u8; 16384]).unwrap();
+        let (hash, _) = crate::api::add_torrent_bytes(
+            &s.state,
+            &blob,
+            "",
+            &src.display().to_string(),
+            "",
+            true,
+            true,
+            "race",
+        )
+        .expect("added");
+        let ih = typhon_engine::torrent::hex_decode(&hash).unwrap();
+        let running = {
+            let store = s.state.store.lock().unwrap();
+            store
+                .create_job("graduate", &hash, &job(&hash, &dst).params, 32768)
+                .unwrap();
+            store.claim_next_job().expect("claimed")
+        };
+        STOP_AFTER_LEAVING_SOURCE.with(|c| c.set(true));
+        graduate(&s.state, &running).expect_err("stopped where a crash would");
+        let again = {
+            let store = s.state.store.lock().unwrap();
+            store.requeue_running_jobs();
+            store.claim_next_job().expect("claimed again")
+        };
+        // a had moved before the stop, and its old folder is now a file: it
+        // cannot go back. b's destination holds somebody else's file: the
+        // resumed run gives up and puts back what it can.
+        std::fs::create_dir_all(da.parent().unwrap()).unwrap();
+        std::fs::rename(&sa, &da).unwrap();
+        std::fs::remove_dir(sa.parent().unwrap()).unwrap();
+        std::fs::write(sa.parent().unwrap(), b"in the way").unwrap();
+        std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+        std::fs::write(&db, b"somebody else's b").unwrap();
+
+        let err = graduate(&s.state, &again).expect_err("given up");
+        assert!(err.contains("already holds another file"), "{err}");
+        assert!(
+            err.contains("back in race, but these files did not move back")
+                && err.contains(&da.display().to_string()),
+            "{err}"
+        );
+        assert!(!err.contains("as before"), "{err}");
+        assert_eq!(std::fs::read(&da).unwrap(), vec![1u8; 16384], "a is kept");
+        assert_eq!(std::fs::read(&sb).unwrap(), vec![2u8; 16384]);
+        assert_eq!(std::fs::read(&db).unwrap(), b"somebody else's b");
+        assert!(
+            s.state
+                .engines
+                .get("race")
+                .unwrap()
+                .manager
+                .get(&ih)
+                .is_some(),
+            "back in race"
+        );
+    }
+
     /// A move interrupted after its torrent left the engine, with the job's
     /// record in its params, picked up again.
     fn interrupted_move(
