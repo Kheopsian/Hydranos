@@ -21,7 +21,7 @@ decided when the release is cut, by looking at what went in: whoever tags it
 renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 `HYDRANOS_VERSION` in the same commit.
 
-## Unreleased -- a .torrent is read only from the folders listed in the config file
+## v4.6.1 -- a .torrent is read only from the folders listed in the config file
 
 ### Security
 
@@ -37,8 +37,15 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   its pieces and its saved bitfield. Only a file that is really gone loses
   its pieces.
 
+### Changed
+
+- The container image is built on the latest patch of `debian:bookworm-slim`.
+
 ### Upgrading
 
+- 4.6.0 is withdrawn: upgrade to 4.6.1 directly. The repository history was
+  rewritten when it was published; a clone made before then has to be cloned
+  again (or reset onto the new `main`), not pulled.
 - `[mcp] torrent_roots` is now the only place `torrent_path` may read from;
   `data_dir` no longer is. An install that reads `.torrent` files by path from
   its data folder lists that folder in `torrent_roots`.
