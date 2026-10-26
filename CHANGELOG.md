@@ -21,7 +21,7 @@ decided when the release is cut, by looking at what went in: whoever tags it
 renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 `HYDRANOS_VERSION` in the same commit.
 
-## Unreleased -- a torrent whose data went missing stays parked across a restart
+## v4.6.3 -- a torrent whose data went missing stays parked across a restart, and the workflow editor names both deletes
 
 ### Fixed
 
