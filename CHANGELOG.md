@@ -21,6 +21,16 @@ decided when the release is cut, by looking at what went in: whoever tags it
 renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 `HYDRANOS_VERSION` in the same commit.
 
+## Unreleased -- the workflow condition "time since a tag was set" lets you pick its tag again
+
+### Fixed
+
+- The workflow editor drew no tag picker for "time since a tag was set", so
+  the condition was sent without a tag and the save was refused with
+  `"" is not a valid value for "tag"`. Two functions of the interface had
+  the same name and the second replaced the first. Broken since 4.6.0; the
+  engine side was not affected.
+
 ## v4.6.3 -- a torrent whose data went missing stays parked across a restart, and the workflow editor names both deletes
 
 ### Fixed

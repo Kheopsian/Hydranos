@@ -1657,4 +1657,26 @@ mod editor_delete_tests {
             "the plain delete can still take the files"
         );
     }
+
+    /// Two top-level functions of one name in app.js: the second replaces the
+    /// first everywhere, with no error. The tag picker of "time since a tag
+    /// was set" was drawn by the actions' control of the same name, so the
+    /// condition had no tag to choose and every save was refused.
+    #[test]
+    fn app_js_declares_each_function_once() {
+        let js = include_str!("../../../web/static/app.js");
+        let mut seen = std::collections::HashSet::new();
+        for line in js.lines() {
+            let rest = line
+                .strip_prefix("async function ")
+                .or_else(|| line.strip_prefix("function "));
+            let Some(rest) = rest else { continue };
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '$')
+                .collect();
+            assert!(seen.insert(name.clone()), "app.js declares {name} twice");
+        }
+        assert!(seen.len() > 100, "the scan found no functions");
+    }
 }
