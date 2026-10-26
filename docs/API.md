@@ -54,6 +54,7 @@ Errors are JSON `{"error": "<message>"}`, sometimes with more fields:
 - `400`: bad or missing field (strict bodies name the unknown field).
 - `404`: `{"error":"torrent not found"}`, or no such engine/node/job.
 - `409`: refused because of state. Data moves add `"reason"` (`hardlinks`, `space`, `shared`, `destination_taken`, …) and a `plan`; a filter selection that grew answers `"reason":"grew"` with the new `count`; an add of a torrent already present answers 409.
+- The MCP `add_torrent` reads a `torrent_path` only from a folder of `[mcp] torrent_roots` (config file only, empty by default: no path is read; `[daemon] data_dir` is not a root).
 - `POST /api/torrents` answers `400` (bad request), `404` (`torrent_path` not found), `409` (already added) or `500` (the engine failed), with `{"error","targets"}`.
 
 ### Hashes, engines and copies

@@ -391,7 +391,8 @@ password_hash = ""
 #
 # [mcp]
 # allow_destructive = false      # list and allow removing torrents
-# # Folders, besides data_dir, an agent may read a .torrent from (add_torrent's
-# # torrent_path). Empty = data_dir only. Set HERE, by hand: no route of the
-# # API writes this list, so a caller of the API cannot widen what it reads.
+# # Folders an agent may read a .torrent from (add_torrent's torrent_path), and
+# # the only ones: data_dir is not one. Empty = no path is read. Set HERE, by
+# # hand: no route of the API writes this list, so a caller of the API cannot
+# # widen what it reads.
 # torrent_roots = []             # e.g. ["/mnt/user/watch"]

@@ -7,10 +7,13 @@
 //! `.torrent` path, a folder listing) goes through one of two checks:
 //!
 //! - [`within_known_dirs`]: every folder the daemon works with, its own data
-//!   folder included (the `.torrent` the MCP reads may sit there);
+//!   folder included;
 //! - [`within_download_dirs`]: the same, WITHOUT the data folder, and refusing
 //!   anything inside it: the config and the database (and their names) are
 //!   never reachable through it. For a listing a browser shows.
+//!
+//! The MCP `.torrent` path is narrower than both: [`within_torrent_roots`],
+//! the folders of `[mcp] torrent_roots` and nothing else.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -60,15 +63,17 @@ pub(crate) fn within_download_dirs(
     check(state, path, false)
 }
 
-/// `path`, canonicalised, if it lies under `[daemon] data_dir` or a folder of
-/// `[mcp] torrent_roots`; a refusal that says nothing about why otherwise.
+/// `path`, canonicalised, if it lies under a folder of `[mcp] torrent_roots`;
+/// a refusal that says nothing about why otherwise. No list (the default) = no
+/// path is read.
 ///
 /// Narrower than [`within_known_dirs`] on purpose: every folder THAT one trusts
-/// (a torrent's save path, the default save path, a category's folder) can be
-/// set by a caller of the API, so a caller could point one at another
-/// program's folder and then read from it. These two are set in the config file
-/// only. Same rules for the path: absolute, links and `..` resolved first, `/`
-/// never a root.
+/// (a torrent's save path, the default save path, a category's folder, and
+/// `[daemon] data_dir`, which `/api/settings` writes and a restart then reads)
+/// can be set by a caller of the API, so a caller could point one at another
+/// program's folder and then read from it. `torrent_roots` is set in the
+/// config file only. Same rules for the path: absolute, links and `..`
+/// resolved first, `/` never a root.
 pub(crate) fn within_torrent_roots(
     state: &crate::api::AppState,
     path: &str,
@@ -78,22 +83,19 @@ pub(crate) fn within_torrent_roots(
         return Err(NOT_KNOWN.to_string());
     }
     let canon = std::fs::canonicalize(p).map_err(|_| NOT_KNOWN.to_string())?;
-    let mut roots: Vec<PathBuf> = vec![state.boot_roots.data_dir.clone()];
-    roots.extend(state.boot_roots.torrent_roots.iter().cloned());
-    if lies_under(&canon, &roots) {
+    if lies_under(&canon, &state.boot_roots.torrent_roots) {
         return Ok(canon);
     }
     Err(NOT_KNOWN.to_string())
 }
 
-/// The two settings the `.torrent` read trusts, read ONCE, when the daemon
-/// starts, from the config file.
+/// The folders the daemon trusts, read ONCE, when it starts, from the config
+/// file.
 ///
-/// `/api/settings` can write `[daemon] data_dir` and the live configuration
-/// follows at once, so a caller could point it at another program's folder
-/// and read from there. These values are taken at boot and kept: a change
-/// to the file takes effect at the next start, which only whoever holds the
-/// file can cause. (`torrent_roots` is never written by a route at all.)
+/// `data_dir` is only for [`within_known_dirs`] and [`within_download_dirs`];
+/// the `.torrent` read does not trust it (`/api/settings` can write it, and the
+/// next start reads it). `torrent_roots` is never written by a route at all,
+/// and is the only folder list that read trusts.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct BootRoots {
     pub(crate) data_dir: PathBuf,

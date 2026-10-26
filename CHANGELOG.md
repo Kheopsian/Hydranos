@@ -21,6 +21,20 @@ decided when the release is cut, by looking at what went in: whoever tags it
 renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 `HYDRANOS_VERSION` in the same commit.
 
+## Unreleased -- a .torrent is read only from the folders listed in the config file
+
+### Security
+
+- The MCP `add_torrent` refuses a `torrent_path` that is not under a folder of
+  `[mcp] torrent_roots`, which is empty by default: `[daemon] data_dir`, which a
+  settings edit can change, no longer makes a folder readable.
+
+### Upgrading
+
+- `[mcp] torrent_roots` is now the only place `torrent_path` may read from;
+  `data_dir` no longer is. An install that reads `.torrent` files by path from
+  its data folder lists that folder in `torrent_roots`.
+
 ## v4.6.0 -- the API asks for its key, and a workflow can wait
 
 ### Upgrading
