@@ -1494,7 +1494,18 @@ impl TorrentState {
                 continue;
             }
             let path = self.meta.disk_path(&save, i);
-            let actual = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            // Only a file that is not there is a file of zero bytes. A stat
+            // the disk refused (permissions, an I/O error, a mount that went
+            // away) says nothing about the pieces: park the torrent and leave
+            // its bitfield for when the disk answers, as a read would.
+            let actual = match std::fs::metadata(&path) {
+                Ok(m) => m.len(),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0,
+                Err(e) => {
+                    self.mark_error(&format!("cannot stat {}: {}", path.display(), e));
+                    return;
+                }
+            };
             if actual >= f.length {
                 continue;
             }
@@ -1930,6 +1941,73 @@ mod tests {
         assert!(addrs.remove(&a).is_some());
         assert!(!addrs.contains_key(&a));
         assert_eq!(addrs.len(), 1);
+    }
+
+    /// A torrent whose pieces are all held, saved under `save`.
+    fn seeded_under(save: std::path::PathBuf) -> TorrentState {
+        let (bytes, _) = torrent_bytes(4);
+        let meta = crate::torrent::metainfo::parse_torrent_bytes(&bytes).unwrap();
+        let st = TorrentState::new(meta, save, true);
+        let n = st.meta.num_pieces();
+        let mut p = PiecePicker::new(n);
+        p.import_bitfield(&crate::torrent::full_bitfield(n));
+        let _ = st.picker.set(Arc::new(Mutex::new(p)));
+        st
+    }
+
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("typhon-verify-{}-{}", std::process::id(), tag));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// A file that is really gone still takes its pieces with it.
+    #[test]
+    fn verify_files_retracts_the_pieces_of_a_file_that_is_absent() {
+        let dir = scratch("absent");
+        let st = seeded_under(dir.clone());
+        st.check_files_back_the_state();
+        let held = st.picker.get().unwrap().lock().unwrap().num_have();
+        assert_eq!(held, 0, "an absent file kept its pieces");
+        assert_eq!(
+            st.status.load(Ordering::Relaxed),
+            TorrentStatus::Error as u8
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A stat that fails for any other reason says nothing about the pieces:
+    /// the torrent is parked with the error and its bitfield is left alone.
+    /// A path component that is a plain file fails with ENOTDIR whoever runs
+    /// the test, root included, which a permission refusal would not.
+    #[test]
+    fn verify_files_parks_on_a_stat_error_and_keeps_the_pieces() {
+        let dir = scratch("enotdir");
+        let blocker = dir.join("not-a-folder");
+        std::fs::write(&blocker, b"x").unwrap();
+        let st = seeded_under(blocker.clone());
+        let before = st.picker.get().unwrap().lock().unwrap().export_bitfield();
+        st.check_files_back_the_state();
+        let p = st.picker.get().unwrap().lock().unwrap();
+        assert_eq!(p.num_have(), 4, "an unreadable disk retracted pieces");
+        assert_eq!(p.export_bitfield(), before, "the bitfield was rewritten");
+        drop(p);
+        assert_eq!(
+            st.status.load(Ordering::Relaxed),
+            TorrentStatus::Error as u8,
+            "not parked"
+        );
+        assert!(
+            st.serving_suspended.load(Ordering::Relaxed),
+            "still serving what it cannot read"
+        );
+        let msg = st.error_msg.lock().unwrap().clone();
+        assert!(
+            msg.contains("some.bin"),
+            "error does not name the file: {msg}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
 

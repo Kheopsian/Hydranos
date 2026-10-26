@@ -29,6 +29,14 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   `[mcp] torrent_roots`, which is empty by default: `[daemon] data_dir`, which a
   settings edit can change, no longer makes a folder readable.
 
+### Fixed
+
+- A file the disk cannot be asked about (permission refused, I/O error, a
+  network mount that dropped) no longer counts as an empty file when a torrent
+  is first used after a start: the torrent is parked with the error and keeps
+  its pieces and its saved bitfield. Only a file that is really gone loses
+  its pieces.
+
 ### Upgrading
 
 - `[mcp] torrent_roots` is now the only place `torrent_path` may read from;
