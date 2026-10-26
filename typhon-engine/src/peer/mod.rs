@@ -975,6 +975,11 @@ pub static PLAINTEXT_INBOUND_REFUSED: std::sync::atomic::AtomicU64 =
 pub static INBOUND_REFUSED_IGNORED: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
+/// Inbound encrypted handshakes that named an info_hash we do not hold.
+/// Ordinary traffic on a public port: counted, not logged one by one.
+pub static UNKNOWN_SKEY_HANDSHAKES: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
 /// Window over which a source's unknown-info_hash handshakes are counted.
 const UNKNOWN_HASH_WINDOW: Duration = Duration::from_secs(60);
 /// How long a source over the limit is ignored.
