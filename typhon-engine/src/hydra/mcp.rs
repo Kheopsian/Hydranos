@@ -1266,9 +1266,9 @@ pub(crate) async fn fetch_torrent_via(
     Ok(bytes)
 }
 
-/// The bytes of a `.torrent` named by path: only from `[daemon] data_dir` or a
-/// folder of `[mcp] torrent_roots` (`pathroots::within_torrent_roots`), only a
-/// regular file, no larger than the limit,
+/// The bytes of a `.torrent` named by path: only from a folder of `[mcp]
+/// torrent_roots` (`pathroots::within_torrent_roots`; none listed = no path is
+/// read), only a regular file, no larger than the limit,
 /// and only if it parses as a torrent. Whatever fails, the answer is the same
 /// one, so the call is no way to ask whether a file exists or what it holds.
 fn read_torrent_file(state: &AppState, path: &str) -> Result<Vec<u8>, String> {
@@ -2526,11 +2526,11 @@ mod tests {
         (s, data, root)
     }
 
-    /// A `.torrent` is read from the data folder or a folder the operator
-    /// listed in `[mcp] torrent_roots`, and nowhere else: not a category's
-    /// folder either, since a category is set through the API.
+    /// A `.torrent` is read from a folder the operator listed in `[mcp]
+    /// torrent_roots`, and nowhere else: not the data folder, not a category's
+    /// folder either, since both are set through the API.
     #[tokio::test]
-    async fn a_torrent_file_is_read_only_from_the_data_folder_or_the_listed_roots() {
+    async fn a_torrent_file_is_read_only_from_the_listed_roots() {
         let (s, data, root) = st_roots("mcp-path-roots").await;
         let elsewhere = outside_dir("roots-elsewhere");
         let category = s.dir.join("books");
@@ -2543,8 +2543,7 @@ mod tests {
         ] {
             std::fs::write(dir.join("t.torrent"), torrent_bytes(name)).unwrap();
         }
-        let ok = add_from_path(&s, &data.join("t.torrent")).await;
-        assert_eq!(ok["isError"], false, "data folder: {ok}");
+        error_text(&add_from_path(&s, &data.join("t.torrent")).await);
         let ok = add_from_path(&s, &root.join("t.torrent")).await;
         assert_eq!(ok["isError"], false, "listed root: {ok}");
         error_text(&add_from_path(&s, &elsewhere.join("t.torrent")).await);
@@ -2580,9 +2579,8 @@ mod tests {
         }
     }
 
-    /// The roots are the ones the daemon started with. A settings edit that
-    /// moves `[daemon] data_dir` moves the live configuration, but not where a
-    /// `.torrent` may be read from.
+    /// A settings edit that moves `[daemon] data_dir` moves the live
+    /// configuration, but not where a `.torrent` may be read from.
     #[tokio::test]
     async fn a_settings_edit_of_data_dir_does_not_move_where_a_torrent_is_read_from() {
         let (s, data, root) = st_roots("mcp-path-datadir").await;
@@ -2601,11 +2599,38 @@ mod tests {
 
         error_text(&add_from_path(&s, &x.join("t.torrent")).await);
         std::fs::write(data.join("t.torrent"), torrent_bytes("boot")).unwrap();
-        let ok = add_from_path(&s, &data.join("t.torrent")).await;
+        error_text(&add_from_path(&s, &data.join("t.torrent")).await);
+        for d in [data, root, x] {
+            let _ = std::fs::remove_dir_all(&d);
+        }
+    }
+
+    /// After a settings edit of `[daemon] data_dir` and a restart (the roots
+    /// rebuilt from the file as it is then on disk, as `main` does), the new
+    /// data folder is no place to read a `.torrent` from; a listed root still
+    /// is.
+    #[tokio::test]
+    async fn a_data_dir_set_by_settings_is_not_a_torrent_root_after_a_restart() {
+        let (mut s, data, root) = st_roots("mcp-path-restart").await;
+        let x = outside_dir("restart-x");
+        std::fs::write(x.join("t.torrent"), torrent_bytes("moved")).unwrap();
+        std::fs::write(root.join("t.torrent"), torrent_bytes("listed")).unwrap();
+
+        let body = json!({"changes": [{"section": "daemon", "key": "data_dir", "value": x.to_string_lossy()}]});
+        let (status, v) = internal(&s.state, Method::POST, "/api/settings", Some(body)).await;
+        assert!(status.is_success(), "{status} {v}");
+
+        let reread = crate::config::Config::load(&s.state.config_path).expect("config rereads");
         assert_eq!(
-            ok["isError"], false,
-            "the data folder of the start still counts: {ok}"
+            reread.daemon.data_dir,
+            x.to_string_lossy(),
+            "the file has it"
         );
+        s.state.boot_roots = std::sync::Arc::new(crate::pathroots::BootRoots::from_config(&reread));
+
+        error_text(&add_from_path(&s, &x.join("t.torrent")).await);
+        let ok = add_from_path(&s, &root.join("t.torrent")).await;
+        assert_eq!(ok["isError"], false, "a listed root still reads: {ok}");
         for d in [data, root, x] {
             let _ = std::fs::remove_dir_all(&d);
         }
