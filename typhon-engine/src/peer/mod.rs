@@ -980,6 +980,43 @@ pub static INBOUND_REFUSED_IGNORED: std::sync::atomic::AtomicU64 =
 pub static UNKNOWN_SKEY_HANDSHAKES: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
+/// Longest an unreported run of unknown-info_hash handshakes waits before the
+/// one summary line that stands for it.
+const UNKNOWN_SKEY_LOG_WINDOW: Duration = Duration::from_secs(60);
+
+/// The log's side of `UNKNOWN_SKEY_HANDSHAKES`: one summary line per window,
+/// instead of one warning per connection. On a public port the encrypted
+/// handshakes naming a torrent we do not hold arrive by the thousand a minute
+/// and drowned the rest of the log. No timer: the line for a window is written
+/// by the first event after it, and the counter is exact in between.
+#[derive(Default)]
+pub struct UnknownSkeyLog {
+    /// When the open window started, and how many it has seen.
+    window: std::sync::Mutex<Option<(std::time::Instant, u64)>>,
+}
+
+impl UnknownSkeyLog {
+    /// Record one handshake. Returns `(count, seconds)` for the window that
+    /// just closed when it is time to write its line, else `None`.
+    pub fn note(&self, now: std::time::Instant) -> Option<(u64, u64)> {
+        let mut w = self.window.lock().unwrap_or_else(|e| e.into_inner());
+        match *w {
+            Some((start, n)) if now.duration_since(start) >= UNKNOWN_SKEY_LOG_WINDOW => {
+                *w = Some((now, 1));
+                Some((n, now.duration_since(start).as_secs()))
+            }
+            Some((_, ref mut n)) => {
+                *n += 1;
+                None
+            }
+            None => {
+                *w = Some((now, 1));
+                None
+            }
+        }
+    }
+}
+
 /// Window over which a source's unknown-info_hash handshakes are counted.
 const UNKNOWN_HASH_WINDOW: Duration = Duration::from_secs(60);
 /// How long a source over the limit is ignored.
@@ -1341,7 +1378,20 @@ async fn handle_incoming(
                         unknown_limit,
                     );
                 }
-                warn!("[peer] {} MSE handshake failed: {}", addr, e);
+                if unknown_skey.load(std::sync::atomic::Ordering::Relaxed) {
+                    // Ordinary traffic: counted, and summed up once a window.
+                    // Every other failure keeps its own line.
+                    UNKNOWN_SKEY_HANDSHAKES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if let Some((n, secs)) =
+                        torrent_mgr.unknown_skeys().note(std::time::Instant::now())
+                    {
+                        info!(
+                            "[peer] {n} incoming encrypted handshakes for torrents we do not hold in the last {secs} s"
+                        );
+                    }
+                } else {
+                    warn!("[peer] {} MSE handshake failed: {}", addr, e);
+                }
                 return;
             }
         }
@@ -2279,6 +2329,203 @@ mod handshake_cap_tests {
         let text = String::from_utf8_lossy(&out.0.lock().unwrap()).into_owned();
         assert!(text.contains("control line"), "the capture works: {text:?}");
         assert!(!text.contains("incoming"), "logged at info: {text}");
+    }
+}
+
+#[cfg(test)]
+mod unknown_skey_log_tests {
+    use super::handle_incoming;
+    use crate::torrent::TorrentManager;
+    use std::sync::atomic::Ordering;
+    use std::sync::{Arc, Mutex};
+    use tokio::io::AsyncWriteExt;
+
+    #[derive(Clone, Default)]
+    struct Captured(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for Captured {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Captured {
+        type Writer = Captured;
+        fn make_writer(&'a self) -> Captured {
+            self.clone()
+        }
+    }
+
+    /// True when this is the child process. Otherwise runs `name` alone in a
+    /// child and checks it passed: `tracing` caches per call site whether
+    /// anyone listens, and the counters are process-wide, so a test on another
+    /// thread would feed both.
+    fn is_child(name: &str) -> bool {
+        if std::env::var_os("TYPHON_SKEY_CHILD").is_some() {
+            return true;
+        }
+        let full = format!("peer::unknown_skey_log_tests::{name}");
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &full, "--nocapture", "--test-threads=1"])
+            .env("TYPHON_SKEY_CHILD", "1")
+            .output()
+            .unwrap();
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(out.status.success() && text.contains("1 passed"), "{text}");
+        false
+    }
+
+    fn manager(tag: &str) -> (Arc<TorrentManager>, Arc<crate::disk::DiskManager>) {
+        let root = std::env::temp_dir().join(format!("typhon-skey-{tag}-{}", std::process::id()));
+        let (data, resume) = (root.join("data"), root.join("resume"));
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::create_dir_all(&resume).unwrap();
+        let disk = Arc::new(crate::disk::DiskManager::new(16));
+        let mgr = Arc::new(TorrentManager::new(
+            data.to_string_lossy().into_owned(),
+            resume.to_string_lossy().into_owned(),
+            disk.clone(),
+        ));
+        (mgr, disk)
+    }
+
+    /// Serve one inbound connection on a fresh listener with `handle_incoming`,
+    /// while `client` plays the peer on the other end.
+    async fn serve_one<F, Fut>(
+        mgr: &Arc<TorrentManager>,
+        disk: &Arc<crate::disk::DiskManager>,
+        client: F,
+    ) where
+        F: FnOnce(tokio::net::TcpStream) -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let at = listener.local_addr().unwrap();
+        let c = tokio::net::TcpStream::connect(at).await.unwrap();
+        let (s, addr) = listener.accept().await.unwrap();
+        let server = handle_incoming(
+            super::PeerTransport::Tcp(s),
+            addr,
+            mgr.clone(),
+            disk.clone(),
+            [7u8; 20],
+            None,
+            at.port(),
+        );
+        tokio::join!(server, client(c));
+    }
+
+    fn captured_runtime(
+        out: &Captured,
+    ) -> (tokio::runtime::Runtime, tracing::subscriber::DefaultGuard) {
+        let sub = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(out.clone())
+            .finish();
+        let g = tracing::subscriber::set_default(sub);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        (rt, g)
+    }
+
+    /// An MSE initiator asking for `ih`: fails, since nobody holds it.
+    async fn ask_for(c: tokio::net::TcpStream, ih: [u8; 20]) {
+        let mut t = super::PeerTransport::Tcp(c);
+        let r = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            crate::crypto::mse::handshake_outgoing(&mut t, &ih, b"-TY0001-initiator000"),
+        )
+        .await
+        .expect("the handshake ended in time");
+        assert!(r.is_err(), "nobody holds this torrent");
+    }
+
+    /// A window yields one line, carrying its count, when the first handshake
+    /// after it arrives; nothing before.
+    #[test]
+    fn the_summary_comes_once_per_window_with_the_count() {
+        use std::time::{Duration, Instant};
+        let l = super::UnknownSkeyLog::default();
+        let t0 = Instant::now();
+        for i in 0..40 {
+            assert_eq!(l.note(t0 + Duration::from_millis(i)), None);
+        }
+        assert_eq!(l.note(t0 + Duration::from_secs(59)), None);
+        // 41 in the first window, then this one opens the second.
+        assert_eq!(l.note(t0 + Duration::from_secs(61)), Some((41, 61)));
+        assert_eq!(l.note(t0 + Duration::from_secs(62)), None);
+        assert_eq!(l.note(t0 + Duration::from_secs(130)), Some((2, 69)));
+    }
+
+    /// ⭐ Fifty encrypted handshakes for torrents we do not hold write no
+    /// warning each, and are all counted. On a public port that is ordinary
+    /// traffic, and a warning per connection once filled the log file in a
+    /// minute.
+    #[test]
+    fn handshakes_for_torrents_we_do_not_hold_are_counted_not_logged_each() {
+        if !is_child("handshakes_for_torrents_we_do_not_hold_are_counted_not_logged_each") {
+            return;
+        }
+        let out = Captured::default();
+        let (rt, _g) = captured_runtime(&out);
+        rt.block_on(async {
+            let (mgr, disk) = manager("flood");
+            for i in 0..50u8 {
+                serve_one(&mgr, &disk, |c| ask_for(c, [i; 20])).await;
+            }
+        });
+        let text = String::from_utf8_lossy(&out.0.lock().unwrap()).into_owned();
+        let lines = text.lines().filter(|l| l.contains("[peer]")).count();
+        assert!(
+            lines <= 1,
+            "{lines} log lines for 50 handshakes in one window: {text}"
+        );
+        assert_eq!(
+            super::UNKNOWN_SKEY_HANDSHAKES.load(Ordering::Relaxed),
+            50,
+            "{text}"
+        );
+    }
+
+    /// Any other way an encrypted handshake fails still has its warning, with
+    /// the peer's address, and is not counted as an unknown torrent.
+    #[test]
+    fn another_handshake_failure_still_writes_its_own_line() {
+        if !is_child("another_handshake_failure_still_writes_its_own_line") {
+            return;
+        }
+        let out = Captured::default();
+        let (rt, _g) = captured_runtime(&out);
+        rt.block_on(async {
+            let (mgr, disk) = manager("other");
+            for _ in 0..3 {
+                // A public key's worth of bytes, then the peer hangs up.
+                serve_one(&mgr, &disk, |mut c| async move {
+                    c.write_all(&[1u8; 96]).await.unwrap();
+                    c.shutdown().await.unwrap();
+                })
+                .await;
+            }
+        });
+        let text = String::from_utf8_lossy(&out.0.lock().unwrap()).into_owned();
+        assert_eq!(
+            text.matches("MSE handshake failed").count(),
+            3,
+            "one warning per failure: {text}"
+        );
+        assert_eq!(
+            super::UNKNOWN_SKEY_HANDSHAKES.load(Ordering::Relaxed),
+            0,
+            "{text}"
+        );
     }
 }
 

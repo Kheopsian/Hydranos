@@ -21,6 +21,17 @@ decided when the release is cut, by looking at what went in: whoever tags it
 renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 `HYDRANOS_VERSION` in the same commit.
 
+## Unreleased -- one log line a minute for handshakes naming torrents we do not hold
+
+### Changed
+
+- An incoming encrypted handshake that asks for a torrent we do not hold no
+  longer writes a warning per connection, which on a public port filled the
+  log file within a minute. Those handshakes are counted
+  (`engine_counters.unknown_skey_handshakes` in the diagnostics) and one
+  summary line, without any address, is written per minute. Every other
+  encrypted-handshake failure keeps its own line.
+
 ## v4.6.1 -- a .torrent is read only from the folders listed in the config file
 
 ### Security

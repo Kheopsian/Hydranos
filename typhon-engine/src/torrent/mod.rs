@@ -228,6 +228,8 @@ pub struct TorrentManager {
     /// Sources this engine is ignoring for naming info hashes it does not
     /// have (`max_unknown_infohash_per_ip`). Per engine like the limit.
     unknown_hashes: crate::peer::UnknownHashLimiter,
+    /// The one summary line per window for those same handshakes.
+    unknown_skeys: crate::peer::UnknownSkeyLog,
     /// IPs whose PROXY v2 headers this engine trusts. The firewall must
     /// guarantee only these can reach the PROXY v2 port; the header carries an
     /// attacker-chosen peer IP otherwise.
@@ -525,6 +527,11 @@ impl TorrentManager {
         &self.unknown_hashes
     }
 
+    /// Where the encrypted handshakes for unknown torrents are summed up.
+    pub(crate) fn unknown_skeys(&self) -> &crate::peer::UnknownSkeyLog {
+        &self.unknown_skeys
+    }
+
     /// This engine's magnet resolutions.
     pub fn magnet(&self) -> &Arc<crate::magnet::MagnetJobs> {
         &self.magnet
@@ -646,6 +653,7 @@ impl TorrentManager {
             magnet: Arc::new(crate::magnet::MagnetJobs::with_policy(policy.clone())),
             policy,
             unknown_hashes: Default::default(),
+            unknown_skeys: Default::default(),
             trusted_proxy_sources: std::sync::OnceLock::new(),
             rebind_tx: std::sync::OnceLock::new(),
             live_port: std::sync::atomic::AtomicU16::new(0),
