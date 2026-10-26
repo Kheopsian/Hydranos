@@ -37,6 +37,14 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   Torrents already rewritten by a 4.5.4 or 4.6 stop are not restored: they
   download as they did before this release.
 
+### Changed
+
+- The workflow editor offers delete as two actions, "delete the torrent
+  (files stay)" and "delete the torrent and its files", instead of "delete
+  the torrent" with a checkbox below it. The label said nothing about the
+  files, which is the one thing a delete decides. Saved workflows are
+  unchanged: a delete that takes the files opens as the second entry.
+
 ## v4.6.2 -- one log line a minute for unknown handshakes, and the API says which pieces and which peers hold a download back
 
 ### Changed
