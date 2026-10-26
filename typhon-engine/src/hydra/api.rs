@@ -6395,6 +6395,7 @@ fn status_payload(state: &AppState) -> serde_json::Value {
             "seed_seed_dropped": typhon_engine::peer::SEED_SEED_DROPPED.load(std::sync::atomic::Ordering::Relaxed),
             "hs_timed_out": typhon_engine::peer::HS_TIMED_OUT.load(std::sync::atomic::Ordering::Relaxed),
             "inbound_accepted": typhon_engine::peer::INBOUND_ACCEPTED.load(std::sync::atomic::Ordering::Relaxed),
+            "unknown_skey_handshakes": typhon_engine::peer::UNKNOWN_SKEY_HANDSHAKES.load(std::sync::atomic::Ordering::Relaxed),
             "inbound_refused_busy": typhon_engine::peer::INBOUND_REFUSED_BUSY.load(std::sync::atomic::Ordering::Relaxed),
             "inbound_refused_cap": typhon_engine::peer::INBOUND_REFUSED_CAP.load(std::sync::atomic::Ordering::Relaxed),
             "dial_queue_full": typhon_engine::tracker::DIAL_QUEUE_FULL.load(std::sync::atomic::Ordering::Relaxed),
