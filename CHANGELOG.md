@@ -21,7 +21,7 @@ decided when the release is cut, by looking at what went in: whoever tags it
 renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 `HYDRANOS_VERSION` in the same commit.
 
-## Unreleased -- the workflow condition "time since a tag was set" lets you pick its tag again
+## v4.6.4 -- the workflow condition "time since a tag was set" lets you pick its tag again
 
 ### Fixed
 
