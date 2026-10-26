@@ -662,6 +662,12 @@ pub async fn run(
             }
         }
 
+        // What the peer table shows of this connection's download side, put on
+        // the stats once the requests of this turn are out and before the loop
+        // waits: a choke, an unchoke or a refill is visible as soon as it has
+        // been handled.
+        dl.publish_to(&stats);
+
         // Held back by the engine's download budget: a write that frees some
         // wakes this session, rather than its next choke tick.
         let budget_wait = dl.held_back_by();
