@@ -35,6 +35,7 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 ### Added
 
 - The detail of a torrent (`/api/{hoard,race}/torrents/:info_hash`) carries `pieces_have`, the number of pieces the engine counts as held (it was always `null`), and `pieces_total`. It is the count `progress` divides, so a torrent whose data is on disk but which the engine counts short can be told apart from a complete one. Additive: nothing else in the panel changes, and the catalogue list does not carry them.
+- Each row of a torrent's peer table (the `peers` of that detail) now says who is choking whom: `peer_choking` (the peer chokes us, so it answers none of our requests), `am_interested` (we want its pieces) and `requests_in_flight` (block requests sent to it and not yet answered). The `flags` string keeps its letters and gains qBittorrent's download pair: `d` (we want data, the peer will not send it) and `D` (we want data and it flows). Additive.
 
 ## v4.6.1 -- a .torrent is read only from the folders listed in the config file
 

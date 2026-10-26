@@ -185,8 +185,19 @@ impl DownloadState {
     /// Copy what this session knows about the peer's side of the conversation
     /// onto the stats the peer table reads: does it choke us, do we want its
     /// pieces, how many of our requests wait for an answer.
+    ///
+    /// Plain stores of three values this session already holds: nothing is
+    /// computed, and the table is read only when someone opens it.
     pub fn publish_to(&self, stats: &PeerStats) {
-        let _ = stats;
+        stats
+            .peer_choking
+            .store(self.peer_choking, Ordering::Relaxed);
+        stats
+            .am_interested
+            .store(self.am_interested, Ordering::Relaxed);
+        stats
+            .requests_in_flight
+            .store(self.inflight.len() as u32, Ordering::Relaxed);
     }
 
     pub fn on_unchoke(&mut self) {
@@ -821,6 +832,55 @@ mod tests {
     // -----------------------------------------------------------------------
     // Choke / interest
     // -----------------------------------------------------------------------
+
+    /// A session whose peer chokes us says so on its stats, and says the
+    /// opposite after the unchoke; a choke voids what was on the wire. This is
+    /// what tells a seeder that holds everything and sends nothing (it chokes
+    /// us) from one that is slow.
+    #[test]
+    fn a_session_publishes_who_is_choking_whom() {
+        let t = downloading(64, 2 * 1024 * 1024);
+        let s = registered(&t);
+        let mut dl = state(t.clone());
+
+        dl.publish_to(&s);
+        assert!(
+            s.peer_choking.load(Ordering::Relaxed),
+            "BT starts with the peer choking us"
+        );
+
+        dl.on_have_all();
+        dl.on_unchoke();
+        dl.publish_to(&s);
+        assert!(
+            !s.peer_choking.load(Ordering::Relaxed),
+            "false after the unchoke"
+        );
+
+        dl.am_interested = true;
+        let asked = dl.get_requests().len();
+        assert!(asked > 0, "the unchoked peer is asked for blocks");
+        dl.publish_to(&s);
+        assert!(s.am_interested.load(Ordering::Relaxed));
+        assert_eq!(s.requests_in_flight.load(Ordering::Relaxed), asked as u32);
+        assert_eq!(
+            crate::rpc::dispatch::peers_json(&t)[0]["flags"],
+            "D",
+            "the table reads what the session published"
+        );
+
+        dl.on_choke();
+        dl.publish_to(&s);
+        assert!(
+            s.peer_choking.load(Ordering::Relaxed),
+            "true again after a choke"
+        );
+        assert_eq!(
+            s.requests_in_flight.load(Ordering::Relaxed),
+            0,
+            "a choke voids what was on the wire"
+        );
+    }
 
     /// A peer registered on the torrent, as a session's guard does.
     fn registered(t: &TorrentState) -> Arc<PeerStats> {
