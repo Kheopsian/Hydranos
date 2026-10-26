@@ -21,7 +21,7 @@ decided when the release is cut, by looking at what went in: whoever tags it
 renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 `HYDRANOS_VERSION` in the same commit.
 
-## Unreleased -- one log line a minute for unknown handshakes, and the API says which pieces and which peers hold a download back
+## v4.6.2 -- one log line a minute for unknown handshakes, and the API says which pieces and which peers hold a download back
 
 ### Changed
 
