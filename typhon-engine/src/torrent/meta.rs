@@ -376,6 +376,17 @@ pub struct PeerStats {
     /// Peer loop tracks a local copy and emits a Choke/Unchoke message whenever
     /// the engine's value overtakes its local copy.
     pub choking_gen: AtomicU32,
+    /// `true` = THIS PEER chokes us (peer_choking): it will answer none of our
+    /// requests. The other direction from `choked`, which is us choking it.
+    /// BT default: true. Mirrored from the session's download state, written by
+    /// the owning peer task only.
+    pub peer_choking: AtomicBool,
+    /// `true` = we want this peer's pieces (am_interested). The other direction
+    /// from `interested`, which is the peer wanting ours.
+    pub am_interested: AtomicBool,
+    /// Block requests sent to this peer and not yet answered. A choke voids
+    /// them, so a peer that choked us reads 0.
+    pub requests_in_flight: AtomicU32,
     /// Bytes uploaded to this peer since the choking engine last tick.
     /// Used to score peers by actual upload speed; reset to 0 by the engine.
     pub uploaded_last_tick: AtomicU64,
@@ -426,6 +437,9 @@ impl PeerStats {
             interested: AtomicBool::new(false),
             choked: AtomicBool::new(true),
             choking_gen: AtomicU32::new(0),
+            peer_choking: AtomicBool::new(true),
+            am_interested: AtomicBool::new(false),
+            requests_in_flight: AtomicU32::new(0),
             uploaded_last_tick: AtomicU64::new(0),
             dl_rate: RateTracker::new(),
             ul_rate: RateTracker::new(),

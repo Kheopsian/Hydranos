@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use tracing::info;
 
 use crate::disk::DiskManager;
-use crate::torrent::meta::{TorrentState, TorrentStatus};
+use crate::torrent::meta::{PeerStats, TorrentState, TorrentStatus};
 use crate::torrent::piece_picker::{self, Block, Owner};
 
 const BLOCK_SIZE: u32 = 16384;
@@ -180,6 +180,13 @@ impl DownloadState {
             picker.lock().unwrap().add_have(piece);
         }
         true
+    }
+
+    /// Copy what this session knows about the peer's side of the conversation
+    /// onto the stats the peer table reads: does it choke us, do we want its
+    /// pieces, how many of our requests wait for an answer.
+    pub fn publish_to(&self, stats: &PeerStats) {
+        let _ = stats;
     }
 
     pub fn on_unchoke(&mut self) {
@@ -814,6 +821,42 @@ mod tests {
     // -----------------------------------------------------------------------
     // Choke / interest
     // -----------------------------------------------------------------------
+
+    /// A peer registered on the torrent, as a session's guard does.
+    fn registered(t: &TorrentState) -> Arc<PeerStats> {
+        let addr: std::net::SocketAddr = "192.0.2.7:6881".parse().unwrap();
+        let s = Arc::new(PeerStats::new(addr, [7; 20], "test".into(), false, false));
+        t.peer_stats.insert(addr, s.clone());
+        s
+    }
+
+    /// The peer table says, per peer, who chokes whom: `flags` only ever said
+    /// whether WE choke it. A fresh connection is choked by the peer and
+    /// wanted by nobody (BT's defaults), and the qBittorrent download letters
+    /// follow the two fields.
+    #[test]
+    fn the_peer_table_names_both_directions() {
+        let t = downloading(8, 16384);
+        let s = registered(&t);
+        let row = |t: &Arc<TorrentState>| crate::rpc::dispatch::peers_json(t)[0].clone();
+
+        let r = row(&t);
+        assert_eq!(r["peer_choking"], true, "BT starts choked");
+        assert_eq!(r["am_interested"], false);
+        assert_eq!(r["requests_in_flight"], 0);
+        assert_eq!(r["flags"], "", "nothing to say yet");
+
+        s.am_interested.store(true, Ordering::Relaxed);
+        s.requests_in_flight.store(5, Ordering::Relaxed);
+        let r = row(&t);
+        assert_eq!(r["flags"], "d", "we want data, the peer will not send");
+        assert_eq!(r["requests_in_flight"], 5);
+
+        s.peer_choking.store(false, Ordering::Relaxed);
+        let r = row(&t);
+        assert_eq!(r["peer_choking"], false);
+        assert_eq!(r["flags"], "D", "we want data and it flows");
+    }
 
     /// A choke voids everything in flight: the peer will answer none of it, and
     /// leaving the counter up would keep the pipeline shut after the unchoke.

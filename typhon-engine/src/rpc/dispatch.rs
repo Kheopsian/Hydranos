@@ -141,6 +141,8 @@ pub fn peers_json(t: &Arc<crate::torrent::meta::TorrentState>) -> Value {
                 .as_secs();
             let interested = p.interested.load(Ordering::Relaxed);
             let choked = p.choked.load(Ordering::Relaxed);
+            let peer_choking = p.peer_choking.load(Ordering::Relaxed);
+            let am_interested = p.am_interested.load(Ordering::Relaxed);
             let is_seed = p.is_seed.load(Ordering::Relaxed);
             let num_pieces = p.num_pieces_have.load(Ordering::Relaxed);
             let mut flags = String::new();
@@ -158,6 +160,13 @@ pub fn peers_json(t: &Arc<crate::torrent::meta::TorrentState>) -> Value {
             }
             if is_seed {
                 flags.push('S');
+            }
+            // qBittorrent's letters for the download direction: `d` = we want
+            // data and the peer will not send it, `D` = we want it and it is
+            // flowing. (`u`/`U` are the upload side; ours keep their older
+            // meaning, see `i` and `U` above.)
+            if am_interested {
+                flags.push(if peer_choking { 'd' } else { 'D' });
             }
             let progress = if total_pieces > 0 {
                 num_pieces as f64 / total_pieces as f64
@@ -185,6 +194,11 @@ pub fn peers_json(t: &Arc<crate::torrent::meta::TorrentState>) -> Value {
                 "total_upload": ul_total,
                 "progress": progress,
                 "flags": flags,
+                // The two directions `flags` did not say: the peer chokes us,
+                // we want its pieces, and what is on the wire to it.
+                "peer_choking": peer_choking,
+                "am_interested": am_interested,
+                "requests_in_flight": p.requests_in_flight.load(Ordering::Relaxed),
                 "num_pieces": num_pieces,
                 "connection_duration": dur,
             })
