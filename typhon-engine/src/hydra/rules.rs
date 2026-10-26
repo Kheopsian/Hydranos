@@ -1623,3 +1623,38 @@ mod tests {
         assert!(m(cond("name", Op::Matches, r"\.1080p"), &f));
     }
 }
+
+#[cfg(test)]
+mod editor_delete_tests {
+    /// The workflow editor offers delete twice, and each entry says what
+    /// happens to the files: "delete the torrent" with a checkbox below left
+    /// the label silent on the one thing that matters. The entry that takes
+    /// the files is saved as the delete action the engine knows, with
+    /// with_files set; the other never sets it.
+    #[test]
+    fn the_editor_names_both_deletes_and_saves_the_one_that_takes_the_files() {
+        let js = include_str!("../../../web/static/app.js");
+        let start = js.find("const WF_ACTIONS").expect("app.js has WF_ACTIONS");
+        let list = &js[start..start + js[start..].find("];").expect("list ends")];
+        assert!(
+            list.contains("\"delete the torrent (files stay)\""),
+            "the plain delete does not say the files stay"
+        );
+        assert!(
+            list.contains("\"delete the torrent and its files\""),
+            "no entry deletes the files"
+        );
+        let collect = &js[js.find("function _wfCollect").expect("collector")..];
+        let collect = &collect[..collect.find("\n}\n").expect("collector ends")];
+        assert!(
+            collect.contains(
+                "if (type === \"delete_with_files\") return { type: \"delete\", with_files: true };"
+            ),
+            "the entry that takes the files is not saved as a delete with the files"
+        );
+        assert!(
+            collect.contains("if (type === \"delete\") return { type, with_files: false };"),
+            "the plain delete can still take the files"
+        );
+    }
+}

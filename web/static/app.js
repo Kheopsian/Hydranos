@@ -11513,7 +11513,12 @@ const WF_ACTIONS = [
     { type: "add_trackers", label: "add trackers" },
     { type: "add_tags", label: "add tags" },
     { type: "remove_tags", label: "remove tags" },
-    { type: "delete", label: "delete the torrent" },
+    // Two entries for one action: a checkbox under "delete the torrent"
+    // left the label saying nothing about the files, and the files staying
+    // or going is the whole question. "delete_with_files" exists only here;
+    // it is saved as delete with with_files set.
+    { type: "delete", label: "delete the torrent (files stay)" },
+    { type: "delete_with_files", label: "delete the torrent and its files" },
     { type: "webhook", label: "call a webhook" },
 ];
 
@@ -11550,11 +11555,6 @@ function _wfArgControl(type, value, act) {
     if (type === "webhook") {
         return `<input type="url" class="wf-a-arg" placeholder="https://discord.com/api/webhooks/..." value="${esc(value || "")}" autocomplete="off">`;
     }
-    if (type === "delete") {
-        // A checkbox, because this is a yes/no and the old box wanted the
-        // literal string "with_files" -- anything else silently meant no.
-        return `<label class="wf-a-arg-wrap"><input type="checkbox" class="wf-a-arg" ${value === "with_files" ? "checked" : ""}> ${esc(t("also delete the files on disk"))}</label>`;
-    }
     // pause and resume take nothing. An empty box invites a value that would
     // be ignored.
     return `<span class="sr-desc wf-a-arg" data-none="1"></span>`;
@@ -11564,6 +11564,7 @@ function _wfArgControl(type, value, act) {
 // reads as a warning about pausing.
 function _wfActionNote(type) {
     if (type === "delete") return t("delete must be the only action in a workflow");
+    if (type === "delete_with_files") return t("Deletes the data on disk too, for good. Must be the only action in a workflow.");
     if (type === "webhook") return t("POSTs the torrent as JSON; Discord, Slack and Gotify read it as is. On a timer, it goes out when another action changes the torrent.");
     if (type === "set_location") return t("Moves the data as Set location does, category unchanged. Hardlinked files are not copied across disks unless the box is ticked: such a torrent is reported as failed.");
     if (type === "add_trackers") return t("Never applied to a private torrent. Every tracker added learns this node's IP for the torrent.");
@@ -11588,17 +11589,18 @@ function addActionRow(act) {
     const wrap = document.getElementById("wf-actions");
     const div = document.createElement("div");
     div.className = "wf-row";
+    // A saved delete that takes the files shows as its own entry.
+    const shown = act && act.type === "delete" && act.with_files ? "delete_with_files" : act && act.type;
     const opts = WF_ACTIONS.map(a =>
-        `<option value="${esc(a.type)}" ${act && act.type === a.type ? "selected" : ""}>${esc(a.label)}</option>`
+        `<option value="${esc(a.type)}" ${shown === a.type ? "selected" : ""}>${esc(a.label)}</option>`
     ).join("");
     let arg = "";
     if (act) {
         if (act.to) arg = act.to;
         else if (act.tags) arg = act.tags.join(",");
-        else if (act.with_files) arg = "with_files";
         else if (act.url) arg = act.url;
     }
-    const type = act ? act.type : WF_ACTIONS[0].type;
+    const type = act ? shown : WF_ACTIONS[0].type;
     div.innerHTML = `
         <select class="wf-a-type" onchange="syncActionRow(this)">${opts}</select>
         ${_wfArgControl(type, arg, act)}
@@ -11612,7 +11614,8 @@ function _wfCollect() {
     const then = [...document.getElementById("wf-actions").children].map(r => {
         const type = r.querySelector(".wf-a-type").value;
         const el = r.querySelector(".wf-a-arg");
-        if (type === "delete") return { type, with_files: !!(el && el.checked) };
+        if (type === "delete") return { type, with_files: false };
+        if (type === "delete_with_files") return { type: "delete", with_files: true };
         const arg = (el && el.value ? el.value : "").trim();
         if (type === "set_category") return { type, to: arg };
         // The checkbox is the only way to keep this: 4.3 had no control and
