@@ -11484,14 +11484,14 @@ function syncCondOps(el) {
     delete row.dataset.wantTag;
     if (f.arg) {
         const holder = document.createElement("span");
-        holder.innerHTML = _wfArgControl(f, keepArg);
+        holder.innerHTML = _wfCondArgControl(f, keepArg);
         row.querySelector(".wf-c-field").after(holder.firstElementChild);
     }
 }
 
 // The argument of a field: the tag of `tag_age`, from the tags that exist
 // (a typed name that matches no tag is a rule that never matches).
-function _wfArgControl(f, value) {
+function _wfCondArgControl(f, value) {
     const list = ((_wfChoices && _wfChoices.tags) || []).slice();
     if (value && !list.includes(value)) list.push(value);
     if (list.length) {
