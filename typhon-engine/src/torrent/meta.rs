@@ -788,6 +788,11 @@ pub struct TorrentState {
     /// Why this torrent is in `TorrentStatus::Error`, shown when the user
     /// opens it. Empty for every other status.
     pub error_msg: Mutex<String>,
+    /// Parked because pieces it held were found missing (`mark_data_lost`).
+    /// Unlike the other errors this one is saved with the record: the
+    /// record of such a torrent says "nothing held", and only this tells
+    /// the next start that it is a parked loss and not a download.
+    pub data_lost: std::sync::atomic::AtomicBool,
     /// Consecutive failures to WRITE a verified piece to disk.
     ///
     /// Counted rather than acted on at the first one, because a full disk on a
@@ -1390,6 +1395,7 @@ impl TorrentState {
             last_announce_at: AtomicI64::new(0),
             next_announce_at: AtomicI64::new(0),
             error_msg: Mutex::new(String::new()),
+            data_lost: std::sync::atomic::AtomicBool::new(false),
             piece_mem: OnceLock::new(),
             files_checked: std::sync::atomic::AtomicU8::new(0),
             peer_stats: DashMap::with_shard_amount(PER_TORRENT_SHARDS),
@@ -1598,12 +1604,55 @@ impl TorrentState {
         if let Ok(mut g) = self.error_msg.lock() {
             *g = msg.to_string();
         }
+        self.data_lost.store(true, Ordering::Relaxed);
         let cur = self.status.load(Ordering::Relaxed);
         if cur == TorrentStatus::Seeding as u8 || cur == TorrentStatus::Downloading as u8 {
             self.status
                 .store(TorrentStatus::Error as u8, Ordering::Relaxed);
         }
         tracing::error!(torrent = %self.meta.name, "{}", msg);
+    }
+
+    /// What the record keeps of a data-lost park: its message, '' when the
+    /// torrent is not parked for lost data.
+    pub fn data_lost_msg(&self) -> String {
+        if !self.data_lost.load(Ordering::Relaxed) {
+            return String::new();
+        }
+        let msg = self.error_msg.lock().map(|g| g.clone()).unwrap_or_default();
+        if msg.is_empty() {
+            "pieces held were found missing from the disk".to_string()
+        } else {
+            msg
+        }
+    }
+
+    /// Put back, at start, the park a previous run saved: the torrent is in
+    /// error again with its message, and fetches nothing until a recheck.
+    /// A stopped torrent stays stopped and keeps the park for its resume.
+    pub fn restore_data_lost(&self, msg: &str) {
+        if msg.is_empty() {
+            return;
+        }
+        // A record that says every piece is held cannot be a parked loss: a
+        // build without the park (a rollback) fetched the data back while
+        // the column kept its old value. Parking it would stop a sound seed.
+        let whole = self
+            .picker
+            .get()
+            .is_none_or(|p| p.lock().unwrap().is_complete());
+        if whole {
+            return;
+        }
+        if let Ok(mut g) = self.error_msg.lock() {
+            *g = msg.to_string();
+        }
+        self.data_lost.store(true, Ordering::Relaxed);
+        let cur = self.status.load(Ordering::Relaxed);
+        if cur == TorrentStatus::Seeding as u8 || cur == TorrentStatus::Downloading as u8 {
+            self.status
+                .store(TorrentStatus::Error as u8, Ordering::Relaxed);
+        }
     }
 
     /// Forget a fault the operator has dealt with.
@@ -1623,6 +1672,7 @@ impl TorrentState {
         }
         self.disk_write_failures.store(0, Ordering::Relaxed);
         self.serving_suspended.store(false, Ordering::Relaxed);
+        self.data_lost.store(false, Ordering::Relaxed);
     }
 
     pub fn have_bitfield(&self) -> Bytes {
@@ -2022,6 +2072,23 @@ mod tests {
             "error does not name the file: {msg}"
         );
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A saved park on a torrent whose record holds every piece is stale (a
+    /// build without the park fetched the data back): a sound seed is not
+    /// stopped for it.
+    #[test]
+    fn a_stale_data_lost_park_does_not_stop_a_whole_seed() {
+        let st = seeded_under(std::env::temp_dir());
+        st.status
+            .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+        st.restore_data_lost("pieces held were found missing");
+        assert_eq!(
+            st.status.load(Ordering::Relaxed),
+            TorrentStatus::Seeding as u8,
+            "a whole seed was parked for a loss it no longer has"
+        );
+        assert!(st.data_lost_msg().is_empty());
     }
 }
 

@@ -1083,6 +1083,7 @@ impl TorrentManager {
             down_limit: 0,
             download_order: None,
             file_renames: state.meta.renamed_files(),
+            data_lost: String::new(),
         };
         // The record first, then the torrent: a store that refuses it refuses
         // the add, with nothing inserted and the error going back to the
@@ -1300,6 +1301,17 @@ impl TorrentManager {
         // final Seeding/Downloading itself when it finishes.
         if t.status.load(Ordering::Relaxed) == TorrentStatus::Checking as u8 {
             t.fold_seed_time(crate::torrent::meta::now_secs());
+            return Ok(());
+        }
+        // Pieces found missing (`mark_data_lost`) park the torrent until a
+        // recheck, whatever status a stop left it in since: a start would make
+        // it a download and fetch them again, which only a recheck may decide.
+        if t.data_lost.load(Ordering::Relaxed) {
+            let _ = t
+                .status
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |cur| {
+                    (cur != TorrentStatus::Checking as u8).then_some(TorrentStatus::Error as u8)
+                });
             return Ok(());
         }
         // Data found missing (`mark_error`) is not undone by a resume: a start
@@ -1825,6 +1837,9 @@ impl TorrentManager {
                     .status
                     .store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
             }
+            // Parked for lost data by the run before: it stays parked, and is
+            // neither offered as a seed nor queued as a download below.
+            state.restore_data_lost(&rd.data_lost);
             self.skey_index
                 .insert(crate::crypto::mse::sha1_combine(b"req2", &ih), ih);
             // The status was just decided above from the resume record, so
@@ -2292,6 +2307,7 @@ impl TorrentManager {
             down_limit: t.rate_limits().1,
             download_order: t.stored_download_order(),
             file_renames: t.meta.renamed_files(),
+            data_lost: t.data_lost_msg(),
         }
     }
 
@@ -2797,6 +2813,7 @@ fn fingerprint_of(t: &TorrentState) -> statedb::Fingerprint {
         seed_hours: t.seed_time_now(crate::torrent::meta::now_secs()) / 3600,
         up_limit: t.rate_limits().0,
         down_limit: t.rate_limits().1,
+        data_lost: t.data_lost.load(Ordering::Relaxed),
     }
 }
 
@@ -3234,6 +3251,7 @@ impl TorrentManager {
             down_limit: t.rate_limits().1,
             download_order: t.stored_download_order(),
             file_renames: t.meta.renamed_files(),
+            data_lost: t.data_lost_msg(),
         };
         self.persist(&ih, &rd);
         info!(
@@ -5005,6 +5023,77 @@ mod manager_tests {
             t.session_uploaded(),
             4096,
             "and counts what this session moves"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// ⭐⭐ A seed whose file went missing is parked in error, and stays parked
+    /// across a restart: the record it leaves says "nothing held", and read as
+    /// a plain download it fetched the whole torrent again with nobody asking.
+    /// Neither a start nor a reload lifts the park; a recheck does.
+    #[tokio::test]
+    async fn a_seed_whose_files_went_missing_stays_parked_across_a_restart() {
+        let (mgr, root) = manager("data-lost-restart");
+        let save = root.join("data");
+        std::fs::write(save.join("gone"), vec![0u8; 16384]).unwrap();
+        let blob = torrent_bytes("gone", &["https://tracker.example/announce"]);
+        let ih = mgr
+            .add_torrent_bytes(&blob, &save.to_string_lossy(), false, true)
+            .unwrap()
+            .0;
+        std::fs::remove_file(save.join("gone")).unwrap();
+        let t = mgr.get(&ih).unwrap();
+        t.verify_files_once().await;
+        assert_eq!(
+            t.status.load(Ordering::Relaxed),
+            TorrentStatus::Error as u8,
+            "the missing file did not park it"
+        );
+        mgr.save_all_resume();
+        mgr.flush_all_resume();
+
+        let again = Arc::new(TorrentManager::new(
+            save.to_string_lossy().into_owned(),
+            root.join("resume").to_string_lossy().into_owned(),
+            Arc::new(DiskManager::new(16)),
+        ));
+        again.set_blob_source(Arc::new(move |_hash: &str| Some(blob.clone())));
+        assert_eq!(again.load_resume_data(), 1);
+        let t = again.get(&ih).unwrap();
+        assert_eq!(
+            t.status.load(Ordering::Relaxed),
+            TorrentStatus::Error as u8,
+            "the restart made it a download again"
+        );
+        assert!(
+            !again.incomplete.contains(&ih),
+            "the restart queued it to fetch everything again"
+        );
+        assert!(
+            !t.error_msg.lock().unwrap().is_empty(),
+            "the park came back without its reason"
+        );
+        again.start_torrent(&ih).unwrap();
+        assert_eq!(
+            t.status.load(Ordering::Relaxed),
+            TorrentStatus::Error as u8,
+            "a start lifted the park"
+        );
+        // A stop leaves it Stopped, not Error: the start after it must find
+        // the park all the same.
+        again.stop_torrent(&ih).unwrap();
+        again.start_torrent(&ih).unwrap();
+        assert_eq!(
+            t.status.load(Ordering::Relaxed),
+            TorrentStatus::Error as u8,
+            "a stop then a start lifted the park"
+        );
+        assert!(!again.incomplete.contains(&ih));
+        again.recheck(&ih).unwrap();
+        assert_ne!(
+            t.status.load(Ordering::Relaxed),
+            TorrentStatus::Error as u8,
+            "a recheck did not lift the park"
         );
         let _ = std::fs::remove_dir_all(root);
     }
