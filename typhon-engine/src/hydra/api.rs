@@ -13705,6 +13705,8 @@ fn detail_payload(
     // divide by the download on its own, and the UI papered over it.
     let ratio = row.get("ratio").and_then(|v| v.as_f64()).unwrap_or(0.0);
 
+    let (pieces_have, pieces_total) = typhon_engine::rpc::dispatch::pieces_held(torrent);
+
     serde_json::json!({
         // 0, not the engine's real figure: 3.x fills this from its IPC status,
         // which does not carry active_time, so it publishes zero. Sending the
@@ -13734,7 +13736,11 @@ fn detail_payload(
         // null, not []: "not computed" and "computed, all zero" are different
         // things to the availability bar.
         "pieces_avail": serde_json::Value::Null,
-        "pieces_have": serde_json::Value::Null,
+        // The pieces the engine counts as held (the picker's count, or all of
+        // them for a seeder), out of `pieces_total`. A scan of the picker: this
+        // is the panel of one torrent, the list does not carry it.
+        "pieces_have": pieces_have,
+        "pieces_total": pieces_total,
         "progress": row.get("progress").cloned().unwrap_or(serde_json::json!(0)),
         "ratio": crate::row::num_json(ratio),
         "ratio_efficiency": 0,
@@ -30372,6 +30378,11 @@ mod detail_panel_tests {
             &admission_of(&s.state, engine),
         );
         settle_clocks(&mut now, &mut before);
+        // Added after the copy was frozen, on purpose: carried over so that
+        // the comparison stays about everything else.
+        for k in ["pieces_have", "pieces_total"] {
+            before[k] = now[k].clone();
+        }
         let mut diff = Vec::new();
         differences(&now, &before, "", &mut diff);
         (now, before, diff)
@@ -30584,6 +30595,42 @@ mod detail_panel_tests {
         assert_eq!(v["tag_since"]["old"], 1000, "worn before the dates");
         assert!(v["tag_since"]["fresh"].as_i64().unwrap() > 1000);
         assert!(v["tag_since"].get("kept").is_none(), "no longer worn");
+    }
+
+    /// The detail says how many pieces the engine counts as held, not null:
+    /// a torrent whose data is all on disk but which the engine counts at 80 %
+    /// could not be told from a complete one by `progress` alone. The count is
+    /// the picker's, the same one `progress` divides.
+    #[tokio::test]
+    async fn the_detail_counts_the_pieces_the_engine_holds() {
+        let s = state_from(
+            "detail-pieces-have",
+            &format!("[daemon]\napi_key = \"{KEY}\"\n"),
+        );
+        // Two pieces, the fixture holds the first.
+        let (hash, t, _) = fixture(&s, "hoard", "delta", "books", false).await;
+        let uri = format!("/api/hoard/torrents/{hash}");
+        let v = get(&s, &uri).await;
+        assert_eq!(v["pieces_have"], 1, "one of two pieces held");
+        assert_eq!(v["pieces_total"], 2);
+        assert_eq!(v["progress"], 0.5, "the same count progress divides");
+
+        // A bitfield imported on top (the resume path): the second piece.
+        t.picker
+            .get()
+            .expect("a download has a picker")
+            .lock()
+            .unwrap()
+            .import_bitfield(&[0b0100_0000]);
+        let v = get(&s, &uri).await;
+        assert_eq!(v["pieces_have"], 2, "the imported piece is counted");
+        assert_eq!(v["progress"], 1.0);
+
+        // Seeding, with no picker walk needed: all of them.
+        let (hash, _t, _peers) = fixture(&s, "hoard", "omega", "books", true).await;
+        let v = get(&s, &format!("/api/hoard/torrents/{hash}")).await;
+        assert_eq!(v["pieces_have"], 2);
+        assert_eq!(v["pieces_total"], 2);
     }
 
     /// A torrent stopped by the user: no peer, no rate, the row's seed time and

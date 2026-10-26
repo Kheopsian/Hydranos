@@ -34,6 +34,8 @@ pub fn torrent_to_json_slim(t: &Arc<crate::torrent::meta::TorrentState>) -> Valu
 pub struct TorrentCore {
     pub state: &'static str,
     pub progress: f64,
+    /// Pieces the engine counts as held: the number `progress` divides.
+    pub num_have: u32,
     pub total_done: u64,
     pub is_paused: bool,
     pub status_u8: u8,
@@ -61,6 +63,16 @@ pub fn state_str(status_u8: u8, is_paused: bool) -> &'static str {
             _ => "unknown",
         }
     }
+}
+
+/// How many pieces the engine counts as held, and out of how many.
+///
+/// The detail panel's `pieces_have` / `pieces_total`. It is `torrent_core`'s
+/// own count, not a second walk of the picker with its own rules, so the panel
+/// cannot say 80 % in `progress` and something else here. Costs one picker
+/// scan: for the panel of ONE torrent, never for the catalogue listing.
+pub fn pieces_held(t: &Arc<crate::torrent::meta::TorrentState>) -> (u32, u32) {
+    (torrent_core(t).num_have, t.meta.num_pieces())
 }
 
 pub fn torrent_core(t: &Arc<crate::torrent::meta::TorrentState>) -> TorrentCore {
@@ -97,6 +109,7 @@ pub fn torrent_core(t: &Arc<crate::torrent::meta::TorrentState>) -> TorrentCore 
     TorrentCore {
         state,
         progress,
+        num_have,
         total_done,
         is_paused,
         status_u8,

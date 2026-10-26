@@ -21,7 +21,7 @@ decided when the release is cut, by looking at what went in: whoever tags it
 renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 `HYDRANOS_VERSION` in the same commit.
 
-## Unreleased -- one log line a minute for handshakes naming torrents we do not hold
+## Unreleased -- one log line a minute for unknown handshakes, and the API says which pieces and which peers hold a download back
 
 ### Changed
 
@@ -31,6 +31,10 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   (`engine_counters.unknown_skey_handshakes` in the diagnostics) and one
   summary line, without any address, is written per minute. Every other
   encrypted-handshake failure keeps its own line.
+
+### Added
+
+- The detail of a torrent (`/api/{hoard,race}/torrents/:info_hash`) carries `pieces_have`, the number of pieces the engine counts as held (it was always `null`), and `pieces_total`. It is the count `progress` divides, so a torrent whose data is on disk but which the engine counts short can be told apart from a complete one. Additive: nothing else in the panel changes, and the catalogue list does not carry them.
 
 ## v4.6.1 -- a .torrent is read only from the folders listed in the config file
 
