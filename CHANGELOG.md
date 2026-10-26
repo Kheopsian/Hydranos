@@ -21,6 +21,22 @@ decided when the release is cut, by looking at what went in: whoever tags it
 renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 `HYDRANOS_VERSION` in the same commit.
 
+## Unreleased -- a torrent whose data went missing stays parked across a restart
+
+### Fixed
+
+- A torrent found to have lost pieces from the disk (a file deleted or cut
+  short under a seed) is parked in error until a recheck, and now stays
+  parked when the engine restarts. Since 4.5.4 the record such a torrent
+  left behind said "nothing held", so the next start took it for a new
+  download and fetched all of it again, unasked. The park is saved with the
+  record (a new `data_lost` column in the state database; an older build
+  ignores it). Neither a start nor a stop followed by a start lifts it; a
+  recheck still does. A record that holds every piece is never parked by
+  it, so data fetched back by an older build is seeded as it should be.
+  Torrents already rewritten by a 4.5.4 or 4.6 stop are not restored: they
+  download as they did before this release.
+
 ## v4.6.2 -- one log line a minute for unknown handshakes, and the API says which pieces and which peers hold a download back
 
 ### Changed

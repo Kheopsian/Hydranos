@@ -61,6 +61,13 @@ pub struct ResumeData {
     /// lost in an engine move, would point the torrent at files it never had.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub file_renames: std::collections::BTreeMap<usize, String>,
+    /// Why the torrent is parked for pieces found missing from the disk, ''
+    /// when it is not. The error status itself is not saved, and the record
+    /// of such a torrent says "nothing held": without this, the next start
+    /// would take it for a download and fetch everything again, which only
+    /// a recheck the operator asks for may start.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub data_lost: String,
 }
 
 /// Save resume data for a torrent.
