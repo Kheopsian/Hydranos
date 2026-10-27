@@ -824,7 +824,15 @@ async fn torrent_detail(state: &AppState, args: &Value) -> Result<Value, String>
     let Some((engine, torrent)) = api::find_torrent(state, &hash) else {
         return Err(format!("no torrent {hash} on this node"));
     };
-    let trackers = serde_json::to_value(&*torrent.live_trackers.read()).unwrap_or(Value::Null);
+    // Announce URLs of a private tracker carry the passkey: the model gets them
+    // masked, like a log line does.
+    let masked: Vec<Vec<String>> = torrent
+        .live_trackers
+        .read()
+        .iter()
+        .map(|tier| tier.iter().map(|u| crate::rss::mask_url(u)).collect())
+        .collect();
+    let trackers = serde_json::to_value(masked).unwrap_or(Value::Null);
     let page = api::fleet_page(state, &engine, &format!("search={hash}&limit=5")).await;
     let row = rows_of(&page)
         .into_iter()
@@ -1734,6 +1742,27 @@ mod tests {
         let out = ok_call(&s, "torrent_files", json!({"info_hash": h})).await;
         assert_eq!(out["count"], 1);
         assert_eq!(out["total_size"], 16384);
+    }
+
+    /// A private tracker's announce URL carries the passkey in its path or its
+    /// query; what the model reads must not.
+    #[tokio::test]
+    async fn torrent_detail_does_not_hand_out_announce_passkeys() {
+        let s = st("mcp-detail-passkey");
+        let h = add(&s, "echo");
+        let (_, torrent) = api::find_torrent(&s.state, &h).expect("added torrent");
+        *torrent.live_trackers.write() = vec![
+            vec!["https://tracker.example/0123456789abcdef0123456789abcdef/announce".to_string()],
+            vec!["https://tracker.example/announce?passkey=0123456789abcdef0123456789abcdef".to_string()],
+        ];
+        let out = ok_call(&s, "torrent_detail", json!({"info_hash": h})).await;
+        let text = out.to_string();
+        assert!(
+            !text.contains("0123456789abcdef0123456789abcdef")
+                && !text.contains("passkey=0123"),
+            "passkey leaked in torrent_detail: {text}"
+        );
+        assert!(text.contains("tracker.example"), "host stays readable: {text}");
     }
 
     #[tokio::test]
