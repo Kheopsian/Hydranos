@@ -78,7 +78,7 @@ pub fn parse_torrent_bytes(data: &[u8]) -> Result<TorrentMeta, String> {
     // cover every byte, alignment padding included.
     let is_v2 = info.get("meta version").and_then(|v| v.as_int()) == Some(2);
     if is_v2 && info.get("pieces").is_none() {
-        return parse_v2(dict, &info, &info_raw);
+        return parse_v2(data, dict, &info, &info_raw);
     }
 
     // Piece length. Read as an i64: a bare `as u32` turned 0 into a torrent
@@ -364,7 +364,12 @@ fn v2_files(info: &BencodeDict) -> Result<Vec<V2File>, String> {
 /// BEP 52 specifies. Every file starts on a piece boundary; the gap after a
 /// file's last byte is alignment, read as zeros and never stored, exactly as
 /// the pad files of a hybrid are.
-fn parse_v2(dict: BencodeDict, info: &BencodeDict, info_raw: &[u8]) -> Result<TorrentMeta, String> {
+fn parse_v2(
+    data: &[u8],
+    dict: BencodeDict,
+    info: &BencodeDict,
+    info_raw: &[u8],
+) -> Result<TorrentMeta, String> {
     use sha2::{Digest, Sha256};
     let full: [u8; 32] = Sha256::digest(info_raw).into();
     let mut info_hash = [0u8; 20];
@@ -412,7 +417,33 @@ fn parse_v2(dict: BencodeDict, info: &BencodeDict, info_raw: &[u8]) -> Result<To
     for f in &files {
         check_file(&name, &f.path, multi_file)?;
     }
-    let num_pieces = u32::try_from(end.div_ceil(pl)).map_err(|_| "too many pieces")?;
+    // The piece count comes from the declared sizes alone, and the picker is
+    // sized from it: a few hundred bytes naming one huge file would otherwise
+    // allocate gigabytes. A real torrent stays far below the ceiling.
+    let pieces = end.div_ceil(pl);
+    if pieces > MAX_V2_PIECES {
+        return Err(format!(
+            "{pieces} pieces is past the {MAX_V2_PIECES} a torrent may have"
+        ));
+    }
+    let num_pieces = u32::try_from(pieces).map_err(|_| "too many pieces")?;
+    // In a .torrent file (`piece layers` present) every file of more than one
+    // piece must come with its layer, one hash per piece: the size is then
+    // backed by bytes the sender supplied. A bare info dict (magnet metadata)
+    // has no layers to check against; the ceiling bounds that case.
+    let layers = piece_layers(data)?;
+    if !layers.is_empty() {
+        for f in tree.iter().filter(|f| f.length > pl) {
+            let want = f.length.div_ceil(pl).saturating_mul(32);
+            let have = f.root.and_then(|r| layers.get(&r)).map(|l| l.len() as u64);
+            if have != Some(want) {
+                return Err(format!(
+                    "the piece layer of {} does not match its size",
+                    f.path.display()
+                ));
+            }
+        }
+    }
     let (trackers, url_list) = trackers_and_seeds(&dict);
     Ok(TorrentMeta {
         info_hash,
@@ -430,6 +461,9 @@ fn parse_v2(dict: BencodeDict, info: &BencodeDict, info_raw: &[u8]) -> Result<To
         renames: Default::default(),
     })
 }
+
+/// Most pieces a v2 torrent may declare (see `parse_v2`).
+const MAX_V2_PIECES: u64 = 1 << 22;
 
 /// Skip one bencoded value, returning where the next one starts.
 fn skip_value(data: &[u8], pos: usize) -> Result<usize, String> {
@@ -1393,6 +1427,58 @@ mod tests {
             "more pieces than a u32 counts"
         );
         parse_torrent_bytes(&v2(&[100, 20000])).expect("a sane one");
+    }
+
+    /// A v2 torrent of a few hundred bytes can declare a file of any size, and
+    /// the piece count follows from that size alone: the picker is sized from
+    /// it. Past the ceiling it is refused; a torrent right at the ceiling is
+    /// a real (very large) one and passes.
+    #[test]
+    fn a_v2_torrent_cannot_declare_more_pieces_than_the_ceiling() {
+        let one_file = |len: u64| {
+            let mut t = b"d4:infod".to_vec();
+            t.extend(bstr(b"file tree"));
+            t.extend(b"d1:ad0:d");
+            t.extend(format!("6:lengthi{len}e").as_bytes());
+            t.extend(bstr(b"pieces root"));
+            t.extend(bstr(&[3u8; 32]));
+            t.extend(b"eee");
+            t.extend(b"12:meta versioni2e4:name1:a12:piece lengthi16384eee");
+            t
+        };
+        let at = MAX_V2_PIECES * 16384;
+        let m = parse_torrent_bytes(&one_file(at)).expect("a huge but real torrent");
+        assert_eq!(m.num_pieces as u64, MAX_V2_PIECES);
+        assert!(
+            parse_torrent_bytes(&one_file(at + 1)).is_err(),
+            "one piece past the ceiling"
+        );
+        assert!(
+            parse_torrent_bytes(&one_file(1 << 44)).is_err(),
+            "a 2^30-piece picker from a 200-byte file"
+        );
+    }
+
+    /// With `piece layers` in the file, a file of several pieces must have its
+    /// layer, and exactly one hash per piece: the piece count is then backed
+    /// by bytes the sender had to supply.
+    #[test]
+    fn a_v2_size_the_piece_layers_do_not_back_is_refused() {
+        let v = v2_torrent(16384, &[("a.bin", 5 * 16384 + 1)]);
+        parse_torrent_bytes(&v.torrent).expect("the honest one");
+        let honest = format!("6:lengthi{}e", 5 * 16384 + 1).into_bytes();
+        let at = v
+            .torrent
+            .windows(honest.len())
+            .position(|w| w == honest)
+            .unwrap();
+        let mut forged = v.torrent[..at].to_vec();
+        forged.extend(b"6:lengthi1073741824e");
+        forged.extend(&v.torrent[at + honest.len()..]);
+        assert!(
+            parse_torrent_bytes(&forged).is_err(),
+            "65536 pieces claimed, six layer hashes supplied"
+        );
     }
 
     #[test]
