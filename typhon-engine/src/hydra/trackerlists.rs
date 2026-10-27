@@ -91,11 +91,32 @@ pub fn get(url: &str) -> Result<Vec<String>, String> {
 }
 
 pub(crate) fn fetch(url: &str) -> Result<Vec<String>, String> {
+    fetch_via(url, &[], typhon_engine::webseed::is_internal_ip)
+}
+
+/// `fetch` with `hosts` names resolved to fixed addresses instead of by DNS,
+/// and `is_internal` deciding which addresses count as internal (the seam a
+/// test uses to give a name a local address).
+pub(crate) fn fetch_via(
+    url: &str,
+    hosts: &[(&str, std::net::IpAddr)],
+    is_internal: fn(std::net::IpAddr) -> bool,
+) -> Result<Vec<String>, String> {
     // The daemon's own way out (`[proxy]`, `[daemon] bind_interface`), not
     // the default route: the list host would otherwise see the home address
-    // of a node whose engines all sit in a tunnel.
+    // of a node whose engines all sit in a tunnel. The URL is the
+    // operator's and may name an internal host; a list host out on the
+    // internet may not send the fetch on to an internal address, however the
+    // name is written (`egress::blocking_client_resolving`).
+    let guard = std::sync::Arc::new(typhon_engine::webseed::StartGuard::for_url(url));
+    let route = typhon_engine::egress::route();
     let client =
-        typhon_engine::egress::blocking_client().map_err(|e| format!("tracker list {url}: {e}"))?;
+        typhon_engine::egress::blocking_client_resolving(&route, hosts, guard, is_internal)
+            .map_err(|e| format!("tracker list {url}: {e}"))?;
+    fetch_with(&client, url)
+}
+
+fn fetch_with(client: &reqwest::blocking::Client, url: &str) -> Result<Vec<String>, String> {
     let resp = client
         .get(url)
         .timeout(Duration::from_secs(20))
@@ -126,6 +147,81 @@ pub(crate) fn fetch(url: &str) -> Result<Vec<String>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    /// A server on `ip` answering every request with `reply`, noting it was asked.
+    fn serve_raw(ip: &str, reply: String) -> (u16, Arc<AtomicBool>) {
+        let l = std::net::TcpListener::bind((ip, 0)).unwrap();
+        let port = l.local_addr().unwrap().port();
+        let hit = Arc::new(AtomicBool::new(false));
+        let seen = hit.clone();
+        std::thread::spawn(move || {
+            while let Ok((mut sock, _)) = l.accept() {
+                seen.store(true, Ordering::SeqCst);
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 1024];
+                while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match sock.read(&mut chunk) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                    }
+                }
+                let _ = sock.write_all(reply.as_bytes());
+            }
+        });
+        (port, hit)
+    }
+
+    fn ok_reply(body: &str) -> String {
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    fn redirect_to(url: &str) -> String {
+        format!("HTTP/1.1 302 Found\r\nLocation: {url}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+    }
+
+    const PUBLIC: std::net::IpAddr = std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1));
+    const INNER: std::net::IpAddr = std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 2));
+
+    fn only_inner(ip: std::net::IpAddr) -> bool {
+        ip == INNER
+    }
+
+    const LIST: &str = "udp://tracker.example:1337/announce\n";
+
+    /// A list host out on the internet cannot send the fetch on to an
+    /// internal address, written out or reached by a name.
+    #[test]
+    fn a_list_redirect_from_a_public_host_to_an_internal_one_is_not_followed() {
+        let hosts = [("lists.example", PUBLIC), ("rebind.example", INNER)];
+        for target in ["127.0.0.2", "rebind.example"] {
+            let (inner, hit) = serve_raw("127.0.0.2", ok_reply(LIST));
+            let (outer, _) = serve_raw("127.0.0.1", redirect_to(&format!("http://{target}:{inner}/l")));
+            let r = fetch_via(&format!("http://lists.example:{outer}/best.txt"), &hosts, only_inner);
+            assert!(r.is_err(), "{target}: {r:?}");
+            assert!(!hit.load(Ordering::SeqCst), "{target}: the internal address was asked");
+        }
+    }
+
+    /// A list on the operator's own network, and a public one that moves to
+    /// another public host, are fetched as before.
+    #[test]
+    fn a_list_that_starts_internal_or_stays_public_is_fetched() {
+        let hosts = [("svc.example", INNER), ("lists.example", PUBLIC), ("mirror.example", PUBLIC)];
+        let (port, _) = serve_raw("127.0.0.2", ok_reply(LIST));
+        let r = fetch_via(&format!("http://svc.example:{port}/l"), &hosts, only_inner);
+        assert_eq!(r.unwrap(), vec!["udp://tracker.example:1337/announce"]);
+
+        let (inner, _) = serve_raw("127.0.0.1", ok_reply(LIST));
+        let (outer, _) = serve_raw("127.0.0.1", redirect_to(&format!("http://mirror.example:{inner}/l")));
+        let r = fetch_via(&format!("http://lists.example:{outer}/l"), &hosts, only_inner);
+        assert_eq!(r.unwrap(), vec!["udp://tracker.example:1337/announce"]);
+    }
 
     #[test]
     fn a_list_is_read_one_announce_url_per_line() {

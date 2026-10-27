@@ -616,6 +616,35 @@ pub fn client_resolving(
     b.build().map_err(|e| format!("http client: {e}"))
 }
 
+/// The blocking twin of [`client_resolving`], for the callers that run on a
+/// plain thread (same rules, same route).
+pub fn blocking_client_resolving(
+    route: &Route,
+    fixed: &[(&str, std::net::IpAddr)],
+    guard: Arc<crate::webseed::StartGuard>,
+    is_internal: fn(std::net::IpAddr) -> bool,
+) -> Result<reqwest::blocking::Client, String> {
+    route.preflight()?;
+    let tunnel: Option<Arc<dyn reqwest::dns::Resolve>> = (route.proxy.is_empty()
+        && !route.interface.is_empty())
+    .then(|| crate::tunneldns::Resolver::new(&route.interface) as Arc<dyn reqwest::dns::Resolve>);
+    let mut map: std::collections::HashMap<String, Vec<std::net::IpAddr>> =
+        std::collections::HashMap::new();
+    for (name, ip) in fixed {
+        map.entry(name.to_ascii_lowercase()).or_default().push(*ip);
+    }
+    let redirect = crate::webseed::redirect_policy_from_start(guard.clone());
+    let guard = route.proxy.is_empty().then_some((guard, is_internal));
+    let resolver = Arc::new(FetchResolver {
+        tunnel,
+        fixed: map,
+        guard,
+    });
+    let b = apply_route!(reqwest::blocking::Client::builder().redirect(redirect), route)
+        .dns_resolver(resolver);
+    b.build().map_err(|e| format!("http client: {e}"))
+}
+
 /// The blocking twin, for the callers that run on a plain thread.
 pub fn blocking_client_for(route: &Route) -> Result<reqwest::blocking::Client, String> {
     route.preflight()?;
