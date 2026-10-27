@@ -116,6 +116,9 @@ pub struct WebseedState {
     /// of its `url-list`. Inverted so the Default (false) is the behaviour so
     /// far; `start` sets it from the config.
     no_private: std::sync::atomic::AtomicBool,
+    /// `webseed_allow_internal`: a mirror may be an internal address. Off by
+    /// default; `start` sets it from the config.
+    allow_internal: std::sync::atomic::AtomicBool,
 }
 
 impl WebseedState {
@@ -267,6 +270,22 @@ pub fn is_internal_ip(ip: std::net::IpAddr) -> bool {
     }
 }
 
+/// Whether a mirror written as `url` may be contacted at all: an address
+/// written as an internal one is not, unless `allow_internal`.
+fn mirror_allowed(url: &str, allow_internal: bool) -> Result<(), String> {
+    if allow_internal {
+        return Ok(());
+    }
+    let host = reqwest::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_string))
+        .unwrap_or_default();
+    if is_internal_host(&host) {
+        return Err("webseed mirror is an internal address (webseed_allow_internal is off)".into());
+    }
+    Ok(())
+}
+
 /// Mirrors redirect: archive.org sends every download to a storage node. A
 /// redirect may not lead to an internal host (`is_internal_host`) unless it
 /// stays on the host it came from, so a mirror named in a torrent cannot send
@@ -327,6 +346,12 @@ impl StartGuard {
             _ => START_UNDECIDED,
         };
         StartGuard(std::sync::atomic::AtomicU8::new(state))
+    }
+
+    /// A start that is public from the outset: every address an internal one
+    /// is refused, on the first request and on every redirect.
+    pub fn public() -> Self {
+        StartGuard(std::sync::atomic::AtomicU8::new(START_PUBLIC))
     }
 
     /// Whether the start is still to be decided.
@@ -612,6 +637,10 @@ async fn drive_torrent(
         );
         for k in 0..t.meta.url_list.len() {
             let base = &t.meta.url_list[(first as usize + k) % t.meta.url_list.len()];
+            if let Err(e) = mirror_allowed(base, ws.allow_internal.load(Ordering::Relaxed)) {
+                last_err = e;
+                continue;
+            }
             match fetch_span(client, &t.meta, base, first, last).await {
                 Ok(d) => {
                     data = Some(d);
@@ -864,18 +893,38 @@ async fn reporter(mgr: Arc<TorrentManager>) {
 
 /// Build the HTTP client used for every webseed fetch.
 ///
+/// Unless `webseed_allow_internal`, it reaches public addresses only: a name
+/// that resolves to an internal one is refused by its resolver, and a redirect
+/// to an address written as an internal one is not followed (a mirror written
+/// as an internal address is refused before the request, `mirror_allowed`).
+/// Behind a proxy the proxy resolves the name, so only written addresses can
+/// be judged.
+///
 /// It deliberately reuses the engine's announce proxy (`http_proxy`, with
 /// the `TYPHON_ANNOUNCE_PROXY` fallback): a webseed GET is an outbound request
 /// carrying our IP to a third party, exactly like an announce, so it must
 /// leave by the same door. Anything else would re-open the leak the announce
 /// proxy exists to close.
 fn build_client(cfg: &EngineConfig) -> Result<reqwest::Client, String> {
+    build_client_hosts(cfg, &[])
+}
+
+/// `build_client` with `hosts` names resolved to fixed addresses instead of by
+/// DNS (the seam a test uses to give a name a local address).
+fn build_client_hosts(
+    cfg: &EngineConfig,
+    hosts: &[(&str, std::net::IpAddr)],
+) -> Result<reqwest::Client, String> {
     let mut b = reqwest::Client::builder()
         .user_agent(cfg.user_agent.clone())
         .timeout(Duration::from_secs(120))
         .connect_timeout(Duration::from_secs(20))
         .pool_idle_timeout(Duration::from_secs(90))
-        .redirect(redirect_policy())
+        .redirect(if cfg.webseed_allow_internal {
+            redirect_policy()
+        } else {
+            redirect_policy_from_start(Arc::new(StartGuard::public()))
+        })
         // HTTP/1.1 ONLY, and this is the whole performance story.
         //
         // archive.org negotiates h2 (verified: ALPN returns `h2`), and reqwest
@@ -905,6 +954,18 @@ fn build_client(cfg: &EngineConfig) -> Result<reqwest::Client, String> {
     // mirror's name is resolved by the tunnel's DNS server. Refused, not
     // unpinned, where the platform cannot bind a request to a device.
     b = crate::tracker::http::pin_builder(b, &cfg.bind_device)?;
+    if !cfg.webseed_allow_internal
+        && crate::tracker::http::effective_proxy(&cfg.http_proxy()).is_none()
+    {
+        b = b.dns_resolver(crate::egress::public_only_resolver(
+            &cfg.bind_device,
+            hosts,
+        ));
+    } else {
+        for (name, ip) in hosts {
+            b = b.resolve(name, std::net::SocketAddr::new(*ip, 0));
+        }
+    }
     b.build().map_err(|e| e.to_string())
 }
 
@@ -928,6 +989,9 @@ pub fn start(mgr: Arc<TorrentManager>, cfg: &EngineConfig) {
         }
     };
     mgr.webseed().set_private_allowed(cfg.webseed_private);
+    mgr.webseed()
+        .allow_internal
+        .store(cfg.webseed_allow_internal, Ordering::Relaxed);
     let workers = cfg.webseed_max_concurrent.max(1);
     let disk = mgr.disk().clone();
     {
@@ -1022,9 +1086,75 @@ mod tests {
     async fn a_redirect_on_the_same_host_is_still_followed() {
         let (inner, hits) = mirror("127.0.0.1", String::new()).await;
         let (outer, _) = mirror("127.0.0.1", format!("{inner}/x")).await;
-        let out = fetch_range(&client(), &format!("{outer}/r"), 0, 3, 4).await;
+        let client = build_client(&cfg_internal(true)).expect("client");
+        let out = fetch_range(&client, &format!("{outer}/r"), 0, 3, 4).await;
         assert_eq!(out.expect("followed"), b"abcd".to_vec());
         assert_eq!(hits.load(Ordering::Relaxed), 1);
+    }
+
+    fn cfg_internal(allow: bool) -> EngineConfig {
+        toml::from_str(&format!("webseed_allow_internal = {allow}")).expect("config")
+    }
+
+    /// A mirror NAMED in a torrent that resolves to this machine is not
+    /// contacted by default.
+    #[tokio::test]
+    async fn a_mirror_name_that_resolves_to_loopback_is_not_contacted() {
+        let (base, hits) = mirror("127.0.0.1", String::new()).await;
+        let port = base.rsplit(':').next().unwrap();
+        let client = build_client_hosts(
+            &cfg_internal(false),
+            &[("mirror.test", "127.0.0.1".parse().unwrap())],
+        )
+        .expect("client");
+        let out = fetch_range(&client, &format!("http://mirror.test:{port}/x"), 0, 3, 4).await;
+        assert!(out.is_err(), "refused: {out:?}");
+        assert_eq!(hits.load(Ordering::Relaxed), 0, "the mirror was never asked");
+    }
+
+    /// With `webseed_allow_internal` the same name is fetched from.
+    #[tokio::test]
+    async fn a_mirror_name_that_resolves_to_loopback_is_contacted_when_allowed() {
+        let (base, hits) = mirror("127.0.0.1", String::new()).await;
+        let port = base.rsplit(':').next().unwrap();
+        let client = build_client_hosts(
+            &cfg_internal(true),
+            &[("mirror.test", "127.0.0.1".parse().unwrap())],
+        )
+        .expect("client");
+        let out = fetch_range(&client, &format!("http://mirror.test:{port}/x"), 0, 3, 4).await;
+        assert_eq!(out.expect("fetched"), b"abcd".to_vec());
+        assert_eq!(hits.load(Ordering::Relaxed), 1);
+    }
+
+    /// A mirror written as an internal address is refused by default, allowed
+    /// with the option; a public one is untouched.
+    #[test]
+    fn a_mirror_written_as_an_internal_address_is_refused_by_default() {
+        for u in [
+            "http://127.0.0.1:8080/f",
+            "http://192.168.99.5/f",
+            "http://[::1]/f",
+            "http://[::ffff:192.168.99.5]/f",
+            "http://localhost/f",
+        ] {
+            assert!(mirror_allowed(u, false).is_err(), "{u} refused");
+            assert!(mirror_allowed(u, true).is_ok(), "{u} allowed on request");
+        }
+        for u in ["http://mirror.example.org/f", "https://93.184.216.34/f"] {
+            assert!(mirror_allowed(u, false).is_ok(), "{u} untouched");
+        }
+    }
+
+    /// By default even a redirect on the same internal host is not followed.
+    #[tokio::test]
+    async fn a_redirect_to_an_internal_address_is_refused_by_default() {
+        let (inner, hits) = mirror("127.0.0.1", String::new()).await;
+        let (outer, _) = mirror("127.0.0.1", format!("{inner}/x")).await;
+        let client = build_client(&cfg_internal(false)).expect("client");
+        let out = fetch_range(&client, &format!("{outer}/r"), 0, 3, 4).await;
+        assert!(out.is_err(), "refused: {out:?}");
+        assert_eq!(hits.load(Ordering::Relaxed), 0);
     }
 
     #[test]

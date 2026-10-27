@@ -223,6 +223,14 @@ pub struct EngineConfig {
     /// torrent never contacts a webseed; public torrents are unaffected.
     #[serde(default = "default_true")]
     pub webseed_private: bool,
+    /// Let a webseed mirror be an internal address: loopback, private,
+    /// link-local, unique-local, CGNAT, written as an address or reached by a
+    /// name that resolves to one. Off by default: the `url-list` comes from
+    /// the .torrent, not from the operator, so a torrent cannot point this
+    /// engine's requests at the machine itself or its network. Turn it on for
+    /// a mirror you run on your own network.
+    #[serde(default)]
+    pub webseed_allow_internal: bool,
     /// Open the peer listening port (TCP, uTP and the PROXY v2 relay) while
     /// `socks5_outbound_host` is set. On by default: the proxy carries what
     /// this engine dials, and the port is what incoming peers reach, which a

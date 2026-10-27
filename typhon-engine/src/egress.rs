@@ -552,6 +552,33 @@ impl reqwest::dns::Resolve for FetchResolver {
     }
 }
 
+/// A resolver that keeps public addresses only, whatever the name and
+/// wherever the fetch began: the guard of a fetch that began on a public host,
+/// for a client that must never reach an internal address (the webseed
+/// client). `device` pins the lookup to a managed tunnel's DNS server when not
+/// empty; `fixed` names resolve to the given addresses without asking DNS.
+pub(crate) fn public_only_resolver(
+    device: &str,
+    fixed: &[(&str, std::net::IpAddr)],
+) -> Arc<impl reqwest::dns::Resolve + 'static> {
+    let device = device.trim();
+    let tunnel: Option<Arc<dyn reqwest::dns::Resolve>> = (!device.is_empty())
+        .then(|| crate::tunneldns::Resolver::new(device) as Arc<dyn reqwest::dns::Resolve>);
+    let mut map: std::collections::HashMap<String, Vec<std::net::IpAddr>> =
+        std::collections::HashMap::new();
+    for (name, ip) in fixed {
+        map.entry(name.to_ascii_lowercase()).or_default().push(*ip);
+    }
+    Arc::new(FetchResolver {
+        tunnel,
+        fixed: map,
+        guard: Some((
+            Arc::new(crate::webseed::StartGuard::public()),
+            crate::webseed::is_internal_ip,
+        )),
+    })
+}
+
 /// A one-shot client for a fetch the operator pointed at one URL: the route's
 /// settings, its own resolver, and the redirect policy of `guard`.
 ///
@@ -637,6 +664,36 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// The webseed resolver keeps public addresses and drops internal ones.
+    #[tokio::test]
+    async fn the_public_only_resolver_drops_internal_addresses() {
+        use reqwest::dns::Resolve;
+        let ask = |r: Arc<dyn Resolve>, name: &str| {
+            let n: reqwest::dns::Name = name.parse().expect("name");
+            async move { r.resolve(n).await.map(|a| a.map(|s| s.ip()).collect::<Vec<_>>()) }
+        };
+        let r = public_only_resolver(
+            "",
+            &[
+                ("pub.test", "93.184.216.34".parse().unwrap()),
+                ("lan.test", "192.168.99.5".parse().unwrap()),
+                ("lo.test", "127.0.0.1".parse().unwrap()),
+                ("mixed.test", "93.184.216.34".parse().unwrap()),
+                ("mixed.test", "10.0.0.7".parse().unwrap()),
+            ],
+        );
+        assert_eq!(
+            ask(r.clone(), "pub.test").await.expect("public"),
+            vec!["93.184.216.34".parse::<std::net::IpAddr>().unwrap()]
+        );
+        assert!(ask(r.clone(), "lan.test").await.is_err());
+        assert!(ask(r.clone(), "lo.test").await.is_err());
+        assert_eq!(
+            ask(r, "mixed.test").await.expect("mixed"),
+            vec!["93.184.216.34".parse::<std::net::IpAddr>().unwrap()]
+        );
+    }
 
     /// A SOCKS5 server that records the host it is asked for and answers
     /// every request with `200 ok` itself.
