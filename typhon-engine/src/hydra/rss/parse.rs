@@ -465,7 +465,12 @@ fn decode_entities(s: &str) -> String {
     while let Some(amp) = rest.find('&') {
         out.push_str(&rest[..amp]);
         let tail = &rest[amp..];
-        let Some(semi) = tail[..tail.len().min(12)].find(';') else {
+        // The look-ahead is 12 bytes, cut back to a character boundary.
+        let mut end = tail.len().min(12);
+        while !tail.is_char_boundary(end) {
+            end -= 1;
+        }
+        let Some(semi) = tail[..end].find(';') else {
             out.push('&');
             rest = &tail[1..];
             continue;
@@ -645,6 +650,20 @@ pub fn rfc2822(ts: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A stray `&` followed by ten ASCII bytes and a multi-byte character used
+    /// to cut the 12-byte look-ahead inside the character and panic, which
+    /// killed the RSS tick for good.
+    #[test]
+    fn a_lone_ampersand_before_a_multibyte_character_does_not_panic() {
+        let s = "Tom &abcdefghij\u{e9}t\u{e9} & Jerry &amp; co";
+        assert_eq!(decode_entities(s), "Tom &abcdefghij\u{e9}t\u{e9} & Jerry & co");
+        // The multi-byte character straddles the 12th byte at every offset.
+        for pad in 0..12 {
+            let s = format!("&{}\u{e9}\u{e9}\u{e9}", "a".repeat(pad));
+            assert_eq!(decode_entities(&s), s);
+        }
+    }
 
     const RSS2: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE rss [ <!ENTITY foo "bar"> ]>
