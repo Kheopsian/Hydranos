@@ -294,6 +294,11 @@ pub struct Session {
     /// 0 / absent = 4, negative = unlimited. Live, NOT a dead key.
     #[serde(default)]
     pub max_uploads_per_torrent: i64,
+    /// Cap on the peers unchoked across all the engine's seeding torrents,
+    /// read only while `choking` is on. 0 = 4, negative (default) = no cap.
+    /// Live.
+    #[serde(default = "default_max_uploads")]
+    pub max_uploads: i64,
     /// Run the choker. Off unless set: it was removed in 2.4.13 after it
     /// churned a hoard's peers into a fraction of their upload, and is back
     /// as an opt-in for an uplink that is the bottleneck. Applied live.
@@ -411,6 +416,7 @@ impl Session {
             enable_pex: true,
             enable_webseed: true,
             max_dials_per_sec: default_max_dials_per_sec(),
+            max_uploads: default_max_uploads(),
             ..Default::default()
         }
     }
@@ -591,6 +597,10 @@ impl Default for Dedup {
     }
 }
 
+fn default_max_uploads() -> i64 {
+    -1
+}
+
 fn default_true() -> bool {
     true
 }
@@ -732,6 +742,13 @@ impl Config {
                 path.display(),
                 cfg.daemon.memory_alert_mb
             );
+        }
+        for (name, s) in [("race", &cfg.race), ("hoard", &cfg.hoard)] {
+            if s.max_uploads >= 0 && !s.choking {
+                tracing::warn!(
+                    "[{name}] max_uploads is set but the choker is off: it has no effect (set choking = true to use it)"
+                );
+            }
         }
         Ok(cfg)
     }

@@ -9627,6 +9627,10 @@ async fn qbit_preferences(
         "max_active_uploads": queue_cap(cfg.race.active_seeds, 50),
         "max_connec": cfg.race.max_connections,
         "max_uploads_per_torrent": cfg.race.max_uploads_per_torrent,
+        "max_uploads_per_torrent_enabled": cfg.race.max_uploads_per_torrent >= 0,
+        // The engine's global cap on unchoked peers (-1 = none, as qBittorrent).
+        "max_uploads": cfg.race.max_uploads,
+        "max_uploads_enabled": cfg.race.max_uploads >= 0,
         "pex": cfg.race.enable_pex,
         // The client-wide caps, bytes/s, 0 = none. qBittorrent's wiki says
         // KiB/s here; qBittorrent itself sends bytes/s (its own WebUI divides
@@ -12088,6 +12092,7 @@ const LIVE_SESSION_KEYS: &[&str] = &[
     "max_unknown_infohash_per_ip",
     "choking",
     "max_uploads_per_torrent",
+    "max_uploads",
     "active_downloads",
     "queueing",
     "active_seeds",
@@ -17186,6 +17191,8 @@ const QBIT_PREFERENCES_APPLIED: &[&str] = &[
     "pex",
     "save_path",
     "max_active_downloads",
+    "max_uploads",
+    "max_uploads_per_torrent",
     "max_active_uploads",
     "max_active_torrents",
     "dont_count_slow_torrents",
@@ -17279,6 +17286,29 @@ fn qbit_apply_more_preferences(state: &AppState, doc: &serde_json::Value) -> Res
     if let Some(v) = num("max_active_downloads").filter(|v| *v != qbit_shown_active_downloads(&cfg))
     {
         all("active_downloads", &v.max(-1).to_string())?;
+    }
+    // The slots of the choker (live; they act only while `choking` is on).
+    // A `*_enabled: false` beside the figure reads as qBittorrent reads it: no
+    // cap, whatever the figure kept.
+    for (key, enabled_key, shown) in [
+        ("max_uploads", "max_uploads_enabled", cfg.race.max_uploads),
+        (
+            "max_uploads_per_torrent",
+            "max_uploads_per_torrent_enabled",
+            cfg.race.max_uploads_per_torrent,
+        ),
+    ] {
+        let want = if flag(enabled_key) == Some(false) {
+            Some(-1)
+        } else {
+            num(key).map(|v| v.max(-1))
+        };
+        if let Some(v) = want.filter(|v| *v != shown) {
+            all(key, &v.to_string())?;
+            // Not carried by the queue workers (they re-read the config):
+            // the slots live in each engine's policy, so put them there now.
+            state.engines.apply_config(&state.cfg());
+        }
     }
     if cfg.race.queueing.unwrap_or(false) {
         let shown = |v: Option<i64>| v.filter(|n| *n > 0).unwrap_or(-1);
@@ -28815,10 +28845,16 @@ mod qbit_shim_post_tests {
         );
         let race = s.state.engines.get("race").unwrap();
         assert!(!race.manager.policy().choking(), "off by default");
+        assert_eq!(
+            race.manager.policy().max_uploads(),
+            None,
+            "no cap by default"
+        );
         let body = serde_json::json!({"changes": [
             {"section": "race", "key": "upload_rate_limit", "value": 65536},
             {"section": "race", "key": "choking", "value": true},
             {"section": "race", "key": "max_uploads_per_torrent", "value": 2},
+            {"section": "race", "key": "max_uploads", "value": 5},
             {"section": "race", "key": "peer_timeout", "value": 600},
         ]});
         let (st, b) = call(&s, "POST", "/api/settings", &body.to_string()).await;
@@ -28831,6 +28867,7 @@ mod qbit_shim_post_tests {
         assert_eq!(race.manager.rates().engine.up.rate(), 65_536);
         assert!(race.manager.policy().choking());
         assert_eq!(race.manager.policy().unchoke_slots(), Some(2));
+        assert_eq!(race.manager.policy().max_uploads(), Some(5));
         assert_eq!(race.manager.policy().idle_timeout().as_secs(), 600);
 
         let (st, b) = call(

@@ -143,6 +143,7 @@ pub fn apply_live_settings(manager: &TorrentManager, session: &crate::config::Se
     manager
         .policy()
         .set_unchoke_slots(session.max_uploads_per_torrent);
+    manager.policy().set_max_uploads(session.max_uploads);
 }
 
 impl EngineHost {
@@ -1355,6 +1356,7 @@ fn engine_config(
         // Rate caps, the idle timeout and the choker: the same values
         // `apply_live_settings` puts on the running engine, so a start and a
         // hot reload cannot disagree. Bytes/s on both sides.
+        "max_uploads": session.max_uploads.clamp(i32::MIN as i64, i32::MAX as i64),
         "choking": session.choking,
         "upload_limit": session.rate_caps().0,
         "download_limit": session.rate_caps().1,

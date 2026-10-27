@@ -732,6 +732,40 @@ async fn set_preferences_applies_rates_dht_pex_active_downloads_and_save_path() 
     );
 }
 
+/// qBittorrent's two upload-slot preferences are the choker's: `max_uploads`
+/// (the engine-wide cap) and `max_uploads_per_torrent`, read and written live,
+/// with -1 or `*_enabled: false` as "no cap".
+#[tokio::test]
+async fn set_preferences_maps_the_upload_slots_onto_the_choker() {
+    let s = st("shim-prefs-slots", "");
+    let p = prefs(&s).await;
+    assert_eq!(p["max_uploads"], -1, "no cap unless set");
+    assert_eq!(p["max_uploads_enabled"], false);
+
+    let (code, body) = set_prefs(
+        &s,
+        serde_json::json!({"max_uploads": 5, "max_uploads_per_torrent": 3}),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK, "{body}");
+    let p = prefs(&s).await;
+    assert_eq!(p["max_uploads"], 5);
+    assert_eq!(p["max_uploads_enabled"], true);
+    assert_eq!(p["max_uploads_per_torrent"], 3);
+    let race = s.state.engines.get("race").unwrap();
+    assert_eq!(race.manager.policy().max_uploads(), Some(5), "live");
+    assert_eq!(race.manager.policy().unchoke_slots(), Some(3), "live");
+
+    let (code, _) = set_prefs(
+        &s,
+        serde_json::json!({"max_uploads": 20, "max_uploads_enabled": false}),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(prefs(&s).await["max_uploads"], -1, "disabled = no cap");
+    assert_eq!(race.manager.policy().max_uploads(), None);
+}
+
 #[tokio::test]
 async fn a_relative_save_path_is_refused_and_writes_nothing() {
     let s = st("shim-prefs-relative", "");

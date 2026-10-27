@@ -48,6 +48,10 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   through a redirect to an internal address. Feeds and lists that start on
   your own network (an indexer on the LAN) work as before.
 
+### Added
+
+- A global cap on upload slots per engine: `max_uploads` (`[race]` and `[hoard]`, also in the engine settings) limits the peers unchoked across all of the engine's seeding torrents, on top of `max_uploads_per_torrent`; the best-ranked peers keep the slots. It only acts with `choking = true` (the choker stays off by default; the settings help and the log say so when it is set without), applies live, is also readable and writable as `max_uploads` through the qBittorrent-compatible preferences, and `-1` (the default) changes nothing.
+
 ### Fixed
 
 - A peer's bitfield whose length does not match the torrent is ignored, the
