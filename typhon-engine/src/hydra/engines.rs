@@ -1346,6 +1346,7 @@ fn engine_config(
         "lsd_announce_seeds": session.lsd_announce_seeds.unwrap_or(true),
         "enable_webseed": session.enable_webseed,
         "webseed_private": session.webseed_private.unwrap_or(true),
+        "webseed_allow_internal": session.webseed_allow_internal.unwrap_or(false),
         "enable_ipv6": session.enable_ipv6,
         "max_connections": session.max_connections.max(0),
         "max_dials_per_sec": if session.max_dials_per_sec.is_finite() { session.max_dials_per_sec.max(0.0) } else { 0.0 },
@@ -1413,6 +1414,20 @@ mod network_wiring_tests {
 "
             ))
             .webseed_private
+        );
+    }
+
+    /// `webseed_allow_internal` reaches the engine, and absent keeps internal
+    /// mirrors off.
+    #[test]
+    fn webseed_allow_internal_reaches_the_engine() {
+        assert!(!cfg_of(&session("")).webseed_allow_internal);
+        assert!(
+            cfg_of(&session(
+                "webseed_allow_internal = true
+"
+            ))
+            .webseed_allow_internal
         );
     }
 

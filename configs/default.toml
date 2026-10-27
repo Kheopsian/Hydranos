@@ -148,6 +148,12 @@ enable_lsd = true
 # been. false keeps a private torrent off the mirrors its .torrent lists
 # (public torrents are unaffected). Same key in [hoard].
 # webseed_private = true
+# A webseed mirror comes from the .torrent, not from you: by default one that
+# is an internal address (loopback, private, link-local, unique-local), written
+# out or reached by a name that resolves to one, is never contacted, nor
+# followed by a redirect. true allows it, for a mirror you run on your own
+# network. Same key in [hoard].
+# webseed_allow_internal = false
 # LSD announces seeds that have peers as well as downloads. false announces
 # only the torrents still downloading (a seed still dials the LAN peers that
 # announce its hash). Same key in [hoard].

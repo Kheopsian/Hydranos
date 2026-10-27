@@ -205,6 +205,12 @@ pub struct Session {
     /// mirrors. Only matters while `enable_webseed` is on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub webseed_private: Option<bool>,
+    /// Let a webseed mirror be an internal address (loopback, private,
+    /// link-local...), by address or by a name that resolves to one. Absent
+    /// means no: the mirrors come from the .torrent. Only matters while
+    /// `enable_webseed` is on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub webseed_allow_internal: Option<bool>,
     /// Open this engine's listening port while it goes out through a SOCKS5
     /// proxy (`socks5_outbound_host`). Absent = yes, as before: the port is
     /// what a forwarded port seeds through. `false` binds nothing for incoming
