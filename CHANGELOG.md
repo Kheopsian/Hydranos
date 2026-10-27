@@ -21,6 +21,45 @@ decided when the release is cut, by looking at what went in: whoever tags it
 renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 `HYDRANOS_VERSION` in the same commit.
 
+## Unreleased -- security hardening of the interface, the API keys and the peer wire
+
+### Security
+
+- The web interface no longer writes any value into an event attribute
+  (`onclick`, `onchange`...): buttons read their value from an escaped
+  `data-*` attribute. Text coming from a .torrent, a tracker list or a node
+  could otherwise run in the page. A test keeps every handler of `app.js`
+  free of interpolation.
+- The MCP tool `torrent_detail` masks the passkeys of the announce URLs it
+  returns, as the logs and the rest of the API already did.
+- `GET /api/settings` masks the daemon API key and the admin password hash.
+  Saving the settings page with the mask unchanged keeps both. The copy
+  button of the key field copies the key this browser holds.
+- Confirming a new API key ends the open login sessions.
+- The API key shipped in the sample configuration is never accepted as a key,
+  even when the configuration file cannot be rewritten with a generated one.
+  The daemon logs once what to do: set a key of your own, or make the file
+  writable and restart. Logging in with the password is not affected.
+- A webseed mirror whose address is internal (loopback, private, link-local),
+  written as such or resolved from its name, is not contacted. The new option
+  `webseed_allow_internal` (default `false`, also under `[hoard]`) restores
+  the old behaviour for mirrors on your own network.
+- An RSS feed or a tracker list fetched from a public address is not followed
+  through a redirect to an internal address. Feeds and lists that start on
+  your own network (an indexer on the LAN) work as before.
+
+### Fixed
+
+- A peer's bitfield whose length does not match the torrent is ignored, the
+  padding bits after the last piece are cleared, and only the first Bitfield,
+  Have All or Have None of a connection counts.
+- A v2 torrent cannot declare more pieces than a fixed ceiling, or than its
+  `piece layers` back when it carries them.
+- An RSS item text with a stray `&` before an accented character no longer
+  stops the RSS refresh until a restart.
+- A `since` filter of the logs ending in an accented character is refused
+  instead of failing the request.
+
 ## v4.6.4 -- the workflow condition "time since a tag was set" lets you pick its tag again
 
 ### Fixed
