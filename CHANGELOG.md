@@ -59,6 +59,9 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   stops the RSS refresh until a restart.
 - A `since` filter of the logs ending in an accented character is refused
   instead of failing the request.
+- Restarting from the interface on Windows works when Hydranos was started inside a
+  job that ends its processes on close (an SSH session, some launchers): the new
+  process is no longer ended together with the old one.
 
 ## v4.6.4 -- the workflow condition "time since a tag was set" lets you pick its tag again
 
