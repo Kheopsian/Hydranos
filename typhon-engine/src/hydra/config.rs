@@ -743,6 +743,25 @@ impl Config {
 /// every reader of the source already knows.
 pub const PLACEHOLDER_API_KEY: &str = "change-me-in-production";
 
+/// Whether a configured key may open the API: set, and not the published
+/// placeholder. Every door that compares a key asks this first, so an install
+/// whose config could not be rewritten at boot (`ensure_api_key` keeps the old
+/// value then) does not accept the one string the whole repository knows.
+pub fn api_key_usable(key: &str) -> bool {
+    !key.is_empty() && key != PLACEHOLDER_API_KEY
+}
+
+/// What the log says, once, while the configured key is the placeholder.
+pub fn warn_placeholder_key_refused() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        tracing::error!(
+            "[daemon] api_key is the published placeholder, so it is refused as a key:              set a key of your own in the config file (for example `head -c 24 /dev/urandom | \
+             xxd -p -c 48`), make the file writable so a generated one can be stored, and restart"
+        );
+    });
+}
+
 /// A key no one else can guess: 24 bytes of system entropy, hex encoded.
 ///
 /// Same shape and same source as `install.sh` uses when it enrols a node

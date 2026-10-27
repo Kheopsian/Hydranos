@@ -320,7 +320,10 @@ pub(crate) fn key_authorised(state: &AppState, headers: &HeaderMap, query: &str)
     let cfg = state.cfg();
     let expected = cfg.daemon.api_key.as_str();
 
-    if expected.is_empty() {
+    if !crate::config::api_key_usable(expected) {
+        if !expected.is_empty() {
+            crate::config::warn_placeholder_key_refused();
+        }
         return false;
     }
 
@@ -9859,7 +9862,7 @@ async fn qbit_login(
 /// Split in two because the throttle treats them apart: the key is checked
 /// first and costs no bcrypt.
 fn qbit_key_ok(cfg: &crate::config::Config, password: &str) -> bool {
-    !cfg.daemon.api_key.is_empty()
+    crate::config::api_key_usable(&cfg.daemon.api_key)
         && !password.is_empty()
         && constant_time_eq(password.as_bytes(), cfg.daemon.api_key.as_bytes())
 }
@@ -18355,7 +18358,7 @@ fn rescue_authorised(state: &RescueState, headers: &HeaderMap) -> bool {
         .get("X-Api-Key")
         .and_then(|v| v.to_str().ok())
         .unwrap_or_default();
-    !expected.is_empty()
+    crate::config::api_key_usable(&expected)
         && !provided.is_empty()
         && constant_time_eq(provided.as_bytes(), expected.as_bytes())
 }
@@ -20315,23 +20318,62 @@ mod tests {
         assert!(!authorised(&fresh, &HeaderMap::new(), ""));
     }
 
-    /// The placeholder is a key, not a bypass.
+    /// The placeholder is neither a bypass nor a key.
     ///
     /// It used to switch the check off entirely once an admin password
     /// existed -- which production had, so production authenticated nothing.
-    /// It is now compared like any other value; `config::ensure_api_key`
-    /// replaces it at boot so an install should never reach this state.
+    /// It was then compared like any other value, so an install whose config
+    /// could not be rewritten (`config::ensure_api_key` keeps the old value
+    /// then) still opened to the one string every reader of the repository
+    /// knows. It opens nothing now, at any door that compares a key.
     #[test]
-    fn the_placeholder_key_is_no_longer_a_bypass() {
+    fn the_placeholder_key_is_neither_a_bypass_nor_a_key() {
         let configured = state(DEFAULT_API_KEY, "$2a$hash");
         assert!(
             !authorised(&configured, &HeaderMap::new(), ""),
             "placeholder + password set must NOT wave a keyless caller through"
         );
         assert!(
-            authorised(&configured, &with_key(DEFAULT_API_KEY), ""),
-            "it is still the configured key, so it still opens the door"
+            !authorised(&configured, &with_key(DEFAULT_API_KEY), ""),
+            "the published placeholder must not open the door as a key"
         );
+        assert!(
+            !key_authorised(&configured, &with_key(DEFAULT_API_KEY), ""),
+            "nor at the gate the MCP endpoint and the key-only routes use"
+        );
+        assert!(
+            !qbit_key_ok(&configured.cfg(), DEFAULT_API_KEY),
+            "nor as the qBittorrent password"
+        );
+
+        // The rescue router reads the key from the file itself.
+        let path = std::env::temp_dir().join(format!(
+            "hydra-placeholder-rescue-{}.toml",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            format!("[daemon]\napi_key = \"{DEFAULT_API_KEY}\"\n"),
+        )
+        .unwrap();
+        let rescue = RescueState {
+            diagnosis: Default::default(),
+            config_path: path.clone(),
+        };
+        assert!(
+            !rescue_authorised(&rescue, &with_key(DEFAULT_API_KEY)),
+            "nor on the rescue router"
+        );
+        std::fs::write(&path, "[daemon]\napi_key = \"a-real-key-0123456789abcdef\"\n").unwrap();
+        assert!(
+            rescue_authorised(&rescue, &with_key("a-real-key-0123456789abcdef")),
+            "a real key still opens it"
+        );
+        let _ = std::fs::remove_file(&path);
+
+        let real = state("a-real-key-0123456789abcdef", "$2a$hash");
+        assert!(authorised(&real, &with_key("a-real-key-0123456789abcdef"), ""));
+        assert!(qbit_key_ok(&real.cfg(), "a-real-key-0123456789abcdef"));
     }
 
     #[test]
