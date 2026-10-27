@@ -607,6 +607,10 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
     // Before anything is served: an install with no key of its own would
     // otherwise answer every caller who sends no key. See config::ensure_api_key.
     config::ensure_api_key(&mut config, &config_path);
+    if config.daemon.api_key == config::PLACEHOLDER_API_KEY {
+        // The file could not be rewritten: the placeholder is refused as a key.
+        config::warn_placeholder_key_refused();
+    }
     let config = config;
     workers::start_memory_watch(config.daemon.memory_alert_bytes());
     bootstrap::announce_setup_code(&config);
