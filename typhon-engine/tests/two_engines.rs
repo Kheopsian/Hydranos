@@ -505,9 +505,14 @@ async fn a_webseed_serving_wrong_bytes_has_them_rejected() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    // Counts what the mirror was asked: a refusal before the fetch would pass
+    // the assertions below without the bytes ever being checked.
+    let asked = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen = asked.clone();
     let app = axum::Router::new().route(
         "/payload.bin",
         axum::routing::get(move |headers: axum::http::HeaderMap| async move {
+            seen.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let range = headers
                 .get(axum::http::header::RANGE)
                 .and_then(|v| v.to_str().ok())
@@ -556,6 +561,10 @@ async fn a_webseed_serving_wrong_bytes_has_them_rejected() {
     tokio::time::sleep(Duration::from_secs(3)).await;
     let _ = tx.send(());
 
+    assert!(
+        asked.load(std::sync::atomic::Ordering::Relaxed) > 0,
+        "the mirror was never asked: nothing below checks its bytes"
+    );
     let progress = typhon_engine::rpc::dispatch::torrent_core(&t).progress;
     assert!(
         progress < 1.0,
