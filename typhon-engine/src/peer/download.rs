@@ -125,9 +125,32 @@ impl DownloadState {
             && self.torrent.status.load(Ordering::Relaxed) == TorrentStatus::Downloading as u8
     }
 
-    /// Process incoming Bitfield from peer.
-    pub fn on_bitfield(&mut self, data: &[u8]) {
-        self.replace_bitfield(data.to_vec());
+    /// Process incoming Bitfield from peer. Returns whether it was taken.
+    ///
+    /// A bitfield is `ceil(num_pieces / 8)` bytes (BEP 3). One of any other
+    /// length is not a statement about this torrent: it is ignored, without
+    /// cutting the peer, and not kept (a peer could otherwise park 256 KiB per
+    /// connection). An empty one is what some clients send for "nothing yet";
+    /// it changes nothing. The padding bits of the last byte are cleared rather
+    /// than refused: they name no piece, and clients that leave them set are
+    /// real. With the piece count unknown (0) the bitfield is taken as sent.
+    pub fn on_bitfield(&mut self, data: &[u8]) -> bool {
+        let num_pieces = self.torrent.meta.num_pieces() as usize;
+        if num_pieces > 0 && !data.is_empty() && data.len() != num_pieces.div_ceil(8) {
+            return false;
+        }
+        if data.is_empty() {
+            return false;
+        }
+        let mut bf = data.to_vec();
+        let trailing = num_pieces % 8;
+        if trailing > 0 && num_pieces > 0 {
+            if let Some(last) = bf.last_mut() {
+                *last &= 0xFF << (8 - trailing);
+            }
+        }
+        self.replace_bitfield(bf);
+        true
     }
 
     /// The peer's view replaces what it said before, in the picker as here:
@@ -791,6 +814,40 @@ mod tests {
             .unwrap()
             .availability_stats()
             .2
+    }
+
+    /// A bitfield is `ceil(num_pieces / 8)` bytes. One of another length says
+    /// nothing about this torrent and must not be kept (a peer could hold
+    /// 256 KiB per connection) nor counted into availability.
+    #[test]
+    fn a_bitfield_of_the_wrong_length_is_not_kept() {
+        let mut dl = state(downloading(16, 16384));
+        dl.on_bitfield(&[0xFF; 3]);
+        dl.on_bitfield(&[0xFF; 70_000]);
+        assert!(dl.peer_bitfield.is_empty(), "nothing was recorded");
+        assert_eq!(copies_seen(&dl), 0, "and no piece was counted");
+        dl.on_bitfield(&[0xFF, 0xFF]);
+        assert_eq!(dl.peer_bitfield.len(), 2, "the right length is still taken");
+        assert_eq!(copies_seen(&dl), 16);
+    }
+
+    /// Padding bits of the last byte name no piece: some clients leave them
+    /// set, so they are cleared rather than the peer refused.
+    #[test]
+    fn the_padding_bits_of_a_bitfield_are_cleared() {
+        let mut dl = state(downloading(10, 16384));
+        dl.on_bitfield(&[0xFF, 0xFF]);
+        assert_eq!(dl.peer_bitfield, vec![0xFF, 0b1100_0000]);
+        assert_eq!(copies_seen(&dl), 10);
+    }
+
+    /// An empty bitfield is how some clients say "nothing yet": harmless.
+    #[test]
+    fn an_empty_bitfield_changes_nothing() {
+        let mut dl = state(downloading(16, 16384));
+        dl.on_bitfield(&[]);
+        assert!(dl.peer_bitfield.is_empty());
+        assert_eq!(copies_seen(&dl), 0);
     }
 
     /// ⭐ One peer is one copy of what it holds, however many times it says

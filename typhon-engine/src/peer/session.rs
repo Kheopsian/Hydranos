@@ -757,11 +757,13 @@ pub async fn run(
                             }
                             Message::Unchoke => dl.on_unchoke(),
                             Message::Bitfield { data } => {
+                                if !dl.on_bitfield(&data) {
+                                    continue;
+                                }
                                 let count = choking::count_bitfield_pieces(&data, num_pieces);
                                 stats.num_pieces_have.store(count, Ordering::Relaxed);
                                 let is_seed = num_pieces > 0 && count >= num_pieces;
                                 stats.is_seed.store(is_seed, Ordering::Relaxed);
-                                dl.on_bitfield(&data);
                                 if is_seed && we_are_complete(&torrent) {
                                     crate::peer::SEED_SEED_DROPPED
                                         .fetch_add(1, Ordering::Relaxed);
