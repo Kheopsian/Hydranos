@@ -5519,7 +5519,16 @@ async fn get_trackers(
 pub(crate) const SECRET_MASK: &str = "********";
 
 /// The keys masked on the way out, in whichever section they sit.
-pub(crate) const SECRET_KEYS: &[&str] = &["socks5_outbound_pass", "socks5_pass", "gluetun_api_key"];
+pub(crate) const SECRET_KEYS: &[&str] = &[
+    "socks5_outbound_pass",
+    "socks5_pass",
+    "gluetun_api_key",
+    // [daemon] api_key and [auth] password_hash: a cookie session reads the
+    // settings too, and neither is for it to read back. The settings page
+    // copies the key from this browser's own store when it shows the mask.
+    "api_key",
+    "password_hash",
+];
 
 /// The mask for a set secret, nothing for an empty one: "is one set" stays
 /// readable.
@@ -29243,6 +29252,53 @@ mod network_mode_tests {
         .await;
         assert_eq!(r.status(), StatusCode::OK);
         assert_eq!(kept(&s), "pk-new", "a new one is written");
+    }
+
+    /// The API key and the admin password hash do not leave the daemon through
+    /// the settings read either: a cookie session reads the mask, and a save of
+    /// the form as it was keeps the real values.
+    #[tokio::test]
+    async fn the_api_key_and_password_hash_are_masked_and_a_masked_save_keeps_them() {
+        let hash = "$2b$12$abcdefghijklmnopqrstuuABCDEFGHIJKLMNOPQRSTUVWXYZ01234";
+        let file = format!("{DIRECT_FILE}\n[auth]\nusername = \"admin\"\npassword_hash = \"{hash}\"\n");
+        let s = state_from("daemon-secrets-mask", &file);
+
+        let settings =
+            body_json(get_settings(State(s.clone()), RawQuery(None), keyed(KEY)).await).await;
+        let text = settings.to_string();
+        assert!(!text.contains(KEY), "the API key was read back: {text}");
+        assert!(!text.contains(hash), "the password hash was read back: {text}");
+        assert_eq!(settings["daemon"]["api_key"], SECRET_MASK);
+        assert_eq!(settings["auth"]["password_hash"], SECRET_MASK);
+        assert_eq!(settings["auth"]["username"], "admin", "only the secrets are masked");
+
+        let r = post_settings(
+            State(s.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            serde_json::json!({"changes": [
+                {"section": "daemon", "key": "api_key", "value": SECRET_MASK},
+                {"section": "auth", "key": "password_hash", "value": SECRET_MASK},
+            ]})
+            .to_string(),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+        assert_eq!(s.cfg().daemon.api_key, KEY, "the mask was written as the key");
+        assert_eq!(s.cfg().auth.password_hash, hash, "the mask was written as the hash");
+
+        let r = post_settings(
+            State(s.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            serde_json::json!({"changes": [
+                {"section": "daemon", "key": "api_key", "value": "a-new-key-0123456789abcdef0123456789"},
+            ]})
+            .to_string(),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+        assert_eq!(s.cfg().daemon.api_key, "a-new-key-0123456789abcdef0123456789", "a new one is written");
     }
 
     #[test]

@@ -7928,8 +7928,14 @@ function genApiKey(id) {
 async function copyField(id, btn) {
     const el = document.getElementById(id);
     if (!el) return;
+    // The settings read answers the mask for the daemon key: copy the one this
+    // browser holds instead of eight stars.
+    let text = el.value;
+    if (text === "********" && id === "set__daemon__api_key") {
+        try { text = localStorage.getItem("hydra_api_key") || text; } catch (_) {}
+    }
     try {
-        await navigator.clipboard.writeText(el.value);
+        await navigator.clipboard.writeText(text);
     } catch (e) {
         el.select();
         try { document.execCommand("copy"); } catch (e2) {}
