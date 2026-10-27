@@ -439,8 +439,10 @@ fn ok_reply(body: &[u8]) -> Vec<u8> {
 }
 
 fn redirect_to(url: &str) -> Vec<u8> {
-    format!("HTTP/1.1 302 Found\r\nLocation: {url}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-        .into_bytes()
+    format!(
+        "HTTP/1.1 302 Found\r\nLocation: {url}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    )
+    .into_bytes()
 }
 
 /// `PUBLIC` (127.0.0.1) plays an address a test can connect to and the guard
@@ -459,8 +461,11 @@ async fn a_feed_redirect_from_a_public_host_to_an_internal_one_is_not_followed()
     let hosts = [("public.example", PUBLIC), ("rebind.example", INNER)];
     for target in ["127.0.0.2", "rebind.example"] {
         let (inner, hit) = serve_raw("127.0.0.2", ok_reply(b"<rss/>")).await;
-        let (outer, _) =
-            serve_raw("127.0.0.1", redirect_to(&format!("http://{target}:{inner}/f"))).await;
+        let (outer, _) = serve_raw(
+            "127.0.0.1",
+            redirect_to(&format!("http://{target}:{inner}/f")),
+        )
+        .await;
         let url = format!("http://public.example:{outer}/feed");
         let r = fetch_via(&Route::default(), &url, 1024, &hosts, only_inner).await;
         assert!(r.is_err(), "{target}: {r:?}");
@@ -493,7 +498,11 @@ async fn a_feed_that_starts_internal_or_stays_public_is_fetched() {
     assert_eq!(r.unwrap(), b"<rss/>");
 
     let (inner, _) = serve_raw("127.0.0.2", ok_reply(b"<rss/>")).await;
-    let (outer, _) = serve_raw("127.0.0.2", redirect_to(&format!("http://127.0.0.2:{inner}/f"))).await;
+    let (outer, _) = serve_raw(
+        "127.0.0.2",
+        redirect_to(&format!("http://127.0.0.2:{inner}/f")),
+    )
+    .await;
     let r = fetch_via(
         &Route::default(),
         &format!("http://svc.example:{outer}/feed"),

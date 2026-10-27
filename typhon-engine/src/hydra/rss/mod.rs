@@ -278,14 +278,7 @@ pub fn feed_engine(state: &AppState, feed_url: &str, rules: &[Rule]) -> String {
 /// GET `url` by `route`, at most `max` bytes, with the client's User-Agent.
 /// Errors name the URL masked, never whole.
 pub async fn fetch(route: &Route, url: &str, max: usize) -> Result<Vec<u8>, String> {
-    fetch_via(
-        route,
-        url,
-        max,
-        &[],
-        typhon_engine::webseed::is_internal_ip,
-    )
-    .await
+    fetch_via(route, url, max, &[], typhon_engine::webseed::is_internal_ip).await
 }
 
 /// `fetch` with `hosts` names resolved to fixed addresses instead of by DNS,

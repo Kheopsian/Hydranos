@@ -657,7 +657,10 @@ mod tests {
     #[test]
     fn a_lone_ampersand_before_a_multibyte_character_does_not_panic() {
         let s = "Tom &abcdefghij\u{e9}t\u{e9} & Jerry &amp; co";
-        assert_eq!(decode_entities(s), "Tom &abcdefghij\u{e9}t\u{e9} & Jerry & co");
+        assert_eq!(
+            decode_entities(s),
+            "Tom &abcdefghij\u{e9}t\u{e9} & Jerry & co"
+        );
         // The multi-byte character straddles the 12th byte at every offset.
         for pad in 0..12 {
             let s = format!("&{}\u{e9}\u{e9}\u{e9}", "a".repeat(pad));

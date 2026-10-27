@@ -1753,16 +1753,21 @@ mod tests {
         let (_, torrent) = api::find_torrent(&s.state, &h).expect("added torrent");
         *torrent.live_trackers.write() = vec![
             vec!["https://tracker.example/0123456789abcdef0123456789abcdef/announce".to_string()],
-            vec!["https://tracker.example/announce?passkey=0123456789abcdef0123456789abcdef".to_string()],
+            vec![
+                "https://tracker.example/announce?passkey=0123456789abcdef0123456789abcdef"
+                    .to_string(),
+            ],
         ];
         let out = ok_call(&s, "torrent_detail", json!({"info_hash": h})).await;
         let text = out.to_string();
         assert!(
-            !text.contains("0123456789abcdef0123456789abcdef")
-                && !text.contains("passkey=0123"),
+            !text.contains("0123456789abcdef0123456789abcdef") && !text.contains("passkey=0123"),
             "passkey leaked in torrent_detail: {text}"
         );
-        assert!(text.contains("tracker.example"), "host stays readable: {text}");
+        assert!(
+            text.contains("tracker.example"),
+            "host stays readable: {text}"
+        );
     }
 
     #[tokio::test]

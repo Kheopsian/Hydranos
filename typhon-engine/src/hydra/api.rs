@@ -20364,7 +20364,11 @@ mod tests {
             !rescue_authorised(&rescue, &with_key(DEFAULT_API_KEY)),
             "nor on the rescue router"
         );
-        std::fs::write(&path, "[daemon]\napi_key = \"a-real-key-0123456789abcdef\"\n").unwrap();
+        std::fs::write(
+            &path,
+            "[daemon]\napi_key = \"a-real-key-0123456789abcdef\"\n",
+        )
+        .unwrap();
         assert!(
             rescue_authorised(&rescue, &with_key("a-real-key-0123456789abcdef")),
             "a real key still opens it"
@@ -20372,7 +20376,11 @@ mod tests {
         let _ = std::fs::remove_file(&path);
 
         let real = state("a-real-key-0123456789abcdef", "$2a$hash");
-        assert!(authorised(&real, &with_key("a-real-key-0123456789abcdef"), ""));
+        assert!(authorised(
+            &real,
+            &with_key("a-real-key-0123456789abcdef"),
+            ""
+        ));
         assert!(qbit_key_ok(&real.cfg(), "a-real-key-0123456789abcdef"));
     }
 
@@ -29305,17 +29313,24 @@ mod network_mode_tests {
     #[tokio::test]
     async fn the_api_key_and_password_hash_are_masked_and_a_masked_save_keeps_them() {
         let hash = "$2b$12$abcdefghijklmnopqrstuuABCDEFGHIJKLMNOPQRSTUVWXYZ01234";
-        let file = format!("{DIRECT_FILE}\n[auth]\nusername = \"admin\"\npassword_hash = \"{hash}\"\n");
+        let file =
+            format!("{DIRECT_FILE}\n[auth]\nusername = \"admin\"\npassword_hash = \"{hash}\"\n");
         let s = state_from("daemon-secrets-mask", &file);
 
         let settings =
             body_json(get_settings(State(s.clone()), RawQuery(None), keyed(KEY)).await).await;
         let text = settings.to_string();
         assert!(!text.contains(KEY), "the API key was read back: {text}");
-        assert!(!text.contains(hash), "the password hash was read back: {text}");
+        assert!(
+            !text.contains(hash),
+            "the password hash was read back: {text}"
+        );
         assert_eq!(settings["daemon"]["api_key"], SECRET_MASK);
         assert_eq!(settings["auth"]["password_hash"], SECRET_MASK);
-        assert_eq!(settings["auth"]["username"], "admin", "only the secrets are masked");
+        assert_eq!(
+            settings["auth"]["username"], "admin",
+            "only the secrets are masked"
+        );
 
         let r = post_settings(
             State(s.clone()),
@@ -29329,8 +29344,16 @@ mod network_mode_tests {
         )
         .await;
         assert_eq!(r.status(), StatusCode::OK);
-        assert_eq!(s.cfg().daemon.api_key, KEY, "the mask was written as the key");
-        assert_eq!(s.cfg().auth.password_hash, hash, "the mask was written as the hash");
+        assert_eq!(
+            s.cfg().daemon.api_key,
+            KEY,
+            "the mask was written as the key"
+        );
+        assert_eq!(
+            s.cfg().auth.password_hash,
+            hash,
+            "the mask was written as the hash"
+        );
 
         let r = post_settings(
             State(s.clone()),
@@ -29343,7 +29366,11 @@ mod network_mode_tests {
         )
         .await;
         assert_eq!(r.status(), StatusCode::OK);
-        assert_eq!(s.cfg().daemon.api_key, "a-new-key-0123456789abcdef0123456789", "a new one is written");
+        assert_eq!(
+            s.cfg().daemon.api_key,
+            "a-new-key-0123456789abcdef0123456789",
+            "a new one is written"
+        );
     }
 
     /// Rotating the API key closes the browser sessions too: a cookie opened

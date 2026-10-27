@@ -1142,7 +1142,7 @@ mod self_ip_tests {
         for ip in OWN_IPS.read().unwrap().iter() {
             if let IpAddr::V6(v6) = ip {
                 assert!(!v6.is_loopback(), "{v6} is loopback");
-                assert!(!(v6.segments()[0] & 0xffc0 == 0xfe80), "{v6} is link-local");
+                assert!(v6.segments()[0] & 0xffc0 != 0xfe80, "{v6} is link-local");
             }
         }
     }

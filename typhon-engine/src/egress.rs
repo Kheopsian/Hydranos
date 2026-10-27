@@ -640,8 +640,11 @@ pub fn blocking_client_resolving(
         fixed: map,
         guard,
     });
-    let b = apply_route!(reqwest::blocking::Client::builder().redirect(redirect), route)
-        .dns_resolver(resolver);
+    let b = apply_route!(
+        reqwest::blocking::Client::builder().redirect(redirect),
+        route
+    )
+    .dns_resolver(resolver);
     b.build().map_err(|e| format!("http client: {e}"))
 }
 
@@ -700,7 +703,11 @@ mod tests {
         use reqwest::dns::Resolve;
         let ask = |r: Arc<dyn Resolve>, name: &str| {
             let n: reqwest::dns::Name = name.parse().expect("name");
-            async move { r.resolve(n).await.map(|a| a.map(|s| s.ip()).collect::<Vec<_>>()) }
+            async move {
+                r.resolve(n)
+                    .await
+                    .map(|a| a.map(|s| s.ip()).collect::<Vec<_>>())
+            }
         };
         let r = public_only_resolver(
             "",
