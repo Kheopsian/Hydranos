@@ -189,6 +189,11 @@ download_rate_limit = 0
 # 2.4.13). -1 slots = unlimited.
 choking = false
 max_uploads_per_torrent = 100
+# Cap on the peers unchoked across ALL this engine's seeding torrents, on top
+# of `max_uploads_per_torrent`: each pass keeps the best-ranked candidates of
+# every torrent, then the best of those overall. Read only with `choking = true`.
+# -1 = no cap (the default), 0 = 4.
+max_uploads = -1
 # Seconds a peer may send nothing useful (keep-alives do not count) before it
 # is dropped. Under 120 is raised to 120.
 peer_timeout = 300
@@ -293,6 +298,9 @@ download_rate_limit = 0
 # The choker, off: a seedbox wants every interested peer served (see [race]).
 choking = false
 max_uploads_per_torrent = -1
+# Global cap on unchoked peers across all seeding torrents, only with
+# `choking = true` (see [race]). -1 = no cap, 0 = 4.
+max_uploads = -1
 peer_timeout = 300
 peer_encryption = "allow"
 inactivity_timeout = 20

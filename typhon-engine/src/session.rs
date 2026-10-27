@@ -308,6 +308,7 @@ pub async fn start(
     mgr.policy().set_choking(config.choking);
     mgr.policy()
         .set_unchoke_slots(config.max_uploads_per_torrent as i64);
+    mgr.policy().set_max_uploads(config.max_uploads as i64);
     tokio::spawn(crate::peer::choking::choking_loop(mgr.clone()));
 
     info!(

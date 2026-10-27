@@ -64,31 +64,54 @@ fn choke_pass(
     torrents: impl FnOnce() -> Vec<Arc<TorrentState>>,
     was_active: bool,
 ) -> bool {
-    let slots = if policy.choking() {
-        policy.unchoke_slots()
+    // (slots per torrent, cap over all torrents). Either alone is enough to
+    // run the choker; with neither it is off by another name. A cap with
+    // unlimited slots per torrent still ranks every torrent.
+    let limits = if policy.choking() {
+        match (policy.unchoke_slots(), policy.max_uploads()) {
+            (None, None) => None,
+            (slots, cap) => Some((slots.unwrap_or(usize::MAX), cap)),
+        }
     } else {
         None
     };
-    match slots {
-        Some(max_unchoked) => {
+    match limits {
+        Some((max_unchoked, cap)) => {
             if !was_active {
-                info!(
-                    "[choking] on: {} unchoke slots per seeding torrent",
-                    max_unchoked
-                );
-            }
-            let all = torrents();
-            let mut total_unchoked = 0usize;
-            let mut total_choked = 0usize;
-            let mut torrents_with_interested = 0usize;
-            for t in &all {
-                let (u, c, had_interested) = tick_torrent(t, max_unchoked);
-                total_unchoked += u;
-                total_choked += c;
-                if had_interested {
-                    torrents_with_interested += 1;
+                let per_torrent = if max_unchoked == usize::MAX {
+                    "unlimited".to_string()
+                } else {
+                    max_unchoked.to_string()
+                };
+                match cap {
+                    Some(cap) => info!(
+                        "[choking] on: {} unchoke slots per seeding torrent, at most {} unchoked in all",
+                        per_torrent, cap
+                    ),
+                    None => info!(
+                        "[choking] on: {} unchoke slots per seeding torrent",
+                        per_torrent
+                    ),
                 }
             }
+            let all = torrents();
+            let (total_unchoked, total_choked, torrents_with_interested) = match cap {
+                None => {
+                    let mut total_unchoked = 0usize;
+                    let mut total_choked = 0usize;
+                    let mut torrents_with_interested = 0usize;
+                    for t in &all {
+                        let (u, c, had_interested) = tick_torrent(t, max_unchoked);
+                        total_unchoked += u;
+                        total_choked += c;
+                        if had_interested {
+                            torrents_with_interested += 1;
+                        }
+                    }
+                    (total_unchoked, total_choked, torrents_with_interested)
+                }
+                Some(cap) => tick_engine(&all, max_unchoked, cap),
+            };
             debug!(
                 "[choking] tick: +{} unchoke -{} choke across {} torrents (interested on {})",
                 total_unchoked,
@@ -121,23 +144,27 @@ fn release_torrent(t: &TorrentState) -> usize {
     n
 }
 
-/// Returns (newly_unchoked, newly_choked, had_any_interested_peer).
-fn tick_torrent(t: &TorrentState, max_unchoked: usize) -> (usize, usize, bool) {
+/// An interested peer of a seeding torrent, with its rank score.
+struct Cand {
+    stats: Arc<crate::torrent::meta::PeerStats>,
+    score: f64,
+    bytes_last_tick: u64,
+}
+
+/// The interested peers of a seeding torrent, best score first. `None` for a
+/// torrent that is not seeding (it is left alone); an empty list when nobody
+/// is interested.
+fn rank_torrent(t: &TorrentState) -> Option<Vec<Cand>> {
     let status = t.status.load(Ordering::Relaxed);
     // Only control choking on seeding torrents (where our upload = our job).
     // Downloading torrents: we're not uploading much anyway, and unchoking
     // everyone who's interested is cheaper than tracking churn.
     if status != TorrentStatus::Seeding as u8 {
-        return (0, 0, false);
+        return None;
     }
 
     let num_pieces = t.meta.num_pieces();
     // Snapshot (addr, Arc<PeerStats>) for interested peers.
-    struct Cand {
-        stats: Arc<crate::torrent::meta::PeerStats>,
-        score: f64,
-        bytes_last_tick: u64,
-    }
     let mut cands: Vec<Cand> = t
         .peer_stats
         .iter()
@@ -156,7 +183,7 @@ fn tick_torrent(t: &TorrentState, max_unchoked: usize) -> (usize, usize, bool) {
         .collect();
 
     if cands.is_empty() {
-        return (0, 0, false);
+        return Some(cands);
     }
 
     let max_rate = cands.iter().map(|c| c.bytes_last_tick).max().unwrap_or(0);
@@ -179,33 +206,99 @@ fn tick_torrent(t: &TorrentState, max_unchoked: usize) -> (usize, usize, bool) {
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
+    Some(cands)
+}
 
+/// Let one candidate through or choke it, telling its session only when that
+/// changes something, and close its tick window. Answers (unchoked, choked)
+/// as 0 or 1 each.
+fn apply_decision(c: &Cand, should_unchoke: bool) -> (usize, usize) {
+    let mut out = (0, 0);
+    let was_choking = c.stats.choked.load(Ordering::Relaxed);
+    if should_unchoke && was_choking {
+        c.stats.choked.store(false, Ordering::Relaxed);
+        c.stats.choking_gen.fetch_add(1, Ordering::Relaxed);
+        // A seeding session keeps no timer (its choke tick is disabled),
+        // so it only turns its loop -- where `choking_gen` is flushed to
+        // the wire -- when something wakes it. A choked peer waiting for
+        // its unchoke sends nothing, and without this it would wait for
+        // its own idle timeout. `punch_wake`'s arm falls through to the
+        // top of the loop with nothing to send when its outbox is empty.
+        c.stats.punch_wake.notify_one();
+        out.0 = 1;
+    } else if !should_unchoke && !was_choking {
+        c.stats.choked.store(true, Ordering::Relaxed);
+        c.stats.choking_gen.fetch_add(1, Ordering::Relaxed);
+        c.stats.punch_wake.notify_one();
+        out.1 = 1;
+    }
+    // Reset delta for the next tick window.
+    c.stats.uploaded_last_tick.store(0, Ordering::Relaxed);
+    out
+}
+
+/// Returns (newly_unchoked, newly_choked, had_any_interested_peer).
+fn tick_torrent(t: &TorrentState, max_unchoked: usize) -> (usize, usize, bool) {
+    let Some(cands) = rank_torrent(t) else {
+        return (0, 0, false);
+    };
+    if cands.is_empty() {
+        return (0, 0, false);
+    }
     let mut newly_unchoked = 0usize;
     let mut newly_choked = 0usize;
     for (i, c) in cands.iter().enumerate() {
-        let should_unchoke = i < max_unchoked;
-        let was_choking = c.stats.choked.load(Ordering::Relaxed);
-        if should_unchoke && was_choking {
-            c.stats.choked.store(false, Ordering::Relaxed);
-            c.stats.choking_gen.fetch_add(1, Ordering::Relaxed);
-            // A seeding session keeps no timer (its choke tick is disabled),
-            // so it only turns its loop -- where `choking_gen` is flushed to
-            // the wire -- when something wakes it. A choked peer waiting for
-            // its unchoke sends nothing, and without this it would wait for
-            // its own idle timeout. `punch_wake`'s arm falls through to the
-            // top of the loop with nothing to send when its outbox is empty.
-            c.stats.punch_wake.notify_one();
-            newly_unchoked += 1;
-        } else if !should_unchoke && !was_choking {
-            c.stats.choked.store(true, Ordering::Relaxed);
-            c.stats.choking_gen.fetch_add(1, Ordering::Relaxed);
-            c.stats.punch_wake.notify_one();
-            newly_choked += 1;
-        }
-        // Reset delta for the next tick window.
-        c.stats.uploaded_last_tick.store(0, Ordering::Relaxed);
+        let (u, ch) = apply_decision(c, i < max_unchoked);
+        newly_unchoked += u;
+        newly_choked += ch;
     }
     (newly_unchoked, newly_choked, true)
+}
+
+/// One pass over all the seeding torrents with a cap on the whole engine.
+///
+/// Each torrent is ranked as `tick_torrent` ranks it and keeps at most
+/// `max_unchoked` candidates; of those, the `cap` best scores (scores are
+/// comparable across torrents: the same formula, a fraction of the torrent's
+/// own pieces) are let through and every other candidate is choked. Returns
+/// (newly_unchoked, newly_choked, torrents_with_an_interested_peer).
+fn tick_engine(
+    torrents: &[Arc<TorrentState>],
+    max_unchoked: usize,
+    cap: usize,
+) -> (usize, usize, usize) {
+    let mut eligible: Vec<Cand> = Vec::new();
+    let mut refused: Vec<Cand> = Vec::new();
+    let mut with_interested = 0usize;
+    for t in torrents {
+        let Some(mut cands) = rank_torrent(t) else {
+            continue;
+        };
+        if cands.is_empty() {
+            continue;
+        }
+        with_interested += 1;
+        refused.extend(cands.split_off(max_unchoked.min(cands.len())));
+        eligible.extend(cands);
+    }
+    // Stable: equal scores keep their torrent order, so the pass is steady
+    // from one tick to the next rather than shuffling ties.
+    eligible.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    refused.extend(eligible.split_off(cap.min(eligible.len())));
+    let mut newly_unchoked = 0usize;
+    let mut newly_choked = 0usize;
+    for (cands, open) in [(&eligible, true), (&refused, false)] {
+        for c in cands.iter() {
+            let (u, ch) = apply_decision(c, open);
+            newly_unchoked += u;
+            newly_choked += ch;
+        }
+    }
+    (newly_unchoked, newly_choked, with_interested)
 }
 
 /// Who the peer says it is. The table lives in `peerclient`, which knows the
@@ -509,6 +602,122 @@ mod tests {
         policy.set_unchoke_slots(-1);
         choke_pass(&policy, || vec![t.clone()], false);
         assert_eq!(choked(), 0, "unlimited slots choke nobody");
+    }
+
+    /// Three seeding torrents of four interested peers each. The peers' `have`
+    /// counts make every score distinct (no speed), so "the best" is a fact:
+    /// the fewer pieces a peer holds, the higher it ranks.
+    fn three_torrents() -> (Vec<Arc<TorrentState>>, Vec<Vec<Arc<PeerStats>>>) {
+        let haves: [[u32; 4]; 3] = [[0, 10, 20, 30], [5, 15, 25, 35], [1, 11, 21, 31]];
+        let mut ts = Vec::new();
+        let mut ps = Vec::new();
+        for row in haves {
+            let t = Arc::new(seeding(100));
+            let peers: Vec<_> = row
+                .iter()
+                .enumerate()
+                .map(|(i, h)| peer(&t, i as u8 + 1, *h, true, 0))
+                .collect();
+            // What a session does with the choker off: unchoke the interested.
+            peers
+                .iter()
+                .for_each(|p| p.choked.store(false, Ordering::Relaxed));
+            ts.push(t);
+            ps.push(peers);
+        }
+        (ts, ps)
+    }
+
+    fn open_haves(ps: &[Vec<Arc<PeerStats>>]) -> Vec<Vec<u32>> {
+        ps.iter()
+            .map(|row| {
+                row.iter()
+                    .filter(|p| !p.choked.load(Ordering::Relaxed))
+                    .map(|p| p.num_pieces_have.load(Ordering::Relaxed))
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// ⭐ The global cap: three torrents, three slots each, five in all. The
+    /// five let through are the five best scores of the whole engine, and no
+    /// torrent holds more than its own three.
+    #[test]
+    fn a_global_cap_keeps_the_best_peers_across_all_torrents() {
+        let (ts, ps) = three_torrents();
+        let policy = crate::peer::extension::PeerPolicy::default();
+        policy.set_choking(true);
+        policy.set_unchoke_slots(3);
+        policy.set_max_uploads(5);
+        assert!(choke_pass(&policy, || ts.clone(), false));
+
+        let open = open_haves(&ps);
+        assert_eq!(
+            open.iter().map(Vec::len).sum::<usize>(),
+            5,
+            "exactly the cap, got {open:?}"
+        );
+        assert!(open.iter().all(|row| row.len() <= 3), "{open:?}");
+        let mut best: Vec<u32> = open.into_iter().flatten().collect();
+        best.sort();
+        assert_eq!(best, vec![0, 1, 5, 10, 11], "the five best scores");
+    }
+
+    /// Without the global cap the same engine lets three through per torrent.
+    #[test]
+    fn without_a_global_cap_each_torrent_keeps_its_own_slots() {
+        let (ts, ps) = three_torrents();
+        let policy = crate::peer::extension::PeerPolicy::default();
+        policy.set_choking(true);
+        policy.set_unchoke_slots(3);
+        policy.set_max_uploads(-1);
+        choke_pass(&policy, || ts.clone(), false);
+        let open = open_haves(&ps);
+        assert_eq!(open.iter().map(Vec::len).collect::<Vec<_>>(), vec![3, 3, 3]);
+        assert_eq!(open.iter().map(Vec::len).sum::<usize>(), 9);
+    }
+
+    /// A global cap alone (unlimited per torrent) still caps the engine, and
+    /// a cap above what the slots allow changes nothing.
+    #[test]
+    fn the_global_cap_works_without_a_per_torrent_limit_and_never_adds() {
+        let (ts, ps) = three_torrents();
+        let policy = crate::peer::extension::PeerPolicy::default();
+        policy.set_choking(true);
+        policy.set_unchoke_slots(-1);
+        policy.set_max_uploads(2);
+        assert!(choke_pass(&policy, || ts.clone(), false));
+        let mut best: Vec<u32> = open_haves(&ps).into_iter().flatten().collect();
+        best.sort();
+        assert_eq!(best, vec![0, 1]);
+
+        policy.set_unchoke_slots(1);
+        policy.set_max_uploads(100);
+        choke_pass(&policy, || ts.clone(), true);
+        assert_eq!(open_haves(&ps).iter().map(Vec::len).sum::<usize>(), 3);
+    }
+
+    /// The cap and the choker switch: 0 reads as 4 like the per-torrent
+    /// slots, and turning the choker off releases every peer the cap choked.
+    #[test]
+    fn the_global_cap_reads_zero_as_four_and_off_releases_everyone() {
+        let p = crate::peer::extension::PeerPolicy::default();
+        assert_eq!(p.max_uploads(), None, "no cap unless asked");
+        p.set_max_uploads(0);
+        assert_eq!(p.max_uploads(), Some(4));
+        p.set_max_uploads(7);
+        assert_eq!(p.max_uploads(), Some(7));
+        p.set_max_uploads(-1);
+        assert_eq!(p.max_uploads(), None);
+
+        let (ts, ps) = three_torrents();
+        p.set_choking(true);
+        p.set_max_uploads(2);
+        let active = choke_pass(&p, || ts.clone(), false);
+        assert_eq!(open_haves(&ps).iter().map(Vec::len).sum::<usize>(), 2);
+        p.set_choking(false);
+        assert!(!choke_pass(&p, || ts.clone(), active));
+        assert_eq!(open_haves(&ps).iter().map(Vec::len).sum::<usize>(), 12);
     }
 
     // -----------------------------------------------------------------------

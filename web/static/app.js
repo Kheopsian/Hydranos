@@ -7782,6 +7782,7 @@ const _SETTINGS_DESC = {
     announce_ip: "Address advertised in the BEP-7 ip= announce parameter (and the BEP-15 ip field, IPv4 only). Empty = omit it and let the tracker observe the source address (correct for almost every setup).",
     max_connections: "Global cap on simultaneous peer connections for this session.",
     max_uploads_per_torrent: "Unchoke slots per seeding torrent, used only while choking is on (-1 = unlimited, 0 = 4). Applied live.",
+    max_uploads: "Cap on unchoked peers across ALL this engine's seeding torrents, on top of max_uploads_per_torrent; the best-ranked peers keep the slots. Active only with the choker (choking = true); with choking off it has no effect (-1 = no cap, 0 = 4). Applied live.",
     choking: "Run the choker: only max_uploads_per_torrent peers per seeding torrent are served, re-ranked every 10 s. Off by default, and best left off: on a large library it churns the peers and can cut total upload by an order of magnitude. Turn it on only when the uplink itself is the bottleneck. Applied live.",
     peer_timeout: "Seconds a peer may send nothing useful (keep-alives do not count) before it is dropped. 0 = 300; under 120 is raised to 120. Applied live.",
     inactivity_timeout: "Seconds before an idle peer is considered inactive.",
@@ -7822,12 +7823,12 @@ const _SETTINGS_COMMON = new Set([
     "daemon::api_host", "daemon::api_port", "daemon::api_key", "daemon::create_torrent_folder",
     "auth::username", "auth::password_hash",
     // Connection + Speed + Queueing, per engine (race & hoard)
-    "race::listen_port", "race::bind_interface", "race::enable_ipv6", "race::max_connections", "race::max_uploads_per_torrent",
+    "race::listen_port", "race::bind_interface", "race::enable_ipv6", "race::max_connections", "race::max_uploads_per_torrent", "race::max_uploads",
     "race::upload_rate_limit", "race::download_rate_limit", "race::choking",
     "race::active_downloads", "race::active_seeds", "race::active_limit", "race::queueing",
     "race::dont_count_slow_torrents", "race::slow_torrent_dl_rate_threshold", "race::slow_torrent_ul_rate_threshold", "race::slow_torrent_inactive_timer",
     "race::max_ratio", "race::max_seeding_time", "race::max_inactive_seeding_time", "race::share_limit_action",
-    "hoard::listen_port", "hoard::bind_interface", "hoard::enable_ipv6", "hoard::max_connections", "hoard::max_uploads_per_torrent",
+    "hoard::listen_port", "hoard::bind_interface", "hoard::enable_ipv6", "hoard::max_connections", "hoard::max_uploads_per_torrent", "hoard::max_uploads",
     "hoard::upload_rate_limit", "hoard::download_rate_limit", "hoard::choking",
     "hoard::active_downloads", "hoard::active_seeds", "hoard::active_limit", "hoard::queueing",
     "hoard::dont_count_slow_torrents", "hoard::slow_torrent_dl_rate_threshold", "hoard::slow_torrent_ul_rate_threshold", "hoard::slow_torrent_inactive_timer",
@@ -7866,7 +7867,7 @@ const _SETTINGS_DEFAULT = {
     "race::enable_lsd": true, "hoard::enable_lsd": false,
     "race::enable_udp_trackers": true, "hoard::enable_udp_trackers": true,
     "race::listen_port": 16171, "race::max_connections": 4000,
-    "race::max_uploads_per_torrent": 100,
+    "race::max_uploads_per_torrent": 100, "race::max_uploads": -1,
     "race::peer_timeout": 300,
     "race::inactivity_timeout": 20,
     // -1 and not 3.x's 50 / 100: shown as a default, they read as a value to
@@ -7874,7 +7875,7 @@ const _SETTINGS_DEFAULT = {
     "race::active_seeds": -1, "race::active_limit": -1, "race::active_downloads": 0,
     // What a fresh install's default.toml holds.
     "hoard::listen_port": 16172, "hoard::max_connections": 12000,
-    "hoard::max_uploads_per_torrent": -1,
+    "hoard::max_uploads_per_torrent": -1, "hoard::max_uploads": -1,
     "hoard::peer_timeout": 300,
     "hoard::inactivity_timeout": 20,
     "hoard::active_seeds": -1, "hoard::active_limit": -1, "hoard::active_downloads": 10,
@@ -7899,7 +7900,7 @@ const _LIVE_ENGINE_KEY_DEFAULTS = {
     upload_rate_limit: 0, download_rate_limit: 0, choking: false,
     // What the engine runs when the file says nothing: 0 = 4 unchoke slots,
     // 0 = a 300 s peer timeout, 0 = no download ceiling.
-    max_uploads_per_torrent: 0, peer_timeout: 0, active_downloads: 0,
+    max_uploads_per_torrent: 0, max_uploads: -1, peer_timeout: 0, active_downloads: 0,
     // The queue and the share limits, off.
     queueing: false, active_seeds: -1, active_limit: -1,
     dont_count_slow_torrents: false, slow_torrent_dl_rate_threshold: 2, slow_torrent_ul_rate_threshold: 2, slow_torrent_inactive_timer: 60,
@@ -8071,8 +8072,15 @@ async function updateSettings() {
                     const _adv = _SETTINGS_COMMON.has(path + "::" + k) ? "" : ' data-adv="1"';
                     const _def = _SETTINGS_DEFAULT[path + "::" + k];
                     const _dtxt = t(_SETTINGS_DESC[k] || "");
-                    const _descHtml = (_dtxt || _def !== undefined)
-                        ? `<span class="sr-desc">${esc(_dtxt)}${_def !== undefined ? ` <span class="sr-default">${t("default:")} ${esc(String(_def))}</span>` : ""}</span>`
+                    // A global upload cap is read only while the choker runs:
+                    // say so beside the field when it is set and the choker is off.
+                    const _chokerRow = scalars.find(([sk]) => sk === "choking");
+                    const _capIdle = k === "max_uploads" && Number(v) >= 0 && !(_chokerRow && _chokerRow[1] === true);
+                    const _idleHtml = _capIdle
+                        ? ` <span class="sr-default" style="color:var(--warn,#d98e04)">${esc(t("Set, but the choker is off: this cap has no effect until choking is turned on."))}</span>`
+                        : "";
+                    const _descHtml = (_dtxt || _def !== undefined || _capIdle)
+                        ? `<span class="sr-desc">${esc(_dtxt)}${_def !== undefined ? ` <span class="sr-default">${t("default:")} ${esc(String(_def))}</span>` : ""}${_idleHtml}</span>`
                         : "";
                     rows += `<div class="settings-row" data-search="${esc(search)}"${_adv}>
                         <div class="sr-label"><span class="sr-key">${esc(k)}</span>${_descHtml}<span class="sr-path">${esc(path)}</span></div>
@@ -8187,7 +8195,7 @@ function _readSettingField(id, orig) {
 //            peer timeout -- LIVE_SESSION_KEYS in api.rs)
 //   engine = the torrent engines must restart (the other [race]/[hoard] knobs)
 //   full   = the whole daemon restarts ([daemon], [auth], services)
-const _LIVE_ENGINE_KEYS = new Set(["upload_rate_limit", "download_rate_limit", "peer_timeout", "choking", "max_uploads_per_torrent",
+const _LIVE_ENGINE_KEYS = new Set(["upload_rate_limit", "download_rate_limit", "peer_timeout", "choking", "max_uploads_per_torrent", "max_uploads",
     "active_downloads", "queueing", "active_seeds", "active_limit",
     "dont_count_slow_torrents", "slow_torrent_dl_rate_threshold", "slow_torrent_ul_rate_threshold", "slow_torrent_inactive_timer",
     "max_ratio", "max_seeding_time", "max_inactive_seeding_time", "share_limit_action"]);

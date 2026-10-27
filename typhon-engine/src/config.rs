@@ -124,6 +124,10 @@ pub struct EngineConfig {
     /// default (4), negative = unlimited (the choker then chokes nobody).
     #[serde(default = "default_max_uploads_per_torrent")]
     pub max_uploads_per_torrent: i32,
+    /// Cap on the peers unchoked across all seeding torrents of the engine,
+    /// read only while `choking` is on. 0 = 4, negative = no cap.
+    #[serde(default = "default_max_uploads")]
+    pub max_uploads: i32,
     /// Seconds a peer may send nothing useful before it is dropped. Was read
     /// by nobody while every session used a hard-coded 300 s; see
     /// `PeerPolicy::set_idle_timeout_secs` for the floor.
@@ -283,6 +287,9 @@ fn default_max_dials_per_sec() -> f64 {
     50.0
 }
 fn default_max_uploads_per_torrent() -> i32 {
+    -1
+}
+fn default_max_uploads() -> i32 {
     -1
 }
 fn default_peer_timeout() -> u64 {

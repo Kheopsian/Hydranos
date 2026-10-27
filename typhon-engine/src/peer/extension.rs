@@ -304,6 +304,9 @@ pub struct PeerPolicy {
     /// (`max_uploads_per_torrent`). `usize::MAX` = unlimited, which is the
     /// choker off by another name.
     unchoke_slots: AtomicUsize,
+    /// Cap on the peers unchoked across ALL the engine's seeding torrents
+    /// (`max_uploads`), on top of `unchoke_slots`. `usize::MAX` = no cap.
+    max_uploads: AtomicUsize,
 }
 
 /// Unchoke slots when `max_uploads_per_torrent` is unset (or 0): the four of
@@ -339,6 +342,7 @@ impl Default for PeerPolicy {
             idle_timeout_secs: AtomicU64::new(DEFAULT_PEER_IDLE_TIMEOUT_SECS),
             choking: AtomicBool::new(false),
             unchoke_slots: AtomicUsize::new(DEFAULT_UNCHOKE_SLOTS),
+            max_uploads: AtomicUsize::new(usize::MAX),
         }
     }
 }
@@ -448,6 +452,27 @@ impl PeerPolicy {
             n => n as usize,
         };
         self.unchoke_slots.store(v, Ordering::Relaxed);
+    }
+
+    /// `max_uploads`: the global cap on unchoked peers, with the same reading
+    /// as `set_unchoke_slots` -- 0 for the default (4), negative for no cap.
+    /// A 0 that unchoked nobody would silently stop all uploading, which no
+    /// one writes on purpose; the two upload keys agree on what 0 means.
+    pub fn set_max_uploads(&self, n: i64) {
+        let v = match n {
+            0 => DEFAULT_UNCHOKE_SLOTS,
+            n if n < 0 => usize::MAX,
+            n => n as usize,
+        };
+        self.max_uploads.store(v, Ordering::Relaxed);
+    }
+
+    /// The global cap on unchoked peers, `None` = no cap.
+    pub fn max_uploads(&self) -> Option<usize> {
+        match self.max_uploads.load(Ordering::Relaxed) {
+            usize::MAX => None,
+            n => Some(n),
+        }
     }
 
     /// The slots the choker grants, `None` = unlimited (nobody is ever choked).
