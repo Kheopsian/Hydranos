@@ -1399,8 +1399,8 @@ async fn post_api_key_rotate(
 ///
 /// Authenticated by the PENDING key alone -- presenting it proves the caller
 /// received it. Written to `[daemon] api_key` and live at once; the old key is
-/// refused from the next request. Logged-in browser sessions (cookies) are not
-/// keyed on it and stay valid.
+/// refused from the next request. Logged-in browser sessions (cookies) are
+/// closed with it: a browser signs in again with the account.
 async fn post_api_key_confirm(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let presented = headers
         .get("X-Api-Key")
@@ -1423,7 +1423,10 @@ async fn post_api_key_confirm(State(state): State<AppState>, headers: HeaderMap)
         )
             .into_response();
     }
-    tracing::warn!("API key rotated: the previous key is no longer accepted");
+    // A cookie opened under the old key (and the password beside it) is as
+    // suspect as the key: whoever rotated it wanted the old holders out.
+    state.sessions.revoke_all();
+    tracing::warn!("API key rotated: the previous key and every login session are closed");
     Json(serde_json::json!({"status": "ok"})).into_response()
 }
 
@@ -29299,6 +29302,25 @@ mod network_mode_tests {
         .await;
         assert_eq!(r.status(), StatusCode::OK);
         assert_eq!(s.cfg().daemon.api_key, "a-new-key-0123456789abcdef0123456789", "a new one is written");
+    }
+
+    /// Rotating the API key closes the browser sessions too: a cookie opened
+    /// with the old credentials must not outlive the key that was rotated
+    /// because it might be known.
+    #[tokio::test]
+    async fn rotating_the_api_key_ends_the_cookie_sessions() {
+        let s = state_from("rotate-sessions", DIRECT_FILE);
+        let sid = s.state.sessions.create();
+        assert!(s.state.sessions.validate(&sid));
+
+        let pending = crate::nodes::begin_local_rotation();
+        let r = post_api_key_confirm(State(s.state.clone()), keyed(&pending)).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        assert_eq!(s.cfg().daemon.api_key, pending, "the new key is live");
+        assert!(
+            !s.state.sessions.validate(&sid),
+            "a session opened before the rotation still works"
+        );
     }
 
     #[test]
