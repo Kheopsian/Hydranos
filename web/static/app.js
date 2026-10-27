@@ -299,7 +299,7 @@ function renderPersonalisation() {
         const active = currentTheme();
         themeBox.innerHTML = THEMES.map(th => `
             <button type="button" class="theme-card${th.id === active ? " active" : ""}"
-                    data-theme-id="${esc(th.id)}" onclick="chooseTheme('${esc(th.id)}')"
+                    data-theme-id="${esc(th.id)}" onclick="chooseTheme(this.dataset.themeId)"
                     aria-pressed="${th.id === active}">
                 <span class="theme-swatch">
                     ${th.swatch.map(c => `<i style="background:${esc(c)}"></i>`).join("")}
@@ -1720,7 +1720,7 @@ function renderRaceTable() {
     } else {
         tbody.innerHTML = visible.map(t => {
             const detailSel = selectedTorrent === t.info_hash ? ' selected' : '';
-            return `<tr class="t-row clickable${detailSel}" data-hash="${t.info_hash}" data-mode="race" data-agent="${t.agent || 'local'}" onclick="handleRowClick(event,'${t.info_hash}','race')" oncontextmenu="handleRowContextMenu(event,'${t.info_hash}','race')">${renderRowCells("race-table", t)}</tr>`;
+            return `<tr class="t-row clickable${detailSel}" data-hash="${esc(t.info_hash)}" data-mode="race" data-agent="${esc(t.agent || 'local')}" onclick="handleRowClick(event,this.dataset.hash,'race')" oncontextmenu="handleRowContextMenu(event,this.dataset.hash,'race')">${renderRowCells("race-table", t)}</tr>`;
         }).join("");
     }
     _updateRowHighlights();
@@ -1898,7 +1898,7 @@ function _filePrioSelect(infoHash, f, remote) {
         return esc(t(p ? p[1] : "Normal"));
     }
     const opts = _FILE_PRIOS.map(([v, l]) => `<option value="${v}"${v === cur ? " selected" : ""}>${esc(t(l))}</option>`).join("");
-    return `<select class="tc-prio" onchange="_setFilePriority('${esc(infoHash)}', ${Number(f.index)}, this)">${opts}</select>`;
+    return `<select class="tc-prio" data-hash="${esc(infoHash)}" data-index="${Number(f.index)}" onchange="_setFilePriority(this.dataset.hash, Number(this.dataset.index), this)">${opts}</select>`;
 }
 
 async function _setFilePriority(infoHash, index, sel) {
@@ -2750,7 +2750,7 @@ async function _showTagPicker(ev) {
     const rows = known.map(t => {
         const jsT = String(t).replace(/\\/g, "\\\\").replace(/'/g, "\\'");
         const on = cur.has(t);
-        return `<div class="ctx-item" data-tag="${esch(t)}" onclick="_toggleTagSelected(this.dataset.tag, ${on ? "false" : "true"})">${on ? "✓ " : " "}${esch(t)}</div>`;
+        return `<div class="ctx-item" data-tag="${esch(t)}" data-on="${on ? "false" : "true"}" onclick="_toggleTagSelected(this.dataset.tag, this.dataset.on === 'true')">${on ? "✓ " : " "}${esch(t)}</div>`;
     }).join("");
     const label = tp(n, "Edit tags, {n} torrent", "Edit tags, {n} torrents");
     _openCtxSubmenu(
@@ -3043,7 +3043,7 @@ function renderHoardTable() {
     }
     tbody.innerHTML = visible.map(t => {
         const detailSel = selectedHoardTorrent === t.info_hash ? " selected" : "";
-        return `<tr class="t-row clickable${detailSel}" data-hash="${t.info_hash}" data-mode="hoard" data-agent="${t.agent || 'local'}" onclick="handleRowClick(event,'${t.info_hash}','hoard')" oncontextmenu="handleRowContextMenu(event,'${t.info_hash}','hoard')">${renderRowCells("hoard-table", t)}</tr>`;
+        return `<tr class="t-row clickable${detailSel}" data-hash="${esc(t.info_hash)}" data-mode="hoard" data-agent="${esc(t.agent || 'local')}" onclick="handleRowClick(event,this.dataset.hash,'hoard')" oncontextmenu="handleRowContextMenu(event,this.dataset.hash,'hoard')">${renderRowCells("hoard-table", t)}</tr>`;
     }).join("");
     _updateRowHighlights();
 }
@@ -3247,7 +3247,7 @@ function _renderHoardCounts() {
         errContainer.innerHTML = errKeys.map(k => {
             const label = t(ERR_CLASS_LABEL[k] || k);
             const hint = t(ERR_CLASS_HINT[k] || "");
-            return `<button class="chip chip-err chip-err-${esc(k)}${(errCounts[k] || 0) ? "" : " chip-orphan"}${_hoardErrInc.includes(k) ? " active" : ""}${_hoardErrExc.includes(k) ? " excluded" : ""}" data-err="${esc(k)}" onclick="setHoardErrFilter(this,'${esc(k)}')" oncontextmenu="setHoardErrFilter(this,'${esc(k)}',true);return false" title="${esc(hint)}">${esc(label)} ${_chipCount("err:" + k, errCounts[k] || 0)}</button>`;
+            return `<button class="chip chip-err chip-err-${esc(k)}${(errCounts[k] || 0) ? "" : " chip-orphan"}${_hoardErrInc.includes(k) ? " active" : ""}${_hoardErrExc.includes(k) ? " excluded" : ""}" data-err="${esc(k)}" onclick="setHoardErrFilter(this,this.dataset.err)" oncontextmenu="setHoardErrFilter(this,this.dataset.err,true);return false" title="${esc(hint)}">${esc(label)} ${_chipCount("err:" + k, errCounts[k] || 0)}</button>`;
         }).join("");
     }
 
@@ -3477,7 +3477,7 @@ async function updateNodes() {
                         ? `<span class="sev sev-green"></span><span class="sev-label">listening</span>`
                         : `<span class="sev sev-red"></span><span class="sev-label">not listening</span>`}</td>
                      <td>${e.torrents ?? 0}</td>
-                     <td>${removable ? `<button class="btn-small" onclick="removeEngine('${esc(e.id)}')">Remove</button>` : ""}</td>
+                     <td>${removable ? `<button class="btn-small" data-id="${esc(e.id)}" onclick="removeEngine(this.dataset.id)">Remove</button>` : ""}</td>
                    </tr>`;
                   }).join("");
         }
@@ -3499,7 +3499,7 @@ async function updateNodes() {
                 ? `<span class="sev sev-green"></span><span class="sev-label">online</span>`
                 : `<span class="sev sev-red"></span><span class="sev-label">${esc(h.error || "offline")}</span>`;
             const open = h.online
-                ? `<button class="btn-small" onclick="openNode('${esc(n.name)}')">Open</button>`
+                ? `<button class="btn-small" data-name="${esc(n.name)}" onclick="openNode(this.dataset.name)">Open</button>`
                 : "";
             return `<tr>
                 <td><strong>${esc(n.name)}</strong></td>
@@ -3508,7 +3508,7 @@ async function updateNodes() {
                 <td>${esc((h.engines || []).join(", ") || "-")}</td>
                 <td>${h.torrents ?? 0}</td>
                 <td>${status}</td>
-                <td>${open} <button class="btn-small" onclick="editNode('${esc(n.name)}', '${esc(n.url)}')">${t("Edit")}</button> <button class="btn-small" onclick="rotateNodeKey('${esc(n.name)}')"${h.online ? "" : " disabled"}>${t("Rotate key")}</button> <button class="btn-small" onclick="removeNode('${esc(n.name)}')">Remove</button></td>
+                <td>${open} <button class="btn-small" data-name="${esc(n.name)}" data-url="${esc(n.url)}" onclick="editNode(this.dataset.name, this.dataset.url)">${t("Edit")}</button> <button class="btn-small" data-name="${esc(n.name)}" onclick="rotateNodeKey(this.dataset.name)"${h.online ? "" : " disabled"}>${t("Rotate key")}</button> <button class="btn-small" data-name="${esc(n.name)}" onclick="removeNode(this.dataset.name)">Remove</button></td>
             </tr>`;
         }).join("");
     } catch (e) {
@@ -4454,7 +4454,6 @@ async function _showEnginePicker(ev, then) {
     if (localTargets.length) {
         items += `<div class="ctx-label">${t("This node")}</div>`;
         for (const e of localTargets) {
-            const jsEng = String(e.id).replace(/\\/g, "\\\\").replace(/\'/g, "\\\'");
             if (!allHere) {
                 // The selection lives elsewhere: bringing it here is a pull, the
                 // exact mirror of a handoff. The metainfo comes over HTTP, the
@@ -4462,24 +4461,21 @@ async function _showEnginePicker(ev, then) {
                 // differs -- easier, in fact, since the far side's address IS
                 // the node URL and needs no working out.
                 if (!fromNode) continue;
-                const jsN = String(fromNode).replace(/\\/g, "\\\\").replace(/\'/g, "\\\'");
-                const jsFE = String(fromEngine).replace(/\\/g, "\\\\").replace(/\'/g, "\\\'");
-                items += `<div class="ctx-item" onclick="_fetchFromNode(\'${jsN}\', \'${jsFE}\', \'${jsEng}\')">local-${esc(e.id)} <span class="sr-desc">(${t("bring it here")})</span></div>`;
+                items += `<div class="ctx-item" data-n="${esc(fromNode)}" data-fe="${esc(fromEngine)}" data-e="${esc(e.id)}" onclick="_fetchFromNode(this.dataset.n, this.dataset.fe, this.dataset.e)">local-${esc(e.id)} <span class="sr-desc">(${t("bring it here")})</span></div>`;
             } else if (then === "remove") {
-                items += `<div class="ctx-item" onclick="_moveToLocalEngine(\'${jsEng}\')">local-${esc(e.id)} <span class="sr-desc">(${t("here, no copy")})</span></div>`;
+                items += `<div class="ctx-item" data-e="${esc(e.id)}" onclick="_moveToLocalEngine(this.dataset.e)">local-${esc(e.id)} <span class="sr-desc">(${t("here, no copy")})</span></div>`;
             } else {
                 // Seed the same files from a second engine: its own peer_id,
                 // its own port, its own tunnel. Nothing is copied on disk --
                 // both engines are pointed at the same payload -- so what this
                 // buys is a second identity in the swarm, which is what pays
                 // when the tunnel saturates before the leechers do.
-                items += `<div class="ctx-item" onclick="_copyToLocalEngine(\'${jsEng}\')">local-${esc(e.id)} <span class="sr-desc">(${t("same files, second identity")})</span></div>`;
+                items += `<div class="ctx-item" data-e="${esc(e.id)}" onclick="_copyToLocalEngine(this.dataset.e)">local-${esc(e.id)} <span class="sr-desc">(${t("same files, second identity")})</span></div>`;
             }
         }
     }
     for (const n of nodes) {
         const h = n.health || {};
-        const jsNode = String(n.name).replace(/\\/g, "\\\\").replace(/\'/g, "\\\'");
         items += `<div class="ctx-label">${esc(n.name)}</div>`;
         if (!h.online) {
             // Named and refused rather than hidden: "why is it not in the list"
@@ -4495,16 +4491,15 @@ async function _showEnginePicker(ev, then) {
         for (const e of engines) {
             // Not the engine it already sits on.
             if (sources.has(n.name + "-" + e)) continue;
-            const jsEng = String(e).replace(/\\/g, "\\\\").replace(/\'/g, "\\\'");
             if (!allHere && n.name === fromNode) {
                 // Its own node's other engines: that node's local move, relayed.
                 // Nothing crosses the wire -- its engines share its filesystem
                 // exactly as ours do, and pulling the payload here to push it
                 // back would be absurd.
                 if (then !== "remove") continue;
-                items += `<div class="ctx-item" onclick="_moveOnNode(\'${jsNode}\', \'${jsEng}\')">${esc(n.name)}-${esc(e)} <span class="sr-desc">(${t("there, no copy")})</span></div>`;
+                items += `<div class="ctx-item" data-n="${esc(n.name)}" data-e="${esc(e)}" onclick="_moveOnNode(this.dataset.n, this.dataset.e)">${esc(n.name)}-${esc(e)} <span class="sr-desc">(${t("there, no copy")})</span></div>`;
             } else if (allHere) {
-                items += `<div class="ctx-item" onclick="_sendToEngineSelected(\'${jsNode}\', \'${jsEng}\', \'${then}\')">${esc(n.name)}-${esc(e)}</div>`;
+                items += `<div class="ctx-item" data-n="${esc(n.name)}" data-e="${esc(e)}" data-then="${esc(then)}" onclick="_sendToEngineSelected(this.dataset.n, this.dataset.e, this.dataset.then)">${esc(n.name)}-${esc(e)}</div>`;
             }
         }
     }
@@ -4701,9 +4696,7 @@ async function _showCategoryPicker(ev, move) {
     const items = cats.map(c => {
         const safeName = esc(c.name);
         const safePath = esc(c.save_path || "");
-        // category name is embedded as a JS string literal, escape quotes.
-        const jsName = String(c.name).replace(/\\/g, "\\\\").replace(/\'/g, "\\\'");
-        return `<div class="ctx-item" onclick="_changeCategorySelected(\'${jsName}\', ${move ? "true" : "false"})" title="${esc(safePath)}">${safeName}</div>`;
+        return `<div class="ctx-item" data-name="${safeName}" data-move="${move ? "true" : "false"}" onclick="_changeCategorySelected(this.dataset.name, this.dataset.move === 'true')" title="${esc(safePath)}">${safeName}</div>`;
     }).join("");
     const verb = move ? t("Move to category") : t("Set category (no move)");
     const label = verb + ": " + tp(_selCount(), "{n} torrent", "{n} torrents");
@@ -5605,7 +5598,7 @@ document.getElementById("add-torrent-form").addEventListener("submit", async (e)
                     resultEl.className = "result-msg success";
                 } else {
                     resultEl.innerHTML = t("{ok} OK, {failed} failed:", { ok: ok, failed: fail }) + "<br>" +
-                        errors.map(e => `<small>${e}</small>`).join("<br>");
+                        errors.map(e => `<small>${esc(e)}</small>`).join("<br>");
                     resultEl.className = "result-msg " + (ok > 0 ? "" : "error");
                 }
                 resultEl.style.display = "block";
@@ -5727,8 +5720,8 @@ async function updateCategories() {
                 <td class="mono" style="font-size:12px">${esc(incoPath(cat.save_path))}</td>
                 <td>${cat.graduate_to ? '\u2192 ' + esc(incoCat(cat.graduate_to)) : '<span style="color:var(--text-muted)">\u2014</span>'}</td>
                 <td>
-                    <button class="btn-small" onclick="editCategory('${cat.name}')">Edit</button>
-                    <button class="btn-small btn-danger" onclick="deleteCategory('${cat.name}')">Delete</button>
+                    <button class="btn-small" data-name="${esc(cat.name)}" onclick="editCategory(this.dataset.name)">Edit</button>
+                    <button class="btn-small btn-danger" data-name="${esc(cat.name)}" onclick="deleteCategory(this.dataset.name)">Delete</button>
                 </td>
             </tr>`).join("");
 
@@ -5747,8 +5740,8 @@ async function updateCategories() {
                     <td class="mono" style="font-size:12px;color:var(--text-muted)">no longer configured, still on ${o.torrents} torrent${o.torrents > 1 ? "s" : ""}</td>
                     <td><span style="color:var(--text-muted)">\u2014</span></td>
                     <td>
-                        <button class="btn-small" onclick="adoptCategory(${i})">${t("Adopt")}</button>
-                        <button class="btn-small btn-danger" onclick="deleteCategory('${o.name}')">Delete</button>
+                        <button class="btn-small" data-i="${Number(i)}" onclick="adoptCategory(Number(this.dataset.i))">${t("Adopt")}</button>
+                        <button class="btn-small btn-danger" data-name="${esc(o.name)}" onclick="deleteCategory(this.dataset.name)">Delete</button>
                     </td>
                 </tr>`).join("");
 
@@ -5777,7 +5770,7 @@ async function refreshCategoryOptions(cats) {
     }
     const current = sel.value;
     sel.innerHTML = '<option value="">- none -</option>' +
-        (cats || []).map(cat => `<option value="${cat.name}"${cat.name === current ? " selected" : ""}>${esc(incoCat(cat.name))}</option>`).join("");
+        (cats || []).map(cat => `<option value="${esc(cat.name)}"${cat.name === current ? " selected" : ""}>${esc(incoCat(cat.name))}</option>`).join("");
 }
 
 async function showCategoryForm(name = null) {
@@ -7107,7 +7100,7 @@ async function loadIpFilter() {
     document.getElementById("ipf-bans").innerHTML = (d.bans || []).map(b => `<tr>
         <td>${esc(b.ip)}</td><td class="sr-desc">${esc(b.reason || "")}</td>
         <td>${esc(new Date(b.added_at * 1000).toLocaleString())}</td>
-        <td><button class="btn-cancel" onclick="removeBan('${esc(b.ip)}')">${esc(t("Remove"))}</button></td></tr>`).join("")
+        <td><button class="btn-cancel" data-ip="${esc(b.ip)}" onclick="removeBan(this.dataset.ip)">${esc(t("Remove"))}</button></td></tr>`).join("")
         || `<tr><td class="sr-desc">${esc(t("No ban."))}</td></tr>`;
 }
 
@@ -7238,9 +7231,9 @@ async function updateMagnets() {
         else if (m.next_try > now) st = esc(t("waiting to retry")) + ` (${Math.ceil((m.next_try - now) / 60)} min) -- ${esc(m.error)}`;
         else st = esc(t("fetching metadata..."));
         const retry = m.state === "failed"
-            ? `<button class="btn-small" onclick="retryMagnet('${esc(m.info_hash)}')">${esc(t("Retry"))}</button>` : "";
+            ? `<button class="btn-small" data-hash="${esc(m.info_hash)}" onclick="retryMagnet(this.dataset.hash)">${esc(t("Retry"))}</button>` : "";
         return `<tr><td title="${esc(m.info_hash)}">${esc(m.name)}</td><td>${esc(m.engine)}</td><td>${st}</td>
-            <td>${retry}<button class="btn-cancel" onclick="removeMagnet('${esc(m.info_hash)}')">${esc(t("Remove"))}</button></td></tr>`;
+            <td>${retry}<button class="btn-cancel" data-hash="${esc(m.info_hash)}" onclick="removeMagnet(this.dataset.hash)">${esc(t("Remove"))}</button></td></tr>`;
     }).join("");
 }
 
@@ -7978,8 +7971,8 @@ function _settingField(id, v, k) {
     if (k === "api_key") {
         return `<div class="sr-keygen">` +
             `<input type="text" id="${id}" value="${esc(String(v))}" class="sr-input">` +
-            `<button type="button" class="btn-small" onclick="genApiKey('${id}')" title="Generate random key">\u21bb</button>` +
-            `<button type="button" class="btn-small" onclick="copyField('${id}', this)" title="Copy">\u29c9</button>` +
+            `<button type="button" class="btn-small" data-field="${esc(id)}" onclick="genApiKey(this.dataset.field)" title="Generate random key">\u21bb</button>` +
+            `<button type="button" class="btn-small" data-field="${esc(id)}" onclick="copyField(this.dataset.field, this)" title="Copy">\u29c9</button>` +
             `</div>`;
     }
     if (typeof v === "boolean") {
@@ -8087,7 +8080,7 @@ async function updateSettings() {
             if (dom.id === "race" || dom.id === "hoard") {
                 body = `<p class="sr-desc" style="margin:0 0 12px">${t("Ports, interface and proxy live in the Network tab, which writes them as one coherent set.")}</p>` + body;
             }
-            _tabsHtml += `<button type="button" class="settings-tab" data-domain="${dom.id}" onclick="showSettingsPanel('${dom.id}')"><span class="sg-title">${esc(t(dom.label))}</span> <span class="sg-count">${count}</span></button>`;
+            _tabsHtml += `<button type="button" class="settings-tab" data-domain="${esc(dom.id)}" onclick="showSettingsPanel(this.dataset.domain)"><span class="sg-title">${esc(t(dom.label))}</span> <span class="sg-count">${count}</span></button>`;
             _panelsHtml += `<div class="settings-panel" data-domain="${dom.id}"><div class="settings-group-body">${body}</div>` +
                 `<div class="settings-save-bar"><button class="btn-primary" onclick="saveSettings()">${t("Save settings")}</button></div></div>`;
         }
@@ -8462,7 +8455,7 @@ function _renderHiddenTrackers(hidden) {
             : '<span class="sr-desc">-</span>';
         return `<tr><td><strong>${esc(incoTracker(r.host))}</strong></td><td>${r.torrents}</td>`
             + `<td>${passkey}</td>`
-            + `<td><button class="btn-small" onclick="hideTracker('${esc(r.host)}',false)">${esc(t("Unhide"))}</button></td></tr>`;
+            + `<td><button class="btn-small" data-host="${esc(r.host)}" onclick="hideTracker(this.dataset.host,false)">${esc(t("Unhide"))}</button></td></tr>`;
     }).join("");
     _labelCells("trk-hidden-table");
 }
@@ -8712,8 +8705,8 @@ async function updateTrackers() {
                 amber: ["sev-amber", "unreachable"],
                 muted: ["sev-muted", "acknowledged"],
             };
-            const mute = `<button class="btn-small" onclick="muteTracker('${esc(r.host)}',${muted ? "false" : "true"})">${muted ? "Unmute" : "Mute"}</button>`;
-            const hide = `<button class="btn-small" onclick="hideTracker('${esc(r.host)}',${r.hidden ? "false" : "true"})" title="${esc(t("Still announced to. Out of this table and out of the tab badge until you show hidden trackers again"))}">${r.hidden ? t("Unhide") : t("Hide")}</button>`;
+            const mute = `<button class="btn-small" data-host="${esc(r.host)}" data-to="${muted ? "false" : "true"}" onclick="muteTracker(this.dataset.host,this.dataset.to === 'true')">${muted ? "Unmute" : "Mute"}</button>`;
+            const hide = `<button class="btn-small" data-host="${esc(r.host)}" data-to="${r.hidden ? "false" : "true"}" onclick="hideTracker(this.dataset.host,this.dataset.to === 'true')" title="${esc(t("Still announced to. Out of this table and out of the tab badge until you show hidden trackers again"))}">${r.hidden ? t("Unhide") : t("Hide")}</button>`;
             // The severity replaces the bare ok/error tag: two words saying the
             // same thing in one cell is noise. Tooltip on the whole row, so the
             // pointer aims at the wording rather than at a 9px circle.
@@ -8724,7 +8717,7 @@ async function updateTrackers() {
                 ? esc(incoTracker(r.host) + ": " + SEV[sev][1] + (counts.length ? " (" + counts.map(([c, n]) => c + " x" + n).join(", ") + ")" : ""))
                 : esc(r.last_error || "");
             const errTip = counts.some(([c]) => c === "udp_proxied") ? t(UDP_PROXIED_MSG) : (incoMsg(r.last_error) || "");
-            return `<tr title="${rowTip}"><td><strong>${esc(incoTracker(r.host))}</strong></td><td>${r.torrents}</td><td>${status}</td><td>${passkey}</td><td>${minseed}</td><td>${ipmode}</td><td class="sr-desc" style="max-width:280px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(errTip)}">${counts.length ? `<a href="#" class="trk-err-link" onclick="showTrackerErrors('${esc(r.host)}');return false">${err}</a>` : err}</td><td>${mute} ${hide} <button class="btn-small" onclick="editTracker('${esc(r.host)}','${esc(cur)}',${r.min_seed_hours})">Edit</button></td></tr>`;
+            return `<tr title="${rowTip}"><td><strong>${esc(incoTracker(r.host))}</strong></td><td>${r.torrents}</td><td>${status}</td><td>${passkey}</td><td>${minseed}</td><td>${ipmode}</td><td class="sr-desc" style="max-width:280px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(errTip)}">${counts.length ? `<a href="#" class="trk-err-link" data-host="${esc(r.host)}" onclick="showTrackerErrors(this.dataset.host);return false">${err}</a>` : err}</td><td>${mute} ${hide} <button class="btn-small" data-host="${esc(r.host)}" data-cur="${esc(cur)}" data-msh="${typeof r.min_seed_hours === "number" ? r.min_seed_hours : -1}" onclick="editTracker(this.dataset.host,this.dataset.cur,Number(this.dataset.msh))">Edit</button></td></tr>`;
         }).join("");
         updateTabBadges();
         if (_thtml === _trackersSig) return;
@@ -8775,7 +8768,7 @@ async function showTrackerErrors(host) {
             // which of them finds these torrents.
             const listClasses = [...new Set((c.samples || []).map(s => s.list_class).filter(Boolean))];
             const show = eng.engine === "hoard" && listClasses.length
-                ? `<button class="btn-small" onclick="showTrackerErrorTorrents('${esc(host)}','${esc(listClasses.join(","))}')">${esc(t("Show the torrents"))}</button>`
+                ? `<button class="btn-small" data-host="${esc(host)}" data-classes="${esc(listClasses.join(","))}" onclick="showTrackerErrorTorrents(this.dataset.host,this.dataset.classes)">${esc(t("Show the torrents"))}</button>`
                 : "";
             html += `<div class="trk-err-class"><div class="trk-err-head">${tag} <strong>${esc(c.class)}</strong> <span class="sr-desc">x${c.count}</span> ${show}</div>`;
             (c.samples || []).forEach(sm => {
@@ -9346,7 +9339,7 @@ function PEER_COLS() {
         { id: "downloaded", label: "Downloaded", sort: "downloaded", render: p => `<td>${formatBytes(p.total_download || 0)}</td>` },
         { id: "uploaded", label: "Uploaded", sort: "uploaded", render: p => `<td>${formatBytes(p.total_upload || 0)}</td>` },
         { id: "flags", label: "Flags", sort: "flags", render: p => `<td>${peerFlags(p) || "-"}</td>` },
-        { id: "ban", label: "Ban", sort: null, render: p => `<td><button class="btn-small" title="${esc(t("Ban this address: disconnected now, refused from now on"))}" onclick="banPeer('${esc(p.ip)}')">${esc(t("Ban"))}</button></td>` },
+        { id: "ban", label: "Ban", sort: null, render: p => `<td><button class="btn-small" title="${esc(t("Ban this address: disconnected now, refused from now on"))}" data-ip="${esc(p.ip)}" onclick="banPeer(this.dataset.ip)">${esc(t("Ban"))}</button></td>` },
     ];
 }
 const TABLE_COLS = {
@@ -9404,6 +9397,14 @@ const TABLE_COLS = {
         { id: "agent", label: "Location", sort: "agent", render: t => `<td>${esc(t.agent || "local")}</td>` },
     ],
 };
+// A header sorts through the function its table names, found from the header
+// itself: the attribute carries nothing but the element.
+function _sortColumn(th) {
+    for (let el = th; el; el = el.parentElement) {
+        const fn = _COL_SORTFN[el.id];
+        if (fn) { window[fn](th); return; }
+    }
+}
 const _COL_SORTFN = { "hoard-table": "sortHoard", "race-table": "sortRace", "detail-peers-table": "sortPeers", "h-detail-peers-table": "sortPeers" };
 
 // "Hardlinks" cell. 0 gets its own class: it is the one value that says
@@ -9522,9 +9523,8 @@ function renderRowCells(tableId, row) {
 function renderTableHeader(tableId, sortCol, sortAsc) {
     const thead = document.querySelector("#" + tableId + " thead");
     if (!thead) return;
-    const fn = _COL_SORTFN[tableId];
     thead.innerHTML = "<tr>" + _visibleCols(tableId).map(c => {
-        const sortable = c.sort ? ` data-col="${c.sort}" onclick="${fn}(this)"` : "";
+        const sortable = c.sort ? ` data-col="${esc(c.sort)}" onclick="_sortColumn(this)"` : "";
         const cls = (c.sort && c.sort === sortCol) ? (sortAsc ? " sort-asc" : " sort-desc") : "";
         return `<th class="col-drag${cls}" draggable="true" data-colid="${c.id}"${sortable}>${esc(t(c.label))}</th>`;
     }).join("") + "</tr>";
@@ -9576,7 +9576,7 @@ function showColumnMenu(ev, tableId) {
         cfg.order.map(id => {
             const col = byId[id]; if (!col) return "";
             const on = !hidden.has(id);
-            return `<div class="ctx-item" onclick="toggleColumn('${tableId}','${id}',this)"><span class="col-chk">${on ? "✓" : ""}</span>${esc(t(col.label))}</div>`;
+            return `<div class="ctx-item" data-table="${esc(tableId)}" data-col="${esc(id)}" onclick="toggleColumn(this.dataset.table,this.dataset.col,this)"><span class="col-chk">${on ? "✓" : ""}</span>${esc(t(col.label))}</div>`;
         }).join("") + `</div>`;
     document.body.appendChild(menu);
     menu.style.left = Math.min(ev.clientX, window.innerWidth - 240) + "px";
@@ -9977,14 +9977,14 @@ function _netEngineSelect(id, label, value, hint) {
 
 // _netOptionSelect is _netSelect for lists whose value is not its label: a
 // provider id is "proton", what the operator reads is "Proton VPN".
-function _netOptionSelect(id, label, value, options, hint, onchange) {
+function _netOptionSelect(id, label, value, options, hint, wgAgent) {
     let html = "";
     for (const o of options) {
         html += `<option value="${esc(o.value)}"${o.value === value ? " selected" : ""}>${esc(t(o.label))}</option>`;
     }
     return `<div class="settings-row">
         <div class="sr-label"><span class="sr-key">${esc(t(label))}</span>${hint ? `<span class="sr-desc">${esc(t(hint))}</span>` : ""}</div>
-        <div class="sr-field"><select class="sr-input" id="${id}"${onchange ? ` onchange="${onchange}"` : ""}>${html}</select></div>
+        <div class="sr-field"><select class="sr-input" id="${id}"${wgAgent ? ` data-agent="${esc(wgAgent)}" onchange="netWgProviderChanged(this.dataset.agent)"` : ""}>${html}</select></div>
     </div>`;
 }
 
@@ -10105,7 +10105,7 @@ function netModeRender() {
     let cards = "";
     for (const m of NET_MODES) {
         const refused = m.id === "wireguard" ? _netWgRefusal() : "";
-        cards += `<button type="button" class="net-mode-card${m.id === mode ? " active" : ""}" onclick="netModeSelect('${m.id}')"${
+        cards += `<button type="button" class="net-mode-card${m.id === mode ? " active" : ""}" data-mode="${esc(m.id)}" onclick="netModeSelect(this.dataset.mode)"${
             refused ? ` aria-disabled="true" title="${esc(t(refused))}" style="opacity:.55;cursor:not-allowed"` : ""}>
             <span class="nm-title">${esc(t(m.label))}</span>
             <span class="nm-blurb">${esc(t(refused || m.blurb))}</span>
@@ -10546,7 +10546,7 @@ async function loadJobs() {
             : `<td><div class="progress-bar"><div class="progress-fill${running ? " downloading" : ""}" style="width:${pct.toFixed(1)}%"></div></div>` +
               `<div class="progress-text">${pct.toFixed(1)}% ${j.total_bytes ? "(" + formatBytes(j.progress_bytes) + " / " + formatBytes(j.total_bytes) + ")" : ""}</div></td>`;
         const action = running
-            ? `<td><button class="btn btn-small" onclick="cancelJob('${esc(j.id)}')">${t("Cancel")}</button></td>`
+            ? `<td><button class="btn btn-small" data-id="${esc(j.id)}" onclick="cancelJob(this.dataset.id)">${t("Cancel")}</button></td>`
             : "<td></td>";
         return `<tr>` +
             `<td>${esc(_jobStateLabel(j.state))}</td>` +
@@ -10920,7 +10920,7 @@ function netWgRender() {
         fileRows += `<div class="settings-row">
             <div class="sr-label"><span class="sr-key">${esc(f.name)}</span>
             <span class="sr-desc">${f.error ? esc(f.error) : esc((f.address || "") + (f.endpoint ? " to " + f.endpoint : ""))}</span></div>
-            <div class="sr-field"><button class="btn-small btn-danger" onclick="netWgDeleteConfig('${esc(f.name)}')">${t("Remove")}</button></div>
+            <div class="sr-field"><button class="btn-small btn-danger" data-name="${esc(f.name)}" onclick="netWgDeleteConfig(this.dataset.name)">${t("Remove")}</button></div>
         </div>`;
     }
     if (!fileRows) fileRows = `<p class="sr-desc">${t("No configuration file yet. Download one from your provider and add it here.")}</p>`;
@@ -10948,7 +10948,7 @@ function netWgRender() {
                 "A .conf from your provider brings a tunnel up for this agent (one file per agent: two agents on one file share one address and one port). Direct: it leaves by the host's default interface, on purpose. Not assigned: the kill switch keeps it off the network.")}
             ${_netOptionSelect("wg-prov-" + e.id, "Provider", cur.provider, providers,
                 prov.note || "Who the configuration comes from. This is what says whether an incoming port can be asked for at all.",
-                "netWgProviderChanged('" + esc(e.id) + "')")}
+                e.id)}
             <div id="wg-manual-${esc(e.id)}" style="${manual ? "" : "display:none"}">
                 ${_netField("wg-port-" + e.id, "Port given by the provider", "number", cur.manual_port || "",
                     "This provider assigns the port on its own website, so Hydranos cannot ask for it. Type the one you were given.")}
@@ -11108,18 +11108,18 @@ async function updateWorkflows() {
                 // mean inventing a completion. Preview, in Edit, shows which
                 // downloads it would act on.
                 const runs = onEvent ? "" : `
-                        <button class="btn-small" onclick="runWorkflow('${esc(w.id)}', true)">Dry-run</button>
-                        <button class="btn-small" onclick="runWorkflow('${esc(w.id)}', false)">Run now</button>`;
+                        <button class="btn-small" data-id="${esc(w.id)}" onclick="runWorkflow(this.dataset.id, true)">Dry-run</button>
+                        <button class="btn-small" data-id="${esc(w.id)}" onclick="runWorkflow(this.dataset.id, false)">Run now</button>`;
                 return `<tr>
                     <td><input type="checkbox" ${w.enabled ? "checked" : ""}
-                        onchange="toggleWorkflow('${esc(w.id)}', this.checked)"></td>
+                        data-id="${esc(w.id)}" onchange="toggleWorkflow(this.dataset.id, this.checked)"></td>
                     <td><strong>${esc(w.name)}</strong></td>
                     <td>${w.trigger === "added" ? esc(t("when added")) : onEvent ? esc(t("on completion")) : `${esc(String(w.interval_secs))}s`}</td>
                     <td>${esc(last)}</td>
                     <td>${esc(acts)}</td>
                     <td>${runs}
-                        <button class="btn-small" onclick="editWorkflow('${esc(w.id)}')">Edit</button>
-                        <button class="btn-small" onclick="deleteWorkflow('${esc(w.id)}')">Delete</button>
+                        <button class="btn-small" data-id="${esc(w.id)}" onclick="editWorkflow(this.dataset.id)">Edit</button>
+                        <button class="btn-small" data-id="${esc(w.id)}" onclick="deleteWorkflow(this.dataset.id)">Delete</button>
                     </td>
                 </tr>`;
             }).join("");
@@ -11843,10 +11843,10 @@ function _rssRenderFeeds(feeds) {
         <td>${esc(t("{u} unread of {n}", { u: f.unread, n: f.articles }))}</td>
         <td>${esc(t("{m} min", { m: Math.round(f.refresh_secs / 60) }))}</td>
         <td>
-            <button class="btn-small" onclick="rssOpenArticles(${f.id})">${esc(t("Articles"))}</button>
-            <button class="btn-small" onclick="rssRefresh(${f.id}, this)">${esc(t("Refresh"))}</button>
-            <button class="btn-small" onclick="rssEditFeed(${f.id})">${esc(t("Edit"))}</button>
-            <button class="btn-small" onclick="rssDeleteFeed(${f.id})">${esc(t("Delete"))}</button>
+            <button class="btn-small" data-id="${Number(f.id)}" onclick="rssOpenArticles(Number(this.dataset.id))">${esc(t("Articles"))}</button>
+            <button class="btn-small" data-id="${Number(f.id)}" onclick="rssRefresh(Number(this.dataset.id), this)">${esc(t("Refresh"))}</button>
+            <button class="btn-small" data-id="${Number(f.id)}" onclick="rssEditFeed(Number(this.dataset.id))">${esc(t("Edit"))}</button>
+            <button class="btn-small" data-id="${Number(f.id)}" onclick="rssDeleteFeed(Number(this.dataset.id))">${esc(t("Delete"))}</button>
         </td>
     </tr>`).join("");
 }
@@ -11950,7 +11950,7 @@ async function rssOpenArticles(id) {
             <td>${title}</td>
             <td>${a.size > 0 ? esc(formatBytes(a.size)) : ""}</td>
             <td>${state}</td>
-            <td><button class="btn-small" ${a.torrent_url ? "" : "disabled"} onclick="rssDownload(${i}, this)">${esc(t("Download"))}</button></td>
+            <td><button class="btn-small" ${a.torrent_url ? "" : "disabled"} data-i="${Number(i)}" onclick="rssDownload(Number(this.dataset.i), this)">${esc(t("Download"))}</button></td>
         </tr>`;
     }).join("");
 }
@@ -12000,15 +12000,15 @@ function _rssRenderRules(rules) {
     const feeds = (_rssState && _rssState.feeds) || [];
     const feedName = url => { const f = feeds.find(x => x.url === url); return f ? f.path : t("(removed feed)"); };
     body.innerHTML = rules.map((r, i) => `<tr>
-        <td><input type="checkbox" ${r.enabled ? "checked" : ""} onchange="rssToggleRule(${i}, this.checked)"></td>
+        <td><input type="checkbox" ${r.enabled ? "checked" : ""} data-i="${Number(i)}" onchange="rssToggleRule(Number(this.dataset.i), this.checked)"></td>
         <td><strong>${esc(r.name)}</strong></td>
         <td>${esc(r.mustContain || "")}${r.mustNotContain ? `<div class="sr-desc">${esc(t("not: {x}", { x: r.mustNotContain }))}</div>` : ""}</td>
         <td>${esc(r.assignedCategory || t("- none -"))}</td>
         <td>${esc((r.affectedFeeds || []).map(feedName).join(", "))}</td>
         <td>${esc(r.lastMatch ? new Date(r.lastMatch).toLocaleString() : t("never"))}</td>
         <td>
-            <button class="btn-small" onclick="rssEditRule(${i})">${esc(t("Edit"))}</button>
-            <button class="btn-small" onclick="rssDeleteRule(${i})">${esc(t("Delete"))}</button>
+            <button class="btn-small" data-i="${Number(i)}" onclick="rssEditRule(Number(this.dataset.i))">${esc(t("Edit"))}</button>
+            <button class="btn-small" data-i="${Number(i)}" onclick="rssDeleteRule(Number(this.dataset.i))">${esc(t("Delete"))}</button>
         </td>
     </tr>`).join("");
 }
