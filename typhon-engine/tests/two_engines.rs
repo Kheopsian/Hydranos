@@ -461,6 +461,9 @@ async fn a_torrent_completes_from_a_webseed_with_no_peer_at_all() {
     // engine did not open, so it is opt-in.
     let mut cfg: typhon_engine::config::EngineConfig = toml::from_str("").unwrap();
     cfg.enable_webseed = true;
+    // The mirror of this test listens on loopback, an internal address a
+    // webseed is refused unless the operator allows it.
+    cfg.webseed_allow_internal = true;
     typhon_engine::webseed::start(e.mgr.clone(), &cfg);
 
     let target = e.root.join("data").join("payload.bin");
@@ -546,6 +549,8 @@ async fn a_webseed_serving_wrong_bytes_has_them_rejected() {
 
     let mut cfg: typhon_engine::config::EngineConfig = toml::from_str("").unwrap();
     cfg.enable_webseed = true;
+    // Loopback mirror: allowed explicitly, so the test reaches the fetch.
+    cfg.webseed_allow_internal = true;
     typhon_engine::webseed::start(e.mgr.clone(), &cfg);
 
     tokio::time::sleep(Duration::from_secs(3)).await;
@@ -582,6 +587,8 @@ async fn a_dead_webseed_url_leaves_the_torrent_alone() {
 
     let mut cfg: typhon_engine::config::EngineConfig = toml::from_str("").unwrap();
     cfg.enable_webseed = true;
+    // Loopback mirror: allowed explicitly, so the test reaches the fetch.
+    cfg.webseed_allow_internal = true;
     typhon_engine::webseed::start(e.mgr.clone(), &cfg);
 
     tokio::time::sleep(Duration::from_secs(2)).await;
