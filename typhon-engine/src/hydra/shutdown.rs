@@ -58,10 +58,9 @@ pub fn exit_for_restart() -> ! {
     #[cfg(windows)]
     {
         if let Ok(exe) = std::env::current_exe() {
-            match std::process::Command::new(exe)
-                .args(std::env::args_os().skip(1))
-                .spawn()
-            {
+            let mut cmd = std::process::Command::new(exe);
+            cmd.args(std::env::args_os().skip(1));
+            match spawn_successor(cmd) {
                 Ok(_) => tracing::info!("restart: successor started"),
                 Err(e) => tracing::error!("restart: cannot start the successor: {e}"),
             }
@@ -69,6 +68,31 @@ pub fn exit_for_restart() -> ! {
     }
     tracing::info!("restart: exiting with code {RESTART_EXIT_CODE} for the supervisor");
     std::process::exit(RESTART_EXIT_CODE)
+}
+
+/// Start the successor outside the job object this process may run in.
+///
+/// A launcher that puts the app in a job with KILL_ON_JOB_CLOSE (an OpenSSH
+/// session does) kills every process of the job when the old process exits:
+/// a successor that stayed in the job died with it. CREATE_BREAKAWAY_FROM_JOB
+/// starts it outside. When the job forbids breaking away (the creation is
+/// refused with ERROR_ACCESS_DENIED), start it the plain way: it may not
+/// survive, but a restart that cannot be done any better is still tried.
+#[cfg(windows)]
+fn spawn_successor(mut cmd: std::process::Command) -> std::io::Result<std::process::Child> {
+    use std::os::windows::process::CommandExt;
+    use windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED;
+    use windows_sys::Win32::System::Threading::CREATE_BREAKAWAY_FROM_JOB;
+    match cmd.creation_flags(CREATE_BREAKAWAY_FROM_JOB).spawn() {
+        Err(e) if e.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) => {
+            tracing::warn!(
+                "restart: the job this process runs in forbids breaking away; \
+                 the successor starts inside it and may end with it"
+            );
+            cmd.creation_flags(0).spawn()
+        }
+        other => other,
+    }
 }
 
 /// The name the updater signals to ask for a clean stop. Shared with
@@ -115,5 +139,60 @@ mod tests {
     #[test]
     fn the_restart_code_is_a_failure_to_systemd() {
         assert_ne!(RESTART_EXIT_CODE, 0);
+    }
+}
+
+/// Windows only: a successor started from inside a job that kills its
+/// processes on close must not be in that job.
+#[cfg(all(test, windows))]
+mod job_tests {
+    use super::spawn_successor;
+    use std::process::Command;
+    use windows_sys::Win32::Foundation::{BOOL, HANDLE};
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, IsProcessInJob,
+        JobObjectExtendedLimitInformation, SetInformationJobObject,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_BREAKAWAY_OK,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+
+    #[test]
+    fn a_restart_from_inside_a_job_starts_the_successor_outside_it() {
+        unsafe {
+            let job: HANDLE = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            assert!(!job.is_null(), "CreateJobObjectW failed");
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            info.BasicLimitInformation.LimitFlags =
+                JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK;
+            let set = SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                &info as *const _ as *const _,
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            );
+            assert!(set != 0, "SetInformationJobObject failed");
+            // The job handle is never closed: closing it would kill this test.
+            let assigned = AssignProcessToJobObject(job, GetCurrentProcess());
+            assert!(
+                assigned != 0,
+                "this process cannot be put in a job: {}",
+                std::io::Error::last_os_error()
+            );
+
+            let mut cmd = Command::new("cmd");
+            cmd.args(["/c", "ping -n 3 127.0.0.1 >nul"]);
+            let mut child = spawn_successor(cmd).expect("the successor starts");
+            let mut inside: BOOL = 0;
+            let ok = IsProcessInJob(
+                std::os::windows::io::AsRawHandle::as_raw_handle(&child) as HANDLE,
+                job,
+                &mut inside,
+            );
+            let _ = child.kill();
+            let _ = child.wait();
+            assert!(ok != 0, "IsProcessInJob failed");
+            assert_eq!(inside, 0, "the successor stayed in the job of its parent");
+        }
     }
 }
