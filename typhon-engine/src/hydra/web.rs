@@ -229,6 +229,40 @@ mod tests {
         );
     }
 
+    /// The page builds rows out of text the swarm and the lists supply
+    /// (tracker hosts, node names, categories). `esc()` writes HTML entities,
+    /// which the browser decodes BEFORE it runs an event attribute, so a value
+    /// interpolated into `onclick="f('${esc(x)}')"` is not a string literal any
+    /// more. A handler attribute therefore carries no interpolation at all: the
+    /// value goes in an escaped `data-*` attribute and the handler reads it
+    /// from `this.dataset`.
+    ///
+    /// The scan: after each `on<event>="`, the first of `"` or `${` decides. A
+    /// `${` first means an expression sits inside the handler.
+    #[test]
+    fn no_event_attribute_interpolates_a_value() {
+        let (js, _) = lookup("app.js").expect("app.js");
+        let js = String::from_utf8_lossy(&js);
+        let start = regex::Regex::new(r#"\bon[a-z]+="|\bon[a-z]+=\\?'"#).unwrap();
+        let mut bad = Vec::new();
+        for m in start.find_iter(&js) {
+            let rest = &js[m.end()..];
+            let quote = if m.as_str().ends_with('"') { '"' } else { '\'' };
+            let q = rest.find(quote).unwrap_or(rest.len());
+            let d = rest.find("${").unwrap_or(rest.len());
+            if d < q {
+                let line = js[..m.start()].matches('\n').count() + 1;
+                let shown: String = js[m.start()..].chars().take(m.len() + d + 20).collect();
+                bad.push(format!("line {line}: {shown}"));
+            }
+        }
+        assert!(
+            bad.is_empty(),
+            "event attributes interpolate a value:\n{}",
+            bad.join("\n")
+        );
+    }
+
     #[test]
     fn every_asset_the_page_needs_is_present() {
         for name in ["app.js", "i18n.js", "style.css"] {
