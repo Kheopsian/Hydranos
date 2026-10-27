@@ -957,10 +957,7 @@ fn build_client_hosts(
     if !cfg.webseed_allow_internal
         && crate::tracker::http::effective_proxy(&cfg.http_proxy()).is_none()
     {
-        b = b.dns_resolver(crate::egress::public_only_resolver(
-            &cfg.bind_device,
-            hosts,
-        ));
+        b = b.dns_resolver(crate::egress::public_only_resolver(&cfg.bind_device, hosts));
     } else {
         for (name, ip) in hosts {
             b = b.resolve(name, std::net::SocketAddr::new(*ip, 0));
@@ -1109,7 +1106,11 @@ mod tests {
         .expect("client");
         let out = fetch_range(&client, &format!("http://mirror.test:{port}/x"), 0, 3, 4).await;
         assert!(out.is_err(), "refused: {out:?}");
-        assert_eq!(hits.load(Ordering::Relaxed), 0, "the mirror was never asked");
+        assert_eq!(
+            hits.load(Ordering::Relaxed),
+            0,
+            "the mirror was never asked"
+        );
     }
 
     /// With `webseed_allow_internal` the same name is fetched from.

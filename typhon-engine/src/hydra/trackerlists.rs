@@ -201,10 +201,20 @@ mod tests {
         let hosts = [("lists.example", PUBLIC), ("rebind.example", INNER)];
         for target in ["127.0.0.2", "rebind.example"] {
             let (inner, hit) = serve_raw("127.0.0.2", ok_reply(LIST));
-            let (outer, _) = serve_raw("127.0.0.1", redirect_to(&format!("http://{target}:{inner}/l")));
-            let r = fetch_via(&format!("http://lists.example:{outer}/best.txt"), &hosts, only_inner);
+            let (outer, _) = serve_raw(
+                "127.0.0.1",
+                redirect_to(&format!("http://{target}:{inner}/l")),
+            );
+            let r = fetch_via(
+                &format!("http://lists.example:{outer}/best.txt"),
+                &hosts,
+                only_inner,
+            );
             assert!(r.is_err(), "{target}: {r:?}");
-            assert!(!hit.load(Ordering::SeqCst), "{target}: the internal address was asked");
+            assert!(
+                !hit.load(Ordering::SeqCst),
+                "{target}: the internal address was asked"
+            );
         }
     }
 
@@ -212,14 +222,25 @@ mod tests {
     /// another public host, are fetched as before.
     #[test]
     fn a_list_that_starts_internal_or_stays_public_is_fetched() {
-        let hosts = [("svc.example", INNER), ("lists.example", PUBLIC), ("mirror.example", PUBLIC)];
+        let hosts = [
+            ("svc.example", INNER),
+            ("lists.example", PUBLIC),
+            ("mirror.example", PUBLIC),
+        ];
         let (port, _) = serve_raw("127.0.0.2", ok_reply(LIST));
         let r = fetch_via(&format!("http://svc.example:{port}/l"), &hosts, only_inner);
         assert_eq!(r.unwrap(), vec!["udp://tracker.example:1337/announce"]);
 
         let (inner, _) = serve_raw("127.0.0.1", ok_reply(LIST));
-        let (outer, _) = serve_raw("127.0.0.1", redirect_to(&format!("http://mirror.example:{inner}/l")));
-        let r = fetch_via(&format!("http://lists.example:{outer}/l"), &hosts, only_inner);
+        let (outer, _) = serve_raw(
+            "127.0.0.1",
+            redirect_to(&format!("http://mirror.example:{inner}/l")),
+        );
+        let r = fetch_via(
+            &format!("http://lists.example:{outer}/l"),
+            &hosts,
+            only_inner,
+        );
         assert_eq!(r.unwrap(), vec!["udp://tracker.example:1337/announce"]);
     }
 

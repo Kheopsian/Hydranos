@@ -616,7 +616,7 @@ fn new_job(action: &str, total: usize) -> Shared {
     let mut jobs = JOBS.lock().unwrap_or_else(|p| p.into_inner());
     jobs.retain(|_, j| {
         let j = j.lock().unwrap_or_else(|p| p.into_inner());
-        !j.ended.is_some_and(|e| e.elapsed() > JOB_TTL)
+        j.ended.is_none_or(|e| e.elapsed() <= JOB_TTL)
     });
     jobs.insert(id, job.clone());
     job

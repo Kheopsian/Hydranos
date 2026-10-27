@@ -883,7 +883,11 @@ mod tests {
         dl.on_bitfield(&[0xFF, 0xFF]);
         dl.on_have_all();
         dl.on_have_all();
-        assert_eq!(dl.peer_bitfield, vec![0b1010_1010, 0x00], "the first stands");
+        assert_eq!(
+            dl.peer_bitfield,
+            vec![0b1010_1010, 0x00],
+            "the first stands"
+        );
         assert_eq!(copies_seen(&dl), 4, "four pieces, one copy each");
         dl.on_disconnect();
         assert_eq!(
@@ -1055,7 +1059,10 @@ mod tests {
         assert!(!dl.should_be_interested());
         let mut dl = state(downloading(16, 16384));
         dl.on_have_all();
-        assert!(dl.should_be_interested(), "a peer with everything is wanted");
+        assert!(
+            dl.should_be_interested(),
+            "a peer with everything is wanted"
+        );
     }
 
     // -----------------------------------------------------------------------
