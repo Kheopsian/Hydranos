@@ -3124,6 +3124,9 @@ impl TorrentManager {
             Some(p) => p.clone(),
             None => return,
         };
+        // Read the files as they are now: a handle cached before the recheck
+        // may be on a file the user has since replaced under the same name.
+        crate::disk::evict_fds(&data_files(&t));
         // Recheck is authoritative, but it must not publish a verdict it does
         // not have yet. Clearing the live picker up front left the torrent at
         // 0% for the entire scan, and the five-minute state sweep -- whose
@@ -3838,6 +3841,73 @@ mod lifecycle_tests {
         assert!(
             t.picker.get().unwrap().lock().unwrap().has_piece(0),
             "what was known is kept: an unreadable disk says nothing about the pieces"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A recheck reads the files as they are now. A file put back by the user
+    /// (deleted then written, or moved in: a new file under the same name) was
+    /// read through the handle opened on the old one, so the recheck kept
+    /// finding the piece wrong; removing and re-adding the torrent was the only
+    /// way to see the new file.
+    #[tokio::test]
+    async fn a_recheck_reads_a_file_replaced_since_the_last_one() {
+        let (mgr, root) = manager("recheckreplaced");
+        let video: Vec<u8> = (0..16384u32).map(|i| (i % 241) as u8).collect();
+        let nfo: Vec<u8> = (0..100u32).map(|i| (i % 7) as u8 + b'a').collect();
+        let mut info = Vec::new();
+        info.extend_from_slice(
+            b"d5:filesld6:lengthi16384e4:pathl5:a.mkveed6:lengthi100e4:pathl5:a.nfoee\
+              e4:name3:rel12:piece lengthi16384e6:pieces40:",
+        );
+        for piece in [&video[..], &nfo[..]] {
+            let mut hasher = Sha1::new();
+            hasher.update(piece);
+            info.extend_from_slice(&hasher.finalize());
+        }
+        info.push(b'e');
+        let mut bytes = b"d4:info".to_vec();
+        bytes.extend_from_slice(&info);
+        bytes.push(b'e');
+        let blob = bytes.clone();
+        mgr.set_blob_source(Arc::new(move |_: &str| Some(blob.clone())));
+        let dir = root.join("data").join("rel");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.mkv"), &video).unwrap();
+        // The wrong .nfo first: same size, other bytes.
+        std::fs::write(dir.join("a.nfo"), vec![b'x'; 100]).unwrap();
+        let save = root.join("data").to_string_lossy().into_owned();
+        let ih = mgr
+            .add_torrent_bytes(&bytes, &save, false, false)
+            .expect("added")
+            .0;
+        let t = mgr.get(&ih).unwrap();
+        let recheck = |t: Arc<TorrentState>| {
+            let mgr = mgr.clone();
+            async move {
+                mgr.recheck(&ih).expect("recheck starts");
+                for _ in 0..300 {
+                    if !t.rechecking.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                assert!(!t.rechecking.load(Ordering::SeqCst), "the recheck ends");
+            }
+        };
+        recheck(t.clone()).await;
+        let has = |p: u32| t.picker.get().unwrap().lock().unwrap().has_piece(p);
+        assert!(has(0) && !has(1), "the wrong .nfo is found wrong");
+
+        // The right one put in its place: a new file, not the old one rewritten.
+        std::fs::remove_file(dir.join("a.nfo")).unwrap();
+        std::fs::write(dir.join("a.nfo"), &nfo).unwrap();
+        recheck(t.clone()).await;
+        assert!(has(1), "the recheck sees the .nfo now on disk");
+        assert_eq!(
+            t.status.load(Ordering::Relaxed),
+            TorrentStatus::Seeding as u8,
+            "and the torrent is complete"
         );
         std::fs::remove_dir_all(&root).ok();
     }

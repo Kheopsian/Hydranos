@@ -66,6 +66,9 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 - Restarting from the interface on Windows works when Hydranos was started inside a
   job that ends its processes on close (an SSH session, some launchers): the new
   process is no longer ended together with the old one.
+- A recheck reads a file put back on disk since it was last read (a missing
+  `.nfo` added by hand, for instance): the torrent no longer stays below 100 %
+  until it is removed and added again.
 
 ## v4.6.4 -- the workflow condition "time since a tag was set" lets you pick its tag again
 
