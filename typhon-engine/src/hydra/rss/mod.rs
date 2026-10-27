@@ -278,8 +278,34 @@ pub fn feed_engine(state: &AppState, feed_url: &str, rules: &[Rule]) -> String {
 /// GET `url` by `route`, at most `max` bytes, with the client's User-Agent.
 /// Errors name the URL masked, never whole.
 pub async fn fetch(route: &Route, url: &str, max: usize) -> Result<Vec<u8>, String> {
+    fetch_via(
+        route,
+        url,
+        max,
+        &[],
+        typhon_engine::webseed::is_internal_ip,
+    )
+    .await
+}
+
+/// `fetch` with `hosts` names resolved to fixed addresses instead of by DNS,
+/// and `is_internal` deciding which addresses count as internal (tests give a
+/// name a local address and say which local addresses are the internal ones).
+pub(crate) async fn fetch_via(
+    route: &Route,
+    url: &str,
+    max: usize,
+    hosts: &[(&str, std::net::IpAddr)],
+    is_internal: fn(std::net::IpAddr) -> bool,
+) -> Result<Vec<u8>, String> {
     let shown = mask_url(url);
-    let client = typhon_engine::egress::client_for(route)?;
+    // The URL is the operator's, so it may name an internal host (a Prowlarr
+    // by its Docker name); what it answers is not: a fetch that began on a
+    // public host is not sent on to an internal address, however the name is
+    // written (`egress::client_resolving`, as for the MCP's torrent URLs).
+    // The route (proxy, bound interface) is the one given.
+    let guard = std::sync::Arc::new(typhon_engine::webseed::StartGuard::for_url(url));
+    let client = typhon_engine::egress::client_resolving(route, hosts, guard, is_internal)?;
     let mut resp = client
         .get(url)
         .timeout(FETCH_TIMEOUT)

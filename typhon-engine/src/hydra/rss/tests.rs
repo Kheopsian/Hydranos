@@ -404,6 +404,123 @@ async fn a_feed_over_the_size_cap_is_refused() {
     );
 }
 
+/// A server on `ip` that answers every request with `reply`, noting it was asked.
+async fn serve_raw(ip: &str, reply: Vec<u8>) -> (u16, Arc<std::sync::atomic::AtomicBool>) {
+    let l = tokio::net::TcpListener::bind((ip, 0)).await.unwrap();
+    let port = l.local_addr().unwrap().port();
+    let hit = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let seen = hit.clone();
+    tokio::spawn(async move {
+        while let Ok((mut sock, _)) = l.accept().await {
+            seen.store(true, std::sync::atomic::Ordering::SeqCst);
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 1024];
+            while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                match sock.read(&mut chunk).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                }
+            }
+            let _ = sock.write_all(&reply).await;
+            let _ = sock.shutdown().await;
+        }
+    });
+    (port, hit)
+}
+
+fn ok_reply(body: &[u8]) -> Vec<u8> {
+    let mut r = format!(
+        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    )
+    .into_bytes();
+    r.extend_from_slice(body);
+    r
+}
+
+fn redirect_to(url: &str) -> Vec<u8> {
+    format!("HTTP/1.1 302 Found\r\nLocation: {url}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+        .into_bytes()
+}
+
+/// `PUBLIC` (127.0.0.1) plays an address a test can connect to and the guard
+/// treats as public; `INNER` (127.0.0.2) is the internal one.
+const PUBLIC: std::net::IpAddr = std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1));
+const INNER: std::net::IpAddr = std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 2));
+
+fn only_inner(ip: std::net::IpAddr) -> bool {
+    ip == INNER
+}
+
+/// A feed on a public host cannot send the fetch on to an internal address,
+/// written out or reached by a name.
+#[tokio::test]
+async fn a_feed_redirect_from_a_public_host_to_an_internal_one_is_not_followed() {
+    let hosts = [("public.example", PUBLIC), ("rebind.example", INNER)];
+    for target in ["127.0.0.2", "rebind.example"] {
+        let (inner, hit) = serve_raw("127.0.0.2", ok_reply(b"<rss/>")).await;
+        let (outer, _) =
+            serve_raw("127.0.0.1", redirect_to(&format!("http://{target}:{inner}/f"))).await;
+        let url = format!("http://public.example:{outer}/feed");
+        let r = fetch_via(&Route::default(), &url, 1024, &hosts, only_inner).await;
+        assert!(r.is_err(), "{target}: {r:?}");
+        assert!(
+            !hit.load(std::sync::atomic::Ordering::SeqCst),
+            "{target}: the internal address was asked"
+        );
+    }
+}
+
+/// Feeds the operator points at an internal host (a Prowlarr by its Docker
+/// name) work as before, redirects included; a public one may redirect to a
+/// public one.
+#[tokio::test]
+async fn a_feed_that_starts_internal_or_stays_public_is_fetched() {
+    let hosts = [
+        ("svc.example", INNER),
+        ("public.example", PUBLIC),
+        ("mirror.example", PUBLIC),
+    ];
+    let (port, _) = serve_raw("127.0.0.2", ok_reply(b"<rss/>")).await;
+    let r = fetch_via(
+        &Route::default(),
+        &format!("http://svc.example:{port}/feed"),
+        1024,
+        &hosts,
+        only_inner,
+    )
+    .await;
+    assert_eq!(r.unwrap(), b"<rss/>");
+
+    let (inner, _) = serve_raw("127.0.0.2", ok_reply(b"<rss/>")).await;
+    let (outer, _) = serve_raw("127.0.0.2", redirect_to(&format!("http://127.0.0.2:{inner}/f"))).await;
+    let r = fetch_via(
+        &Route::default(),
+        &format!("http://svc.example:{outer}/feed"),
+        1024,
+        &hosts,
+        only_inner,
+    )
+    .await;
+    assert_eq!(r.unwrap(), b"<rss/>", "internal start, internal redirect");
+
+    let (inner, _) = serve_raw("127.0.0.1", ok_reply(b"<rss/>")).await;
+    let (outer, _) = serve_raw(
+        "127.0.0.1",
+        redirect_to(&format!("http://mirror.example:{inner}/f")),
+    )
+    .await;
+    let r = fetch_via(
+        &Route::default(),
+        &format!("http://public.example:{outer}/feed"),
+        1024,
+        &hosts,
+        only_inner,
+    )
+    .await;
+    assert_eq!(r.unwrap(), b"<rss/>", "public start, public redirect");
+}
+
 // ---------------------------------------------------------------------------
 // The qBittorrent shim, through the router
 // ---------------------------------------------------------------------------
