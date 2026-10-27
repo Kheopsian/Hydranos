@@ -52,6 +52,9 @@ pub struct DownloadState {
     torrent: Arc<TorrentState>,
     disk: Arc<DiskManager>,
     peer_bitfield: Vec<u8>,
+    /// The peer has said what it holds up front (Bitfield, Have All or Have
+    /// None); a later one of the three is ignored.
+    announced: bool,
     pub am_interested: bool,
     pub peer_choking: bool,
     /// This session's identity on the shared picker. Releases are by owner, so
@@ -94,6 +97,7 @@ impl DownloadState {
             torrent,
             disk,
             peer_bitfield: Vec::new(),
+            announced: false,
             am_interested: false,
             peer_choking: true,
             owner: piece_picker::new_owner(),
@@ -127,6 +131,10 @@ impl DownloadState {
 
     /// Process incoming Bitfield from peer. Returns whether it was taken.
     ///
+    /// Only the first of Bitfield / Have All / Have None per connection counts
+    /// (BEP 3, BEP 6): a repeat is ignored rather than the peer cut, since
+    /// cutting risks a real client for no gain and ignoring costs nothing.
+    ///
     /// A bitfield is `ceil(num_pieces / 8)` bytes (BEP 3). One of any other
     /// length is not a statement about this torrent: it is ignored, without
     /// cutting the peer, and not kept (a peer could otherwise park 256 KiB per
@@ -139,9 +147,10 @@ impl DownloadState {
         if num_pieces > 0 && !data.is_empty() && data.len() != num_pieces.div_ceil(8) {
             return false;
         }
-        if data.is_empty() {
+        if data.is_empty() || self.announced {
             return false;
         }
+        self.announced = true;
         let mut bf = data.to_vec();
         let trailing = num_pieces % 8;
         if trailing > 0 && num_pieces > 0 {
@@ -167,8 +176,21 @@ impl DownloadState {
         self.peer_bitfield = bitfield;
     }
 
-    /// Process incoming HaveAll from peer.
-    pub fn on_have_all(&mut self) {
+    /// Process incoming HaveNone from peer. Returns whether it was taken.
+    pub fn on_have_none(&mut self) -> bool {
+        if self.announced {
+            return false;
+        }
+        self.announced = true;
+        true
+    }
+
+    /// Process incoming HaveAll from peer. Returns whether it was taken.
+    pub fn on_have_all(&mut self) -> bool {
+        if self.announced {
+            return false;
+        }
+        self.announced = true;
         let num_pieces = self.torrent.meta.num_pieces() as usize;
         let byte_len = num_pieces.div_ceil(8);
         let mut all = vec![0xFF; byte_len];
@@ -178,6 +200,7 @@ impl DownloadState {
             all[byte_len - 1] = 0xFF << (8 - trailing);
         }
         self.replace_bitfield(all);
+        true
     }
 
     /// Process incoming Have from peer. Returns true iff the piece bit was
@@ -857,20 +880,52 @@ mod tests {
     fn a_peer_that_repeats_its_bitfield_still_counts_once() {
         let mut dl = state(downloading(16, 16384));
         dl.on_bitfield(&[0b1010_1010, 0x00]);
-        dl.on_bitfield(&[0b1010_1010, 0x00]);
+        dl.on_bitfield(&[0xFF, 0xFF]);
         dl.on_have_all();
         dl.on_have_all();
-        assert_eq!(
-            copies_seen(&dl),
-            16,
-            "one copy of each of the sixteen pieces"
-        );
+        assert_eq!(dl.peer_bitfield, vec![0b1010_1010, 0x00], "the first stands");
+        assert_eq!(copies_seen(&dl), 4, "four pieces, one copy each");
         dl.on_disconnect();
         assert_eq!(
             copies_seen(&dl),
             0,
             "gone with the peer, nothing left behind"
         );
+    }
+
+    /// Whichever of Bitfield / Have All / Have None comes first is the peer's
+    /// statement (BEP 3 / BEP 6); a later one of any of the three changes
+    /// nothing, instead of costing two passes over every piece under the
+    /// picker's lock each time.
+    #[test]
+    fn only_the_first_of_bitfield_have_all_and_have_none_counts() {
+        let mut dl = state(downloading(16, 16384));
+        dl.on_have_all();
+        dl.on_bitfield(&[0x00, 0x00]);
+        dl.on_have_none();
+        assert_eq!(copies_seen(&dl), 16, "Have All stands");
+
+        let mut dl = state(downloading(16, 16384));
+        dl.on_have_none();
+        dl.on_have_all();
+        dl.on_bitfield(&[0xFF, 0xFF]);
+        assert_eq!(copies_seen(&dl), 0, "Have None stands");
+        assert!(dl.peer_bitfield.is_empty());
+
+        let mut dl = state(downloading(16, 16384));
+        dl.on_bitfield(&[0b1000_0000, 0x00]);
+        dl.on_have_all();
+        assert_eq!(copies_seen(&dl), 1, "the Bitfield stands");
+    }
+
+    /// A Have is not an announcement: some clients send one before their
+    /// Bitfield, which is then still taken.
+    #[test]
+    fn a_bitfield_still_counts_after_haves() {
+        let mut dl = state(downloading(16, 16384));
+        assert!(dl.on_have(9));
+        dl.on_bitfield(&[0b1000_0000, 0x00]);
+        assert_eq!(copies_seen(&dl), 1);
     }
 
     /// A Bitfield that drops a piece the peer announced by Have takes that copy
@@ -998,8 +1053,9 @@ mod tests {
         let mut dl = state(downloading(16, 16384));
         dl.on_bitfield(&[0x00, 0x00]);
         assert!(!dl.should_be_interested());
+        let mut dl = state(downloading(16, 16384));
         dl.on_have_all();
-        assert!(dl.should_be_interested(), "now it has what we need");
+        assert!(dl.should_be_interested(), "a peer with everything is wanted");
     }
 
     // -----------------------------------------------------------------------

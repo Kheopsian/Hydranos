@@ -770,10 +770,15 @@ pub async fn run(
                                     break;
                                 }
                             }
+                            Message::HaveNone => {
+                                dl.on_have_none();
+                            }
                             Message::HaveAll => {
+                                if !dl.on_have_all() {
+                                    continue;
+                                }
                                 stats.num_pieces_have.store(num_pieces, Ordering::Relaxed);
                                 stats.is_seed.store(true, Ordering::Relaxed);
-                                dl.on_have_all();
                                 if we_are_complete(&torrent) {
                                     crate::peer::SEED_SEED_DROPPED
                                         .fetch_add(1, Ordering::Relaxed);
