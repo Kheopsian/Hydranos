@@ -153,7 +153,8 @@ fn parse_since(v: &str, now: i64) -> Option<i64> {
     if let Ok(n) = v.parse::<i64>() {
         return Some(n);
     }
-    let (num, unit) = v.split_at(v.len().checked_sub(1)?);
+    let last = v.chars().next_back()?;
+    let (num, unit) = v.split_at(v.len() - last.len_utf8());
     let n: i64 = num.parse().ok().filter(|n| *n >= 0)?;
     let secs = match unit {
         "s" => n,
@@ -350,6 +351,15 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `since` comes from a query string: a last character that is more than
+    /// one byte is a plain refusal, not a panic.
+    #[test]
+    fn a_since_ending_in_a_multibyte_character_is_refused_not_a_panic() {
+        assert_eq!(parse_since("5\u{e9}", 1_000), None);
+        assert_eq!(parse_since("\u{e9}", 1_000), None);
+        assert_eq!(parse_since("5m", 1_000), Some(700));
+    }
 
     fn line(level: &str, module: &str, msg: &str, unix: i64) -> Entry {
         Entry {
