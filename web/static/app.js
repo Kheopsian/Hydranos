@@ -2361,7 +2361,7 @@ async function refreshDetail() {
         document.getElementById("detail-path").textContent = incoPath(d.save_path);
         _renderIsolated("", d);
         document.getElementById("detail-hash").textContent = d.info_hash;
-        renderPieceMap(d.pieces_have, d.pieces_avail, "detail-pieces-canvas", "detail-pieces-info");
+        renderPieceMap(d.pieces_have, d.pieces_avail, "detail-pieces-canvas", "detail-pieces-info", "detail-pieces-card", d.pieces_total);
         document.getElementById("detail-dl-speed").textContent = formatSpeed(d.download_rate);
         document.getElementById("detail-ul-speed").textContent = formatSpeed(d.upload_rate);
         document.getElementById("detail-limits").textContent = _limitsText(d);
@@ -5324,7 +5324,7 @@ async function refreshHoardDetail() {
         document.getElementById("h-detail-path").textContent = incoPath(d.save_path);
         _renderIsolated("h-", d);
         document.getElementById("h-detail-hash").textContent = d.info_hash;
-        renderPieceMap(d.pieces_have, d.pieces_avail, "h-detail-pieces-canvas", "h-detail-pieces-info", "h-detail-pieces-card");
+        renderPieceMap(d.pieces_have, d.pieces_avail, "h-detail-pieces-canvas", "h-detail-pieces-info", "h-detail-pieces-card", d.pieces_total);
         document.getElementById("h-detail-dl-speed").textContent = formatSpeed(d.download_rate);
         document.getElementById("h-detail-ul-speed").textContent = formatSpeed(d.upload_rate);
         document.getElementById("h-detail-limits").textContent = _limitsText(d);
@@ -9306,10 +9306,37 @@ else document.addEventListener("DOMContentLoaded", initTorrentColumnResizers);
 
 // ─── Piece availability map (restored: dropped by the 2026-07-10 overview
 // refactor, which broke the torrent detail panel with a ReferenceError). ───
-function renderPieceMap(piecesHave, piecesAvail, canvasId, infoId, cardId) {
+function renderPieceMap(piecesHave, piecesAvail, canvasId, infoId, cardId, piecesTotal) {
     const card = document.getElementById(cardId || "detail-pieces-card");
     const canvas = document.getElementById(canvasId);
     const info = document.getElementById(infoId);
+
+    // Since 4.6.1 the detail carries a COUNT of held pieces, not a bitfield.
+    // Read as an array it threw on `.filter`, the panel's catch swallowed it,
+    // and every field drawn after the map (speeds, peers, sizes) stayed empty
+    // for any torrent holding a piece. A count draws one bar, have vs missing.
+    if (typeof piecesHave === "number") {
+        const total = Number(piecesTotal) || 0;
+        if (total <= 0) {
+            if (card) card.style.display = "none";
+            return;
+        }
+        if (card) card.style.display = "";
+        const have = Math.min(piecesHave, total);
+        if (info) info.textContent = t("({have}/{total}, {missing} missing)", { have: have, total: total, missing: total - have });
+        if (!canvas) return;
+        const ctx = canvas.getContext("2d");
+        const width = canvas.parentElement.clientWidth - 16;
+        canvas.width = width;
+        canvas.height = 40;
+        ctx.clearRect(0, 0, width, 40);
+        const split = Math.round(width * have / total);
+        ctx.fillStyle = "#2ecc71";
+        ctx.fillRect(0, 0, split, 40);
+        ctx.fillStyle = "#555";
+        ctx.fillRect(split, 0, width - split, 40);
+        return;
+    }
 
     if (!piecesHave || piecesHave.length === 0) {
         if (card) card.style.display = "none";

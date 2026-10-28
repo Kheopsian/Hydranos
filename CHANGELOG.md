@@ -82,6 +82,9 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   longer recounts the whole library after every small sweep. The qBittorrent
   category listing and the download queue's paused list use their own indexes
   (built once, at the first start) instead of walking every torrent.
+- The detail panel of a torrent that holds at least one piece shows its speeds,
+  peers, sizes and pieces again. Since 4.6.1 it stopped at the piece map and left
+  everything below it empty.
 - A stopped torrent being rechecked shows as checking (`checking_files`, and
   `checkingUP`/`checkingDL` on the qBittorrent-compatible API) instead of
   stopped, and goes back to stopped, without being started, when the check
