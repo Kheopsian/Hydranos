@@ -73,6 +73,19 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   file the other copy does not have) names the folder it was asked for, and says
   that a file it misses goes in its own save path. A file put back by hand next
   to the other copy was never read, and nothing said where it should go.
+- On a large library the interface, the API and the *arr no longer freeze for
+  seconds at a time. The link index scanner and the workflow passes read the
+  store a page at a time and do their work with it let go; the scanner no
+  longer recounts the whole library after every small sweep. The qBittorrent
+  category listing and the download queue's paused list use their own indexes
+  (built once, at the first start) instead of walking every torrent.
+
+### Changed
+
+- `GET /api/{hoard,race}/torrents` and `/api/engines/:id/torrents` honour
+  `limit` (1 to 5000) and `offset`, in the order of `/api/hoard/page` (newest
+  first unless `sort`/`order` say otherwise). They used to ignore both and
+  return the whole list; without `limit` they still do.
 
 ## v4.6.4 -- the workflow condition "time since a tag was set" lets you pick its tag again
 
