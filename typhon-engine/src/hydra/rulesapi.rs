@@ -665,13 +665,15 @@ fn gather_all_with(
         .iter()
         .map(|e| e.id.clone())
         .collect();
-    // ⚠️ The READ connection. This only reads, and it walks the whole
-    // catalogue: on the writer it held every add, tag and pause for twenty
-    // seconds and more at a million torrents.
-    let store = state.store.read().unwrap();
+    // ⚠️ The READ connection, a page at a time (`StoreLock::workflow_facts`):
+    // on the writer this held every add, tag and pause for twenty seconds and
+    // more at a million torrents, and holding the read connection through the
+    // map and the walk of the engine's torrents kept every list waiting too.
+    // `gather` takes no connection: nothing after the rows needs one.
     let mut out = Vec::new();
     for id in ids {
-        out.extend(rulesrun::gather(&state.engines, &store, &id, links, want));
+        let stored = state.store.workflow_facts(&id).unwrap_or_default();
+        out.extend(rulesrun::gather(&state.engines, &stored, &id, links, want));
     }
     out
 }

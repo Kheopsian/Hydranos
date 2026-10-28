@@ -80,9 +80,11 @@ impl Want {
     }
 }
 
+/// `stored` is `StoreLock::workflow_facts` of the engine, read beforehand: this
+/// walks a million torrents and takes no store connection at all.
 pub fn gather(
     host: &EngineHost,
-    store: &Store,
+    stored: &std::collections::HashMap<String, crate::store::WorkflowFacts>,
     engine_id: &str,
     links: &std::collections::HashMap<String, LinkFacts>,
     want: Want,
@@ -91,7 +93,6 @@ pub fn gather(
     let Some(engine) = host.engines().iter().find(|e| e.id == engine_id) else {
         return Vec::new();
     };
-    let stored = store.workflow_facts(engine_id).unwrap_or_default();
     let now = crate::store::now_secs() as f64;
     // statvfs once per distinct save_path, not once per torrent: a catalogue
     // shares a handful of them, and the syscall is the same answer every time.

@@ -978,6 +978,32 @@ impl StoreLock {
         }
     }
 
+    /// Everything the store knows about one session's torrents, for a pass,
+    /// keyed by info hash so the caller can join it to the engine's own view
+    /// without a second query per torrent. Read page by page; the map is built
+    /// with the connection let go.
+    pub fn workflow_facts(
+        &self,
+        session: &str,
+    ) -> anyhow::Result<std::collections::HashMap<String, WorkflowFacts>> {
+        let mut out = std::collections::HashMap::new();
+        let mut after = String::new();
+        loop {
+            let page = self
+                .read()
+                .map_err(|_| anyhow::anyhow!("store lock"))?
+                .workflow_facts_page(session, &after, PAGE)?;
+            let full = page.len() as i64 >= PAGE;
+            let last = page.last().map(|(h, _)| h.clone());
+            out.extend(page);
+            match last {
+                Some(k) if full => after = k,
+                _ => return Ok(out),
+            }
+            std::thread::sleep(PAGE_PAUSE);
+        }
+    }
+
     /// The read-only connection when there is one, the shared one otherwise.
     #[track_caller]
     pub fn read(&self) -> std::sync::LockResult<StoreGuard<'_>> {
@@ -1960,24 +1986,26 @@ impl Store {
             .optional()?)
     }
 
-    /// Everything the store knows about one session's torrents, for a pass.
+    /// One page of what the store knows about one session's torrents, for a
+    /// pass: the rows after `after` in hash order, at most `limit`.
     ///
     /// Every column named here is in `idx_torrents_cover`, so this is an
     /// index-only scan and never opens the 4.7 GB table -- the same reason the
-    /// listing is half a second instead of twenty-one.
-    ///
-    /// Keyed by info hash so the caller can join it to the engine's own view
-    /// without a second query per torrent.
-    pub fn workflow_facts(
+    /// listing is half a second instead of twenty-one. See
+    /// `StoreLock::workflow_facts`, which walks the pages.
+    fn workflow_facts_page(
         &self,
         session: &str,
-    ) -> anyhow::Result<std::collections::HashMap<String, WorkflowFacts>> {
-        let mut stmt = self.conn.prepare(
+        after: &str,
+        limit: i64,
+    ) -> anyhow::Result<Vec<(String, WorkflowFacts)>> {
+        let mut stmt = self.conn.prepare_cached(
             "SELECT info_hash, category, save_path, added_time, completed_time,
                     seeding_time, tags, paused
-             FROM torrents WHERE session = ?1",
+             FROM torrents WHERE session = ?1 AND info_hash > ?2
+             ORDER BY info_hash LIMIT ?3",
         )?;
-        let rows = stmt.query_map(rusqlite::params![session], |r| {
+        let rows = stmt.query_map(rusqlite::params![session, after, limit], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 WorkflowFacts {
@@ -7642,6 +7670,45 @@ mod paged_read_tests {
                 "a request waited {w:?} for the connection; one hold over the table is {whole:?}"
             );
         }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// ⭐ A workflow pass reads a million rows of facts: the same map as one
+    /// query, and no request waits for the length of the table.
+    #[test]
+    fn the_facts_of_a_session_are_read_without_holding_the_connection() {
+        let n = 300_000;
+        let (dir, lock) = filled("facts", n);
+
+        let t = Instant::now();
+        let all = lock
+            .read()
+            .unwrap()
+            .workflow_facts_page("hoard", "", i64::MAX)
+            .unwrap();
+        let whole = t.elapsed();
+        assert_eq!(all.len(), n);
+        drop(all);
+        eprintln!("one hold over the table: {whole:?}");
+        assert!(
+            whole > Duration::from_millis(100),
+            "the table is too small to show anything ({whole:?}): raise n"
+        );
+
+        let mut facts = None;
+        let wait = longest_wait_during(&lock, || {
+            facts = Some(lock.workflow_facts("hoard").unwrap())
+        });
+        eprintln!("longest wait: {wait:?}");
+        let facts = facts.unwrap();
+        assert_eq!(facts.len(), n);
+        assert!(facts.contains_key(&format!("{:040x}", n - 1)));
+        assert!(facts.contains_key(&format!("{:040x}", 0)));
+        assert!(lock.workflow_facts("other").unwrap().is_empty());
+        assert!(
+            wait < whole / 4,
+            "a request waited {wait:?} for the connection; one hold over the table is {whole:?}"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 }
