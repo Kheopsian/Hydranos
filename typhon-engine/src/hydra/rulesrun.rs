@@ -251,7 +251,10 @@ fn facts_of(
             typhon_engine::rpc::dispatch::state_str(
                 t.status.load(Ordering::Relaxed),
                 t.is_paused.load(Ordering::Relaxed),
-                t.rechecking.load(Ordering::Relaxed),
+                // Not the check's flag: a recheck of a stopped torrent is
+                // shown as checking, but a workflow that has seen it stopped
+                // for a week would lose that week to every recheck.
+                false,
             ),
             s.paused,
         )

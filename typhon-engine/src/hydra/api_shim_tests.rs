@@ -609,6 +609,42 @@ async fn a_rechecked_torrent_is_checking_on_the_shim_and_comes_back_as_it_was() 
     }
 }
 
+/// A workflow sees a stopped torrent as stopped while it is rechecked: a
+/// condition such as "stopped for at least a week" would otherwise turn false
+/// for the length of the check and start counting again from zero after it.
+#[tokio::test]
+async fn a_workflow_sees_a_rechecked_stopped_torrent_as_stopped() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let s = st("rules-checking", "");
+    let dir = data(&s);
+    let t = single("wf-stopped");
+    let (code, body) = add(&s, &t, &[("savepath", dir.as_str()), ("paused", "true")]).await;
+    assert_eq!(code, StatusCode::OK, "{body}");
+    let h = hash_of(&t);
+    let torrent = held(&s, &h).unwrap();
+    // The engine the shim put it in: no category is the race engine.
+    let engine = s
+        .state
+        .engines
+        .engines()
+        .iter()
+        .find(|e| e.manager.get(&torrent.info_hash).is_some())
+        .expect("held by an engine")
+        .id
+        .clone();
+    let state = || {
+        let store = s.state.store.read().unwrap();
+        crate::rulesrun::gather_one(&s.state.engines, &store, &engine, &h)
+            .expect("facts")
+            .state
+    };
+    let before = state();
+    assert_eq!(before, "stopped");
+    torrent.rechecking.store(true, SeqCst);
+    assert_eq!(state(), before, "a recheck is not a change of state for a workflow");
+    torrent.rechecking.store(false, SeqCst);
+}
+
 /// `setLocation` takes the native move's refusals.
 #[tokio::test]
 async fn set_location_needs_an_absolute_location() {
