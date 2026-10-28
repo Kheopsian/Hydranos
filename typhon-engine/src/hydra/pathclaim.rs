@@ -219,6 +219,15 @@ pub fn isolated_save_path(save_path: &str, name: &str, info_hash: &str) -> PathB
     Path::new(save_path).join(format!("{top} [{short}]"))
 }
 
+/// The save path an isolated torrent was asked for, read back from the one
+/// it got: `None` for a torrent that sits where it was put. Files missing
+/// from it are fetched into, and only read from, its own folder.
+pub fn isolated_from(save_path: &Path, name: &str, info_hash: &str) -> Option<PathBuf> {
+    let asked = save_path.parent()?;
+    (isolated_save_path(&asked.to_string_lossy(), name, info_hash) == save_path)
+        .then(|| asked.to_path_buf())
+}
+
 /// The directory a torrent's file paths hang off: the save path. Its paths
 /// start with the torrent's folder (`name/<file>`, or wherever a file was
 /// renamed to) or, for a single file, are the file's own name.
@@ -1498,6 +1507,75 @@ mod tests {
         assert_eq!(
             std::fs::read(dir.join("P").join("x.nfo")).unwrap(),
             b"the first notes!"
+        );
+    }
+
+    /// A torrent placed beside another one's files says so in its detail, with
+    /// the folder it was asked for: a file it misses, put back by hand next to
+    /// the other copy, is never read, and nothing told the user where it goes.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_detail_of_an_isolated_torrent_names_the_folder_it_was_asked_for() {
+        use tower::ServiceExt;
+        let s = crate::api::testing::state_from(
+            "pathclaim-isolated-detail",
+            "[daemon]\napi_key = \"k-isolated\"\n",
+        );
+        let dir = s.dir.join("d");
+        std::fs::create_dir_all(dir.join("Film")).unwrap();
+        let video: Vec<u8> = (0..32_768u32).map(|i| (i % 251) as u8).collect();
+        std::fs::write(dir.join("Film").join("a.mkv"), &video).unwrap();
+        // Another tracker's copy seeds the video from the folder; this one
+        // also has an .nfo nobody holds.
+        let b = add(
+            &s,
+            &torrent_over("Film", &[("a.mkv", &video)], 16384),
+            &dir,
+            false,
+            true,
+        )
+        .unwrap();
+        let a = add(
+            &s,
+            &torrent_over(
+                "Film",
+                &[("a.mkv", &video), ("a.nfo", b"release notes...")],
+                16384,
+            ),
+            &dir,
+            false,
+            false,
+        )
+        .unwrap();
+        let detail = |hash: String| {
+            let state = s.state.clone();
+            async move {
+                let req = axum::http::Request::builder()
+                    .uri(format!("/api/hoard/torrents/{hash}"))
+                    .header("X-API-Key", "k-isolated")
+                    .body(axum::body::Body::empty())
+                    .unwrap();
+                let resp = crate::api::router(state).oneshot(req).await.unwrap();
+                assert_eq!(resp.status(), axum::http::StatusCode::OK);
+                let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap()
+            }
+        };
+        let d = detail(a.clone()).await;
+        assert_eq!(
+            d["save_path"].as_str().map(PathBuf::from),
+            Some(dir.join(format!("Film [{}]", &a[..8]))),
+            "placed beside the other copy"
+        );
+        assert_eq!(
+            d["isolated_from"].as_str().map(PathBuf::from),
+            Some(dir.clone()),
+            "and says where it was asked for: {d}"
+        );
+        assert!(
+            detail(b).await["isolated_from"].is_null(),
+            "a torrent where it was put says nothing"
         );
     }
 

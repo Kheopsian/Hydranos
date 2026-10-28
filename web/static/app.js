@@ -2326,6 +2326,23 @@ function displayRatio(d) {
     return typeof d.ratio === "number" ? d.ratio : 0;
 }
 
+// A torrent placed beside another one's files (same folder name, files it
+// shares at the same size) reads and fetches only in its own folder: a file
+// put back by hand in the folder it was asked for is never seen there.
+function _renderIsolated(prefix, d) {
+    const row = document.getElementById(prefix + "detail-isolated-row");
+    const el = document.getElementById(prefix + "detail-isolated");
+    if (!row || !el) return;
+    if (!d.isolated_from) {
+        row.style.display = "none";
+        el.textContent = "";
+        return;
+    }
+    row.style.display = "";
+    el.innerHTML = `${esc(incoPath(d.isolated_from))}`
+        + `<div class="detail-error-hint">${esc(window.t("Another torrent's files are there. Files this one is missing go in its Save Path."))}</div>`;
+}
+
 async function refreshDetail() {
     if (!selectedTorrent) return;
     try {
@@ -2342,6 +2359,7 @@ async function refreshDetail() {
         document.getElementById("detail-uploaded").textContent = formatBytes(d.total_upload);
         document.getElementById("detail-ratio").textContent = displayRatio(d).toFixed(4);
         document.getElementById("detail-path").textContent = incoPath(d.save_path);
+        _renderIsolated("", d);
         document.getElementById("detail-hash").textContent = d.info_hash;
         renderPieceMap(d.pieces_have, d.pieces_avail, "detail-pieces-canvas", "detail-pieces-info");
         document.getElementById("detail-dl-speed").textContent = formatSpeed(d.download_rate);
@@ -5294,6 +5312,7 @@ async function refreshHoardDetail() {
         document.getElementById("h-detail-uploaded").textContent = formatBytes(d.total_upload);
         document.getElementById("h-detail-ratio").textContent = displayRatio(d).toFixed(4);
         document.getElementById("h-detail-path").textContent = incoPath(d.save_path);
+        _renderIsolated("h-", d);
         document.getElementById("h-detail-hash").textContent = d.info_hash;
         renderPieceMap(d.pieces_have, d.pieces_avail, "h-detail-pieces-canvas", "h-detail-pieces-info", "h-detail-pieces-card");
         document.getElementById("h-detail-dl-speed").textContent = formatSpeed(d.download_rate);

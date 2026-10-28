@@ -69,6 +69,10 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 - A recheck reads a file put back on disk since it was last read (a missing
   `.nfo` added by hand, for instance): the torrent no longer stays below 100 %
   until it is removed and added again.
+- The detail of a torrent placed beside another one's files (a cross-seed with a
+  file the other copy does not have) names the folder it was asked for, and says
+  that a file it misses goes in its own save path. A file put back by hand next
+  to the other copy was never read, and nothing said where it should go.
 
 ## v4.6.4 -- the workflow condition "time since a tag was set" lets you pick its tag again
 

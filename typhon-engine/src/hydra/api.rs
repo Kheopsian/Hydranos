@@ -13742,6 +13742,16 @@ fn detail_payload(
         "download_rate": i(&row, "download_rate"),
         "engine_save_path": row.get("engine_save_path").cloned().unwrap_or_else(|| "".into()),
         "info_hash": hash,
+        // The folder it was asked for, when another torrent's files there had
+        // it placed beside them instead: a file put back by hand goes in
+        // `save_path`, not here. null when it sits where it was put.
+        "isolated_from": crate::pathclaim::isolated_from(
+            &torrent.save_path.read(),
+            &torrent.meta.name,
+            hash,
+        )
+        .map(|p| serde_json::Value::String(p.to_string_lossy().into_owned()))
+        .unwrap_or(serde_json::Value::Null),
         "list_peers": i(&raw, "list_peers"),
         "list_seeds": i(&raw, "list_seeds"),
         "multi_file": row.get("multi_file").cloned().unwrap_or(serde_json::Value::Bool(false)),
@@ -30564,7 +30574,7 @@ mod detail_panel_tests {
         settle_clocks(&mut now, &mut before);
         // Added after the copy was frozen, on purpose: carried over so that
         // the comparison stays about everything else.
-        for k in ["pieces_have", "pieces_total"] {
+        for k in ["pieces_have", "pieces_total", "isolated_from"] {
             before[k] = now[k].clone();
         }
         let mut diff = Vec::new();
