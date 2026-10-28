@@ -641,7 +641,11 @@ async fn a_workflow_sees_a_rechecked_stopped_torrent_as_stopped() {
     let before = state();
     assert_eq!(before, "stopped");
     torrent.rechecking.store(true, SeqCst);
-    assert_eq!(state(), before, "a recheck is not a change of state for a workflow");
+    assert_eq!(
+        state(),
+        before,
+        "a recheck is not a change of state for a workflow"
+    );
     torrent.rechecking.store(false, SeqCst);
 }
 
