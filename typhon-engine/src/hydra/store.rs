@@ -265,6 +265,22 @@ thread_local! {
 }
 
 /// The frozen schema, as the production database has it.
+/// The per-category facts query, a constant so the test that reads its plan
+/// reads the very text the store runs.
+///
+/// `likelihood()` is there because, without statistics, SQLite prefers
+/// scanning the whole session slice of the covering index to searching
+/// `idx_torrents_category` and fetching rows from the table. A category holds
+/// a small share of a library; saying so makes it search. It never changes
+/// the result, and unlike `INDEXED BY` it cannot fail on a database that
+/// lacks the index.
+const FACTS_IN_CATEGORY_SQL: &str = "SELECT info_hash, category, save_path, added_time,
+        completed_time, seeding_time, tags, paused, content_folder
+     FROM torrents WHERE session = ?1 AND likelihood(category = ?2, 0.001)";
+
+/// The operator's pauses of one session; a constant for the same reason.
+const PAUSED_HASHES_SQL: &str = "SELECT info_hash FROM torrents WHERE session = ?1 AND paused <> 0";
+
 pub const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS torrents (
     info_hash TEXT NOT NULL, session TEXT NOT NULL, torrent BLOB NOT NULL,
@@ -1543,6 +1559,29 @@ impl Store {
         self.conn.execute_batch(
             "CREATE INDEX IF NOT EXISTS idx_torrents_save_path
              ON torrents(save_path COLLATE NOCASE, session, info_hash);",
+        )?;
+        // The two reads that used to walk a whole session to return a few
+        // rows, each under the one read-connection mutex (measured on a 1.08 M
+        // library: ~470 ms for the qBit shim's `torrents/info?category=`, ~450
+        // ms for the download queue's paused list, and the whole API waited
+        // behind them).
+        //  - `category` sits after `session` in `idx_torrents_cover`, behind
+        //    `info_hash`, so it could not be searched, only filtered. This
+        //    index puts it second; the rows themselves are then fetched from
+        //    the table, a few thousand point reads that never touch a BLOB
+        //    overflow page (no BLOB column is read).
+        //  - paused rows are a handful: a PARTIAL index, like the pinned one. It
+        //    also carries `paused` itself: without it SQLite must read each row
+        //    to re-check the flag, no longer sees a covering index, and prefers
+        //    the session scan of `idx_torrents_cover` to it.
+        // Additive and invisible to older versions. Built once, at the first
+        // start on an existing database (a pass over the table's index,
+        // seconds even at a million rows).
+        self.conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_torrents_category
+             ON torrents(session, category, info_hash);
+             CREATE INDEX IF NOT EXISTS idx_torrents_paused
+             ON torrents(session, info_hash, paused) WHERE paused <> 0;",
         )?;
         Ok(())
     }
@@ -3416,11 +3455,7 @@ impl Store {
         session: &str,
         category: &str,
     ) -> anyhow::Result<std::collections::HashMap<String, crate::row::StoreFacts>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT info_hash, category, save_path, added_time, completed_time,
-                    seeding_time, tags, paused, content_folder
-             FROM torrents WHERE session = ?1 AND category = ?2",
-        )?;
+        let mut stmt = self.conn.prepare(FACTS_IN_CATEGORY_SQL)?;
         let mut out = std::collections::HashMap::new();
         let rows = stmt.query_map([session, category], Self::fact_row)?;
         for row in rows {
@@ -3911,9 +3946,7 @@ impl Store {
     /// human stopped this" from "I parked this myself" -- and will happily
     /// restart the first, which is the bug this exists to prevent.
     pub fn paused_hashes(&self, session: &str) -> anyhow::Result<Vec<String>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT info_hash FROM torrents WHERE session = ?1 AND paused <> 0")?;
+        let mut stmt = self.conn.prepare(PAUSED_HASHES_SQL)?;
         let rows = stmt.query_map(rusqlite::params![session], |r| r.get::<_, String>(0))?;
         Ok(rows.filter_map(Result::ok).collect())
     }
@@ -5553,6 +5586,75 @@ mod tests {
         store.set_paused(&b, "hoard", true).unwrap();
         store.set_paused(&a, "hoard", false).unwrap();
         assert_eq!(store.paused_hashes("hoard").unwrap(), vec![b]);
+    }
+
+    /// Plan and work of a statement over a populated store: the plan lines and
+    /// the number of VM steps one full run took.
+    fn plan_and_steps(store: &Store, sql: &str, params: &[&str]) -> (String, i32) {
+        let conn = &store.conn;
+        let mut plan = String::new();
+        let mut q = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+        let mut rows = q.query(rusqlite::params_from_iter(params)).unwrap();
+        while let Some(r) = rows.next().unwrap() {
+            plan.push_str(&r.get::<_, String>(3).unwrap());
+            plan.push('\n');
+        }
+        let mut stmt = conn.prepare(sql).unwrap();
+        let mut rows = stmt.query(rusqlite::params_from_iter(params)).unwrap();
+        while rows.next().unwrap().is_some() {}
+        drop(rows);
+        let steps = stmt.get_status(rusqlite::StatementStatus::VmStep);
+        (plan, steps)
+    }
+
+    /// The category read of the qBit shim and the paused list of the download
+    /// queue each answered by walking their whole session (~470 ms and ~450 ms
+    /// at a million torrents, under the one read-connection mutex). With the
+    /// right index the work follows the result, not the library.
+    #[test]
+    fn category_and_paused_reads_are_proportional_to_their_result() {
+        let store = fresh();
+        store.ensure_cover_index().unwrap();
+        let conn = &store.conn;
+        conn.execute_batch("BEGIN").unwrap();
+        {
+            let mut ins = conn
+                .prepare(
+                    "INSERT INTO torrents (info_hash, session, torrent, category, paused)
+                     VALUES (?1, 'hoard', x'00', ?2, ?3)",
+                )
+                .unwrap();
+            for i in 0..30_000u32 {
+                // 12 rows in "rare", all paused; the rest spread over 3 categories.
+                let (cat, paused) = if i % 2500 == 0 {
+                    ("rare", 1)
+                } else {
+                    (["tv", "movies", "books"][(i % 3) as usize], 0)
+                };
+                ins.execute(rusqlite::params![format!("{i:040x}"), cat, paused])
+                    .unwrap();
+            }
+        }
+        conn.execute_batch("COMMIT").unwrap();
+
+        let (plan, steps) = plan_and_steps(&store, FACTS_IN_CATEGORY_SQL, &["hoard", "rare"]);
+        assert!(
+            plan.contains("USING INDEX idx_torrents_category") && !plan.contains("SCAN"),
+            "category read must search the category index, plan:\n{plan}"
+        );
+        assert!(
+            steps < 1_000,
+            "category read took {steps} VM steps:\n{plan}"
+        );
+        assert_eq!(store.facts_in_category("hoard", "rare").unwrap().len(), 12);
+
+        let (plan, steps) = plan_and_steps(&store, PAUSED_HASHES_SQL, &["hoard"]);
+        assert!(
+            plan.contains("USING COVERING INDEX idx_torrents_paused") && !plan.contains("SCAN"),
+            "paused read must use the partial index, plan:\n{plan}"
+        );
+        assert!(steps < 1_000, "paused read took {steps} VM steps:\n{plan}");
+        assert_eq!(store.paused_hashes("hoard").unwrap().len(), 12);
     }
 
     /// A store on the REAL schema, not a hand-copied subset of it.
