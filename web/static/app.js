@@ -2343,6 +2343,14 @@ function _renderIsolated(prefix, d) {
         + `<div class="detail-error-hint">${esc(window.t("Another torrent's files are there. Files this one is missing go in its Save Path."))}</div>`;
 }
 
+// One block of a detail panel, on its own: a block that throws is logged and
+// the rest of the panel is still drawn. A single try around the whole panel
+// let one bad shape (peer flags as a string, a piece count read as a bitfield)
+// leave every field after it empty, twice, with nothing on screen to say so.
+function _detailPart(name, draw) {
+    try { draw(); } catch (e) { console.error("Detail panel, " + name + ":", e); }
+}
+
 async function refreshDetail() {
     if (!selectedTorrent) return;
     try {
@@ -2359,9 +2367,9 @@ async function refreshDetail() {
         document.getElementById("detail-uploaded").textContent = formatBytes(d.total_upload);
         document.getElementById("detail-ratio").textContent = displayRatio(d).toFixed(4);
         document.getElementById("detail-path").textContent = incoPath(d.save_path);
-        _renderIsolated("", d);
+        _detailPart("isolated", () => _renderIsolated("", d));
         document.getElementById("detail-hash").textContent = d.info_hash;
-        renderPieceMap(d.pieces_have, d.pieces_avail, "detail-pieces-canvas", "detail-pieces-info", "detail-pieces-card", d.pieces_total);
+        _detailPart("pieces", () => renderPieceMap(d.pieces_have, d.pieces_avail, "detail-pieces-canvas", "detail-pieces-info", "detail-pieces-card", d.pieces_total));
         document.getElementById("detail-dl-speed").textContent = formatSpeed(d.download_rate);
         document.getElementById("detail-ul-speed").textContent = formatSpeed(d.upload_rate);
         document.getElementById("detail-limits").textContent = _limitsText(d);
@@ -2379,17 +2387,19 @@ async function refreshDetail() {
         document.getElementById("detail-seeding-time").textContent = formatDuration(d.seeding_time);
 
         // Peers table
-        renderPeerRows("detail-peers-table", d.peers);
+        _detailPart("peers", () => renderPeerRows("detail-peers-table", d.peers));
 
         // Trackers table. Skipped while the editor is open: redrawing the
         // list someone is editing is how an edit gets lost mid-typing.
-        const ttbody = document.getElementById("detail-trackers-tbody");
         if (trackerEditorIsOpen()) return;
-        if (d.trackers && d.trackers.length > 0) {
-            ttbody.innerHTML = d.trackers.map(trackerRowHtml).join("");
-        } else {
-            ttbody.innerHTML = '<tr><td colspan="5" class="empty">No trackers</td></tr>';
-        }
+        _detailPart("trackers", () => {
+            const ttbody = document.getElementById("detail-trackers-tbody");
+            if (d.trackers && d.trackers.length > 0) {
+                ttbody.innerHTML = d.trackers.map(trackerRowHtml).join("");
+            } else {
+                ttbody.innerHTML = '<tr><td colspan="5" class="empty">No trackers</td></tr>';
+            }
+        });
     } catch (e) {
         console.error("Failed to refresh detail:", e);
     }
@@ -5322,9 +5332,9 @@ async function refreshHoardDetail() {
         document.getElementById("h-detail-uploaded").textContent = formatBytes(d.total_upload);
         document.getElementById("h-detail-ratio").textContent = displayRatio(d).toFixed(4);
         document.getElementById("h-detail-path").textContent = incoPath(d.save_path);
-        _renderIsolated("h-", d);
+        _detailPart("isolated", () => _renderIsolated("h-", d));
         document.getElementById("h-detail-hash").textContent = d.info_hash;
-        renderPieceMap(d.pieces_have, d.pieces_avail, "h-detail-pieces-canvas", "h-detail-pieces-info", "h-detail-pieces-card", d.pieces_total);
+        _detailPart("pieces", () => renderPieceMap(d.pieces_have, d.pieces_avail, "h-detail-pieces-canvas", "h-detail-pieces-info", "h-detail-pieces-card", d.pieces_total));
         document.getElementById("h-detail-dl-speed").textContent = formatSpeed(d.download_rate);
         document.getElementById("h-detail-ul-speed").textContent = formatSpeed(d.upload_rate);
         document.getElementById("h-detail-limits").textContent = _limitsText(d);
@@ -5338,16 +5348,18 @@ async function refreshHoardDetail() {
         document.getElementById("h-detail-active-time").textContent = _addedAgo(d.added_time);
         document.getElementById("h-detail-seeding-time").textContent = formatDuration(d.seeding_time);
 
-        renderPeerRows("h-detail-peers-table", d.peers);
+        _detailPart("peers", () => renderPeerRows("h-detail-peers-table", d.peers));
 
         // Same freeze as the race panel: never redraw a list being edited.
         if (trackerEditorIsOpen()) return;
-        const ttbody = document.getElementById("h-detail-trackers-tbody");
-        if (d.trackers && d.trackers.length > 0) {
-            ttbody.innerHTML = d.trackers.map(trackerRowHtml).join("");
-        } else {
-            ttbody.innerHTML = '<tr><td colspan="5" class="empty">No trackers</td></tr>';
-        }
+        _detailPart("trackers", () => {
+            const ttbody = document.getElementById("h-detail-trackers-tbody");
+            if (d.trackers && d.trackers.length > 0) {
+                ttbody.innerHTML = d.trackers.map(trackerRowHtml).join("");
+            } else {
+                ttbody.innerHTML = '<tr><td colspan="5" class="empty">No trackers</td></tr>';
+            }
+        });
     } catch (e) {
         console.error("Failed to refresh hoard detail:", e);
     }
