@@ -542,6 +542,73 @@ async fn force_start_starts_a_stopped_torrent_even_under_a_queue() {
     assert!(!forced(&q), "value=false lifts it");
 }
 
+/// ⭐ A torrent being rechecked is `checkingUP` / `checkingDL` on the shim,
+/// stopped or not, and comes back to what it was. An *arr seeing a stopped
+/// torrent turn "active" would believe it restarted. The check's flag is held
+/// by hand: what is under test is what the shim says while it is up.
+#[tokio::test]
+async fn a_rechecked_torrent_is_checking_on_the_shim_and_comes_back_as_it_was() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let s = st("shim-checking", "");
+    let dir = data(&s);
+    // (name, stopped, complete, state while checking)
+    let cases = [
+        ("chk-stopped-dl", true, false, "checkingDL"),
+        ("chk-stopped-up", true, true, "checkingUP"),
+        ("chk-running-dl", false, false, "checkingDL"),
+        ("chk-running-up", false, true, "checkingUP"),
+    ];
+    for (name, stopped, complete, during) in cases {
+        let t = single(name);
+        let mut fields = vec![("savepath", dir.as_str())];
+        if complete {
+            // skip_checking stats the file it vouches for.
+            std::fs::write(std::path::Path::new(&dir).join(name), vec![0u8; 16384]).unwrap();
+            fields.push(("skip_checking", "true"));
+        }
+        if stopped {
+            fields.push(("paused", "true"));
+        }
+        let (code, body) = add(&s, &t, &fields).await;
+        assert_eq!(code, StatusCode::OK, "{name}: {body}");
+        let h = hash_of(&t);
+        let state_of = |b: &str| info_row(b, &h)["state"].as_str().unwrap().to_string();
+        let torrent = held(&s, &h).unwrap();
+        let is_paused = || torrent.is_paused.load(SeqCst);
+        let status = || torrent.status.load(SeqCst);
+
+        let (_, b) = call(&s, "GET", "/api/v2/torrents/info", "").await;
+        let before = state_of(&b);
+        if stopped {
+            assert!(
+                before.starts_with("stopped") || before.starts_with("paused"),
+                "{name}: {before}"
+            );
+        }
+        let (paused_before, status_before) = (is_paused(), status());
+        assert_eq!(paused_before, stopped, "{name}");
+
+        torrent.rechecking.store(true, SeqCst);
+        let (_, b) = call(&s, "GET", "/api/v2/torrents/info", "").await;
+        assert_eq!(state_of(&b), during, "{name}: while it is checked");
+        assert_eq!(
+            is_paused(),
+            paused_before,
+            "{name}: not started nor stopped"
+        );
+        assert_eq!(
+            status(),
+            status_before,
+            "{name}: the engine's status is untouched"
+        );
+
+        torrent.rechecking.store(false, SeqCst);
+        let (_, b) = call(&s, "GET", "/api/v2/torrents/info", "").await;
+        assert_eq!(state_of(&b), before, "{name}: back to what it was");
+        assert_eq!(is_paused(), paused_before, "{name}");
+    }
+}
+
 /// `setLocation` takes the native move's refusals.
 #[tokio::test]
 async fn set_location_needs_an_absolute_location() {

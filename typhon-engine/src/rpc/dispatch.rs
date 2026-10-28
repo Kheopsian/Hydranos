@@ -48,8 +48,15 @@ pub struct TorrentCore {
 /// lock, and a workflow pass asking 300 000 torrents what state they are in
 /// would take it 300 000 times. One definition either way: two places deciding
 /// separately what "paused" means is how a view starts contradicting another.
-pub fn state_str(status_u8: u8, is_paused: bool) -> &'static str {
-    if status_u8 == TorrentStatus::Error as u8 {
+///
+/// `rechecking` outranks everything: a torrent being verified is read as such
+/// whether it is running or stopped. A stopped one keeps its `Stopped` status
+/// and its pause flag (nothing in the engine may take the check for a start);
+/// only what is shown changes, and it goes back by itself when the check ends.
+pub fn state_str(status_u8: u8, is_paused: bool, rechecking: bool) -> &'static str {
+    if rechecking {
+        "checking_files"
+    } else if status_u8 == TorrentStatus::Error as u8 {
         "error"
     } else if is_paused {
         "paused"
@@ -78,7 +85,8 @@ pub fn pieces_held(t: &Arc<crate::torrent::meta::TorrentState>) -> (u32, u32) {
 pub fn torrent_core(t: &Arc<crate::torrent::meta::TorrentState>) -> TorrentCore {
     let status_u8 = t.status.load(Ordering::Relaxed);
     let is_paused = t.is_paused.load(Ordering::Relaxed);
-    let state = state_str(status_u8, is_paused);
+    let rechecking = t.rechecking.load(Ordering::Relaxed);
+    let state = state_str(status_u8, is_paused, rechecking);
     // Real progress from picker's have count (was a 0.0/1.0 placeholder).
     let (num_have, progress) = if status_u8 == TorrentStatus::Seeding as u8 {
         (t.meta.num_pieces(), 1.0_f64)

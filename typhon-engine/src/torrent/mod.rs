@@ -3845,6 +3845,108 @@ mod lifecycle_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    /// A two-piece single-file torrent whose data is already on disk and
+    /// whole, added and ready to recheck.
+    fn whole_two_piece_torrent(
+        tag: &str,
+    ) -> (
+        Arc<TorrentManager>,
+        std::path::PathBuf,
+        InfoHash,
+        Arc<TorrentState>,
+    ) {
+        let (mgr, root) = manager(tag);
+        let data: Vec<u8> = (0..32768u32).map(|i| (i % 241) as u8).collect();
+        std::fs::write(root.join("data").join("whole"), &data).unwrap();
+        let mut info = Vec::new();
+        info.extend_from_slice(b"d6:lengthi32768e4:name5:whole12:piece lengthi16384e6:pieces40:");
+        for chunk in data.chunks(16384) {
+            let mut hasher = Sha1::new();
+            hasher.update(chunk);
+            info.extend_from_slice(&hasher.finalize());
+        }
+        info.push(b'e');
+        let mut bytes = b"d4:info".to_vec();
+        bytes.extend_from_slice(&info);
+        bytes.push(b'e');
+        let blob = bytes.clone();
+        mgr.set_blob_source(Arc::new(move |_: &str| Some(blob.clone())));
+        let save = root.join("data").to_string_lossy().into_owned();
+        let ih = mgr
+            .add_torrent_bytes(&bytes, &save, false, false)
+            .expect("added")
+            .0;
+        let t = mgr.get(&ih).unwrap();
+        (mgr, root, ih, t)
+    }
+
+    async fn wait_recheck_end(t: &Arc<TorrentState>) {
+        for _ in 0..500 {
+            if !t.rechecking.load(Ordering::SeqCst) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("the recheck does not end");
+    }
+
+    /// ⭐ A recheck on a STOPPED torrent left it displayed as stopped for the
+    /// whole verification, the disk busy and nothing saying why. The check has
+    /// to show, stopped or not, and the torrent has to come back exactly as it
+    /// was -- stopped, not started. The check is held at the semaphore so the
+    /// state is read while it is certainly under way.
+    #[tokio::test]
+    async fn a_recheck_shows_as_checking_stopped_or_not_and_restores_the_state() {
+        let (mgr, root, ih, t) = whole_two_piece_torrent("recheckshown");
+        let state =
+            |t: &Arc<TorrentState>| crate::rpc::dispatch::torrent_to_json(t)["state"].clone();
+
+        // Stopped.
+        mgr.stop_torrent(&ih).unwrap();
+        assert_eq!(state(&t), "paused");
+        let hold = recheck_sem().acquire_many(4).await.unwrap();
+        mgr.recheck(&ih).expect("recheck starts");
+        assert_eq!(
+            state(&t),
+            "checking_files",
+            "a stopped torrent being checked"
+        );
+        assert!(
+            t.is_paused.load(Ordering::Relaxed),
+            "and it is still stopped underneath"
+        );
+        assert_eq!(
+            t.status.load(Ordering::Relaxed),
+            TorrentStatus::Stopped as u8,
+            "the check did not start it"
+        );
+        drop(hold);
+        wait_recheck_end(&t).await;
+        assert_eq!(state(&t), "paused", "back to what it was");
+        assert!(t.is_paused.load(Ordering::Relaxed));
+        assert_eq!(
+            t.status.load(Ordering::Relaxed),
+            TorrentStatus::Stopped as u8,
+            "not started"
+        );
+        assert_eq!(
+            t.picker.get().unwrap().lock().unwrap().num_have(),
+            2,
+            "and the check did its work"
+        );
+
+        // Running.
+        mgr.start_torrent(&ih).unwrap();
+        let hold = recheck_sem().acquire_many(4).await.unwrap();
+        mgr.recheck(&ih).expect("recheck starts");
+        assert_eq!(state(&t), "checking_files");
+        drop(hold);
+        wait_recheck_end(&t).await;
+        assert_eq!(state(&t), "seeding");
+        assert!(!t.is_paused.load(Ordering::Relaxed));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     /// A recheck reads the files as they are now. A file put back by the user
     /// (deleted then written, or moved in: a new file under the same name) was
     /// read through the handle opened on the old one, so the recheck kept

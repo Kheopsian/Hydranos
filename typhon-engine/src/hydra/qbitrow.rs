@@ -43,6 +43,12 @@ pub fn state_to_qbit(
 ) -> &'static str {
     let complete = progress >= 1.0;
 
+    // A check outranks the user's stop: the disk is being read whatever the
+    // intent, and qBittorrent reports checkingUP/checkingDL for a stopped
+    // torrent being rechecked too. The stop comes back with the check's end.
+    if matches!(state, "checking" | "checking_files") {
+        return if complete { "checkingUP" } else { "checkingDL" };
+    }
     if user_paused {
         return if complete { "stoppedUP" } else { "stoppedDL" };
     }
@@ -61,7 +67,6 @@ pub fn state_to_qbit(
                 "stalledUP"
             }
         }
-        "checking" | "checking_files" => "checkingDL",
         "stopped" => {
             if complete {
                 "stoppedUP"
@@ -291,6 +296,22 @@ mod tests {
         assert_eq!(state_to_qbit("queued", 1.0, 0, 0, false), "queuedUP");
         assert_eq!(state_to_qbit("queued", 0.5, 0, 0, false), "queuedDL");
         assert_eq!(state_to_qbit("stopped", 0.5, 0, 0, false), "stoppedDL");
+    }
+
+    #[test]
+    fn a_check_reads_as_checking_even_on_a_stopped_torrent() {
+        assert_eq!(
+            state_to_qbit("checking_files", 1.0, 0, 0, true),
+            "checkingUP"
+        );
+        assert_eq!(
+            state_to_qbit("checking_files", 0.5, 0, 0, true),
+            "checkingDL"
+        );
+        assert_eq!(
+            state_to_qbit("checking_files", 0.5, 0, 0, false),
+            "checkingDL"
+        );
     }
 
     #[test]

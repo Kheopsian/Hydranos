@@ -251,6 +251,7 @@ fn facts_of(
             typhon_engine::rpc::dispatch::state_str(
                 t.status.load(Ordering::Relaxed),
                 t.is_paused.load(Ordering::Relaxed),
+                t.rechecking.load(Ordering::Relaxed),
             ),
             s.paused,
         )
