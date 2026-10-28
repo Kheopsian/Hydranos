@@ -2352,7 +2352,7 @@ async function refreshDetail() {
 
         _detailAddedTime = d.added_time || 0;
         document.getElementById("detail-name").textContent = incoName(d);
-        document.getElementById("detail-state").textContent = d.state;
+        document.getElementById("detail-state").textContent = d.state === "checking_files" ? displayState(d).label : d.state;
         document.getElementById("detail-progress").textContent = (d.progress * 100).toFixed(1) + "%";
         document.getElementById("detail-size").textContent = formatBytes(d.total_size);
         document.getElementById("detail-downloaded").textContent = formatBytes(d.total_download);
@@ -5124,6 +5124,16 @@ function displayState(t) {
             title: t.torrent_error_msg || window.t("Its data could not be read"),
         };
     }
+    // A check outranks the stop: the disk is being read, stopped or not, and the
+    // row goes back to what it was by itself when the check ends. The figure is
+    // how far the check has got, not `progress` (what the torrent holds).
+    if (t.state === "checking_files") {
+        const cp = typeof t.checking_progress === "number" ? t.checking_progress : null;
+        const label = cp === null
+            ? window.t("Checking")
+            : window.t("Checking {pct}%", { pct: (cp * 100).toFixed(1) });
+        return { label, cls: "state-checking", title: label };
+    }
     if (t.user_paused || t.state === "stopped") {
         return { label: window.t("stopped"), cls: "state-paused", title: window.t("Stopped by you, survives a restart") };
     }
@@ -5291,7 +5301,7 @@ async function refreshHoardDetail() {
         const d = await api(`/api/hoard/torrents/${selectedHoardTorrent}${q}`);
 
         document.getElementById("h-detail-name").textContent = incoName(d);
-        document.getElementById("h-detail-state").textContent = d.state;
+        document.getElementById("h-detail-state").textContent = d.state === "checking_files" ? displayState(d).label : d.state;
         // Say why it broke, and what to do about it. Nothing clears this on its
         // own: the serve path is suspended, so no read will ever retry.
         const hErr = document.getElementById("h-detail-error");
@@ -7556,7 +7566,9 @@ function _openHoardSSE() {
             for (const m of data.torrents) {
                 const t = byHash.get(m.info_hash);
                 if (!t) continue;
-                t.state = _STATUS_TO_STATE[m.status] || t.state;
+                // A row under a check keeps saying so: the engine's status of a
+                // stopped torrent being checked is still "stopped".
+                if (t.checking_progress == null) t.state = _STATUS_TO_STATE[m.status] || t.state;
                 t.upload_rate = m.upload_rate;
                 t.download_rate = m.download_rate;
                 t.total_upload = m.total_uploaded;

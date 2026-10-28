@@ -225,6 +225,16 @@ pub fn build(engine: &Value, facts: &StoreFacts, agent: &str) -> Value {
     row.insert("added_time".into(), added_time.into());
     row.insert("agent".into(), agent.into());
     row.insert("category".into(), facts.category.clone().into());
+    // How far a running recheck has got, 0..1, null when none is: its own
+    // field, because `progress` keeps meaning what the torrent holds.
+    row.insert(
+        "checking_progress".into(),
+        engine
+            .get("checking_progress")
+            .and_then(Value::as_f64)
+            .map(num)
+            .unwrap_or(Value::Null),
+    );
     row.insert("completed_time".into(), completed_time.into());
     row.insert(
         "content_folder".into(),
@@ -442,6 +452,7 @@ mod tests {
                 "added_time",
                 "agent",
                 "category",
+                "checking_progress",
                 "completed_time",
                 "content_folder",
                 "download_rate",

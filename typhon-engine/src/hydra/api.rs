@@ -13820,6 +13820,8 @@ fn detail_payload(
         "pieces_have": pieces_have,
         "pieces_total": pieces_total,
         "progress": row.get("progress").cloned().unwrap_or(serde_json::json!(0)),
+        // How far a running recheck has got; null when none is.
+        "checking_progress": row.get("checking_progress").cloned().unwrap_or(serde_json::Value::Null),
         "ratio": crate::row::num_json(ratio),
         "ratio_efficiency": 0,
         "save_path": row.get("save_path").cloned().unwrap_or_else(|| "".into()),
@@ -30780,7 +30782,12 @@ mod detail_panel_tests {
         settle_clocks(&mut now, &mut before);
         // Added after the copy was frozen, on purpose: carried over so that
         // the comparison stays about everything else.
-        for k in ["pieces_have", "pieces_total", "isolated_from"] {
+        for k in [
+            "pieces_have",
+            "pieces_total",
+            "isolated_from",
+            "checking_progress",
+        ] {
             before[k] = now[k].clone();
         }
         let mut diff = Vec::new();

@@ -733,6 +733,10 @@ pub struct TorrentState {
     /// meanwhile would read and hash the whole torrent again, and the two
     /// verdicts would land in whichever order they finish.
     pub rechecking: AtomicBool,
+    /// Pieces the running recheck has read so far (verified or not). 0 outside
+    /// a check; what `checking_progress` is made of. The verdict itself is
+    /// still installed in one go at the end, so `progress` stays what it was.
+    pub recheck_done: AtomicU32,
 
     /// The torrent's 20-byte piece hashes: loaded from the store the
     /// first time something needs to verify data, dropped again the moment the
@@ -1380,6 +1384,7 @@ impl TorrentState {
             serving_suspended: AtomicBool::new(false),
             is_removed: AtomicBool::new(false),
             rechecking: AtomicBool::new(false),
+            recheck_done: AtomicU32::new(0),
             piece_hashes: Mutex::new(None),
             v2_checks: Mutex::new(None),
             picker,

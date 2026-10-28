@@ -229,6 +229,24 @@ pub fn tracker_host_str(url: &str) -> &str {
     s.split(['/', ':']).next().unwrap_or("")
 }
 
+/// How far the running recheck has got, 0..1; `None` when none is running.
+///
+/// Not `progress`: that is what the torrent holds and stays so until the
+/// verdict lands (the *arr read it), whereas this only says how much of the
+/// disk the check has read.
+pub fn checking_progress(t: &Arc<crate::torrent::meta::TorrentState>) -> Option<f64> {
+    if !t.rechecking.load(Ordering::SeqCst) {
+        return None;
+    }
+    let total = t.meta.num_pieces();
+    let done = t.recheck_done.load(Ordering::SeqCst);
+    Some(if total == 0 {
+        0.0
+    } else {
+        (done as f64 / total as f64).min(1.0)
+    })
+}
+
 pub fn torrent_to_json(t: &Arc<crate::torrent::meta::TorrentState>) -> Value {
     // Shared with the slim projection so the two cannot disagree on what a
     // torrent's state or progress is.
@@ -279,6 +297,7 @@ pub fn torrent_to_json(t: &Arc<crate::torrent::meta::TorrentState>) -> Value {
         "name": t.meta.content_name(),
         "state": state,
         "progress": progress,
+        "checking_progress": checking_progress(t),
         "total_size": t.meta.total_size,
         "multi_file": t.meta.multi_file,
         "total_done": total_done,

@@ -3113,6 +3113,9 @@ impl TorrentManager {
                     mgr.announce_soon(&ih);
                 }
             }
+            // The counter goes first: a reader seeing `rechecking` false must
+            // not find a figure left over from this check.
+            t.recheck_done.store(0, Ordering::SeqCst);
             t.rechecking.store(false, Ordering::SeqCst);
         });
         Ok(())
@@ -3146,6 +3149,7 @@ impl TorrentManager {
             .unwrap_or(16);
         let unreadable: Arc<std::sync::Mutex<Option<String>>> =
             Arc::new(std::sync::Mutex::new(None));
+        t.recheck_done.store(0, Ordering::SeqCst);
         let mut verified: Vec<u32> = futures::stream::iter(0..num_pieces)
             .map(|piece| {
                 let t = t.clone();
@@ -3154,6 +3158,15 @@ impl TorrentManager {
                     if t.is_removed.load(Ordering::Relaxed) {
                         return None;
                     }
+                    // Counted when the read ends, whatever its verdict: this
+                    // is how far the check has got, not how much was good.
+                    struct Counted(Arc<TorrentState>);
+                    impl Drop for Counted {
+                        fn drop(&mut self) {
+                            self.0.recheck_done.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                    let _counted = Counted(t.clone());
                     // No hash table -> we cannot say this piece is good. Leave
                     // the have bit clear; the recheck reports the torrent
                     // incomplete rather than blessing unverified data.
@@ -3944,6 +3957,39 @@ mod lifecycle_tests {
         wait_recheck_end(&t).await;
         assert_eq!(state(&t), "seeding");
         assert!(!t.is_paused.load(Ordering::Relaxed));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// ⭐ The check shows how far it has got, in a field of its own: `progress`
+    /// keeps saying what the torrent holds until the verdict lands (the *arr
+    /// read it), and a verification of hours was a number that did not move.
+    #[tokio::test]
+    async fn a_recheck_publishes_how_far_it_has_got_in_its_own_field() {
+        let (mgr, root, ih, t) = whole_two_piece_torrent("recheckprogress");
+        let field = |t: &Arc<TorrentState>| {
+            crate::rpc::dispatch::torrent_to_json(t)["checking_progress"].clone()
+        };
+        let progress =
+            |t: &Arc<TorrentState>| crate::rpc::dispatch::torrent_to_json(t)["progress"].clone();
+        assert!(field(&t).is_null(), "no check, no figure");
+
+        // Queued: under way, nothing read yet. `progress` is what it was.
+        let before = progress(&t);
+        let hold = recheck_sem().acquire_many(4).await.unwrap();
+        mgr.recheck(&ih).expect("recheck starts");
+        assert_eq!(field(&t), 0.0);
+        assert_eq!(progress(&t), before, "progress is not the check's figure");
+        drop(hold);
+        wait_recheck_end(&t).await;
+        assert!(field(&t).is_null(), "and it goes back to null");
+
+        // The pass itself counts the pieces it reads: run it on its own with
+        // the flag up, and read the figure it leaves.
+        t.rechecking.store(true, Ordering::SeqCst);
+        mgr.run_recheck(ih, t.clone()).await;
+        assert_eq!(field(&t), 1.0, "both pieces were read");
+        t.rechecking.store(false, Ordering::SeqCst);
+        assert!(field(&t).is_null());
         std::fs::remove_dir_all(&root).ok();
     }
 
