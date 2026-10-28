@@ -547,6 +547,15 @@ struct Hold {
 }
 type HoldSlot = std::sync::Mutex<Option<Hold>>;
 
+/// Rows copied out of the store per hold of the read connection, by the
+/// readers that walk a whole table (`StoreLock::link_index_meta` and the like).
+/// A page is a few milliseconds; the table is a million rows.
+const PAGE: i64 = 5000;
+
+/// Between two pages, the connection is free and nobody holds it: long enough
+/// for a request that waited to be woken and take it before the walk does.
+const PAGE_PAUSE: std::time::Duration = std::time::Duration::from_millis(1);
+
 /// A connection held this long is reported to the log while it is still held.
 pub const LOCK_STUCK_WARN: std::time::Duration = std::time::Duration::from_secs(10);
 
@@ -869,6 +878,104 @@ impl StoreLock {
             &self.inner_hold,
             std::panic::Location::caller(),
         )
+    }
+
+    /// Every row's bookkeeping, without the measurements: what the scanner
+    /// reads to decide what is due. Read page by page on the read connection,
+    /// which is let go between two pages (see `PAGE`).
+    pub fn link_index_meta(
+        &self,
+    ) -> anyhow::Result<std::collections::HashMap<(String, String), LinkRowMeta>> {
+        let mut out = std::collections::HashMap::new();
+        let mut after = (String::new(), String::new());
+        loop {
+            let page = self
+                .read()
+                .map_err(|_| anyhow::anyhow!("store lock"))?
+                .link_index_meta_page(&after, PAGE)?;
+            let last = page.last().map(|(k, _)| k.clone());
+            let full = page.len() as i64 >= PAGE;
+            out.extend(page);
+            match last {
+                Some(k) if full => after = k,
+                _ => return Ok(out),
+            }
+            std::thread::sleep(PAGE_PAUSE);
+        }
+    }
+
+    /// Every row's measurement, handed over one at a time: (info_hash,
+    /// session, the save path it was taken under, when, the packed stats).
+    ///
+    /// `measured_at` rides along so the list's "Checked" column is read in the
+    /// same query as the measurement it dates, not from a second read that a
+    /// batch written in between would make disagree.
+    ///
+    /// ⚠️ A callback and not a map, on purpose: collected into a HashMap of
+    /// owned strings and BLOBs, the table was 0.7 GB at a million torrents,
+    /// built again by every summary refresh and every workflow pass. The caller
+    /// keeps the rows it can use, and nothing else is ever allocated beyond one
+    /// page.
+    ///
+    /// ⚠️ The read connection is held for one page at a time, to copy its raw
+    /// rows, and `f` runs on them after it is let go: a million rows read in
+    /// one hold kept every list, detail and *arr request waiting for the
+    /// seconds it took.
+    pub fn for_each_link_row(
+        &self,
+        mut f: impl FnMut(&str, &str, &str, i64, &[u8]),
+    ) -> anyhow::Result<()> {
+        let mut after = (String::new(), String::new());
+        loop {
+            let page = self
+                .read()
+                .map_err(|_| anyhow::anyhow!("store lock"))?
+                .link_rows_page(&after, PAGE)?;
+            for r in &page {
+                f(
+                    &r.info_hash,
+                    &r.session,
+                    &r.save_path,
+                    r.measured_at,
+                    &r.stats,
+                );
+            }
+            match page.last() {
+                Some(r) if page.len() as i64 >= PAGE => {
+                    after = (r.info_hash.clone(), r.session.clone())
+                }
+                _ => return Ok(()),
+            }
+            std::thread::sleep(PAGE_PAUSE);
+        }
+    }
+
+    /// The torrents the store holds for one session, as raw hashes.
+    ///
+    /// All the link index asks of the store about the catalogue is whether a
+    /// copy is known; `workflow_facts` answers that too, with every column of
+    /// a million rows (half a gigabyte) behind a yes or no. Read page by page,
+    /// the connection let go between two.
+    pub fn session_hashes(
+        &self,
+        session: &str,
+    ) -> anyhow::Result<std::collections::HashSet<[u8; 20]>> {
+        let mut out = std::collections::HashSet::new();
+        let mut after = String::new();
+        loop {
+            let page = self
+                .read()
+                .map_err(|_| anyhow::anyhow!("store lock"))?
+                .session_hashes_page(session, &after, PAGE)?;
+            let full = page.len() as i64 >= PAGE;
+            let last = page.last().cloned();
+            out.extend(page.iter().filter_map(|h| hex20(h)));
+            match last {
+                Some(k) if full => after = k,
+                _ => return Ok(out),
+            }
+            std::thread::sleep(PAGE_PAUSE);
+        }
     }
 
     /// The read-only connection when there is one, the shared one otherwise.
@@ -4270,15 +4377,19 @@ impl Store {
         Ok(())
     }
 
-    /// Every row's bookkeeping, without the measurements: what the scanner
-    /// reads to decide what is due.
-    pub fn link_index_meta(
+    /// One page of every row's bookkeeping, without the measurements: the
+    /// rows after `after` in primary-key order, at most `limit`. See
+    /// `StoreLock::link_index_meta`, which walks the pages.
+    fn link_index_meta_page(
         &self,
-    ) -> anyhow::Result<std::collections::HashMap<(String, String), LinkRowMeta>> {
-        let mut q = self
-            .conn
-            .prepare("SELECT info_hash, session, save_path, measured_at, files FROM link_index")?;
-        let rows = q.query_map([], |r| {
+        after: &(String, String),
+        limit: i64,
+    ) -> anyhow::Result<Vec<((String, String), LinkRowMeta)>> {
+        let mut q = self.conn.prepare_cached(
+            "SELECT info_hash, session, save_path, measured_at, files FROM link_index
+             WHERE (info_hash, session) > (?1, ?2) ORDER BY info_hash, session LIMIT ?3",
+        )?;
+        let rows = q.query_map(rusqlite::params![after.0, after.1, limit], |r| {
             Ok((
                 (r.get::<_, String>(0)?, r.get::<_, String>(1)?),
                 LinkRowMeta {
@@ -4291,58 +4402,43 @@ impl Store {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
-    /// Every row's measurement, handed over one at a time: (info_hash,
-    /// session, the save path it was taken under, when, the packed stats).
-    ///
-    /// `measured_at` rides along so the list's "Checked" column is read in the
-    /// same query as the measurement it dates, not from a second read that a
-    /// batch written in between would make disagree.
-    ///
-    /// ⚠️ A callback and not a map, on purpose: collected into a HashMap of
-    /// owned strings and BLOBs, the table was 0.7 GB at a million torrents,
-    /// built again by every summary refresh and every workflow pass. The caller
-    /// keeps the rows it can use, and nothing else is ever allocated.
-    pub fn for_each_link_row(
-        &self,
-        mut f: impl FnMut(&str, &str, &str, i64, &[u8]),
-    ) -> anyhow::Result<()> {
-        let mut q = self
-            .conn
-            .prepare("SELECT info_hash, session, save_path, measured_at, stats FROM link_index")?;
-        let mut rows = q.query([])?;
-        while let Some(r) = rows.next()? {
-            f(
-                r.get_ref(0)?.as_str()?,
-                r.get_ref(1)?.as_str()?,
-                r.get_ref(2)?.as_str()?,
-                r.get(3)?,
-                r.get_ref(4)?.as_blob()?,
-            );
-        }
-        Ok(())
+    /// One page of the link index's rows, measurements included, in primary-key
+    /// order after `after`. See `StoreLock::for_each_link_row`.
+    fn link_rows_page(&self, after: &(String, String), limit: i64) -> anyhow::Result<Vec<LinkRow>> {
+        let mut q = self.conn.prepare_cached(
+            "SELECT info_hash, session, save_path, measured_at, files, missing, stats
+             FROM link_index WHERE (info_hash, session) > (?1, ?2)
+             ORDER BY info_hash, session LIMIT ?3",
+        )?;
+        let rows = q.query_map(rusqlite::params![after.0, after.1, limit], |r| {
+            Ok(LinkRow {
+                info_hash: r.get(0)?,
+                session: r.get(1)?,
+                save_path: r.get(2)?,
+                measured_at: r.get(3)?,
+                files: r.get(4)?,
+                missing: r.get(5)?,
+                stats: r.get(6)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
     }
 
-    /// The torrents the store holds for one session, as raw hashes.
-    ///
-    /// All the link index asks of the store about the catalogue is whether a
-    /// copy is known; `workflow_facts` answers that too, with every column of
-    /// a million rows (half a gigabyte) behind a yes or no. Index-only, like
-    /// `workflow_facts`: `session, info_hash` lead `idx_torrents_cover`.
-    pub fn session_hashes(
+    /// One page of the raw hashes the store holds for one session, after
+    /// `after`. Index-only, like `workflow_facts_page`: `session, info_hash`
+    /// lead `idx_torrents_cover`. See `StoreLock::session_hashes`.
+    fn session_hashes_page(
         &self,
         session: &str,
-    ) -> anyhow::Result<std::collections::HashSet<[u8; 20]>> {
-        let mut q = self
-            .conn
-            .prepare("SELECT info_hash FROM torrents WHERE session = ?1")?;
-        let mut rows = q.query(rusqlite::params![session])?;
-        let mut out = std::collections::HashSet::new();
-        while let Some(r) = rows.next()? {
-            if let Some(h) = r.get_ref(0)?.as_str().ok().and_then(hex20) {
-                out.insert(h);
-            }
-        }
-        Ok(out)
+        after: &str,
+        limit: i64,
+    ) -> anyhow::Result<Vec<String>> {
+        let mut q = self.conn.prepare_cached(
+            "SELECT info_hash FROM torrents WHERE session = ?1 AND info_hash > ?2
+             ORDER BY info_hash LIMIT ?3",
+        )?;
+        let rows = q.query_map(rusqlite::params![session, after, limit], |r| r.get(0))?;
+        Ok(rows.collect::<Result<_, _>>()?)
     }
 
     /// Write a batch of measurements in one transaction.
@@ -6971,6 +7067,7 @@ mod link_index_tests {
         s.put_link_rows(&[row("a", "hoard", 10, 2, 0), row("a", "race", 11, 2, 0)])
             .unwrap();
         s.put_link_rows(&[row("a", "hoard", 20, 3, 1)]).unwrap();
+        let s = StoreLock::new(s);
         let meta = s.link_index_meta().unwrap();
         assert_eq!(meta.len(), 2, "one row per (hash, session)");
         assert_eq!(meta[&("a".into(), "hoard".into())].measured_at, 20);
@@ -7018,7 +7115,7 @@ mod link_index_tests {
                 .unwrap(),
             1
         );
-        let meta = s.link_index_meta().unwrap();
+        let meta = StoreLock::new(s).link_index_meta().unwrap();
         assert!(meta.contains_key(&("b".into(), "hoard".into())));
         assert_eq!(meta.len(), 1);
     }
@@ -7410,5 +7507,141 @@ mod tag_since_tests {
         println!("bulk_edit add one tag on 10000 torrents: {:?}", t.elapsed());
         drop(s);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// The readers that walk a whole table hold the read connection one page at a
+/// time. Measured the way a request meets them: another thread asks for
+/// `read()` in a loop, and the longest wait is what a list page would have
+/// waited.
+#[cfg(test)]
+mod paged_read_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    /// A store on disk with a writer and a reader, `n` torrents in the hoard
+    /// session and `n` rows in the link index. Enough rows that one hold over
+    /// the whole table lasts far longer than a page does, even in a release
+    /// build.
+    fn filled(tag: &str, n: usize) -> (std::path::PathBuf, Arc<StoreLock>) {
+        let dir = std::env::temp_dir().join(format!("paged-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("hydra.db");
+        let writer = Store::open(&path, false).unwrap();
+        let reader = Store::open(&path, true).unwrap();
+        writer.ensure_link_index().unwrap();
+        let tx = writer.conn.unchecked_transaction().unwrap();
+        {
+            let mut q = tx
+                .prepare("INSERT INTO torrents (info_hash, session, torrent) VALUES (?1, 'hoard', x'00')")
+                .unwrap();
+            for i in 0..n {
+                q.execute([format!("{i:040x}")]).unwrap();
+            }
+        }
+        tx.commit().unwrap();
+        let rows: Vec<LinkRow> = (0..n)
+            .map(|i| LinkRow {
+                info_hash: format!("{i:040x}"),
+                session: "hoard".into(),
+                save_path: format!("/data/{i}"),
+                measured_at: i as i64,
+                files: 3,
+                missing: 0,
+                stats: vec![7; 40],
+            })
+            .collect();
+        writer.put_link_rows(&rows).unwrap();
+        (dir, Arc::new(StoreLock::with_reader(writer, Some(reader))))
+    }
+
+    /// The longest a `read()` waited while `work` ran.
+    fn longest_wait_during(lock: &Arc<StoreLock>, work: impl FnOnce()) -> Duration {
+        let done = Arc::new(AtomicBool::new(false));
+        let probe = {
+            let (lock, done) = (lock.clone(), done.clone());
+            std::thread::spawn(move || {
+                let mut worst = Duration::ZERO;
+                while !done.load(Ordering::Relaxed) {
+                    let asked = Instant::now();
+                    let held = lock.read().unwrap();
+                    worst = worst.max(asked.elapsed());
+                    drop(held);
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                worst
+            })
+        };
+        // Let the probe start before the work does.
+        std::thread::sleep(Duration::from_millis(20));
+        work();
+        done.store(true, Ordering::Relaxed);
+        probe.join().unwrap()
+    }
+
+    /// ⭐ The scanner's and a workflow pass's reads of the whole store: same
+    /// rows as ever, and no request waits for the length of the table.
+    #[test]
+    fn a_whole_table_read_lets_go_of_the_connection_between_pages() {
+        let n = 300_000;
+        let (dir, lock) = filled("whole", n);
+        let none = (String::new(), String::new());
+
+        // What one hold over the table costs: the longest wait the old reads
+        // imposed.
+        let t = Instant::now();
+        let all = lock
+            .read()
+            .unwrap()
+            .link_rows_page(&none, i64::MAX)
+            .unwrap();
+        let whole = t.elapsed();
+        assert_eq!(all.len(), n);
+        drop(all);
+        eprintln!("one hold over the table: {whole:?}");
+        assert!(
+            whole > Duration::from_millis(100),
+            "the table is too small to show anything ({whole:?}): raise n"
+        );
+
+        let (mut meta, mut rows, mut hashes) = (None, 0usize, None);
+        let waits = [
+            longest_wait_during(&lock, || meta = Some(lock.link_index_meta().unwrap())),
+            longest_wait_during(&lock, || {
+                let mut last = String::new();
+                lock.for_each_link_row(|h, s, p, at, blob| {
+                    assert!(h > last.as_str(), "in key order");
+                    last = h.to_string();
+                    assert_eq!((s, p.len() > 6, blob), ("hoard", true, &[7u8; 40][..]));
+                    assert_eq!(at, i64::from_str_radix(h, 16).unwrap());
+                    rows += 1;
+                })
+                .unwrap()
+            }),
+            longest_wait_during(&lock, || {
+                hashes = Some(lock.session_hashes("hoard").unwrap())
+            }),
+        ];
+        eprintln!("longest waits (meta, rows, hashes): {waits:?}");
+
+        // The same rows as one hold would have returned.
+        let meta = meta.unwrap();
+        assert_eq!(meta.len(), n);
+        assert_eq!(rows, n);
+        assert_eq!(hashes.unwrap().len(), n);
+        let k = (format!("{:040x}", n - 1), "hoard".to_string());
+        assert_eq!(meta[&k].measured_at, n as i64 - 1);
+        assert_eq!(meta[&k].files, 3);
+
+        for w in waits {
+            assert!(
+                w < whole / 4,
+                "a request waited {w:?} for the connection; one hold over the table is {whole:?}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

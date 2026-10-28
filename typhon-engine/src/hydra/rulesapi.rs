@@ -576,16 +576,10 @@ fn decide(state: &AppState, w: &Workflow, persist: bool) -> Result<Decision, Str
 
     // On the read connection: a pass must not hold the writer while it reads
     // a million rows.
-    let known = {
-        let store = state.store.read().map_err(|_| "store lock")?;
-        rulesrun::stored_copies(&state.engines, &store)
-    };
+    let known = rulesrun::stored_copies(&state.engines, &state.store);
     let cat = rulesrun::catalogue_from(&state.engines, &known);
     drop(known);
-    let measured = {
-        let store = state.store.read().map_err(|_| "store lock")?;
-        rulesrun::read_measured(&cat, &store).map_err(|e| e.to_string())?
-    };
+    let measured = rulesrun::read_measured(&cat, &state.store).map_err(|e| e.to_string())?;
     // The same computation the list's "Hardlinks" column is built from, cf
     // `rulesrun::links_from_measured`.
     let rulesrun::StoredLinks {
@@ -2503,10 +2497,7 @@ mod one_number_tests {
         // Measured and stored the way `linkscan::sweep` does it.
         let measured_at = 1_700_000_123;
         {
-            let stored = {
-                let store = s.state.store.read().unwrap();
-                rulesrun::stored_copies(&s.state.engines, &store)
-            };
+            let stored = rulesrun::stored_copies(&s.state.engines, &s.state.store);
             let cat = rulesrun::catalogue_from(&s.state.engines, &stored);
             assert_eq!(cat.len(), 3);
             let plan = cat

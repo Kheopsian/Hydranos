@@ -390,11 +390,12 @@ impl CatalogueEntry {
 }
 
 /// The store's half of the catalogue, per engine: which copies it knows.
-/// The only part that needs a store connection. Take it, let the connection
-/// go, then `catalogue_from`.
+/// The only part that needs a store connection, taken a page at a time (see
+/// `StoreLock::session_hashes`) so that no request waits for the whole read.
+/// Then `catalogue_from`.
 pub fn stored_copies(
     host: &EngineHost,
-    store: &Store,
+    store: &crate::store::StoreLock,
 ) -> Vec<(String, std::collections::HashSet<[u8; 20]>)> {
     host.engines()
         .iter()
@@ -531,8 +532,13 @@ pub struct Measured {
 }
 
 /// Read the store's measurements of `cat`, row by row. The connection is held
-/// for the read only; the counting happens after, in `links_from_measured`.
-pub fn read_measured(cat: &[CatalogueEntry], store: &Store) -> anyhow::Result<Measured> {
+/// for one page of raw rows at a time (see `StoreLock::for_each_link_row`) and
+/// the matching happens with it let go; the counting happens after, in
+/// `links_from_measured`.
+pub fn read_measured(
+    cat: &[CatalogueEntry],
+    store: &crate::store::StoreLock,
+) -> anyhow::Result<Measured> {
     let mut m = RowMatcher::new(cat);
     store.for_each_link_row(|h, s, p, at, blob| m.offer(h, s, p, at, blob))?;
     Ok(m.finish())
@@ -1464,7 +1470,7 @@ mod tests {
         )
     }
 
-    /// Stored rows as `Store::for_each_link_row` hands them over, matched and
+    /// Stored rows as `StoreLock::for_each_link_row` hands them over, matched and
     /// counted the way the scanner and a pass do it.
     fn from_rows(
         catalogue: &[CatalogueEntry],

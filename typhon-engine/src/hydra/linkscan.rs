@@ -48,6 +48,20 @@ const IDLE: Duration = Duration::from_secs(300);
 /// the cost of one workflow pass), so not after every batch.
 const SUMMARY_EVERY: Duration = Duration::from_secs(600);
 
+/// Between the end of a sweep and the next look at the catalogue. Reading the
+/// store and walking a million torrents is seconds of work; a sweep of thirty
+/// torrents must not set it off again the moment it ends.
+const ROUND_PAUSE: Duration = Duration::from_secs(5);
+
+/// Whether the list's summary is recomputed now. A sweep always leaves it
+/// stale, and a full refresh is seconds of reading and counting a million
+/// rows: done after every small sweep it ran the scanner flat out, one round
+/// every half minute for thirty torrents due. Stale summaries wait for
+/// `SUMMARY_EVERY` since the last one.
+fn summary_due(stale: bool, since_last: Duration) -> bool {
+    stale && since_last >= SUMMARY_EVERY
+}
+
 /// Where the scanner is, for the status line. Plain atomics: written by one
 /// thread, read by a request that only wants an approximate picture.
 pub struct Progress {
@@ -129,10 +143,10 @@ pub fn spawn(engines: Arc<EngineHost>, store: Arc<StoreLock>) {
 /// computed, never by HOW. Returns how many torrents it answers for.
 pub fn refresh_summary(engines: &EngineHost, store: &StoreLock) -> Option<usize> {
     // The read connection, for the reads only; released before the counting.
-    let known = rulesrun::stored_copies(engines, &*store.read().ok()?);
+    let known = rulesrun::stored_copies(engines, store);
     let cat = rulesrun::catalogue_from(engines, &known);
     drop(known);
-    let measured = rulesrun::read_measured(&cat, &*store.read().ok()?).ok()?;
+    let measured = rulesrun::read_measured(&cat, store).ok()?;
     let got = rulesrun::links_from_measured(&cat, measured);
     let summary = rulesrun::link_summary(&cat, &got.origin, &got.measured_at, &got.links);
     let n = summary.len();
@@ -153,6 +167,7 @@ fn run(engines: Arc<EngineHost>, store: Arc<StoreLock>) {
     // for every torrent for four minutes after each start (rc32, 2026-10-03).
     // Only the measuring waits for the disks to settle.
     let mut summary_stale = refresh_summary(&engines, &store).is_none();
+    let mut summarised = (!summary_stale).then(std::time::Instant::now);
     std::thread::sleep(SETTLE);
     loop {
         // Between two passes, and between two batches in `sweep`: a batch
@@ -165,13 +180,9 @@ fn run(engines: Arc<EngineHost>, store: Arc<StoreLock>) {
         // two thousand torrents. The catalogue holds no paths -- each batch
         // resolves its own -- so keeping it for the sweep costs ~90 bytes a
         // torrent, not the 1.7 GB it did.
-        let snapshot = store.read().ok().map(|s| {
-            (
-                rulesrun::stored_copies(&engines, &s),
-                s.link_index_meta().unwrap_or_default(),
-            )
-        });
-        let Some((stored, meta)) = snapshot else {
+        // Read a page at a time, the connection let go between two pages.
+        let stored = rulesrun::stored_copies(&engines, &store);
+        let Ok(meta) = store.link_index_meta() else {
             std::thread::sleep(IDLE);
             continue;
         };
@@ -196,9 +207,13 @@ fn run(engines: Arc<EngineHost>, store: Arc<StoreLock>) {
 
         let order = due(&cat, &meta, crate::store::now_secs());
         drop(meta);
-        if summary_stale {
+        if summary_due(
+            summary_stale,
+            summarised.map_or(Duration::MAX, |at| at.elapsed()),
+        ) {
             refresh_summary(&engines, &store);
             summary_stale = false;
+            summarised = Some(std::time::Instant::now());
         }
         if order.is_empty() {
             std::thread::sleep(IDLE);
@@ -206,6 +221,7 @@ fn run(engines: Arc<EngineHost>, store: Arc<StoreLock>) {
         }
         sweep(&cat, &order, &store, &engines);
         summary_stale = true;
+        std::thread::sleep(ROUND_PAUSE);
     }
 }
 
@@ -338,6 +354,19 @@ mod tests {
             "anything without a valid row first"
         );
         assert!(!order.contains(&"fresh"));
+    }
+
+    /// ⭐ A sweep always leaves the summary stale; recomputing it every time
+    /// ran the scanner flat out, a full read of the store every half minute
+    /// for a handful of torrents due.
+    #[test]
+    fn a_small_sweep_does_not_recompute_the_summary_at_once() {
+        let soon = Duration::from_secs(40);
+        assert!(!summary_due(true, soon), "stale, but computed 40 s ago");
+        assert!(!summary_due(true, SUMMARY_EVERY - Duration::from_secs(1)));
+        assert!(summary_due(true, SUMMARY_EVERY), "stale long enough");
+        assert!(summary_due(true, Duration::MAX), "never computed");
+        assert!(!summary_due(false, Duration::MAX), "nothing changed");
     }
 
     #[test]
