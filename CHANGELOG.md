@@ -50,6 +50,9 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 
 ### Added
 
+- A recheck says how far it has got: `checking_progress` (0 to 1, `null` when
+  no check is running) in the torrent lists and detail, and "Checking 42 %" in
+  the interface. `progress` keeps its meaning until the check ends.
 - A global cap on upload slots per engine: `max_uploads` (`[race]` and `[hoard]`, also in the engine settings) limits the peers unchoked across all of the engine's seeding torrents, on top of `max_uploads_per_torrent`; the best-ranked peers keep the slots. It only acts with `choking = true` (the choker stays off by default; the settings help and the log say so when it is set without), applies live, is also readable and writable as `max_uploads` through the qBittorrent-compatible preferences, and `-1` (the default) changes nothing.
 
 ### Fixed
@@ -79,6 +82,17 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   longer recounts the whole library after every small sweep. The qBittorrent
   category listing and the download queue's paused list use their own indexes
   (built once, at the first start) instead of walking every torrent.
+- A stopped torrent being rechecked shows as checking (`checking_files`, and
+  `checkingUP`/`checkingDL` on the qBittorrent-compatible API) instead of
+  stopped, and goes back to stopped, without being started, when the check
+  ends. Workflows keep seeing it stopped: a recheck no longer restarts a
+  "stopped for at least…" count.
+- A torrent held paused because files it shares with another torrent could not
+  be proven is released by a recheck once the files on disk are right. The
+  proof failed whenever such a file shared a piece with a file next to it, so
+  the torrent stayed held (a missing `.nfo` put back by hand left it at
+  99.9 %). The message now says how many files are missing or wrong, names the
+  first one, and what to do.
 
 ### Changed
 
