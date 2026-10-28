@@ -409,10 +409,28 @@ fn read_at(f: &std::fs::File, buf: &mut [u8], mut off: u64) -> std::io::Result<(
 ///
 /// `verify(piece, data)` is the torrent's own check (SHA-1 for v1, the merkle
 /// root for v2); None -- no hash table -- fails the piece.
+#[cfg(test)]
 pub fn prove(
     meta: &TorrentMeta,
     src_root: &Path,
     candidates: &HashSet<PathBuf>,
+    verify: &dyn Fn(u32, &[u8]) -> Option<bool>,
+) -> HashSet<PathBuf> {
+    prove_from(meta, src_root, candidates, false, verify)
+}
+
+/// `prove`, with `beside`: the files of the torrent that are not candidates
+/// are read from `src_root` too, to complete a piece a candidate shares with
+/// them. Only for a proof in place, where `src_root` is the torrent's own
+/// root and those files are where the torrent will read them: a piece that
+/// verifies proves every byte of it, the neighbour's included, and nothing is
+/// written. Without it a video whose last piece holds the first bytes of its
+/// `.nfo` could never be proven, however right both files were.
+pub fn prove_from(
+    meta: &TorrentMeta,
+    src_root: &Path,
+    candidates: &HashSet<PathBuf>,
+    beside: bool,
     verify: &dyn Fn(u32, &[u8]) -> Option<bool>,
 ) -> HashSet<PathBuf> {
     let plen = meta.piece_length as u64;
@@ -450,7 +468,7 @@ pub fn prove(
                 data.resize(data.len() + op.length as usize, 0);
                 continue;
             }
-            if !candidates.contains(&op.path) {
+            if !beside && !candidates.contains(&op.path) {
                 continue 'piece;
             }
             let file = open
@@ -488,6 +506,7 @@ pub fn prove_torrent(
     metainfo: Option<&[u8]>,
     src_root: &Path,
     candidates: &HashSet<PathBuf>,
+    beside: bool,
 ) -> HashSet<PathBuf> {
     let table = metainfo.and_then(crate::dedup::pieces);
     let check = |p: u32, d: &[u8]| -> Option<bool> {
@@ -500,7 +519,7 @@ pub fn prove_torrent(
             None => t.verify_piece(p, d),
         }
     };
-    prove(&t.meta, src_root, candidates, &check)
+    prove_from(&t.meta, src_root, candidates, beside, &check)
 }
 
 // ---------------------------------------------------------------------------
@@ -752,7 +771,7 @@ impl Job {
         let root = root_of(&t.meta, &t.save_path.read().clone());
 
         if let Some((src_root, candidates)) = &self.isolate_from {
-            let proven = prove_torrent(&t, self.metainfo.as_deref(), src_root, candidates);
+            let proven = prove_torrent(&t, self.metainfo.as_deref(), src_root, candidates, false);
             let mut linked = 0usize;
             for rel in &proven {
                 let (from, to) = (src_root.join(rel), root.join(rel));
@@ -785,16 +804,32 @@ impl Job {
         }
 
         if let Some(files) = &self.prove_in_place {
-            let proven = prove_torrent(&t, self.metainfo.as_deref(), &root, files);
+            let proven = prove_torrent(&t, self.metainfo.as_deref(), &root, files, true);
             if proven.len() == files.len() {
                 self.recheck_and_release(&manager, &ih);
             } else {
-                let bad = files.len() - proven.len();
+                let mut bad: Vec<&PathBuf> =
+                    files.iter().filter(|f| !proven.contains(*f)).collect();
+                bad.sort();
+                let absent = bad.iter().filter(|f| !root.join(f).exists()).count();
                 let msg = format!(
-                    "{bad} file(s) on disk differ from this torrent and are hardlinked elsewhere; \
-                     held paused rather than overwrite them"
+                    "{} file(s) are named by another torrent or hardlinked elsewhere and cannot be \
+                     proven to be this torrent's ({absent} not on disk, {} not matching; first: {}); \
+                     held paused rather than overwrite them. Put the right bytes there or free the \
+                     file from the other torrent or link, then recheck",
+                    bad.len(),
+                    bad.len() - absent,
+                    bad.first()
+                        .map(|f| f.to_string_lossy().replace('\\', "/"))
+                        .unwrap_or_default(),
                 );
                 t.mark_write_error(&msg);
+                // A torrent already in error keeps its first message there;
+                // a hold that is renewed after the user changed the disk must
+                // say what is wrong now, not what was wrong before.
+                if let Ok(mut said) = t.error_msg.lock() {
+                    *said = msg.clone();
+                }
                 record(&self.engine_id, &self.hash, &name, "held", msg);
             }
         }
@@ -1823,5 +1858,183 @@ mod tests {
         let candidates: HashSet<PathBuf> = [PathBuf::from("Pack/a.mkv")].into_iter().collect();
         assert!(prove(&meta, &dir, &candidates, &sha1_verify(&want)).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- a hold the user has dealt with ------------------------------------
+
+    type Blobs = Arc<Mutex<HashMap<String, Vec<u8>>>>;
+
+    /// Let the engine of `s` read the .torrent of each torrent added so far,
+    /// so a recheck really verifies pieces.
+    fn wire_blobs(s: &crate::api::testing::TestState) -> Blobs {
+        let blobs: Blobs = Arc::new(Mutex::new(HashMap::new()));
+        let b = blobs.clone();
+        s.state
+            .engines
+            .get("hoard")
+            .unwrap()
+            .manager
+            .set_blob_source(Arc::new(move |h: &str| b.lock().unwrap().get(h).cloned()));
+        blobs
+    }
+
+    fn learn(blobs: &Blobs, hash: &str, bytes: &[u8]) {
+        blobs
+            .lock()
+            .unwrap()
+            .insert(hash.to_string(), bytes.to_vec());
+    }
+
+    fn held(s: &crate::api::testing::TestState, hash: &str) -> Arc<TorrentState> {
+        s.state
+            .engines
+            .get("hoard")
+            .unwrap()
+            .manager
+            .get(&crate::store::hex20(hash).unwrap())
+            .unwrap()
+    }
+
+    /// The Verify button: the route, as the UI calls it.
+    async fn press_verify(s: &crate::api::testing::TestState, hash: &str) {
+        use tower::ServiceExt;
+        // The add started a recheck of its own; let it finish, or its verdict
+        // lands after the hold and the test measures the wrong thing.
+        let t = held(s, hash);
+        for _ in 0..200 {
+            if !t.rechecking.load(std::sync::atomic::Ordering::SeqCst) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri(format!("/api/hoard/torrents/{hash}/verify"))
+            .header("X-API-Key", "k-verify")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = crate::api::router(s.state.clone())
+            .oneshot(req)
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        for _ in 0..200 {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            if !t.rechecking.load(std::sync::atomic::Ordering::SeqCst) {
+                break;
+            }
+        }
+    }
+
+    fn status_of(t: &TorrentState) -> u8 {
+        t.status.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn is_error(t: &TorrentState) -> bool {
+        status_of(t) == typhon_engine::torrent::meta::TorrentStatus::Error as u8
+    }
+
+    fn why(t: &TorrentState) -> String {
+        t.error_msg.lock().unwrap().clone()
+    }
+
+    fn is_paused(t: &TorrentState) -> bool {
+        t.is_paused.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn verify_cfg(name: &str) -> crate::api::testing::TestState {
+        crate::api::testing::state_from(
+            name,
+            "[daemon]\napi_key = \"k-verify\"\n[dedup]\npath_collision = \"legacy\"\n",
+        )
+    }
+
+    /// Another torrent names the video of this folder; this one has a small
+    /// .nfo besides, and the video does not end on a piece boundary: its last
+    /// piece holds the first bytes of the .nfo.
+    async fn video_and_nfo(
+        name: &str,
+    ) -> (crate::api::testing::TestState, PathBuf, String, Vec<u8>) {
+        let s = verify_cfg(name);
+        let dir = s.dir.join("d");
+        std::fs::create_dir_all(dir.join("Film")).unwrap();
+        let video: Vec<u8> = (0..40_000u32).map(|i| (i % 251) as u8).collect();
+        std::fs::write(dir.join("Film").join("a.mkv"), &video).unwrap();
+        let blobs = wire_blobs(&s);
+        let ta = torrent_over("Film", &[("a.mkv", &video)], 16384);
+        let a = add(&s, &ta, &dir, true, true).unwrap();
+        learn(&blobs, &a, &ta);
+        let tb = torrent_over(
+            "Film",
+            &[("a.mkv", &video), ("a.nfo", b"release notes...")],
+            16384,
+        );
+        let b = add(&s, &tb, &dir, false, false).unwrap();
+        learn(&blobs, &b, &tb);
+        (s, dir, b, video)
+    }
+
+    /// The Verify button on a held torrent whose video is right and whose
+    /// .nfo the user has just put back: the torrent must come out of its hold.
+    /// The proof used to refuse every piece that touched a file it was not
+    /// proving, so a video sharing its last piece with the .nfo could never be
+    /// proven -- whatever the user did to the disk.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_held_torrent_is_released_once_the_disk_is_right() {
+        let (s, dir, b, video) = video_and_nfo("pathclaim-fixed-nfo").await;
+        let t = held(&s, &b);
+        let nfo = dir.join("Film").join("a.nfo");
+
+        // The .nfo is not there: the video's last piece cannot be checked, and
+        // a fetch of it would rewrite the video the other torrent holds.
+        press_verify(&s, &b).await;
+        assert!(is_error(&t), "no .nfo, nothing proves the video");
+        assert!(is_paused(&t));
+
+        // A .nfo of the same size with other words: still held.
+        std::fs::write(&nfo, b"other words....!").unwrap();
+        press_verify(&s, &b).await;
+        assert!(is_error(&t), "a wrong .nfo released the torrent");
+        assert!(is_paused(&t));
+
+        // The right one: the whole torrent verifies and the hold is lifted.
+        std::fs::write(&nfo, b"release notes...").unwrap();
+        press_verify(&s, &b).await;
+        assert!(
+            !is_error(&t),
+            "still held with the right bytes on disk: {}",
+            why(&t)
+        );
+        assert!(why(&t).is_empty());
+        assert!(crate::workers::holds_everything(&t), "not complete");
+        assert_eq!(
+            std::fs::read(dir.join("Film").join("a.mkv")).unwrap(),
+            video
+        );
+    }
+
+    /// A held torrent says why it is held: a file that is gone is not a file
+    /// with other bytes, and the user fixes them differently.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_hold_says_what_is_wrong_with_the_files() {
+        let (s, dir, b, _) = video_and_nfo("pathclaim-hold-reason").await;
+        let t = held(&s, &b);
+        std::fs::write(dir.join("Film").join("a.nfo"), b"other words....!").unwrap();
+        press_verify(&s, &b).await;
+        assert!(is_error(&t));
+        let msg = why(&t);
+        assert!(msg.contains("0 not on disk, 1 not matching"), "{msg}");
+        assert!(msg.contains("Film/a.mkv"), "{msg}");
+        assert!(
+            msg.contains("held paused rather than overwrite them"),
+            "{msg}"
+        );
+
+        std::fs::remove_file(dir.join("Film").join("a.nfo")).unwrap();
+        std::fs::remove_file(dir.join("Film").join("a.mkv")).unwrap();
+        press_verify(&s, &b).await;
+        let msg = why(&t);
+        assert!(is_error(&t));
+        assert!(msg.contains("1 not on disk, 0 not matching"), "{msg}");
     }
 }
