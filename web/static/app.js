@@ -1775,7 +1775,7 @@ let _detailAddedTime = 0;
 function switchDetailTab(tab) {
     _activeDetailTab = tab;
     document.querySelectorAll("#torrent-detail .detail-tab").forEach(btn =>
-        btn.classList.toggle("active", btn.textContent.toLowerCase() === tab)
+        btn.classList.toggle("active", btn.dataset.tab === tab)
     );
     document.getElementById("detail-tab-info").style.display = tab === "info" ? "" : "none";
     document.getElementById("detail-tab-timeline").style.display = tab === "timeline" ? "" : "none";
@@ -1791,7 +1791,7 @@ let _activeHoardDetailTab = "info";
 function switchHoardDetailTab(tab) {
     _activeHoardDetailTab = tab;
     document.querySelectorAll("#hoard-detail-panel .h-detail-tab").forEach(btn =>
-        btn.classList.toggle("active", btn.textContent.toLowerCase() === tab)
+        btn.classList.toggle("active", btn.dataset.tab === tab)
     );
     document.getElementById("h-detail-tab-info").style.display = tab === "info" ? "" : "none";
     document.getElementById("h-detail-tab-content").style.display = tab === "content" ? "" : "none";

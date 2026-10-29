@@ -287,9 +287,9 @@
                 </div>
 
                 <div class="detail-tabs">
-                    <button class="detail-tab active" onclick="switchDetailTab('info')">Info</button>
-                    <button class="detail-tab" onclick="switchDetailTab('timeline')">Timeline</button>
-                    <button class="detail-tab" onclick="switchDetailTab('content')">Content</button>
+                    <button class="detail-tab active" data-tab="info" onclick="switchDetailTab('info')">Info</button>
+                    <button class="detail-tab" data-tab="timeline" onclick="switchDetailTab('timeline')">Timeline</button>
+                    <button class="detail-tab" data-tab="content" onclick="switchDetailTab('content')">Content</button>
                 </div>
 
                 <div id="detail-tab-info">
@@ -528,8 +528,8 @@
                 </div>
 
                 <div class="detail-tabs">
-                    <button class="h-detail-tab active" onclick="switchHoardDetailTab('info')">Info</button>
-                    <button class="h-detail-tab" onclick="switchHoardDetailTab('content')">Content</button>
+                    <button class="h-detail-tab active" data-tab="info" onclick="switchHoardDetailTab('info')">Info</button>
+                    <button class="h-detail-tab" data-tab="content" onclick="switchHoardDetailTab('content')">Content</button>
                 </div>
 
                 <div id="h-detail-tab-info">
@@ -1688,6 +1688,6 @@
     </div>
 
     <script src="/static/i18n.js?v=1.0.0"></script>
-    <script src="/static/app.js?v=1.6.103"></script>
+    <script src="/static/app.js?v=1.6.104"></script>
 </body>
 </html>

@@ -1679,4 +1679,35 @@ mod editor_delete_tests {
         }
         assert!(seen.len() > 100, "the scan found no functions");
     }
+
+    /// The tabs of the detail panels were lit by comparing the button's text
+    /// with the tab name; the page translation rewrites that text ("Timeline"
+    /// becomes "Chronologie"), so in French those tabs never lit up. Each
+    /// tab button names its tab in `data-tab`, and the switches read that.
+    #[test]
+    fn detail_tabs_are_lit_by_their_key_not_their_translated_text() {
+        let html = include_str!("../../../web/templates/index.html");
+        let mut buttons = 0;
+        for class in ["detail-tab", "h-detail-tab"] {
+            let open = format!("<button class=\"{class}");
+            for (at, _) in html.match_indices(&open) {
+                let tag = &html[at..at + html[at..].find('>').expect("tag ends")];
+                assert!(tag.contains("data-tab=\""), "tab button without data-tab: {tag}");
+                buttons += 1;
+            }
+        }
+        assert_eq!(buttons, 5, "expected 3 race tabs and 2 hoard tabs");
+        let js = include_str!("../../../web/static/app.js");
+        for name in ["switchDetailTab", "switchHoardDetailTab"] {
+            let body = &js[js
+                .find(&format!("function {name}("))
+                .expect("switch exists")..];
+            let body = &body[..body.find("\n}\n").expect("switch ends")];
+            assert!(
+                !body.contains("textContent"),
+                "{name} lights a tab by its text, which is translated"
+            );
+            assert!(body.contains("dataset.tab"), "{name} does not read data-tab");
+        }
+    }
 }
