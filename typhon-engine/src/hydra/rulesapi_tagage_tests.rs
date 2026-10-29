@@ -228,3 +228,117 @@ async fn the_dates_are_read_only_when_a_rule_asks() {
         "one read, for the torrents that wear it"
     );
 }
+
+// -------------------------------------------------------------- the preview
+
+async fn previewed(s: &TestState, w: &Workflow) -> serde_json::Value {
+    use crate::api::testing::{body_json, keyed};
+    use axum::extract::{RawQuery, State};
+    let body = serde_json::to_string(w).unwrap();
+    let r = preview(State(s.state.clone()), RawQuery(None), keyed(KEY), body).await;
+    body_json(r).await
+}
+
+/// The date a tag set `ago` seconds back carries, as `wear` stores it.
+fn dated(ago: i64) -> i64 {
+    crate::store::now_secs() - ago
+}
+
+/// A tag worn 3 days and wanted 7 days old: the torrent is waiting, and the
+/// rule fires on the day the tag turns 7 days old. No `for` is involved.
+#[tokio::test]
+async fn the_preview_gives_the_day_a_tag_becomes_old_enough() {
+    let s = st("tagage-preview");
+    let a = add(&s, "aaa.bin");
+    let at = dated(3 * DAY);
+    wear(&s, &a, "keep", Some(3 * DAY));
+    let w = workflow("wf-prev", age_cond("keep", Op::Gt, "7d"), "stale");
+    let v = previewed(&s, &w).await;
+    assert_eq!(v["would_apply"], 0, "{v}");
+    assert_eq!(v["waiting"], 1, "{v}");
+    let e = &v["waiting_sample"][0];
+    assert_eq!(e["info_hash"], a.as_str(), "{v}");
+    assert!(
+        (e["fires_at"].as_i64().unwrap() - (at + 7 * DAY)).abs() <= 2,
+        "{v}"
+    );
+    let h = &e["waiting"][0];
+    assert_eq!(h["field"], "tag_age", "{v}");
+    assert_eq!(h["op"], "gt", "{v}");
+    assert_eq!(h["value"], "7d", "{v}");
+    assert_eq!(h["tag"], "keep", "{v}");
+    assert!((h["since"].as_i64().unwrap() - at).abs() <= 2, "{v}");
+    assert!(
+        (h["due"].as_i64().unwrap() - (at + 7 * DAY)).abs() <= 2,
+        "{v}"
+    );
+}
+
+/// "Newer than" never becomes true later: a torrent that is too old for it is
+/// not waiting for anything. Nor is one that is already old enough.
+#[tokio::test]
+async fn the_preview_has_no_date_for_newer_than_or_for_a_tag_already_old() {
+    let s = st("tagage-preview-lt");
+    let a = add(&s, "aaa.bin");
+    let b = add(&s, "bbbb.bin");
+    wear(&s, &a, "keep", Some(3 * DAY));
+    wear(&s, &b, "keep", Some(9 * DAY));
+    let lt = workflow("wf-lt", age_cond("keep", Op::Lt, "1d"), "stale");
+    let v = previewed(&s, &lt).await;
+    assert_eq!(v["waiting"], 0, "{v}");
+    assert_eq!(v["would_apply"], 0, "{v}");
+    let gt = workflow("wf-gt", age_cond("keep", Op::Gt, "7d"), "stale");
+    let v = previewed(&s, &gt).await;
+    assert_eq!(v["would_apply"], 1, "the 9 day old one is due now: {v}");
+    assert_eq!(v["waiting"], 1, "the 3 day old one waits: {v}");
+}
+
+/// A `for` and a `tag_age` together: the rule fires when the later of the two
+/// comes due.
+#[tokio::test]
+async fn the_preview_waits_for_the_later_of_a_for_and_a_tag_age() {
+    let s = st("tagage-preview-mixed");
+    let a = add(&s, "aaa.bin");
+    s.state
+        .store
+        .lock()
+        .unwrap()
+        .set_paused(&a, "hoard", true)
+        .unwrap();
+    let at = dated(3 * DAY);
+    wear(&s, &a, "keep", Some(3 * DAY));
+    let paused = Node::Cond(Cond {
+        field: "user_paused".into(),
+        op: Op::Eq,
+        value: "true".into(),
+        hold: Some("2d".into()),
+        tag: None,
+    });
+    let w = workflow(
+        "wf-mixed",
+        Node::All {
+            of: vec![age_cond("keep", Op::Gt, "7d"), paused],
+        },
+        "stale",
+    );
+    let before = crate::store::now_secs();
+    let v = previewed(&s, &w).await;
+    assert_eq!(v["waiting"], 1, "{v}");
+    let e = &v["waiting_sample"][0];
+    assert_eq!(e["waiting"].as_array().unwrap().len(), 2, "{v}");
+    // The tag is the later one (4 days from now against 2).
+    assert!(
+        (e["fires_at"].as_i64().unwrap() - (at + 7 * DAY)).abs() <= 2,
+        "{v}"
+    );
+    // The `for` one is still described as it always was.
+    let f = e["waiting"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["field"] == "user_paused")
+        .unwrap();
+    assert_eq!(f["for_secs"], 2 * DAY, "{v}");
+    assert!(f.get("tag").is_none(), "{v}");
+    assert!(f["due"].as_i64().unwrap() >= before + 2 * DAY, "{v}");
+}

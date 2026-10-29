@@ -818,7 +818,10 @@ pub fn track_since(
     let timed = rules::timed_conditions(&w.when).map_err(|e| e.to_string())?;
     // A workflow that stopped carrying any `for` still has rows to clear.
     let (rows, _) = read_since(store, &w.id, SINCE_READ_SLICE)?;
-    if timed.is_empty() && rows.is_empty() {
+    // A `tag_age` condition needs the pass's clock too, to be asked when it
+    // will hold, though it has no row of its own.
+    let ages = !rules::tag_age_conditions(&w.when).is_empty();
+    if timed.is_empty() && rows.is_empty() && !ages {
         return Ok(None);
     }
     let delta = rules::since_delta(&timed, facts, &rows).map_err(|e| e.to_string())?;
@@ -840,7 +843,7 @@ pub fn track_since(
         }
     }
     drop(delta);
-    if timed.is_empty() {
+    if timed.is_empty() && !ages {
         return Ok(None);
     }
     Ok(Some(TimedPass {
@@ -921,6 +924,10 @@ pub struct Held {
     pub since: Option<i64>,
     /// When the condition will have held long enough.
     pub due: i64,
+    /// For a condition on `tag_age`: which tag. Its `since` is the date the
+    /// tag was set, and `for_secs` is 0: the wait is in `value`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
 }
 
 /// A torrent the condition describes but whose time has not come.
@@ -944,6 +951,7 @@ impl TimedPass {
             for_secs: t.secs,
             since: self.timing.recorded(&t.key, hash),
             due: self.timing.due(&t.key, hash, t.secs),
+            tag: None,
         }
     }
 
@@ -973,6 +981,7 @@ pub fn pending(
         .iter()
         .map(|t| rules::compile_raw(&t.cond).map_err(|e| e.to_string()))
         .collect::<Result<_, _>>()?;
+    let ages = rules::tag_age_conditions(&w.when);
     let origin = tp.timing.origin();
     let (mut total, mut out) = (0, Vec::new());
     for f in facts {
@@ -989,20 +998,54 @@ pub fn pending(
         if out.len() >= sample {
             continue;
         }
-        let waiting: Vec<Held> = tp
+        let mut waiting: Vec<Held> = tp
             .timed
             .iter()
             .zip(&raws)
             .filter(|(t, raw)| raw(f) && !tp.timing.held(&t.key, &f.info_hash, t.secs))
             .map(|(t, _)| tp.held_of(t, &f.info_hash))
             .collect();
+        // A tag that is not old enough yet is waiting on time too. Only
+        // "older than" gets older: "newer than" never becomes true later.
+        let mut strict = Vec::new();
+        for c in &ages {
+            let worn = c.tag.as_deref().map(str::trim).unwrap_or_default();
+            let Some((tag, age)) = f.tag_ages.iter().find(|(t, _)| t == worn) else {
+                continue;
+            };
+            let Some(want) = rules::parse_duration(&c.value) else {
+                continue;
+            };
+            if !matches!(c.op, rules::Op::Gt | rules::Op::Ge) || *age >= want {
+                continue;
+            }
+            let since = origin - age.round() as i64;
+            waiting.push(Held {
+                field: c.field.clone(),
+                op: serde_json::to_value(c.op).unwrap_or_default(),
+                value: c.value.clone(),
+                for_secs: 0,
+                since: Some(since),
+                due: since.saturating_add(want.round() as i64),
+                tag: Some(tag.clone()),
+            });
+            if c.op == rules::Op::Gt {
+                strict.push(waiting.len() - 1);
+            }
+        }
         // The rule is monotone in time unless it says `not`: the first moment
         // it holds is one of the moments a condition comes due.
-        let mut dues: Vec<i64> = waiting.iter().map(|h| h.due).collect();
+        // "Older than" holds the second after the date, so that one is asked
+        // a second late and reported on the date itself.
+        let mut dues: Vec<(i64, i64)> = waiting
+            .iter()
+            .enumerate()
+            .map(|(i, h)| (h.due, i64::from(strict.contains(&i))))
+            .collect();
         dues.sort_unstable();
-        let fires_at = dues.into_iter().find(|&t| {
-            tp.timing.set_now(t);
-            gated(f)
+        let fires_at = dues.into_iter().find_map(|(t, late)| {
+            tp.timing.set_now(t + late);
+            gated(f).then_some(t)
         });
         tp.timing.set_now(origin);
         out.push(Pending {

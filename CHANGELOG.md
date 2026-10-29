@@ -96,6 +96,11 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
   the torrent stayed held (a missing `.nfo` put back by hand left it at
   99.9 %). The message now says how many files are missing or wrong, names the
   first one, and what to do.
+- The preview of a workflow whose condition is "a tag was set more than so long
+  ago" (`tag_age`) now lists the torrents whose tag is not old enough yet under
+  `waiting`, with the date the rule will fire (`fires_at`: the date of the tag
+  plus the duration). Before, only a rule with a `for` showed them. "Newer
+  than" never gets a date, since it does not become true with time.
 
 ### Changed
 

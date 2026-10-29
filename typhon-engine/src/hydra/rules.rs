@@ -735,6 +735,48 @@ fn compile_cond(c: &Cond) -> Result<Matcher, CompileError> {
     }
 }
 
+/// `tag_age` judged on the clock of `timing`, not on the instant the ages were
+/// read: a preview moves that clock forward to ask when the rule will hold,
+/// and a tag grows older with it. A real pass never moves it. On the
+/// "held long enough" clock of a preview, "older than" holds for any torrent
+/// that wears the tag: the age is the time that is waited for.
+fn compile_tag_age_in(c: &Cond, timing: &Arc<Timing>) -> Result<Matcher, CompileError> {
+    let fixed = compile_cond(c)?;
+    let (Some(tag), Some(want)) = (c.tag.as_deref().map(str::trim), parse_duration(&c.value))
+    else {
+        return Ok(fixed);
+    };
+    let (tag, op, timing) = (tag.to_string(), c.op, timing.clone());
+    Ok(Box::new(move |f: &Facts| {
+        f.tag_ages
+            .iter()
+            .find(|(t, _)| *t == tag)
+            .is_some_and(|(_, age)| {
+                (timing.is_ungated() && matches!(op, Op::Gt | Op::Ge))
+                    || cmp_num(op, *age + timing.elapsed() as f64, want)
+            })
+    }))
+}
+
+/// The distinct `tag_age` conditions of a tree.
+pub fn tag_age_conditions(n: &Node) -> Vec<&Cond> {
+    fn walk<'a>(n: &'a Node, out: &mut Vec<&'a Cond>) {
+        match n {
+            Node::All { of } | Node::Any { of } => of.iter().for_each(|c| walk(c, out)),
+            Node::Not { of } => walk(of, out),
+            Node::Cond(c) => {
+                if c.field == "tag_age" && !out.iter().any(|o| condition_key(o) == condition_key(c))
+                {
+                    out.push(c);
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(n, &mut out);
+    out
+}
+
 /// One condition judged on the torrent as it is now, its `for` ignored.
 pub fn compile_raw(c: &Cond) -> Result<Matcher, CompileError> {
     compile_cond(c)
@@ -754,7 +796,10 @@ pub fn compile(node: &Node) -> Result<Matcher, CompileError> {
 pub fn compile_in(node: &Node, timing: Option<&Arc<Timing>>) -> Result<Matcher, CompileError> {
     match node {
         Node::Cond(c) => {
-            let raw = compile_cond(c)?;
+            let raw = match timing {
+                Some(t) if c.field == "tag_age" => compile_tag_age_in(c, t)?,
+                _ => compile_cond(c)?,
+            };
             let Some(secs) = hold_secs(c)? else {
                 return Ok(raw);
             };
@@ -937,6 +982,15 @@ impl Timing {
     /// Move the clock, to ask when a torrent will be due. Only a preview does.
     pub fn set_now(&self, t: i64) {
         self.now.store(t, std::sync::atomic::Ordering::Relaxed);
+    }
+    /// Seconds the clock has been moved from the pass's own time. Zero except
+    /// in a preview asking when a rule will hold.
+    pub fn elapsed(&self) -> i64 {
+        self.now.load(std::sync::atomic::Ordering::Relaxed) - self.origin
+    }
+    /// Is this the clock that answers "held long enough" to everything?
+    pub fn is_ungated(&self) -> bool {
+        self.ungated
     }
     /// The pass's own time: what a torrent with no row counts from.
     pub fn origin(&self) -> i64 {
@@ -1692,7 +1746,10 @@ mod editor_delete_tests {
             let open = format!("<button class=\"{class}");
             for (at, _) in html.match_indices(&open) {
                 let tag = &html[at..at + html[at..].find('>').expect("tag ends")];
-                assert!(tag.contains("data-tab=\""), "tab button without data-tab: {tag}");
+                assert!(
+                    tag.contains("data-tab=\""),
+                    "tab button without data-tab: {tag}"
+                );
                 buttons += 1;
             }
         }
@@ -1707,7 +1764,10 @@ mod editor_delete_tests {
                 !body.contains("textContent"),
                 "{name} lights a tab by its text, which is translated"
             );
-            assert!(body.contains("dataset.tab"), "{name} does not read data-tab");
+            assert!(
+                body.contains("dataset.tab"),
+                "{name} does not read data-tab"
+            );
         }
     }
 }
