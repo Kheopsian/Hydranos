@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Hydranos - Torrent Daemon</title>
     <link rel="icon" type="image/png" href="/static/hydra-logo.png">
-    <link rel="stylesheet" href="/static/style.css?v=1.5.23">
+    <link rel="stylesheet" href="/static/style.css?v=1.5.24">
     <!-- Before the stylesheet paints anything. app.js loads at the end of the
          body, so choosing the theme there means a dark flash on a light theme
          and a navy one on every other. Inline and tiny on purpose. -->
@@ -290,6 +290,7 @@
                     <button class="detail-tab active" data-tab="info" onclick="switchDetailTab('info')">Info</button>
                     <button class="detail-tab" data-tab="timeline" onclick="switchDetailTab('timeline')">Timeline</button>
                     <button class="detail-tab" data-tab="content" onclick="switchDetailTab('content')">Content</button>
+                    <button class="detail-tab" data-tab="workflows" onclick="switchDetailTab('workflows')">Workflows</button>
                 </div>
 
                 <div id="detail-tab-info">
@@ -432,6 +433,13 @@
                         <div class="card-body" id="detail-content-body"></div>
                     </div>
                 </div><!-- /detail-tab-content -->
+
+                <div id="detail-tab-workflows" style="display:none">
+                    <div class="card">
+                        <h3>Workflows</h3>
+                        <div class="card-body wft" id="detail-workflows-body"></div>
+                    </div>
+                </div><!-- /detail-tab-workflows -->
             </div>
         </section>
 
@@ -530,6 +538,7 @@
                 <div class="detail-tabs">
                     <button class="h-detail-tab active" data-tab="info" onclick="switchHoardDetailTab('info')">Info</button>
                     <button class="h-detail-tab" data-tab="content" onclick="switchHoardDetailTab('content')">Content</button>
+                    <button class="h-detail-tab" data-tab="workflows" onclick="switchHoardDetailTab('workflows')">Workflows</button>
                 </div>
 
                 <div id="h-detail-tab-info">
@@ -604,6 +613,13 @@
                         <div class="card-body" id="h-detail-content-body"></div>
                     </div>
                 </div><!-- /h-detail-tab-content -->
+
+                <div id="h-detail-tab-workflows" style="display:none">
+                    <div class="card">
+                        <h3>Workflows</h3>
+                        <div class="card-body wft" id="h-detail-workflows-body"></div>
+                    </div>
+                </div><!-- /h-detail-tab-workflows -->
             </div>
         </section>
 
@@ -1688,6 +1704,6 @@
     </div>
 
     <script src="/static/i18n.js?v=1.0.0"></script>
-    <script src="/static/app.js?v=1.6.104"></script>
+    <script src="/static/app.js?v=1.6.105"></script>
 </body>
 </html>

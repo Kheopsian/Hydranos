@@ -1780,7 +1780,11 @@ function switchDetailTab(tab) {
     document.getElementById("detail-tab-info").style.display = tab === "info" ? "" : "none";
     document.getElementById("detail-tab-timeline").style.display = tab === "timeline" ? "" : "none";
     document.getElementById("detail-tab-content").style.display = tab === "content" ? "" : "none";
+    document.getElementById("detail-tab-workflows").style.display = tab === "workflows" ? "" : "none";
     if (tab === "timeline" && selectedTorrent) loadTimeline(selectedTorrent);
+    if (tab === "workflows" && selectedTorrent) {
+        loadWorkflowsTab(selectedTorrent, "detail-workflows-body", selectedTorrentAgent);
+    }
     if (tab === "content" && selectedTorrent) {
         loadTorrentContent(selectedTorrent, "detail-content-body", "detail-content-summary", selectedTorrentAgent, "race");
     }
@@ -1795,9 +1799,166 @@ function switchHoardDetailTab(tab) {
     );
     document.getElementById("h-detail-tab-info").style.display = tab === "info" ? "" : "none";
     document.getElementById("h-detail-tab-content").style.display = tab === "content" ? "" : "none";
+    document.getElementById("h-detail-tab-workflows").style.display = tab === "workflows" ? "" : "none";
+    if (tab === "workflows" && selectedHoardTorrent) {
+        loadWorkflowsTab(selectedHoardTorrent, "h-detail-workflows-body", selectedHoardTorrentAgent);
+    }
     if (tab === "content" && selectedHoardTorrent) {
         loadTorrentContent(selectedHoardTorrent, "h-detail-content-body", "h-detail-content-summary", selectedHoardTorrentAgent, "hoard");
     }
+}
+
+// ---------------------------------------------------------------------------
+// Workflows tab: which delay rules aim at this torrent, and when they act
+// ---------------------------------------------------------------------------
+
+// Only the newest request may paint, as for the Content tab.
+let _wfTabReq = 0;
+
+// Loaded when the tab opens and by its Recalculate button, never on a timer:
+// the answer is a computation at one instant, and says which instant.
+async function loadWorkflowsTab(infoHash, bodyId, agent) {
+    const body = document.getElementById(bodyId);
+    if (!body) return;
+    const req = ++_wfTabReq;
+    // The workflows of a node judge that node's torrents.
+    if (agent && !_isLocalAgent(agent)) {
+        body.innerHTML = `<div class="tc-empty">${esc(t("Workflows are not shown for a torrent of another node."))}</div>`;
+        return;
+    }
+    body.innerHTML = `<div class="tc-empty">${esc(t("Loading…"))}</div>`;
+    try {
+        const [d] = await Promise.all([
+            api(`/api/workflows/for/${encodeURIComponent(infoHash)}`),
+            loadWorkflowFields().catch(() => []),
+        ]);
+        if (req !== _wfTabReq) return;
+        body.innerHTML = renderWorkflowsTab(d, infoHash, bodyId);
+    } catch (e) {
+        if (req !== _wfTabReq) return;
+        body.innerHTML = `<div class="tc-empty">${esc(e.message)}</div>`;
+    }
+}
+
+// "4 d", "3 h", "12 min": the largest unit that gives a figure of 1 or more,
+// two days and up counted in days.
+function _wfTabSpan(secs) {
+    const s = Math.max(0, Math.round(secs));
+    if (s >= 2 * 86400) return t("{n} d", { n: Math.round(s / 86400) });
+    if (s >= 3600) return t("{n} h", { n: Math.round(s / 3600) });
+    if (s >= 60) return t("{n} min", { n: Math.round(s / 60) });
+    return t("under a minute");
+}
+
+function _wfTabDate(ts) {
+    return new Date(ts * 1000).toLocaleString(undefined, {
+        day: "numeric", month: "short", hour: "2-digit", minute: "2-digit",
+    });
+}
+
+// What a condition reads on the torrent, as a short string (not escaped).
+function _wfTabCurrent(c) {
+    const v = c.current;
+    if (v === null || v === undefined) return "–";
+    if (typeof v === "boolean") return v ? t("true") : t("false");
+    if (Array.isArray(v)) return v.length ? v.join(", ") : "–";
+    if (typeof v === "string") return v === "" ? "–" : v;
+    if (c.kind === "size") return formatBytes(v);
+    if (c.kind === "duration") return _wfTabSpan(v);
+    if (c.kind === "percent") return `${Math.round(v * 10) / 10} %`;
+    return String(Math.round(v * 100) / 100);
+}
+
+// The rule's own words for a field and an operator, from the editor's list.
+function _wfTabWords(c) {
+    const f = (_wfFields || []).find(x => x.name === c.field);
+    const label = t(f && f.label ? f.label : c.field);
+    const o = f && (f.operators_labelled || []).find(x => x.op === c.op);
+    // The age of a tag reads "age of tag “keep” is older than 10d".
+    const named = c.field === "tag_age" && c.tag ? t("age of tag “{tag}”", { tag: c.tag }) : label;
+    return { label: named, op: t(o ? o.label : c.op) };
+}
+
+// "ratio is at least 1", "stopped by hand is true, for at least 7 d".
+function _wfTabCondText(c) {
+    const w = _wfTabWords(c);
+    let s = `${w.label} ${w.op} ${c.value}`;
+    if (c.for_secs && c.field !== "tag_age") {
+        s += `, ${t("for at least {span}", { span: _wfTabSpan(c.for_secs) })}`;
+    }
+    return s;
+}
+
+// "stop the torrent", "move files to a folder: /archive".
+function _wfTabAction(a) {
+    const type = a.type === "delete" && a.with_files ? "delete_with_files" : a.type;
+    const known = WF_ACTIONS.find(x => x.type === type);
+    let s = t(known ? known.label : type);
+    // Never the URL of a webhook: it often carries a secret.
+    if (a.type === "set_location" && a.to) s += `: ${a.to}`;
+    else if (a.type === "set_category" && a.to) s += `: ${a.to}`;
+    else if ((a.type === "add_tags" || a.type === "remove_tags") && a.tags) s += `: ${a.tags.join(", ")}`;
+    return s;
+}
+
+function _wfTabCondRow(c, now) {
+    const text = esc(_wfTabCondText(c));
+    // A delay that is running: a bar from the date it started to the date it ends.
+    if (c.for_secs && c.due !== undefined) {
+        const elapsed = c.since === null ? 0 : Math.max(0, now - c.since);
+        const pct = Math.min(100, Math.round(elapsed / c.for_secs * 100));
+        // The mark's slot is always there, so the labels of a rule line up.
+        const mark = c.holds ? `<span class="wft-mark wft-ok">✓</span>` : `<span class="wft-mark">…</span>`;
+        const fig = c.since === null
+            ? esc(t("from now on"))
+            : esc(`${_wfTabSpan(elapsed)} / ${_wfTabSpan(c.for_secs)}`);
+        return `<div class="wft-cond">
+            <span class="wft-label">${mark}${text}</span>
+            <div class="progress-bar"><div class="progress-fill" style="width:${pct}%"></div></div>
+            <small>${fig}</small></div>`;
+    }
+    const mark = c.holds ? `<span class="wft-mark wft-ok">✓</span>` : `<span class="wft-mark wft-no">✗</span>`;
+    return `<div class="wft-cond plain">
+        <span class="wft-label">${mark}${text}</span>
+        <small>${esc(_wfTabCurrent(c))}</small></div>`;
+}
+
+function _wfTabRow(w, now) {
+    let when;
+    if (w.ready) {
+        when = `<span class="wft-when">${esc(t("acts on the next pass"))}</span>`;
+    } else if (w.fires_at) {
+        const text = t("acts on {date} · in {delay}", {
+            date: _wfTabDate(w.fires_at),
+            delay: _wfTabSpan(w.fires_at - now),
+        });
+        when = `<span class="wft-when">${esc(text)}</span>`;
+    } else {
+        const why = (w.blocked_by || []).map(c => {
+            const words = _wfTabWords(c);
+            return `${words.label} ${_wfTabCurrent(c)} (${words.op} ${c.value})`;
+        }).join(", ");
+        when = `<span class="wft-when blocked">${esc(t("blocked: {what}", { what: why }))}</span>`;
+    }
+    const acts = (w.then || []).map(_wfTabAction).join(", ");
+    return `<div class="wft-row">
+        <div class="wft-head"><span class="wft-name">${esc(w.name)}</span>${when}</div>
+        <div class="wft-action">→ ${esc(acts)}</div>
+        ${(w.conditions || []).map(c => _wfTabCondRow(c, now)).join("")}
+    </div>`;
+}
+
+// The tab's markup for one answer of GET /api/workflows/for/:info_hash.
+function renderWorkflowsTab(d, infoHash, bodyId) {
+    const now = d.computed_at;
+    const rows = (d.workflows || []).map(w => _wfTabRow(w, now)).join("");
+    const at = new Date(now * 1000).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+    return `${rows || `<div class="wft-empty">${esc(t("No rule with a delay aims at this torrent."))}</div>`}
+        <div class="wft-foot">
+            <span>${esc(t("computed at {time}", { time: at }))}</span>
+            <button class="btn-small" data-hash="${esc(infoHash)}" data-body="${esc(bodyId)}"
+                onclick="loadWorkflowsTab(this.dataset.hash, this.dataset.body)">${esc(t("Recalculate"))}</button>
+        </div>`;
 }
 
 // ---------------------------------------------------------------------------

@@ -1795,7 +1795,7 @@ mod editor_delete_tests {
                 buttons += 1;
             }
         }
-        assert_eq!(buttons, 5, "expected 3 race tabs and 2 hoard tabs");
+        assert_eq!(buttons, 7, "expected 4 race tabs and 3 hoard tabs");
         let js = include_str!("../../../web/static/app.js");
         for name in ["switchDetailTab", "switchHoardDetailTab"] {
             let body = &js[js
@@ -1811,5 +1811,89 @@ mod editor_delete_tests {
                 "{name} does not read data-tab"
             );
         }
+    }
+
+    /// The body of the JS function `name`, up to its closing brace at column 0.
+    fn js_function<'a>(js: &'a str, name: &str) -> &'a str {
+        let from = js
+            .find(&format!("function {name}("))
+            .unwrap_or_else(|| panic!("app.js has no function {name}"));
+        let body = &js[from..];
+        &body[..body.find("\n}\n").expect("function ends")]
+    }
+
+    /// The Workflows tab of a torrent's detail, in both panels: a button that
+    /// names its tab, a div the switch shows and hides, a load that happens
+    /// when the tab opens, never on a timer, and a rule's name -- text the user
+    /// typed -- escaped on its way into the page.
+    #[test]
+    fn the_workflows_tab_is_wired_in_both_panels() {
+        let html = include_str!("../../../web/templates/index.html");
+        let js = include_str!("../../../web/static/app.js");
+        for (class, panel, switch, show, body) in [
+            (
+                "detail-tab",
+                "detail-tab-workflows",
+                "switchDetailTab",
+                "selectedTorrent",
+                "detail-workflows-body",
+            ),
+            (
+                "h-detail-tab",
+                "h-detail-tab-workflows",
+                "switchHoardDetailTab",
+                "selectedHoardTorrent",
+                "h-detail-workflows-body",
+            ),
+        ] {
+            assert!(
+                html.contains(&format!(
+                    "<button class=\"{class}\" data-tab=\"workflows\" onclick=\"{switch}('workflows')\">"
+                )),
+                "no Workflows button in the {class} panel"
+            );
+            assert!(
+                html.contains(&format!("<div id=\"{panel}\" style=\"display:none\">")),
+                "no {panel} div, hidden at first"
+            );
+            assert!(html.contains(&format!("id=\"{body}\"")), "no {body}");
+            let f = js_function(js, switch);
+            assert!(
+                f.contains(&format!(
+                    "getElementById(\"{panel}\").style.display = tab === \"workflows\""
+                )),
+                "{switch} does not show and hide {panel}"
+            );
+            assert!(
+                f.contains(&format!(
+                    "if (tab === \"workflows\" && {show}) {{\n        loadWorkflowsTab({show}, \"{body}\""
+                )),
+                "{switch} does not load the tab when it opens"
+            );
+        }
+
+        // Loaded on opening and on the Recalculate button, nothing else: no
+        // timer, and no call from the periodic refresh of the panel.
+        let load = js_function(js, "loadWorkflowsTab");
+        assert!(!load.contains("setInterval") && !load.contains("setTimeout"));
+        assert!(!js_function(js, "refreshDetail").contains("loadWorkflowsTab"));
+        assert!(
+            js_function(js, "renderWorkflowsTab")
+                .contains("onclick=\"loadWorkflowsTab(this.dataset.hash, this.dataset.body)\""),
+            "the Recalculate button reads its arguments from data attributes"
+        );
+
+        // Everything the API sends goes through the escaping helper.
+        let row = js_function(js, "_wfTabRow");
+        assert!(
+            row.contains("esc(w.name)"),
+            "the rule's name is not escaped"
+        );
+        assert!(
+            !row.contains("${w.name}"),
+            "the rule's name is written raw into the page"
+        );
+        assert!(js_function(js, "_wfTabCondRow").contains("esc(_wfTabCondText(c))"));
+        assert!(js_function(js, "_wfTabRow").contains("esc(acts)"));
     }
 }

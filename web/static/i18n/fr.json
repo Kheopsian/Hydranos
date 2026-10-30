@@ -1157,5 +1157,21 @@
   ", the first on {d}": ", le premier le {d}",
   "tag": "tag",
   "Isolated from": "Isolé de",
-  "Another torrent's files are there. Files this one is missing go in its Save Path.": "Les fichiers d'un autre torrent y sont. Ceux qui manquent à celui-ci vont dans son chemin d'enregistrement."
+  "Another torrent's files are there. Files this one is missing go in its Save Path.": "Les fichiers d'un autre torrent y sont. Ceux qui manquent à celui-ci vont dans son chemin d'enregistrement.",
+  "{n} d": "{n} j",
+  "{n} h": "{n} h",
+  "{n} min": "{n} min",
+  "under a minute": "moins d'une minute",
+  "for at least {span}": "pendant au moins {span}",
+  "from now on": "à partir de maintenant",
+  "true": "vrai",
+  "false": "faux",
+  "acts on the next pass": "agit au prochain passage",
+  "acts on {date} · in {delay}": "agit le {date} · dans {delay}",
+  "blocked: {what}": "bloquée : {what}",
+  "No rule with a delay aims at this torrent.": "Aucune règle à délai ne vise ce torrent.",
+  "computed at {time}": "calculé à {time}",
+  "Recalculate": "Recalculer",
+  "Workflows are not shown for a torrent of another node.": "Les workflows ne sont pas affichés pour un torrent d'un autre nœud.",
+  "age of tag “{tag}”": "âge du tag « {tag} »"
 }
