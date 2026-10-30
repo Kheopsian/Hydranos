@@ -511,6 +511,48 @@ pub fn kind_of(field: &str) -> Option<Kind> {
     FIELDS.iter().find(|(n, _)| *n == field).map(|(_, k)| *k)
 }
 
+/// The name of a field's kind as the API spells it (`/api/workflows/fields`).
+pub fn kind_name(field: &str) -> &'static str {
+    match kind_of(field) {
+        Some(Kind::Text) => "text",
+        Some(Kind::Number) => "number",
+        Some(Kind::Duration) => "duration",
+        Some(Kind::Size) => "size",
+        Some(Kind::Percent) => "percent",
+        Some(Kind::Bool) => "bool",
+        Some(Kind::Tags) => "tags",
+        None => "unknown",
+    }
+}
+
+/// What `field` reads on this torrent right now, for showing next to a
+/// condition: a string, a number (seconds, bytes, a percentage or a plain
+/// count according to the kind), a boolean, the list of tags, or null when the
+/// torrent has no such value (`NEVER`, a tag not worn, a link fact not
+/// measured). `tag` is the argument of `tag_age`.
+pub fn current_value(f: &Facts, field: &str, tag: Option<&str>) -> serde_json::Value {
+    use serde_json::Value;
+    if field == "tag_age" {
+        let tag = tag.map(str::trim).unwrap_or_default();
+        return f
+            .tag_ages
+            .iter()
+            .find(|(t, _)| t == tag)
+            .map(|(_, age)| Value::from(*age))
+            .unwrap_or(Value::Null);
+    }
+    match kind_of(field) {
+        Some(Kind::Bool) => bool_of(f, field).map(Value::from).unwrap_or(Value::Null),
+        Some(Kind::Tags) => Value::from(f.tags.clone()),
+        Some(Kind::Text) => text_of(f, field).map(Value::from).unwrap_or(Value::Null),
+        Some(_) => number_of(f, field)
+            .filter(|n| n.is_finite())
+            .map(Value::from)
+            .unwrap_or(Value::Null),
+        None => Value::Null,
+    }
+}
+
 /// `2d`, `36h`, `90m`, `45s`, or a bare number of seconds.
 pub fn parse_duration(text: &str) -> Option<f64> {
     let t = text.trim();

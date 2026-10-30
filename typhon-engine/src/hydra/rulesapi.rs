@@ -1162,6 +1162,116 @@ fn run_events_at(state: &AppState, now: i64) -> usize {
     done
 }
 
+/// Which delay rules aim at ONE torrent, since when, and when they will act.
+///
+/// For the "Workflows" tab of a torrent's detail. Every active scheduled
+/// workflow that carries a `for` or a `tag_age` is judged against this
+/// torrent alone (`rulesrun::timeline_of`, which shares its date arithmetic
+/// with the preview); the ones that do not concern it are left out.
+///
+/// ⚠️ One torrent, never the catalogue: the facts come from the engine's entry
+/// and the store's row of this torrent, the record is read through its hash
+/// index, the hardlink facts are the ones the scanner already published. Reads
+/// only: the record of `for` conditions is not written.
+pub async fn for_torrent(
+    State(state): State<AppState>,
+    Path(info_hash): Path<String>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+) -> Response {
+    let query = query.unwrap_or_default();
+    if !crate::api::authorised(&state, &headers, &query) {
+        return refuse();
+    }
+    let hash = info_hash.to_ascii_lowercase();
+    let answer = tokio::task::spawn_blocking(move || timeline_for(&state, &hash)).await;
+    match answer {
+        Ok(Ok(Some(v))) => Json(v).into_response(),
+        Ok(Ok(None)) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "unknown torrent"})),
+        )
+            .into_response(),
+        Ok(Err(e)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e})),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// `for_torrent`, blocking. None: no engine holds this torrent.
+fn timeline_for(state: &AppState, hash: &str) -> Result<Option<serde_json::Value>, String> {
+    if crate::store::hex20(hash).is_none() {
+        return Ok(None);
+    }
+    let now = crate::store::now_secs();
+    let stored = {
+        let store = state.store.read().map_err(|_| "store lock")?;
+        store.workflows().unwrap_or_default()
+    };
+    let candidates: Vec<Workflow> = stored
+        .into_iter()
+        .filter(|s| s.enabled)
+        .filter_map(|s| serde_json::from_str::<Workflow>(&s.body).ok())
+        .filter(|w| w.trigger == rules::Trigger::Schedule && rulesrun::has_delay(w))
+        .collect();
+
+    let want = candidates
+        .iter()
+        .map(rulesrun::Want::of)
+        .fold(rulesrun::Want::default(), |a, b| rulesrun::Want {
+            free_space: a.free_space || b.free_space,
+            trackers: a.trackers || b.trackers,
+        });
+    let found = {
+        let store = state.store.read().map_err(|_| "store lock")?;
+        state.engines.engines().iter().find_map(|e| {
+            let f = rulesrun::gather_one_with(&state.engines, &store, &e.id, hash, want)?;
+            Some((e.id.clone(), f))
+        })
+    };
+    let Some((engine_id, mut facts)) = found else {
+        return Ok(None);
+    };
+    if candidates.iter().any(|w| rules::needs_link_scan(&w.when)) {
+        let store = state.store.read().map_err(|_| "store lock")?;
+        rulesrun::link_facts_one(&state.engines, &store, &engine_id, &mut facts);
+    }
+    let mut record: std::collections::HashMap<String, rules::SinceRows> = Default::default();
+    for (wf, key, since) in {
+        let store = state.store.read().map_err(|_| "store lock")?;
+        store.rule_since_of(hash).unwrap_or_default()
+    } {
+        record
+            .entry(wf)
+            .or_default()
+            .entry(key)
+            .or_default()
+            .insert(hash.to_string(), since);
+    }
+
+    let mut out = Vec::new();
+    for w in &candidates {
+        // The ages of the tags this rule names, for this torrent only.
+        let mut f = facts.clone();
+        rulesrun::fill_tag_ages(&state.store, &w.when, std::slice::from_mut(&mut f), now)?;
+        let rows = record.remove(&w.id).unwrap_or_default();
+        if let Some(t) = rulesrun::timeline_of(w, &f, rows, now)? {
+            out.push(t);
+        }
+    }
+    Ok(Some(serde_json::json!({
+        "computed_at": now,
+        "workflows": out,
+    })))
+}
+
 /// Mount the workflow routes.
 pub fn routes() -> axum::Router<AppState> {
     use axum::routing::{delete, get, post};
@@ -1171,6 +1281,7 @@ pub fn routes() -> axum::Router<AppState> {
         .route("/api/workflows/preview", post(preview))
         .route("/api/workflows/activity", get(activity))
         .route("/api/workflows/links", get(links_status))
+        .route("/api/workflows/for/:info_hash", get(for_torrent))
         .route("/api/workflows/:id/run", post(run_now))
         .route("/api/workflows/:id", delete(remove))
 }
@@ -2664,3 +2775,7 @@ mod since_tests;
 #[cfg(test)]
 #[path = "rulesapi_tagage_tests.rs"]
 mod tagage_tests;
+
+#[cfg(test)]
+#[path = "rulesapi_timeline_tests.rs"]
+mod timeline_tests;

@@ -136,13 +136,31 @@ pub fn gather_one(
     engine_id: &str,
     info_hash: &str,
 ) -> Option<Facts> {
+    // One torrent: its tracker list and its free space cost nothing worth saving.
+    let want = Want {
+        free_space: true,
+        trackers: true,
+    };
+    gather_one_with(host, store, engine_id, info_hash, want)
+}
+
+/// `gather_one`, paying only for the facts `want` names. A question about a
+/// torrent that reads neither the free space nor the trackers asks the
+/// filesystem nothing.
+pub fn gather_one_with(
+    host: &EngineHost,
+    store: &Store,
+    engine_id: &str,
+    info_hash: &str,
+    want: Want,
+) -> Option<Facts> {
     let engine = host.engines().iter().find(|e| e.id == engine_id)?;
     let t = engine.manager.get(&crate::store::hex20(info_hash)?)?;
     let s = store
         .workflow_facts_of(engine_id, info_hash)
         .ok()
         .flatten()?;
-    let free_space = if s.save_path.is_empty() {
+    let free_space = if s.save_path.is_empty() || !want.free_space {
         rules::NEVER
     } else {
         free_space_at(&s.save_path)
@@ -150,7 +168,7 @@ pub fn gather_one(
     let now = crate::store::now_secs() as f64;
     // No link facts: an event workflow may not ask for them (see
     // `CompileError::LinkFieldOnEvent`), so NEVER is the honest answer.
-    // One torrent: its tracker list costs nothing worth saving.
+    // `link_facts_one` adds them for a question about a scheduled rule.
     Some(facts_of(
         &t,
         info_hash.to_string(),
@@ -159,8 +177,29 @@ pub fn gather_one(
         None,
         free_space,
         now,
-        true,
+        want.trackers,
     ))
+}
+
+/// The link facts of ONE torrent, from what the link scanner already stored.
+///
+/// ⚠️ No scan, no `stat`: `external_links` is a property of the whole
+/// catalogue, so the answer is the one the scanner published for the list
+/// (`EngineHost::link_summary`), the very number a pass reads. `data_missing`
+/// comes from the torrent's own stored row. `freeable_bytes` needs the sizes of
+/// every file, which the summary does not keep: it stays unmeasured. A torrent
+/// the scanner has not reached keeps `NEVER`, as in a pass.
+pub fn link_facts_one(host: &EngineHost, store: &Store, engine_id: &str, f: &mut Facts) {
+    let Some(raw) = crate::store::hex20(&f.info_hash) else {
+        return;
+    };
+    if let Some(c) = host.link_summary().get(&raw) {
+        f.link_count = c.link_count as f64;
+        f.external_links = c.external_links as f64;
+    }
+    if let Ok(Some((files, missing))) = store.link_row_counts(&f.info_hash, engine_id) {
+        f.data_missing = missing >= files;
+    }
 }
 
 /// One torrent's facts, from the engine's live state and the store's row.
@@ -965,50 +1004,64 @@ impl TimedPass {
     }
 }
 
-/// The torrents the rule would act on if only time were not in the way: the
-/// whole count, and the first `sample` of them with what they wait for.
-pub fn pending(
-    w: &Workflow,
-    facts: &[Facts],
-    tp: &TimedPass,
-    sample: usize,
-) -> Result<(usize, Vec<Pending>), String> {
-    let gated = rules::compile_workflow_in(w, Some(&tp.timing)).map_err(|e| e.to_string())?;
-    let free = Arc::new(tp.timing.ungated());
-    let ungated = rules::compile_workflow_in(w, Some(&free)).map_err(|e| e.to_string())?;
-    let raws: Vec<rules::Matcher> = tp
-        .timed
-        .iter()
-        .map(|t| rules::compile_raw(&t.cond).map_err(|e| e.to_string()))
-        .collect::<Result<_, _>>()?;
-    let ages = rules::tag_age_conditions(&w.when);
-    let origin = tp.timing.origin();
-    let (mut total, mut out) = (0, Vec::new());
-    for f in facts {
-        if !ungated(f) || gated(f) {
-            continue;
-        }
-        if w.then
+/// The three ways of judging a workflow a question about time needs: as the
+/// pass judges it (`gated`), as if every delay had run out (`ungated`), and
+/// each `for` condition on the torrent as it is now (`raws`).
+///
+/// ⭐ One construction for the preview of a whole catalogue (`pending`) and the
+/// answer about one torrent (`timeline_of`): a date computed twice is a date
+/// computed two ways.
+pub struct TimedGates<'w> {
+    gated: rules::Matcher,
+    ungated: rules::Matcher,
+    raws: Vec<rules::Matcher>,
+    ages: Vec<&'w rules::Cond>,
+}
+
+impl<'w> TimedGates<'w> {
+    pub fn new(w: &'w Workflow, tp: &TimedPass) -> Result<Self, String> {
+        let gated = rules::compile_workflow_in(w, Some(&tp.timing)).map_err(|e| e.to_string())?;
+        let free = Arc::new(tp.timing.ungated());
+        let ungated = rules::compile_workflow_in(w, Some(&free)).map_err(|e| e.to_string())?;
+        let raws = tp
+            .timed
             .iter()
-            .all(|a| a.is_webhook() || rules::already_satisfied(a, f))
-        {
-            continue;
-        }
-        total += 1;
-        if out.len() >= sample {
-            continue;
-        }
+            .map(|t| rules::compile_raw(&t.cond).map_err(|e| e.to_string()))
+            .collect::<Result<_, _>>()?;
+        Ok(TimedGates {
+            gated,
+            ungated,
+            raws,
+            ages: rules::tag_age_conditions(&w.when),
+        })
+    }
+
+    /// The rule holds on this torrent as of the pass's clock.
+    pub fn holds_now(&self, f: &Facts) -> bool {
+        (self.gated)(f)
+    }
+
+    /// Only time stands between this torrent and the rule.
+    pub fn waits_on_time_alone(&self, f: &Facts) -> bool {
+        (self.ungated)(f) && !(self.gated)(f)
+    }
+
+    /// What this torrent waits for, and when the whole rule will first hold
+    /// (if every wait keeps holding). Meant for a torrent that
+    /// `waits_on_time_alone`.
+    pub fn waiting(&self, tp: &TimedPass, f: &Facts) -> (Vec<Held>, Option<i64>) {
+        let origin = tp.timing.origin();
         let mut waiting: Vec<Held> = tp
             .timed
             .iter()
-            .zip(&raws)
+            .zip(&self.raws)
             .filter(|(t, raw)| raw(f) && !tp.timing.held(&t.key, &f.info_hash, t.secs))
             .map(|(t, _)| tp.held_of(t, &f.info_hash))
             .collect();
         // A tag that is not old enough yet is waiting on time too. Only
         // "older than" gets older: "newer than" never becomes true later.
         let mut strict = Vec::new();
-        for c in &ages {
+        for c in &self.ages {
             let worn = c.tag.as_deref().map(str::trim).unwrap_or_default();
             let Some((tag, age)) = f.tag_ages.iter().find(|(t, _)| t == worn) else {
                 continue;
@@ -1045,9 +1098,38 @@ pub fn pending(
         dues.sort_unstable();
         let fires_at = dues.into_iter().find_map(|(t, late)| {
             tp.timing.set_now(t + late);
-            gated(f).then_some(t)
+            (self.gated)(f).then_some(t)
         });
         tp.timing.set_now(origin);
+        (waiting, fires_at)
+    }
+}
+
+/// The torrents the rule would act on if only time were not in the way: the
+/// whole count, and the first `sample` of them with what they wait for.
+pub fn pending(
+    w: &Workflow,
+    facts: &[Facts],
+    tp: &TimedPass,
+    sample: usize,
+) -> Result<(usize, Vec<Pending>), String> {
+    let gates = TimedGates::new(w, tp)?;
+    let (mut total, mut out) = (0, Vec::new());
+    for f in facts {
+        if !gates.waits_on_time_alone(f) {
+            continue;
+        }
+        if w.then
+            .iter()
+            .all(|a| a.is_webhook() || rules::already_satisfied(a, f))
+        {
+            continue;
+        }
+        total += 1;
+        if out.len() >= sample {
+            continue;
+        }
+        let (waiting, fires_at) = gates.waiting(tp, f);
         out.push(Pending {
             info_hash: f.info_hash.clone(),
             name: f.name.clone(),
@@ -1058,6 +1140,190 @@ pub fn pending(
         });
     }
     Ok((total, out))
+}
+
+/// One condition of a rule as one torrent stands against it.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CondView {
+    pub field: String,
+    pub op: serde_json::Value,
+    pub value: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
+    /// The field's kind (`duration`, `size`, `bool`...), to format `current`.
+    pub kind: &'static str,
+    /// True of the torrent now, its delay included: a `for` that has run its
+    /// course, a tag old enough.
+    pub holds: bool,
+    /// What the field reads on the torrent (null: no such value).
+    pub current: serde_json::Value,
+    /// The delay: a `for`, or for `tag_age` the age the tag must reach.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub for_secs: Option<i64>,
+    /// Present on a counting delay. The date it has been true since, or null
+    /// when the last pass has not seen it yet ("from now on"); for `tag_age`
+    /// the date the tag was set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub since: Option<Option<i64>>,
+    /// When the delay runs out.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub due: Option<i64>,
+    /// A delay is running on this condition: not a reason for the rule to be
+    /// blocked, a reason for it to wait.
+    #[serde(skip)]
+    pub counting: bool,
+}
+
+/// What the delay rules say about one torrent, for one workflow.
+#[derive(Debug, serde::Serialize)]
+pub struct Timeline {
+    pub id: String,
+    pub name: String,
+    pub then: Vec<Action>,
+    /// Every condition holds right now: the next pass acts.
+    pub ready: bool,
+    /// When the rule will act, if every delay keeps holding. Null when
+    /// something other than time is in the way (see `blocked_by`).
+    pub fires_at: Option<i64>,
+    /// The conditions that are false and that time does not mend.
+    pub blocked_by: Vec<CondView>,
+    pub conditions: Vec<CondView>,
+}
+
+/// Does this workflow carry a condition that waits for time: a `for`, or the
+/// age of a tag that must reach a duration?
+pub fn has_delay(w: &Workflow) -> bool {
+    rules::timed_conditions(&w.when).is_ok_and(|t| !t.is_empty())
+        || rules::tag_age_conditions(&w.when)
+            .iter()
+            .any(|c| matches!(c.op, rules::Op::Gt | rules::Op::Ge))
+}
+
+/// The distinct leaves of a condition tree, in reading order.
+fn leaves<'a>(n: &'a rules::Node, out: &mut Vec<&'a rules::Cond>) {
+    match n {
+        rules::Node::All { of } | rules::Node::Any { of } => of.iter().for_each(|c| leaves(c, out)),
+        rules::Node::Not { of } => leaves(of, out),
+        rules::Node::Cond(c) => {
+            let same = |o: &&rules::Cond| {
+                rules::condition_key(o) == rules::condition_key(c) && o.hold == c.hold
+            };
+            if !out.iter().any(same) {
+                out.push(c);
+            }
+        }
+    }
+}
+
+/// A scheduled workflow with a delay, judged against ONE torrent: what it
+/// waits for, since when, and when it will act.
+///
+/// `None` when the rule does not concern the torrent: an event workflow, no
+/// delay in it, nothing left to do to this torrent, or no delay running on it
+/// (a pause cleanup says nothing about a torrent that is not paused).
+/// `rows` is the record of the workflow's `for` conditions for this torrent
+/// (read, never written); `now` the clock.
+///
+/// ⚠️ Whether a delay "is running" comes from the torrent's facts, not from
+/// the record: a condition that became true since the last pass has no row yet
+/// and counts from now, and a `tag_age` never has one.
+pub fn timeline_of(
+    w: &Workflow,
+    f: &Facts,
+    rows: rules::SinceRows,
+    now: i64,
+) -> Result<Option<Timeline>, String> {
+    if w.trigger.is_event() || !has_delay(w) {
+        return Ok(None);
+    }
+    if w.then
+        .iter()
+        .all(|a| a.is_webhook() || rules::already_satisfied(a, f))
+    {
+        return Ok(None);
+    }
+    let timed = rules::timed_conditions(&w.when).map_err(|e| e.to_string())?;
+    let tp = TimedPass {
+        timed,
+        timing: Arc::new(rules::Timing::new(now, rows)),
+        written: 0,
+    };
+    let mut cs = Vec::new();
+    leaves(&w.when, &mut cs);
+    let mut conditions = Vec::with_capacity(cs.len());
+    for c in cs {
+        let on = rules::compile_raw(c).map_err(|e| e.to_string())?(f);
+        let tag = c
+            .tag
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(String::from);
+        let mut v = CondView {
+            field: c.field.clone(),
+            op: serde_json::to_value(c.op).unwrap_or_default(),
+            value: c.value.clone(),
+            kind: rules::kind_name(&c.field),
+            holds: on,
+            current: rules::current_value(f, &c.field, tag.as_deref()),
+            tag,
+            for_secs: None,
+            since: None,
+            due: None,
+            counting: false,
+        };
+        if let Some(secs) = rules::hold_secs(c).map_err(|e| e.to_string())? {
+            let key = rules::condition_key(c);
+            v.for_secs = Some(secs);
+            if on {
+                v.since = Some(tp.timing.recorded(&key, &f.info_hash));
+                v.due = Some(tp.timing.due(&key, &f.info_hash, secs));
+                v.holds = tp.timing.held(&key, &f.info_hash, secs);
+                v.counting = true;
+            }
+        } else if c.field == "tag_age" && matches!(c.op, rules::Op::Gt | rules::Op::Ge) {
+            let worn = c.tag.as_deref().map(str::trim).unwrap_or_default();
+            let age = f.tag_ages.iter().find(|(t, _)| t == worn).map(|(_, a)| *a);
+            if let (Some(age), Some(want)) = (age, rules::parse_duration(&c.value)) {
+                let since = now - age.round() as i64;
+                v.for_secs = Some(want.round() as i64);
+                v.since = Some(Some(since));
+                v.due = Some(since.saturating_add(want.round() as i64));
+                v.counting = true;
+            }
+        }
+        conditions.push(v);
+    }
+    if !conditions.iter().any(|v| v.counting) {
+        return Ok(None);
+    }
+    let gates = TimedGates::new(w, &tp)?;
+    let ready = gates.holds_now(f);
+    let fires_at = if ready {
+        Some(now)
+    } else if gates.waits_on_time_alone(f) {
+        gates.waiting(&tp, f).1
+    } else {
+        None
+    };
+    let blocked_by = if fires_at.is_none() {
+        conditions
+            .iter()
+            .filter(|v| !v.holds && !v.counting)
+            .cloned()
+            .collect()
+    } else {
+        Vec::new()
+    };
+    Ok(Some(Timeline {
+        id: w.id.clone(),
+        name: w.name.clone(),
+        then: w.then.clone(),
+        ready,
+        fires_at,
+        blocked_by,
+        conditions,
+    }))
 }
 
 /// `evaluate`, judging `for` conditions on the pass's record of them.

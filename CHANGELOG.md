@@ -50,6 +50,11 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 
 ### Added
 
+- `GET /api/workflows/for/:info_hash` says which workflows with a delay (a
+  condition held `for` some time, or the age of a tag) aim at one torrent:
+  since when each condition has held, when the rule will act, and, when
+  another condition is false, which one and what it reads now. It looks at
+  that torrent alone and writes nothing.
 - A recheck says how far it has got: `checking_progress` (0 to 1, `null` when
   no check is running) in the torrent lists and detail, and "Checking 42 %" in
   the interface. `progress` keeps its meaning until the check ends.

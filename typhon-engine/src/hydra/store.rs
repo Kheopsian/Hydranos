@@ -2148,6 +2148,35 @@ impl Store {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
+    /// Every row the record holds for ONE torrent, whatever the workflow:
+    /// (workflow id, condition key, since). Through `idx_rule_since_hash`, so
+    /// the cost is the torrent's rows and not the table's.
+    pub fn rule_since_of(&self, info_hash: &str) -> anyhow::Result<Vec<(String, String, i64)>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT workflow_id, condition_key, since FROM rule_since WHERE info_hash = ?1",
+        )?;
+        let rows = stmt.query_map([info_hash], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// How many files the link scanner measured for one copy of a torrent, and
+    /// how many of them it could not read. None: never measured.
+    pub fn link_row_counts(
+        &self,
+        info_hash: &str,
+        session: &str,
+    ) -> anyhow::Result<Option<(i64, i64)>> {
+        use rusqlite::OptionalExtension;
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT files, missing FROM link_index WHERE info_hash = ?1 AND session = ?2",
+                rusqlite::params![info_hash, session],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?)
+    }
+
     /// Everything the record holds for one workflow, in one query: the
     /// reference the sliced read (`rule_since_page`) is checked against.
     /// condition key -> info hash -> since.
