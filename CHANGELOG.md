@@ -62,6 +62,9 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 
 ### Fixed
 
+- A workflow with a condition on the age of a tag reads the tag dates in
+  slices of 500 torrents instead of 5 000, so the store is never held for
+  seconds at a time on a library of over a million torrents.
 - A workflow condition on the age of a tag that also has a "for at least"
   delay is no longer missing from a torrent's Workflows tab and from the
   preview. It is listed from the day the tag is set, and its date is the tag's

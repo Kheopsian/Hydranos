@@ -262,6 +262,8 @@ pub const TAG_SINCE_MIGRATED_KEY: &str = "tag_since_migrated_at";
 #[cfg(test)]
 thread_local! {
     pub static TAG_SINCE_BULK_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// The most hashes any one call asked for.
+    pub static TAG_SINCE_BULK_MAX: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// The frozen schema, as the production database has it.
@@ -3899,7 +3901,10 @@ impl Store {
             return Ok(out);
         }
         #[cfg(test)]
-        TAG_SINCE_BULK_CALLS.with(|c| c.set(c.get() + 1));
+        {
+            TAG_SINCE_BULK_CALLS.with(|c| c.set(c.get() + 1));
+            TAG_SINCE_BULK_MAX.with(|c| c.set(c.get().max(info_hashes.len())));
+        }
         let floor: i64 = self
             .meta_doc(TAG_SINCE_MIGRATED_KEY)
             .and_then(|v| v.parse().ok())

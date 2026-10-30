@@ -229,6 +229,56 @@ async fn the_dates_are_read_only_when_a_rule_asks() {
     );
 }
 
+/// The dates are read in short slices, because a read holds the store: the
+/// answer is the same whatever the size of a slice, and no read asks for more
+/// hashes than the slice (and the slice, in production, stays short).
+#[tokio::test]
+async fn the_dates_are_read_in_short_slices_with_the_same_answer() {
+    let s = st("tagage-slices");
+    let mut facts: Vec<Facts> = Vec::new();
+    for i in 0..23 {
+        let h = add(&s, &format!("t{i}.bin"));
+        // Every third torrent wears another tag: it is left out of the reads.
+        let tag = if i % 3 == 0 { "elsewhere" } else { "keep" };
+        wear(&s, &h, tag, Some(100 * (i + 1)));
+        facts.push(Facts {
+            info_hash: h,
+            tags: vec![tag.into()],
+            ..Default::default()
+        });
+    }
+    let when = age_cond("keep", Op::Gt, "7d");
+    let wearing = facts.iter().filter(|f| f.tags[0] == "keep").count();
+    assert!(wearing > 10);
+    let now = crate::store::now_secs();
+    let ages = |facts: &[Facts]| -> Vec<Vec<(String, f64)>> {
+        facts.iter().map(|f| f.tag_ages.clone()).collect()
+    };
+
+    let mut whole = facts.clone();
+    rulesrun::fill_tag_ages_by(&s.state.store, &when, &mut whole, now, 1000).unwrap();
+    assert_eq!(
+        whole.iter().filter(|f| !f.tag_ages.is_empty()).count(),
+        wearing
+    );
+    for slice in [1, 4, 7, wearing - 1] {
+        crate::store::TAG_SINCE_BULK_MAX.with(|c| c.set(0));
+        let before = crate::store::TAG_SINCE_BULK_CALLS.with(|c| c.get());
+        let mut cut = facts.clone();
+        rulesrun::fill_tag_ages_by(&s.state.store, &when, &mut cut, now, slice).unwrap();
+        assert_eq!(ages(&cut), ages(&whole), "slice of {slice}");
+        let max = crate::store::TAG_SINCE_BULK_MAX.with(|c| c.get());
+        assert!(max <= slice && max > 0, "slice {slice}: a read asked {max}");
+        let calls = crate::store::TAG_SINCE_BULK_CALLS.with(|c| c.get()) - before;
+        assert_eq!(calls, wearing.div_ceil(slice), "slice {slice}");
+    }
+    assert!(
+        rulesrun::TAG_AGE_SLICE <= 500,
+        "a read of {} hashes holds the store for seconds on a big library",
+        rulesrun::TAG_AGE_SLICE
+    );
+}
+
 // -------------------------------------------------------------- the preview
 
 async fn previewed(s: &TestState, w: &Workflow) -> serde_json::Value {

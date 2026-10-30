@@ -790,6 +790,12 @@ pub fn evaluate(w: &Workflow, facts: &[Facts]) -> Result<(Vec<Match>, PassReport
     evaluate_with(w, facts, None)
 }
 
+/// How many torrents one read of `tag_since` covers. The reader's lock is held
+/// for the whole read: at 5 000 hashes it was held for about 3 s on a
+/// library of a million and a half torrents, with hundreds of thousands of
+/// them wearing the tags, and everything else waited for the store.
+pub const TAG_AGE_SLICE: usize = 500;
+
 /// Give each torrent the age of the tags a `tag_age` condition names.
 ///
 /// Reads `tag_since` only when a condition uses the field, and then only for
@@ -802,6 +808,18 @@ pub fn fill_tag_ages(
     facts: &mut [Facts],
     now: i64,
 ) -> Result<(), String> {
+    fill_tag_ages_by(store, when, facts, now, TAG_AGE_SLICE)
+}
+
+/// `fill_tag_ages` with the size of a slice given: the answer does not depend
+/// on it, only how long each read keeps the store.
+pub fn fill_tag_ages_by(
+    store: &Arc<crate::store::StoreLock>,
+    when: &rules::Node,
+    facts: &mut [Facts],
+    now: i64,
+    slice_len: usize,
+) -> Result<(), String> {
     let used = rules::tag_ages_used(when);
     if used.is_empty() {
         return Ok(());
@@ -809,7 +827,7 @@ pub fn fill_tag_ages(
     let wearing: Vec<usize> = (0..facts.len())
         .filter(|&i| facts[i].tags.iter().any(|t| used.contains(t)))
         .collect();
-    for slice in wearing.chunks(5000) {
+    for slice in wearing.chunks(slice_len.max(1)) {
         let dates = {
             let hashes: Vec<&str> = slice.iter().map(|&i| facts[i].info_hash.as_str()).collect();
             let s = store.read().map_err(|_| "store lock")?;
