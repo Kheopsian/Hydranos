@@ -62,6 +62,11 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 
 ### Fixed
 
+- A workflow condition on the age of a tag that also has a "for at least"
+  delay is no longer missing from a torrent's Workflows tab and from the
+  preview. It is listed from the day the tag is set, and its date is the tag's
+  date plus the age plus the delay, since the delay only starts once the tag
+  is old enough.
 - A peer's bitfield whose length does not match the torrent is ignored, the
   padding bits after the last piece are cleared, and only the first Bitfield,
   Have All or Have None of a connection counts.

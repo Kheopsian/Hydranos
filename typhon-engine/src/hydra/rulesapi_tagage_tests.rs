@@ -342,3 +342,35 @@ async fn the_preview_waits_for_the_later_of_a_for_and_a_tag_age() {
     assert!(f.get("tag").is_none(), "{v}");
     assert!(f["due"].as_i64().unwrap() >= before + 2 * DAY, "{v}");
 }
+
+/// A `tag_age` that also carries a `for`: the `for` only starts to run once
+/// the tag is old enough, so the rule acts at tag date + value + for -- not at
+/// tag date + value, and not at "now + for" either.
+#[tokio::test]
+async fn the_preview_adds_the_for_after_the_tag_age() {
+    let s = st("tagage-preview-for");
+    let a = add(&s, "aaa.bin");
+    let at = dated(600);
+    wear(&s, &a, "noHL", Some(600));
+    let aged_for = Node::Cond(Cond {
+        field: "tag_age".into(),
+        op: Op::Ge,
+        value: "3d".into(),
+        hold: Some("1h".into()),
+        tag: Some("noHL".into()),
+    });
+    let w = workflow("wf-for", Node::All { of: vec![aged_for] }, "stale");
+    let v = previewed(&s, &w).await;
+    assert_eq!(v["waiting"], 1, "{v}");
+    let e = &v["waiting_sample"][0];
+    let due = at + 3 * DAY + 3600;
+    assert!((e["fires_at"].as_i64().unwrap() - due).abs() <= 2, "{v}");
+    let h = &e["waiting"][0];
+    assert_eq!(h["tag"], "noHL", "{v}");
+    assert!((h["since"].as_i64().unwrap() - at).abs() <= 2, "{v}");
+    assert!((h["due"].as_i64().unwrap() - due).abs() <= 2, "{v}");
+    assert!(
+        (h["for_secs"].as_i64().unwrap() - (3 * DAY + 3600)).abs() <= 2,
+        "{v}"
+    );
+}

@@ -1018,6 +1018,13 @@ pub struct TimedGates<'w> {
     ages: Vec<&'w rules::Cond>,
 }
 
+/// A `tag_age` condition "older than" that also carries a `for`.
+fn is_aged_hold(c: &rules::Cond) -> bool {
+    c.field == "tag_age"
+        && matches!(c.op, rules::Op::Gt | rules::Op::Ge)
+        && rules::hold_secs(c).ok().flatten().is_some()
+}
+
 impl<'w> TimedGates<'w> {
     pub fn new(w: &'w Workflow, tp: &TimedPass) -> Result<Self, String> {
         let gated = rules::compile_workflow_in(w, Some(&tp.timing)).map_err(|e| e.to_string())?;
@@ -1055,7 +1062,11 @@ impl<'w> TimedGates<'w> {
             .timed
             .iter()
             .zip(&self.raws)
-            .filter(|(t, raw)| raw(f) && !tp.timing.held(&t.key, &f.info_hash, t.secs))
+            .filter(|(t, raw)| {
+                // A `tag_age` "older than" with a `for` is listed below, with
+                // the tag's own date.
+                !is_aged_hold(&t.cond) && raw(f) && !tp.timing.held(&t.key, &f.info_hash, t.secs)
+            })
             .map(|(t, _)| tp.held_of(t, &f.info_hash))
             .collect();
         // A tag that is not old enough yet is waiting on time too. Only
@@ -1069,10 +1080,31 @@ impl<'w> TimedGates<'w> {
             let Some(want) = rules::parse_duration(&c.value) else {
                 continue;
             };
-            if !matches!(c.op, rules::Op::Gt | rules::Op::Ge) || *age >= want {
+            if !matches!(c.op, rules::Op::Gt | rules::Op::Ge) {
                 continue;
             }
             let since = origin - age.round() as i64;
+            if let Some(secs) = rules::hold_secs(c).ok().flatten() {
+                // The wait is the age and then the `for`: one bar, from the
+                // date of the tag to the date the condition has held long enough.
+                let due = rules::tag_age_hold_due(c, f, &tp.timing, secs);
+                if due <= origin {
+                    continue;
+                }
+                waiting.push(Held {
+                    field: c.field.clone(),
+                    op: serde_json::to_value(c.op).unwrap_or_default(),
+                    value: c.value.clone(),
+                    for_secs: due - since,
+                    since: Some(since),
+                    due,
+                    tag: Some(tag.clone()),
+                });
+                continue;
+            }
+            if *age >= want {
+                continue;
+            }
             waiting.push(Held {
                 field: c.field.clone(),
                 op: serde_json::to_value(c.op).unwrap_or_default(),
@@ -1272,7 +1304,20 @@ pub fn timeline_of(
             due: None,
             counting: false,
         };
-        if let Some(secs) = rules::hold_secs(c).map_err(|e| e.to_string())? {
+        if is_aged_hold(c) {
+            let secs = rules::hold_secs(c).map_err(|e| e.to_string())?.unwrap_or(0);
+            let worn = c.tag.as_deref().map(str::trim).unwrap_or_default();
+            let age = f.tag_ages.iter().find(|(t, _)| t == worn).map(|(_, a)| *a);
+            if let Some(age) = age {
+                let since = now - age.round() as i64;
+                let due = rules::tag_age_hold_due(c, f, &tp.timing, secs);
+                v.for_secs = Some(due - since);
+                v.since = Some(Some(since));
+                v.due = Some(due);
+                v.holds = on && now >= due;
+                v.counting = true;
+            }
+        } else if let Some(secs) = rules::hold_secs(c).map_err(|e| e.to_string())? {
             let key = rules::condition_key(c);
             v.for_secs = Some(secs);
             if on {

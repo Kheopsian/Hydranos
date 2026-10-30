@@ -218,6 +218,7 @@ async fn a_condition_not_yet_recorded_counts_from_now_and_nothing_is_written() {
     let e = &v["workflows"][0];
     let c = &e["conditions"][0];
     assert!(c["since"].is_null(), "{v}");
+    assert_eq!(c["holds"], false, "the count has not started: {v}");
     assert!(near(&c["due"], now + 7 * DAY), "{v}");
     assert!(near(&e["fires_at"], now + 7 * DAY), "{v}");
     assert_eq!(rows(&s, &w), 0, "a question is not a pass");
@@ -243,6 +244,38 @@ async fn a_tag_age_rule_alone_gives_the_day_the_tag_is_old_enough() {
     assert_eq!(c["for_secs"], 7 * DAY, "{v}");
     assert!(near(&c["since"], now - 3 * DAY), "{v}");
     assert!(near(&c["due"], now + 4 * DAY), "{v}");
+}
+
+/// A `tag_age` that also carries a `for`: the rule is listed from the day the
+/// tag is set, and acts when the tag is old enough AND the `for` has then run:
+/// tag date + 3 days + 1 hour. The bar goes from the tag to that date.
+#[tokio::test]
+async fn a_tag_age_with_a_for_is_listed_and_dated_after_both_waits() {
+    let s = st("timeline-e");
+    let h = add(&s, "aaa.bin");
+    wear(&s, &h, "noHL", 600);
+    let w = workflow(
+        "wf-e",
+        Node::All {
+            of: vec![cond("tag_age", Op::Ge, "3d", Some("1h"), Some("noHL"))],
+        },
+    );
+    store_wf(&s, &w);
+    let now = crate::store::now_secs();
+
+    let (_, v) = ask(&s, &h).await;
+    let list = v["workflows"].as_array().unwrap();
+    assert_eq!(list.len(), 1, "{v}");
+    let e = &list[0];
+    let due = now - 600 + 3 * DAY + 3600;
+    assert!(near(&e["fires_at"], due), "{v}");
+    let c = &e["conditions"][0];
+    assert_eq!(c["holds"], false, "{v}");
+    assert_eq!(c["tag"], "noHL", "{v}");
+    assert!(near(&c["since"], now - 600), "{v}");
+    assert!(near(&c["due"], due), "{v}");
+    let span = c["for_secs"].as_i64().unwrap();
+    assert!((span - (3 * DAY + 3600)).abs() <= 5, "{v}");
 }
 
 /// A torrent no delay rule aims at: an empty list, not an error.

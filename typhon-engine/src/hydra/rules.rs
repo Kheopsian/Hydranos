@@ -800,6 +800,27 @@ fn compile_tag_age_in(c: &Cond, timing: &Arc<Timing>) -> Result<Matcher, Compile
     }))
 }
 
+/// When a `tag_age` condition that carries a `for` will have held long enough
+/// on this torrent: the row of the record plus the `for` if the pass has seen
+/// the condition true, else the moment the tag reaches the age plus the `for`
+/// (the `for` runs from the moment the comparison becomes true, not before).
+pub fn tag_age_hold_due(c: &Cond, f: &Facts, timing: &Timing, secs: i64) -> i64 {
+    if let Some(row) = timing.recorded(&condition_key(c), &f.info_hash) {
+        return row.saturating_add(secs);
+    }
+    let origin = timing.origin();
+    let tag = c.tag.as_deref().map(str::trim).unwrap_or_default();
+    let age = f.tag_ages.iter().find(|(t, _)| t == tag).map(|(_, a)| *a);
+    let want = parse_duration(&c.value);
+    let start = match (age, want) {
+        (Some(age), Some(want)) if matches!(c.op, Op::Gt | Op::Ge) => {
+            origin.max((origin - age.round() as i64).saturating_add(want.round() as i64))
+        }
+        _ => origin,
+    };
+    start.saturating_add(secs)
+}
+
 /// The distinct `tag_age` conditions of a tree.
 pub fn tag_age_conditions(n: &Node) -> Vec<&Cond> {
     fn walk<'a>(n: &'a Node, out: &mut Vec<&'a Cond>) {
@@ -845,6 +866,19 @@ pub fn compile_in(node: &Node, timing: Option<&Arc<Timing>>) -> Result<Matcher, 
             let Some(secs) = hold_secs(c)? else {
                 return Ok(raw);
             };
+            // ⭐ A `tag_age` with a `for`: the `for` starts to run once the tag
+            // is old enough, not when the pass first looks.
+            if c.field == "tag_age" {
+                let c = c.clone();
+                let timing = timing.cloned();
+                return Ok(Box::new(move |f: &Facts| {
+                    raw(f)
+                        && timing.as_ref().is_some_and(|t| {
+                            t.is_ungated()
+                                || t.origin() + t.elapsed() >= tag_age_hold_due(&c, f, t, secs)
+                        })
+                }));
+            }
             let (key, timing) = (condition_key(c), timing.cloned());
             Ok(Box::new(move |f: &Facts| {
                 raw(f)
