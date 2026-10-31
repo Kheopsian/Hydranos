@@ -63,7 +63,7 @@ jobs:
           } > body.md
 
       - name: Create/update the release with the platform label
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           body_path: body.md
@@ -188,7 +188,7 @@ jobs:
           subject-path: hydranos-*-linux-*.tar.gz
 
       - name: Publish to the GitHub release
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           # ⚠ The tarball is hydranos-<ver>-linux-<arch>.tar.gz. This glob
@@ -273,7 +273,7 @@ jobs:
           subject-path: hydranos-*-windows-*.zip
 
       - name: Publish to the GitHub release
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           # ⚠ hydranos-*, not hydra-*. The Linux glob carried this exact typo
