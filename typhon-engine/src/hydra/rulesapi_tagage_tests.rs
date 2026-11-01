@@ -272,11 +272,10 @@ async fn the_dates_are_read_in_short_slices_with_the_same_answer() {
         let calls = crate::store::TAG_SINCE_BULK_CALLS.with(|c| c.get()) - before;
         assert_eq!(calls, wearing.div_ceil(slice), "slice {slice}");
     }
-    assert!(
-        rulesrun::TAG_AGE_SLICE <= 500,
-        "a read of {} hashes holds the store for seconds on a big library",
-        rulesrun::TAG_AGE_SLICE
-    );
+    // A read of thousands of hashes holds the store for seconds on a big
+    // library; checked when the tests compile, so clippy sees no constant
+    // assertion at run time.
+    const _: () = assert!(rulesrun::TAG_AGE_SLICE <= 500);
 }
 
 // -------------------------------------------------------------- the preview
