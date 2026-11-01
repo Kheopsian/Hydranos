@@ -21,7 +21,7 @@ decided when the release is cut, by looking at what went in: whoever tags it
 renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 `HYDRANOS_VERSION` in the same commit.
 
-## Unreleased -- security hardening of the interface, the API keys and the peer wire
+## v4.7.0 -- security hardening of the interface, the API keys and the peer wire
 
 ### Security
 
