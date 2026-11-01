@@ -190,17 +190,18 @@ async fn an_only_v6_listener_does_not_take_v4() {
         eprintln!("no IPv6 on this host: the only_v6 listener is not testable here");
         return;
     }
-    let mut b = binding(1, "::", 0);
+    // The test holds the v4 side of the port itself, as the v4 listener does
+    // in production: a test running beside this one cannot take it, and a
+    // dual-stack v6 wildcard cannot bind on top of it (EADDRINUSE).
+    let v4 = std::net::TcpListener::bind("0.0.0.0:0").unwrap();
+    let port = v4.local_addr().unwrap().port();
+    let mut b = binding(1, "::", port);
     b.only_v6 = true;
-    let round = bind_round(&[b]).expect("a v6 wildcard binds");
-    let port = round[0].0.local_addr().unwrap().port();
+    let round = bind_round(&[b]).expect("the v6-only listener binds beside the v4 one");
+    assert_eq!(round[0].0.local_addr().unwrap().port(), port);
     assert!(
         accepts("::1", port).await,
         "the v6 listener does not accept v6"
-    );
-    assert!(
-        !accepts("127.0.0.1", port).await,
-        "the v6-only listener took a v4 connection"
     );
 }
 
