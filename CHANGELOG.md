@@ -21,6 +21,12 @@ decided when the release is cut, by looking at what went in: whoever tags it
 renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 `HYDRANOS_VERSION` in the same commit.
 
+## Unreleased -- configuration
+
+### Changed
+
+- The engine no longer reads `peer_fingerprint` and `user_agent` from a configuration file. Since client spoofing was removed, the `hydranos` binary never passed them to the engine; this closes the library path as well.
+
 ## v4.7.0 -- security hardening of the interface, the API keys and the peer wire
 
 ### Security

@@ -160,9 +160,12 @@ pub struct EngineConfig {
     pub download_limit: u64,
     #[serde(default = "default_file_pool_size")]
     pub file_pool_size: usize,
-    #[serde(default = "default_peer_fingerprint")]
+    /// The `-HY<version>-` fingerprint and the user agent are the client's own
+    /// identity, never a setting: `skip` keeps a configuration file from
+    /// naming another client here, whatever it contains.
+    #[serde(skip, default = "default_peer_fingerprint")]
     pub peer_fingerprint: String,
-    #[serde(default = "default_user_agent")]
+    #[serde(skip, default = "default_user_agent")]
     pub user_agent: String,
     /// Listen for incoming peers over IPv6 as well, on the same port. Off by
     /// default: the engine binds v4 only, exactly as it always has. On, a
@@ -433,6 +436,23 @@ mod peer_id_tests {
             "{:?}",
             &id[8..]
         );
+    }
+
+    /// The engine presents its own identity and nobody else's: a configuration
+    /// that names another client in `peer_fingerprint` or `user_agent` is read
+    /// without error, and neither value reaches the wire.
+    #[test]
+    fn the_engine_does_not_read_peer_fingerprint_and_user_agent_from_a_config() {
+        let c: EngineConfig = toml::from_str(
+            "peer_fingerprint = \"-qB5220-\"\nuser_agent = \"qBittorrent/5.2.2\"\n",
+        )
+        .expect("a config naming another client still loads");
+        assert!(
+            c.peer_id().starts_with(b"-HY"),
+            "peer id {:?}",
+            String::from_utf8_lossy(&c.peer_id())
+        );
+        assert_eq!(c.user_agent, super::user_agent());
     }
 }
 
