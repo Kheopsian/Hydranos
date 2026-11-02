@@ -459,21 +459,57 @@ pub fn catalogue_from(
     host: &EngineHost,
     known: &[(String, std::collections::HashSet<[u8; 20]>)],
 ) -> Vec<CatalogueEntry> {
+    catalogue_where(
+        host,
+        |session, hash| {
+            known
+                .iter()
+                .find(|(id, _)| id == session)
+                .is_some_and(|(_, stored)| stored.contains(hash))
+        },
+        |_| true,
+    )
+}
+
+/// The walk behind `catalogue_from`, with the two questions it asks of each
+/// torrent left to the caller: `stored(session, raw hash)`, whether the store
+/// knows the copy, and `wanted(fields)`, whether it is kept at all.
+///
+/// `wanted` is asked before the entry is interned and pushed, so a caller that
+/// wants a handful of torrents out of 1.85 M pays one short-lived allocation
+/// per torrent and holds nothing: the full catalogue is ~200 MB, and building
+/// it just to look at the few that changed was part of a ~3 GiB peak.
+pub fn catalogue_where(
+    host: &EngineHost,
+    stored: impl Fn(&str, &[u8; 20]) -> bool,
+    mut wanted: impl FnMut(&CatalogueFields<'_>) -> bool,
+) -> Vec<CatalogueEntry> {
     let mut out = Vec::new();
     let mut folders: std::collections::HashMap<String, std::sync::Arc<str>> =
         std::collections::HashMap::new();
     for engine in host.engines().iter() {
-        let Some((_, stored)) = known.iter().find(|(id, _)| *id == engine.id) else {
-            continue;
-        };
         let session: std::sync::Arc<str> = engine.id.as_str().into();
         for t in engine.manager.all() {
             // A copy the store does not know is not part of any pass.
-            if !stored.contains(&t.info_hash) {
+            if !stored(&engine.id, &t.info_hash) {
                 continue;
             }
             let save_path = engine_save_path(&t);
             if save_path.is_empty() {
+                continue;
+            }
+            let info_hash: String = t.info_hash.iter().map(|b| format!("{b:02x}")).collect();
+            let files = if t.meta.multi_file {
+                t.meta.files.len()
+            } else {
+                1
+            };
+            if !wanted(&CatalogueFields {
+                info_hash: &info_hash,
+                session: &session,
+                save_path: &save_path,
+                files,
+            }) {
                 continue;
             }
             let save_path = folders
@@ -481,19 +517,23 @@ pub fn catalogue_from(
                 .or_insert_with_key(|k| k.as_str().into())
                 .clone();
             out.push(CatalogueEntry {
-                info_hash: t.info_hash.iter().map(|b| format!("{b:02x}")).collect(),
+                info_hash,
                 session: session.clone(),
                 save_path,
-                files: if t.meta.multi_file {
-                    t.meta.files.len()
-                } else {
-                    1
-                },
+                files,
                 source: CatalogueFiles::Torrent(std::sync::Arc::downgrade(&t)),
             });
         }
     }
     out
+}
+
+/// What `catalogue_where` shows its `wanted` callback about a torrent.
+pub struct CatalogueFields<'a> {
+    pub info_hash: &'a str,
+    pub session: &'a str,
+    pub save_path: &'a str,
+    pub files: usize,
 }
 
 /// The store's measurements of a catalogue, matched to it as they are read.

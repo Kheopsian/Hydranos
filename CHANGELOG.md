@@ -21,12 +21,16 @@ decided when the release is cut, by looking at what went in: whoever tags it
 renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 `HYDRANOS_VERSION` in the same commit.
 
-## Unreleased -- configuration
+## Unreleased -- the client's identity and the link scanner's memory
 
 ### Changed
 
 - The engine no longer reads `peer_fingerprint` and `user_agent` from a configuration file. Since client spoofing was removed, the `hydranos` binary never passed them to the engine; this closes the library path as well.
 - A `peer_id` set on one of the engine's `bindings` is used only when it starts with the client's own fingerprint; any other value is replaced by the engine's id. The `hydranos` binary does not pass `bindings` either.
+
+### Fixed
+
+- The memory no longer climbs by several GiB at every round of the hardlink measurement on a large catalogue: a round that only has newly added torrents to measure looks at those, and the whole link index is read again every half hour, to forget the torrents that were removed.
 
 ## v4.7.0 -- security hardening of the interface, the API keys and the peer wire
 

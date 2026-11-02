@@ -996,6 +996,23 @@ impl StoreLock {
         }
     }
 
+    /// Which of these hex hashes the store holds for one session: the same
+    /// answer as `session_hashes`, for a few hundred torrents instead of a
+    /// million. One indexed lookup each, the read connection let go every
+    /// `PAGE` of them.
+    pub fn held_among(
+        &self,
+        session: &str,
+        hashes: &[&str],
+    ) -> anyhow::Result<std::collections::HashSet<String>> {
+        let mut out = std::collections::HashSet::new();
+        for chunk in hashes.chunks(PAGE as usize) {
+            let r = self.read().map_err(|_| anyhow::anyhow!("store lock"))?;
+            out.extend(r.held_among_chunk(session, chunk)?);
+        }
+        Ok(out)
+    }
+
     /// Everything the store knows about one session's torrents, for a pass,
     /// keyed by info hash so the caller can join it to the engine's own view
     /// without a second query per torrent. Read page by page; the map is built
@@ -4519,6 +4536,25 @@ impl Store {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
+    /// The hashes of `hashes` that `torrents` holds for `session`. Same index
+    /// as `session_hashes_page`.
+    fn held_among_chunk(&self, session: &str, hashes: &[&str]) -> anyhow::Result<Vec<String>> {
+        use rusqlite::OptionalExtension;
+        let mut q = self.conn.prepare_cached(
+            "SELECT info_hash FROM torrents WHERE session = ?1 AND info_hash = ?2",
+        )?;
+        let mut out = Vec::new();
+        for h in hashes {
+            if let Some(found) = q
+                .query_row(rusqlite::params![session, h], |r| r.get::<_, String>(0))
+                .optional()?
+            {
+                out.push(found);
+            }
+        }
+        Ok(out)
+    }
+
     /// One page of the raw hashes the store holds for one session, after
     /// `after`. Index-only, like `workflow_facts_page`: `session, info_hash`
     /// lead `idx_torrents_cover`. See `StoreLock::session_hashes`.
@@ -7744,6 +7780,25 @@ mod paged_read_tests {
         work();
         done.store(true, Ordering::Relaxed);
         probe.join().unwrap()
+    }
+
+    /// The scanner's ordinary round asks the store about its few new torrents
+    /// by name instead of reading the session's million hashes.
+    #[test]
+    fn held_among_answers_for_the_named_hashes_of_one_session_only() {
+        let (dir, lock) = filled("held", 20);
+        let (a, b, absent) = (
+            format!("{:040x}", 3),
+            format!("{:040x}", 19),
+            "f".repeat(40),
+        );
+        let got = lock
+            .held_among("hoard", &[a.as_str(), b.as_str(), absent.as_str()])
+            .unwrap();
+        assert_eq!(got, [a.clone(), b].into_iter().collect());
+        assert!(lock.held_among("race", &[a.as_str()]).unwrap().is_empty());
+        assert!(lock.held_among("hoard", &[]).unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// ⭐ The scanner's and a workflow pass's reads of the whole store: same
