@@ -10023,6 +10023,10 @@ fn qbit_value_cmp(a: &serde_json::Value, b: &serde_json::Value) -> std::cmp::Ord
     }
 }
 
+/// Most hashes a listing reads by name from the store; more than this reads
+/// the session whole.
+const NAMED_HASHES_QUERY_MAX: usize = 500;
+
 /// One engine's torrents in the qBittorrent shape, with the listing's category
 /// and hash filters applied *before* each row is built.
 ///
@@ -10107,10 +10111,21 @@ pub(crate) fn engine_qbit_rows(
         return rows;
     }
 
-    // One query for the whole session, not one per torrent.
+    // One query, not one per torrent: the rows of the hashes asked for when
+    // there are a few of them (a client polling its own queue by hash), the
+    // whole session otherwise. The bound keeps the query inside SQLite's limit
+    // on bound variables; past it the whole session is the cheaper read.
     let facts = {
         let store = state.store.read().unwrap();
-        store.facts_by_session(engine_id).unwrap_or_default()
+        match hashes {
+            Some(wanted) if wanted.len() <= NAMED_HASHES_QUERY_MAX => {
+                let named: Vec<String> = wanted.iter().cloned().collect();
+                store
+                    .facts_for_hashes(&named, engine_id)
+                    .unwrap_or_default()
+            }
+            _ => store.facts_by_session(engine_id).unwrap_or_default(),
+        }
     };
 
     for torrent in engine.manager.all().iter() {
@@ -11110,12 +11125,20 @@ async fn qbit_torrent_properties(
     };
 
     let raw = typhon_engine::rpc::dispatch::torrent_to_json(&torrent);
+    // This torrent's row only. The whole session used to be read into a map
+    // to keep one entry of it: on a big library that held the store for
+    // seconds and put gigabytes in memory, once per call, and a client asks
+    // every few seconds. The key is the stored lowercase hash, not the
+    // spelling of the request.
+    let key = typhon_engine::torrent::hex_encode(&torrent.info_hash);
     let facts = {
         let store = state.store.read().unwrap();
-        store.facts_by_session(&engine_id).unwrap_or_default()
+        store
+            .facts_for_hashes(std::slice::from_ref(&key), &engine_id)
+            .unwrap_or_default()
     };
     let empty = crate::row::StoreFacts::default();
-    let native = crate::row::build(&raw, facts.get(&hash).unwrap_or(&empty), "");
+    let native = crate::row::build(&raw, facts.get(&key).unwrap_or(&empty), "");
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -30394,6 +30417,64 @@ mod detail_panel_tests {
             body["category"], "movies",
             "the panel keeps its own row's category"
         );
+    }
+
+    /// A hoard torrent with a readable row of its own, beside a neighbour in
+    /// the same session whose row cannot be read: `facts_by_session` fails on
+    /// that session, `facts_for_hashes` of the healthy torrent does not. The
+    /// healthy row's `added_time` is 1234567, a value the engine cannot make
+    /// up (it stamps the torrent with the clock when it is added).
+    fn beside_an_unreadable_neighbour(s: &TestState) -> String {
+        let hash = hold(s, "hoard", "alpha", "movies");
+        let neighbour = "b".repeat(40);
+        let store = s.state.store.lock().unwrap();
+        store
+            .insert_torrent(&neighbour, "hoard", b"x", "", "", 0.0, false, "")
+            .unwrap();
+        store.execute_batch_for_tests(&format!(
+            "UPDATE torrents SET added_time = 1234567 WHERE info_hash = '{hash}';
+             UPDATE torrents SET added_time = 'not a number' WHERE info_hash = '{neighbour}'"
+        ));
+        assert!(
+            store.facts_by_session("hoard").is_err(),
+            "the fixture: the neighbour row must be unreadable as a session"
+        );
+        hash
+    }
+
+    /// ⭐⭐ The qBittorrent properties of a torrent come from its own row and
+    /// from no other. `addition_date` is the store's `added_time`, so it is
+    /// what a read of the wrong rows loses: the engine only knows the clock.
+    #[tokio::test]
+    async fn the_qbit_properties_of_a_torrent_do_not_depend_on_the_other_rows_of_its_session() {
+        let s = state_from(
+            "qbit-properties-own-row",
+            &format!("[daemon]\napi_key = \"{KEY}\"\n"),
+        );
+        let hash = beside_an_unreadable_neighbour(&s);
+        let body = get(&s, &format!("/api/v2/torrents/properties?hash={hash}")).await;
+        assert_eq!(
+            body["addition_date"], 1_234_567,
+            "the panel keeps its own row's addition date"
+        );
+    }
+
+    /// The same for the listing asked for named hashes: the category is the
+    /// store's, and a neighbour's unreadable row does not take it away.
+    #[tokio::test]
+    async fn a_qbit_listing_of_named_hashes_does_not_depend_on_the_other_rows_of_its_session() {
+        let s = state_from(
+            "qbit-info-own-row",
+            &format!("[daemon]\napi_key = \"{KEY}\"\n"),
+        );
+        let hash = beside_an_unreadable_neighbour(&s);
+        let body = get(&s, &format!("/api/v2/torrents/info?hashes={hash}")).await;
+        assert_eq!(body.as_array().map(Vec::len), Some(1));
+        assert_eq!(
+            body[0]["category"], "movies",
+            "the row keeps its own category"
+        );
+        assert_eq!(body[0]["added_on"], 1_234_567);
     }
 
     /// An install whose second engine of each role has an id that is not the

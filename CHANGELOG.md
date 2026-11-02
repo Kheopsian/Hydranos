@@ -31,6 +31,7 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 ### Fixed
 
 - The memory no longer climbs by several GiB at every round of the hardlink measurement on a large catalogue: a round that only has newly added torrents to measure looks at those, and the whole link index is read again every half hour, to forget the torrents that were removed.
+- The qBittorrent route for the properties of a torrent no longer reads the data of the whole session: on a large catalogue it held the store for several seconds and pushed the memory up by several GiB at every call. It reads the row of the torrent asked for, and `torrents/info` does the same when it is asked for a few hashes by name.
 
 ## v4.7.0 -- security hardening of the interface, the API keys and the peer wire
 
