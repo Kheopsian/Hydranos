@@ -16,8 +16,8 @@ pub struct Binding {
     /// Stable index used for logs and round-robin dial selection.
     #[serde(default)]
     pub id: u32,
-    /// 20-char ASCII peer_id (BEP-20). Empty = legacy random suffix on
-    /// `peer_fingerprint` at startup.
+    /// 20-char ASCII peer_id (BEP-20). Empty, or not starting with this
+    /// client's `peer_fingerprint`, = the engine's own id.
     #[serde(default)]
     pub peer_id: String,
     /// Local IP this binding listens on. Multi-tunnel Proton setup shares
@@ -454,6 +454,42 @@ mod peer_id_tests {
         );
         assert_eq!(c.user_agent, super::user_agent());
     }
+
+    /// A binding may carry its own peer id, but only under the client's own
+    /// fingerprint: one naming another client is replaced by the engine's id.
+    #[test]
+    fn a_binding_cannot_present_another_clients_peer_id() {
+        let c: EngineConfig = toml::from_str(
+            "[[bindings]]\nlisten_addr = \"127.0.0.1\"\nlisten_port = 6881\n\
+             peer_id = \"-qB5220-abcdefghijkl\"\n\
+             [[bindings]]\nlisten_addr = \"127.0.0.1\"\nlisten_port = 6882\n",
+        )
+        .expect("a config naming another client still loads");
+        let own = c.peer_id();
+        let bound = c.resolved_bindings();
+        assert_eq!(bound.len(), 2);
+        for b in &bound {
+            assert_eq!(
+                b.peer_id,
+                own,
+                "binding {} presents {:?}",
+                b.id,
+                String::from_utf8_lossy(&b.peer_id)
+            );
+        }
+    }
+
+    /// A per-binding id under the client's own fingerprint is still honoured.
+    #[test]
+    fn a_binding_keeps_its_own_peer_id_under_the_clients_fingerprint() {
+        let c: EngineConfig = serde_json::from_str("{}").expect("empty config");
+        let id = format!("{}abcdefghijkl", c.peer_fingerprint);
+        let c: EngineConfig = toml::from_str(&format!(
+            "[[bindings]]\nlisten_addr = \"127.0.0.1\"\nlisten_port = 6881\npeer_id = \"{id}\"\n"
+        ))
+        .expect("config");
+        assert_eq!(c.resolved_bindings()[0].peer_id, id.as_bytes());
+    }
 }
 
 #[cfg(test)]
@@ -654,7 +690,12 @@ impl EngineConfig {
                         continue;
                     }
                 };
-                let pid = if b.peer_id.is_empty() {
+                // A binding's own id must carry this client's fingerprint: one
+                // naming another client gets the engine's id instead, the way
+                // `peer_fingerprint` itself is never read from a config.
+                let pid = if b.peer_id.is_empty()
+                    || !b.peer_id.starts_with(self.peer_fingerprint.as_str())
+                {
                     self.peer_id()
                 } else {
                     let mut p = [0u8; 20];

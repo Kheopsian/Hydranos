@@ -26,6 +26,7 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 ### Changed
 
 - The engine no longer reads `peer_fingerprint` and `user_agent` from a configuration file. Since client spoofing was removed, the `hydranos` binary never passed them to the engine; this closes the library path as well.
+- A `peer_id` set on one of the engine's `bindings` is used only when it starts with the client's own fingerprint; any other value is replaced by the engine's id. The `hydranos` binary does not pass `bindings` either.
 
 ## v4.7.0 -- security hardening of the interface, the API keys and the peer wire
 
