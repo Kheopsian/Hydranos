@@ -89,9 +89,13 @@ pub struct LinkRowMeta {
     pub save_path: String,
     pub measured_at: i64,
     pub files: i64,
+    /// Of `files`, how many could not be read.
+    pub missing: i64,
 }
 
-/// How far the link index has got, for the status line.
+/// How far the link index has got, for the status line: the SQL count the
+/// scanner's own counters are checked against.
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, serde::Serialize)]
 pub struct LinkIndexCounts {
     pub measured: i64,
@@ -898,9 +902,40 @@ impl StoreLock {
         )
     }
 
-    /// Every row's bookkeeping, without the measurements: what the scanner
-    /// reads to decide what is due. Read page by page on the read connection,
-    /// which is let go between two pages (see `PAGE`).
+    /// One page of the link index's bookkeeping, after `after` in key order:
+    /// the read connection is held for this page alone. The scanner's orphan
+    /// walk and its first count go through it, a page at a time, and keep
+    /// nothing of the table.
+    pub fn link_meta_page(
+        &self,
+        after: &(String, String),
+        limit: i64,
+    ) -> anyhow::Result<Vec<((String, String), LinkRowMeta)>> {
+        self.read()
+            .map_err(|_| anyhow::anyhow!("store lock"))?
+            .link_index_meta_page(after, limit)
+    }
+
+    /// The bookkeeping of these copies' rows alone, one indexed lookup each,
+    /// the read connection let go every `PAGE` of them. What the scanner reads
+    /// for a packet of torrents instead of the whole table.
+    pub fn link_meta_among(
+        &self,
+        session: &str,
+        hashes: &[&str],
+    ) -> anyhow::Result<std::collections::HashMap<String, LinkRowMeta>> {
+        let mut out = std::collections::HashMap::new();
+        for chunk in hashes.chunks(PAGE as usize) {
+            let r = self.read().map_err(|_| anyhow::anyhow!("store lock"))?;
+            out.extend(r.link_meta_among_chunk(session, chunk)?);
+        }
+        Ok(out)
+    }
+
+    /// Every row's bookkeeping, without the measurements. The reference the
+    /// paged readers are checked against; the scanner no longer reads the
+    /// table whole.
+    #[cfg(test)]
     pub fn link_index_meta(
         &self,
     ) -> anyhow::Result<std::collections::HashMap<(String, String), LinkRowMeta>> {
@@ -2179,19 +2214,20 @@ impl Store {
     }
 
     /// How many files the link scanner measured for one copy of a torrent, and
-    /// how many of them it could not read. None: never measured.
+    /// how many of them it could not read, and the save path it measured them
+    /// under. None: never measured.
     pub fn link_row_counts(
         &self,
         info_hash: &str,
         session: &str,
-    ) -> anyhow::Result<Option<(i64, i64)>> {
+    ) -> anyhow::Result<Option<(i64, i64, String)>> {
         use rusqlite::OptionalExtension;
         Ok(self
             .conn
             .query_row(
-                "SELECT files, missing FROM link_index WHERE info_hash = ?1 AND session = ?2",
+                "SELECT files, missing, save_path FROM link_index WHERE info_hash = ?1 AND session = ?2",
                 rusqlite::params![info_hash, session],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()?)
     }
@@ -4498,7 +4534,7 @@ impl Store {
         limit: i64,
     ) -> anyhow::Result<Vec<((String, String), LinkRowMeta)>> {
         let mut q = self.conn.prepare_cached(
-            "SELECT info_hash, session, save_path, measured_at, files FROM link_index
+            "SELECT info_hash, session, save_path, measured_at, files, missing FROM link_index
              WHERE (info_hash, session) > (?1, ?2) ORDER BY info_hash, session LIMIT ?3",
         )?;
         let rows = q.query_map(rusqlite::params![after.0, after.1, limit], |r| {
@@ -4508,10 +4544,42 @@ impl Store {
                     save_path: r.get(2)?,
                     measured_at: r.get(3)?,
                     files: r.get(4)?,
+                    missing: r.get(5)?,
                 },
             ))
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// The bookkeeping of `session`'s rows for `hashes`: the primary key
+    /// (`info_hash, session`) answers each lookup.
+    fn link_meta_among_chunk(
+        &self,
+        session: &str,
+        hashes: &[&str],
+    ) -> anyhow::Result<Vec<(String, LinkRowMeta)>> {
+        use rusqlite::OptionalExtension;
+        let mut q = self.conn.prepare_cached(
+            "SELECT save_path, measured_at, files, missing FROM link_index
+             WHERE info_hash = ?1 AND session = ?2",
+        )?;
+        let mut out = Vec::new();
+        for h in hashes {
+            if let Some(m) = q
+                .query_row(rusqlite::params![h, session], |r| {
+                    Ok(LinkRowMeta {
+                        save_path: r.get(0)?,
+                        measured_at: r.get(1)?,
+                        files: r.get(2)?,
+                        missing: r.get(3)?,
+                    })
+                })
+                .optional()?
+            {
+                out.push((h.to_string(), m));
+            }
+        }
+        Ok(out)
     }
 
     /// One page of the link index's rows, measurements included, in primary-key
@@ -4612,6 +4680,10 @@ impl Store {
         Ok(n)
     }
 
+    /// What the table holds, counted by SQL in one pass. The reference the
+    /// scanner's own counters are checked against (they are kept by deltas and
+    /// recounted by pages, never by this).
+    #[cfg(test)]
     pub fn link_index_counts(&self) -> anyhow::Result<LinkIndexCounts> {
         Ok(self.conn.query_row(
             "SELECT COUNT(*), COALESCE(SUM(files),0),

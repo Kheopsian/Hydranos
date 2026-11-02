@@ -193,13 +193,30 @@ pub fn link_facts_one(host: &EngineHost, store: &Store, engine_id: &str, f: &mut
     let Some(raw) = crate::store::hex20(&f.info_hash) else {
         return;
     };
+    // ⚠️ Only for a torrent whose stored row describes it AS IT IS NOW (its
+    // save path, its number of files). The summary is keyed by hash and
+    // published rarely: a torrent added again, moved, or whose row was just
+    // dropped would otherwise read the numbers of what it used to be, where a
+    // pass reads "unknown" (`links_from_measured`).
+    let session: std::sync::Arc<str> = engine_id.into();
+    let Some(entry) = host
+        .get(engine_id)
+        .and_then(|e| e.manager.get(&raw))
+        .and_then(|t| entry_for(&session, &t))
+    else {
+        return;
+    };
+    let Ok(Some((files, missing, saved))) = store.link_row_counts(&f.info_hash, engine_id) else {
+        return;
+    };
+    if saved != *entry.save_path || files != entry.files as i64 {
+        return;
+    }
     if let Some(c) = host.link_summary().get(&raw) {
         f.link_count = c.link_count as f64;
         f.external_links = c.external_links as f64;
     }
-    if let Ok(Some((files, missing))) = store.link_row_counts(&f.info_hash, engine_id) {
-        f.data_missing = missing >= files;
-    }
+    f.data_missing = missing >= files;
 }
 
 /// One torrent's facts, from the engine's live state and the store's row.
@@ -459,30 +476,22 @@ pub fn catalogue_from(
     host: &EngineHost,
     known: &[(String, std::collections::HashSet<[u8; 20]>)],
 ) -> Vec<CatalogueEntry> {
-    catalogue_where(
-        host,
-        |session, hash| {
-            known
-                .iter()
-                .find(|(id, _)| id == session)
-                .is_some_and(|(_, stored)| stored.contains(hash))
-        },
-        |_| true,
-    )
+    catalogue_where(host, |session, hash| {
+        known
+            .iter()
+            .find(|(id, _)| id == session)
+            .is_some_and(|(_, stored)| stored.contains(hash))
+    })
 }
 
-/// The walk behind `catalogue_from`, with the two questions it asks of each
+/// The walk behind `catalogue_from`, with the question it asks of each
 /// torrent left to the caller: `stored(session, raw hash)`, whether the store
-/// knows the copy, and `wanted(fields)`, whether it is kept at all.
-///
-/// `wanted` is asked before the entry is interned and pushed, so a caller that
-/// wants a handful of torrents out of 1.85 M pays one short-lived allocation
-/// per torrent and holds nothing: the full catalogue is ~200 MB, and building
-/// it just to look at the few that changed was part of a ~3 GiB peak.
+/// knows the copy. The link scanner no longer builds a catalogue at all (see
+/// `entry_for`): the whole one is ~200 MB, and building it every few minutes
+/// was part of a ~3 GiB peak.
 pub fn catalogue_where(
     host: &EngineHost,
     stored: impl Fn(&str, &[u8; 20]) -> bool,
-    mut wanted: impl FnMut(&CatalogueFields<'_>) -> bool,
 ) -> Vec<CatalogueEntry> {
     let mut out = Vec::new();
     let mut folders: std::collections::HashMap<String, std::sync::Arc<str>> =
@@ -504,14 +513,6 @@ pub fn catalogue_where(
             } else {
                 1
             };
-            if !wanted(&CatalogueFields {
-                info_hash: &info_hash,
-                session: &session,
-                save_path: &save_path,
-                files,
-            }) {
-                continue;
-            }
             let save_path = folders
                 .entry(save_path)
                 .or_insert_with_key(|k| k.as_str().into())
@@ -528,12 +529,28 @@ pub fn catalogue_where(
     out
 }
 
-/// What `catalogue_where` shows its `wanted` callback about a torrent.
-pub struct CatalogueFields<'a> {
-    pub info_hash: &'a str,
-    pub session: &'a str,
-    pub save_path: &'a str,
-    pub files: usize,
+/// One torrent as the catalogue would list it, for a caller that already holds
+/// the torrent and wants nothing else: the same save path, hash spelling and
+/// file count as `catalogue_where`. `None` for a torrent with no save path.
+pub fn entry_for(
+    session: &std::sync::Arc<str>,
+    t: &std::sync::Arc<typhon_engine::torrent::meta::TorrentState>,
+) -> Option<CatalogueEntry> {
+    let save_path = engine_save_path(t);
+    if save_path.is_empty() {
+        return None;
+    }
+    Some(CatalogueEntry {
+        info_hash: t.info_hash.iter().map(|b| format!("{b:02x}")).collect(),
+        session: session.clone(),
+        save_path: save_path.as_str().into(),
+        files: if t.meta.multi_file {
+            t.meta.files.len()
+        } else {
+            1
+        },
+        source: CatalogueFiles::Torrent(std::sync::Arc::downgrade(t)),
+    })
 }
 
 /// The store's measurements of a catalogue, matched to it as they are read.

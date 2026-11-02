@@ -191,6 +191,10 @@ pub struct TorrentManager {
     /// go and move, so "which folders does this engine use" is a few dozen
     /// keys and never a walk of the catalogue.
     save_path_counts: std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, usize>>,
+    /// Torrents that arrived (added, or pointed at another folder) since a
+    /// reader last drained this, oldest first. See `note_arrival`.
+    arrivals: std::sync::Mutex<std::collections::VecDeque<InfoHash>>,
+    arrivals_armed: std::sync::atomic::AtomicBool,
     // O(1) MSE inbound resolution: SHA1("req2"+info_hash) -> info_hash.
     // Avoids the O(N) SHA1 scan over all torrents per inbound handshake.
     skey_index: DashMap<[u8; 20], InfoHash>,
@@ -645,6 +649,8 @@ impl TorrentManager {
             moved_uploaded: std::sync::atomic::AtomicU64::new(0),
             moved_downloaded: std::sync::atomic::AtomicU64::new(0),
             save_path_counts: std::sync::Mutex::new(std::collections::HashMap::new()),
+            arrivals: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            arrivals_armed: std::sync::atomic::AtomicBool::new(false),
             skey_index: DashMap::new(),
             incomplete: DashSet::new(),
             dht: std::sync::OnceLock::new(),
@@ -857,12 +863,47 @@ impl TorrentManager {
     /// Put a torrent in the map and in the save path counts; a torrent it
     /// replaces leaves the counts.
     fn insert_counted(&self, ih: InfoHash, state: Arc<TorrentState>) {
+        self.note_arrival(ih);
         let path = state.save_path.read().clone();
         self.count_save_path(&path);
         if let Some(old) = self.torrents.insert(ih, state) {
             let was = old.save_path.read().clone();
             self.uncount_save_path(&was);
         }
+    }
+
+    /// Most arrivals kept between two drains. Past it the oldest are dropped:
+    /// whoever drains also walks the whole catalogue slowly, and finds what
+    /// the queue lost.
+    const ARRIVALS_CAP: usize = 4096;
+
+    /// Start remembering the torrents that arrive from now on. Off until a
+    /// reader asks for it: the restore at start inserts a million torrents
+    /// through the same door, and a queue of them would be the whole catalogue
+    /// asking to be looked at first.
+    pub fn arm_arrivals(&self) {
+        self.arrivals_armed.store(true, Ordering::Release);
+    }
+
+    fn note_arrival(&self, ih: InfoHash) {
+        if !self.arrivals_armed.load(Ordering::Acquire) {
+            return;
+        }
+        let mut q = self.arrivals.lock().unwrap_or_else(|p| p.into_inner());
+        // Twice is harmless: the second look finds a valid row and passes.
+        if q.len() >= Self::ARRIVALS_CAP {
+            q.pop_front();
+        }
+        q.push_back(ih);
+    }
+
+    /// Up to `max` of the torrents added or moved since the last call, oldest
+    /// first, forgotten once handed over. For the link scanner, which measures
+    /// them ahead of its slow walk.
+    pub fn take_arrivals(&self, max: usize) -> Vec<InfoHash> {
+        let mut q = self.arrivals.lock().unwrap_or_else(|p| p.into_inner());
+        let n = max.min(q.len());
+        q.drain(..n).collect()
     }
 
     /// Insert a torrent the caller built, with no resume record, store row or
@@ -2554,6 +2595,9 @@ impl TorrentManager {
     fn swap_save_path(&self, t: &TorrentState, new: std::path::PathBuf) -> std::path::PathBuf {
         let mut m = self.counts();
         let was = std::mem::replace(&mut *t.save_path.write(), new.clone());
+        if was != new {
+            self.note_arrival(t.meta.info_hash);
+        }
         if let Some(n) = m.get_mut(&was) {
             if *n <= 1 {
                 m.remove(&was);

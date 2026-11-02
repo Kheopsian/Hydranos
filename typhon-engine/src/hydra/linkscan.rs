@@ -3,23 +3,47 @@
 //! A workflow on hardlinks used to stat the whole catalogue itself, on the
 //! request that asked: at a million torrents that is some three million
 //! `statx` on a pool serving torrents at the same time, and the dry-run button
-//! sat for longer than anyone waits. Now this thread walks the catalogue at
+//! sat for longer than anyone waits. Now this thread measures the catalogue at
 //! its own pace and writes what it finds to the store (`link_index`); a pass
 //! reads the store, and re-measures only the torrents it is about to act on.
 //!
-//! ⭐ Two things fall out of keeping the measurement: a restart resumes where
-//! the last sweep stopped instead of starting over, and a torrent whose files
-//! are gone is found by this walk -- not only when a peer asks us for a piece
-//! we cannot serve.
+//! ⭐ It is a walk, not rounds. It used to take a round: read the whole index
+//! (`link_index_meta`) and the whole catalogue, sweep what was due, let go.
+//! Measured on 1.04 M torrents, each whole round was +2 to 3.5 GiB of resident
+//! memory and one core at 100 % for one to five minutes, and the daily
+//! refresh (`REFRESH_SECS`, ~12 torrents a second) made almost every round a
+//! whole one. Now three small cursors share the thread, none of which holds
+//! anything proportional to the catalogue but a list of 20-byte ids:
+//!
+//! - the **walk** goes through the torrents in hash order, `WALK_BATCH` at a
+//!   time, reads only those torrents' rows, measures the ones that are not
+//!   current and writes the packet; it pauses so that one cycle lasts about a
+//!   day (`walk_pause`);
+//! - the **arrivals** queue (filled where a torrent is added or moved, see
+//!   `TorrentManager::take_arrivals`) is measured ahead of the walk, within
+//!   seconds;
+//! - the **orphan** walk pages through the index and drops the rows of
+//!   torrents the engine no longer holds, one cycle an hour.
+//!
+//! ⭐ Two things fall out of keeping the measurement: a restart resumes with
+//! what the last walk wrote instead of starting over, and a torrent whose
+//! files are gone is found by this walk -- not only when a peer asks us for a
+//! piece we cannot serve.
+//!
+//! ⚠️ A torrent with no valid row -- never measured, waiting in the arrivals
+//! queue, being measured, or just dropped as an orphan -- reads `NEVER` in
+//! every link fact of a pass (`links_from_measured` leaves it out of the
+//! store's answer, `rules::cmp_num` answers false to NaN for every operator),
+//! so no rule that deletes on `external_links == 0` or `link_count == 1` can
+//! match it. Nothing here is read by a pass: it reads the table.
 
 use std::collections::{HashMap, HashSet};
-use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::engines::EngineHost;
-use crate::rulesrun::{self, CatalogueEntry, CatalogueFields};
+use crate::rulesrun::{self, CatalogueEntry};
 use crate::store::{LinkRow, LinkRowMeta, StoreLock};
 
 /// A measurement older than this is taken again. Hardlinks appear when the
@@ -27,194 +51,289 @@ use crate::store::{LinkRow, LinkRowMeta, StoreLock};
 /// keeps a million-torrent catalogue current at a few `statx` a second.
 pub const REFRESH_SECS: i64 = 24 * 3600;
 
-/// Torrents measured between two writes. Small enough that the store lock is
-/// held for a few tens of milliseconds, large enough that the write is not
-/// the cost.
-const BATCH: usize = 2000;
+/// How much younger than `REFRESH_SECS` a measurement may be and still be
+/// taken again when the walk comes by. The walk paces itself to a cycle of
+/// `REFRESH_SECS`, give or take its bounds and the time it spends working: a
+/// row written at the start of one cycle and met at the end of the next by a
+/// walk a few minutes quicker would be skipped, and wait for a third cycle.
+const WALK_SLACK_SECS: i64 = 2 * 3600;
 
-/// Before the first sweep: the catalogue must be loaded, or the thread would
-/// measure half of it and call the rest removed.
+/// Torrents the walk looks at per step. A packet is a hundred indexed lookups
+/// and, at most, a hundred torrents' files to stat: a few milliseconds of the
+/// store and a short stretch of the disks, whatever the size of the catalogue.
+const WALK_BATCH: usize = 100;
+
+/// Before the first measuring: the catalogue must be loaded, or the thread
+/// would measure half of it.
 const SETTLE: Duration = Duration::from_secs(180);
 
-/// Between batches. The pool also serves torrents; the scanner yields.
-const PAUSE: Duration = Duration::from_secs(1);
+/// The least and the most a pause between two packets may be, by the clock
+/// alone. Under the floor a small catalogue would be walked in a burst; over
+/// the ceiling the arrivals queue and the stop flag would be looked at too
+/// rarely (they have their own poll, but the ceiling bounds the walk's
+/// sleeps).
+const WALK_MIN_PAUSE: Duration = Duration::from_millis(250);
+const WALK_MAX_PAUSE: Duration = Duration::from_secs(300);
 
-/// When nothing is due. A torrent added in the meantime is picked up then.
-const IDLE: Duration = Duration::from_secs(300);
+/// The walk spends at most 1 / `WALK_DUTY` of the time working: after a step
+/// that took `w` it pauses at least `(WALK_DUTY - 1) * w`, whatever the clock
+/// says. The pool also serves torrents, and a step that finds cold metadata
+/// (43 ms a `statx`, measured) is not a step to follow at once.
+const WALK_DUTY: u32 = 20;
 
-/// During a long sweep, how often the list's summary is brought up to date.
-/// A first sweep of a million torrents takes hours; the column should not sit
-/// on "never measured" for all of them until the last batch lands. Each
-/// refresh reads every measurement and counts the catalogue (seconds of CPU,
-/// the cost of one workflow pass), so not after every batch.
-const SUMMARY_EVERY: Duration = Duration::from_secs(600);
+/// Between two looks at the arrivals queue. A torrent added is measured within
+/// about this plus the time of a packet: well under the minute asked.
+const ARRIVAL_POLL: Duration = Duration::from_secs(5);
 
-/// Between the end of a sweep and the next look at the catalogue. Reading the
-/// store and walking a million torrents is seconds of work; a sweep of thirty
-/// torrents must not set it off again the moment it ends.
-const ROUND_PAUSE: Duration = Duration::from_secs(5);
+/// Arrivals measured per look. A bulk add of thousands of torrents is taken
+/// fifty at a time, and what the queue loses (it is bounded) the walk finds.
+const ARRIVAL_BATCH: usize = 50;
 
-/// How often a round reads the whole link index and the whole catalogue: to
-/// find the rows of removed torrents, which needs both side by side, and to
-/// start the next stretch from what the store really holds. Between two of
-/// them a round only looks at the torrents that changed. The whole read is
-/// ~3 GiB of resident memory for 25-40 s at 1.85 M torrents; done on every
-/// round it came back every few minutes, each time a handful of torrents were
-/// added. A removed torrent's row waits at most this long to be dropped, and it
-/// is harmless meanwhile (see `orphans`).
-const FULL_EVERY: Duration = Duration::from_secs(30 * 60);
+/// Looks at an arrival the store does not know yet (the engine holds a torrent
+/// a moment before its row is written) before it is left to the walk: five
+/// minutes at `ARRIVAL_POLL`.
+const ARRIVAL_TRIES: u32 = 60;
 
-/// Whether the list's summary is recomputed now. A sweep always leaves it
-/// stale, and a full refresh is seconds of reading and counting a million
-/// rows: done after every small sweep it ran the scanner flat out, one round
-/// every half minute for thirty torrents due. Stale summaries wait for
-/// `SUMMARY_EVERY` since the last one.
-fn summary_due(stale: bool, since_last: Duration) -> bool {
-    stale && since_last >= SUMMARY_EVERY
+/// Rows of the index the orphan walk looks at per step.
+const ORPHAN_PAGE: usize = 500;
+
+/// How long the orphan walk takes to go through the index once. The rows of
+/// removed torrents are harmless to a pass (facts are built from the catalogue,
+/// never from the table), they only keep growing the table and its counts.
+const ORPHAN_CYCLE: Duration = Duration::from_secs(3600);
+
+/// Bounds of the pause between two orphan pages, as for the walk's.
+const ORPHAN_MIN_PAUSE: Duration = Duration::from_millis(200);
+const ORPHAN_MAX_PAUSE: Duration = Duration::from_secs(60);
+
+/// Rows read per page by the first count, at start. A page is a few
+/// milliseconds on the read connection, let go between two.
+const COUNT_PAGE: usize = 5000;
+
+/// When the store could not be read: the same step is tried again after this.
+const RETRY: Duration = Duration::from_secs(30);
+
+/// The pause after a walk step that took `work`, for a catalogue of
+/// `torrents`: the day divided over the packets, less the time the step took,
+/// held between `WALK_MIN_PAUSE` and `WALK_MAX_PAUSE`; and never less than
+/// what keeps the walk under 1 / `WALK_DUTY` of the clock.
+///
+/// At 1 M torrents that is 10 000 packets and 8.6 s between two: ~12 torrents
+/// a second, the rate the daily refresh needs, and a cycle of a day. A
+/// catalogue of a thousand would get a pause of hours; the ceiling makes its
+/// cycle a few minutes, which costs a hundred lookups and measures nothing
+/// that is not due.
+pub fn walk_pause(torrents: usize, work: Duration) -> Duration {
+    let packets = torrents.div_ceil(WALK_BATCH).max(1) as f64;
+    let slot = Duration::from_secs_f64(REFRESH_SECS as f64 / packets);
+    let paced = slot
+        .saturating_sub(work)
+        .clamp(WALK_MIN_PAUSE, WALK_MAX_PAUSE);
+    paced.max(work.saturating_mul(WALK_DUTY - 1))
+}
+
+/// The pause between two orphan pages for an index of about `rows`.
+fn orphan_pause(rows: usize) -> Duration {
+    let pages = rows.div_ceil(ORPHAN_PAGE).max(1) as u32;
+    (ORPHAN_CYCLE / pages).clamp(ORPHAN_MIN_PAUSE, ORPHAN_MAX_PAUSE)
+}
+
+/// What the index holds, counted: the figures the status line shows.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Tally {
+    pub measured: i64,
+    pub files: i64,
+    /// Torrents none of whose files could be read.
+    pub data_missing: i64,
+    /// Torrents some, but not all, of whose files could be read.
+    pub partly_missing: i64,
+    /// The oldest measurement; 0 when there is none.
+    pub oldest: i64,
+}
+
+impl Tally {
+    fn add(&mut self, m: &LinkRowMeta) {
+        self.measured += 1;
+        self.files += m.files;
+        self.data_missing += (m.files > 0 && m.missing == m.files) as i64;
+        self.partly_missing += (m.missing > 0 && m.missing < m.files) as i64;
+        if self.oldest == 0 || m.measured_at < self.oldest {
+            self.oldest = m.measured_at;
+        }
+    }
+}
+
+/// The published counters: kept by deltas (a row written or dropped is
+/// subtracted as it was and added as it is) and set to a recount at the end of
+/// every walk cycle, which wipes whatever the deltas got wrong.
+///
+/// ⚠️ The deltas are not exact, and the cycle's recount is what makes them
+/// safe to use: `oldest` can only go down by delta (the row that was the oldest
+/// being replaced leaves it too low until the recount), a row dropped as an
+/// orphan that the last recount did not include is taken off once too often,
+/// and a torrent added while a cycle runs is in the deltas but not in that
+/// cycle's recount. None of it lasts longer than a cycle.
+pub struct Counts {
+    measured: AtomicI64,
+    files: AtomicI64,
+    data_missing: AtomicI64,
+    partly_missing: AtomicI64,
+    oldest: AtomicI64,
+}
+
+impl Counts {
+    const fn new() -> Self {
+        Counts {
+            measured: AtomicI64::new(0),
+            files: AtomicI64::new(0),
+            data_missing: AtomicI64::new(0),
+            partly_missing: AtomicI64::new(0),
+            oldest: AtomicI64::new(0),
+        }
+    }
+
+    pub fn get(&self) -> Tally {
+        Tally {
+            measured: self.measured.load(Ordering::Relaxed),
+            files: self.files.load(Ordering::Relaxed),
+            data_missing: self.data_missing.load(Ordering::Relaxed),
+            partly_missing: self.partly_missing.load(Ordering::Relaxed),
+            oldest: self.oldest.load(Ordering::Relaxed),
+        }
+    }
+
+    fn set(&self, t: &Tally) {
+        self.measured.store(t.measured, Ordering::Relaxed);
+        self.files.store(t.files, Ordering::Relaxed);
+        self.data_missing.store(t.data_missing, Ordering::Relaxed);
+        self.partly_missing
+            .store(t.partly_missing, Ordering::Relaxed);
+        self.oldest.store(t.oldest, Ordering::Relaxed);
+    }
+
+    /// A row that was `old` is now `new` (either may be absent).
+    fn replace(&self, old: Option<&LinkRowMeta>, new: Option<&LinkRowMeta>) {
+        let mut d = Tally::default();
+        for (m, sign) in [(old, -1), (new, 1)] {
+            let Some(m) = m else { continue };
+            d.measured += sign;
+            d.files += sign * m.files;
+            d.data_missing += sign * (m.files > 0 && m.missing == m.files) as i64;
+            d.partly_missing += sign * (m.missing > 0 && m.missing < m.files) as i64;
+        }
+        for (field, by) in [
+            (&self.measured, d.measured),
+            (&self.files, d.files),
+            (&self.data_missing, d.data_missing),
+            (&self.partly_missing, d.partly_missing),
+        ] {
+            // A count below zero is a delta that outran its basis (see the
+            // note above), never a fact.
+            field.fetch_add(by, Ordering::Relaxed);
+            field.fetch_max(0, Ordering::Relaxed);
+        }
+        if let Some(n) = new {
+            let oldest = self.oldest.load(Ordering::Relaxed);
+            if oldest == 0 || n.measured_at < oldest {
+                self.oldest.store(n.measured_at, Ordering::Relaxed);
+            }
+        }
+    }
 }
 
 /// Where the scanner is, for the status line. Plain atomics: written by one
 /// thread, read by a request that only wants an approximate picture.
 pub struct Progress {
+    /// Torrents the engines held when the walk's cycle began.
     pub catalogue: AtomicI64,
-    pub sweep_total: AtomicI64,
-    pub sweep_done: AtomicI64,
-    pub sweep_started: AtomicI64,
+    /// This cycle of the walk: torrents in it, torrents behind the cursor, and
+    /// when it began.
+    pub walk_total: AtomicI64,
+    pub walk_done: AtomicI64,
+    pub walk_started: AtomicI64,
+    /// Unix time of the last packet written, and the files a second it took.
     pub last_batch_at: AtomicI64,
     pub files_per_sec: AtomicI64,
+    /// Walk cycles finished since the start, and the last one's length.
+    pub cycles: AtomicI64,
+    pub last_cycle_secs: AtomicI64,
+    /// Arrivals waiting to be measured.
+    pub queued: AtomicI64,
+    /// Orphan cycles finished since the start, and rows dropped by them.
+    pub orphan_cycles: AtomicI64,
+    pub orphans_dropped: AtomicI64,
+    /// When the counters were last set whole (start, end of a cycle): 0 until
+    /// the first count has been made.
+    pub counted_at: AtomicI64,
+    pub counts: Counts,
 }
 
-pub static PROGRESS: Progress = Progress {
-    catalogue: AtomicI64::new(0),
-    sweep_total: AtomicI64::new(0),
-    sweep_done: AtomicI64::new(0),
-    sweep_started: AtomicI64::new(0),
-    last_batch_at: AtomicI64::new(0),
-    files_per_sec: AtomicI64::new(0),
-};
-
-/// Which copies need measuring, most urgent first.
-///
-/// Never measured -- or measured under another save path, or with another
-/// number of files, which is the same thing -- comes before anything else: a
-/// torrent nobody has looked at is invisible to every rule. Then the oldest
-/// measurements past `REFRESH_SECS`. Fresh ones are not due.
-pub fn due(
-    cat: &[CatalogueEntry],
-    meta: &HashMap<(String, String), LinkRowMeta>,
-    now: i64,
-) -> Vec<usize> {
-    due_by(
-        cat,
-        |c| match meta.get(&(c.info_hash.clone(), c.session.to_string())) {
-            Some(m) if *m.save_path == *c.save_path && m.files == c.files as i64 => {
-                Some(m.measured_at)
-            }
-            _ => None,
-        },
-        now,
-    )
-}
-
-/// `due`, with the measurement date of a copy's valid row (`None`: no row, or
-/// one taken under another save path or file count) given by `at`.
-fn due_by(
-    cat: &[CatalogueEntry],
-    at: impl Fn(&CatalogueEntry) -> Option<i64>,
-    now: i64,
-) -> Vec<usize> {
-    let mut keyed: Vec<((u8, i64), usize)> = Vec::new();
-    for (i, c) in cat.iter().enumerate() {
-        match at(c) {
-            Some(t) => {
-                if now - t >= REFRESH_SECS {
-                    keyed.push(((1, t), i));
-                }
-            }
-            None => keyed.push(((0, 0), i)),
+impl Progress {
+    const fn new() -> Self {
+        Progress {
+            catalogue: AtomicI64::new(0),
+            walk_total: AtomicI64::new(0),
+            walk_done: AtomicI64::new(0),
+            walk_started: AtomicI64::new(0),
+            last_batch_at: AtomicI64::new(0),
+            files_per_sec: AtomicI64::new(0),
+            cycles: AtomicI64::new(0),
+            last_cycle_secs: AtomicI64::new(0),
+            queued: AtomicI64::new(0),
+            orphan_cycles: AtomicI64::new(0),
+            orphans_dropped: AtomicI64::new(0),
+            counted_at: AtomicI64::new(0),
+            counts: Counts::new(),
         }
     }
-    keyed.sort_by_key(|(k, _)| *k);
-    keyed.into_iter().map(|(_, i)| i).collect()
 }
 
-/// What a round remembers of the link index from one round to the next: for
-/// each valid row, when it was measured, under the name of a 64-bit
-/// fingerprint of (hash, engine, save path, file count).
-///
-/// ⭐ Not the rows' bookkeeping themselves: those are two strings and a path a
-/// row, ~0.5 GiB at 1.85 M torrents, held for good to save a read. 16 bytes a
-/// row is ~40 MiB. A fingerprint collision would make an unmeasured torrent
-/// look measured -- once in ~10^13 additions -- until the next whole read,
-/// which rebuilds this from the rows themselves.
-#[derive(Default)]
-struct Known(HashMap<u64, i64>);
+pub static PROGRESS: Progress = Progress::new();
 
-impl Known {
-    fn key(info_hash: &str, session: &str, save_path: &str, files: i64) -> u64 {
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        (info_hash, session, save_path, files).hash(&mut h);
-        h.finish()
-    }
+type Key = (String, String);
 
-    fn at(&self, f: &CatalogueFields<'_>) -> Option<i64> {
-        self.0
-            .get(&Self::key(
-                f.info_hash,
-                f.session,
-                f.save_path,
-                f.files as i64,
-            ))
-            .copied()
-    }
+/// A torrent in the walk's list: 20 bytes of hash and which engine holds it.
+/// Hash first, so that sorting the list is sorting by info hash.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct Id {
+    hash: [u8; 20],
+    engine: u8,
+}
 
-    /// What the store holds, minus the rows about to be dropped.
-    fn from_meta(
-        meta: &HashMap<(String, String), LinkRowMeta>,
-        gone: &HashSet<&(String, String)>,
-    ) -> Self {
-        Known(
-            meta.iter()
-                .filter(|(k, _)| !gone.contains(k))
-                .map(|((h, s), m)| (Self::key(h, s, &m.save_path, m.files), m.measured_at))
-                .collect(),
-        )
-    }
+fn key(c: &CatalogueEntry) -> Key {
+    (c.info_hash.clone(), c.session.to_string())
+}
 
-    /// A row the sweep has just written.
-    fn record(&mut self, r: &LinkRow) {
-        self.0.insert(
-            Self::key(&r.info_hash, &r.session, &r.save_path, r.files),
-            r.measured_at,
-        );
+/// Whether a row describes the torrent as it is now: measured under its save
+/// path, with its number of files. Anything else is as good as no row.
+fn valid(m: &LinkRowMeta, c: &CatalogueEntry) -> bool {
+    *m.save_path == *c.save_path && m.files == c.files as i64
+}
+
+/// Whether the walk measures this torrent when it comes by: no valid row, or
+/// one old enough to be taken again.
+fn due(row: Option<&LinkRowMeta>, c: &CatalogueEntry, now: i64) -> bool {
+    match row {
+        Some(m) if valid(m, c) => now - m.measured_at >= REFRESH_SECS - WALK_SLACK_SECS,
+        _ => true,
     }
 }
 
-/// Whether a torrent the engines hold is for a round to look at: no valid row
-/// for it, or one old enough to be taken again.
-fn needs_measuring(known: &Known, f: &CatalogueFields<'_>, now: i64) -> bool {
-    known.at(f).is_none_or(|t| now - t >= REFRESH_SECS)
-}
-
-/// Rows whose torrent copy is no longer held.
-///
-/// They are harmless to a pass -- facts are built from the catalogue, never
-/// from the table -- but they would keep growing the table and the counts.
-pub fn orphans(
-    cat: &[CatalogueEntry],
-    meta: &HashMap<(String, String), LinkRowMeta>,
-) -> Vec<(String, String)> {
-    let held: std::collections::HashSet<(&str, &str)> = cat
-        .iter()
-        .map(|c| (c.info_hash.as_str(), &*c.session))
-        .collect();
-    meta.keys()
-        .filter(|(h, s)| !held.contains(&(h.as_str(), s.as_str())))
-        .cloned()
-        .collect()
+fn meta_of(r: &LinkRow) -> LinkRowMeta {
+    LinkRowMeta {
+        save_path: r.save_path.clone(),
+        measured_at: r.measured_at,
+        files: r.files,
+        missing: r.missing,
+    }
 }
 
 pub fn spawn(engines: Arc<EngineHost>, store: Arc<StoreLock>) {
+    // From here on, a torrent that is added or moved is queued. Not before:
+    // the restore at start goes through the same door.
+    for e in engines.engines() {
+        e.manager.arm_arrivals();
+    }
     let spawned = std::thread::Builder::new()
         .name("link-scan".into())
         .spawn(move || run(engines, store));
@@ -248,25 +367,34 @@ pub fn refresh_summary(engines: &EngineHost, store: &StoreLock) -> Option<usize>
     Some(n)
 }
 
-/// The whole catalogue and the whole index's bookkeeping, as `Io::read_all`
-/// returns them.
-type WholeRead = (Vec<CatalogueEntry>, HashMap<(String, String), LinkRowMeta>);
-
-/// Everything a round asks of the outside world, so that a test can count
-/// the whole reads it makes.
+/// Everything the scanner asks of the outside world, so that a test can count
+/// what each step reads. Nothing here returns the whole catalogue or the whole
+/// index: the largest answer is a packet or a page.
 trait Io {
-    /// The whole catalogue and the whole index's bookkeeping. The expensive
-    /// read (`FULL_EVERY`). `None` when the store could not be read.
-    fn read_all(&self) -> Option<WholeRead>;
-    /// Only the torrents `needs_measuring`, that the store knows. `None` when
-    /// there are more than a sweep's worth: the caller reads everything then.
-    fn changed(&self, known: &Known, now: i64) -> Option<Vec<CatalogueEntry>>;
-    fn drop_rows(&self, keys: &[(String, String)]);
+    /// The ids of every torrent the engines hold. Taken once a cycle: 20 bytes
+    /// a torrent, ~24 MB at 1 M, and no allocation per torrent.
+    fn ids(&self) -> Vec<Id>;
+    /// Up to `max` torrents added or moved since the last call.
+    fn arrivals(&self, max: usize) -> Vec<Id>;
+    /// The ones of `ids` the engine still holds and the store knows, as the
+    /// catalogue would list them. A copy the store does not know is not part of
+    /// any pass.
+    fn entries(&self, ids: &[Id]) -> Vec<(Id, CatalogueEntry)>;
+    /// The store's rows for these copies, and no others. `None`: unreadable.
+    fn rows(&self, entries: &[&CatalogueEntry]) -> Option<HashMap<Key, LinkRowMeta>>;
+    /// A page of the index after `after`, in key order. `None`: unreadable.
+    fn meta_page(&self, after: &Key, limit: usize) -> Option<Vec<(Key, LinkRowMeta)>>;
+    /// Whether the engine of `session` holds this torrent.
+    fn holds(&self, session: &str, info_hash: &str) -> bool;
+    /// Whether the rows were dropped.
+    fn drop_rows(&self, keys: &[Key]) -> bool;
     /// `None`: the store is gone, stop. `Some(false)`: the batch was not
     /// written.
     fn put_rows(&self, rows: &[LinkRow]) -> Option<bool>;
-    fn publish_summary(&self);
 }
+
+/// Engines an `Id` can name.
+const MAX_ENGINES: usize = 256;
 
 struct Live<'a> {
     engines: &'a EngineHost,
@@ -274,52 +402,98 @@ struct Live<'a> {
 }
 
 impl Io for Live<'_> {
-    fn read_all(&self) -> Option<WholeRead> {
-        // Read a page at a time, the connection let go between two pages.
-        let stored = rulesrun::stored_copies(self.engines, self.store);
-        let meta = self.store.link_index_meta().ok()?;
-        // Walked after the connection is released.
-        let cat = rulesrun::catalogue_from(self.engines, &stored);
-        Some((cat, meta))
+    fn ids(&self) -> Vec<Id> {
+        let mut out =
+            Vec::with_capacity(self.engines.engines().iter().map(|e| e.manager.len()).sum());
+        for (i, e) in self.engines.engines().iter().enumerate().take(MAX_ENGINES) {
+            e.manager.for_each(|t| {
+                out.push(Id {
+                    hash: t.info_hash,
+                    engine: i as u8,
+                })
+            });
+        }
+        out
     }
 
-    fn changed(&self, known: &Known, now: i64) -> Option<Vec<CatalogueEntry>> {
-        let mut seen = 0usize;
-        let mut cat = rulesrun::catalogue_where(
-            self.engines,
-            |_, _| true,
-            |f| {
-                if !needs_measuring(known, f, now) {
-                    return false;
-                }
-                seen += 1;
-                seen <= BATCH
-            },
-        );
-        if seen > BATCH {
-            return None;
+    fn arrivals(&self, max: usize) -> Vec<Id> {
+        let mut out = Vec::new();
+        for (i, e) in self.engines.engines().iter().enumerate().take(MAX_ENGINES) {
+            let room = max.saturating_sub(out.len());
+            if room == 0 {
+                break;
+            }
+            out.extend(e.manager.take_arrivals(room).into_iter().map(|hash| Id {
+                hash,
+                engine: i as u8,
+            }));
         }
-        // The store's say on the few that are left, not a read of its million.
-        let mut held: HashMap<String, HashSet<String>> = HashMap::new();
-        for c in &cat {
-            held.entry(c.session.to_string()).or_default();
-        }
-        for (session, set) in held.iter_mut() {
-            let hashes: Vec<&str> = cat
+        out
+    }
+
+    fn entries(&self, ids: &[Id]) -> Vec<(Id, CatalogueEntry)> {
+        let mut out = Vec::with_capacity(ids.len());
+        for (i, e) in self.engines.engines().iter().enumerate().take(MAX_ENGINES) {
+            let session: Arc<str> = e.id.as_str().into();
+            let found: Vec<(Id, CatalogueEntry)> = ids
                 .iter()
-                .filter(|c| *c.session == **session)
-                .map(|c| c.info_hash.as_str())
+                .filter(|id| id.engine as usize == i)
+                .filter_map(|id| {
+                    let t = e.manager.get(&id.hash)?;
+                    Some((*id, rulesrun::entry_for(&session, &t)?))
+                })
                 .collect();
-            *set = self.store.held_among(session, &hashes).ok()?;
+            if found.is_empty() {
+                continue;
+            }
+            let hashes: Vec<&str> = found.iter().map(|(_, c)| c.info_hash.as_str()).collect();
+            let Ok(held) = self.store.held_among(&e.id, &hashes) else {
+                continue;
+            };
+            out.extend(
+                found
+                    .into_iter()
+                    .filter(|(_, c)| held.contains(&c.info_hash)),
+            );
         }
-        cat.retain(|c| held[&*c.session].contains(&c.info_hash));
-        Some(cat)
+        out
     }
 
-    fn drop_rows(&self, keys: &[(String, String)]) {
-        if let Ok(s) = self.store.lock() {
-            if let Err(e) = s.drop_link_rows(keys) {
+    fn rows(&self, entries: &[&CatalogueEntry]) -> Option<HashMap<Key, LinkRowMeta>> {
+        let mut by_session: HashMap<&str, Vec<&str>> = HashMap::new();
+        for c in entries {
+            by_session.entry(&c.session).or_default().push(&c.info_hash);
+        }
+        let mut out = HashMap::new();
+        for (session, hashes) in by_session {
+            for (h, m) in self.store.link_meta_among(session, &hashes).ok()? {
+                out.insert((h, session.to_string()), m);
+            }
+        }
+        Some(out)
+    }
+
+    fn meta_page(&self, after: &Key, limit: usize) -> Option<Vec<(Key, LinkRowMeta)>> {
+        self.store.link_meta_page(after, limit as i64).ok()
+    }
+
+    fn holds(&self, session: &str, info_hash: &str) -> bool {
+        let (Some(e), Some(raw)) = (self.engines.get(session), crate::store::hex20(info_hash))
+        else {
+            return false;
+        };
+        e.manager.has(&raw)
+    }
+
+    fn drop_rows(&self, keys: &[Key]) -> bool {
+        let Ok(s) = self.store.lock() else {
+            return false;
+        };
+        match s.drop_link_rows(keys) {
+            Ok(_) => true,
+            Err(e) => {
                 tracing::warn!("link index: could not drop removed torrents: {e}");
+                false
             }
         }
     }
@@ -336,95 +510,296 @@ impl Io for Live<'_> {
             Err(_) => None,
         }
     }
-
-    fn publish_summary(&self) {
-        refresh_summary(self.engines, self.store);
-    }
 }
 
-/// What the scanner carries from one round to the next.
-struct State {
-    known: Known,
-    /// When the index was last read whole; `None` before the first time, so
-    /// that the first round after a start always is one.
-    full_at: Option<std::time::Instant>,
-    full_every: Duration,
+/// What looking at a packet came to.
+#[derive(Default)]
+struct Looked {
+    /// Of the ids, those the engine holds and the store knows.
+    resolved: HashSet<Id>,
+    measured: usize,
+    files: usize,
 }
 
-impl State {
-    fn new() -> Self {
-        State {
-            known: Known::default(),
-            full_at: None,
-            full_every: FULL_EVERY,
-        }
-    }
-}
-
-enum Round {
-    /// The store could not be read; try again later.
-    Failed,
-    Done {
-        /// Rows of removed torrents dropped.
-        dropped: usize,
-        /// Torrents the sweep was asked to measure.
-        swept: usize,
-    },
-}
-
-/// One look at the catalogue, and a sweep of what it found due.
-///
-/// ⭐ A round reads the whole index and the whole catalogue only the first
-/// time, then every `FULL_EVERY`: that is when the rows of removed torrents
-/// are found, and `State::known` is rebuilt from the store. In between it
-/// walks the engines (no store, no allocation kept) for the torrents that are
-/// not in `known` or are due again, asks the store about those few alone, and
-/// sweeps them; `sweep` adds what it writes to `known`.
-fn round(io: &dyn Io, st: &mut State, pause: Duration) -> Round {
+/// Look at `ids`: read their rows and no others, measure those that are not
+/// current, write them, bring the counters along. `tally` receives the rows
+/// that stand afterwards, for the walk's recount. `None`: the store could not
+/// be read, nothing was measured.
+fn look(io: &dyn Io, progress: &Progress, ids: &[Id], tally: Option<&mut Tally>) -> Option<Looked> {
+    let found = io.entries(ids);
+    let entries: Vec<&CatalogueEntry> = found.iter().map(|(_, c)| c).collect();
+    let rows = io.rows(&entries)?;
     let now = crate::store::now_secs();
-    let full = st.full_at.is_none_or(|at| at.elapsed() >= st.full_every);
-    let light = if full {
-        None
+
+    let todo: Vec<&CatalogueEntry> = entries
+        .iter()
+        .copied()
+        .filter(|c| due(rows.get(&key(c)), c, now))
+        .collect();
+    // Paths for this packet only, dropped with it. A torrent removed since the
+    // id was listed has none, and is not measured.
+    let (live, plan): (Vec<&CatalogueEntry>, Vec<_>) = todo
+        .iter()
+        .filter_map(|&c| Some((c, (c.info_hash.clone(), c.paths()?))))
+        .unzip();
+    let measured = if plan.is_empty() {
+        Vec::new()
     } else {
-        io.changed(&st.known, now)
+        rulesrun::stat_plan_with(plan, rulesrun::scan_threads())
     };
-    let (cat, order, dropped) = match light {
-        Some(cat) => {
-            let order = due_by(&cat, |c| st.known.at(&fields(c)), now);
-            (cat, order, 0)
+    let mut files = 0usize;
+    let new_rows: Vec<LinkRow> = live
+        .iter()
+        .zip(&measured)
+        .map(|(&c, (_, fs))| {
+            let stats: Vec<_> = fs.iter().map(|(_, st)| *st).collect();
+            files += stats.len();
+            rulesrun::link_row(c, &stats, now)
+        })
+        .collect();
+    let written: HashMap<Key, LinkRowMeta> = if new_rows.is_empty() {
+        HashMap::new()
+    } else {
+        match io.put_rows(&new_rows) {
+            Some(true) => new_rows
+                .iter()
+                .map(|r| ((r.info_hash.clone(), r.session.clone()), meta_of(r)))
+                .collect(),
+            Some(false) => HashMap::new(),
+            None => return None,
         }
-        None => {
-            let Some((cat, meta)) = io.read_all() else {
-                return Round::Failed;
-            };
-            PROGRESS
-                .catalogue
-                .store(cat.len() as i64, Ordering::Relaxed);
-            let gone = orphans(&cat, &meta);
-            for chunk in gone.chunks(BATCH) {
-                io.drop_rows(chunk);
+    };
+    for (k, m) in &written {
+        progress.counts.replace(rows.get(k), Some(m));
+    }
+    if let Some(t) = tally {
+        for c in &entries {
+            let k = key(c);
+            if let Some(m) = written.get(&k).or_else(|| rows.get(&k)) {
+                t.add(m);
             }
-            st.known = Known::from_meta(&meta, &gone.iter().collect());
-            st.full_at = Some(std::time::Instant::now());
-            let order = due(&cat, &meta, now);
-            (cat, order, gone.len())
         }
-    };
-    if !order.is_empty() {
-        sweep(&cat, &order, io, &mut st.known, pause);
     }
-    Round::Done {
-        dropped,
-        swept: order.len(),
-    }
+    Some(Looked {
+        resolved: found.iter().map(|(id, _)| *id).collect(),
+        measured: written.len(),
+        files,
+    })
 }
 
-fn fields(c: &CatalogueEntry) -> CatalogueFields<'_> {
-    CatalogueFields {
-        info_hash: &c.info_hash,
-        session: &c.session,
-        save_path: &c.save_path,
-        files: c.files,
+/// A cycle of the walk in progress.
+struct Cycle {
+    started: Instant,
+    tally: Tally,
+    measured: usize,
+    files: usize,
+}
+
+/// What one step of the walk did.
+struct Walked {
+    /// Torrents in the cycle's list, for the pause.
+    torrents: usize,
+    /// Read by the tests, which have no clock to judge a step by.
+    #[cfg_attr(not(test), allow(dead_code))]
+    measured: usize,
+    work: Duration,
+}
+
+#[derive(Default)]
+struct OrphanCycle {
+    started: Option<Instant>,
+    rows: usize,
+    dropped: usize,
+}
+
+/// What the scanner carries from one step to the next: the cursors, and
+/// nothing about the catalogue but the list of ids the walk is going through.
+struct Scanner {
+    progress: &'static Progress,
+    ids: Vec<Id>,
+    pos: usize,
+    cycle: Option<Cycle>,
+    /// Arrivals the store did not know yet, with how many looks they had.
+    waiting: Vec<(Id, u32)>,
+    orphan_after: Key,
+    orphan: OrphanCycle,
+}
+
+impl Scanner {
+    fn new(progress: &'static Progress) -> Self {
+        Scanner {
+            progress,
+            ids: Vec::new(),
+            pos: 0,
+            cycle: None,
+            waiting: Vec::new(),
+            orphan_after: Key::default(),
+            orphan: OrphanCycle::default(),
+        }
+    }
+
+    /// Count the index by pages, at start: the figures the status line shows
+    /// are right as soon as this ends, and the table is never held. Returns
+    /// whether it could be read.
+    fn count_table(&self, io: &dyn Io) -> bool {
+        let mut t = Tally::default();
+        let mut after = Key::default();
+        loop {
+            let Some(page) = io.meta_page(&after, COUNT_PAGE) else {
+                return false;
+            };
+            page.iter().for_each(|(_, m)| t.add(m));
+            match page.last() {
+                Some((k, _)) if page.len() >= COUNT_PAGE => after = k.clone(),
+                _ => break,
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        self.progress.counts.set(&t);
+        self.progress
+            .counted_at
+            .store(crate::store::now_secs(), Ordering::Relaxed);
+        true
+    }
+
+    /// Measure the torrents that were added or moved, ahead of the walk. Fifty
+    /// at most per look; the ones the store does not know yet are looked at
+    /// again at the next. Returns how many it measured.
+    fn arrivals_step(&mut self, io: &dyn Io) -> usize {
+        let mut tries: HashMap<Id, u32> = std::mem::take(&mut self.waiting).into_iter().collect();
+        let fresh = io.arrivals(ARRIVAL_BATCH.saturating_sub(tries.len()));
+        for id in fresh {
+            tries.entry(id).or_insert(0);
+        }
+        let mut ids: Vec<Id> = tries.keys().copied().collect();
+        ids.sort_unstable();
+        let looked = look(io, self.progress, &ids, None);
+        let measured = looked.as_ref().map_or(0, |l| l.measured);
+        // Resolved ones are done. The rest wait for their row in the store (or
+        // for the engine to let go of them), a while, then are left to the walk.
+        self.waiting = ids
+            .into_iter()
+            .filter(|id| looked.as_ref().is_none_or(|l| !l.resolved.contains(id)))
+            .map(|id| (id, tries[&id] + 1))
+            .filter(|(_, n)| *n < ARRIVAL_TRIES)
+            .collect();
+        self.progress
+            .queued
+            .store(self.waiting.len() as i64, Ordering::Relaxed);
+        measured
+    }
+
+    /// One packet of the walk. `None` when the store could not be read: the
+    /// cursor stays where it is.
+    fn walk_step(&mut self, io: &dyn Io) -> Option<Walked> {
+        let t0 = Instant::now();
+        let p = self.progress;
+        if self.cycle.is_none() {
+            let mut ids = io.ids();
+            ids.sort_unstable();
+            p.catalogue.store(ids.len() as i64, Ordering::Relaxed);
+            p.walk_total.store(ids.len() as i64, Ordering::Relaxed);
+            p.walk_done.store(0, Ordering::Relaxed);
+            p.walk_started
+                .store(crate::store::now_secs(), Ordering::Relaxed);
+            self.ids = ids;
+            self.pos = 0;
+            self.cycle = Some(Cycle {
+                started: Instant::now(),
+                tally: Tally::default(),
+                measured: 0,
+                files: 0,
+            });
+        }
+        let torrents = self.ids.len();
+        let end = (self.pos + WALK_BATCH).min(torrents);
+        let packet = self.ids[self.pos..end].to_vec();
+        let cycle = self.cycle.as_mut()?;
+        let looked = look(io, p, &packet, Some(&mut cycle.tally))?;
+        cycle.measured += looked.measured;
+        cycle.files += looked.files;
+        self.pos = end;
+        p.walk_done.store(end as i64, Ordering::Relaxed);
+        let work = t0.elapsed();
+        if looked.measured > 0 {
+            p.last_batch_at
+                .store(crate::store::now_secs(), Ordering::Relaxed);
+            p.files_per_sec.store(
+                (looked.files as f64 / work.as_secs_f64().max(0.001)) as i64,
+                Ordering::Relaxed,
+            );
+        }
+        if end >= torrents {
+            self.end_cycle();
+        }
+        Some(Walked {
+            torrents,
+            measured: looked.measured,
+            work,
+        })
+    }
+
+    /// The walk has been through every torrent of its list: what it counted on
+    /// the way replaces the counters, and the list is let go.
+    fn end_cycle(&mut self) {
+        let Some(c) = self.cycle.take() else { return };
+        let p = self.progress;
+        p.counts.set(&c.tally);
+        p.counted_at
+            .store(crate::store::now_secs(), Ordering::Relaxed);
+        p.cycles.fetch_add(1, Ordering::Relaxed);
+        let secs = c.started.elapsed().as_secs();
+        p.last_cycle_secs.store(secs as i64, Ordering::Relaxed);
+        tracing::info!(
+            torrents = self.ids.len(),
+            measured = c.measured,
+            files = c.files,
+            rows = c.tally.measured,
+            data_missing = c.tally.data_missing,
+            partly_missing = c.tally.partly_missing,
+            secs,
+            "link index measure cycle complete"
+        );
+        self.ids = Vec::new();
+        self.pos = 0;
+    }
+
+    /// One page of the orphan walk: the rows of torrents the engine of their
+    /// session no longer holds are dropped. Returns the rows it looked at, or
+    /// `None` when the store could not be read.
+    fn orphan_step(&mut self, io: &dyn Io) -> Option<usize> {
+        let p = self.progress;
+        let page = io.meta_page(&self.orphan_after, ORPHAN_PAGE)?;
+        let started = *self.orphan.started.get_or_insert_with(Instant::now);
+        let gone: Vec<&(Key, LinkRowMeta)> =
+            page.iter().filter(|((h, s), _)| !io.holds(s, h)).collect();
+        if !gone.is_empty() {
+            let keys: Vec<Key> = gone.iter().map(|(k, _)| k.clone()).collect();
+            if io.drop_rows(&keys) {
+                for (_, m) in &gone {
+                    p.counts.replace(Some(m), None);
+                }
+                self.orphan.dropped += gone.len();
+            }
+        }
+        self.orphan.rows += page.len();
+        match page.last() {
+            Some((k, _)) if page.len() >= ORPHAN_PAGE => self.orphan_after = k.clone(),
+            _ => {
+                p.orphan_cycles.fetch_add(1, Ordering::Relaxed);
+                p.orphans_dropped
+                    .fetch_add(self.orphan.dropped as i64, Ordering::Relaxed);
+                tracing::info!(
+                    rows = self.orphan.rows,
+                    dropped = self.orphan.dropped,
+                    secs = started.elapsed().as_secs(),
+                    "link index orphan cycle complete"
+                );
+                self.orphan = OrphanCycle::default();
+                self.orphan_after = Key::default();
+            }
+        }
+        Some(page.len())
     }
 }
 
@@ -434,116 +809,95 @@ fn run(engines: Arc<EngineHost>, store: Arc<StoreLock>) {
     // thread is spawned. Waiting left the Hardlinks and Checked columns at "-"
     // for every torrent for four minutes after each start (rc32, 2026-10-03).
     // Only the measuring waits for the disks to settle.
-    let mut summary_stale = refresh_summary(&engines, &store).is_none();
-    let mut summarised = (!summary_stale).then(std::time::Instant::now);
-    std::thread::sleep(SETTLE);
+    //
+    // ⚠️ The one whole read left, once, at start: the list's per-torrent
+    // `external_links` is a join over every name of the catalogue (a name held
+    // by another torrent of ours is not external), which no packet can answer.
+    // After it, the list is brought up to date by the workflow passes that
+    // already compute it (`rulesapi::decide`), not by this thread.
+    refresh_summary(&engines, &store);
     let io = Live {
         engines: &engines,
         store: &store,
     };
-    let mut state = State::new();
+    let mut sc = Scanner::new(&PROGRESS);
+    // The counters are right as soon as this is done, a page at a time.
+    sc.count_table(&io);
+    std::thread::sleep(SETTLE);
+
+    let (mut next_arrivals, mut next_walk, mut next_orphans) =
+        (Instant::now(), Instant::now(), Instant::now());
     loop {
-        // Between two passes, and between two batches in `sweep`: a batch
-        // that has started is written whole.
+        // Between two steps: a packet that has started is written whole.
         if crate::shutdown::stopping() {
             return;
         }
-        let (dropped, swept) = match round(&io, &mut state, PAUSE) {
-            Round::Failed => {
-                std::thread::sleep(IDLE);
-                continue;
-            }
-            Round::Done { dropped, swept } => (dropped, swept),
-        };
+        let now = Instant::now();
+        if now >= next_arrivals {
+            sc.arrivals_step(&io);
+            next_arrivals = Instant::now() + ARRIVAL_POLL;
+        }
+        if now >= next_walk {
+            next_walk = Instant::now()
+                + match sc.walk_step(&io) {
+                    Some(w) => walk_pause(w.torrents, w.work),
+                    None => RETRY,
+                };
+        }
+        if now >= next_orphans {
+            let rows = PROGRESS.counts.get().measured.max(0) as usize;
+            next_orphans = Instant::now()
+                + match sc.orphan_step(&io) {
+                    Some(_) => orphan_pause(rows),
+                    None => RETRY,
+                };
+        }
         if crate::shutdown::stopping() {
             return;
         }
-        // A removed torrent's names leave the count: another torrent that
-        // shared its files may now have an external link. And a sweep always
-        // leaves the summary stale.
-        summary_stale |= dropped > 0 || swept > 0;
-        if summary_due(
-            summary_stale,
-            summarised.map_or(Duration::MAX, |at| at.elapsed()),
-        ) {
-            refresh_summary(&engines, &store);
-            summary_stale = false;
-            summarised = Some(std::time::Instant::now());
-        }
-        std::thread::sleep(if swept == 0 { IDLE } else { ROUND_PAUSE });
+        let next = next_arrivals.min(next_walk).min(next_orphans);
+        std::thread::sleep(
+            next.saturating_duration_since(Instant::now())
+                .clamp(Duration::from_millis(10), ARRIVAL_POLL),
+        );
     }
 }
 
-fn sweep(cat: &[CatalogueEntry], order: &[usize], io: &dyn Io, known: &mut Known, pause: Duration) {
-    let started = std::time::Instant::now();
-    let mut summarised = std::time::Instant::now();
-    PROGRESS
-        .sweep_total
-        .store(order.len() as i64, Ordering::Relaxed);
-    PROGRESS.sweep_done.store(0, Ordering::Relaxed);
-    PROGRESS
-        .sweep_started
-        .store(crate::store::now_secs(), Ordering::Relaxed);
-    let (mut files, mut missing, mut done) = (0usize, 0usize, 0usize);
+/// The scanner over a live engine host and store, one step of the arrivals
+/// queue: for the tests of the workflows' side, which have an engine and no
+/// thread.
+#[cfg(test)]
+pub(crate) fn measure_arrivals_once(engines: &EngineHost, store: &StoreLock) -> usize {
+    let io = Live { engines, store };
+    let progress: &'static Progress = Box::leak(Box::new(Progress::new()));
+    Scanner::new(progress).arrivals_step(&io)
+}
 
-    for chunk in order.chunks(BATCH) {
-        let t0 = std::time::Instant::now();
-        // Paths for this batch only, dropped with it. A torrent removed since
-        // the catalogue was taken has none, and is not measured.
-        let (live, plan): (Vec<usize>, Vec<_>) = chunk
-            .iter()
-            .filter_map(|&i| Some((i, (cat[i].info_hash.clone(), cat[i].paths()?))))
-            .unzip();
-        let measured = rulesrun::stat_plan_with(plan, rulesrun::scan_threads());
-        let now = crate::store::now_secs();
-        let mut batch_files = 0usize;
-        let rows: Vec<_> = live
-            .iter()
-            .zip(&measured)
-            .map(|(&i, (_, fs))| {
-                let stats: Vec<_> = fs.iter().map(|(_, st)| *st).collect();
-                batch_files += stats.len();
-                if !stats.is_empty() && stats.iter().all(Option::is_none) {
-                    missing += 1;
-                }
-                rulesrun::link_row(&cat[i], &stats, now)
-            })
-            .collect();
-        match io.put_rows(&rows) {
-            Some(true) => rows.iter().for_each(|r| known.record(r)),
-            Some(false) => {}
-            None => return,
-        }
-        files += batch_files;
-        done += chunk.len();
-        let secs = t0.elapsed().as_secs_f64().max(0.001);
-        PROGRESS.sweep_done.store(done as i64, Ordering::Relaxed);
-        PROGRESS.last_batch_at.store(now, Ordering::Relaxed);
-        PROGRESS
-            .files_per_sec
-            .store((batch_files as f64 / secs) as i64, Ordering::Relaxed);
-        if summarised.elapsed() >= SUMMARY_EVERY {
-            io.publish_summary();
-            summarised = std::time::Instant::now();
-        }
-        if crate::shutdown::stopping() {
-            return;
-        }
-        std::thread::sleep(pause);
-    }
-
-    tracing::info!(
-        torrents = done,
-        files,
-        data_missing = missing,
-        secs = started.elapsed().as_secs(),
-        "link index sweep complete"
-    );
+/// One packet of the walk, from a scanner that has just started: how many
+/// torrents it measured.
+#[cfg(test)]
+pub(crate) fn walk_once(engines: &EngineHost, store: &StoreLock) -> usize {
+    let io = Live { engines, store };
+    let progress: &'static Progress = Box::leak(Box::new(Progress::new()));
+    let mut sc = Scanner::new(progress);
+    sc.walk_step(&io).expect("the store reads").measured
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::{Cell, RefCell};
+    use std::collections::{BTreeMap, VecDeque};
+
+    fn id_of(hash: &str) -> Id {
+        let mut h = [0u8; 20];
+        h[..hash.len()].copy_from_slice(hash.as_bytes());
+        Id { hash: h, engine: 0 }
+    }
+
+    fn name(n: usize) -> String {
+        format!("t{n:05}")
+    }
 
     fn c(hash: &str, save_path: &str, files: usize) -> CatalogueEntry {
         CatalogueEntry::fixed(
@@ -556,102 +910,57 @@ mod tests {
         )
     }
 
-    fn m(save_path: &str, measured_at: i64, files: i64) -> LinkRowMeta {
+    fn m(save_path: &str, measured_at: i64, files: i64, missing: i64) -> LinkRowMeta {
         LinkRowMeta {
             save_path: save_path.into(),
             measured_at,
             files,
+            missing,
         }
     }
 
-    #[test]
-    fn the_never_measured_go_first_then_the_oldest_and_fresh_ones_wait() {
-        let now = 10 * REFRESH_SECS;
-        let cat = vec![
-            c("fresh", "/d", 1),
-            c("old", "/d", 1),
-            c("older", "/d", 1),
-            c("never", "/d", 1),
-            c("moved", "/new", 1),
-            c("regrown", "/d", 2),
-        ];
-        let mut meta = HashMap::new();
-        let k = |h: &str| (h.to_string(), "hoard".to_string());
-        meta.insert(k("fresh"), m("/d", now - 60, 1));
-        meta.insert(k("old"), m("/d", now - REFRESH_SECS - 5, 1));
-        meta.insert(k("older"), m("/d", now - 3 * REFRESH_SECS, 1));
-        meta.insert(k("moved"), m("/old", now - 60, 1));
-        meta.insert(k("regrown"), m("/d", now - 60, 1));
-
-        let order: Vec<&str> = due(&cat, &meta, now)
-            .iter()
-            .map(|&i| cat[i].info_hash.as_str())
-            .collect();
-        assert_eq!(
-            &order[3..],
-            &["older", "old"],
-            "stale ones after, oldest first"
-        );
-        let mut first: Vec<&str> = order[..3].to_vec();
-        first.sort();
-        assert_eq!(
-            first,
-            vec!["moved", "never", "regrown"],
-            "anything without a valid row first"
-        );
-        assert!(!order.contains(&"fresh"));
+    fn k(hash: &str) -> Key {
+        (hash.to_string(), "hoard".to_string())
     }
 
-    /// ⭐ A sweep always leaves the summary stale; recomputing it every time
-    /// ran the scanner flat out, a full read of the store every half minute
-    /// for a handful of torrents due.
-    #[test]
-    fn a_small_sweep_does_not_recompute_the_summary_at_once() {
-        let soon = Duration::from_secs(40);
-        assert!(!summary_due(true, soon), "stale, but computed 40 s ago");
-        assert!(!summary_due(true, SUMMARY_EVERY - Duration::from_secs(1)));
-        assert!(summary_due(true, SUMMARY_EVERY), "stale long enough");
-        assert!(summary_due(true, Duration::MAX), "never computed");
-        assert!(!summary_due(false, Duration::MAX), "nothing changed");
+    /// Its own counters: the statics are shared by every test of the process.
+    fn progress() -> &'static Progress {
+        Box::leak(Box::new(Progress::new()))
     }
 
-    #[test]
-    fn rows_of_removed_torrents_are_found_and_held_ones_are_not() {
-        let cat = vec![c("kept", "/d", 1)];
-        let mut meta = HashMap::new();
-        meta.insert(("kept".to_string(), "hoard".to_string()), m("/d", 0, 1));
-        meta.insert(("kept".to_string(), "race".to_string()), m("/d", 0, 1));
-        meta.insert(("removed".to_string(), "hoard".to_string()), m("/d", 0, 1));
-        let mut gone = orphans(&cat, &meta);
-        gone.sort();
-        assert_eq!(
-            gone,
-            vec![
-                ("kept".to_string(), "race".to_string()),
-                ("removed".to_string(), "hoard".to_string())
-            ],
-            "the copy in another engine is its own row"
-        );
-    }
-
-    /// The engines and the store, in memory, counting the whole reads.
+    /// The engines and the store, in memory, counting what each step reads.
+    #[derive(Default)]
     struct Fake {
-        held: std::cell::RefCell<Vec<CatalogueEntry>>,
-        table: std::cell::RefCell<HashMap<(String, String), LinkRowMeta>>,
-        whole_reads: std::cell::Cell<usize>,
+        held: RefCell<Vec<CatalogueEntry>>,
+        /// Held by the engine but not (yet) known to the store.
+        hidden: RefCell<HashSet<String>>,
+        table: RefCell<BTreeMap<Key, LinkRowMeta>>,
+        queue: RefCell<VecDeque<Id>>,
+        /// Calls to `ids`: the list is taken once a cycle.
+        id_calls: Cell<usize>,
+        /// The most torrents asked about, or rows answered, in one call.
+        widest: Cell<usize>,
+        /// The most rows of the index answered in one page.
+        widest_page: Cell<usize>,
+        puts: Cell<usize>,
     }
 
     impl Fake {
-        fn new(hashes: &[&str]) -> Self {
-            Fake {
-                held: std::cell::RefCell::new(hashes.iter().map(|h| c(h, "/d", 1)).collect()),
-                table: Default::default(),
-                whole_reads: Default::default(),
+        fn new(n: usize) -> Self {
+            let f = Fake::default();
+            for i in 0..n {
+                f.held.borrow_mut().push(c(&name(i), "/d", 1));
             }
+            f
+        }
+
+        fn widen(&self, n: usize) {
+            self.widest.set(self.widest.get().max(n));
         }
 
         fn add(&self, hash: &str) {
             self.held.borrow_mut().push(c(hash, "/d", 1));
+            self.queue.borrow_mut().push_back(id_of(hash));
         }
 
         fn remove(&self, hash: &str) {
@@ -659,128 +968,368 @@ mod tests {
         }
 
         fn measured(&self, hash: &str) -> bool {
-            self.table
-                .borrow()
-                .contains_key(&(hash.to_string(), "hoard".to_string()))
+            self.table.borrow().contains_key(&k(hash))
+        }
+
+        fn at(&self, hash: &str) -> i64 {
+            self.table.borrow()[&k(hash)].measured_at
+        }
+
+        /// What the counters must read, counted off the table.
+        fn recount(&self) -> Tally {
+            let mut t = Tally::default();
+            self.table.borrow().values().for_each(|m| t.add(m));
+            t
         }
     }
 
     impl Io for Fake {
-        fn read_all(&self) -> Option<WholeRead> {
-            self.whole_reads.set(self.whole_reads.get() + 1);
-            Some((self.held.borrow().clone(), self.table.borrow().clone()))
+        fn ids(&self) -> Vec<Id> {
+            self.id_calls.set(self.id_calls.get() + 1);
+            self.held
+                .borrow()
+                .iter()
+                .map(|e| id_of(&e.info_hash))
+                .collect()
         }
 
-        fn changed(&self, known: &Known, now: i64) -> Option<Vec<CatalogueEntry>> {
+        fn arrivals(&self, max: usize) -> Vec<Id> {
+            let mut q = self.queue.borrow_mut();
+            let n = max.min(q.len());
+            q.drain(..n).collect()
+        }
+
+        fn entries(&self, ids: &[Id]) -> Vec<(Id, CatalogueEntry)> {
+            self.widen(ids.len());
+            self.held
+                .borrow()
+                .iter()
+                .filter(|e| !self.hidden.borrow().contains(&e.info_hash))
+                .filter(|e| ids.contains(&id_of(&e.info_hash)))
+                .map(|e| (id_of(&e.info_hash), e.clone()))
+                .collect()
+        }
+
+        fn rows(&self, entries: &[&CatalogueEntry]) -> Option<HashMap<Key, LinkRowMeta>> {
+            self.widen(entries.len());
+            let t = self.table.borrow();
             Some(
-                self.held
-                    .borrow()
+                entries
                     .iter()
-                    .filter(|e| needs_measuring(known, &fields(e), now))
-                    .cloned()
+                    .filter_map(|e| Some((key(e), t.get(&key(e))?.clone())))
                     .collect(),
             )
         }
 
-        fn drop_rows(&self, keys: &[(String, String)]) {
-            for k in keys {
-                self.table.borrow_mut().remove(k);
+        fn meta_page(&self, after: &Key, limit: usize) -> Option<Vec<(Key, LinkRowMeta)>> {
+            let page: Vec<_> = self
+                .table
+                .borrow()
+                .range::<Key, _>((std::ops::Bound::Excluded(after), std::ops::Bound::Unbounded))
+                .take(limit)
+                .map(|(k, m)| (k.clone(), m.clone()))
+                .collect();
+            self.widest_page.set(self.widest_page.get().max(page.len()));
+            Some(page)
+        }
+
+        fn holds(&self, session: &str, info_hash: &str) -> bool {
+            session == "hoard" && self.held.borrow().iter().any(|e| e.info_hash == info_hash)
+        }
+
+        fn drop_rows(&self, keys: &[Key]) -> bool {
+            for key in keys {
+                self.table.borrow_mut().remove(key);
             }
+            true
         }
 
         fn put_rows(&self, rows: &[LinkRow]) -> Option<bool> {
+            self.puts.set(self.puts.get() + 1);
             for r in rows {
-                self.table.borrow_mut().insert(
-                    (r.info_hash.clone(), r.session.clone()),
-                    LinkRowMeta {
-                        save_path: r.save_path.clone(),
-                        measured_at: r.measured_at,
-                        files: r.files,
-                    },
-                );
+                self.table
+                    .borrow_mut()
+                    .insert((r.info_hash.clone(), r.session.clone()), meta_of(r));
             }
             Some(true)
         }
-
-        fn publish_summary(&self) {}
     }
 
-    fn swept(r: Round) -> usize {
-        match r {
-            Round::Done { swept, .. } => swept,
-            Round::Failed => panic!("the round failed"),
-        }
-    }
-
-    /// ⭐ At 1.85 M torrents every round read the whole index and the whole
-    /// catalogue (~3 GiB of resident memory for 30 s) to measure the three to
-    /// ten torrents that had been added. After the first round, one that finds
-    /// a few new torrents must measure them and read nothing whole.
-    #[test]
-    fn rounds_after_the_first_measure_the_added_without_reading_everything() {
-        let io = Fake::new(&["a", "b", "c", "d"]);
-        let mut st = State::new();
-        assert_eq!(swept(round(&io, &mut st, Duration::ZERO)), 4);
-        assert_eq!(io.whole_reads.get(), 1, "the first round reads everything");
-
-        for (n, added) in [["e", "f"], ["g", "h"], ["i", "j"]].iter().enumerate() {
-            for h in added {
-                io.add(h);
+    /// Steps of the walk until a cycle ends (and never more than a sane number).
+    fn walk_cycle(sc: &mut Scanner, io: &Fake) -> usize {
+        let before = sc.progress.cycles.load(Ordering::Relaxed);
+        for steps in 1..=10_000 {
+            sc.walk_step(io).expect("the store reads");
+            if sc.progress.cycles.load(Ordering::Relaxed) > before {
+                return steps;
             }
-            assert_eq!(swept(round(&io, &mut st, Duration::ZERO)), 2);
-            assert!(added.iter().all(|h| io.measured(h)), "added are measured");
-            assert_eq!(io.whole_reads.get(), 1, "round {n} read nothing whole");
         }
-        assert_eq!(
-            swept(round(&io, &mut st, Duration::ZERO)),
-            0,
-            "nothing changed, nothing to sweep"
-        );
-        assert_eq!(io.whole_reads.get(), 1);
+        panic!("the cycle never ended");
     }
 
-    #[test]
-    fn a_copy_moved_to_another_save_path_is_measured_again_without_a_whole_read() {
-        let io = Fake::new(&["a", "b"]);
-        let mut st = State::new();
-        round(&io, &mut st, Duration::ZERO);
-        io.held.borrow_mut()[0] = c("a", "/elsewhere", 1);
-        assert_eq!(swept(round(&io, &mut st, Duration::ZERO)), 1);
-        assert_eq!(
-            io.table.borrow()[&("a".into(), "hoard".into())].save_path,
-            "/elsewhere"
-        );
-        assert_eq!(io.whole_reads.get(), 1);
-    }
-
-    /// A removed torrent's row is harmless, but it must not stay for ever: the
-    /// whole round, run every `FULL_EVERY`, drops it and leaves the others.
-    #[test]
-    fn a_removed_torrent_leaves_the_index_at_the_next_whole_round() {
-        let io = Fake::new(&["a", "b", "c"]);
-        let mut st = State::new();
-        round(&io, &mut st, Duration::ZERO);
-        io.remove("b");
-        assert_eq!(swept(round(&io, &mut st, Duration::ZERO)), 0);
+    fn never_more_than_a_packet(io: &Fake) {
         assert!(
-            io.measured("b"),
-            "an ordinary round does not look for orphans"
+            io.widest.get() <= WALK_BATCH,
+            "a step read more than a packet: {} torrents or rows in one call (packet {WALK_BATCH})",
+            io.widest.get()
         );
+    }
 
-        st.full_every = Duration::ZERO;
-        let dropped = match round(&io, &mut st, Duration::ZERO) {
-            Round::Done { dropped, .. } => dropped,
-            Round::Failed => panic!("the round failed"),
-        };
-        assert_eq!(dropped, 1);
-        assert!(!io.measured("b"));
-        assert!(io.measured("a") && io.measured("c"));
-        assert_eq!(io.whole_reads.get(), 2);
+    /// What a round did before this walk, over the same `Io`: the whole
+    /// catalogue's entries in one call, the whole index in one page, then a
+    /// sweep of what was due. Kept as the thing the guard below must catch.
+    fn old_round(io: &Fake, progress: &Progress) {
+        let all = io.ids();
+        let _everything = io.entries(&all);
+        let _whole_index = io.meta_page(&Key::default(), usize::MAX).unwrap();
+        let _ = progress;
+    }
 
-        // The same torrent back: it is measured again, not taken for known.
-        io.add("b");
-        st.full_every = FULL_EVERY;
-        assert_eq!(swept(round(&io, &mut st, Duration::ZERO)), 1);
-        assert!(io.measured("b"));
+    /// ⭐ At 1.04 M torrents each whole round was +2 to 3.5 GiB and a core at
+    /// 100 % for minutes. In steady state a step now reads one packet: not the
+    /// catalogue, not the index, and the list of ids once per cycle.
+    #[test]
+    fn a_step_reads_at_most_a_packet_and_never_the_catalogue_or_the_index() {
+        let io = Fake::new(350);
+        let mut sc = Scanner::new(progress());
+        assert_eq!(walk_cycle(&mut sc, &io), 4, "350 torrents, 100 a packet");
+        assert_eq!(io.table.borrow().len(), 350, "the first cycle measures all");
+        never_more_than_a_packet(&io);
+        assert_eq!(io.id_calls.get(), 1);
+
+        let puts = io.puts.get();
+        assert_eq!(walk_cycle(&mut sc, &io), 4);
+        assert_eq!(io.puts.get(), puts, "nothing is due: nothing is written");
+        never_more_than_a_packet(&io);
+        assert_eq!(io.id_calls.get(), 2, "the id list is taken once a cycle");
+        assert!(io.widest_page.get() == 0, "the walk never pages the index");
+    }
+
+    /// The guard of the test above is not vacuous: the old round, through the
+    /// same `Io`, trips it.
+    #[test]
+    #[should_panic(expected = "a step read more than a packet")]
+    fn the_old_whole_round_trips_the_guard() {
+        let io = Fake::new(350);
+        old_round(&io, progress());
+        never_more_than_a_packet(&io);
+    }
+
+    /// ⭐ A torrent added is measured by the next look at the queue, not when
+    /// the walk gets to it.
+    #[test]
+    fn an_added_torrent_is_measured_at_the_next_step_before_the_cycle_ends() {
+        let io = Fake::new(350);
+        let mut sc = Scanner::new(progress());
+        sc.walk_step(&io).unwrap();
+        assert_eq!(sc.pos, WALK_BATCH, "the walk is a quarter through");
+
+        io.add("zz-added");
+        assert!(!io.measured("zz-added"));
+        assert_eq!(sc.arrivals_step(&io), 1);
+        assert!(io.measured("zz-added"), "measured by the queue");
+        assert_eq!(sc.pos, WALK_BATCH, "the cursor has not moved for it");
+        never_more_than_a_packet(&io);
+        assert_eq!(sc.arrivals_step(&io), 0, "and only once");
+
+        // A move is an arrival too: the row under the old path is not valid.
+        io.held.borrow_mut()[0] = c(&name(0), "/elsewhere", 1);
+        io.queue.borrow_mut().push_back(id_of(&name(0)));
+        assert_eq!(sc.arrivals_step(&io), 1);
+        assert_eq!(io.table.borrow()[&k(&name(0))].save_path, "/elsewhere");
+    }
+
+    /// The engine holds a torrent a moment before the store has its row: it
+    /// waits in the queue, and is measured as soon as the store knows it.
+    #[test]
+    fn an_arrival_the_store_does_not_know_yet_waits_and_is_then_measured() {
+        let io = Fake::new(3);
+        let mut sc = Scanner::new(progress());
+        io.hidden.borrow_mut().insert("late".into());
+        io.add("late");
+        assert_eq!(sc.arrivals_step(&io), 0);
+        assert_eq!(sc.progress.queued.load(Ordering::Relaxed), 1);
+        io.hidden.borrow_mut().clear();
+        assert_eq!(sc.arrivals_step(&io), 1);
+        assert!(io.measured("late"));
+        assert_eq!(sc.progress.queued.load(Ordering::Relaxed), 0);
+    }
+
+    /// A measurement older than `REFRESH_SECS` is taken again when the walk
+    /// comes by; a recent one is not.
+    #[test]
+    fn the_walk_measures_again_what_is_old_and_leaves_what_is_recent() {
+        let io = Fake::new(0);
+        let now = crate::store::now_secs();
+        for n in ["old", "recent", "moved"] {
+            io.held.borrow_mut().push(c(n, "/d", 1));
+        }
+        io.held.borrow_mut()[2] = c("moved", "/new", 1);
+        {
+            let mut t = io.table.borrow_mut();
+            t.insert(k("old"), m("/d", now - REFRESH_SECS - 5, 1, 0));
+            t.insert(k("recent"), m("/d", now - 60, 1, 0));
+            t.insert(k("moved"), m("/old", now - 60, 1, 0));
+        }
+        let mut sc = Scanner::new(progress());
+        walk_cycle(&mut sc, &io);
+        assert!(io.at("old") >= now, "old: measured again");
+        assert_eq!(io.at("recent"), now - 60, "recent: left alone");
+        assert_eq!(io.table.borrow()[&k("moved")].save_path, "/new");
+    }
+
+    /// A removed torrent's row goes within one cycle of the orphan walk, the
+    /// others stay, and the walk pages (here three pages of the index).
+    #[test]
+    fn an_orphan_is_dropped_within_one_orphan_cycle() {
+        let io = Fake::new(1200);
+        let p = progress();
+        let mut sc = Scanner::new(p);
+        for i in 0..1200 {
+            io.table
+                .borrow_mut()
+                .insert(k(&name(i)), m("/d", 100, 1, 1));
+        }
+        // Three torrents gone from the engine: one in each page.
+        for i in [10, 600, 1190] {
+            io.remove(&name(i));
+        }
+        // And a row of a session no engine has.
+        io.table
+            .borrow_mut()
+            .insert(("t00001".into(), "race".into()), m("/d", 100, 1, 1));
+        assert!(sc.count_table(&io));
+        let before = p.counts.get().measured;
+        io.widest_page.set(0);
+
+        let mut pages = 0;
+        while p.orphan_cycles.load(Ordering::Relaxed) == 0 {
+            sc.orphan_step(&io).expect("reads");
+            pages += 1;
+            assert!(pages < 50, "the cycle never ended");
+        }
+        assert_eq!(pages, 3, "1201 rows, 500 a page");
+        assert!(io.widest_page.get() <= ORPHAN_PAGE);
+        for i in [10, 600, 1190] {
+            assert!(!io.measured(&name(i)), "{} is dropped", name(i));
+        }
+        assert!(!io
+            .table
+            .borrow()
+            .contains_key(&("t00001".into(), "race".into())));
+        assert!(io.measured(&name(11)) && io.measured(&name(1)));
+        assert_eq!(io.table.borrow().len(), 1197);
+        assert_eq!(p.orphans_dropped.load(Ordering::Relaxed), 4);
+        assert_eq!(
+            p.counts.get().measured,
+            before - 4,
+            "and the counters follow"
+        );
+    }
+
+    /// ⭐ The counters are kept by deltas, and the end of a walk cycle sets them
+    /// to what the walk counted: whatever the deltas got wrong is gone.
+    #[test]
+    fn the_end_of_a_cycle_resets_the_counters_to_the_recount() {
+        let io = Fake::new(250);
+        let p = progress();
+        let mut sc = Scanner::new(p);
+        assert!(sc.count_table(&io));
+        assert_eq!(p.counts.get(), Tally::default());
+
+        // Deltas alone: a first walk writes 250 rows and counts them by delta
+        // before the cycle's recount replaces them. Stop short of its end.
+        sc.walk_step(&io).unwrap();
+        sc.walk_step(&io).unwrap();
+        assert_eq!(p.counts.get().measured, 200, "by delta, mid-cycle");
+
+        // Wrong on purpose, in every field.
+        p.counts.measured.fetch_add(777, Ordering::Relaxed);
+        p.counts.files.fetch_add(-5, Ordering::Relaxed);
+        p.counts.data_missing.fetch_add(31, Ordering::Relaxed);
+        p.counts.partly_missing.fetch_add(9, Ordering::Relaxed);
+        p.counts.oldest.store(1, Ordering::Relaxed);
+        assert_ne!(p.counts.get(), io.recount());
+
+        walk_cycle(&mut sc, &io);
+        let want = io.recount();
+        assert_eq!(want.measured, 250);
+        assert_eq!(p.counts.get(), want, "the recount is what is published");
+        assert!(p.counted_at.load(Ordering::Relaxed) > 0);
+    }
+
+    /// The first count reads the index a page at a time and keeps none of it.
+    #[test]
+    fn the_first_count_reads_pages_and_gets_the_totals_right() {
+        let io = Fake::new(0);
+        for i in 0..(2 * COUNT_PAGE + 1) {
+            let (files, missing) = match i % 3 {
+                0 => (2, 2),
+                1 => (3, 1),
+                _ => (1, 0),
+            };
+            io.table
+                .borrow_mut()
+                .insert(k(&name(i)), m("/d", 1000 + i as i64, files, missing));
+        }
+        let p = progress();
+        assert_eq!(p.counted_at.load(Ordering::Relaxed), 0);
+        assert!(Scanner::new(p).count_table(&io));
+        assert!(io.widest_page.get() <= COUNT_PAGE);
+        assert_eq!(p.counts.get(), io.recount());
+        assert_eq!(p.counts.get().measured, 2 * COUNT_PAGE as i64 + 1);
+        assert_eq!(p.counts.get().oldest, 1000);
+    }
+
+    /// ⭐ The pause makes a cycle last a day at a million torrents, and stays
+    /// inside its bounds whatever the catalogue and however slow a step is.
+    #[test]
+    fn the_pause_makes_a_cycle_last_a_day_at_a_million_torrents_within_bounds() {
+        let work = Duration::from_millis(50);
+        let n = 1_000_000;
+        let pause = walk_pause(n, work);
+        let packets = n.div_ceil(WALK_BATCH) as f64;
+        let cycle = packets * (pause + work).as_secs_f64();
+        assert!(
+            (cycle - REFRESH_SECS as f64).abs() < 0.01 * REFRESH_SECS as f64,
+            "a cycle of {cycle} s, wanted ~{REFRESH_SECS}"
+        );
+        assert!((pause.as_secs_f64() - 8.59).abs() < 0.05, "{pause:?}");
+
+        // Bounds.
+        assert_eq!(
+            walk_pause(0, Duration::ZERO),
+            WALK_MAX_PAUSE,
+            "tiny: ceiling"
+        );
+        assert_eq!(walk_pause(1_000, Duration::ZERO), WALK_MAX_PAUSE);
+        assert_eq!(
+            walk_pause(2_000_000_000, Duration::ZERO),
+            WALK_MIN_PAUSE,
+            "huge: floor"
+        );
+        for n in [0, 1, 99, 100, 101, 10_000, 1_000_000, 50_000_000] {
+            for ms in [0, 1, 50, 2_000, 60_000] {
+                let work = Duration::from_millis(ms);
+                let pause = walk_pause(n, work);
+                assert!(pause >= WALK_MIN_PAUSE, "{n} {work:?}");
+                // Working never takes more than 1 / WALK_DUTY of the time...
+                assert!(
+                    work.as_secs_f64() * WALK_DUTY as f64
+                        <= (work + pause).as_secs_f64() * 1.0001 + 1e-9,
+                    "{n} {work:?}: {pause:?} leaves the walk over its share"
+                );
+                // ...and past the ceiling only because of that.
+                assert!(
+                    pause <= WALK_MAX_PAUSE || pause == work * (WALK_DUTY - 1),
+                    "{n} {work:?}: {pause:?}"
+                );
+            }
+        }
+        // The orphan walk, as well: an hour at a million rows.
+        let p = orphan_pause(1_000_000);
+        assert!((p.as_secs_f64() * 2000.0 - 3600.0).abs() < 60.0, "{p:?}");
+        assert_eq!(orphan_pause(0), ORPHAN_MAX_PAUSE);
+        assert_eq!(orphan_pause(2_000_000_000), ORPHAN_MIN_PAUSE);
     }
 }

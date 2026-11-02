@@ -863,6 +863,12 @@ fn apply_matches(
 /// Where the link index stands: how much of the catalogue it has measured,
 /// how old the oldest measurement is, and how many torrents it found with
 /// their files gone.
+///
+/// ⭐ From the scanner's own counters (`linkscan::PROGRESS`), not from a count
+/// of the table: they are kept by deltas as rows are written and dropped, and
+/// set to a recount at the end of each walk cycle. This route used to run one
+/// SQL aggregate over every row of the index per request, under the read
+/// connection, from a page the browser polls.
 pub async fn links_status(
     State(state): State<AppState>,
     RawQuery(query): RawQuery,
@@ -872,12 +878,9 @@ pub async fn links_status(
     if !crate::api::authorised(&state, &headers, &query) {
         return refuse();
     }
-    let counts = {
-        let store = state.store.read().unwrap();
-        store.link_index_counts().unwrap_or_default()
-    };
     use std::sync::atomic::Ordering::Relaxed;
     let p = &crate::linkscan::PROGRESS;
+    let counts = p.counts.get();
     Json(serde_json::json!({
         "catalogue": p.catalogue.load(Relaxed),
         "measured": counts.measured,
@@ -885,13 +888,23 @@ pub async fn links_status(
         "data_missing": counts.data_missing,
         "partly_missing": counts.partly_missing,
         "oldest_measurement": counts.oldest,
+        "counted_at": p.counted_at.load(Relaxed),
         "refresh_secs": crate::linkscan::REFRESH_SECS,
+        // The walk's current cycle: `done` torrents of `total` are behind the
+        // cursor. It never stops, it starts over.
         "sweep": {
-            "total": p.sweep_total.load(Relaxed),
-            "done": p.sweep_done.load(Relaxed),
-            "started": p.sweep_started.load(Relaxed),
+            "total": p.walk_total.load(Relaxed),
+            "done": p.walk_done.load(Relaxed),
+            "started": p.walk_started.load(Relaxed),
             "last_batch_at": p.last_batch_at.load(Relaxed),
             "files_per_sec": p.files_per_sec.load(Relaxed),
+            "cycles": p.cycles.load(Relaxed),
+            "last_cycle_secs": p.last_cycle_secs.load(Relaxed),
+        },
+        "queued": p.queued.load(Relaxed),
+        "orphans": {
+            "cycles": p.orphan_cycles.load(Relaxed),
+            "dropped": p.orphans_dropped.load(Relaxed),
         },
     }))
     .into_response()
@@ -2765,6 +2778,127 @@ mod one_number_tests {
             serde_json::json!(measured_at),
             "not a candidate, not re-measured"
         );
+    }
+
+    /// ⭐ Prod workflows delete WITH the files on `external_links == 0` and
+    /// `link_count == 1`. A torrent with no measurement -- never reached, added
+    /// and waiting in the scanner's queue, or whose row the orphan walk just
+    /// dropped -- must read "unknown" and satisfy NO condition on a link fact,
+    /// whatever the operator. Through the real pass (`decide`), with a
+    /// measured torrent beside them that does match, so the test is not
+    /// vacuous.
+    #[tokio::test]
+    async fn a_torrent_with_no_measurement_satisfies_no_hardlink_condition() {
+        let s = st("links-unmeasured");
+        let root = s.dir.join("data");
+        std::fs::create_dir_all(&root).unwrap();
+        for n in ["m.bin", "c.bin", "a.bin", "b.bin"] {
+            std::fs::write(root.join(n), b"x").unwrap();
+        }
+        let root_s = root.to_str().unwrap();
+
+        // m is measured (as the scanner does); c is added and never measured.
+        let m = add(&s, "m.bin", root_s);
+        let c = add(&s, "c.bin", root_s);
+        {
+            let stored = rulesrun::stored_copies(&s.state.engines, &s.state.store);
+            let cat = rulesrun::catalogue_from(&s.state.engines, &stored);
+            let cat: Vec<_> = cat.into_iter().filter(|e| e.info_hash == m).collect();
+            assert_eq!(cat.len(), 1);
+            let plan = cat
+                .iter()
+                .map(|e| (e.info_hash.clone(), e.paths().unwrap()))
+                .collect();
+            let measured = rulesrun::stat_plan_with(plan, 1);
+            let rows: Vec<_> = cat
+                .iter()
+                .zip(&measured)
+                .map(|(e, (_, fs))| {
+                    let stats: Vec<_> = fs.iter().map(|(_, st)| *st).collect();
+                    rulesrun::link_row(e, &stats, 1_700_000_123)
+                })
+                .collect();
+            s.state.store.lock().unwrap().put_link_rows(&rows).unwrap();
+        }
+        // From here on additions are queued: a and b wait for the scanner.
+        for e in s.state.engines.engines() {
+            e.manager.arm_arrivals();
+        }
+        let a = add(&s, "a.bin", root_s);
+        let b = add(&s, "b.bin", root_s);
+
+        let conds = [
+            ("external_links", "eq", "0"),
+            ("link_count", "eq", "1"),
+            ("link_count", "lt", "2"),
+            ("link_count", "le", "1"),
+            ("external_links", "ne", "1"),
+            ("external_links", "ge", "0"),
+            ("external_links", "lt", "1"),
+            ("link_count", "gt", "0"),
+            ("freeable_bytes", "ge", "0"),
+        ];
+        let matched = |field: &str, op: &str, value: &str| -> std::collections::HashSet<String> {
+            let w = parse(
+                &serde_json::json!({
+                    "id": "", "name": "noHL", "enabled": true, "interval_secs": 3600, "cap": 100,
+                    "when": {"kind": "cond", "field": field, "op": op, "value": value},
+                    "then": [{"type": "add_tags", "tags": ["noHL"]}],
+                })
+                .to_string(),
+            )
+            .expect("a valid workflow");
+            decide(&s.state, &w, false)
+                .expect("decided")
+                .matches
+                .into_iter()
+                .map(|m| m.info_hash)
+                .collect()
+        };
+        let only = |h: &str| std::collections::HashSet::from([h.to_string()]);
+
+        // Before anything reaches a, b and c: the measured one matches, the
+        // others (never measured, queued) match nothing.
+        for (f, o, v) in conds {
+            assert_eq!(matched(f, o, v), only(&m), "{f} {o} {v}");
+        }
+
+        // The queue was fed by the real add: the scanner's next look measures
+        // a and b, and c (added before the queue was armed) stays unknown.
+        assert_eq!(
+            crate::linkscan::measure_arrivals_once(&s.state.engines, &s.state.store),
+            2
+        );
+        for (f, o, v) in conds {
+            let got = matched(f, o, v);
+            assert!(
+                got.contains(&m) && got.contains(&a) && got.contains(&b),
+                "{f} {o} {v}"
+            );
+            assert!(!got.contains(&c), "{f} {o} {v}: c was never measured");
+        }
+
+        // A row the orphan walk dropped is unknown again until it is measured.
+        s.state
+            .store
+            .lock()
+            .unwrap()
+            .drop_link_rows(&[(a.clone(), "hoard".to_string())])
+            .unwrap();
+        for (f, o, v) in conds {
+            let got = matched(f, o, v);
+            assert!(!got.contains(&a), "{f} {o} {v}: a has no row");
+            assert!(got.contains(&b), "{f} {o} {v}");
+        }
+        // The walk reaches it, and c, and measures them.
+        assert_eq!(
+            crate::linkscan::walk_once(&s.state.engines, &s.state.store),
+            2
+        );
+        for (f, o, v) in conds {
+            let got = matched(f, o, v);
+            assert!(got.contains(&a) && got.contains(&c), "{f} {o} {v}");
+        }
     }
 }
 

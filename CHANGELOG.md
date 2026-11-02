@@ -27,6 +27,7 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 
 - The engine no longer reads `peer_fingerprint` and `user_agent` from a configuration file. Since client spoofing was removed, the `hydranos` binary never passed them to the engine; this closes the library path as well.
 - A `peer_id` set on one of the engine's `bindings` is used only when it starts with the client's own fingerprint; any other value is replaced by the engine's id. The `hydranos` binary does not pass `bindings` either.
+- The hardlink scanner walks the catalogue continuously, in small steps, instead of rounds that read the whole link index and the whole catalogue (several GiB of memory and a full core for minutes at every round on a large catalogue); torrents that are added or moved are measured first, within seconds. The counters of the link index status are kept as rows are written and recounted at the end of every cycle, and the rows of removed torrents are dropped by a slow walk of the index, once an hour.
 
 ### Fixed
 
