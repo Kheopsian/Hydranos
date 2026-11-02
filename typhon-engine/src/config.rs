@@ -443,10 +443,9 @@ mod peer_id_tests {
     /// without error, and neither value reaches the wire.
     #[test]
     fn the_engine_does_not_read_peer_fingerprint_and_user_agent_from_a_config() {
-        let c: EngineConfig = toml::from_str(
-            "peer_fingerprint = \"-qB5220-\"\nuser_agent = \"qBittorrent/5.2.2\"\n",
-        )
-        .expect("a config naming another client still loads");
+        let c: EngineConfig =
+            toml::from_str("peer_fingerprint = \"-qB5220-\"\nuser_agent = \"qBittorrent/5.2.2\"\n")
+                .expect("a config naming another client still loads");
         assert!(
             c.peer_id().starts_with(b"-HY"),
             "peer id {:?}",
