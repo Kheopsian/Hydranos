@@ -809,9 +809,16 @@ impl Job {
         let root = root_of(&t.meta, &t.save_path.read().clone());
 
         if let Some((src_root, candidates)) = &self.isolate_from {
-            let proven = prove_torrent(&t, self.metainfo.as_deref(), src_root, candidates, false);
+            let (proven, interior) =
+                prove_torrent_detail(&t, self.metainfo.as_deref(), src_root, candidates, false);
+            // A file only its interior proves is linked too: the pieces it
+            // shares with a file this torrent does not have (another .nfo
+            // there) are written through the byte comparison, which leaves the
+            // other torrent's file alone, so the disk cost stays that of the
+            // files that really differ.
             let mut linked = 0usize;
-            for rel in &proven {
+            let mut shared: HashSet<PathBuf> = HashSet::new();
+            for rel in proven.iter().chain(&interior) {
                 let (from, to) = (src_root.join(rel), root.join(rel));
                 if to.exists() {
                     continue;
@@ -821,8 +828,10 @@ impl Job {
                 }
                 if std::fs::hard_link(&from, &to).is_ok() {
                     linked += 1;
+                    shared.insert(rel.clone());
                 }
             }
+            t.guard_files(shared);
             if !candidates.is_empty() {
                 record(
                     &self.engine_id,
@@ -2336,5 +2345,75 @@ mod tests {
         for (mkv, before) in stamps {
             assert_eq!(stamp(&mkv), before, "{mkv:?} was written to");
         }
+    }
+    /// The owner's scenario: torrent A in place with `movie1.mkv` and its
+    /// `movie1.nfo`; torrent B under the same folder and file names with
+    /// another `.nfo` (other bytes, other size) in a piece shared with the
+    /// video. B gets a folder of its own, the video linked in (the same
+    /// inode), downloads its own `.nfo`, completes -- and A is not touched.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_isolated_torrent_links_the_video_and_fetches_its_own_nfo() {
+        let s = crate::api::testing::state("pathclaim-owner");
+        let dir = s.dir.join("save");
+        std::fs::create_dir_all(dir.join("movie1")).unwrap();
+        let video: Vec<u8> = (0..40_000u32).map(|i| (i % 251) as u8).collect();
+        let nfo1 = b"first release notes, 36 bytes...".to_vec();
+        let nfo2 = b"another team's notes, a different length and other bytes".to_vec();
+        let (mkv, nfo) = (dir.join("movie1/movie1.mkv"), dir.join("movie1/movie1.nfo"));
+        std::fs::write(&mkv, &video).unwrap();
+        std::fs::write(&nfo, &nfo1).unwrap();
+        age(&mkv);
+        age(&nfo);
+        let a = add(
+            &s,
+            &torrent_over(
+                "movie1",
+                &[("movie1.mkv", &video), ("movie1.nfo", &nfo1)],
+                16384,
+            ),
+            &dir,
+            true,
+            true,
+        )
+        .unwrap();
+        let (mkv_before, nfo_before) = (stamp(&mkv), stamp(&nfo));
+
+        let bytes_b = torrent_over(
+            "movie1",
+            &[("movie1.mkv", &video), ("movie1.nfo", &nfo2)],
+            16384,
+        );
+        wire_one(&s, &bytes_b);
+        let b = add(&s, &bytes_b, &dir, false, false).unwrap();
+        let t = held(&s, &b);
+        settled(&t).await;
+
+        let own = dir.join(format!("movie1 [{}]", &b[..8]));
+        assert_eq!(engine_save_path(&s, &b), own, "not isolated");
+        assert_eq!(engine_save_path(&s, &a), dir);
+        let linked = stamp(&own.join("movie1/movie1.mkv"));
+        assert_eq!(linked.0, mkv_before.0, "the video was copied, not linked");
+        assert!(!own.join("movie1/movie1.nfo").exists());
+        assert!(!is_error(&t), "{}", why(&t));
+        assert_eq!(missing(&t), vec![2], "only the shared piece is left");
+
+        let stream: Vec<u8> = video.iter().chain(nfo2.iter()).copied().collect();
+        let (sent, owned) = fetch_missing(&s, &t, &stream).await;
+        assert_eq!((sent, owned), (1, 1), "{}", why(&t));
+        assert!(crate::workers::holds_everything(&t), "not at 100 %");
+        assert_eq!(
+            std::fs::read(own.join("movie1/movie1.nfo")).unwrap(),
+            nfo2,
+            "B's own .nfo"
+        );
+        assert_eq!(stamp(&mkv), mkv_before, "A's video moved");
+        assert_eq!(stamp(&nfo), nfo_before, "A's .nfo moved");
+        assert_eq!(nfo_before.3, nfo1);
+        assert_eq!(
+            stamp(&own.join("movie1/movie1.mkv")).3,
+            video,
+            "the linked video changed"
+        );
     }
 }
