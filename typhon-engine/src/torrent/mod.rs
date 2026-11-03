@@ -195,6 +195,10 @@ pub struct TorrentManager {
     /// reader last drained this, oldest first. See `note_arrival`.
     arrivals: std::sync::Mutex<ArrivalQueue>,
     arrivals_armed: std::sync::atomic::AtomicBool,
+    /// How many times a torrent was put in this manager or pointed at another
+    /// folder. A reader that built something from the torrents' places knows
+    /// by this whether it is still true.
+    placements: std::sync::atomic::AtomicU64,
     // O(1) MSE inbound resolution: SHA1("req2"+info_hash) -> info_hash.
     // Avoids the O(N) SHA1 scan over all torrents per inbound handshake.
     skey_index: DashMap<[u8; 20], InfoHash>,
@@ -651,6 +655,7 @@ impl TorrentManager {
             save_path_counts: std::sync::Mutex::new(std::collections::HashMap::new()),
             arrivals: std::sync::Mutex::new(ArrivalQueue::new(Self::ARRIVALS_CAP)),
             arrivals_armed: std::sync::atomic::AtomicBool::new(false),
+            placements: std::sync::atomic::AtomicU64::new(0),
             skey_index: DashMap::new(),
             incomplete: DashSet::new(),
             dht: std::sync::OnceLock::new(),
@@ -863,6 +868,7 @@ impl TorrentManager {
     /// Put a torrent in the map and in the save path counts; a torrent it
     /// replaces leaves the counts.
     fn insert_counted(&self, ih: InfoHash, state: Arc<TorrentState>) {
+        self.placements.fetch_add(1, Ordering::Release);
         self.note_arrival(ih);
         let path = state.save_path.read().clone();
         self.count_save_path(&path);
@@ -883,6 +889,11 @@ impl TorrentManager {
     /// asking to be looked at first.
     pub fn arm_arrivals(&self) {
         self.arrivals_armed.store(true, Ordering::Release);
+    }
+
+    /// See `placements`.
+    pub fn placements(&self) -> u64 {
+        self.placements.load(Ordering::Acquire)
     }
 
     fn note_arrival(&self, ih: InfoHash) {
@@ -2608,6 +2619,7 @@ impl TorrentManager {
         // new one (and a move that is undone is a move too).
         t.forget_write_verdicts();
         if was != new {
+            self.placements.fetch_add(1, Ordering::Release);
             self.note_arrival(t.meta.info_hash);
         }
         if let Some(n) = m.get_mut(&was) {
