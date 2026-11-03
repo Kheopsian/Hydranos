@@ -113,6 +113,36 @@ const COUNT_PAGE: usize = 5000;
 /// When the store could not be read: the same step is tried again after this.
 const RETRY: Duration = Duration::from_secs(30);
 
+/// The list's summary and the catalogue's space on disk are published again at
+/// the end of every walk cycle, and, when arrivals have been measured since,
+/// at most this often. Both are a join over every name of the catalogue
+/// (`refresh_summary`): ~30 s and 2 to 3 GiB at 1 M torrents, which is
+/// acceptable only because it is rare. Without it a torrent added reads "-"
+/// in the Hardlinks column until a workflow pass happens to publish.
+const SUMMARY_EVERY: Duration = Duration::from_secs(30 * 60);
+
+/// A measurement that found files missing is taken again once it is this old,
+/// whenever the walk or a recheck meets it. A torrent is measured seconds
+/// after it is added, often before its data has been downloaded or moved into
+/// place; a row saying "missing" must not then stand for a day.
+const MISSING_RETRY_SECS: i64 = 5 * 60;
+
+/// How long after an arrival was measured with files missing it is measured
+/// again, step by step: 5 minutes, then 30, then 2 hours, after which the
+/// normal rhythm (the walk, once a cycle) takes over.
+const RECHECK_BACKOFF: [Duration; 3] = [
+    Duration::from_secs(5 * 60),
+    Duration::from_secs(30 * 60),
+    Duration::from_secs(2 * 3600),
+];
+
+/// Rechecks kept. Past it the new ones are left to the walk, which takes a
+/// row with files missing as due.
+const RECHECK_CAP: usize = 4096;
+
+/// Arrivals waiting for the store to know them, kept. Past it the oldest go.
+const WAIT_CAP: usize = 1024;
+
 /// The pause after a walk step that took `work`, for a catalogue of
 /// `torrents`: the day divided over the packets, less the time the step took,
 /// held between `WALK_MIN_PAUSE` and `WALK_MAX_PAUSE`; and never less than
@@ -314,6 +344,8 @@ fn valid(m: &LinkRowMeta, c: &CatalogueEntry) -> bool {
 /// one old enough to be taken again.
 fn due(row: Option<&LinkRowMeta>, c: &CatalogueEntry, now: i64) -> bool {
     match row {
+        // Files missing: measured too early, perhaps (see `MISSING_RETRY_SECS`).
+        Some(m) if valid(m, c) && m.missing > 0 => now - m.measured_at >= MISSING_RETRY_SECS,
         Some(m) if valid(m, c) => now - m.measured_at >= REFRESH_SECS - WALK_SLACK_SECS,
         _ => true,
     }
@@ -328,12 +360,18 @@ fn meta_of(r: &LinkRow) -> LinkRowMeta {
     }
 }
 
-pub fn spawn(engines: Arc<EngineHost>, store: Arc<StoreLock>) {
-    // From here on, a torrent that is added or moved is queued. Not before:
-    // the restore at start goes through the same door.
+/// From here on, a torrent that is added or moved is queued for the scanner.
+/// Not before: the restore at start goes through the same door. Called before
+/// the watched folders and the RSS feeds start adding, so that what they bring
+/// in the first minutes is not left to the slow walk.
+pub fn arm(engines: &EngineHost) {
     for e in engines.engines() {
         e.manager.arm_arrivals();
     }
+}
+
+pub fn spawn(engines: Arc<EngineHost>, store: Arc<StoreLock>) {
+    arm(&engines);
     let spawned = std::thread::Builder::new()
         .name("link-scan".into())
         .spawn(move || run(engines, store));
@@ -391,6 +429,14 @@ trait Io {
     /// `None`: the store is gone, stop. `Some(false)`: the batch was not
     /// written.
     fn put_rows(&self, rows: &[LinkRow]) -> Option<bool>;
+    /// Whether the arrivals queue dropped some since the last call.
+    fn overflowed(&self) -> bool;
+    /// The ids that have a row in the index, read by pages and returned as a
+    /// list of 21 bytes an id: ~21 MB at 1 M, let go by the caller after use.
+    /// `None`: unreadable.
+    fn measured_ids(&self) -> Option<Vec<Id>>;
+    /// Publish the list's summary and the catalogue's space on disk.
+    fn publish_summary(&self);
 }
 
 /// Engines an `Id` can name.
@@ -498,6 +544,48 @@ impl Io for Live<'_> {
         }
     }
 
+    fn overflowed(&self) -> bool {
+        self.engines
+            .engines()
+            .iter()
+            .fold(false, |any, e| e.manager.take_arrivals_overflow() | any)
+    }
+
+    fn measured_ids(&self) -> Option<Vec<Id>> {
+        let engines = self.engines.engines();
+        let mut out = Vec::new();
+        let mut after = Key::default();
+        loop {
+            if crate::shutdown::stopping() {
+                return None;
+            }
+            let page = self.meta_page(&after, COUNT_PAGE)?;
+            for ((hash, session), _) in &page {
+                let (Some(raw), Some(engine)) = (
+                    crate::store::hex20(hash),
+                    engines.iter().position(|e| e.id == *session),
+                ) else {
+                    continue;
+                };
+                if engine < MAX_ENGINES {
+                    out.push(Id {
+                        hash: raw,
+                        engine: engine as u8,
+                    });
+                }
+            }
+            match page.last() {
+                Some((k, _)) if page.len() >= COUNT_PAGE => after = k.clone(),
+                _ => return Some(out),
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    fn publish_summary(&self) {
+        refresh_summary(self.engines, self.store);
+    }
+
     fn put_rows(&self, rows: &[LinkRow]) -> Option<bool> {
         match self.store.lock() {
             Ok(s) => Some(match s.put_link_rows(rows) {
@@ -519,6 +607,8 @@ struct Looked {
     resolved: HashSet<Id>,
     measured: usize,
     files: usize,
+    /// Of those measured now, the ones with files missing.
+    partial: Vec<Id>,
 }
 
 /// Look at `ids`: read their rows and no others, measure those that are not
@@ -584,6 +674,11 @@ fn look(io: &dyn Io, progress: &Progress, ids: &[Id], tally: Option<&mut Tally>)
         resolved: found.iter().map(|(id, _)| *id).collect(),
         measured: written.len(),
         files,
+        partial: found
+            .iter()
+            .filter(|(_, c)| written.get(&key(c)).is_some_and(|m| m.missing > 0))
+            .map(|(id, _)| *id)
+            .collect(),
     })
 }
 
@@ -621,6 +716,17 @@ struct Scanner {
     cycle: Option<Cycle>,
     /// Arrivals the store did not know yet, with how many looks they had.
     waiting: Vec<(Id, u32)>,
+    /// Arrivals measured with files missing, to be measured again: which
+    /// backoff step they are at, and when.
+    rechecks: Vec<(Id, usize, Instant)>,
+    /// Whether the next list of ids puts the torrents with no row in the
+    /// index first. True at start, and again when the arrivals queue dropped
+    /// some: the walk's order is by hash, and a torrent added during a stop or
+    /// lost by the queue would wait for its turn, up to a day.
+    want_priority: bool,
+    /// Arrivals have been measured since the summary was last published.
+    summary_dirty: bool,
+    published_at: Instant,
     orphan_after: Key,
     orphan: OrphanCycle,
 }
@@ -633,6 +739,10 @@ impl Scanner {
             pos: 0,
             cycle: None,
             waiting: Vec::new(),
+            rechecks: Vec::new(),
+            want_priority: true,
+            summary_dirty: false,
+            published_at: Instant::now(),
             orphan_after: Key::default(),
             orphan: OrphanCycle::default(),
         }
@@ -645,6 +755,9 @@ impl Scanner {
         let mut t = Tally::default();
         let mut after = Key::default();
         loop {
+            if crate::shutdown::stopping() {
+                return false;
+            }
             let Some(page) = io.meta_page(&after, COUNT_PAGE) else {
                 return false;
             };
@@ -663,30 +776,94 @@ impl Scanner {
     }
 
     /// Measure the torrents that were added or moved, ahead of the walk. Fifty
-    /// at most per look; the ones the store does not know yet are looked at
-    /// again at the next. Returns how many it measured.
-    fn arrivals_step(&mut self, io: &dyn Io) -> usize {
-        let mut tries: HashMap<Id, u32> = std::mem::take(&mut self.waiting).into_iter().collect();
-        let fresh = io.arrivals(ARRIVAL_BATCH.saturating_sub(tries.len()));
-        for id in fresh {
-            tries.entry(id).or_insert(0);
+    /// at most per look: up to half of them retries of arrivals the store did
+    /// not know yet (the rest keep their place and cannot hold up new ones),
+    /// the others new. Returns how many it measured.
+    fn arrivals_step(&mut self, io: &dyn Io, now: Instant) -> usize {
+        if io.overflowed() {
+            // Some arrivals were lost: start the walk's list again, with the
+            // torrents that have no row first (`walk_step`).
+            self.want_priority = true;
+            self.cycle = None;
         }
-        let mut ids: Vec<Id> = tries.keys().copied().collect();
+        let retry = self.waiting.len().min(ARRIVAL_BATCH / 2);
+        let retried: Vec<(Id, u32)> = self.waiting.drain(..retry).collect();
+        let mut ids: Vec<Id> = retried.iter().map(|(id, _)| *id).collect();
+        ids.extend(io.arrivals(ARRIVAL_BATCH - retried.len()));
         ids.sort_unstable();
+        ids.dedup();
+        let tries: HashMap<Id, u32> = retried.into_iter().collect();
         let looked = look(io, self.progress, &ids, None);
-        let measured = looked.as_ref().map_or(0, |l| l.measured);
         // Resolved ones are done. The rest wait for their row in the store (or
         // for the engine to let go of them), a while, then are left to the walk.
-        self.waiting = ids
-            .into_iter()
-            .filter(|id| looked.as_ref().is_none_or(|l| !l.resolved.contains(id)))
-            .map(|id| (id, tries[&id] + 1))
-            .filter(|(_, n)| *n < ARRIVAL_TRIES)
-            .collect();
+        for id in &ids {
+            if looked.as_ref().is_some_and(|l| l.resolved.contains(id)) {
+                continue;
+            }
+            let n = tries.get(id).copied().unwrap_or(0) + 1;
+            if n < ARRIVAL_TRIES {
+                self.waiting.push((*id, n));
+            }
+        }
+        if self.waiting.len() > WAIT_CAP {
+            self.waiting.drain(..self.waiting.len() - WAIT_CAP);
+        }
         self.progress
             .queued
             .store(self.waiting.len() as i64, Ordering::Relaxed);
-        measured
+        let Some(l) = looked else { return 0 };
+        for id in l.partial {
+            self.schedule_recheck(id, 0, now);
+        }
+        self.summary_dirty |= l.measured > 0;
+        l.measured
+    }
+
+    fn schedule_recheck(&mut self, id: Id, step: usize, now: Instant) {
+        if step < RECHECK_BACKOFF.len() && self.rechecks.len() < RECHECK_CAP {
+            self.rechecks.push((id, step, now + RECHECK_BACKOFF[step]));
+        }
+    }
+
+    /// Measure again the arrivals that were measured with files missing and
+    /// whose time has come; one that still has files missing goes on to the
+    /// next, longer, backoff. Returns how many it measured.
+    fn recheck_step(&mut self, io: &dyn Io, now: Instant) -> usize {
+        let (due, later): (Vec<_>, Vec<_>) = std::mem::take(&mut self.rechecks)
+            .into_iter()
+            .partition(|(_, _, at)| *at <= now);
+        let take = due.len().min(ARRIVAL_BATCH);
+        let mut due = due;
+        let rest = due.split_off(take);
+        self.rechecks = later;
+        self.rechecks.extend(rest);
+        if due.is_empty() {
+            return 0;
+        }
+        let ids: Vec<Id> = due.iter().map(|(id, _, _)| *id).collect();
+        let Some(l) = look(io, self.progress, &ids, None) else {
+            self.rechecks.extend(due);
+            return 0;
+        };
+        for (id, step, _) in due {
+            if l.partial.contains(&id) {
+                self.schedule_recheck(id, step + 1, now);
+            }
+        }
+        self.summary_dirty |= l.measured > 0;
+        l.measured
+    }
+
+    /// Publish the summary again if arrivals have been measured since the last
+    /// time and `SUMMARY_EVERY` has gone by.
+    fn summary_step(&mut self, io: &dyn Io, now: Instant) -> bool {
+        if !self.summary_dirty || now.saturating_duration_since(self.published_at) < SUMMARY_EVERY {
+            return false;
+        }
+        io.publish_summary();
+        self.published_at = now;
+        self.summary_dirty = false;
+        true
     }
 
     /// One packet of the walk. `None` when the store could not be read: the
@@ -697,6 +874,15 @@ impl Scanner {
         if self.cycle.is_none() {
             let mut ids = io.ids();
             ids.sort_unstable();
+            if self.want_priority {
+                // The torrents with no row at all first, each group in hash
+                // order. The set of measured ids is dropped with this block.
+                if let Some(mut measured) = io.measured_ids() {
+                    measured.sort_unstable();
+                    ids.sort_by_key(|id| measured.binary_search(id).is_ok());
+                    self.want_priority = false;
+                }
+            }
             p.catalogue.store(ids.len() as i64, Ordering::Relaxed);
             p.walk_total.store(ids.len() as i64, Ordering::Relaxed);
             p.walk_done.store(0, Ordering::Relaxed);
@@ -730,7 +916,7 @@ impl Scanner {
             );
         }
         if end >= torrents {
-            self.end_cycle();
+            self.end_cycle(io);
         }
         Some(Walked {
             torrents,
@@ -741,7 +927,7 @@ impl Scanner {
 
     /// The walk has been through every torrent of its list: what it counted on
     /// the way replaces the counters, and the list is let go.
-    fn end_cycle(&mut self) {
+    fn end_cycle(&mut self, io: &dyn Io) {
         let Some(c) = self.cycle.take() else { return };
         let p = self.progress;
         p.counts.set(&c.tally);
@@ -762,6 +948,10 @@ impl Scanner {
         );
         self.ids = Vec::new();
         self.pos = 0;
+        // The cycle's rows are all new to the summary: publish it again.
+        io.publish_summary();
+        self.published_at = Instant::now();
+        self.summary_dirty = false;
     }
 
     /// One page of the orphan walk: the rows of torrents the engine of their
@@ -823,7 +1013,13 @@ fn run(engines: Arc<EngineHost>, store: Arc<StoreLock>) {
     let mut sc = Scanner::new(&PROGRESS);
     // The counters are right as soon as this is done, a page at a time.
     sc.count_table(&io);
-    std::thread::sleep(SETTLE);
+    // In seconds, so that a stop is not waited on for the length of the settle.
+    for _ in 0..SETTLE.as_secs() {
+        if crate::shutdown::stopping() {
+            return;
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
 
     let (mut next_arrivals, mut next_walk, mut next_orphans) =
         (Instant::now(), Instant::now(), Instant::now());
@@ -834,7 +1030,9 @@ fn run(engines: Arc<EngineHost>, store: Arc<StoreLock>) {
         }
         let now = Instant::now();
         if now >= next_arrivals {
-            sc.arrivals_step(&io);
+            sc.arrivals_step(&io, now);
+            sc.recheck_step(&io, now);
+            sc.summary_step(&io, now);
             next_arrivals = Instant::now() + ARRIVAL_POLL;
         }
         if now >= next_walk {
@@ -870,7 +1068,7 @@ fn run(engines: Arc<EngineHost>, store: Arc<StoreLock>) {
 pub(crate) fn measure_arrivals_once(engines: &EngineHost, store: &StoreLock) -> usize {
     let io = Live { engines, store };
     let progress: &'static Progress = Box::leak(Box::new(Progress::new()));
-    Scanner::new(progress).arrivals_step(&io)
+    Scanner::new(progress).arrivals_step(&io, Instant::now())
 }
 
 /// One packet of the walk, from a scanner that has just started: how many
@@ -943,6 +1141,8 @@ mod tests {
         /// The most rows of the index answered in one page.
         widest_page: Cell<usize>,
         puts: Cell<usize>,
+        overflow: Cell<bool>,
+        published: Cell<usize>,
     }
 
     impl Fake {
@@ -1044,6 +1244,18 @@ mod tests {
             true
         }
 
+        fn overflowed(&self) -> bool {
+            self.overflow.replace(false)
+        }
+
+        fn measured_ids(&self) -> Option<Vec<Id>> {
+            Some(self.table.borrow().keys().map(|(h, _)| id_of(h)).collect())
+        }
+
+        fn publish_summary(&self) {
+            self.published.set(self.published.get() + 1);
+        }
+
         fn put_rows(&self, rows: &[LinkRow]) -> Option<bool> {
             self.puts.set(self.puts.get() + 1);
             for r in rows {
@@ -1126,16 +1338,16 @@ mod tests {
 
         io.add("zz-added");
         assert!(!io.measured("zz-added"));
-        assert_eq!(sc.arrivals_step(&io), 1);
+        assert_eq!(sc.arrivals_step(&io, Instant::now()), 1);
         assert!(io.measured("zz-added"), "measured by the queue");
         assert_eq!(sc.pos, WALK_BATCH, "the cursor has not moved for it");
         never_more_than_a_packet(&io);
-        assert_eq!(sc.arrivals_step(&io), 0, "and only once");
+        assert_eq!(sc.arrivals_step(&io, Instant::now()), 0, "and only once");
 
         // A move is an arrival too: the row under the old path is not valid.
         io.held.borrow_mut()[0] = c(&name(0), "/elsewhere", 1);
         io.queue.borrow_mut().push_back(id_of(&name(0)));
-        assert_eq!(sc.arrivals_step(&io), 1);
+        assert_eq!(sc.arrivals_step(&io, Instant::now()), 1);
         assert_eq!(io.table.borrow()[&k(&name(0))].save_path, "/elsewhere");
     }
 
@@ -1147,10 +1359,10 @@ mod tests {
         let mut sc = Scanner::new(progress());
         io.hidden.borrow_mut().insert("late".into());
         io.add("late");
-        assert_eq!(sc.arrivals_step(&io), 0);
+        assert_eq!(sc.arrivals_step(&io, Instant::now()), 0);
         assert_eq!(sc.progress.queued.load(Ordering::Relaxed), 1);
         io.hidden.borrow_mut().clear();
-        assert_eq!(sc.arrivals_step(&io), 1);
+        assert_eq!(sc.arrivals_step(&io, Instant::now()), 1);
         assert!(io.measured("late"));
         assert_eq!(sc.progress.queued.load(Ordering::Relaxed), 0);
     }
@@ -1331,5 +1543,196 @@ mod tests {
         assert!((p.as_secs_f64() * 2000.0 - 3600.0).abs() < 60.0, "{p:?}");
         assert_eq!(orphan_pause(0), ORPHAN_MAX_PAUSE);
         assert_eq!(orphan_pause(2_000_000_000), ORPHAN_MIN_PAUSE);
+    }
+
+    /// ⭐ Arrivals measured are published again, at the latest after
+    /// `SUMMARY_EVERY` and not before; the end of a cycle publishes too.
+    #[test]
+    fn the_summary_is_published_again_after_arrivals_and_at_the_end_of_a_cycle() {
+        let io = Fake::new(5);
+        let mut sc = Scanner::new(progress());
+        let t0 = Instant::now();
+        sc.published_at = t0;
+        assert!(
+            !sc.summary_step(&io, t0 + SUMMARY_EVERY * 3),
+            "nothing to say"
+        );
+
+        io.add("zz-new");
+        assert_eq!(sc.arrivals_step(&io, t0), 1);
+        assert!(!sc.summary_step(&io, t0 + SUMMARY_EVERY - Duration::from_secs(1)));
+        assert_eq!(io.published.get(), 0, "not before the delay");
+        assert!(sc.summary_step(&io, t0 + SUMMARY_EVERY));
+        assert_eq!(io.published.get(), 1, "at the delay");
+        assert!(!sc.summary_step(&io, t0 + SUMMARY_EVERY * 5));
+        assert_eq!(io.published.get(), 1, "and once");
+
+        walk_cycle(&mut sc, &io);
+        assert_eq!(io.published.get(), 2, "the end of a cycle publishes");
+    }
+
+    /// ⭐ An arrival is measured seconds after it is added, often before its
+    /// data is in place: with files missing it is measured again, 5 minutes
+    /// later, and ends with the right count.
+    #[test]
+    fn an_arrival_measured_before_its_files_exist_is_measured_again() {
+        let dir = std::env::temp_dir().join(format!("linkscan-late-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sp = dir.to_str().unwrap().to_string();
+        let io = Fake::new(0);
+        io.held.borrow_mut().push(c("late", &sp, 1));
+        io.queue.borrow_mut().push_back(id_of("late"));
+        let p = progress();
+        let mut sc = Scanner::new(p);
+        let t0 = Instant::now();
+
+        assert_eq!(sc.arrivals_step(&io, t0), 1);
+        assert_eq!(
+            io.table.borrow()[&k("late")].missing,
+            1,
+            "nothing there yet"
+        );
+        assert_eq!(p.counts.get().data_missing, 1);
+        assert_eq!(sc.rechecks.len(), 1);
+        assert_eq!(
+            sc.recheck_step(&io, t0 + Duration::from_secs(60)),
+            0,
+            "too soon"
+        );
+
+        std::fs::write(dir.join("0"), b"x").unwrap();
+        // The clock of the rows is the wall clock: age the row by 6 minutes.
+        io.table
+            .borrow_mut()
+            .get_mut(&k("late"))
+            .unwrap()
+            .measured_at -= 360;
+        assert_eq!(sc.recheck_step(&io, t0 + RECHECK_BACKOFF[0]), 1);
+        assert_eq!(
+            io.table.borrow()[&k("late")].missing,
+            0,
+            "found at the second look"
+        );
+        assert_eq!(p.counts.get().data_missing, 0, "and counted so");
+        assert!(sc.rechecks.is_empty(), "and no third look");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A torrent whose files never come is looked at three times, 5 minutes,
+    /// 30 and 2 hours apart, then left to the walk.
+    #[test]
+    fn the_rechecks_back_off_and_stop() {
+        let io = Fake::new(0);
+        io.held.borrow_mut().push(c("never-there", "/nowhere", 1));
+        io.queue.borrow_mut().push_back(id_of("never-there"));
+        let mut sc = Scanner::new(progress());
+        let mut now = Instant::now();
+        sc.arrivals_step(&io, now);
+        for (n, wait) in RECHECK_BACKOFF.iter().enumerate() {
+            assert_eq!(sc.rechecks.len(), 1, "look {n} is scheduled");
+            assert_eq!(sc.rechecks[0].2, now + *wait);
+            now += *wait;
+            io.table
+                .borrow_mut()
+                .get_mut(&k("never-there"))
+                .unwrap()
+                .measured_at -= 400;
+            assert_eq!(sc.recheck_step(&io, now), 1);
+        }
+        assert!(sc.rechecks.is_empty(), "then the normal rhythm");
+    }
+
+    #[test]
+    fn a_row_with_files_missing_is_due_again_soon_and_a_whole_one_is_not() {
+        let now = 1_000_000;
+        let e = c("x", "/d", 1);
+        assert!(
+            !due(Some(&m("/d", now - 60, 1, 1)), &e, now),
+            "just measured"
+        );
+        assert!(
+            due(Some(&m("/d", now - 400, 1, 1)), &e, now),
+            "missing, 6 min"
+        );
+        assert!(
+            !due(Some(&m("/d", now - 3600, 1, 0)), &e, now),
+            "whole, 1 h"
+        );
+    }
+
+    /// ⭐ The torrents with no row go first, then the walk goes on in hash
+    /// order. Without the priority the first packet is the first in hash order.
+    #[test]
+    fn the_never_measured_go_first_then_the_walk_goes_on() {
+        let now = crate::store::now_secs();
+        let build = || {
+            let io = Fake::new(150);
+            for i in 0..30 {
+                io.table
+                    .borrow_mut()
+                    .insert(k(&name(i)), m("/d", now - 60, 1, 0));
+            }
+            io
+        };
+        let io = build();
+        let mut sc = Scanner::new(progress());
+        sc.walk_step(&io).unwrap();
+        assert_eq!(io.table.borrow().len(), 130, "a packet of never-measured");
+        assert!(io.measured(&name(129)) && !io.measured(&name(130)));
+        assert!(!sc.want_priority);
+        assert_eq!(io.at(&name(5)), now - 60, "the fresh are left alone");
+
+        let io = build();
+        let mut sc = Scanner::new(progress());
+        sc.want_priority = false;
+        sc.walk_step(&io).unwrap();
+        assert!(
+            io.measured(&name(99)) && !io.measured(&name(100)),
+            "hash order"
+        );
+    }
+
+    /// ⭐ A queue that dropped arrivals (a bulk add past its bound) sends the
+    /// walk back to the start of a new list, the torrents with no row first.
+    #[test]
+    fn a_queue_that_overflowed_puts_the_lost_arrivals_first() {
+        let now = crate::store::now_secs();
+        let io = Fake::new(250);
+        for i in 0..250 {
+            io.table
+                .borrow_mut()
+                .insert(k(&name(i)), m("/d", now - 60, 1, 0));
+        }
+        let mut sc = Scanner::new(progress());
+        sc.walk_step(&io).unwrap();
+        assert_eq!(sc.pos, WALK_BATCH);
+
+        // 300 torrents the engine holds that the queue never told us about.
+        for i in 0..300 {
+            io.held.borrow_mut().push(c(&format!("z{i:05}"), "/d", 1));
+        }
+        io.overflow.set(true);
+        sc.arrivals_step(&io, Instant::now());
+        assert!(sc.want_priority && sc.cycle.is_none());
+        sc.walk_step(&io).unwrap();
+        assert!(io.measured("z00099") && !io.measured("z00100"));
+    }
+
+    /// Fifty arrivals waiting for the store do not stop the next one from
+    /// being measured (they used to take the whole look for five minutes).
+    #[test]
+    fn waiting_arrivals_do_not_block_new_ones() {
+        let io = Fake::new(0);
+        let mut sc = Scanner::new(progress());
+        for i in 0..ARRIVAL_BATCH {
+            let h = format!("h{i:03}");
+            io.hidden.borrow_mut().insert(h.clone());
+            io.add(&h);
+        }
+        sc.arrivals_step(&io, Instant::now());
+        assert_eq!(sc.waiting.len(), ARRIVAL_BATCH);
+        io.add("ok");
+        assert_eq!(sc.arrivals_step(&io, Instant::now()), 1);
+        assert!(io.measured("ok"));
     }
 }

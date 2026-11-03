@@ -193,7 +193,7 @@ pub struct TorrentManager {
     save_path_counts: std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, usize>>,
     /// Torrents that arrived (added, or pointed at another folder) since a
     /// reader last drained this, oldest first. See `note_arrival`.
-    arrivals: std::sync::Mutex<std::collections::VecDeque<InfoHash>>,
+    arrivals: std::sync::Mutex<ArrivalQueue>,
     arrivals_armed: std::sync::atomic::AtomicBool,
     // O(1) MSE inbound resolution: SHA1("req2"+info_hash) -> info_hash.
     // Avoids the O(N) SHA1 scan over all torrents per inbound handshake.
@@ -649,7 +649,7 @@ impl TorrentManager {
             moved_uploaded: std::sync::atomic::AtomicU64::new(0),
             moved_downloaded: std::sync::atomic::AtomicU64::new(0),
             save_path_counts: std::sync::Mutex::new(std::collections::HashMap::new()),
-            arrivals: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            arrivals: std::sync::Mutex::new(ArrivalQueue::new(Self::ARRIVALS_CAP)),
             arrivals_armed: std::sync::atomic::AtomicBool::new(false),
             skey_index: DashMap::new(),
             incomplete: DashSet::new(),
@@ -889,21 +889,30 @@ impl TorrentManager {
         if !self.arrivals_armed.load(Ordering::Acquire) {
             return;
         }
-        let mut q = self.arrivals.lock().unwrap_or_else(|p| p.into_inner());
-        // Twice is harmless: the second look finds a valid row and passes.
-        if q.len() >= Self::ARRIVALS_CAP {
-            q.pop_front();
-        }
-        q.push_back(ih);
+        self.arrivals
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(ih);
     }
 
     /// Up to `max` of the torrents added or moved since the last call, oldest
     /// first, forgotten once handed over. For the link scanner, which measures
     /// them ahead of its slow walk.
     pub fn take_arrivals(&self, max: usize) -> Vec<InfoHash> {
-        let mut q = self.arrivals.lock().unwrap_or_else(|p| p.into_inner());
-        let n = max.min(q.len());
-        q.drain(..n).collect()
+        self.arrivals
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take(max)
+    }
+
+    /// Whether the queue dropped an arrival since the last call: the reader
+    /// then knows it has not been told of every torrent that came, and goes
+    /// looking for the ones that were lost.
+    pub fn take_arrivals_overflow(&self) -> bool {
+        self.arrivals
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take_overflow()
     }
 
     /// Insert a torrent the caller built, with no resume record, store row or
@@ -6076,5 +6085,66 @@ mod unreadable_state_tests {
         mgr.load_resume_data();
         assert_reported(&mgr, &hash);
         let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+/// The arrivals a reader has not taken yet. Bounded: a bulk add of 86 000
+/// torrents keeps the newest `cap` and says it dropped the rest.
+struct ArrivalQueue {
+    q: std::collections::VecDeque<InfoHash>,
+    cap: usize,
+    overflowed: bool,
+}
+
+impl ArrivalQueue {
+    fn new(cap: usize) -> Self {
+        ArrivalQueue {
+            q: std::collections::VecDeque::new(),
+            cap,
+            overflowed: false,
+        }
+    }
+
+    fn push(&mut self, ih: InfoHash) {
+        // Twice is harmless: the second look finds a valid row and passes.
+        if self.q.len() >= self.cap {
+            self.q.pop_front();
+            self.overflowed = true;
+        }
+        self.q.push_back(ih);
+    }
+
+    fn take(&mut self, max: usize) -> Vec<InfoHash> {
+        let n = max.min(self.q.len());
+        self.q.drain(..n).collect()
+    }
+
+    fn take_overflow(&mut self) -> bool {
+        std::mem::take(&mut self.overflowed)
+    }
+}
+
+#[cfg(test)]
+mod arrival_queue_tests {
+    use super::*;
+
+    /// A bulk add past the bound keeps the newest and reports the loss, once.
+    #[test]
+    fn a_queue_past_its_bound_says_it_dropped_some() {
+        let mut q = ArrivalQueue::new(3);
+        for i in 0..3u8 {
+            q.push([i; 20]);
+        }
+        assert!(!q.take_overflow(), "full is not overflowed");
+        q.push([3; 20]);
+        q.push([4; 20]);
+        assert!(q.take_overflow());
+        assert!(!q.take_overflow(), "and it says so once");
+        assert_eq!(
+            q.take(10),
+            vec![[2; 20], [3; 20], [4; 20]],
+            "the newest stay"
+        );
+        assert!(q.take(10).is_empty());
     }
 }

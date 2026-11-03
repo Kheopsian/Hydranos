@@ -1142,6 +1142,9 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
     speedtest::spawn(state.clone());
     // Block lists and bans, before the engines take their first peers.
     ipfilter::spawn(state.clone());
+    // The hardlink scanner queues what is added from here on, the watched
+    // folders and the feeds below included.
+    linkscan::arm(&state.engines);
     // Watched folders: a .torrent or .magnet dropped in is added.
     watch::spawn(state.clone());
     // RSS feeds due for a refresh, and the rules applied to what they bring.
