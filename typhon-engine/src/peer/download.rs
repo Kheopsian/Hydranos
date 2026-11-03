@@ -684,6 +684,7 @@ async fn commit(
             }
             // The disk answered. Whatever was wrong before is not wrong now.
             torrent.disk_write_failures.store(0, Ordering::Relaxed);
+            torrent.clear_recheck_note();
             Commit::Owned
         }
         Ok(false) => {

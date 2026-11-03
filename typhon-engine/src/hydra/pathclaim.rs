@@ -869,17 +869,26 @@ impl Job {
             } else {
                 let mut bad = bad;
                 bad.sort();
-                let absent = bad.iter().filter(|f| !root.join(f).exists()).count();
+                // Every file of the torrent that is not at its expected place,
+                // not only the ones that are guarded: a video loose in the
+                // parent folder is not named by anyone and is just as absent.
+                let gone = t.files_not_on_disk();
+                let mismatching: Vec<&&PathBuf> =
+                    bad.iter().filter(|f| root.join(f).exists()).collect();
+                let first = gone
+                    .first()
+                    .or(mismatching.first().map(|f| **f))
+                    .map(|f| f.to_string_lossy().replace('\\', "/"))
+                    .unwrap_or_default();
                 let msg = format!(
-                    "{} file(s) are named by another torrent or hardlinked elsewhere and cannot be \
-                     proven to be this torrent's ({absent} not on disk, {} not matching; first: {}); \
-                     held paused rather than overwrite them. Put the right bytes there or free the \
-                     file from the other torrent or link, then recheck",
-                    bad.len(),
-                    bad.len() - absent,
-                    bad.first()
-                        .map(|f| f.to_string_lossy().replace('\\', "/"))
-                        .unwrap_or_default(),
+                    "{} file(s) cannot be proven to be this torrent's ({} not on disk, {} not \
+                     matching; first: {first}); some of them are named by another torrent or \
+                     hardlinked elsewhere, so the torrent is held paused rather than overwrite \
+                     them. Put the right bytes there or free the file from the other torrent or \
+                     link, then recheck",
+                    gone.len() + mismatching.len(),
+                    gone.len(),
+                    mismatching.len(),
                 );
                 t.mark_write_error(&msg);
                 // A torrent already in error keeps its first message there;
@@ -2099,7 +2108,7 @@ mod tests {
         press_verify(&s, &b).await;
         let msg = why(&t);
         assert!(is_error(&t));
-        assert!(msg.contains("1 not on disk, 0 not matching"), "{msg}");
+        assert!(msg.contains("2 not on disk, 0 not matching"), "{msg}");
     }
     // ---- pieces that touch a file the torrent may not write ---------------
 
@@ -2415,5 +2424,44 @@ mod tests {
             video,
             "the linked video changed"
         );
+    }
+    /// The diagnostic counts the files that are not where the torrent expects
+    /// them -- guarded or not -- and cites them first: a video loose in the
+    /// parent folder is absent, and the one thing that does not match is only
+    /// the last of the three.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_hold_counts_and_names_the_files_missing_from_their_place() {
+        let s = verify_cfg("pathclaim-hold-absent");
+        let dir = s.dir.join("d");
+        std::fs::create_dir_all(dir.join("Film")).unwrap();
+        let video: Vec<u8> = (0..40_000u32).map(|i| (i % 251) as u8).collect();
+        let second: Vec<u8> = (0..20_000u32).map(|i| (i % 241) as u8).collect();
+        let mut damaged = video.clone();
+        damaged[100] ^= 0xff;
+        std::fs::write(dir.join("Film").join("a.mkv"), &damaged).unwrap();
+        // The second video is there, but a folder up: not at its place.
+        std::fs::write(dir.join("b.mkv"), &second).unwrap();
+        let blobs = wire_blobs(&s);
+        let ta = torrent_over("Film", &[("a.mkv", &damaged)], 16384);
+        let a = add(&s, &ta, &dir, true, true).unwrap();
+        learn(&blobs, &a, &ta);
+        let tb = torrent_over(
+            "Film",
+            &[
+                ("a.mkv", &video),
+                ("ep2/b.mkv", &second),
+                ("a.nfo", b"release notes..."),
+            ],
+            16384,
+        );
+        let b = add(&s, &tb, &dir, false, false).unwrap();
+        learn(&blobs, &b, &tb);
+        let t = held(&s, &b);
+        press_verify(&s, &b).await;
+        assert!(is_error(&t));
+        let msg = why(&t);
+        assert!(msg.contains("2 not on disk, 1 not matching"), "{msg}");
+        assert!(msg.contains("first: Film/ep2/b.mkv"), "{msg}");
+        assert!(msg.contains("3 file(s) cannot be proven"), "{msg}");
     }
 }

@@ -742,6 +742,9 @@ pub struct TorrentState {
     /// the range back and accepts the piece when the bytes are already there.
     /// Empty for nearly every torrent. See `guard_files`.
     overwrite_guard: RwLock<Arc<std::collections::HashSet<PathBuf>>>,
+    /// `error_msg` holds a note a recheck left (nothing was found where it was
+    /// expected), not a fault: the first piece that lands clears it.
+    recheck_note: AtomicBool,
 
     /// The torrent's 20-byte piece hashes: loaded from the store the
     /// first time something needs to verify data, dropped again the moment the
@@ -1391,6 +1394,7 @@ impl TorrentState {
             rechecking: AtomicBool::new(false),
             recheck_done: AtomicU32::new(0),
             overwrite_guard: RwLock::new(Arc::new(std::collections::HashSet::new())),
+            recheck_note: AtomicBool::new(false),
             piece_hashes: Mutex::new(None),
             v2_checks: Mutex::new(None),
             picker,
@@ -1680,6 +1684,39 @@ impl TorrentState {
         self.overwrite_guard.read().clone()
     }
 
+    /// The files of this torrent (paths below the save path) that are not on
+    /// disk at the place the torrent expects them, in torrent order. A file
+    /// that sits elsewhere -- loose in the parent folder, say -- is not there.
+    pub fn files_not_on_disk(&self) -> Vec<PathBuf> {
+        let root = self.save_path.read().clone();
+        (0..self.meta.files.len())
+            .filter(|i| !self.meta.disk_path(&root, *i).exists())
+            .map(|i| self.meta.disk_rel(i))
+            .collect()
+    }
+
+    /// Said by a recheck that found nothing where it looked: shown like an
+    /// error message, without parking the torrent, and forgotten once a piece
+    /// lands.
+    pub fn set_recheck_note(&self, msg: &str) {
+        if let Ok(mut g) = self.error_msg.lock() {
+            *g = msg.to_string();
+        }
+        self.recheck_note.store(true, Ordering::Relaxed);
+    }
+
+    /// A piece landed: a note from a recheck is stale. Only that note -- an
+    /// error the torrent is parked in stays.
+    pub fn clear_recheck_note(&self) {
+        if self.recheck_note.swap(false, Ordering::Relaxed)
+            && self.status.load(Ordering::Relaxed) != TorrentStatus::Error as u8
+        {
+            if let Ok(mut g) = self.error_msg.lock() {
+                g.clear();
+            }
+        }
+    }
+
     /// Forget a fault the operator has dealt with.
     ///
     /// Called when a recheck starts, which is the one moment somebody has
@@ -1698,6 +1735,7 @@ impl TorrentState {
         self.disk_write_failures.store(0, Ordering::Relaxed);
         self.serving_suspended.store(false, Ordering::Relaxed);
         self.data_lost.store(false, Ordering::Relaxed);
+        self.recheck_note.store(false, Ordering::Relaxed);
     }
 
     pub fn have_bitfield(&self) -> Bytes {

@@ -3266,6 +3266,30 @@ impl TorrentManager {
         }
         verified.sort_unstable();
         let have = verified.len() as u32;
+        // Nothing verified because nothing was where it was looked for: the
+        // verdict is the same -- no piece held -- but a check that ends in a
+        // second says nothing about WHY, and the files are often only a folder
+        // up. Say how many were not there, in the log and on the torrent.
+        if have == 0 {
+            let absent = t.files_not_on_disk();
+            if let Some(first) = absent.first() {
+                let first = first.to_string_lossy().replace('\\', "/");
+                let save = t.save_path.read().to_string_lossy().into_owned();
+                warn!(
+                    "[recheck] {} verified 0/{} pieces: {} of {} file(s) not on disk at the expected place under {save} (first: {first})",
+                    &hex_encode(&ih)[..8],
+                    num_pieces,
+                    absent.len(),
+                    t.meta.files.len(),
+                );
+                t.set_recheck_note(&format!(
+                    "cannot find the data: {} of {} file(s) are not on disk at the expected place under {save} (first: {first}). \
+                     Put them there or move the torrent to where they are, then recheck this torrent",
+                    absent.len(),
+                    t.meta.files.len(),
+                ));
+            }
+        }
         {
             let mut p = picker.lock().unwrap();
             p.reset_have();
@@ -3944,6 +3968,50 @@ mod lifecycle_tests {
             .0;
         let t = mgr.get(&ih).unwrap();
         (mgr, root, ih, t)
+    }
+
+    /// A recheck that verifies nothing because the files are not where the
+    /// torrent expects them says so on the torrent: how many, and which one
+    /// first. The verdict is the one it always was -- no piece held, the torrent
+    /// not parked -- and the first piece that lands takes the note away.
+    #[tokio::test]
+    async fn a_recheck_that_finds_no_file_says_how_many_are_missing() {
+        let (mgr, root, ih, t) = whole_two_piece_torrent("recheckabsent");
+        let data: Vec<u8> = (0..32768u32).map(|i| (i % 241) as u8).collect();
+        wait_recheck_end(&t).await;
+        std::fs::remove_file(root.join("data").join("whole")).unwrap();
+        mgr.recheck(&ih).expect("recheck starts");
+        wait_recheck_end(&t).await;
+        let msg = t.error_msg.lock().unwrap().clone();
+        assert!(
+            msg.starts_with("cannot find the data: 1 of 1 file(s)"),
+            "{msg}"
+        );
+        assert!(msg.contains("first: whole"), "{msg}");
+        assert_ne!(
+            t.status.load(Ordering::Relaxed),
+            TorrentStatus::Error as u8,
+            "the verdict is unchanged: a download with nothing yet"
+        );
+        assert!(!t.picker.get().unwrap().lock().unwrap().has_piece(0));
+
+        let ok =
+            crate::peer::download::commit_piece(&t, mgr.disk(), 0, data[..16384].to_vec()).await;
+        assert!(ok);
+        assert!(t.error_msg.lock().unwrap().is_empty(), "stale note kept");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Files that are there and wrong say nothing of the sort.
+    #[tokio::test]
+    async fn a_recheck_that_finds_the_files_wrong_does_not_say_they_are_missing() {
+        let (mgr, root, ih, t) = whole_two_piece_torrent("recheckwrong");
+        wait_recheck_end(&t).await;
+        std::fs::write(root.join("data").join("whole"), vec![0u8; 32768]).unwrap();
+        mgr.recheck(&ih).expect("recheck starts");
+        wait_recheck_end(&t).await;
+        assert!(t.error_msg.lock().unwrap().is_empty());
+        std::fs::remove_dir_all(&root).ok();
     }
 
     async fn wait_recheck_end(t: &Arc<TorrentState>) {
