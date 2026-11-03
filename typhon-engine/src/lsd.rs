@@ -797,6 +797,24 @@ mod tests {
             .is_err());
     }
 
+    /// `LsdSession::bind` on a port that was free a moment ago, asked again
+    /// for up to 3 s while it reads as busy. A neighbour test that spawns a
+    /// child process (the `--exact` re-runs elsewhere in the crate) forks the
+    /// whole test process, and until that child's `exec` closes its copy it
+    /// keeps alive every socket the parent just closed -- `free_udp_port`'s
+    /// own included. A port really held stays busy past the 3 s.
+    async fn bind_settled(device: Option<&str>, port: u16) -> Result<Arc<LsdSession>, String> {
+        let until = std::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            let r = LsdSession::bind(device, port).await;
+            let busy = matches!(&r, Err(e) if e.contains("in use"));
+            if !busy || std::time::Instant::now() >= until {
+                return r;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
     fn free_udp_port() -> u16 {
         std::net::UdpSocket::bind("0.0.0.0:0")
             .unwrap()
@@ -809,7 +827,7 @@ mod tests {
     /// into a dial; the same announce from a LAN address is.
     #[tokio::test]
     async fn an_announce_from_outside_the_lan_is_ignored() {
-        let session = LsdSession::bind(None, free_udp_port())
+        let session = bind_settled(None, free_udp_port())
             .await
             .expect("an LSD socket");
         let (mgr, root) = manager("foreign");
@@ -858,8 +876,8 @@ mod tests {
     async fn two_engines_discover_each_other_and_ignore_themselves() {
         let port = free_udp_port();
         let (a, b) = match (
-            LsdSession::bind(None, port).await,
-            LsdSession::bind(None, port).await,
+            bind_settled(None, port).await,
+            bind_settled(None, port).await,
         ) {
             (Ok(a), Ok(b)) => (a, b),
             (Err(e), _) | (_, Err(e)) => {
