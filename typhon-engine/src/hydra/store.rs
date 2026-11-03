@@ -316,6 +316,12 @@ CREATE TABLE IF NOT EXISTS jobs (
     updated_at INTEGER NOT NULL DEFAULT 0);
 ";
 
+// How many metainfo blobs were read: what a test holds the claim probe to.
+#[cfg(test)]
+thread_local! {
+    pub static TORRENT_BLOB_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 // How many times `rows_by_save_path` ran: what a test holds a path that must
 // not scan a folder to.
 #[cfg(test)]
@@ -2407,6 +2413,8 @@ impl Store {
     /// Reading it here rather than re-encoding from the parsed metadata keeps
     /// the info dict byte-identical, and therefore the info hash with it.
     pub fn torrent_blob(&self, info_hash: &str) -> anyhow::Result<Option<Vec<u8>>> {
+        #[cfg(test)]
+        TORRENT_BLOB_READS.with(|c| c.set(c.get() + 1));
         let mut stmt = self
             .conn
             .prepare("SELECT torrent FROM torrents WHERE info_hash = ?1 LIMIT 1")?;
