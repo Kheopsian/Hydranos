@@ -302,7 +302,17 @@ async fn a_rebind_whose_utp_port_is_busy_changes_nothing() {
     let target = free_port();
     let _udp_squatter = std::net::UdpSocket::bind(("0.0.0.0", target)).expect("hold the UDP port");
 
-    let err = l.rebind(target).await.expect_err("the uTP port is held");
+    // The rebind must fail on the UDP port. Failing on the TCP one instead
+    // means that port read as busy a moment (see SETTLE); the round is all or
+    // nothing, so asking again is the same question.
+    let until = std::time::Instant::now() + SETTLE;
+    let err = loop {
+        let err = l.rebind(target).await.expect_err("the uTP port is held");
+        if err.contains("uTP socket") || std::time::Instant::now() >= until {
+            break err;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    };
     assert!(
         err.contains("uTP socket") && err.contains(&format!("still listening on {was}")),
         "{err}"
@@ -313,6 +323,12 @@ async fn a_rebind_whose_utp_port_is_busy_changes_nothing() {
         accepts("127.0.0.1", was).await,
         "the old TCP listener is gone"
     );
+    // A listener a forked child still holds (see SETTLE) goes away at its
+    // exec; one the failed rebind kept would not.
+    let until = std::time::Instant::now() + SETTLE;
+    while accepts("127.0.0.1", target).await && std::time::Instant::now() < until {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
     assert!(
         !accepts("127.0.0.1", target).await,
         "the new TCP socket was left bound after the failure"
