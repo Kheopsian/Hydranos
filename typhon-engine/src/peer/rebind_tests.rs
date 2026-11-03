@@ -213,13 +213,15 @@ async fn a_round_that_cannot_bind_one_binding_holds_none() {
     let round = [binding(1, "127.0.0.1", free), binding(2, "127.0.0.1", busy)];
     // The round must fail on the SQUATTED port. Failing on `free` instead
     // means a neighbour held that one a moment (see SETTLE), not that the
-    // round did what the test is about: ask again.
+    // round did what the test is about: ask again. The expected failure is
+    // carried in Ok so that its own "in use" does not read as a reason to ask
+    // again: it ends the wait at once.
     let err = settled(|| match bind_round(&round) {
-        Err(e) if !e.contains(&format!("cannot bind 127.0.0.1:{busy}")) => {
-            Err(format!("in use: {e}"))
-        }
-        r => r.map(|_| ()),
+        Err(e) if e.contains(&format!("cannot bind 127.0.0.1:{busy}")) => Ok(Err(e)),
+        Err(e) => Err(format!("in use: {e}")),
+        Ok(_) => Ok(Ok(())),
     })
+    .expect("the round failed on the free port for longer than SETTLE")
     .expect_err("the second binding is busy");
     assert!(
         err.contains(&format!("cannot bind 127.0.0.1:{busy}")),
