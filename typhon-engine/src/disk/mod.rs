@@ -1752,6 +1752,55 @@ mod disk_tests {
         assert_eq!(std::fs::read(f.root.join("library.bin")).unwrap(), other);
     }
 
+    /// A file renamed onto one that is already there -- hardlinked, with a byte
+    /// of difference -- is compared at its next piece, not written over: the
+    /// rename drops what was found under the old name and is entered in the
+    /// manager's placement log, which is what the claim index reads.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_renamed_file_is_compared_at_its_new_name() {
+        let content: Vec<u8> = (0..4096u32).map(|i| (i % 251) as u8).collect();
+        let f = fixture_in_pieces("renamed", &content, 4096);
+        assert!(f
+            .disk
+            .write_piece(&f.torrent, 0, content.clone())
+            .await
+            .unwrap());
+        assert_eq!(f.torrent.write_verdicts().lock().files.len(), 1);
+
+        // The old name goes away, the new one is somebody else's file.
+        std::fs::remove_file(f.root.join("data").join("payload.bin")).unwrap();
+        let mut other = content.clone();
+        other[100] ^= 0xff;
+        std::fs::write(f.root.join("data").join("moved.bin"), &other).unwrap();
+        std::fs::hard_link(
+            f.root.join("data").join("moved.bin"),
+            f.root.join("library.bin"),
+        )
+        .unwrap();
+        let mark = f._mgr.placements();
+        f._mgr
+            .rename_file(&f.torrent.info_hash, "payload.bin", "moved.bin")
+            .unwrap();
+        assert_eq!(
+            f._mgr.placed_since(mark),
+            Some(vec![f.torrent.info_hash]),
+            "the rename is not in the placement log"
+        );
+
+        let why = f
+            .disk
+            .write_piece(&f.torrent, 0, content.clone())
+            .await
+            .unwrap_err();
+        assert!(why.starts_with("refused to overwrite"), "{why}");
+        assert_eq!(
+            std::fs::read(f.root.join("data").join("moved.bin")).unwrap(),
+            other
+        );
+        assert_eq!(std::fs::read(f.root.join("library.bin")).unwrap(), other);
+    }
+
     fn four_piece_fixture(tag: &str) -> (Fixture, Vec<Vec<u8>>) {
         let mut content = Vec::new();
         for i in 0..4u8 {

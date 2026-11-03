@@ -2481,6 +2481,10 @@ impl TorrentManager {
         };
         let before = t.meta.disk_rel(index);
         t.meta.set_disk_rel(index, to_path);
+        // The file is somewhere else now: a placement like a move, and what was
+        // found about the files at their old names says nothing of the new ones.
+        self.note_placed(*info_hash);
+        t.forget_write_verdicts();
         // Pieces that touch the file were counted as held under its old name:
         // a start without a recheck must not serve whatever the new name holds.
         let f = &t.meta.files[index];
@@ -2499,6 +2503,8 @@ impl TorrentManager {
             // name, so the caller is not told it took. The retracted pieces
             // stay retracted: a recheck finds them again.
             t.meta.set_disk_rel(index, before);
+            self.note_placed(*info_hash);
+            t.forget_write_verdicts();
             return Err(RenameError::Conflict(e));
         }
         Ok(())
