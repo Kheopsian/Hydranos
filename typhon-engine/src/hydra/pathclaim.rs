@@ -1039,23 +1039,37 @@ fn roots_of_torrent(t: &TorrentState) -> Vec<PathBuf> {
 impl SharedRoots {
     fn build(state: &AppState) -> Self {
         let engines = state.engines.engines();
+        let marks = engines.iter().map(|e| e.manager.placements()).collect();
+        Self::from_rows(
+            marks,
+            engines.iter().enumerate().flat_map(|(i, e)| {
+                e.manager.all().into_iter().map(move |t| {
+                    let save = t.save_path.read().clone();
+                    (i as u8, t.info_hash, save, roots_of_torrent(&t))
+                })
+            }),
+        )
+    }
+
+    /// The index over `rows`: (engine, torrent, save path, roots), one pass.
+    fn from_rows(
+        marks: Vec<u64>,
+        rows: impl Iterator<Item = (u8, [u8; 20], PathBuf, Vec<PathBuf>)>,
+    ) -> Self {
         let mut out = SharedRoots {
-            marks: engines.iter().map(|e| e.manager.placements()).collect(),
+            marks,
             ..Default::default()
         };
         let mut dirs: HashMap<u64, PathBuf> = HashMap::new();
-        for (i, e) in engines.iter().enumerate() {
-            for t in e.manager.all() {
-                let slot = out.slots.len() as u32;
-                out.slots.push((i as u8, t.info_hash));
-                for r in roots_of_torrent(&t) {
-                    out.by_root.push((path_hash(&r), slot));
-                }
-                let save = t.save_path.read().clone();
-                let key = path_hash(&save);
-                dirs.entry(key).or_insert_with(|| lower(&save));
-                out.by_save.entry(key).or_default().push(slot);
+        for (engine, ih, save, roots) in rows {
+            let slot = out.slots.len() as u32;
+            out.slots.push((engine, ih));
+            for r in roots {
+                out.by_root.push((path_hash(&r), slot));
             }
+            let key = path_hash(&save);
+            dirs.entry(key).or_insert_with(|| lower(&save));
+            out.by_save.entry(key).or_default().push(slot);
         }
         out.by_root.sort_unstable();
         out.dirs = dirs.into_values().collect();
@@ -1065,8 +1079,19 @@ impl SharedRoots {
 
     /// The torrents of the index that may name a file of `t`.
     fn candidates(&self, state: &AppState, t: &TorrentState) -> Vec<Arc<TorrentState>> {
+        let slots = self.slots_for(roots_of_torrent(t));
+        let engines = state.engines.engines();
+        slots
+            .into_iter()
+            .filter_map(|s| self.slots.get(s as usize))
+            .filter_map(|(i, ih)| engines.get(*i as usize).and_then(|e| e.manager.get(ih)))
+            .collect()
+    }
+
+    /// The slots of the torrents that lie on one chain with one of `roots`.
+    fn slots_for(&self, roots: Vec<PathBuf>) -> Vec<u32> {
         let mut slots: Vec<u32> = Vec::new();
-        for root in roots_of_torrent(t) {
+        for root in roots {
             for a in root.ancestors() {
                 let key = path_hash(a);
                 let from = self.by_root.partition_point(|(k, _)| *k < key);
@@ -1086,12 +1111,7 @@ impl SharedRoots {
         }
         slots.sort_unstable();
         slots.dedup();
-        let engines = state.engines.engines();
         slots
-            .into_iter()
-            .filter_map(|s| self.slots.get(s as usize))
-            .filter_map(|(i, ih)| engines.get(*i as usize).and_then(|e| e.manager.get(ih)))
-            .collect()
     }
 }
 
@@ -3146,6 +3166,207 @@ mod tests {
         assert!(
             Arc::ptr_eq(&built, &roots.lock().unwrap()),
             "the index was built again"
+        );
+    }
+
+    // ---- cost of the roots index at the scale of the production ------------
+
+    /// `VmRSS` / `VmHWM` of this process, in MiB.
+    fn rss_mib(field: &str) -> f64 {
+        let status = std::fs::read_to_string("/proc/self/status").unwrap();
+        let line = status.lines().find(|l| l.starts_with(field)).unwrap();
+        let kib: f64 = line
+            .split_whitespace()
+            .nth(1)
+            .and_then(|v| v.parse().ok())
+            .unwrap();
+        kib / 1024.0
+    }
+
+    fn pct(sorted: &[f64], p: f64) -> f64 {
+        sorted[((sorted.len() as f64 * p) as usize).min(sorted.len() - 1)]
+    }
+
+    /// What building the index and asking it costs with a million torrents.
+    ///
+    /// `HYDRA_BENCH_QUERIES` (default 10 000) is the number of probes timed.
+    /// `HYDRA_BENCH_SAVE_PATHS` is a file with one save path per line (the
+    /// `save_path` column of a real store, nothing else); `HYDRA_BENCH_N` the
+    /// number of torrents (the lines are cycled, a lap past the first gets its
+    /// own sub folder, when N is above the number of lines). Each torrent
+    /// gets a synthetic name: 60 % a single file, 40 % a folder. The index is
+    /// built by `SharedRoots::from_rows`, the code `build` runs, from rows made
+    /// on the fly (no engine); the cost of `roots_of_torrent` on real
+    /// `TorrentState`s (1 to 20 files) is measured apart on a sample.
+    /// Run alone, in a fresh process, with `--release`:
+    /// `HYDRA_BENCH_SAVE_PATHS=f HYDRA_BENCH_N=1040000 cargo test --release
+    /// --lib roots_index_cost -- --ignored --nocapture`
+    #[test]
+    #[ignore = "bench: needs HYDRA_BENCH_SAVE_PATHS (one save path per line) and HYDRA_BENCH_N"]
+    fn roots_index_cost_at_production_scale() {
+        let file = std::env::var("HYDRA_BENCH_SAVE_PATHS").expect("HYDRA_BENCH_SAVE_PATHS");
+        let n: usize = std::env::var("HYDRA_BENCH_N")
+            .expect("HYDRA_BENCH_N")
+            .parse()
+            .unwrap();
+        let data = std::fs::read_to_string(file).unwrap();
+        let lines: Vec<&str> = data.lines().filter(|l| !l.is_empty()).collect();
+        let distinct = lines.iter().collect::<HashSet<_>>().len();
+
+        let save_of = |i: usize| -> PathBuf {
+            let base = lines[i % lines.len()];
+            match i / lines.len() {
+                0 => PathBuf::from(base),
+                lap => PathBuf::from(format!("{base}/lap{lap}")),
+            }
+        };
+        let name_of = |i: usize| -> String {
+            if i % 10 < 6 {
+                format!("Some.Release.Name.{i}.1080p.mkv")
+            } else {
+                format!("Some.Release.Name.{i}.1080p-GRP")
+            }
+        };
+        let hash_of = |i: usize| -> [u8; 20] {
+            let mut h = [0u8; 20];
+            h[..8].copy_from_slice(&(i as u64).to_le_bytes());
+            h[8..16].copy_from_slice(&(i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15).to_le_bytes());
+            h
+        };
+        // (engine, hash, save, roots) of each torrent.
+        let rows = || {
+            (0..n).map(|i| {
+                let save = save_of(i);
+                let roots = vec![save.join(name_of(i))];
+                ((i % 2) as u8, hash_of(i), save, roots)
+            })
+        };
+
+        // The rows alone, to take them off the build.
+        let mut gen = Vec::new();
+        for _ in 0..3 {
+            let t0 = Instant::now();
+            let c = rows().map(|r| r.3.len()).sum::<usize>();
+            assert_eq!(c, n);
+            gen.push(t0.elapsed().as_secs_f64());
+        }
+        gen.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+        // Peak since here, not since the load of the file.
+        let _ = std::fs::write("/proc/self/clear_refs", "5");
+        let rss0 = rss_mib("VmRSS:");
+        let mut times = Vec::new();
+        let mut kept: Option<SharedRoots> = None;
+        let (mut rss1, mut hwm1) = (0.0, 0.0);
+        for k in 0..5 {
+            drop(kept.take());
+            let t0 = Instant::now();
+            let idx = SharedRoots::from_rows(vec![0, 0], rows());
+            times.push(t0.elapsed().as_secs_f64());
+            if k == 0 {
+                rss1 = rss_mib("VmRSS:");
+                hwm1 = rss_mib("VmHWM:");
+            }
+            kept = Some(idx);
+        }
+        times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let (rss_last, hwm_last) = (rss_mib("VmRSS:"), rss_mib("VmHWM:"));
+        let idx = kept.unwrap();
+
+        println!(
+            "BENCH n={n} lines={} distinct_save_paths={distinct} by_save={} dirs={}",
+            lines.len(),
+            idx.by_save.len(),
+            idx.dirs.len()
+        );
+        println!(
+            "BENCH rows_alone_median_s={:.3} build_median_s={:.3} build_all_s={times:.3?}",
+            gen[1], times[2]
+        );
+        println!(
+            "BENCH rss_before_mib={rss0:.0} rss_after_first_build_mib={rss1:.0} peak_first_build_mib={hwm1:.0} \
+             rss_after_5_builds_mib={rss_last:.0} peak_all_mib={hwm_last:.0}"
+        );
+        println!(
+            "BENCH retained_mib={:.0} peak_over_before_mib={:.0}",
+            rss1 - rss0,
+            hwm1 - rss0
+        );
+        // Queries: a torrent that names nothing, the same root, a file below
+        // a root, a folder above the save paths.
+        let mut seed = 0x1234_5678_9abc_def1u64;
+        let mut rnd = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let queries_n: usize = std::env::var("HYDRA_BENCH_QUERIES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(10_000);
+        let mut queries: Vec<(usize, Vec<PathBuf>)> = Vec::new();
+        for q in 0..queries_n {
+            let j = rnd() as usize % n;
+            let save = save_of(j);
+            let root = save.join(name_of(j));
+            let roots = match q % 4 {
+                0 => vec![save.join(format!("Brand.New.{q}"))],
+                1 => vec![root],
+                2 => vec![root.join("episode.mkv")],
+                _ => vec![save.parent().map(Path::to_path_buf).unwrap_or(save)],
+            };
+            queries.push((q % 4, roots));
+        }
+        let mut per: Vec<Vec<f64>> = vec![Vec::new(); 4];
+        let mut found = [0usize; 4];
+        for (kind, roots) in queries {
+            let t0 = Instant::now();
+            let got = idx.slots_for(roots);
+            per[kind].push(t0.elapsed().as_secs_f64() * 1e6);
+            found[kind] += got.len();
+        }
+        let mut all: Vec<f64> = per.iter().flatten().copied().collect();
+        all.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        println!(
+            "BENCH query_us median={:.1} p99={:.1} max={:.1}",
+            pct(&all, 0.5),
+            pct(&all, 0.99),
+            all[all.len() - 1]
+        );
+        for (k, name) in ["miss", "same_root", "below_root", "above_saves"]
+            .iter()
+            .enumerate()
+        {
+            per[k].sort_by(|a, b| a.partial_cmp(b).unwrap());
+            println!(
+                "BENCH query_us[{name}] median={:.1} p99={:.1} slots_found={}",
+                pct(&per[k], 0.5),
+                pct(&per[k], 0.99),
+                found[k]
+            );
+        }
+
+        // `roots_of_torrent` on real states: 60 % one file, 40 % a folder of 1 to 20.
+        let sample = 20_000usize;
+        let states: Vec<TorrentState> = (0..sample)
+            .map(|i| {
+                let k = if i % 10 < 6 { 0 } else { 1 + (i * 7) % 20 };
+                let name = format!("Some.Release.Name.{i}.1080p");
+                let names: Vec<String> = (0..k.max(1)).map(|f| format!("f{f}.mkv")).collect();
+                let files: Vec<(&str, &[u8])> =
+                    names.iter().map(|f| (f.as_str(), &[1u8; 3][..])).collect();
+                let bytes = torrent_over(&name, &files, 16384);
+                let meta = typhon_engine::torrent::metainfo::parse_torrent_bytes(&bytes).unwrap();
+                TorrentState::new(meta, save_of(i), true)
+            })
+            .collect();
+        let t0 = Instant::now();
+        let c: usize = states.iter().map(|t| roots_of_torrent(t).len()).sum();
+        let per_torrent_us = t0.elapsed().as_secs_f64() * 1e6 / sample as f64;
+        println!(
+            "BENCH roots_of_torrent real states: {per_torrent_us:.2} us each, {c} roots over {sample}; x{n} = {:.2} s",
+            per_torrent_us * n as f64 / 1e6
         );
     }
 }
