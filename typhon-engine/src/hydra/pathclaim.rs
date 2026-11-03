@@ -977,11 +977,18 @@ const ROOTS_TTL: Duration = Duration::from_secs(60);
 /// - the roots that are an ancestor of one of its own, itself included: every
 ///   torrent is indexed by its roots (`by_root`, sorted, searched by key);
 /// - the torrents saved in one of its roots or below it: every torrent is also
-///   indexed by its save path (`by_save`), and the distinct save paths, a few
-///   dozen to a few thousand, are tested against the root (`dirs`).
+///   indexed by its save path and by each folder above it (`by_dir`, sorted,
+///   searched by key), so "saved in or below this root" is one search and no
+///   save path is ever walked, however many the store holds (a million, almost
+///   all distinct, in production).
 ///
-/// Built on demand from what the engines hold in memory, one pass, about
-/// 40 bytes per torrent (40 MB at a million), and again after `ROOTS_TTL`.
+/// Built on demand from what the engines hold in memory, one pass, and again
+/// after `ROOTS_TTL`. Memory is about 12 bytes per root, 12 bytes per folder
+/// of each save path (5 to 6 deep in production) and 21 bytes per torrent:
+/// measured on the save paths of a store of 1.04 million torrents, see the
+/// `roots_index_cost_at_production_scale` bench for the figures. Folders are
+/// held by hash: a collision adds a candidate, which the check on its files
+/// (`claim_of`) drops, and never hides one.
 /// Between builds it is kept true by the managers' placement logs
 /// (`TorrentManager::placed_since`): the few torrents added or moved since are
 /// looked at directly, so a torrent injected a second ago is seen, and no
@@ -996,22 +1003,48 @@ struct SharedRoots {
     /// (engine, torrent) by slot.
     slots: Vec<(u8, [u8; 20])>,
     /// (root key, slot), sorted.
-    by_root: Vec<(u64, u32)>,
-    /// save path key -> slots.
-    by_save: HashMap<u64, Vec<u32>>,
-    /// The distinct save paths, lowercased.
-    dirs: Vec<PathBuf>,
+    by_root: Vec<Hit>,
+    /// (key of the save path or of a folder above it, slot), sorted.
+    by_dir: Vec<Hit>,
+}
+
+/// A key and the slot of a torrent, 12 bytes (a tuple would take 16).
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(C, packed)]
+struct Hit {
+    key: u64,
+    slot: u32,
+}
+
+/// The slots of `v` (sorted by key) that carry `key`.
+fn slots_of(v: &[Hit], key: u64) -> impl Iterator<Item = u32> + '_ {
+    let from = v.partition_point(|h| {
+        let k = h.key;
+        k < key
+    });
+    v[from..]
+        .iter()
+        .take_while(move |h| {
+            let k = h.key;
+            k == key
+        })
+        .map(|h| h.slot)
 }
 
 fn lower(p: &Path) -> PathBuf {
     PathBuf::from(path_key(p).to_string_lossy().to_lowercase())
 }
 
-fn path_hash(p: &Path) -> u64 {
+/// The key of a path already lowercased by `lower`.
+fn hash_lowered(p: &Path) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    lower(p).hash(&mut h);
+    p.hash(&mut h);
     h.finish()
+}
+
+fn path_hash(p: &Path) -> u64 {
+    hash_lowered(&lower(p))
 }
 
 /// The roots of `t`: its folder (or file) below the save path, or for a torrent
@@ -1040,8 +1073,10 @@ impl SharedRoots {
     fn build(state: &AppState) -> Self {
         let engines = state.engines.engines();
         let marks = engines.iter().map(|e| e.manager.placements()).collect();
+        let expected = engines.iter().map(|e| e.manager.len()).sum();
         Self::from_rows(
             marks,
+            expected,
             engines.iter().enumerate().flat_map(|(i, e)| {
                 e.manager.all().into_iter().map(move |t| {
                     let save = t.save_path.read().clone();
@@ -1054,25 +1089,38 @@ impl SharedRoots {
     /// The index over `rows`: (engine, torrent, save path, roots), one pass.
     fn from_rows(
         marks: Vec<u64>,
+        expected: usize,
         rows: impl Iterator<Item = (u8, [u8; 20], PathBuf, Vec<PathBuf>)>,
     ) -> Self {
         let mut out = SharedRoots {
             marks,
             ..Default::default()
         };
-        let mut dirs: HashMap<u64, PathBuf> = HashMap::new();
+        out.slots.reserve(expected);
+        out.by_root.reserve(expected);
+        out.by_dir.reserve(expected.saturating_mul(8));
         for (engine, ih, save, roots) in rows {
             let slot = out.slots.len() as u32;
             out.slots.push((engine, ih));
             for r in roots {
-                out.by_root.push((path_hash(&r), slot));
+                out.by_root.push(Hit {
+                    key: path_hash(&r),
+                    slot,
+                });
             }
-            let key = path_hash(&save);
-            dirs.entry(key).or_insert_with(|| lower(&save));
-            out.by_save.entry(key).or_default().push(slot);
+            let save = lower(&save);
+            for a in save.ancestors() {
+                out.by_dir.push(Hit {
+                    key: hash_lowered(a),
+                    slot,
+                });
+            }
         }
         out.by_root.sort_unstable();
-        out.dirs = dirs.into_values().collect();
+        out.by_dir.sort_unstable();
+        out.slots.shrink_to_fit();
+        out.by_root.shrink_to_fit();
+        out.by_dir.shrink_to_fit();
         out.built = Some(Instant::now());
         out
     }
@@ -1092,22 +1140,11 @@ impl SharedRoots {
     fn slots_for(&self, roots: Vec<PathBuf>) -> Vec<u32> {
         let mut slots: Vec<u32> = Vec::new();
         for root in roots {
-            for a in root.ancestors() {
-                let key = path_hash(a);
-                let from = self.by_root.partition_point(|(k, _)| *k < key);
-                slots.extend(
-                    self.by_root[from..]
-                        .iter()
-                        .take_while(|(k, _)| *k == key)
-                        .map(|(_, s)| *s),
-                );
-            }
             let mine = lower(&root);
-            for d in self.dirs.iter().filter(|d| d.starts_with(&mine)) {
-                if let Some(v) = self.by_save.get(&path_hash(d)) {
-                    slots.extend(v);
-                }
+            for a in mine.ancestors() {
+                slots.extend(slots_of(&self.by_root, hash_lowered(a)));
             }
+            slots.extend(slots_of(&self.by_dir, hash_lowered(&mine)));
         }
         slots.sort_unstable();
         slots.dedup();
@@ -3261,7 +3298,7 @@ mod tests {
         for k in 0..5 {
             drop(kept.take());
             let t0 = Instant::now();
-            let idx = SharedRoots::from_rows(vec![0, 0], rows());
+            let idx = SharedRoots::from_rows(vec![0, 0], n, rows());
             times.push(t0.elapsed().as_secs_f64());
             if k == 0 {
                 rss1 = rss_mib("VmRSS:");
@@ -3274,10 +3311,10 @@ mod tests {
         let idx = kept.unwrap();
 
         println!(
-            "BENCH n={n} lines={} distinct_save_paths={distinct} by_save={} dirs={}",
+            "BENCH n={n} lines={} distinct_save_paths={distinct} by_root={} by_dir={}",
             lines.len(),
-            idx.by_save.len(),
-            idx.dirs.len()
+            idx.by_root.len(),
+            idx.by_dir.len()
         );
         println!(
             "BENCH rows_alone_median_s={:.3} build_median_s={:.3} build_all_s={times:.3?}",
