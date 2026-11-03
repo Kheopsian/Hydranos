@@ -430,14 +430,54 @@ impl DiskManager {
             }
         };
 
+        let guard = torrent.guarded();
         let outcome = tokio::task::spawn_blocking(move || {
             if !check.matches(&data) {
                 return Ok(false);
             }
+            // Before a byte goes down: the ranges that fall in a file this
+            // torrent must not write into (another torrent names it, or it has
+            // another hardlink) are read back. Identical bytes need no write
+            // and get none; one that differs refuses the whole piece, so a
+            // piece never lands half in a guarded file and half beside it.
+            let mut same = vec![false; ops.len()];
+            if !guard.is_empty() {
+                let mut at = 0usize;
+                for (i, op) in ops.iter().enumerate() {
+                    let len = op.length as usize;
+                    if !op.pad && guard.contains(&op.path) {
+                        let full_path = save_path.join(&op.path);
+                        match holds_bytes(&full_path, op.file_offset, &data[at..at + len]) {
+                            Ok(Some(true)) => same[i] = true,
+                            // Not there: creating it overwrites nothing.
+                            Ok(None) => {}
+                            Ok(Some(false)) => {
+                                return Err(format!(
+                                    "{REFUSED} {}: piece {piece} carries other bytes than the file \
+                                     holds, and another torrent or another hardlink names that \
+                                     file. It was left untouched",
+                                    op.path.display()
+                                ))
+                            }
+                            Err(e) => {
+                                let name = op.path.display();
+                                return Err(format!("{REFUSED} {name}: cannot read it: {e}"));
+                            }
+                        }
+                    }
+                    at += len;
+                }
+            }
             let mut data_offset = 0usize;
-            for op in ops {
+            for (i, op) in ops.into_iter().enumerate() {
                 // Alignment padding: zeros no file holds.
                 if op.pad {
+                    data_offset += op.length as usize;
+                    continue;
+                }
+                // Already there, byte for byte: the piece counts, the file is
+                // not opened for writing.
+                if same[i] {
                     data_offset += op.length as usize;
                     continue;
                 }
@@ -479,6 +519,13 @@ impl DiskManager {
         })
         .await
         .map_err(|e| format!("spawn_blocking: {}", e))?;
+        if let Err(why) = &outcome {
+            if why.starts_with(REFUSED) {
+                // Not a disk fault to retry three times: the file is not ours
+                // to write, and no other peer's copy of the piece changes that.
+                torrent.mark_write_error(why);
+            }
+        }
         // Again once the bytes are down: a read that went to disk while the
         // write was under way may have read the old bytes, and must not leave
         // them cached over the piece just written.
@@ -518,6 +565,36 @@ impl DiskManager {
         let full_path = save_path.join(&op.path);
         get_or_open(&full_path).ok().map(|f| (f, op.file_offset))
     }
+}
+
+/// How a refusal to write into a guarded file starts.
+const REFUSED: &str = "refused to overwrite";
+
+/// Whether the file at `path` holds exactly `want` from `offset`: `None` when
+/// there is no such file, `Some(false)` when it is shorter than that or any
+/// byte differs. Reads through a handle of its own, read-only: never the cached
+/// one, which may be on a file replaced since.
+fn holds_bytes(path: &std::path::Path, offset: u64, want: &[u8]) -> std::io::Result<Option<bool>> {
+    let file = match File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    let mut buf = vec![0u8; want.len().min(1 << 20)];
+    let mut done = 0usize;
+    while done < want.len() {
+        let n = (want.len() - done).min(buf.len());
+        match pread_exact(&file, &mut buf[..n], offset + done as u64) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(Some(false)),
+            Err(e) => return Err(e),
+        }
+        if buf[..n] != want[done..done + n] {
+            return Ok(Some(false));
+        }
+        done += n;
+    }
+    Ok(Some(true))
 }
 
 /// The cache blocks from `first_block` up to `end`.
@@ -1362,6 +1439,54 @@ mod disk_tests {
             !holds_descriptor_for(&old),
             "the old path is no longer this torrent's"
         );
+    }
+
+    /// A guarded file is compared, never written: gone, a piece creates it (it
+    /// overwrites nothing); cut short, the piece is refused (writing would
+    /// extend a file that is not this torrent's); whole and identical, the
+    /// piece counts and the file is not touched.
+    #[tokio::test]
+    async fn a_guarded_file_is_compared_not_written() {
+        let content: Vec<u8> = (0..4096u32).map(|i| (i % 251) as u8).collect();
+        let f = fixture_in_pieces("guarded", &content, 4096);
+        let path = f.root.join("data").join("payload.bin");
+        f.torrent
+            .guard_files([std::path::PathBuf::from("payload.bin")].into());
+
+        // Gone: written.
+        assert!(f
+            .disk
+            .write_piece(&f.torrent, 0, content.clone())
+            .await
+            .unwrap());
+        assert_eq!(std::fs::read(&path).unwrap(), content);
+
+        // Cut short: refused, the file as it was.
+        std::fs::write(&path, &content[..100]).unwrap();
+        let why = f
+            .disk
+            .write_piece(&f.torrent, 0, content.clone())
+            .await
+            .unwrap_err();
+        assert!(why.starts_with("refused to overwrite"), "{why}");
+        assert_eq!(std::fs::read(&path).unwrap(), &content[..100]);
+
+        // Whole and identical: accepted, and the file is not written (its
+        // back-dated modification time stays).
+        std::fs::write(&path, &content).unwrap();
+        let old = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        assert!(f
+            .disk
+            .write_piece(&f.torrent, 0, content.clone())
+            .await
+            .unwrap());
+        assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), old);
     }
 
     fn four_piece_fixture(tag: &str) -> (Fixture, Vec<Vec<u8>>) {

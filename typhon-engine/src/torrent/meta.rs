@@ -737,6 +737,11 @@ pub struct TorrentState {
     /// a check; what `checking_progress` is made of. The verdict itself is
     /// still installed in one go at the end, so `progress` stays what it was.
     pub recheck_done: AtomicU32,
+    /// Files (below the save path) that another torrent names or that have
+    /// another hardlink: `write_piece` writes into none of them, it only reads
+    /// the range back and accepts the piece when the bytes are already there.
+    /// Empty for nearly every torrent. See `guard_files`.
+    overwrite_guard: RwLock<Arc<std::collections::HashSet<PathBuf>>>,
 
     /// The torrent's 20-byte piece hashes: loaded from the store the
     /// first time something needs to verify data, dropped again the moment the
@@ -1385,6 +1390,7 @@ impl TorrentState {
             is_removed: AtomicBool::new(false),
             rechecking: AtomicBool::new(false),
             recheck_done: AtomicU32::new(0),
+            overwrite_guard: RwLock::new(Arc::new(std::collections::HashSet::new())),
             piece_hashes: Mutex::new(None),
             v2_checks: Mutex::new(None),
             picker,
@@ -1658,6 +1664,20 @@ impl TorrentState {
             self.status
                 .store(TorrentStatus::Error as u8, Ordering::Relaxed);
         }
+    }
+
+    /// From now on, never write into these files (paths below the save path,
+    /// as `FileOp::path`): a piece whose range falls in one is accepted only if
+    /// the disk already holds exactly those bytes, and then nothing is written
+    /// there. A byte that differs refuses the piece and parks the torrent, the
+    /// file untouched. Replaces the previous set.
+    pub fn guard_files(&self, files: std::collections::HashSet<PathBuf>) {
+        *self.overwrite_guard.write() = Arc::new(files);
+    }
+
+    /// The files `guard_files` set, cheap to clone.
+    pub fn guarded(&self) -> Arc<std::collections::HashSet<PathBuf>> {
+        self.overwrite_guard.read().clone()
     }
 
     /// Forget a fault the operator has dealt with.

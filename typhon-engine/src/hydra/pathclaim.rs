@@ -426,6 +426,7 @@ pub fn prove(
 /// verifies proves every byte of it, the neighbour's included, and nothing is
 /// written. Without it a video whose last piece holds the first bytes of its
 /// `.nfo` could never be proven, however right both files were.
+#[cfg(test)]
 pub fn prove_from(
     meta: &TorrentMeta,
     src_root: &Path,
@@ -433,6 +434,23 @@ pub fn prove_from(
     beside: bool,
     verify: &dyn Fn(u32, &[u8]) -> Option<bool>,
 ) -> HashSet<PathBuf> {
+    prove_detail(meta, src_root, candidates, beside, verify).0
+}
+
+/// `prove_from`, and with it the candidates that are not proven but whose
+/// INTERIOR is: at least one piece lies wholly inside the file and every such
+/// piece verifies. Only the pieces it shares with a neighbour -- the first and
+/// the last -- are missing or wrong, and those are the ones a download writes
+/// through the byte comparison of `TorrentState::guard_files`, which never
+/// touches a byte of a file it cannot prove. A file with no piece of its own
+/// (smaller than a piece) has no interior to vouch for it.
+pub fn prove_detail(
+    meta: &TorrentMeta,
+    src_root: &Path,
+    candidates: &HashSet<PathBuf>,
+    beside: bool,
+    verify: &dyn Fn(u32, &[u8]) -> Option<bool>,
+) -> (HashSet<PathBuf>, HashSet<PathBuf>) {
     let plen = meta.piece_length as u64;
     let mut wanted: HashMap<PathBuf, (u32, u32)> = HashMap::new();
     let mut proven: HashSet<PathBuf> = HashSet::new();
@@ -487,27 +505,47 @@ pub fn prove_from(
             good.insert(p);
         }
     }
+    let mut interior_ok: HashSet<PathBuf> = HashSet::new();
     for (path, (a, b)) in wanted {
         if (a..=b).all(|p| good.contains(&p)) {
             proven.insert(path);
+            continue;
+        }
+        let Some(f) = meta
+            .files
+            .iter()
+            .enumerate()
+            .find(|(i, _)| meta.disk_rel(*i) == path)
+            .map(|(_, f)| f)
+        else {
+            continue;
+        };
+        let (start, end) = (f.offset, f.offset + f.length);
+        let mut own = (a..=b).filter(|p| {
+            let at = *p as u64 * plen;
+            at >= start && at + meta.piece_size(*p) as u64 <= end
+        });
+        let first_own = own.next();
+        if first_own.is_some_and(|p| good.contains(&p)) && own.all(|p| good.contains(&p)) {
+            interior_ok.insert(path);
         }
     }
-    proven
+    (proven, interior_ok)
 }
 
-/// `prove` against a torrent the engine holds.
+/// `prove_detail` against a torrent the engine holds.
 ///
 /// Checked against the SHA-1 table of `metainfo` -- the bytes the caller
 /// already has in hand -- rather than through the engine, which loads its own
 /// copy from the store and keeps it for the torrent's life. Only a v2-only
 /// torrent, which has no SHA-1 table, goes through the engine's merkle check.
-pub fn prove_torrent(
+pub fn prove_torrent_detail(
     t: &TorrentState,
     metainfo: Option<&[u8]>,
     src_root: &Path,
     candidates: &HashSet<PathBuf>,
     beside: bool,
-) -> HashSet<PathBuf> {
+) -> (HashSet<PathBuf>, HashSet<PathBuf>) {
     let table = metainfo.and_then(crate::dedup::pieces);
     let check = |p: u32, d: &[u8]| -> Option<bool> {
         match table {
@@ -519,7 +557,7 @@ pub fn prove_torrent(
             None => t.verify_piece(p, d),
         }
     };
-    prove_from(&t.meta, src_root, candidates, beside, &check)
+    prove_detail(&t.meta, src_root, candidates, beside, &check)
 }
 
 // ---------------------------------------------------------------------------
@@ -804,12 +842,23 @@ impl Job {
         }
 
         if let Some(files) = &self.prove_in_place {
-            let proven = prove_torrent(&t, self.metainfo.as_deref(), &root, files, true);
-            if proven.len() == files.len() {
+            let (proven, interior) =
+                prove_torrent_detail(&t, self.metainfo.as_deref(), &root, files, true);
+            // A file whose every piece of its own verifies and whose only
+            // missing pieces are the ones it shares with a neighbour is not a
+            // reason to hold: those pieces are written through a byte
+            // comparison that never changes a byte of a file it cannot prove.
+            let bad: Vec<&PathBuf> = files
+                .iter()
+                .filter(|f| !proven.contains(*f) && !interior.contains(*f))
+                .collect();
+            // Held or released, nothing writes into these files but through
+            // the comparison.
+            t.guard_files(files.clone());
+            if bad.is_empty() {
                 self.recheck_and_release(&manager, &ih);
             } else {
-                let mut bad: Vec<&PathBuf> =
-                    files.iter().filter(|f| !proven.contains(*f)).collect();
+                let mut bad = bad;
                 bad.sort();
                 let absent = bad.iter().filter(|f| !root.join(f).exists()).count();
                 let msg = format!(
@@ -1951,7 +2000,10 @@ mod tests {
 
     /// Another torrent names the video of this folder; this one has a small
     /// .nfo besides, and the video does not end on a piece boundary: its last
-    /// piece holds the first bytes of the .nfo.
+    /// piece holds the first bytes of the .nfo. The video on disk has a byte
+    /// wrong inside its first piece: nothing proves it is this torrent's, so
+    /// the torrent is held. (With every piece of its own right it would not
+    /// be: see `a_piece_over_a_shared_video_writes_only_the_missing_file`.)
     async fn video_and_nfo(
         name: &str,
     ) -> (crate::api::testing::TestState, PathBuf, String, Vec<u8>) {
@@ -1959,9 +2011,11 @@ mod tests {
         let dir = s.dir.join("d");
         std::fs::create_dir_all(dir.join("Film")).unwrap();
         let video: Vec<u8> = (0..40_000u32).map(|i| (i % 251) as u8).collect();
-        std::fs::write(dir.join("Film").join("a.mkv"), &video).unwrap();
+        let mut damaged = video.clone();
+        damaged[100] ^= 0xff;
+        std::fs::write(dir.join("Film").join("a.mkv"), &damaged).unwrap();
         let blobs = wire_blobs(&s);
-        let ta = torrent_over("Film", &[("a.mkv", &video)], 16384);
+        let ta = torrent_over("Film", &[("a.mkv", &damaged)], 16384);
         let a = add(&s, &ta, &dir, true, true).unwrap();
         learn(&blobs, &a, &ta);
         let tb = torrent_over(
@@ -1985,8 +2039,8 @@ mod tests {
         let t = held(&s, &b);
         let nfo = dir.join("Film").join("a.nfo");
 
-        // The .nfo is not there: the video's last piece cannot be checked, and
-        // a fetch of it would rewrite the video the other torrent holds.
+        // The video is damaged and the .nfo is not there: a fetch would
+        // rewrite the video the other torrent holds.
         press_verify(&s, &b).await;
         assert!(is_error(&t), "no .nfo, nothing proves the video");
         assert!(is_paused(&t));
@@ -1997,7 +2051,8 @@ mod tests {
         assert!(is_error(&t), "a wrong .nfo released the torrent");
         assert!(is_paused(&t));
 
-        // The right one: the whole torrent verifies and the hold is lifted.
+        // The right ones: the whole torrent verifies and the hold is lifted.
+        std::fs::write(dir.join("Film").join("a.mkv"), &video).unwrap();
         std::fs::write(&nfo, b"release notes...").unwrap();
         press_verify(&s, &b).await;
         assert!(
@@ -2036,5 +2091,250 @@ mod tests {
         let msg = why(&t);
         assert!(is_error(&t));
         assert!(msg.contains("1 not on disk, 0 not matching"), "{msg}");
+    }
+    // ---- pieces that touch a file the torrent may not write ---------------
+
+    /// What a file looks like to whoever else holds it: inode, modification
+    /// time (ns) and contents.
+    #[cfg(unix)]
+    fn stamp(p: &Path) -> (u64, i64, i64, Vec<u8>) {
+        use std::os::unix::fs::MetadataExt;
+        let m = std::fs::metadata(p).unwrap();
+        (
+            m.ino(),
+            m.mtime(),
+            m.mtime_nsec(),
+            std::fs::read(p).unwrap(),
+        )
+    }
+
+    /// Back-date a file, so that any write to it moves its mtime.
+    #[cfg(unix)]
+    fn age(p: &Path) {
+        let f = std::fs::OpenOptions::new().write(true).open(p).unwrap();
+        f.set_modified(std::time::UNIX_EPOCH + Duration::from_secs(1_000_000_000))
+            .unwrap();
+    }
+
+    /// Wait for the recheck an add starts to be over.
+    async fn settled(t: &Arc<TorrentState>) {
+        for _ in 0..400 {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            if !t.rechecking.load(std::sync::atomic::Ordering::SeqCst)
+                && status_of(t) != typhon_engine::torrent::meta::TorrentStatus::Checking as u8
+            {
+                return;
+            }
+        }
+        panic!("the recheck never ended");
+    }
+
+    /// The pieces the torrent does not hold, as numbers.
+    fn missing(t: &TorrentState) -> Vec<u32> {
+        let p = t.picker.get().unwrap().lock().unwrap();
+        (0..t.meta.num_pieces())
+            .filter(|i| !p.has_piece(*i))
+            .collect()
+    }
+
+    /// Deliver each missing piece the way a peer does, from `stream` (every
+    /// file of the torrent end to end). How many were delivered, and how many
+    /// of them were owned.
+    async fn fetch_missing(
+        s: &crate::api::testing::TestState,
+        t: &Arc<TorrentState>,
+        stream: &[u8],
+    ) -> (usize, usize) {
+        let disk = s.state.engines.get("hoard").unwrap().manager.disk().clone();
+        let plen = t.meta.piece_length as usize;
+        let (mut sent, mut owned) = (0, 0);
+        for p in missing(t) {
+            let (a, b) = (
+                p as usize * plen,
+                ((p as usize + 1) * plen).min(stream.len()),
+            );
+            sent += 1;
+            if typhon_engine::peer::download::commit_piece(t, &disk, p, stream[a..b].to_vec()).await
+            {
+                owned += 1;
+            }
+        }
+        (sent, owned)
+    }
+
+    /// Let the engine read the .torrent of the one torrent a test adds.
+    fn wire_one(s: &crate::api::testing::TestState, bytes: &[u8]) {
+        let blob = bytes.to_vec();
+        s.state
+            .engines
+            .get("hoard")
+            .unwrap()
+            .manager
+            .set_blob_source(Arc::new(move |_: &str| Some(blob.clone())));
+    }
+
+    /// One video whose last piece holds the first bytes of its `.nfo`, the
+    /// video hardlinked in a library, the `.nfo` nowhere. The video's bytes on
+    /// disk are `on_disk`; the torrent describes `video`.
+    #[cfg(unix)]
+    async fn shared_video_missing_nfo(
+        name: &str,
+        video: &[u8],
+        on_disk: &[u8],
+    ) -> (
+        crate::api::testing::TestState,
+        PathBuf,
+        PathBuf,
+        Arc<TorrentState>,
+        Vec<u8>,
+    ) {
+        let s = crate::api::testing::state(name);
+        let dir = s.dir.join("d");
+        let lib = s.dir.join("library");
+        std::fs::create_dir_all(dir.join("Film")).unwrap();
+        std::fs::create_dir_all(&lib).unwrap();
+        let mkv = dir.join("Film").join("a.mkv");
+        std::fs::write(&mkv, on_disk).unwrap();
+        std::fs::hard_link(&mkv, lib.join("a.mkv")).unwrap();
+        age(&mkv);
+        let nfo = b"release notes...";
+        let bytes = torrent_over("Film", &[("a.mkv", video), ("a.nfo", nfo)], 16384);
+        wire_one(&s, &bytes);
+        let hash = add(&s, &bytes, &dir, false, false).unwrap();
+        let t = held(&s, &hash);
+        settled(&t).await;
+        let stream: Vec<u8> = video.iter().chain(nfo.iter()).copied().collect();
+        (s, dir, lib, t, stream)
+    }
+
+    /// The video is right and shared, the last piece also holds the missing
+    /// `.nfo`: the torrent fetches that piece, writes the `.nfo`, and does not
+    /// write a byte of the video -- not even the same ones.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_piece_over_a_shared_video_writes_only_the_missing_file() {
+        let video: Vec<u8> = (0..40_000u32).map(|i| (i % 251) as u8).collect();
+        let (s, dir, lib, t, stream) =
+            shared_video_missing_nfo("pathclaim-same", &video, &video).await;
+        let before = stamp(&dir.join("Film").join("a.mkv"));
+        assert!(
+            !is_error(&t),
+            "held although its only missing piece is an edge one: {}",
+            why(&t)
+        );
+        assert_eq!(missing(&t), vec![2], "the video's own pieces verified");
+
+        let (sent, owned) = fetch_missing(&s, &t, &stream).await;
+        assert_eq!((sent, owned), (1, 1), "the edge piece was refused");
+        assert!(!is_error(&t), "{}", why(&t));
+        assert!(crate::workers::holds_everything(&t), "not complete");
+        assert_eq!(
+            std::fs::read(dir.join("Film").join("a.nfo")).unwrap(),
+            b"release notes..."
+        );
+        assert_eq!(
+            stamp(&dir.join("Film").join("a.mkv")),
+            before,
+            "the shared video was written to"
+        );
+        assert_eq!(
+            stamp(&lib.join("a.mkv")),
+            before,
+            "and so was its other name"
+        );
+    }
+
+    /// The same, but the video on disk differs from the torrent's in the very
+    /// bytes the edge piece covers: every piece of its own verifies, the edge
+    /// one cannot be written without changing the shared file. Refused, the
+    /// file untouched byte for byte, the torrent in error.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_piece_that_would_change_a_shared_video_is_refused() {
+        let video: Vec<u8> = (0..40_000u32).map(|i| (i % 251) as u8).collect();
+        let mut other = video.clone();
+        other[39_999] ^= 0xff;
+        let (s, dir, lib, t, stream) =
+            shared_video_missing_nfo("pathclaim-differs", &video, &other).await;
+        let before = stamp(&dir.join("Film").join("a.mkv"));
+        assert_eq!(before.3, other);
+
+        let (sent, owned) = fetch_missing(&s, &t, &stream).await;
+        assert_eq!((sent, owned), (1, 0), "the piece was accepted");
+        assert!(is_error(&t), "no error");
+        assert!(why(&t).contains("refused to overwrite"), "{}", why(&t));
+        assert_eq!(
+            stamp(&dir.join("Film").join("a.mkv")),
+            before,
+            "the shared video changed"
+        );
+        assert_eq!(stamp(&lib.join("a.mkv")), before);
+        assert!(
+            !dir.join("Film").join("a.nfo").exists(),
+            "half a piece was written"
+        );
+    }
+
+    /// The production case in small: a pack of episodes, each a video hardlinked
+    /// in a library and an `.nfo` that is nowhere, a `.nfo` for the release
+    /// besides; the pieces hold a video's tail, its `.nfo` and the next
+    /// video's head. Held for good before; now it downloads what is missing and
+    /// reaches 100 % without touching a video.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_pack_of_shared_videos_with_missing_nfos_completes() {
+        let s = crate::api::testing::state("pathclaim-pack");
+        let dir = s.dir.join("d");
+        let lib = s.dir.join("library");
+        std::fs::create_dir_all(&lib).unwrap();
+        let nfo = |n: u8| -> Vec<u8> { (0..300u32).map(|i| (i as u8) ^ n).collect() };
+        let video = |n: u8| -> Vec<u8> {
+            (0..20_000u32)
+                .map(|i| ((i * 7 + n as u32 * 31) % 251) as u8)
+                .collect()
+        };
+        let mut files: Vec<(String, Vec<u8>)> = vec![("rel.nfo".into(), nfo(0))];
+        for ep in 1..=3u8 {
+            files.push((format!("ep{ep}/ep{ep}.mkv"), video(ep)));
+            files.push((format!("ep{ep}/ep{ep}.nfo"), nfo(ep)));
+        }
+        let mut stamps = Vec::new();
+        for ep in 1..=3u8 {
+            let mkv = dir
+                .join("Rel")
+                .join(format!("ep{ep}"))
+                .join(format!("ep{ep}.mkv"));
+            std::fs::create_dir_all(mkv.parent().unwrap()).unwrap();
+            std::fs::write(&mkv, video(ep)).unwrap();
+            std::fs::hard_link(&mkv, lib.join(format!("ep{ep}.mkv"))).unwrap();
+            age(&mkv);
+            stamps.push((mkv.clone(), stamp(&mkv)));
+        }
+        let refs: Vec<(&str, &[u8])> = files
+            .iter()
+            .map(|(p, d)| (p.as_str(), d.as_slice()))
+            .collect();
+        let bytes = torrent_over("Rel", &refs, 4096);
+        wire_one(&s, &bytes);
+        let hash = add(&s, &bytes, &dir, false, false).unwrap();
+        let t = held(&s, &hash);
+        settled(&t).await;
+        assert!(!is_error(&t), "held for good: {}", why(&t));
+        assert!(!missing(&t).is_empty(), "the .nfo files are not there");
+
+        let stream: Vec<u8> = files.iter().flat_map(|(_, d)| d.iter().copied()).collect();
+        let (sent, owned) = fetch_missing(&s, &t, &stream).await;
+        assert_eq!(sent, owned, "a piece was refused: {}", why(&t));
+        assert!(missing(&t).is_empty());
+        assert!(crate::workers::holds_everything(&t), "not at 100 %");
+        assert!(!is_error(&t), "{}", why(&t));
+        for (p, d) in &files {
+            if p.ends_with(".nfo") {
+                assert_eq!(&std::fs::read(dir.join("Rel").join(p)).unwrap(), d, "{p}");
+            }
+        }
+        for (mkv, before) in stamps {
+            assert_eq!(stamp(&mkv), before, "{mkv:?} was written to");
+        }
     }
 }
