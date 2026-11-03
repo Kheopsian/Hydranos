@@ -1045,6 +1045,7 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
         bench,
         sessions: Default::default(),
     };
+    pathclaim::install_claim_probe(&state);
     // Started once the shared config exists, so a changed `[daemon] exit_probe`
     // applies at the next pass.
     netprobe::spawn(

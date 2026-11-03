@@ -27,6 +27,19 @@ pub enum TorrentStatus {
     Error = 4,
 }
 
+/// Per file of a torrent, whether a piece written into it must be compared with
+/// what the disk holds instead of written: the file existed when the torrent
+/// first touched it AND has another hardlink or is named by another torrent.
+/// A file the torrent creates itself is never one (nothing else can name it
+/// yet), so a normal download asks once per file and compares nothing.
+#[derive(Debug, Default)]
+pub struct WriteVerdicts {
+    pub files: std::collections::HashMap<PathBuf, bool>,
+    /// The files other torrents name, asked once, for the first existing file
+    /// that no hardlink gives away.
+    pub claimed: Option<Arc<std::collections::HashSet<PathBuf>>>,
+}
+
 #[derive(Debug, Clone)]
 pub struct FileEntry {
     pub path: PathBuf,
@@ -742,6 +755,9 @@ pub struct TorrentState {
     /// the range back and accepts the piece when the bytes are already there.
     /// Empty for nearly every torrent. See `guard_files`.
     overwrite_guard: RwLock<Arc<std::collections::HashSet<PathBuf>>>,
+    /// What `write_piece` found out about each file it writes into, once: see
+    /// `WriteVerdicts`.
+    write_verdicts: Arc<parking_lot::Mutex<WriteVerdicts>>,
     /// `error_msg` holds a note a recheck left (nothing was found where it was
     /// expected), not a fault: the first piece that lands clears it.
     recheck_note: AtomicBool,
@@ -1394,6 +1410,7 @@ impl TorrentState {
             rechecking: AtomicBool::new(false),
             recheck_done: AtomicU32::new(0),
             overwrite_guard: RwLock::new(Arc::new(std::collections::HashSet::new())),
+            write_verdicts: Arc::default(),
             recheck_note: AtomicBool::new(false),
             piece_hashes: Mutex::new(None),
             v2_checks: Mutex::new(None),
@@ -1677,6 +1694,17 @@ impl TorrentState {
     /// file untouched. Replaces the previous set.
     pub fn guard_files(&self, files: std::collections::HashSet<PathBuf>) {
         *self.overwrite_guard.write() = Arc::new(files);
+    }
+
+    /// The per-file verdicts of `write_piece`, to share with its blocking task.
+    pub fn write_verdicts(&self) -> Arc<parking_lot::Mutex<WriteVerdicts>> {
+        self.write_verdicts.clone()
+    }
+
+    /// Forget what was found about the files: the next piece asks again. A
+    /// recheck calls it, so a file linked or claimed since is seen.
+    pub fn forget_write_verdicts(&self) {
+        *self.write_verdicts.lock() = WriteVerdicts::default();
     }
 
     /// The files `guard_files` set, cheap to clone.

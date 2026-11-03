@@ -928,6 +928,23 @@ impl Job {
 // Rechecks of torrents already held
 // ---------------------------------------------------------------------------
 
+/// Tell every engine's disk how to find the files other torrents name, so a
+/// piece is compared with the disk before it is written into one -- whatever
+/// the process has or has not proven since it started.
+pub fn install_claim_probe(state: &AppState) {
+    for e in state.engines.engines() {
+        let st = state.clone();
+        e.disk.set_claim_probe(Arc::new(move |ih| {
+            st.engines
+                .engines()
+                .iter()
+                .find_map(|e| e.manager.get(ih))
+                .map(|t| protected_files(&st, &t))
+                .unwrap_or_default()
+        }));
+    }
+}
+
 /// The files of `t` (relative to its root) that another torrent names with
 /// other bytes.
 pub fn protected_files(state: &AppState, t: &TorrentState) -> HashSet<PathBuf> {

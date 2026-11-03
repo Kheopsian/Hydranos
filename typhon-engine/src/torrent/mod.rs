@@ -3183,6 +3183,7 @@ impl TorrentManager {
         // Read the files as they are now: a handle cached before the recheck
         // may be on a file the user has since replaced under the same name.
         crate::disk::evict_fds(&data_files(&t));
+        t.forget_write_verdicts();
         // Recheck is authoritative, but it must not publish a verdict it does
         // not have yet. Clearing the live picker up front left the torrent at
         // 0% for the entire scan, and the five-minute state sweep -- whose
