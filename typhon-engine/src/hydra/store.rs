@@ -316,6 +316,13 @@ CREATE TABLE IF NOT EXISTS jobs (
     updated_at INTEGER NOT NULL DEFAULT 0);
 ";
 
+// How many times `rows_by_save_path` ran: what a test holds a path that must
+// not scan a folder to.
+#[cfg(test)]
+thread_local! {
+    pub static ROWS_BY_SAVE_PATH_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Split a `tags` column into tag names.
 ///
 /// The column is comma-separated, EXCEPT that some rows were written with a
@@ -1649,6 +1656,8 @@ impl Store {
         root: &str,
         sep: char,
     ) -> anyhow::Result<Vec<(String, String)>> {
+        #[cfg(test)]
+        ROWS_BY_SAVE_PATH_CALLS.with(|c| c.set(c.get() + 1));
         let mut out: Vec<(String, String)> = Vec::new();
         {
             let mut q = self.conn.prepare_cached(

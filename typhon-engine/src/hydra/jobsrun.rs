@@ -793,7 +793,7 @@ pub fn scan_claims(
 /// The files of `mine` that `other` names, with the size it expects, or None.
 /// `root`/`my_top` as in `scan_claims`: a prefix test first, the file list
 /// only for a torrent on the same branch.
-fn claim_of(
+pub(crate) fn claim_of(
     other: &typhon_engine::torrent::meta::TorrentState,
     root: &std::path::Path,
     my_top: Option<&std::ffi::OsStr>,

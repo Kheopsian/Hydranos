@@ -330,6 +330,17 @@ pub fn claimants(
 ) -> Vec<Claimant> {
     let keys: HashSet<PathBuf> = mine.iter().map(|(p, _)| path_key(p)).collect();
     let hits = crate::jobsrun::scan_claims(state, save_path, top, &keys, skip);
+    claimants_from(state, bytes, hits)
+}
+
+/// The claimants of the torrents `hits` found, each with whether it holds the
+/// very same bytes as `bytes`.
+#[allow(clippy::type_complexity)]
+fn claimants_from(
+    state: &AppState,
+    bytes: &[u8],
+    hits: Vec<(Arc<TorrentState>, Vec<(PathBuf, u64)>)>,
+) -> Vec<Claimant> {
     let mut out: Vec<Claimant> = Vec::with_capacity(hits.len());
     for (other, files) in hits {
         let hash = typhon_engine::torrent::hex_encode(&other.meta.info_hash);
@@ -946,18 +957,181 @@ impl Job {
 // Rechecks of torrents already held
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// The claim probe of the write path
+// ---------------------------------------------------------------------------
+
+/// How long the roots index is trusted before it is built again.
+const ROOTS_TTL: Duration = Duration::from_secs(60);
+
+/// Which torrents hang off the same root folder, to answer "does another
+/// torrent name this file" without reading the store: a lookup per ancestor of
+/// the torrent's own root, then the file lists of the few torrents found.
+///
+/// Only what can be a claimant is kept: the roots that two or more torrents
+/// share (their folder, or their file for a single-file torrent), and every
+/// torrent that has no common root (its files sit under several names of its
+/// save path, rare). A million torrents with a folder each leave an empty
+/// index. Built from what the engines hold in memory, in two passes over their
+/// torrents, and again after `ROOTS_TTL`: a torrent added since is known to the
+/// add-time check, which isolates it from any it would clash with.
+#[derive(Default)]
+struct SharedRoots {
+    built: Option<Instant>,
+    /// root key -> (engine, torrent) of every torrent with that root.
+    same_root: HashMap<u64, Vec<(usize, [u8; 20])>>,
+    /// save path key -> torrents with no common root.
+    rootless: HashMap<u64, Vec<(usize, [u8; 20])>>,
+}
+
+fn path_hash(p: &Path) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    path_key(p)
+        .to_string_lossy()
+        .to_lowercase()
+        .trim_end_matches(['/', '\\'])
+        .hash(&mut h);
+    h.finish()
+}
+
+/// The root folder of `t` and whether it has one.
+fn root_of_torrent(t: &TorrentState) -> (PathBuf, bool) {
+    let save = t.save_path.read().clone();
+    match t.meta.common_root() {
+        Some(top) => (save.join(top), true),
+        None => (save, false),
+    }
+}
+
+impl SharedRoots {
+    fn build(state: &AppState) -> Self {
+        let mut count: HashMap<u64, u8> = HashMap::new();
+        for e in state.engines.engines() {
+            for t in e.manager.all() {
+                let (root, has) = root_of_torrent(&t);
+                if has {
+                    let c = count.entry(path_hash(&root)).or_insert(0);
+                    *c = c.saturating_add(1);
+                }
+            }
+        }
+        let mut out = SharedRoots {
+            built: Some(Instant::now()),
+            ..Default::default()
+        };
+        for (i, e) in state.engines.engines().iter().enumerate() {
+            for t in e.manager.all() {
+                let (root, has) = root_of_torrent(&t);
+                let key = path_hash(&root);
+                if !has {
+                    out.rootless.entry(key).or_default().push((i, t.info_hash));
+                } else if count.get(&key).copied().unwrap_or(0) >= 2 {
+                    out.same_root.entry(key).or_default().push((i, t.info_hash));
+                }
+            }
+        }
+        out
+    }
+
+    /// The torrents that may name a file of `t`, other than `t` itself.
+    fn candidates(&self, state: &AppState, t: &TorrentState) -> Vec<Arc<TorrentState>> {
+        let (root, has) = root_of_torrent(t);
+        let mut seen: HashSet<(usize, [u8; 20])> = HashSet::new();
+        let mut out = Vec::new();
+        let engines = state.engines.engines();
+        let mut take = |list: Option<&Vec<(usize, [u8; 20])>>| {
+            for (i, ih) in list.into_iter().flatten() {
+                if *ih == t.info_hash || !seen.insert((*i, *ih)) {
+                    continue;
+                }
+                if let Some(o) = engines.get(*i).and_then(|e| e.manager.get(ih)) {
+                    out.push(o);
+                }
+            }
+        };
+        if has {
+            take(self.same_root.get(&path_hash(&root)));
+        }
+        for a in root.ancestors() {
+            take(self.rootless.get(&path_hash(a)));
+        }
+        out
+    }
+}
+
+/// `protected_files` through the roots index: no scan of a folder, and no
+/// store mutex but for the point reads of the metainfo of `t` and of each
+/// claimant (`.torrent` blobs, by primary key).
+fn protected_files_indexed(
+    state: &AppState,
+    t: &TorrentState,
+    roots: &Mutex<Arc<SharedRoots>>,
+    build: &Mutex<()>,
+) -> HashSet<PathBuf> {
+    let idx = {
+        let fresh = |g: &Arc<SharedRoots>| g.built.is_some_and(|b| b.elapsed() < ROOTS_TTL);
+        let cur = roots.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        if fresh(&cur) {
+            cur
+        } else {
+            // One build at a time, and not under the lock the others read it
+            // through: a storm of resumed torrents builds it once.
+            let _one = build.lock().unwrap_or_else(|e| e.into_inner());
+            let cur = roots.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            if fresh(&cur) {
+                cur
+            } else {
+                let built = Arc::new(SharedRoots::build(state));
+                *roots.lock().unwrap_or_else(|e| e.into_inner()) = built.clone();
+                built
+            }
+        }
+    };
+    let hash = typhon_engine::torrent::hex_encode(&t.meta.info_hash);
+    let Some(bytes) = ({
+        let store = state.store.lock().unwrap_or_else(|e| e.into_inner());
+        store.torrent_blob(&hash).ok().flatten()
+    }) else {
+        return HashSet::new();
+    };
+    let save = t.save_path.read().clone();
+    let all = files_of(&t.meta, &save);
+    let mine: Vec<(PathBuf, u64)> = all.iter().map(|(a, _, l)| (a.clone(), *l)).collect();
+    let keys: HashSet<PathBuf> = mine.iter().map(|(p, _)| path_key(p)).collect();
+    let top = t.meta.common_root();
+    let ih = t.meta.info_hash;
+    let skip = move |o: &TorrentState| o.meta.info_hash == ih;
+    #[allow(clippy::type_complexity)]
+    let hits: Vec<(Arc<TorrentState>, Vec<(PathBuf, u64)>)> = idx
+        .candidates(state, t)
+        .into_iter()
+        .filter_map(|o| {
+            crate::jobsrun::claim_of(&o, &save, top.as_deref(), &keys, &skip).map(|h| (o, h))
+        })
+        .collect();
+    let found = claimants_from(state, &bytes, hits);
+    guarded_from(&all, &mine, &found, false)
+}
+
 /// Tell every engine's disk how to find the files other torrents name, so a
 /// piece is compared with the disk before it is written into one -- whatever
 /// the process has or has not proven since it started.
+///
+/// Cost of one answer: a lookup per ancestor folder in the roots index, one
+/// metainfo read for the torrent and one for each torrent found to share a
+/// file; no folder is scanned and no row of the store is listed.
 pub fn install_claim_probe(state: &AppState) {
+    let roots = Arc::new(Mutex::new(Arc::new(SharedRoots::default())));
+    let build = Arc::new(Mutex::new(()));
     for e in state.engines.engines() {
-        let st = state.clone();
+        let (st, roots, build) = (state.clone(), roots.clone(), build.clone());
         e.disk.set_claim_probe(Arc::new(move |ih| {
             st.engines
                 .engines()
                 .iter()
                 .find_map(|e| e.manager.get(ih))
-                .map(|t| protected_files(&st, &t))
+                .map(|t| protected_files_indexed(&st, &t, &roots, &build))
                 .unwrap_or_default()
         }));
     }
@@ -987,7 +1161,17 @@ fn guarded_files(state: &AppState, t: &TorrentState, links: bool) -> HashSet<Pat
     let ih = t.meta.info_hash;
     let skip = move |o: &TorrentState| o.meta.info_hash == ih;
     let found = claimants(state, &bytes, &save, top.as_deref(), &mine, &skip);
-    let ov = overlap(&mine, &found);
+    guarded_from(&all, &mine, &found, links)
+}
+
+/// `guarded_files` from the claimants already found.
+fn guarded_from(
+    all: &[(PathBuf, PathBuf, u64)],
+    mine: &[(PathBuf, u64)],
+    found: &[Claimant],
+    links: bool,
+) -> HashSet<PathBuf> {
+    let ov = overlap(mine, found);
     let rel_of: HashMap<PathBuf, PathBuf> = all
         .iter()
         .map(|(a, r, _)| (path_key(a), r.clone()))
@@ -1003,7 +1187,7 @@ fn guarded_files(state: &AppState, t: &TorrentState, links: bool) -> HashSet<Pat
             .iter()
             .flat_map(|c| c.files.iter().map(|(p, _)| path_key(p)))
             .collect();
-        out.extend(foreign_links(&all, &claimed));
+        out.extend(foreign_links(all, &claimed));
     }
     out
 }
@@ -2511,5 +2695,73 @@ mod tests {
         assert_eq!(accepted_interior(one.clone(), true), one);
         assert!(accepted_interior(one, false).is_empty());
         assert_eq!(INTERIOR_ONLY_OK, cfg!(unix));
+    }
+    /// The probe the write path asks names the files another torrent holds
+    /// without listing a folder of the store: it reads no `rows_by_save_path`
+    /// (counted), and gives the answer the full scan gives. Through the disk, a
+    /// piece of a torrent that was never proven is then refused over such a
+    /// file, which nothing but its single link told apart from the torrent's own.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_write_probe_asks_no_folder_scan_and_protects_a_claimed_file() {
+        let s = verify_cfg("pathclaim-probe");
+        install_claim_probe(&s.state);
+        let dir = s.dir.join("d");
+        std::fs::create_dir_all(dir.join("P")).unwrap();
+        let first: Vec<u8> = (0..20_000u32).map(|i| (i % 241) as u8).collect();
+        let second: Vec<u8> = (0..20_000u32).map(|i| (i % 239) as u8).collect();
+        std::fs::write(dir.join("P").join("x.bin"), &first).unwrap();
+        add(
+            &s,
+            &torrent_over("P", &[("x.bin", &first)], 16384),
+            &dir,
+            true,
+            true,
+        )
+        .unwrap();
+        // Many torrents in the same folder, none of them on the same name.
+        for n in 0..30u32 {
+            let name = format!("other{n}");
+            std::fs::create_dir_all(dir.join(&name)).unwrap();
+            add(
+                &s,
+                &torrent_over(&name, &[("y.bin", &[n as u8; 100])], 16384),
+                &dir,
+                true,
+                true,
+            )
+            .unwrap();
+        }
+        let tb = torrent_over("P", &[("x.bin", &second)], 16384);
+        wire_one(&s, &tb);
+        let b = add(&s, &tb, &dir, false, false).unwrap();
+        let t = held(&s, &b);
+        settled(&t).await;
+
+        let roots = Mutex::new(Arc::new(SharedRoots::default()));
+        let build = Mutex::new(());
+        let rows = || crate::store::ROWS_BY_SAVE_PATH_CALLS.with(|c| c.get());
+        let before = rows();
+        let got = protected_files_indexed(&s.state, &t, &roots, &build);
+        assert_eq!(rows(), before, "the probe listed a folder");
+        let want: HashSet<PathBuf> = [PathBuf::from("P/x.bin")].into_iter().collect();
+        assert_eq!(got, want);
+        assert_eq!(protected_files(&s.state, &t), want, "the full scan differs");
+        assert!(rows() > before, "the counter does not count");
+
+        // Never proven (legacy add), and the file has one link: only the claim
+        // protects it.
+        let stream: Vec<u8> = second.clone();
+        let (sent, owned) = fetch_missing(&s, &t, &stream).await;
+        assert!(sent > 0);
+        assert_eq!(
+            owned, 0,
+            "a piece was written over the other torrent's file"
+        );
+        assert_eq!(
+            std::fs::read(dir.join("P").join("x.bin")).unwrap(),
+            first,
+            "the other torrent's file changed"
+        );
+        assert!(why(&t).contains("refused to overwrite"), "{}", why(&t));
     }
 }
