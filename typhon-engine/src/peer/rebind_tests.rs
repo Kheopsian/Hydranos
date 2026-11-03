@@ -28,6 +28,29 @@ fn free_port() -> u16 {
         .port()
 }
 
+/// How long a port closed a moment ago may still read as busy. A neighbour
+/// test that spawns a child process (the `--exact` re-runs in `peer`) forks
+/// the whole test process, and until that child's `exec` closes its copy the
+/// child keeps every listener the parent just closed alive: the port is
+/// released on the parent's side and busy all the same, for a few
+/// milliseconds. A socket this code really kept would still be there when the
+/// time is up.
+const SETTLE: Duration = Duration::from_secs(3);
+
+/// `attempt` until it is no longer refused for a busy port, or [`SETTLE`] is
+/// out; the last result is returned either way.
+fn settled<T>(mut attempt: impl FnMut() -> Result<T, String>) -> Result<T, String> {
+    let until = std::time::Instant::now() + SETTLE;
+    loop {
+        let r = attempt();
+        let busy = matches!(&r, Err(e) if e.contains("in use"));
+        if !busy || std::time::Instant::now() >= until {
+            return r;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 fn binding(id: u32, ip: &str, port: u16) -> ResolvedBinding {
     ResolvedBinding {
         id,
@@ -58,7 +81,7 @@ impl Listening {
     /// round.
     fn start(tag: &str, cur: Vec<ResolvedBinding>, utp: UtpHandle) -> Listening {
         let (mgr, disk) = engine(tag);
-        let first = bind_round(&cur).expect("first round binds");
+        let first = settled(|| bind_round(&cur)).expect("first round binds");
         let handles = spawn_tcp(first, &mgr, &disk, &utp);
         let utp_task = spawn_utp(&utp, &cur, cur[0].addr.port(), &mgr, &disk);
         Listening {
@@ -82,6 +105,22 @@ impl Listening {
             &self.disk,
         )
         .await
+    }
+
+    /// `rebind` to a port that was free a moment ago: asked again while it
+    /// reads as busy (see SETTLE). For the tests that expect the move to
+    /// succeed; a port really held keeps answering "in use" and the last
+    /// answer is returned.
+    async fn rebind_to_free(&mut self, port: u16) -> Result<u16, String> {
+        let until = std::time::Instant::now() + SETTLE;
+        loop {
+            let r = self.rebind(port).await;
+            let busy = matches!(&r, Err(e) if e.contains("in use"));
+            if !busy || std::time::Instant::now() >= until {
+                return r;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
     }
 }
 
@@ -140,7 +179,7 @@ async fn a_rebind_moves_every_binding_and_frees_the_old_port() {
         UtpHandle::off(),
     );
     let now = free_port();
-    assert_eq!(l.rebind(now).await, Ok(now));
+    assert_eq!(l.rebind_to_free(now).await, Ok(now));
     for b in &l.cur {
         assert_eq!(
             (b.addr.port(), b.advertised_port),
@@ -171,14 +210,29 @@ async fn a_round_that_cannot_bind_one_binding_holds_none() {
     let squatter = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let busy = squatter.local_addr().unwrap().port();
     let free = free_port();
-    let err = bind_round(&[binding(1, "127.0.0.1", free), binding(2, "127.0.0.1", busy)])
-        .expect_err("the second binding is busy");
+    let round = [binding(1, "127.0.0.1", free), binding(2, "127.0.0.1", busy)];
+    // The round must fail on the SQUATTED port. Failing on `free` instead
+    // means a neighbour held that one a moment (see SETTLE), not that the
+    // round did what the test is about: ask again.
+    let err = settled(|| match bind_round(&round) {
+        Err(e) if !e.contains(&format!("cannot bind 127.0.0.1:{busy}")) => {
+            Err(format!("in use: {e}"))
+        }
+        r => r.map(|_| ()),
+    })
+    .expect_err("the second binding is busy");
     assert!(
         err.contains(&format!("cannot bind 127.0.0.1:{busy}")),
         "{err}"
     );
-    std::net::TcpListener::bind(("127.0.0.1", free))
-        .expect("the first binding's socket was kept after the failure");
+    // Rebindable at once, or within SETTLE: only a socket the failed round
+    // kept would still hold it after that.
+    settled(|| {
+        std::net::TcpListener::bind(("127.0.0.1", free))
+            .map(drop)
+            .map_err(|e| format!("in use: {e}"))
+    })
+    .expect("the first binding's socket was kept after the failure");
 }
 
 /// An `enable_ipv6` listener sits BESIDE the v4 one, so it must not also take
@@ -214,7 +268,7 @@ async fn a_rebind_moves_the_utp_socket_with_the_tcp_listeners() {
     let old_udp = utp.get().unwrap().bind_addr().port();
     let mut l = Listening::start("utp-move", vec![binding(1, "127.0.0.1", was)], utp);
     let now = free_port();
-    assert_eq!(l.rebind(now).await, Ok(now));
+    assert_eq!(l.rebind_to_free(now).await, Ok(now));
     assert_eq!(
         l.utp.get().unwrap().bind_addr().port(),
         now,
@@ -280,7 +334,7 @@ async fn an_engine_without_utp_rebinds_tcp_only() {
         UtpHandle::off(),
     );
     let now = free_port();
-    assert_eq!(l.rebind(now).await, Ok(now));
+    assert_eq!(l.rebind_to_free(now).await, Ok(now));
     assert!(
         l.utp.get().is_none() && l.utp_task.is_none(),
         "a uTP socket appeared"
