@@ -2604,6 +2604,9 @@ impl TorrentManager {
     fn swap_save_path(&self, t: &TorrentState, new: std::path::PathBuf) -> std::path::PathBuf {
         let mut m = self.counts();
         let was = std::mem::replace(&mut *t.save_path.write(), new.clone());
+        // What was found about the files at the old place says nothing of the
+        // new one (and a move that is undone is a move too).
+        t.forget_write_verdicts();
         if was != new {
             self.note_arrival(t.meta.info_hash);
         }

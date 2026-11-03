@@ -533,6 +533,22 @@ pub fn prove_detail(
     (proven, interior_ok)
 }
 
+/// Whether a file proven by its interior only is accepted. The comparison that
+/// makes it safe tells a shared file by its link count, which only Unix gives
+/// the engine; elsewhere a file that is not wholly proven keeps the old rule
+/// (held in place, downloaded again when isolated), so that a restart, which
+/// forgets what the proof job set, can never leave one to be written blind.
+const INTERIOR_ONLY_OK: bool = cfg!(unix);
+
+/// `interior` as the platform accepts it.
+fn accepted_interior(interior: HashSet<PathBuf>, allowed: bool) -> HashSet<PathBuf> {
+    if allowed {
+        interior
+    } else {
+        HashSet::new()
+    }
+}
+
 /// `prove_detail` against a torrent the engine holds.
 ///
 /// Checked against the SHA-1 table of `metainfo` -- the bytes the caller
@@ -811,6 +827,7 @@ impl Job {
         if let Some((src_root, candidates)) = &self.isolate_from {
             let (proven, interior) =
                 prove_torrent_detail(&t, self.metainfo.as_deref(), src_root, candidates, false);
+            let interior = accepted_interior(interior, INTERIOR_ONLY_OK);
             // A file only its interior proves is linked too: the pieces it
             // shares with a file this torrent does not have (another .nfo
             // there) are written through the byte comparison, which leaves the
@@ -853,6 +870,7 @@ impl Job {
         if let Some(files) = &self.prove_in_place {
             let (proven, interior) =
                 prove_torrent_detail(&t, self.metainfo.as_deref(), &root, files, true);
+            let interior = accepted_interior(interior, INTERIOR_ONLY_OK);
             // A file whose every piece of its own verifies and whose only
             // missing pieces are the ones it shares with a neighbour is not a
             // reason to hold: those pieces are written through a byte
@@ -881,11 +899,11 @@ impl Job {
                     .map(|f| f.to_string_lossy().replace('\\', "/"))
                     .unwrap_or_default();
                 let msg = format!(
-                    "{} file(s) cannot be proven to be this torrent's ({} not on disk, {} not \
-                     matching; first: {first}); some of them are named by another torrent or \
-                     hardlinked elsewhere, so the torrent is held paused rather than overwrite \
-                     them. Put the right bytes there or free the file from the other torrent or \
-                     link, then recheck",
+                    "{} file(s) are missing or cannot be proven to be this torrent's ({} not on \
+                     disk, {} not matching; first: {first}); some are named by another torrent or \
+                     hardlinked elsewhere, so it is held paused rather than overwrite them. Put \
+                     the right bytes there or free the file from the other torrent or link, then \
+                     recheck",
                     gone.len() + mismatching.len(),
                     gone.len(),
                     mismatching.len(),
@@ -2479,6 +2497,19 @@ mod tests {
         let msg = why(&t);
         assert!(msg.contains("2 not on disk, 1 not matching"), "{msg}");
         assert!(msg.contains("first: Film/ep2/b.mkv"), "{msg}");
-        assert!(msg.contains("3 file(s) cannot be proven"), "{msg}");
+        assert!(
+            msg.contains("3 file(s) are missing or cannot be proven"),
+            "{msg}"
+        );
+    }
+
+    /// Where the link count is not known to the engine, a file proven by its
+    /// interior alone is not accepted: the old rule holds.
+    #[test]
+    fn an_interior_only_proof_is_refused_where_links_are_not_seen() {
+        let one: HashSet<PathBuf> = [PathBuf::from("a.mkv")].into_iter().collect();
+        assert_eq!(accepted_interior(one.clone(), true), one);
+        assert!(accepted_interior(one, false).is_empty());
+        assert_eq!(INTERIOR_ONLY_OK, cfg!(unix));
     }
 }

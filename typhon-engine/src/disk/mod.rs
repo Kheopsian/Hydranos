@@ -462,8 +462,9 @@ impl DiskManager {
                 for (i, op) in ops.iter().enumerate() {
                     let len = op.length as usize;
                     // Whatever the process remembers: a torrent resumed after
-                    // a restart has no guard, and a file shared with a
-                    // library is shared all the same.
+                    // a restart has no guard, and a file that was already
+                    // shared with a library when the torrent started writing
+                    // is shared all the same.
                     if !op.pad
                         && (guard.contains(&op.path)
                             || must_compare(&verdicts, &probe, &info_hash, &save_path, &op.path))
@@ -594,6 +595,12 @@ impl DiskManager {
 /// torrent's own to create: no. One that is there is protected when another
 /// name points at it (a link count above one) or another torrent names it.
 /// A normal download costs one `stat` per file, the first time it is written.
+///
+/// A link that appears WHILE the torrent downloads (an import hardlinking the
+/// incomplete file) is not seen: the verdict was taken at the first piece. That
+/// is acceptable, because what the torrent writes into its own file is bytes
+/// that matched the piece hash. The hole is for a file that was ALREADY shared
+/// when the torrent started writing, and that is what this decides.
 fn must_compare(
     verdicts: &parking_lot::Mutex<crate::torrent::meta::WriteVerdicts>,
     probe: &Option<ClaimProbe>,
@@ -601,27 +608,35 @@ fn must_compare(
     save_path: &std::path::Path,
     rel: &std::path::Path,
 ) -> bool {
-    let mut v = verdicts.lock();
-    if let Some(known) = v.files.get(rel) {
-        return *known;
+    if let Some(known) = verdicts.lock().files.get(rel).copied() {
+        return known;
     }
-    let verdict = match std::fs::metadata(save_path.join(rel)) {
-        Err(_) => false,
-        Ok(m) => {
-            if linked_elsewhere(&m) {
-                true
-            } else {
-                match probe {
-                    Some(probe) => {
-                        let claimed = v.claimed.get_or_insert_with(|| Arc::new(probe(info_hash)));
-                        claimed.contains(rel)
+    // (verdict, whether it may be kept). Nothing here holds the lock: the probe
+    // can take a while and every other piece of the torrent asks the same cache.
+    let (verdict, keep) = match std::fs::metadata(save_path.join(rel)) {
+        Err(_) => (false, true),
+        Ok(m) if linked_elsewhere(&m) => (true, true),
+        Ok(_) => match probe {
+            // No way to ask yet (the host installs it after the engines
+            // start): "nobody names it" would be a guess, so it is neither
+            // believed nor kept -- the next piece asks again.
+            None => (false, false),
+            Some(probe) => {
+                let known = verdicts.lock().claimed.clone();
+                let claimed = match known {
+                    Some(c) => c,
+                    None => {
+                        let c = Arc::new(probe(info_hash));
+                        verdicts.lock().claimed.get_or_insert(c).clone()
                     }
-                    None => false,
-                }
+                };
+                (claimed.contains(rel), true)
             }
-        }
+        },
     };
-    v.files.insert(rel.to_path_buf(), verdict);
+    if keep {
+        verdicts.lock().files.insert(rel.to_path_buf(), verdict);
+    }
     verdict
 }
 
@@ -1660,6 +1675,83 @@ mod disk_tests {
         assert_eq!(b.load(Ordering::Relaxed), 1, "asked once for the torrent");
     }
 
+    /// A verdict taken without the means to ask is no verdict: with no claim
+    /// probe yet, an existing single-link file is written as before but nothing
+    /// is kept, and once the probe exists the next piece asks it.
+    #[tokio::test]
+    async fn no_verdict_is_kept_while_nobody_can_be_asked() {
+        let content: Vec<u8> = (0..4096u32).map(|i| (i % 251) as u8).collect();
+        let f = fixture_in_pieces("noprobe", &content, 4096);
+        let path = f.root.join("data").join("payload.bin");
+        std::fs::write(&path, &content).unwrap();
+        assert!(f
+            .disk
+            .write_piece(&f.torrent, 0, content.clone())
+            .await
+            .unwrap());
+        assert!(
+            f.torrent.write_verdicts().lock().files.is_empty(),
+            "a guess was kept"
+        );
+        f.disk.set_claim_probe(Arc::new(|_| {
+            [std::path::PathBuf::from("payload.bin")].into()
+        }));
+        let mut other = content.clone();
+        other[7] ^= 1;
+        std::fs::write(&path, &other).unwrap();
+        let why = f
+            .disk
+            .write_piece(&f.torrent, 0, content.clone())
+            .await
+            .unwrap_err();
+        assert!(why.starts_with("refused to overwrite"), "{why}");
+        assert_eq!(std::fs::read(&path).unwrap(), other);
+    }
+
+    /// The verdict belongs to a place: taken at one ("not compared": the file
+    /// was the torrent's own), it is forgotten when the torrent moves, so a
+    /// file of the same name that is already there, hardlinked, with a byte of
+    /// difference, is not written over.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_move_forgets_what_was_found_at_the_old_place() {
+        let content: Vec<u8> = (0..4096u32).map(|i| (i % 251) as u8).collect();
+        let f = fixture_in_pieces("moved", &content, 4096);
+        assert!(f
+            .disk
+            .write_piece(&f.torrent, 0, content.clone())
+            .await
+            .unwrap());
+        assert_eq!(
+            f.torrent
+                .write_verdicts()
+                .lock()
+                .files
+                .values()
+                .collect::<Vec<_>>(),
+            vec![&false]
+        );
+
+        let new = f.root.join("moved");
+        std::fs::create_dir_all(&new).unwrap();
+        let mut other = content.clone();
+        other[100] ^= 0xff;
+        std::fs::write(new.join("payload.bin"), &other).unwrap();
+        std::fs::hard_link(new.join("payload.bin"), f.root.join("library.bin")).unwrap();
+        f._mgr
+            .set_save_path(&f.torrent.info_hash, &new.to_string_lossy())
+            .unwrap();
+
+        let why = f
+            .disk
+            .write_piece(&f.torrent, 0, content.clone())
+            .await
+            .unwrap_err();
+        assert!(why.starts_with("refused to overwrite"), "{why}");
+        assert_eq!(std::fs::read(new.join("payload.bin")).unwrap(), other);
+        assert_eq!(std::fs::read(f.root.join("library.bin")).unwrap(), other);
+    }
+
     fn four_piece_fixture(tag: &str) -> (Fixture, Vec<Vec<u8>>) {
         let mut content = Vec::new();
         for i in 0..4u8 {
@@ -2119,6 +2211,25 @@ mod claim_probe_tests {
         let why = disk.write_piece(&t, 0, content.clone()).await.unwrap_err();
         assert!(why.starts_with("refused to overwrite"), "{why}");
         assert_eq!(std::fs::read(data.join("payload.bin")).unwrap(), other);
+
+        // The same bytes: the piece counts and the file is not written.
+        let old = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+        std::fs::write(data.join("payload.bin"), &content).unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(data.join("payload.bin"))
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        assert!(disk.write_piece(&t, 0, content.clone()).await.unwrap());
+        assert_eq!(
+            std::fs::metadata(data.join("payload.bin"))
+                .unwrap()
+                .modified()
+                .unwrap(),
+            old,
+            "written although identical"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }
