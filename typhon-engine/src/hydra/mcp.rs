@@ -2088,6 +2088,70 @@ mod tests {
         assert_eq!(row["rows"][0]["category"], "books");
     }
 
+    /// A single file in a folder of its own (`<category>/<name>/<name>.mkv`)
+    /// keeps that folder in the new category, and the emptied old one goes.
+    /// It used to land loose at the new category's root, its folder left
+    /// behind empty. A file loose in a shared folder stays loose, and the
+    /// shared folder stays.
+    #[tokio::test]
+    async fn a_file_in_its_own_folder_moves_with_its_folder() {
+        let s = st("mv-own-folder");
+        let (old_cat, new_cat) = (s.dir.join("old"), s.dir.join("new"));
+        let own = old_cat.join("Show.S01E03.1080p");
+        let h = add_on_disk(&s, &own, "Show.S01E03.1080p.mkv");
+        let loose = add_on_disk(&s, &old_cat, "loose.bin");
+        make_category(&s, "anime", &new_cat).await;
+
+        let (st_, v) = set_cat(&s, &h, json!({"category": "anime", "move_files": true})).await;
+        assert_eq!(st_, StatusCode::ACCEPTED, "{v}");
+        run_next_job(&s).expect("the move");
+        let kept = new_cat.join("Show.S01E03.1080p");
+        assert!(
+            kept.join("Show.S01E03.1080p.mkv").exists(),
+            "the file is in its own folder in the new category"
+        );
+        assert_eq!(root_of(&s, &h), kept);
+        assert!(!own.exists(), "the emptied old folder is gone");
+
+        let (st_, v) = set_cat(&s, &loose, json!({"category": "anime", "move_files": true})).await;
+        assert_eq!(st_, StatusCode::ACCEPTED, "{v}");
+        run_next_job(&s).expect("the move");
+        assert!(new_cat.join("loose.bin").exists());
+        assert_eq!(root_of(&s, &loose), new_cat);
+        assert!(old_cat.exists(), "a shared folder is never removed");
+
+        // A folder named after the file but shared with another torrent: the
+        // file still keeps its folder, and the folder stays for the other.
+        let shared = old_cat.join("Foo");
+        let foo = add_on_disk(&s, &shared, "Foo.mkv");
+        let _other = add_on_disk(&s, &shared, "other.bin");
+        let (st_, v) = set_cat(&s, &foo, json!({"category": "anime", "move_files": true})).await;
+        assert_eq!(st_, StatusCode::ACCEPTED, "{v}");
+        run_next_job(&s).expect("the move");
+        assert!(new_cat.join("Foo").join("Foo.mkv").exists());
+        assert!(
+            shared.join("other.bin").exists(),
+            "the other torrent's file stays"
+        );
+
+        // A location move leaves no emptied own folder behind either.
+        let own_loc = old_cat.join("Ep.S01E05");
+        let ep = add_on_disk(&s, &own_loc, "Ep.S01E05.mkv");
+        let elsewhere = s.dir.join("elsewhere");
+        let (st_, v) = internal(
+            &s.state,
+            Method::POST,
+            &format!("/api/hoard/torrents/{ep}/location"),
+            Some(json!({"location": elsewhere.to_string_lossy()})),
+        )
+        .await;
+        assert_eq!(st_, StatusCode::ACCEPTED, "{v}");
+        run_next_job(&s).expect("the move");
+        assert!(elsewhere.join("Ep.S01E05.mkv").exists());
+        assert!(!own_loc.exists(), "the emptied own folder is gone");
+        assert!(old_cat.exists(), "the folder it sat in stays");
+    }
+
     #[tokio::test]
     async fn data_already_in_place_is_a_relabel() {
         let s = st("mv-noop");

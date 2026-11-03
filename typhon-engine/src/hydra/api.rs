@@ -8310,8 +8310,8 @@ fn category_change(
     } else {
         placement(state, category, "").0
     };
-    let plan =
-        crate::jobsrun::plan_move_checked(state, &torrent, std::path::Path::new(&cat.save_path));
+    let dest = crate::jobsrun::category_destination(&torrent, std::path::Path::new(&cat.save_path));
+    let plan = crate::jobsrun::plan_move_checked(state, &torrent, &dest);
     let (name, total) = (torrent.meta.name.clone(), torrent.meta.total_size as i64);
     Ok(if target != engine {
         CategoryChange::Graduate {
@@ -15141,7 +15141,13 @@ async fn post_torrent_graduate(
         let _ = &cfg;
         if let Some(c) = category_entry(&state, &category) {
             if !c.save_path.is_empty() {
-                save_path = c.save_path;
+                // A file in a folder of its own keeps it there.
+                save_path = crate::jobsrun::category_destination(
+                    &torrent,
+                    std::path::Path::new(&c.save_path),
+                )
+                .to_string_lossy()
+                .to_string();
             }
         }
     }

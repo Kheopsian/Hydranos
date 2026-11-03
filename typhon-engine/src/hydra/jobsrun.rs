@@ -468,6 +468,18 @@ fn graduate(state: &AppState, job: &crate::store::Job) -> Result<(), String> {
     }
     tracing::info!(hash = %hash, from = %from, to = %to, moved_bytes = done, seed_secs = seeded,
                    "graduated");
+    // What the files left behind, as a move inside an engine does: their
+    // subfolders, and the torrent's own folder.
+    let rels: Vec<std::path::PathBuf> = files
+        .iter()
+        .filter_map(|(from, _)| from.strip_prefix(&old_root).ok().map(|r| r.to_path_buf()))
+        .collect();
+    prune_left_dirs(
+        &old_root,
+        std::path::Path::new(&dest_root),
+        files.iter().map(|(from, _)| from.as_path()),
+        own_folder_of(&old_root, &rels).is_some(),
+    );
     Ok(())
 }
 
@@ -506,6 +518,10 @@ pub struct MovePlan {
     /// without a word, so moving onto them would destroy whatever they are --
     /// another torrent's file, most likely, under the same name.
     pub occupied: Vec<String>,
+    /// `old_root` is the folder this torrent was given for itself (see
+    /// `own_folder`), not a category folder it shares: once the move has
+    /// emptied it, it goes too.
+    pub old_root_is_own: bool,
 }
 
 impl MovePlan {
@@ -900,6 +916,51 @@ fn scan_claims_walk(
     out
 }
 
+/// The folder `root` is when a single-file torrent was put in one of its
+/// own: `<category>/<name>/<name>.mkv`, the folder named after the file, with
+/// or without its extension. `None` for a file sitting directly in a shared
+/// folder, and for a multi-file torrent, whose own folder is already part of
+/// its paths.
+pub fn own_folder(
+    t: &typhon_engine::torrent::meta::TorrentState,
+    root: &std::path::Path,
+) -> Option<std::ffi::OsString> {
+    if t.meta.files.len() != 1 {
+        return None;
+    }
+    own_folder_of(root, &[t.meta.disk_rel(0)])
+}
+
+/// `own_folder` from the files' paths below `root`.
+fn own_folder_of(
+    root: &std::path::Path,
+    rels: &[std::path::PathBuf],
+) -> Option<std::ffi::OsString> {
+    let [rel] = rels else {
+        return None;
+    };
+    if rel.components().count() != 1 {
+        return None;
+    }
+    let folder = root.file_name()?;
+    (Some(folder) == rel.file_name() || Some(folder) == rel.file_stem())
+        .then(|| folder.to_os_string())
+}
+
+/// Where a move to the category folder `category_root` puts `t`: in that
+/// folder, or in a folder of its own there if it has one now. Moved to the
+/// bare category folder, the file lost its folder and landed among the others.
+pub fn category_destination(
+    t: &typhon_engine::torrent::meta::TorrentState,
+    category_root: &std::path::Path,
+) -> std::path::PathBuf {
+    let old_root = t.save_path.read().clone();
+    match own_folder(t, &old_root) {
+        Some(folder) => category_root.join(folder),
+        None => category_root.to_path_buf(),
+    }
+}
+
 /// Plan moving `t`'s files from where it reads them to `new_root`.
 pub fn plan_move(
     t: &typhon_engine::torrent::meta::TorrentState,
@@ -938,6 +999,7 @@ pub fn plan_move(
         .filter(|f| f.present && f.from != f.to && f.to.exists() && !same_file(&f.from, &f.to))
         .map(|f| f.to.display().to_string())
         .collect();
+    let old_root_is_own = own_folder(t, &old_root).is_some();
     MovePlan {
         old_root,
         new_root: new_root.to_path_buf(),
@@ -945,6 +1007,7 @@ pub fn plan_move(
         unsafe_path,
         shared_with: Vec::new(),
         occupied,
+        old_root_is_own,
     }
 }
 
@@ -1514,14 +1577,30 @@ fn undo_interrupted_move(
     }
 }
 
-/// Remove the directories the move emptied, deepest first, never the old root
-/// itself: that is a category directory other torrents may share.
+/// Remove the directories the move emptied, deepest first. The old root itself
+/// only when it was the torrent's own folder: otherwise it is a category
+/// directory other torrents may share. `remove_dir` leaves any that is not
+/// empty.
 fn prune_empty_dirs(plan: &MovePlan) {
+    prune_left_dirs(
+        &plan.old_root,
+        &plan.new_root,
+        plan.files.iter().map(|f| f.from.as_path()),
+        plan.old_root_is_own,
+    );
+}
+
+fn prune_left_dirs<'a>(
+    old_root: &std::path::Path,
+    new_root: &std::path::Path,
+    froms: impl Iterator<Item = &'a std::path::Path>,
+    old_root_is_own: bool,
+) {
     let mut dirs: Vec<std::path::PathBuf> = Vec::new();
-    for f in &plan.files {
-        let mut cur = f.from.parent();
+    for from in froms {
+        let mut cur = from.parent();
         while let Some(d) = cur {
-            if d == plan.old_root || !d.starts_with(&plan.old_root) {
+            if d == old_root || !d.starts_with(old_root) {
                 break;
             }
             if !dirs.iter().any(|x| x == d) {
@@ -1529,6 +1608,9 @@ fn prune_empty_dirs(plan: &MovePlan) {
             }
             cur = d.parent();
         }
+    }
+    if old_root_is_own && !new_root.starts_with(old_root) {
+        dirs.push(old_root.to_path_buf());
     }
     dirs.sort_by_key(|d| std::cmp::Reverse(d.components().count()));
     for d in dirs {
@@ -1606,6 +1688,45 @@ mod graduate_tests {
             created_at: 0,
             updated_at: 0,
         }
+    }
+
+    /// A file in a folder of its own graduates into a folder of the same name,
+    /// and the emptied old one goes; the folder that held it stays.
+    #[test]
+    fn a_graduation_keeps_the_own_folder_and_removes_the_emptied_one() {
+        let s = state_from("grad-own", "");
+        let (cat, dst) = (s.dir.join("race-data"), s.dir.join("hoard-data"));
+        let own = cat.join("grad");
+        std::fs::create_dir_all(&own).unwrap();
+        std::fs::write(own.join("grad"), vec![7u8; 16384]).unwrap();
+        let (hash, _) = crate::api::add_torrent_bytes(
+            &s.state,
+            &torrent_bytes("grad"),
+            "",
+            &own.display().to_string(),
+            "",
+            true,
+            true,
+            "race",
+        )
+        .expect("added");
+        let ih = crate::store::hex20(&hash).unwrap();
+        let t = s
+            .state
+            .engines
+            .get("race")
+            .unwrap()
+            .manager
+            .get(&ih)
+            .unwrap();
+        let dest = category_destination(&t, &dst);
+        assert_eq!(dest, dst.join("grad"));
+        drop(t);
+
+        graduate(&s.state, &job(&hash, &dest)).expect("graduated");
+        assert!(dest.join("grad").exists());
+        assert!(!own.exists(), "the emptied own folder is gone");
+        assert!(cat.exists(), "the folder it sat in stays");
     }
 
     /// The torrent arrives with its own state: the stopped flag and an edited

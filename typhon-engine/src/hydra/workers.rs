@@ -1385,6 +1385,11 @@ pub fn drain_once(
                 );
                 continue;
             };
+            // A file in a folder of its own keeps it in the new category.
+            let save_path =
+                crate::jobsrun::category_destination(&torrent, std::path::Path::new(&save_path))
+                    .to_string_lossy()
+                    .to_string();
             if to_engine == engine_id {
                 // Graduating onto the engine it is already on moves nothing.
                 // Counted by category rather than logged per torrent: this runs
