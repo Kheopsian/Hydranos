@@ -233,7 +233,7 @@ jobs:
       # the dependency here means a runner image that drops it fails on this
       # line instead of somewhere inside a five-minute compile.
       - name: Build dependencies
-        run: sudo apt-get install -y --no-install-recommends cmake
+        run: command -v cmake >/dev/null || { sudo apt-get update && sudo apt-get install -y --no-install-recommends cmake; }
       # Keyed on the lockfile: a dependency change gets a cold build, everything
       # else reuses the last one. Without it a PR touching one Rust line pays
       # for jemalloc, ring and aws-lc every time.
@@ -257,25 +257,18 @@ jobs:
       - name: Format
         working-directory: typhon-engine
         run: cargo fmt --check
-      - name: Check
-        working-directory: typhon-engine
-        env:
-          RUSTFLAGS: "--cfg tokio_unstable"
-        run: cargo check --locked --all-targets
-      # Same cfg and same targets as Check, so the code behind tokio_unstable and
-      # the tests are linted too. A lint that is wrong for one line gets a local
+      # Clippy compiles everything -- all targets, the same cfg and --locked --
+      # so a separate `cargo check` would only compile it a second time. The
+      # code behind tokio_unstable and the tests are linted too. A lint that is wrong for one line gets a local
       # #[allow(...)] with its reason, not a crate-wide one.
       - name: Clippy
         working-directory: typhon-engine
         env:
           RUSTFLAGS: "--cfg tokio_unstable"
         run: cargo clippy --locked --all-targets -- -D warnings
-      - name: Test
-        working-directory: typhon-engine
-        env:
-          RUSTFLAGS: "--cfg tokio_unstable"
-        run: cargo test --locked
-      # Coverage, as a ratchet rather than a target.
+      # Coverage, as a ratchet rather than a target. It is also the only place
+      # the test suite runs: `cargo llvm-cov` runs `cargo test` instrumented,
+      # so a separate test step would run the same ~2 700 tests twice.
       #
       # Chasing a percentage produces tests written for the metric. What this
       # guards is narrower and worth more: a change cannot arrive with less
@@ -306,7 +299,7 @@ jobs:
           # 7 900 lines no build compiles any more. Clean the workspace's
           # coverage artifacts first, so only what this tree builds is measured.
           cargo llvm-cov clean --workspace
-          cargo llvm-cov --workspace --summary-only --json --output-path cov.json
+          cargo llvm-cov --workspace --locked --summary-only --json --output-path cov.json
           pct=$(python3 -c "import json;print(json.load(open('cov.json'))['data'][0]['totals']['lines']['percent'])")
           echo "line coverage: $pct%  (floor $floor%)"
           # The run's logs need an account to read; its annotations do not.
