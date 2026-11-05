@@ -119,7 +119,7 @@ mod tests {
             ("v4: <url> 429 Too Many Requests:  | v6: <url> 429 Too Many Requests: ", "throttled"),
             ("tracker: You already have 3 peers on this torrent. Ignoring.", "throttled"),
             ("v4: tracker: invalid passkey | v6: tracker: invalid passkey", "auth"),
-            ("v4: tracker: Unregistered torrent: supprime ou introuvable sur tracker-x5 | v6: tracker: Unregistered torrent: supprime ou introuvable sur tracker-x5", "dead"),
+            ("v4: tracker: Unregistered torrent: supprime ou introuvable sur tracker-c | v6: tracker: Unregistered torrent: supprime ou introuvable sur tracker-c", "dead"),
             ("v4: tracker: torrent introuvable | v6: tracker: torrent introuvable", "dead"),
             ("v4: tracker: Torrent not registered on this tracker | v6: tracker: Torrent not registered on this tracker", "dead"),
             ("v4: tracker: Torrent not registered with this tracker | v6: tracker: Torrent not registered with this tracker", "dead"),

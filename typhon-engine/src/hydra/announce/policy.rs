@@ -627,7 +627,7 @@ mod tests {
             Some("NEWKEY")
         );
         assert_eq!(passkey_for(&p, "https://nottr-a.test/announce/X"), None);
-        assert_eq!(passkey_for(&p, "https://tracker-x7.example/announce/X"), None);
+        assert_eq!(passkey_for(&p, "https://tr-c.example/announce/X"), None);
     }
 
     #[test]
@@ -635,7 +635,7 @@ mod tests {
         let p = policy();
         let r = prepare(
             &p,
-            "https://tracker-x7.example/announce/K",
+            "https://tr-c.example/announce/K",
             &"ab".repeat(20),
             16171,
             0,

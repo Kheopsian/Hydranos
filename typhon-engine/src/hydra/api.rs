@@ -28498,7 +28498,7 @@ mod delete_spares_shared_files_tests {
     }
 
     /// 2026-10-02: a bulk delete "with files" took the source torrents' files,
-    /// which the tracker-x5 uploads made from them also read, and 1 376 uploads went
+    /// which the cross-seed uploads made from them also read, and 1 376 uploads went
     /// on announcing empty folders as complete.
     #[test]
     fn deleting_a_torrent_with_its_files_keeps_the_ones_another_torrent_reads() {
