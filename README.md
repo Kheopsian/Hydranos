@@ -1,45 +1,53 @@
 # Hydranos
 
-A self-hosted BitTorrent daemon built for **scale and seeding**: one Rust
-process ("Typhon") holding a very large catalogue and keeping every torrent of
-it announced. Hydranos runs **over a million torrents in a single instance** in
-production today. It exposes a live web
-UI, a native REST API, and a qBittorrent-compatible shim so your existing
-`*arr` / autobrr / cross-seed setup keeps working unchanged.
+**Seed over a million torrents from one box.** Hydranos is a self-hosted BitTorrent client built for that scale on a single machine, with a live web UI, a native REST API and a qBittorrent-compatible API, so your `*arr` / autobrr / cross-seed setup keeps working unchanged.
 
-> Status: opened up from a private homelab project. It is used in production
-> but some rough edges remain; issues and PRs welcome.
+Same machine, ~290,000 torrents, four clients ([method and caveats](docs/scale-290k.md): single runs, read them as orders of magnitude; Hydranos measured on 4.2):
+
+| | Hydranos 4.2 | Transmission 4.1.3 | qBittorrent 5.2.3 | rtorrent 0.16.24 |
+|---|---|---|---|---|
+| Cold start to API | 95-125 s | 48 min | 91 min | 15 h 21 min |
+| RAM after load | 2.8 GiB | 12.3 GiB | 15.6-18.3 GiB | 31.3 GiB |
+| Announces/s | 146-155 | 13.6 default, 61 raised | ~15 default, 86 raised | ~4-12 |
+
+<!-- GIF: scrolling the 100k-row list -->
+
+## Quick start
+
+```sh
+docker run -d --name hydranos --restart unless-stopped --stop-timeout 150 \
+  --ulimit nofile=1048576:1048576 \
+  -p 8199:8199 -p 16171:16171/tcp -p 16171:16171/udp -p 16172:16172/tcp -p 16172:16172/udp \
+  -v "$PWD/config:/config" -v "$PWD/data:/data" \
+  ghcr.io/kheopsian/hydranos:latest
+docker logs hydranos | grep 'setup code'
+```
+
+Pin a release tag (`:v4.7.0`) instead if you want to choose when you upgrade, and back up `./config` before each upgrade (see [Upgrading and rolling back](#upgrading-and-rolling-back)).
+
+- UI and API: <http://localhost:8199>. Open it, enter the one-time **setup code** from the log and create the admin account (the first-run screen only answers callers on this machine or a private network).
+- Config, resume data and the SQLite store: `./config` (mounted at `/config`, seeded on first start). Payload data: `./data`. BitTorrent ports 16171 (race) and 16172 (hoard) are published too.
+- Scripts talk to the API with the key kept in `config/default.toml`, sent as `X-Api-Key` ([`docs/API.md`](docs/API.md)).
+- Bare metal: unpack the Linux tarball (amd64 or arm64) from the [releases](https://github.com/Kheopsian/Hydranos/releases) and run `sudo ./install.sh` (systemd, see [`packaging/install.sh`](packaging/install.sh)). Windows: the zip from the same page, see [`packaging/README-windows.md`](packaging/README-windows.md).
+- Full walkthrough: [Installation & First Run](https://github.com/Kheopsian/Hydranos/wiki/Installation-and-First-Run).
+
+## What sets it apart
+
+- **Two engines, two jobs.** **Race** is for releases you race: torrents in a race-mode category (the default) live there for a while — aggressive (it re-announces every 5 s while the tracker has not registered the upload yet), with a detailed per-torrent timeline and metrics — and are usually removed once your tracker's rules allow it; the few you want to keep can **graduate** to hoard. **Hoard** is the long-term library engine, built to stay light at a million torrents (no piece-hash tables kept for seeds, about 10 KiB per torrent); categories in hoard mode (cross-seeds, long-term imports) send torrents straight there. Each engine has its own port and its own rules ([`docs/API.md`](docs/API.md)).
+- **Light at scale.** 2.8 GiB of RAM for ~293,000 torrents (about 10 KiB each) and a cold start of 95-125 s, in the table above ([`docs/scale-290k.md`](docs/scale-290k.md)).
+- **Your automation keeps working.** A qBittorrent v2 API shim (`/api/v2/*`) for Sonarr/Radarr, autobrr and cross-seed, and an importer for an existing qBittorrent library ([`docs/API.md`](docs/API.md)).
+- **Tracker conformance, documented and tested.** Every rule names the test that asserts it, and `tools/interop/run.sh` plays the client against opentracker, Torrust and qBittorrent/libtorrent in CI ([`docs/BITTORRENT-CONFORMANCE.md`](docs/BITTORRENT-CONFORMANCE.md)).
+- **Workflows.** Rules built from conditions and actions over the library, previewed with a dry run before they run ([`docs/API.md`](docs/API.md)).
+
+## Upgrading and rolling back
+
+`:latest` follows each release. To upgrade only when you decide, pin a release tag (`ghcr.io/kheopsian/hydranos:v4.7.0`) and change it on purpose; with `:latest`, an image auto-updater upgrades you as soon as a release is out. Read the [`CHANGELOG.md`](CHANGELOG.md) first: a *major* number change means the upgrade needs more than replacing the binary.
+
+**Back up before you upgrade:** stop the container (`docker stop hydranos`, or `docker compose stop`; it flushes the resume data) and copy the whole `config/` folder (bare metal: `/etc/hydranos` and `/var/lib/hydranos`; Windows: the folder holding `hydranos.exe`). It holds `default.toml` (API key, password hash), `hydra.db` and `bench.db`. There is no automatic backup yet. To go back, stop, restore that copy and start the previous tag. Only the latest release gets fixes, and only the 10 most recent releases keep their images and archives ([`SECURITY.md`](SECURITY.md)); older ones are built from the tag. No downgrade procedure is documented: treat the backup as the way back.
 
 ---
 
-## Why Hydranos?
-
-Most BitTorrent clients are designed around a few thousand torrents, and do
-that very well. At hundreds of thousands the constraints change: how long the
-client takes to start, and whether every torrent is still announced on
-schedule. A torrent the tracker has not heard about is a torrent nobody
-downloads from you. Hydranos is built around those two constraints, and around
-three uses of one instance:
-
-- **Hoard.** Seed a very large library and keep all of it announced: over
-  a million torrents in production today.
-- **Race.** Grab and seed new releases fast. Hydranos runs a *race* engine and
-  a *hoard* engine side by side in one process, each tuned for its job, so a
-  large library never slows a race down.
-- **Stay light.** Holding 290,000 torrents took 2.8 GiB of RAM (about
-  10 KiB per torrent, measured on 4.2), where the other clients we measured
-  needed 12 to 31 GiB.
-
-How Hydranos and three other clients behave at
-[290,000 torrents](docs/scale-290k.md), measured on the same machine.
-
-And your automation keeps working: the qBittorrent v2 API shim means
-Sonarr/Radarr, autobrr and cross-seed talk to Hydranos unchanged.
-
-If you seed a few hundred torrents, qBittorrent or Transmission will serve you
-with less to learn.
-
-Also in the box:
+## Also in the box
 
 - **Networking per engine**: managed WireGuard (a tunnel per engine, with
   port forwarding), gluetun, SOCKS5 or a PROXY-v2 relay, an interface pin,
