@@ -259,8 +259,9 @@ jobs:
         run: cargo fmt --check
       # Clippy compiles everything -- all targets, the same cfg and --locked --
       # so a separate `cargo check` would only compile it a second time. The
-      # code behind tokio_unstable and the tests are linted too. A lint that is wrong for one line gets a local
-      # #[allow(...)] with its reason, not a crate-wide one.
+      # code behind tokio_unstable and the tests are linted too. A lint that is
+      # wrong for one line gets a local #[allow(...)] with its reason, not a
+      # crate-wide one.
       - name: Clippy
         working-directory: typhon-engine
         env:
@@ -284,7 +285,7 @@ jobs:
           command -v cargo-llvm-cov >/dev/null 2>&1 \
             || cargo install cargo-llvm-cov --locked
           rustup component add llvm-tools-preview
-      - name: Coverage does not go down
+      - name: Tests, and coverage does not go down
         working-directory: typhon-engine
         env:
           RUSTFLAGS: "--cfg tokio_unstable"
