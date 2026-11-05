@@ -3249,7 +3249,7 @@ function renderHoardTable() {
 // Meta keys (__none__) are drawn by their own branch below and are kept out of
 // this list.
 // Alphabetical as a person reads it: "animes" between "ABNormal" and
-// "tracker-x1", not after every capitalised name as a bare `.sort()` puts it.
+// "Comics", not after every capitalised name as a bare `.sort()` puts it.
 const _facetCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
 function _facetKeys(counts, inc, exc, metas, seen) {
     const out = Object.keys(counts);
@@ -5344,8 +5344,8 @@ function _markLocallyStopped(hashes, stopped) {
 //
 // A Ctrl+A travels as its FILTER, and the daemon resolves it (selection.rs).
 //
-// ⚠⚠ It did once before, and on 2026-09-16 a start aimed at 70k tracker-x1
-// torrents started all 293k: the endpoint had no `filter` field, serde dropped
+// ⚠⚠ It did once before, and on 2026-09-16 a start aimed at 70k torrents of one tracker
+// started all 293k: the endpoint had no `filter` field, serde dropped
 // it, and the empty hash list left behind meant the whole engine. What changed
 // is the daemon side, not the idea: every body refuses a key it does not know,
 // an empty selection is a refusal, the filter is resolved by the function that

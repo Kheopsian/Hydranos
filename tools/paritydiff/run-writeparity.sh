@@ -25,8 +25,9 @@ if ! flock -n 9; then
 fi
 
 
-REPO=/data/appdata/hydra-v4
-STAGING=/data/appdata/hydra-v4-staging
+REPO=${HYDRA_REPO:-/srv/hydra-repo}
+STAGING=${HYDRA_STAGING:-/srv/hydra-staging}
+export HYDRA_STAGING=$STAGING
 TOOLS=$REPO/tools/paritydiff
 NET=v4bench
 KEY=change-me-in-production

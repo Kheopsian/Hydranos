@@ -107,9 +107,9 @@ body:
         Not sure about the filesystem? Run `df -T /path/to/your/save/dir`.
         On Unraid, point it at the pool rather than the share — `/mnt/user`
         reports `shfs`, which hides what is actually underneath, so use
-        `df -T /data/...` (and `zfs list` if you are on ZFS).
+        `df -T /mnt/pool/...` (and `zfs list` if you are on ZFS).
       placeholder: |
-        save paths on ZFS (/data), gluetun with port rebind
+        save paths on ZFS (/mnt/pool), gluetun with port rebind
 
   - type: textarea
     id: config

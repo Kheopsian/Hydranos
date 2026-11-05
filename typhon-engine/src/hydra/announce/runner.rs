@@ -727,7 +727,7 @@ pub(super) async fn announce_one(
                         // paused the host for ten minutes, and every torrent
                         // due in that time was pushed back half an hour without
                         // a request, a failure or a minute of lateness to show
-                        // for it. tracker-x1 on 2026-09-28: announced one second
+                        // for it. A private tracker on 2026-09-28: announced one second
                         // in every ten minutes, 1 150 announces in an hour for
                         // 789 000 torrents.
                         // A `failure reason` is an answer too: the tracker is
@@ -928,7 +928,7 @@ fn parse_hex(s: &str) -> Option<[u8; 20]> {
 mod tests {
     use super::*;
 
-    /// ⭐⭐ tracker-x1's 429 as it came on 2026-09-28: an answer, so the breaker
+    /// ⭐⭐ A tracker's 429 as it came on 2026-09-28: an answer, so the breaker
     /// must not set the tracker aside however many come -- slowing down is the
     /// scheduler's job. A tracker that does not answer at all still trips it.
     #[test]
@@ -973,13 +973,13 @@ mod tests {
     #[test]
     fn an_error_message_never_carries_the_url() {
         let raw = "http request: error sending request for url \
-                   (https://tk.tracker-x3.net/announce/SECRETKEY?info_hash=%AB): timed out";
+                   (https://tk.tr-a.test/announce/SECRETKEY?info_hash=%AB): timed out";
         let clean = redact(raw);
         assert!(
             !clean.contains("SECRETKEY"),
             "the passkey survived: {clean}"
         );
-        assert!(!clean.contains("tk.tracker-x3.net"));
+        assert!(!clean.contains("tk.tr-a.test"));
         assert!(
             clean.contains("timed out"),
             "the reason is what we keep: {clean}"

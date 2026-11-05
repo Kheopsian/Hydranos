@@ -78,7 +78,7 @@ pub struct Item {
 pub struct Selection {
     #[serde(default)]
     pub items: Vec<Item>,
-    /// The list page's query string, e.g. `category=movies&tracker=tracker-x1`.
+    /// The list page's query string, e.g. `category=movies&tracker=tracker-a`.
     #[serde(default)]
     pub filter: Option<String>,
     /// The list the filter was typed on. `hoard` when absent.

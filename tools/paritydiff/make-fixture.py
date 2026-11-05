@@ -27,9 +27,13 @@ import shutil
 import sqlite3
 import sys
 
-PROD = "/data/appdata/hydra/race"
-PROD_STORE = "/data/appdata/hydra/hydra.db"
-FIXTURE = "/data/appdata/hydra-v4-staging/fixture"
+# Where the live state sits on this machine, and where the fixture goes. Set
+# HYDRA_DATA to the daemon's data directory; HYDRA_STAGING to a scratch dir.
+DATA = os.environ.get("HYDRA_DATA", "/srv/hydra")
+STAGING = os.environ.get("HYDRA_STAGING", "/srv/hydra-staging")
+PROD = os.path.join(DATA, "race")
+PROD_STORE = os.path.join(DATA, "hydra.db")
+FIXTURE = os.path.join(STAGING, "fixture")
 ENGINE = "race"
 
 
@@ -81,7 +85,7 @@ def main():
         # back onto the host, then into the fixture at the same relative place
         # so the copied state.db keeps working untouched.
         rel = path[len("/configs/"):] if path.startswith("/configs/") else path.lstrip("/")
-        src = os.path.join("/data/appdata/hydra", rel)
+        src = os.path.join(DATA, rel)
         if not os.path.isfile(src):
             missing += 1
             continue

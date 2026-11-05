@@ -556,7 +556,7 @@ mod tests {
         Entry {
             complete,
             incomplete: 0,
-            tracker: "tracker-x3.net".into(),
+            tracker: "tr-a.test".into(),
             at: Instant::now(),
             interval: Duration::from_secs(1800),
         }

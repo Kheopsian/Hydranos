@@ -2488,7 +2488,7 @@ async fn get_categories(
     // On disk it is a map keyed by name; the API publishes a list with the name
     // folded in, in alphabetical order -- sorted again below, because the
     // BTreeMap's order is BYTE order, which puts every capitalised name
-    // ("tracker-x1", "tracker-x7") before every lowercase one ("animes").
+    // ("Comics", "Music") before every lowercase one ("animes").
     // A document that will not parse yields an empty list, as in 3.x, but it is
     // logged: silently serving [] for a list the user has configured is the
     // kind of failure nobody notices until a category stops being applied.
@@ -11417,7 +11417,7 @@ fn set_one_paused(state: &AppState, engine: &str, prefix: &str, paused: bool) ->
 /// `filter` at all. The browser believed the message and sent the filter for
 /// any selection over 500 rows, serde dropped the unknown key without a word,
 /// `hashes` defaulted to empty -- and empty meant THE WHOLE ENGINE. A start
-/// aimed at 70k tracker-x1 torrents started all 293k instead, and nothing in the
+/// aimed at 70k torrents of one tracker started all 293k instead, and nothing in the
 /// request, the response or the logs said so.
 ///
 /// A field this API does not implement must now be a 400. Silence is what made
@@ -19872,8 +19872,8 @@ mod bulk_body_tests {
     /// location"-ed to it, re-added at the trimmed name, and stayed in error.
     #[test]
     fn a_location_keeps_the_trailing_space_of_its_folder() {
-        let p = location_path("/tracker-x1/sw_1/Purity  2016 ").unwrap();
-        assert_eq!(p, std::path::PathBuf::from("/tracker-x1/sw_1/Purity  2016 "));
+        let p = location_path("/data/sw_1/Purity  2016 ").unwrap();
+        assert_eq!(p, std::path::PathBuf::from("/data/sw_1/Purity  2016 "));
         assert_eq!(
             location_path("/data/tv/").unwrap(),
             std::path::PathBuf::from("/data/tv")
@@ -19893,7 +19893,7 @@ mod bulk_body_tests {
     /// implement it: this test fails the moment it parses again.
     #[test]
     fn the_body_that_started_the_whole_library_is_refused() {
-        let body = r#"{"action":"start","filter":{"category":"tracker-x1","search":"","tracker":"","tag":"","state":""},"exclude":[]}"#;
+        let body = r#"{"action":"start","filter":{"category":"Books","search":"","tracker":"","tag":"","state":""},"exclude":[]}"#;
         let parsed = serde_json::from_str::<BulkBody>(body);
         let err = parsed
             .err()
@@ -24880,7 +24880,7 @@ mod node_route_tests {
         let s = st("node-incomplete");
         for body in [
             serde_json::json!({"url": "http://10.0.0.5:8199"}),
-            serde_json::json!({"name": "node-x2"}),
+            serde_json::json!({"name": "node-a"}),
             serde_json::json!({"name": "  ", "url": "http://10.0.0.5:8199"}),
             serde_json::json!({}),
         ] {
@@ -24931,13 +24931,13 @@ mod node_route_tests {
     #[tokio::test]
     async fn a_declared_node_is_stored_and_listed() {
         let s = st("node-store");
-        declare(&s, "node-x2", "http://10.0.0.5:8199", "the-remote-key");
+        declare(&s, "node-a", "http://10.0.0.5:8199", "the-remote-key");
 
         let listed =
             body_json(super::get_nodes(State(s.state.clone()), RawQuery(None), keyed(KEY)).await)
                 .await;
         let text = listed.to_string();
-        assert!(text.contains("node-x2"), "the node is listed: {listed}");
+        assert!(text.contains("node-a"), "the node is listed: {listed}");
         assert!(
             !text.contains("the-remote-key"),
             "⚠️ the remote's key must not be served back to a browser: {listed}"
@@ -25015,11 +25015,11 @@ mod node_route_tests {
     #[tokio::test]
     async fn a_node_can_be_deleted_and_deleting_an_unknown_one_is_reported() {
         let s = st("node-delete");
-        declare(&s, "node-x2", "http://10.0.0.5:8199", "k");
+        declare(&s, "node-a", "http://10.0.0.5:8199", "k");
 
         let gone = super::delete_node(
             State(s.state.clone()),
-            axum::extract::Path("node-x2".to_string()),
+            axum::extract::Path("node-a".to_string()),
             RawQuery(None),
             keyed(KEY),
         )
@@ -25028,7 +25028,7 @@ mod node_route_tests {
 
         let again = super::delete_node(
             State(s.state.clone()),
-            axum::extract::Path("node-x2".to_string()),
+            axum::extract::Path("node-a".to_string()),
             RawQuery(None),
             keyed(KEY),
         )
@@ -25942,7 +25942,7 @@ mod populated_tests {
     #[tokio::test]
     async fn categories_are_listed_alphabetically_whatever_their_case() {
         let s = st("cats-alpha");
-        for name in ["tracker-x7", "animes", "tracker-x1", "kids", "ABNormal"] {
+        for name in ["Music", "animes", "Comics", "kids", "ABNormal"] {
             crate::api::testing::put_category(&s.state, name, "hoard", "/tmp");
         }
         let v = body_json(
@@ -25955,7 +25955,7 @@ mod populated_tests {
             .iter()
             .map(|c| c["name"].as_str().unwrap())
             .collect();
-        assert_eq!(names, vec!["ABNormal", "animes", "tracker-x1", "kids", "tracker-x7"]);
+        assert_eq!(names, vec!["ABNormal", "animes", "Comics", "kids", "Music"]);
     }
 
     /// The Transmission import end to end, through its routes: the folder is

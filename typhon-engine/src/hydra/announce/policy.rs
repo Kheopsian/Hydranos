@@ -387,7 +387,7 @@ mod tests {
         };
         let a = prepare(
             &p,
-            "udp://tracker-x3.net:6969/announce",
+            "udp://tr-a.test:6969/announce",
             &"ab".repeat(20),
             16172,
             0,
@@ -400,7 +400,7 @@ mod tests {
         .unwrap();
         let b = prepare(
             &p,
-            "udp://tracker-x3.net:6969/announce",
+            "udp://tr-a.test:6969/announce",
             &"cd".repeat(20),
             16172,
             0,
@@ -415,7 +415,7 @@ mod tests {
         assert_ne!(a.udp.unwrap().key, b.udp.unwrap().key, "UDP key");
         let again = prepare(
             &p,
-            "udp://tracker-x3.net:6969/announce",
+            "udp://tr-a.test:6969/announce",
             &"ab".repeat(20),
             16172,
             0,
@@ -435,7 +435,7 @@ mod tests {
             user_agent: "Hydra/4.0.0".into(),
             ..Default::default()
         };
-        p.passkeys.insert("tracker-x3.net".into(), "NEWKEY".into());
+        p.passkeys.insert("tr-a.test".into(), "NEWKEY".into());
         p
     }
 
@@ -448,7 +448,7 @@ mod tests {
         p.public_ip = "203.0.113.9".into();
         let r = prepare(
             &p,
-            "udp://tracker-x3.net:6969/announce/OLDKEY",
+            "udp://tr-a.test:6969/announce/OLDKEY",
             &"ab".repeat(20),
             16172,
             30,
@@ -461,7 +461,7 @@ mod tests {
         .expect("prepared");
         let u = r.udp.expect("a UDP request for a udp:// tracker");
         assert_eq!(
-            u.tracker, "udp://tracker-x3.net:6969/announce/NEWKEY",
+            u.tracker, "udp://tr-a.test:6969/announce/NEWKEY",
             "the passkey is rewritten here too"
         );
         assert_eq!(u.info_hash, [0xAB; 20]);
@@ -483,7 +483,7 @@ mod tests {
 
         let http = prepare(
             &p,
-            "https://tracker-x3.net/announce/OLDKEY",
+            "https://tr-a.test/announce/OLDKEY",
             &"ab".repeat(20),
             16172,
             0,
@@ -598,18 +598,18 @@ mod tests {
     #[test]
     fn a_passkey_replaces_the_last_path_segment() {
         assert_eq!(
-            apply_passkey("https://tracker-x3.net/announce/OLDKEY", "NEWKEY"),
-            "https://tracker-x3.net/announce/NEWKEY"
+            apply_passkey("https://tr-a.test/announce/OLDKEY", "NEWKEY"),
+            "https://tr-a.test/announce/NEWKEY"
         );
         // A URL that ends at /announce has no key segment to replace.
         assert_eq!(
-            apply_passkey("https://tracker-x3.net/announce", "NEWKEY"),
-            "https://tracker-x3.net/announce"
+            apply_passkey("https://tr-a.test/announce", "NEWKEY"),
+            "https://tr-a.test/announce"
         );
         // A query is preserved, not swallowed.
         assert_eq!(
-            apply_passkey("https://tracker-x3.net/announce/OLD?x=1", "NEW"),
-            "https://tracker-x3.net/announce/NEW?x=1"
+            apply_passkey("https://tr-a.test/announce/OLD?x=1", "NEW"),
+            "https://tr-a.test/announce/NEW?x=1"
         );
     }
 
@@ -619,14 +619,14 @@ mod tests {
     fn a_passkey_never_reaches_a_tracker_it_was_not_meant_for() {
         let p = policy();
         assert_eq!(
-            passkey_for(&p, "https://tracker-x3.net/announce/X"),
+            passkey_for(&p, "https://tr-a.test/announce/X"),
             Some("NEWKEY")
         );
         assert_eq!(
-            passkey_for(&p, "https://tk.tracker-x3.net/announce/X"),
+            passkey_for(&p, "https://tk.tr-a.test/announce/X"),
             Some("NEWKEY")
         );
-        assert_eq!(passkey_for(&p, "https://nottracker-x3.net/announce/X"), None);
+        assert_eq!(passkey_for(&p, "https://nottr-a.test/announce/X"), None);
         assert_eq!(passkey_for(&p, "https://tracker-x7.example/announce/X"), None);
     }
 
@@ -658,7 +658,7 @@ mod tests {
         let p = policy();
         let r = prepare(
             &p,
-            "https://tracker-x3.net/announce/OLD",
+            "https://tr-a.test/announce/OLD",
             &"ab".repeat(20),
             16171,
             1,
@@ -670,7 +670,7 @@ mod tests {
         )
         .unwrap();
         assert!(
-            r.url.starts_with("https://tracker-x3.net/announce/NEWKEY?"),
+            r.url.starts_with("https://tr-a.test/announce/NEWKEY?"),
             "{}",
             r.url
         );

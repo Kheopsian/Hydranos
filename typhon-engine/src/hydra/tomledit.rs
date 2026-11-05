@@ -667,7 +667,7 @@ listen_port = 16171
 
     #[test]
     fn a_host_is_quoted_so_its_dots_do_not_nest_tables() {
-        assert_eq!(quote_toml_key("tk.tracker-x3.net"), "\"tk.tracker-x3.net\"");
+        assert_eq!(quote_toml_key("tk.tr-a.test"), "\"tk.tr-a.test\"");
         assert_eq!(quote_toml_key("a\"b"), "\"a\\\"b\"");
     }
 }

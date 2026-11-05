@@ -167,12 +167,9 @@ mod tests {
         let mut config = Config::default();
         config
             .announce_passkeys
-            .insert("tracker-x3.net".into(), "KEY".into());
+            .insert("tr-a.test".into(), "KEY".into());
         let p = policy_from_config(&config, "-TY0001-abcdefghijkl".into(), String::new());
-        assert_eq!(
-            p.passkeys.get("tracker-x3.net").map(String::as_str),
-            Some("KEY")
-        );
+        assert_eq!(p.passkeys.get("tr-a.test").map(String::as_str), Some("KEY"));
     }
 
     /// ⭐ One product name on the wire. The announce said `Hydra/<v>` while

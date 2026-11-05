@@ -13,7 +13,7 @@ Usage, on the host:
 
     kill -USR1 <engine pid>                  # writes /configs/jeprof.<nspid>.N.mN.heap
     python3 heap_report.py \\
-        --heap /data/appdata/hydra/jeprof.39.0.m0.heap \\
+        --heap /path/to/jeprof.39.0.m0.heap \\
         --base 0x5634e3027000 \\
         --binary /tmp/hydra-engine
 

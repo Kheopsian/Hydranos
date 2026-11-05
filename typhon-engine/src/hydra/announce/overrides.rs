@@ -53,8 +53,8 @@ fn url_host(u: &str) -> Option<String> {
 /// Whether a tracker host matches a configured key: the same host, or a
 /// subdomain of it.
 ///
-/// ⚠ This is deliberately NOT a substring test. It used to be, and `"torr"`
-/// matched `"tracker-x2.net"` -- so a passkey configured for one tracker was sent to
+/// ⚠ This is deliberately NOT a substring test. It used to be, and `"tr"`
+/// matched `"tr-b.test"` -- so a passkey configured for one tracker was sent to
 /// a different one. The old form also walked a Go map, whose iteration order is
 /// randomised, so with several keys the wrong match was picked intermittently
 /// rather than every time, which is the hardest kind of wrong to notice.
@@ -68,7 +68,7 @@ pub fn host_key_matches(host: &str, key: &str) -> bool {
 
 /// The most specific configured key matching this host.
 ///
-/// Longest wins, so overlapping keys ("tracker-x3.net" and "tk.tracker-x3.net")
+/// Longest wins, so overlapping keys ("tr-a.test" and "tk.tr-a.test")
 /// resolve deterministically to the more specific one whatever the map order.
 pub fn longest_override_key<'a, I>(host: &str, keys: I) -> Option<&'a str>
 where
@@ -86,15 +86,15 @@ mod tests {
     #[test]
     fn a_host_is_read_from_a_url_a_pair_or_a_bare_name() {
         assert_eq!(
-            override_host("https://Tracker.tracker-x3.net/announce/abc"),
-            "tracker.tracker-x3.net"
+            override_host("https://Tracker.TR-A.test/announce/abc"),
+            "tracker.tr-a.test"
         );
         assert_eq!(
-            override_host("udp://tracker.tracker-x2.net:6969/announce"),
-            "tracker.tracker-x2.net"
+            override_host("udp://tracker.tr-b.test:6969/announce"),
+            "tracker.tr-b.test"
         );
-        assert_eq!(override_host("tracker.tracker-x2.net:6969"), "tracker.tracker-x2.net");
-        assert_eq!(override_host("Tracker.tracker-x2.NET"), "tracker.tracker-x2.net");
+        assert_eq!(override_host("tracker.tr-b.test:6969"), "tracker.tr-b.test");
+        assert_eq!(override_host("Tracker.Tr-B.TEST"), "tracker.tr-b.test");
         assert_eq!(override_host("[2a01:e0a::1]:6969"), "2a01:e0a::1");
         assert_eq!(override_host("   "), "");
     }
@@ -131,31 +131,31 @@ mod tests {
     /// and matching loosely hands it to the wrong tracker.
     #[test]
     fn a_prefix_is_not_a_match() {
-        assert!(!host_key_matches("tracker-x2.net", "torr"));
-        assert!(!host_key_matches("tracker.tracker-x2.net", "torr"));
+        assert!(!host_key_matches("tr-b.test", "tr"));
+        assert!(!host_key_matches("tracker.tr-b.test", "tr"));
         // A subdomain of the key is, on the dot boundary.
-        assert!(host_key_matches("tracker.tracker-x2.net", "tracker-x2.net"));
-        assert!(host_key_matches("tracker-x2.net", "tracker-x2.net"));
+        assert!(host_key_matches("tracker.tr-b.test", "tr-b.test"));
+        assert!(host_key_matches("tr-b.test", "tr-b.test"));
         // ...but not a name that merely ends with it.
-        assert!(!host_key_matches("nottracker-x2.net", "tracker-x2.net"));
+        assert!(!host_key_matches("nottr-b.test", "tr-b.test"));
     }
 
     #[test]
     fn the_most_specific_key_wins_whatever_the_order() {
-        let keys = ["tracker-x3.net", "tk.tracker-x3.net"];
+        let keys = ["tr-a.test", "tk.tr-a.test"];
         assert_eq!(
-            longest_override_key("tk.tracker-x3.net", keys),
-            Some("tk.tracker-x3.net")
+            longest_override_key("tk.tr-a.test", keys),
+            Some("tk.tr-a.test")
         );
         // Reversed input, same answer: the old map-order dependency is gone.
-        let reversed = ["tk.tracker-x3.net", "tracker-x3.net"];
+        let reversed = ["tk.tr-a.test", "tr-a.test"];
         assert_eq!(
-            longest_override_key("tk.tracker-x3.net", reversed),
-            Some("tk.tracker-x3.net")
+            longest_override_key("tk.tr-a.test", reversed),
+            Some("tk.tr-a.test")
         );
         assert_eq!(
-            longest_override_key("other.tracker-x3.net", keys),
-            Some("tracker-x3.net")
+            longest_override_key("other.tr-a.test", keys),
+            Some("tr-a.test")
         );
         assert_eq!(longest_override_key("elsewhere.net", keys), None);
     }

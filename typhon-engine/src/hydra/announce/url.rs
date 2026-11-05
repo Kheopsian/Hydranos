@@ -180,7 +180,7 @@ mod tests {
     #[test]
     fn a_seeding_torrent_asks_for_no_peers() {
         let a = Announce {
-            tracker_url: "https://tracker-x3.net/announce/KEY",
+            tracker_url: "https://tr-a.test/announce/KEY",
             info_hash: &"ab".repeat(20),
             peer_id: "-qB5220-abcdefghijkl",
             port: 16171,
@@ -197,7 +197,7 @@ mod tests {
             u.contains("&numwant=0"),
             "a complete torrent wants no peers: {u}"
         );
-        assert!(u.starts_with("https://tracker-x3.net/announce/KEY?info_hash=%AB"));
+        assert!(u.starts_with("https://tr-a.test/announce/KEY?info_hash=%AB"));
         assert!(
             !u.contains("&event="),
             "a periodic announce carries no event"
@@ -207,7 +207,7 @@ mod tests {
     #[test]
     fn a_tracker_query_is_kept_and_ours_appended() {
         let a = Announce {
-            tracker_url: "https://tracker-x3.net/announce?passkey=SECRET",
+            tracker_url: "https://tr-a.test/announce?passkey=SECRET",
             info_hash: &"ab".repeat(20),
             peer_id: "-qB5220-abcdefghijkl",
             port: 16171,
@@ -220,7 +220,7 @@ mod tests {
             tracker_id: None,
         };
         let u = build(&a).unwrap();
-        assert!(u.starts_with("https://tracker-x3.net/announce?passkey=SECRET&info_hash="));
+        assert!(u.starts_with("https://tr-a.test/announce?passkey=SECRET&info_hash="));
         assert!(
             u.contains("&numwant=200"),
             "a leeching torrent asks for peers"

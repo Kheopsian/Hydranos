@@ -34,7 +34,7 @@ const MAX_CONCURRENCY: usize = 4096;
 /// first adaptive pool sized itself from throughput x latency (Little's law)
 /// -- and a saturated tracker answers SLOWER the harder it is pushed, so the
 /// measured latency asked for more concurrency, which raised the latency:
-/// on 2026-09-28 it climbed to 4096 in flight, tracker-x1 went from 1 s to 11 s
+/// on 2026-09-28 it climbed to 4096 in flight, the tracker went from 1 s to 11 s
 /// and timed out, and throughput did not move from ~350/s.
 /// Now each tracker has its own limit, found the way TCP Vegas finds a
 /// window: grow while the tracker answers at its natural speed and work is
@@ -1316,7 +1316,7 @@ mod tests {
     }
 
     /// A tracker serving at most `cap` answers a second at `base` seconds each;
-    /// past that, requests queue on its side (Little's law) -- what tracker-x1
+    /// past that, requests queue on its side (Little's law) -- what a tracker
     /// did on 2026-09-28. Work always waiting; one cycle at the current limit.
     fn saturable_cycle(t: &mut Tracker, base: f64, cap: f64) -> (f64, f64) {
         let rate = (t.limit as f64 / base).min(cap);

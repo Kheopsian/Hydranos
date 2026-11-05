@@ -55,7 +55,7 @@ const MAX_BULK: usize = 1000;
 const MAX_PER_TORRENT: usize = 100;
 const MAX_RECHECK: usize = 50;
 
-/// A .torrent is a few hundred KB; tracker-x1 refuses above 15 MiB, so will we.
+/// A .torrent is a few hundred KB; trackers commonly refuse above 15 MiB, so will we.
 const MAX_TORRENT_BYTES: usize = 15 << 20;
 
 const INSTRUCTIONS: &str = "Hydranos is a BitTorrent seedbox. Each torrent lives in one \

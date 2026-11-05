@@ -9,22 +9,20 @@ already have -- and a hardlink gives them back without touching what seeds.
 Dry run by default. Nothing is unlinked until --apply is passed, and even then
 every removal is preceded by a link that is verified to share the source inode.
 
-    python3 dedup_sweep.py                  # report only
-    python3 dedup_sweep.py --limit 20       # look at 20 groups
-    python3 dedup_sweep.py --apply --limit 20
+    python3 dedup_sweep.py --db /path/to/hydra.db \\
+        --mount /data=/mnt/pool/data           # report only
+    python3 dedup_sweep.py --db ... --mount ... --limit 20
+    python3 dedup_sweep.py --db ... --mount ... --apply --limit 20
+
+--mount GUEST=HOST (repeatable) maps a path the daemon sees (inside its
+container) to the same place on the machine this script runs on.
 """
 
 import argparse, collections, hashlib, os, sqlite3, sys
 
-DB = "file:/data/appdata/hydra/hydra.db?mode=ro"
-
-# The daemon sees container paths; this script runs on the host.
-MOUNTS = {
-    "/data": "/mnt/datapool/data",
-    "/tracker-x1": "/mnt/calepool/data",
-    "/race": "/mnt/race",
-    "/configs": "/data/appdata/hydra",
-}
+# The daemon sees container paths; this script runs on the host. Filled from
+# the --mount options.
+MOUNTS = {}
 
 
 def host_path(p):
@@ -121,14 +119,25 @@ def human(n):
 
 def main():
     ap = argparse.ArgumentParser()
+    ap.add_argument("--db", default=os.environ.get("HYDRA_DB"),
+                    help="path to hydra.db (or set HYDRA_DB)")
+    ap.add_argument("--mount", action="append", default=[], metavar="GUEST=HOST",
+                    help="map a path seen by the daemon to its host path")
     ap.add_argument("--apply", action="store_true",
                     help="actually relink (default is a dry run)")
     ap.add_argument("--limit", type=int, default=0, help="only this many groups")
     ap.add_argument("--min-mib", type=int, default=16,
                     help="skip groups whose payload is smaller than this")
     args = ap.parse_args()
+    if not args.db:
+        ap.error("--db (or HYDRA_DB) is required")
+    for m in args.mount:
+        guest, sep, host = m.partition("=")
+        if not sep or not guest or not host:
+            ap.error(f"--mount expects GUEST=HOST, got {m!r}")
+        MOUNTS[guest.rstrip("/")] = host.rstrip("/")
 
-    con = sqlite3.connect(DB, uri=True)
+    con = sqlite3.connect("file:" + os.path.abspath(args.db) + "?mode=ro", uri=True)
     groups = collections.defaultdict(list)
     for ih, sess, sp, blob in con.execute(
             "SELECT info_hash, session, save_path, torrent FROM torrents"):

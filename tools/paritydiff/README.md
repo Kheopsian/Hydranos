@@ -24,8 +24,9 @@ field by field.
 ## Running it
 
 ```bash
-# on node-x1
-/data/appdata/hydra-v4/tools/paritydiff/run-parity.sh --rebuild
+# on the bench host (HYDRA_REPO = this checkout, HYDRA_STAGING = scratch dir,
+# HYDRA_DATA = the daemon's data dir, for make-fixture.py)
+HYDRA_REPO=/srv/hydra-repo tools/paritydiff/run-parity.sh --rebuild
 ```
 
 The two daemons sit on the `v4bench` docker network, created `--internal`: it

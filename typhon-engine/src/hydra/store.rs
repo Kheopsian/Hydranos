@@ -3423,7 +3423,7 @@ impl Store {
     /// list request, holding the store's lock -- every other store write
     /// waited behind every search. A cache invalidated on any write was tried
     /// before and never served: the store takes a write every few seconds
-    /// (tracker-x1 adds torrents all day). So the triggers set up in
+    /// (a big tracker adds torrents all day). So the triggers set up in
     /// `track_changes` note WHICH rows changed, and only those are read again.
     ///
     /// Falls back to a full read when it cannot vouch for the copy: no
@@ -3749,7 +3749,7 @@ impl Store {
     /// Per-tracker cumulative counters, as (engine, tracker, ul, dl).
     ///
     /// ⚠ The key fields are separated by NUL bytes, not spaces:
-    /// `tracker\0hoard\0tk.tracker-x3.net`. A dump prints them as if they were
+    /// `tracker\0hoard\0tk.tr-a.test`. A dump prints them as if they were
     /// spaces, so `LIKE 'tracker %'` looks right and matches nothing at all --
     /// the endpoint then answers an empty list while the data is sitting there.
     pub fn tracker_counters(&self) -> anyhow::Result<Vec<(String, String, i64, i64)>> {
@@ -6654,9 +6654,8 @@ mod jobs_nodes_drain_tests {
     #[test]
     fn a_node_round_trips_with_its_key() {
         let s = store();
-        s.put_node(&node("node-x2", "http://10.0.0.5:8199"))
-            .unwrap();
-        let back = s.node("node-x2").unwrap().expect("the node is stored");
+        s.put_node(&node("node-a", "http://10.0.0.5:8199")).unwrap();
+        let back = s.node("node-a").unwrap().expect("the node is stored");
         assert_eq!(back.url, "http://10.0.0.5:8199");
         assert_eq!(back.api_key, "remote-key");
         assert!(back.enabled);
@@ -6665,10 +6664,8 @@ mod jobs_nodes_drain_tests {
     #[test]
     fn putting_a_node_twice_updates_it_rather_than_duplicating_it() {
         let s = store();
-        s.put_node(&node("node-x2", "http://10.0.0.5:8199"))
-            .unwrap();
-        s.put_node(&node("node-x2", "http://10.0.0.9:8199"))
-            .unwrap();
+        s.put_node(&node("node-a", "http://10.0.0.5:8199")).unwrap();
+        s.put_node(&node("node-a", "http://10.0.0.9:8199")).unwrap();
         let all = s.nodes().unwrap();
         assert_eq!(all.len(), 1, "one name is one node");
         assert_eq!(all[0].url, "http://10.0.0.9:8199", "the newer address wins");
@@ -6677,11 +6674,10 @@ mod jobs_nodes_drain_tests {
     #[test]
     fn deleting_a_node_reports_whether_there_was_one() {
         let s = store();
-        s.put_node(&node("node-x2", "http://10.0.0.5:8199"))
-            .unwrap();
-        assert!(s.delete_node("node-x2").unwrap());
+        s.put_node(&node("node-a", "http://10.0.0.5:8199")).unwrap();
+        assert!(s.delete_node("node-a").unwrap());
         assert!(
-            !s.delete_node("node-x2").unwrap(),
+            !s.delete_node("node-a").unwrap(),
             "the second call has nothing to delete"
         );
         assert!(s.nodes().unwrap().is_empty());

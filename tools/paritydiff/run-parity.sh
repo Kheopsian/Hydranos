@@ -2,7 +2,7 @@
 # Build the Rust daemon, stand it up next to the Go reference on the SAME data,
 # and compare them.
 #
-# Runs on node-x1. Both daemons sit on the "v4bench" docker network, created
+# Runs on the bench host. Both daemons sit on the "v4bench" docker network, created
 # --internal: no route off the host. That is deliberate. The bench replays real
 # production data, and an instance able to reach a tracker would announce those
 # torrents a second time from the house IP. The engines are additionally started
@@ -36,8 +36,9 @@ if ! flock -n 9; then
 fi
 
 
-REPO=/data/appdata/hydra-v4
-STAGING=/data/appdata/hydra-v4-staging
+REPO=${HYDRA_REPO:-/srv/hydra-repo}
+STAGING=${HYDRA_STAGING:-/srv/hydra-staging}
+export HYDRA_STAGING=$STAGING
 TOOLS=$REPO/tools/paritydiff
 NET=v4bench
 KEY=change-me-in-production
