@@ -2054,7 +2054,7 @@ What a script, a supervisor or a habit may notice after upgrading.
 - **Categories are in alphabetical order, whatever their case** -- the hoard's
   filter chips and every category list (`GET /api/categories`: the add
   dialog, *Move to category*, settings, workflows). They were in byte order,
-  which put every capitalised name (`tracker-x1`, `tracker-x7`) before every
+  which put every capitalised name (`Books`, `Music`) before every
   lowercase one (`animes`). Tracker and tag chips use the same order.
 - **Clicking a control that redraws itself no longer closes the detail
   panel.** The "click outside closes the panel" check looked for the panel
