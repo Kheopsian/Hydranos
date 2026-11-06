@@ -415,7 +415,6 @@ pub const STATES: &[&str] = &[
 
 /// The classes `tracker_error_class` can read, for the editor's dropdown.
 /// `""` (no error, or not known to be) is not one: it is the absence of a class.
-#[allow(dead_code)] // the editor's list of choices reads it once the API serves it
 pub const TRACKER_ERROR_CLASSES: &[&str] = &["auth", "dead", "throttled", "unreachable", "other"];
 
 /// Every field a condition may name, with the kind that decides its operators.

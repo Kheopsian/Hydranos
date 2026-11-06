@@ -126,6 +126,7 @@ pub async fn fields(
                 },
                 "choices": match (*name, kind) {
                     ("state", _) => serde_json::json!(rules::STATES),
+                    ("tracker_error_class", _) => serde_json::json!(rules::TRACKER_ERROR_CLASSES),
                     (_, rules::Kind::Bool) => serde_json::json!(["true", "false"]),
                     _ => serde_json::Value::Null,
                 },
@@ -139,6 +140,7 @@ pub async fn fields(
                     "external_links" => "0 means only Hydranos points at these files, so deleting them loses nothing",
                     "freeable_bytes" => "only files nothing else points at; deleting a shared one frees nothing",
                     "data_missing" => "the torrent is seeding data it cannot read",
+                    "tracker_error_class" => "dead only when every tracker it announces to answered that the torrent is unregistered or deleted; a tracker not heard from yet, unreachable or still retrying counts as alive",
                     "tag_age" => "how long ago the chosen tag was set on the torrent; a torrent without that tag never matches. A tag set before dates were kept counts from the day they began",
                     "seeding_time" => "time actually spent seeding since the torrent completed; stopped time is not counted",
                     "ratio" => "uploaded divided by downloaded, or by the data held when under 1% of it was downloaded (a cross-seed); 0 when nothing is held or downloaded",
@@ -208,6 +210,7 @@ fn field_label(name: &str) -> String {
         "tracker_host" => "tracker",
         "tracker_error" => "has a tracker error",
         "tracker_error_msg" => "tracker error message",
+        "tracker_error_class" => "kind of tracker error, on every tracker",
         "torrent_error" => "has a torrent error",
         "user_paused" => "stopped by hand",
         "multi_file" => "has several files",
@@ -1460,6 +1463,33 @@ mod tests {
             let g = f["group"].as_str().expect("a field carries its group");
             assert!(groups.contains(&g), "{g} is not in the served groups");
         }
+    }
+
+    /// `tracker_error_class` is picked from its classes, not typed: a rule
+    /// that says `eq Dead` or `eq unregistered` matches nothing and looks
+    /// right while it does. It reads as words, in the Tracker group.
+    #[tokio::test]
+    async fn tracker_error_class_offers_its_classes() {
+        let s = st("rules-tracker-error-class");
+        let resp = fields(State(s.state.clone()), RawQuery(None), keyed(KEY)).await;
+        let body = body_json(resp).await;
+        let f = body["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["name"] == "tracker_error_class")
+            .expect("the field is served");
+        assert_eq!(
+            f["choices"],
+            serde_json::json!(rules::TRACKER_ERROR_CLASSES)
+        );
+        assert_eq!(f["group"], "Tracker");
+        assert_ne!(f["label"], "tracker_error_class", "a label of its own");
+        assert!(
+            f["hint"].as_str().unwrap().contains("every tracker"),
+            "the hint says when it is dead: {}",
+            f["hint"]
+        );
     }
 
     /// A field with no label of its own still reads as the engine spells it,
