@@ -14,7 +14,10 @@
 
 /// The classes, in order of how ACTIONABLE they are. The order is the tie-break
 /// below, not decoration.
-pub const CLASSES: [&str; 5] = ["auth", "dead", "throttled", "unreachable", "other"];
+///
+/// Defined in the engine (`ERROR_CLASSES`): the announce book keeps a tracker's
+/// class as a code into that list, and the two must be one list.
+pub const CLASSES: [&str; 5] = typhon_engine::torrent::meta::ERROR_CLASSES;
 
 fn rank(class: &str) -> usize {
     CLASSES

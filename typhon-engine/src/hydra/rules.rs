@@ -34,6 +34,9 @@ pub struct Facts {
     pub tracker_host: String,
     pub tracker_error: bool,
     pub tracker_error_msg: String,
+    /// `torrent::meta::tracker_error_class`: `dead` only when EVERY tracker
+    /// listed answered dead. `""` when not known to be in error.
+    pub tracker_error_class: String,
     pub torrent_error: bool,
     pub user_paused: bool,
     pub multi_file: bool,
@@ -410,6 +413,11 @@ pub const STATES: &[&str] = &[
     "error",
 ];
 
+/// The classes `tracker_error_class` can read, for the editor's dropdown.
+/// `""` (no error, or not known to be) is not one: it is the absence of a class.
+#[allow(dead_code)] // the editor's list of choices reads it once the API serves it
+pub const TRACKER_ERROR_CLASSES: &[&str] = &["auth", "dead", "throttled", "unreachable", "other"];
+
 /// Every field a condition may name, with the kind that decides its operators.
 ///
 /// The single source of truth: `/api/workflows/fields` serves this, the
@@ -427,6 +435,7 @@ pub const FIELDS: &[(&str, Kind)] = &[
     ("tracker_host", Kind::Text),
     ("tracker_error", Kind::Bool),
     ("tracker_error_msg", Kind::Text),
+    ("tracker_error_class", Kind::Text),
     ("torrent_error", Kind::Bool),
     ("user_paused", Kind::Bool),
     ("multi_file", Kind::Bool),
@@ -621,6 +630,7 @@ fn text_of<'a>(f: &'a Facts, field: &str) -> Option<&'a str> {
         "save_path" => &f.save_path,
         "tracker_host" => &f.tracker_host,
         "tracker_error_msg" => &f.tracker_error_msg,
+        "tracker_error_class" => &f.tracker_error_class,
         _ => return None,
     })
 }

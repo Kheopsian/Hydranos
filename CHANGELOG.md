@@ -23,6 +23,10 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 
 ## Unreleased -- the client's identity and the link scanner's memory
 
+### Added
+
+- Workflow condition `tracker_error_class` (`auth`, `dead`, `throttled`, `unreachable`, `other`, or empty), also in the torrent rows. Unlike `tracker_error_msg`, which is the last message of the last tracker heard from, it is read from what every tracker of the torrent last said: `dead` only when every tracker it announces to answered dead. A tracker not yet heard from, cut by the circuit breaker, retired by `retry in: never` or still retrying a registration counts as alive, so a torrent dead on one tracker and never announced to on another is not dead. The announce book keeps one byte per tracker for it (the slot does not grow). A refusal counts as a registration still in progress only during the first 21 minutes after the torrent was added, and `dead` only comes from the tracker's own answer, never from a transport error that says "not found".
+
 ### Changed
 
 - The engine no longer reads `peer_fingerprint` and `user_agent` from a configuration file. Since client spoofing was removed, the `hydranos` binary never passed them to the engine; this closes the library path as well.

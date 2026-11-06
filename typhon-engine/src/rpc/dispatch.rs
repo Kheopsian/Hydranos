@@ -324,6 +324,7 @@ pub fn torrent_to_json(t: &Arc<crate::torrent::meta::TorrentState>) -> Value {
         "is_announced": announce_ok,
         "tracker_error": !tracker_error.is_empty(),
         "tracker_error_msg": tracker_error,
+        "tracker_error_class": t.tracker_error_class(),
         "error_msg": error_msg,
     })
 }

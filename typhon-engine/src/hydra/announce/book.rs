@@ -14,7 +14,7 @@
 use std::time::Duration;
 
 use typhon_engine::torrent::meta::{
-    tracker_key, TrackerSlot, ANNOUNCE_EVENT_COMPLETED, ANNOUNCE_EVENT_STOPPED,
+    class_code, tracker_key, TrackerSlot, ANNOUNCE_EVENT_COMPLETED, ANNOUNCE_EVENT_STOPPED,
 };
 use typhon_engine::tracker::http::{retry_hint, AnnounceResponse, RetryHint};
 
@@ -116,6 +116,7 @@ pub fn record(
     match result {
         Ok(resp) => {
             slot.last_ok = now;
+            slot.last_class = 0;
             slot.refusals = 0;
             slot.not_before = now + resp.min_interval as i64;
             if let Some(id) = &resp.tracker_id {
@@ -139,6 +140,18 @@ pub fn record(
             }
         }
         Err(e) => {
+            // An error nobody could classify is still an error, never "ok".
+            // `dead` only from an answer of the tracker: a transport error
+            // that merely says "not found" (404 from a proxy) is a tracker we
+            // could not reach.
+            let class = match crate::errclass::classify(e) {
+                "dead" if !is_refusal(e) => "unreachable",
+                c => c,
+            };
+            slot.last_class = match class_code(class) {
+                0 => class_code("other"),
+                c => c,
+            };
             match retry_hint(e) {
                 Some(RetryHint::After(d)) => slot.hint_until = now + d.as_secs() as i64,
                 Some(RetryHint::Never) => slot.disabled = true,
@@ -159,6 +172,14 @@ pub fn record(
             }
         }
     }
+}
+
+/// The breaker would not let an announce go to this tracker: it is down as far
+/// as we know, which is not the same as dead. Marked so that a torrent whose
+/// other trackers said "unregistered" is not read as dead on the strength of a
+/// tracker that was never asked.
+pub fn record_cut(slot: &mut TrackerSlot) {
+    slot.last_class = class_code("unreachable");
 }
 
 /// The tracker answered, and the answer was no (`failure reason`) -- as
@@ -452,6 +473,69 @@ mod tests {
             "registered: the swarm finds us"
         );
         assert_eq!(book[0].refusals, 0);
+    }
+
+    /// The class of the last answer is kept per tracker: a refusal that says
+    /// "not registered" is dead, a success puts it right, and a tracker the
+    /// breaker cut is unreachable, never dead.
+    #[test]
+    fn a_tracker_keeps_the_class_of_its_last_answer() {
+        let mut s = TrackerSlot::default();
+        assert_eq!(s.last_class, 0);
+        record(
+            &mut s,
+            "started",
+            &Err("tracker: Torrent not registered with this tracker".into()),
+            1,
+        );
+        assert_eq!(s.last_class, class_code("dead"));
+        record_cut(&mut s);
+        assert_eq!(s.last_class, class_code("unreachable"));
+        record(&mut s, "", &Err("http request: timed out".into()), 2);
+        assert_eq!(s.last_class, class_code("unreachable"));
+        record(
+            &mut s,
+            "",
+            &Err("tracker: Torrent not registered with this tracker".into()),
+            3,
+        );
+        assert_eq!(s.last_class, class_code("dead"));
+        record(&mut s, "", &ok(0, None), 4);
+        assert_eq!(s.last_class, 0, "a success puts it right");
+        assert_eq!(s.last_ok, 4);
+        // An error nobody can classify is still an error.
+        record(&mut s, "", &Err("???".into()), 5);
+        assert_eq!(s.last_class, class_code("other"));
+    }
+
+    /// The longest a race can retry is the window a reader without the engine
+    /// assumes: 255 attempts, whatever minutes are configured.
+    #[test]
+    fn the_longest_retry_is_the_window_the_engine_assumes() {
+        let longest = registration_attempts(Duration::from_secs(u32::MAX as u64));
+        assert_eq!(
+            longest as i64 * REGISTRATION_RETRY.as_secs() as i64,
+            typhon_engine::torrent::meta::REGISTRATION_WINDOW_MAX_SECS
+        );
+    }
+
+    /// `dead` only comes from an ANSWER of the tracker. The same words in a
+    /// transport error (an HTTP 404 from a proxy, a front page) are not one.
+    #[test]
+    fn dead_is_only_ever_an_answer_of_the_tracker() {
+        let mut s = TrackerSlot::default();
+        record(&mut s, "", &Err("http 404 Not Found".into()), 1);
+        assert_eq!(s.last_class, class_code("unreachable"));
+        record(
+            &mut s,
+            "",
+            &Err(
+                "v4: tracker: Torrent not registered on this tracker | v6: http 404 Not Found"
+                    .into(),
+            ),
+            2,
+        );
+        assert_eq!(s.last_class, class_code("dead"), "a refusal still counts");
     }
 
     /// Not answering is not refusing: a tracker that is down is the breaker's

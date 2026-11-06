@@ -521,6 +521,11 @@ pub(super) async fn announce_one(
                     _ => break,
                 };
                 if !breaker.allows(&host, std::time::Instant::now()) {
+                    let mut book = torrent
+                        .announce_book
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    book::record_cut(book::slot_mut(&mut book, tracker_url));
                     break;
                 }
                 // Per tracker, not per torrent: we can be visible to one and

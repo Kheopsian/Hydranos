@@ -610,8 +610,94 @@ pub struct TrackerSlot {
     /// Refusals in a row from a tracker that has not registered this torrent
     /// yet -- the count a race's registration retries are bounded by.
     pub refusals: u8,
+    /// The class of this tracker's LAST answer or failure, as a code of
+    /// `ERROR_CLASSES` (1-based); 0 = it answered without error, or has not
+    /// answered at all (`last_ok` tells the two apart). A success resets it.
+    /// One byte, in the padding the bools and `refusals` leave: the slot does
+    /// not grow.
+    pub last_class: u8,
     /// BEP 3 `tracker id`, echoed back as `trackerid=`.
     pub tracker_id: Option<Box<str>>,
+}
+
+/// The classes of a tracker error, most ACTIONABLE first: what an operator
+/// does about it, not how bad it is. Position + 1 is the code kept in
+/// `TrackerSlot::last_class`. `hydra::errclass` classifies messages into these.
+pub const ERROR_CLASSES: [&str; 5] = ["auth", "dead", "throttled", "unreachable", "other"];
+
+/// The code of a class name (see `TrackerSlot::last_class`); 0 for `""` or a
+/// name that is not a class.
+pub fn class_code(name: &str) -> u8 {
+    ERROR_CLASSES
+        .iter()
+        .position(|c| *c == name)
+        .map_or(0, |i| i as u8 + 1)
+}
+
+/// How long after a torrent is added a tracker's "unregistered" may still be a
+/// moment rather than a verdict: the longest a race can retry (255 attempts, the
+/// cap of `registration_attempts`, 5 s apart). The window is configurable per
+/// engine (`registration_retry_minutes`) and never longer than this; a reader
+/// without the engine's session at hand (a workflow fact, the list row) takes
+/// the longest, the prudent side for a field a rule may delete on.
+pub const REGISTRATION_WINDOW_MAX_SECS: i64 = 255 * 5;
+
+/// What a whole torrent's tracker error is, from what EACH tracker it lists
+/// last said. `""` = not in error, or not known to be.
+///
+/// `TorrentState::last_announce_error` is one message, the last tracker's: it
+/// cannot say "dead on every tracker", and a success on one tracker wipes the
+/// error of another. This reads the book instead.
+///
+/// A rule can delete files on `dead`, so every doubt reads as ALIVE (`""`):
+/// - a tracker that answered without error;
+/// - a tracker with no slot, or a slot that never answered (never announced,
+///   cut by the breaker before it could, ...): unknown;
+/// - a tracker retired by BEP 31 `retry in: never` (`disabled`);
+/// - a tracker still being retried for registration (`started` false, it
+///   refused at least once, and the torrent was added less than
+///   `REGISTRATION_WINDOW_MAX_SECS` ago): the "unregistered" it says is what a
+///   race expects to turn into a success. By TIME and not by the refusal count:
+///   `started` is false after every restart and `refusals` counts every refusal,
+///   so a torrent added months ago and deleted from its tracker would otherwise
+///   wait for 72 refusals, days of announces, before reading dead.
+///
+/// Only when EVERY listed tracker is in a known error is there a class, and it
+/// is the LEAST actionable of theirs (the last of `ERROR_CLASSES`): `dead` on
+/// both is `dead`, `dead` and `throttled` is `throttled`, `auth` and `dead` is
+/// `dead`. So `dead` needs every tracker to have said dead.
+pub fn tracker_error_class(
+    listed: &[&str],
+    book: &[TrackerSlot],
+    added_time: i64,
+    now: i64,
+) -> &'static str {
+    let recent = now - added_time < REGISTRATION_WINDOW_MAX_SECS;
+    let mut worst = 0u8;
+    for url in listed {
+        let key = tracker_key(url);
+        let code = match book.iter().find(|s| s.key == key) {
+            Some(s) => {
+                let registering = !s.started && s.refusals > 0 && recent;
+                if s.disabled || registering {
+                    0
+                } else {
+                    s.last_class
+                }
+            }
+            None => 0,
+        };
+        if code == 0 {
+            return "";
+        }
+        worst = worst.max(code);
+    }
+    // `worst` is 0 only for an empty list: nothing listed, nothing in error.
+    (worst as usize)
+        .checked_sub(1)
+        .and_then(|i| ERROR_CLASSES.get(i))
+        .copied()
+        .unwrap_or("")
 }
 
 /// The key a tracker URL is filed under in the announce book.
@@ -900,6 +986,15 @@ impl TorrentState {
 }
 
 impl TorrentState {
+    /// The class of this torrent's tracker error, from what each listed tracker
+    /// last said (`tracker_error_class`). `""` unless every one is in error.
+    pub fn tracker_error_class(&self) -> &'static str {
+        let live = self.live_trackers.read();
+        let listed: Vec<&str> = live.iter().flatten().map(String::as_str).collect();
+        let book = self.announce_book.lock().unwrap_or_else(|e| e.into_inner());
+        tracker_error_class(&listed, &book, self.added_time, now_secs())
+    }
+
     /// Open a new announce session: the counters reported to trackers start
     /// from zero again, and every tracker is owed a fresh `started`.
     ///
@@ -2406,5 +2501,169 @@ mod announce_session_tests {
             tracker_key("https://a/announce"),
             tracker_key("https://b/announce")
         );
+    }
+
+    // --- the class of a torrent's tracker error, from each tracker's book ---
+
+    const A: &str = "https://tracker-a/announce";
+    const B: &str = "https://tracker-b/announce";
+
+    /// A slot for `url` that answered with this class ("" = answered, no error).
+    fn said(url: &str, class: &str) -> TrackerSlot {
+        TrackerSlot {
+            key: tracker_key(url),
+            last_ok: if class.is_empty() { 1 } else { 0 },
+            last_class: class_code(class),
+            ..Default::default()
+        }
+    }
+
+    const NOW: i64 = 2_000_000_000;
+
+    /// The class of a torrent added `age` seconds ago.
+    fn class_aged(listed: &[&str], book: &[TrackerSlot], age: i64) -> &'static str {
+        tracker_error_class(listed, book, NOW - age, NOW)
+    }
+
+    /// The class of a torrent added 30 days ago, long past any registration.
+    fn class_of(listed: &[&str], book: &[TrackerSlot]) -> &'static str {
+        class_aged(listed, book, 30 * 86400)
+    }
+
+    /// The slot is one per tracker per torrent, a node holds a million
+    /// torrents: the class byte must fit in the padding.
+    #[test]
+    fn the_class_byte_does_not_grow_the_slot() {
+        assert_eq!(std::mem::size_of::<TrackerSlot>(), 56);
+    }
+
+    #[test]
+    fn a_class_name_and_its_code_round_trip() {
+        assert_eq!(class_code(""), 0);
+        assert_eq!(class_code("nonsense"), 0);
+        for (i, name) in ERROR_CLASSES.iter().enumerate() {
+            assert_eq!(class_code(name), i as u8 + 1);
+        }
+    }
+
+    /// One tracker that answers keeps the torrent out of error: the other's
+    /// "unregistered" is not the torrent's.
+    #[test]
+    fn dead_on_one_tracker_and_ok_on_another_is_not_dead() {
+        let book = [said(A, "dead"), said(B, "")];
+        assert_eq!(class_of(&[A, B], &book), "");
+    }
+
+    #[test]
+    fn dead_on_every_tracker_is_dead() {
+        let book = [said(A, "dead"), said(B, "dead")];
+        assert_eq!(class_of(&[A, B], &book), "dead");
+    }
+
+    #[test]
+    fn a_single_dead_tracker_is_dead() {
+        assert_eq!(class_of(&[A], &[said(A, "dead")]), "dead");
+    }
+
+    /// Every tracker in error, not all dead: the least actionable class, and
+    /// whichever order the book holds them in.
+    #[test]
+    fn dead_and_throttled_is_throttled() {
+        assert_eq!(
+            class_of(&[A, B], &[said(A, "dead"), said(B, "throttled")]),
+            "throttled"
+        );
+        assert_eq!(
+            class_of(&[A, B], &[said(B, "throttled"), said(A, "dead")]),
+            "throttled"
+        );
+        assert_eq!(
+            class_of(&[A, B], &[said(A, "auth"), said(B, "dead")]),
+            "dead"
+        );
+        assert_eq!(
+            class_of(&[A, B], &[said(A, "unreachable"), said(B, "other")]),
+            "other"
+        );
+    }
+
+    /// A tracker never announced to -- no slot, or a slot that never heard
+    /// anything -- is unknown, and unknown is not dead.
+    #[test]
+    fn a_tracker_never_announced_to_keeps_the_torrent_from_dead() {
+        assert_eq!(class_of(&[A, B], &[said(A, "dead")]), "", "no slot");
+        let silent = TrackerSlot {
+            key: tracker_key(B),
+            ..Default::default()
+        };
+        assert_eq!(
+            class_of(&[A, B], &[said(A, "dead"), silent]),
+            "",
+            "no answer"
+        );
+    }
+
+    /// A tracker the breaker cut is marked unreachable by the announcer: it is
+    /// down, not dead, and the torrent reads unreachable, not dead.
+    #[test]
+    fn a_tracker_cut_by_the_breaker_keeps_the_torrent_from_dead() {
+        let book = [said(A, "dead"), said(B, "unreachable")];
+        assert_eq!(class_of(&[A, B], &book), "unreachable");
+    }
+
+    /// A race retries a tracker that has not registered the torrent yet: its
+    /// "unregistered" is a moment, not a verdict.
+    #[test]
+    fn a_tracker_still_retrying_registration_is_not_dead() {
+        let mut retrying = said(B, "dead");
+        retrying.refusals = 3;
+        let book = [said(A, "dead"), retrying.clone()];
+        assert_eq!(class_aged(&[A, B], &book, 60), "", "added a minute ago");
+        // The window spent, the answer stands.
+        assert_eq!(
+            class_aged(&[A, B], &book, REGISTRATION_WINDOW_MAX_SECS),
+            "dead",
+            "the longest retry is over"
+        );
+        // A tracker that registered us is not in a registration retry.
+        retrying.started = true;
+        assert_eq!(
+            class_aged(&[A, B], &[said(A, "dead"), retrying], 60),
+            "dead"
+        );
+    }
+
+    /// ⭐ `started` is false after every restart and `refusals` counts every
+    /// refusal: a torrent added a month ago and deleted from its only tracker
+    /// is dead at its first refusal, not after days of them; the same state
+    /// a minute after the add is a registration still in progress.
+    #[test]
+    fn an_old_torrent_refused_once_is_dead_and_a_new_one_is_not() {
+        let mut refused = said(A, "dead");
+        refused.refusals = 1;
+        assert_eq!(class_aged(&[A], &[refused.clone()], 30 * 86400), "dead");
+        assert_eq!(class_aged(&[A], &[refused], 60), "");
+    }
+
+    /// BEP 31 `retry in: never` retires a tracker: not heard from, not dead.
+    #[test]
+    fn a_retired_tracker_keeps_the_torrent_from_dead() {
+        let mut gone = said(B, "dead");
+        gone.disabled = true;
+        assert_eq!(class_of(&[A, B], &[said(A, "dead"), gone]), "");
+    }
+
+    #[test]
+    fn no_tracker_is_no_error() {
+        assert_eq!(class_of(&[], &[]), "");
+        assert_eq!(class_of(&[], &[said(A, "dead")]), "");
+    }
+
+    /// Only the trackers the torrent lists count: a slot left by a tracker the
+    /// operator removed says nothing about it.
+    #[test]
+    fn a_tracker_no_longer_listed_does_not_count() {
+        let book = [said(A, "dead"), said(B, "")];
+        assert_eq!(class_of(&[A], &book), "dead");
     }
 }

@@ -325,6 +325,7 @@ fn facts_of(
             .unwrap_or_default(),
         tracker_error: !tracker_err.is_empty(),
         tracker_error_msg: tracker_err,
+        tracker_error_class: t.tracker_error_class().to_string(),
         torrent_error: t.status.load(Ordering::Relaxed)
             == typhon_engine::torrent::meta::TorrentStatus::Error as u8,
         upload_rate: t.upload_rate.get() as f64,
@@ -2143,6 +2144,74 @@ mod tests {
             then,
             cap,
         }
+    }
+
+    /// ⭐ A rule that deletes on `tracker_error_class eq dead` must not match a
+    /// torrent that is dead on one tracker and was never announced to on the
+    /// other, whatever the last message says: through the real decision
+    /// (`evaluate`), with a torrent that IS dead everywhere beside it so the
+    /// test is not vacuous.
+    #[test]
+    fn dead_on_one_tracker_and_never_announced_on_the_other_is_not_matched_as_dead() {
+        use typhon_engine::torrent::meta::{
+            class_code, tracker_error_class, tracker_key, TrackerSlot,
+        };
+        const A: &str = "https://tracker-a/announce";
+        const B: &str = "https://tracker-b/announce";
+        let dead = |url: &str| TrackerSlot {
+            key: tracker_key(url),
+            last_class: class_code("dead"),
+            ..Default::default()
+        };
+        // (name, the book): what the announcer left for each torrent.
+        let books = [
+            ("one-dead-one-unknown", vec![dead(A)]),
+            ("dead-everywhere", vec![dead(A), dead(B)]),
+            (
+                "one-dead-one-ok",
+                vec![
+                    dead(A),
+                    TrackerSlot {
+                        key: tracker_key(B),
+                        last_ok: 5,
+                        ..Default::default()
+                    },
+                ],
+            ),
+        ];
+        let facts: Vec<Facts> = books
+            .iter()
+            .enumerate()
+            .map(|(i, (name, book))| Facts {
+                info_hash: format!("{i:040x}"),
+                name: (*name).into(),
+                engine: "hoard".into(),
+                // What the one-message fact says about all three: the last
+                // tracker to answer said "unregistered".
+                tracker_error: true,
+                tracker_error_msg: "tracker: Torrent not registered with this tracker".into(),
+                // Added a month ago, as a library torrent is.
+                tracker_error_class: tracker_error_class(&[A, B], book, 1_000, 2_600_000).into(),
+                ..Default::default()
+            })
+            .collect();
+        let mut w = wf(
+            vec![Action::AddTags {
+                tags: vec!["gone".into()],
+            }],
+            500,
+        );
+        w.when = Node::Cond(Cond {
+            field: "tracker_error_class".into(),
+            op: Op::Eq,
+            value: "dead".into(),
+            hold: None,
+            tag: None,
+        });
+        let (matches, report) = evaluate(&w, &facts).unwrap();
+        let names: Vec<&str> = matches.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, ["dead-everywhere"], "matched: {names:?}");
+        assert_eq!(report.matched, 1);
     }
 
     #[test]

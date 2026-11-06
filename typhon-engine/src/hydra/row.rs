@@ -299,6 +299,10 @@ pub fn build(engine: &Value, facts: &StoreFacts, agent: &str) -> Value {
         "tracker_error_msg".into(),
         s(engine, "tracker_error_msg").into(),
     );
+    row.insert(
+        "tracker_error_class".into(),
+        s(engine, "tracker_error_class").into(),
+    );
     row.insert("tracker_host".into(), s(engine, "tracker_host").into());
     row.insert("upload_rate".into(), i(engine, "upload_rate").into());
     row.insert("uploader".into(), "".into());
@@ -478,6 +482,7 @@ mod tests {
                 "total_size",
                 "total_upload",
                 "tracker_error",
+                "tracker_error_class",
                 "tracker_error_msg",
                 "tracker_host",
                 "upload_rate",
