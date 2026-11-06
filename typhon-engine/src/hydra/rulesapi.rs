@@ -140,7 +140,7 @@ pub async fn fields(
                     "external_links" => "0 means only Hydranos points at these files, so deleting them loses nothing",
                     "freeable_bytes" => "only files nothing else points at; deleting a shared one frees nothing",
                     "data_missing" => "the torrent is seeding data it cannot read",
-                    "tracker_error_class" => "dead only when every tracker it announces to answered that the torrent is unregistered or deleted; a tracker not heard from yet, unreachable or still retrying counts as alive",
+                    "tracker_error_class" => "dead only when every tracker it announces to answered that the torrent is unregistered or deleted; a tracker not heard from yet or still retrying counts as alive, and one that cannot be reached is never dead",
                     "tag_age" => "how long ago the chosen tag was set on the torrent; a torrent without that tag never matches. A tag set before dates were kept counts from the day they began",
                     "seeding_time" => "time actually spent seeding since the torrent completed; stopped time is not counted",
                     "ratio" => "uploaded divided by downloaded, or by the data held when under 1% of it was downloaded (a cross-seed); 0 when nothing is held or downloaded",

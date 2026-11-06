@@ -651,8 +651,8 @@ pub const REGISTRATION_WINDOW_MAX_SECS: i64 = 255 * 5;
 ///
 /// A rule can delete files on `dead`, so every doubt reads as ALIVE (`""`):
 /// - a tracker that answered without error;
-/// - a tracker with no slot, or a slot that never answered (never announced,
-///   cut by the breaker before it could, ...): unknown;
+/// - a tracker with no slot, or a slot that never answered (never announced):
+///   unknown;
 /// - a tracker retired by BEP 31 `retry in: never` (`disabled`);
 /// - a tracker still being retried for registration (`started` false, it
 ///   refused at least once, and the torrent was added less than
@@ -665,7 +665,9 @@ pub const REGISTRATION_WINDOW_MAX_SECS: i64 = 255 * 5;
 /// Only when EVERY listed tracker is in a known error is there a class, and it
 /// is the LEAST actionable of theirs (the last of `ERROR_CLASSES`): `dead` on
 /// both is `dead`, `dead` and `throttled` is `throttled`, `auth` and `dead` is
-/// `dead`. So `dead` needs every tracker to have said dead.
+/// `dead`. So `dead` needs every tracker to have said dead. A tracker the
+/// breaker cuts is marked `unreachable` by the announcer (`book::record_cut`):
+/// in error, so it gives a class, but never `dead`.
 pub fn tracker_error_class(
     listed: &[&str],
     book: &[TrackerSlot],
@@ -989,9 +991,11 @@ impl TorrentState {
     /// The class of this torrent's tracker error, from what each listed tracker
     /// last said (`tracker_error_class`). `""` unless every one is in error.
     pub fn tracker_error_class(&self) -> &'static str {
+        // The book, then the list: the order `depart` takes them in. The other
+        // order can deadlock behind a writer of the list (the lock is fair).
+        let book = self.announce_book.lock().unwrap_or_else(|e| e.into_inner());
         let live = self.live_trackers.read();
         let listed: Vec<&str> = live.iter().flatten().map(String::as_str).collect();
-        let book = self.announce_book.lock().unwrap_or_else(|e| e.into_inner());
         tracker_error_class(&listed, &book, self.added_time, now_secs())
     }
 
@@ -2665,5 +2669,39 @@ mod announce_session_tests {
     fn a_tracker_no_longer_listed_does_not_count() {
         let book = [said(A, "dead"), said(B, "")];
         assert_eq!(class_of(&[A], &book), "dead");
+    }
+
+    /// The book first, then the tracker list, as `depart` takes them. Read the
+    /// other way round, a reader holding the list while it waits for the book
+    /// that `depart` holds blocks every writer of the list (the lock is fair),
+    /// and `depart` behind them: three threads stuck for good, and no error.
+    #[test]
+    fn the_class_waits_for_the_book_without_holding_the_tracker_list() {
+        let t = Arc::new(TorrentState::new_with_times(
+            meta(16384, 16384),
+            "/tmp".into(),
+            false,
+            Some(1),
+            Some(0),
+            true,
+        ));
+        *t.live_trackers.write() = vec![vec![A.to_string()]];
+        // What `depart` holds while it reads the list.
+        let book = t.announce_book.lock().unwrap();
+        let reader = {
+            let t = t.clone();
+            std::thread::spawn(move || t.tracker_error_class())
+        };
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let writer = t
+            .live_trackers
+            .try_write_for(std::time::Duration::from_millis(500));
+        assert!(
+            writer.is_some(),
+            "the class held the tracker list while it waited for the book"
+        );
+        drop(writer);
+        drop(book);
+        assert_eq!(reader.join().unwrap(), "");
     }
 }
