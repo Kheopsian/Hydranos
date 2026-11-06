@@ -11323,6 +11323,7 @@ async function netWgSave() {
 // the rest was reinjected as markup.
 
 let _wfFields = null;
+let _wfGroups = [];
 let _wfEditing = null;
 let _wfEditingEnabled = false;
 
@@ -11330,6 +11331,7 @@ async function loadWorkflowFields() {
     if (_wfFields) return _wfFields;
     const d = await api("/api/workflows/fields");
     _wfFields = d.fields || [];
+    _wfGroups = d.groups || [];
     return _wfFields;
 }
 
@@ -11567,9 +11569,18 @@ function _wfChoiceList(f) {
 function addCondRow(cond, wrap) {
     wrap = wrap || document.querySelector("#wf-conds .wf-kids");
     if (!wrap) { wfRootGroup(); wrap = document.querySelector("#wf-conds .wf-kids"); }
-    const opts = _wfFields.map(f =>
-        `<option value="${esc(f.name)}" ${cond && cond.field === f.name ? "selected" : ""}>${esc(f.label || f.name)}</option>`
-    ).join("");
+    // One <optgroup> per group, in the order the daemon gives. A field whose
+    // group is not listed goes in a group of its own after those, and a field
+    // with none (an older daemon) loose at the end: never dropped from the list.
+    const optOf = f =>
+        `<option value="${esc(f.name)}" ${cond && cond.field === f.name ? "selected" : ""}>${esc(f.label || f.name)}</option>`;
+    const order = _wfGroups.slice();
+    for (const f of _wfFields) if (f.group && !order.includes(f.group)) order.push(f.group);
+    let opts = order.map(g => {
+        const inG = _wfFields.filter(f => f.group === g);
+        return inG.length ? `<optgroup label="${esc(g)}">${inG.map(optOf).join("")}</optgroup>` : "";
+    }).join("");
+    opts += _wfFields.filter(f => !f.group).map(optOf).join("");
     const f0 = _wfFields.find(x => x.name === (cond ? cond.field : (_wfFields[0] || {}).name));
     const div = document.createElement("div");
     div.className = "wf-row";

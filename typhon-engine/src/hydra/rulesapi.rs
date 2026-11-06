@@ -102,6 +102,7 @@ pub async fn fields(
             serde_json::json!({
                 "name": name,
                 "label": field_label(name),
+                "group": field_group(name),
                 "kind": kind_name,
                 "operators": ops,
                 "operators_labelled": ops_labelled,
@@ -153,7 +154,42 @@ pub async fn fields(
             })
         })
         .collect();
-    Json(serde_json::json!({"fields": out})).into_response()
+    Json(serde_json::json!({"fields": out, "groups": FIELD_GROUPS})).into_response()
+}
+
+/// The groups of the editor's field list, in the order they are shown.
+/// "Other" is last: it is where a field lands when nobody has said what it
+/// describes, so it stays visible instead of vanishing from the list.
+const FIELD_GROUPS: &[&str] = &[
+    "Torrent",
+    "State",
+    "Tracker",
+    "Transfer",
+    "Time",
+    "Disk & hardlinks",
+    "Other",
+];
+
+/// What a field describes, for the editor's `<optgroup>`s. A field missing
+/// here is "Other", not hidden; a test fails until every field has a group.
+fn field_group(name: &str) -> &'static str {
+    match name {
+        "name" | "info_hash" | "category" | "tags" | "engine" | "save_path" | "private"
+        | "multi_file" => "Torrent",
+        "state" | "user_paused" | "progress" | "torrent_error" | "data_missing" => "State",
+        "tracker_host"
+        | "tracker_error"
+        | "tracker_error_msg"
+        | "tracker_error_class"
+        | "num_seeds" => "Tracker",
+        "ratio" | "total_uploaded" | "total_downloaded" | "upload_rate" | "download_rate"
+        | "num_peers" | "swarm_seeds" | "swarm_leechers" => "Transfer",
+        "added_age" | "completed_age" | "seeding_time" | "tag_age" => "Time",
+        "total_size" | "free_space" | "link_count" | "external_links" | "freeable_bytes" => {
+            "Disk & hardlinks"
+        }
+        _ => "Other",
+    }
 }
 
 /// A field name as a person reads it.
@@ -1392,6 +1428,37 @@ mod tests {
                     .len(),
                 "{name}: every operator has a label"
             );
+        }
+    }
+
+    /// The editor groups its field list: every field says what group it is in,
+    /// and none falls into "Other" (where a field lands when it was added
+    /// without one). Dropping a name from `field_group` turns this red.
+    #[tokio::test]
+    async fn every_field_belongs_to_a_named_group() {
+        for (name, _) in rules::FIELDS {
+            assert_ne!(field_group(name), "Other", "{name} has no group");
+            assert!(
+                FIELD_GROUPS.contains(&field_group(name)),
+                "{name}: group not in the ordered list"
+            );
+        }
+        assert_eq!(field_group("no_such_field_yet"), "Other");
+
+        let s = st("rules-field-groups");
+        let resp = fields(State(s.state.clone()), RawQuery(None), keyed(KEY)).await;
+        let body = body_json(resp).await;
+        let groups: Vec<&str> = body["groups"]
+            .as_array()
+            .expect("a groups array")
+            .iter()
+            .map(|g| g.as_str().unwrap())
+            .collect();
+        assert_eq!(groups.first(), Some(&"Torrent"));
+        assert_eq!(groups.last(), Some(&"Other"));
+        for f in body["fields"].as_array().unwrap() {
+            let g = f["group"].as_str().expect("a field carries its group");
+            assert!(groups.contains(&g), "{g} is not in the served groups");
         }
     }
 
