@@ -21,7 +21,7 @@ decided when the release is cut, by looking at what went in: whoever tags it
 renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 `HYDRANOS_VERSION` in the same commit.
 
-## Unreleased -- the client's identity and the link scanner's memory
+## v4.8.0 -- the link scanner's memory, writes into shared files, and the tracker error class
 
 ### Added
 
