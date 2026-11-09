@@ -21,6 +21,12 @@ decided when the release is cut, by looking at what went in: whoever tags it
 renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 `HYDRANOS_VERSION` in the same commit.
 
+## Unreleased -- the delete path checks every file
+
+### Fixed
+
+- The last check of a workflow's delete refuses a torrent when any one of its files cannot be read, instead of only when none can. A file that cannot be read is one whose hardlinks cannot be counted; the refusal is in the workflow's activity.
+
 ## v4.8.1 -- a torrent held for proof reads as checking
 
 ### Fixed

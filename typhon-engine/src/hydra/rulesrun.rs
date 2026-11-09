@@ -1655,7 +1655,14 @@ pub fn link_guard(host: &EngineHost, m: &Match, cached: &LinkFacts) -> Result<()
     if save_path.is_empty() {
         return Err("no save path to check the links against".into());
     }
-    let fresh = linkindex::recheck(&torrent_files(&t, &save_path), cached);
+    // Not the zero-length files: the engine never creates one, and "cannot be
+    // read" would refuse every complete torrent that has one, for good.
+    let base = std::path::Path::new(&save_path);
+    let files: Vec<_> = (0..t.meta.files.len())
+        .filter(|&i| t.meta.files[i].length > 0)
+        .map(|i| t.meta.disk_path(base, i))
+        .collect();
+    let fresh = linkindex::recheck(&files, cached);
     linkindex::guard_verdict(&fresh, cached)
 }
 
@@ -2689,14 +2696,7 @@ mod tests {
 
     /// A file that cannot be stat'd among others that can: the doubt is on
     /// that file, which may be held by a name nobody looked at.
-    ///
-    /// Ignored: `linkindex::recheck` skips a file it cannot stat and answers
-    /// for the rest, so this torrent passes the guard. Whether that is a
-    /// defect (a file that errors for a reason other than absence) or the
-    /// harmless direction (a missing file frees nothing) is the owner's call;
-    /// the code is not changed here.
     #[tokio::test]
-    #[ignore = "recheck skips an unreadable file among readable ones; decision pending"]
     async fn the_guard_refuses_when_one_file_among_several_cannot_be_read() {
         let s = guard_state("guard-partial");
         let h = guard_add(
@@ -2707,6 +2707,23 @@ mod tests {
         put_file(&s.dir.join("data/pack/a.mkv"), 16384);
         // b.nfo never written: not readable.
         assert!(link_guard(&s.state.engines, &guard_match(&h, "hoard"), &measured(1, 0)).is_err());
+    }
+
+    /// A zero-length file is never created by the engine: its absence says
+    /// nothing, and a complete torrent that has one can still be deleted.
+    #[tokio::test]
+    async fn the_guard_does_not_ask_for_a_zero_length_file() {
+        let s = guard_state("guard-empty");
+        let h = guard_add(
+            &s,
+            "hoard",
+            &guard_torrent("pack", 0, &[("a.mkv", 16384), ("empty.txt", 0)]),
+        );
+        put_file(&s.dir.join("data/pack/a.mkv"), 16384);
+        assert_eq!(
+            link_guard(&s.state.engines, &guard_match(&h, "hoard"), &measured(1, 0)),
+            Ok(())
+        );
     }
 
     /// The delete runs through the API's own route: the torrent leaves its

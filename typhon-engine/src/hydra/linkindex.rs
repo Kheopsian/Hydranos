@@ -332,11 +332,15 @@ pub fn recheck(files: &[PathBuf], cached: &LinkFacts) -> LinkFacts {
         ..Default::default()
     };
     let mut any_unknown = false;
+    // One file that cannot be read is one whose links nobody can vouch for,
+    // and this answers a question about deleting: the torrent reads as missing
+    // data, which the guard refuses, even if its other files are fine.
+    let mut unreadable = files.is_empty();
     for p in files {
         let Some(id) = crate::platform::file_id(p) else {
+            unreadable = true;
             continue;
         };
-        out.data_missing = false;
         out.link_count = out.link_count.max(id.links);
         if id.links == 1 {
             out.freeable_bytes += id.size;
@@ -354,6 +358,7 @@ pub fn recheck(files: &[PathBuf], cached: &LinkFacts) -> LinkFacts {
     if any_unknown && out.external_links == 0 {
         out.external_links = 1;
     }
+    out.data_missing = unreadable;
     out
 }
 
