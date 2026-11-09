@@ -21,6 +21,12 @@ decided when the release is cut, by looking at what went in: whoever tags it
 renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 `HYDRANOS_VERSION` in the same commit.
 
+## Unreleased -- a torrent held for proof reads as checking
+
+### Fixed
+
+- A torrent added over files that another torrent already names is held while those files are proven (hashed, hardlinked or compared in place), which can take minutes; during that time it read as `stopped` at 0 %, and a verification asked from outside meanwhile checked a folder that was not in place yet and could replace the real verdict with an empty one. It now reads `checking_files` from the instant it exists until the proof has handed it to the check, in the native rows, the detail, the qBittorrent-compatible list and the workflow `state` condition (so a workflow aimed at stopped torrents does not reach it); a verification asked while it is held (`POST /api/hoard/torrents/:info_hash/verify`, `torrents/recheck`) answers success and starts nothing, and renaming one of its files is refused as for any torrent being checked. The hold is lifted whichever way the proof ends, an error or a removed torrent included.
+
 ## v4.8.0 -- the link scanner's memory, writes into shared files, and the tracker error class
 
 ### Added

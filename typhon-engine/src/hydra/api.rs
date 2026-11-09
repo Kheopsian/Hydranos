@@ -2815,25 +2815,34 @@ pub(crate) fn add_torrent_bytes_as(
         }
     }
 
-    let (info_hash, name) = engine
-        .manager
-        .add_torrent_bytes(bytes, &save_path, paused, seed_mode)
-        .inspect_err(|_| {
-            // Undo the row ONLY if this call is what put it there.
-            //
-            // ⚠ The refusal this hits in practice is "already added", and there
-            // the row belongs to the copy the engine is still running -- the
-            // previous code deleted it and left a live torrent with no store
-            // row at all. `delete_copy` and not `delete_torrent` for the same
-            // reason one notch down: a torrent seeded from two engines has two
-            // rows, and only ours is ours to drop.
-            if row_is_ours {
-                crate::store::log_store(
-                    "undo the row of a refused add",
-                    state.store.lock().unwrap().delete_copy(&hash, &engine_id),
-                );
-            }
-        })?;
+    // A torrent a proof is about to run on is created held, not held after:
+    // between the two it would read as stopped, and a client verifying it
+    // then checks a folder that is not in place.
+    let added = if claim.hold {
+        engine
+            .manager
+            .add_torrent_bytes_held(bytes, &save_path, paused, seed_mode)
+    } else {
+        engine
+            .manager
+            .add_torrent_bytes(bytes, &save_path, paused, seed_mode)
+    };
+    let (info_hash, name) = added.inspect_err(|_| {
+        // Undo the row ONLY if this call is what put it there.
+        //
+        // ⚠ The refusal this hits in practice is "already added", and there
+        // the row belongs to the copy the engine is still running -- the
+        // previous code deleted it and left a live torrent with no store
+        // row at all. `delete_copy` and not `delete_torrent` for the same
+        // reason one notch down: a torrent seeded from two engines has two
+        // rows, and only ours is ours to drop.
+        if row_is_ours {
+            crate::store::log_store(
+                "undo the row of a refused add",
+                state.store.lock().unwrap().delete_copy(&hash, &engine_id),
+            );
+        }
+    })?;
 
     // Data already on disk (cross-seed, a re-add) is hash-checked rather than
     // overwritten -- unless the caller asked to skip, which is what

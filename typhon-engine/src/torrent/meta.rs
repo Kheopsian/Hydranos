@@ -27,6 +27,20 @@ pub enum TorrentStatus {
     Error = 4,
 }
 
+/// A torrent held while a job proves the files it shares with another one.
+///
+/// Dropping it lifts the hold, whatever way the job ended (done, failed, left
+/// early, panicked, or its thread never started): a torrent can not stay held
+/// for good. See `TorrentState::hold_for_proof`.
+#[must_use = "the hold ends when this is dropped"]
+pub struct ProofHold(Arc<TorrentState>);
+
+impl Drop for ProofHold {
+    fn drop(&mut self) {
+        self.0.proof_holds.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 /// Per file of a torrent, whether a piece written into it must be compared with
 /// what the disk holds instead of written: the file existed when the torrent
 /// first touched it AND has another hardlink or is named by another torrent.
@@ -834,6 +848,11 @@ pub struct TorrentState {
     /// meanwhile would read and hash the whole torrent again, and the two
     /// verdicts would land in whichever order they finish.
     pub rechecking: AtomicBool,
+    /// How many proofs hold this torrent (see `ProofHold`). Above 0 it is read
+    /// as checking: it is stopped at 0 % only because a job is still hashing
+    /// what it shares with another torrent, and a verification asked in that
+    /// time would read a folder that is not yet in place.
+    proof_holds: AtomicU32,
     /// Pieces the running recheck has read so far (verified or not). 0 outside
     /// a check; what `checking_progress` is made of. The verdict itself is
     /// still installed in one go at the end, so `progress` stays what it was.
@@ -1507,6 +1526,7 @@ impl TorrentState {
             serving_suspended: AtomicBool::new(false),
             is_removed: AtomicBool::new(false),
             rechecking: AtomicBool::new(false),
+            proof_holds: AtomicU32::new(0),
             recheck_done: AtomicU32::new(0),
             overwrite_guard: RwLock::new(Arc::new(std::collections::HashSet::new())),
             write_verdicts: Arc::default(),
@@ -1532,6 +1552,30 @@ impl TorrentState {
             peer_stats: DashMap::with_shard_amount(PER_TORRENT_SHARDS),
             connected_addrs: DashMap::with_shard_amount(PER_TORRENT_SHARDS),
         }
+    }
+
+    /// A job is proving what this torrent shares with another one, and will
+    /// check it when done. Until the returned guard is dropped the torrent
+    /// reads as checking, and a verification asked from outside is a no-op.
+    pub fn hold_for_proof(self: &Arc<Self>) -> ProofHold {
+        self.proof_holds.fetch_add(1, Ordering::SeqCst);
+        ProofHold(self.clone())
+    }
+
+    /// Take over a hold that was placed when the torrent was created, so that
+    /// no reader ever saw it without (`start_held`).
+    pub fn adopt_proof_hold(self: &Arc<Self>) -> ProofHold {
+        ProofHold(self.clone())
+    }
+
+    /// Created already held, for a torrent whose add is followed by a proof.
+    pub fn start_held(&self) {
+        self.proof_holds.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// True while a proof holds this torrent.
+    pub fn held_for_proof(&self) -> bool {
+        self.proof_holds.load(Ordering::SeqCst) > 0
     }
 
     /// The data is missing: park the torrent instead of promising pieces we

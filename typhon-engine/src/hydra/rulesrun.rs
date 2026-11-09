@@ -309,8 +309,11 @@ fn facts_of(
                 t.is_paused.load(Ordering::Relaxed),
                 // Not the check's flag: a recheck of a stopped torrent is
                 // shown as checking, but a workflow that has seen it stopped
-                // for a week would lose that week to every recheck.
-                false,
+                // for a week would lose that week to every recheck. A hold
+                // for proof is another matter: the torrent is not stopped,
+                // it is being proven, and a "delete when stopped" must not
+                // reach it.
+                t.held_for_proof(),
             ),
             s.paused,
         )

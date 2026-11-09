@@ -1110,6 +1110,39 @@ impl TorrentManager {
         seed_mode: bool,
         renames: &std::collections::BTreeMap<usize, String>,
     ) -> Result<(InfoHash, String), String> {
+        self.add_torrent_inner(bytes, save_path, stopped, seed_mode, renames, false)
+    }
+
+    /// `add_torrent_bytes` for a torrent a job is about to prove: it is held
+    /// from the moment it exists, so no reader ever sees it as simply stopped.
+    /// The caller takes the hold over with `TorrentState::adopt_proof_hold`,
+    /// and must do so (or the torrent stays held).
+    pub fn add_torrent_bytes_held(
+        &self,
+        bytes: &[u8],
+        save_path: &str,
+        stopped: bool,
+        seed_mode: bool,
+    ) -> Result<(InfoHash, String), String> {
+        self.add_torrent_inner(
+            bytes,
+            save_path,
+            stopped,
+            seed_mode,
+            &Default::default(),
+            true,
+        )
+    }
+
+    fn add_torrent_inner(
+        &self,
+        bytes: &[u8],
+        save_path: &str,
+        stopped: bool,
+        seed_mode: bool,
+        renames: &std::collections::BTreeMap<usize, String>,
+        held: bool,
+    ) -> Result<(InfoHash, String), String> {
         let meta = metainfo::parse_torrent_bytes(bytes)?;
         meta.restore_renamed_files(renames);
         let ih = meta.info_hash;
@@ -1120,6 +1153,9 @@ impl TorrentManager {
         }
 
         let state = TorrentState::new(meta, save_path.into(), seed_mode);
+        if held {
+            state.start_held();
+        }
         self.adopt(&state);
 
         if stopped {
@@ -2554,6 +2590,7 @@ impl TorrentManager {
             ));
         }
         if t.rechecking.load(Ordering::Relaxed)
+            || t.held_for_proof()
             || t.status.load(Ordering::Relaxed) == TorrentStatus::Checking as u8
         {
             return Err(RenameError::Conflict(

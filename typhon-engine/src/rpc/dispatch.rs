@@ -85,7 +85,10 @@ pub fn pieces_held(t: &Arc<crate::torrent::meta::TorrentState>) -> (u32, u32) {
 pub fn torrent_core(t: &Arc<crate::torrent::meta::TorrentState>) -> TorrentCore {
     let status_u8 = t.status.load(Ordering::Relaxed);
     let is_paused = t.is_paused.load(Ordering::Relaxed);
-    let rechecking = t.rechecking.load(Ordering::Relaxed);
+    // A torrent held for proof is read as checking too: it is stopped at 0 %
+    // only until its files are in place, and a client that sees "stopped"
+    // would verify it over a folder not yet there.
+    let rechecking = t.rechecking.load(Ordering::Relaxed) || t.held_for_proof();
     let state = state_str(status_u8, is_paused, rechecking);
     // Real progress from picker's have count (was a 0.0/1.0 placeholder).
     let (num_have, progress) = if status_u8 == TorrentStatus::Seeding as u8 {

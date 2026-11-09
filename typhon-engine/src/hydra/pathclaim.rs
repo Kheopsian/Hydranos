@@ -791,7 +791,17 @@ pub fn finish(
     plan: &AddPlan,
     resume: bool,
 ) {
+    // Created held by the add (`add_torrent_bytes_held`): taken over here.
+    let hold = crate::store::hex20(hash)
+        .and_then(|ih| {
+            state
+                .engines
+                .get(engine_id)
+                .and_then(|e| e.manager.get(&ih))
+        })
+        .map(|t| t.adopt_proof_hold());
     let job = Job {
+        _hold: hold,
         metainfo: Some(bytes.to_vec()),
         state: state.clone(),
         engine_id: engine_id.to_string(),
@@ -820,6 +830,10 @@ struct Job {
     prove_in_place: Option<HashSet<PathBuf>>,
     resume: bool,
     rt: Option<tokio::runtime::Handle>,
+    /// The torrent reads as checking for as long as the job lives, and no
+    /// longer: dropped with it on every way out, a panic included. `None`
+    /// when the torrent is gone. Never read; owning it is the point.
+    _hold: Option<typhon_engine::torrent::meta::ProofHold>,
 }
 
 impl Job {
@@ -1352,11 +1366,20 @@ pub fn guarded_recheck(
     let Some(engine) = state.engines.get(engine_id) else {
         return Err(format!("no engine {engine_id}"));
     };
+    // Held for proof: a job is hashing what this torrent shares and will check
+    // it itself. A check asked now would read a folder that is not in place,
+    // and could land its verdict after the real one. Nothing to do, and not a
+    // refusal: the caller is told what it wants to hear, that a check is on.
+    if t.held_for_proof() {
+        return Ok(());
+    }
     let protected = protected_files(state, t);
     if protected.is_empty() {
         return engine.manager.recheck(&t.info_hash);
     }
     let hash = typhon_engine::torrent::hex_encode(&t.info_hash);
+    // Held before it is stopped, so there is no instant where it reads stopped.
+    let hold = t.hold_for_proof();
     let was_running = !t.is_paused.load(std::sync::atomic::Ordering::Relaxed);
     if was_running {
         {
@@ -1371,6 +1394,7 @@ pub fn guarded_recheck(
         store.torrent_blob(&hash).ok().flatten()
     };
     let job = Job {
+        _hold: Some(hold),
         metainfo,
         state: state.clone(),
         engine_id: engine_id.to_string(),
@@ -1416,6 +1440,7 @@ pub fn guarded_start(
         return engine.manager.start_torrent(&t.info_hash);
     }
     let hash = typhon_engine::torrent::hex_encode(&t.info_hash);
+    let hold = t.hold_for_proof();
     // Paused until proven, in the store as in the engine: the job releases it.
     {
         let store = state.store.lock().unwrap_or_else(|e| e.into_inner());
@@ -1427,6 +1452,7 @@ pub fn guarded_start(
         store.torrent_blob(&hash).ok().flatten()
     };
     let job = Job {
+        _hold: Some(hold),
         metainfo,
         state: state.clone(),
         engine_id: engine_id.to_string(),
@@ -1763,6 +1789,199 @@ mod tests {
             .expect("held");
         let p = t.save_path.read().clone();
         p
+    }
+
+    async fn api_call(
+        s: &crate::api::testing::TestState,
+        method: &str,
+        uri: String,
+        form: &str,
+    ) -> (axum::http::StatusCode, serde_json::Value) {
+        use tower::ServiceExt;
+        let req = axum::http::Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("X-API-Key", "k-held")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(axum::body::Body::from(form.to_string()))
+            .unwrap();
+        let resp = crate::api::router(s.state.clone())
+            .oneshot(req)
+            .await
+            .unwrap();
+        let status = resp.status();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (
+            status,
+            serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    /// A torrent held while its files are proven is not "stopped at 0 %": a
+    /// client reading that would verify it over a folder not yet in place,
+    /// and the emptier verdict could land last. It reads as checking, and a
+    /// verification asked meanwhile is a success that does nothing.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_torrent_held_for_proof_reads_as_checking_and_verify_does_nothing() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let s = crate::api::testing::state_from(
+            "pathclaim-held-verify",
+            "[daemon]\napi_key = \"k-held\"\n",
+        );
+        let dir = s.dir.join("d");
+        std::fs::create_dir_all(&dir).unwrap();
+        let data = [9u8; 20_000];
+        let h = add(
+            &s,
+            &torrent_over("Solo", &[("a.bin", &data)], 16384),
+            &dir,
+            true,
+            false,
+        )
+        .unwrap();
+        let mgr = s.state.engines.get("hoard").unwrap().manager.clone();
+        let t = mgr.get(&crate::store::hex20(&h).unwrap()).unwrap();
+        let detail = format!("/api/hoard/torrents/{h}");
+
+        let (_, d) = api_call(&s, "GET", detail.clone(), "").await;
+        assert_ne!(d["state"], "checking_files", "not held yet: {d}");
+
+        let hold = t.hold_for_proof();
+        let status_before = t.status.load(SeqCst);
+        let (_, d) = api_call(&s, "GET", detail.clone(), "").await;
+        assert_eq!(d["state"], "checking_files", "held: {d}");
+        assert_eq!(
+            typhon_engine::rpc::dispatch::torrent_core(&t).state,
+            "checking_files"
+        );
+
+        // The real handler: same success as ever, no check started.
+        let (code, body) = api_call(&s, "POST", format!("{detail}/verify"), "").await;
+        assert_eq!(code, axum::http::StatusCode::OK, "{body}");
+        assert!(
+            !t.rechecking.load(SeqCst),
+            "a verification was started over a held torrent"
+        );
+        assert_eq!(t.status.load(SeqCst), status_before);
+        // And the qBittorrent shim's bulk recheck, which answers 200 either way.
+        let (code, _) = api_call(
+            &s,
+            "POST",
+            "/api/v2/torrents/recheck".into(),
+            &format!("hashes={h}"),
+        )
+        .await;
+        assert_eq!(code, axum::http::StatusCode::OK);
+        assert!(!t.rechecking.load(SeqCst));
+
+        drop(hold);
+        assert!(!t.held_for_proof());
+        let (_, d) = api_call(&s, "GET", detail, "").await;
+        assert_ne!(d["state"], "checking_files", "released: {d}");
+    }
+
+    /// Held from the instant it exists: no reader sees the torrent between its
+    /// add and the start of the proof as simply stopped.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_torrent_added_for_proof_is_never_seen_stopped() {
+        let s = crate::api::testing::state("pathclaim-held-window");
+        let mgr = s.state.engines.get("hoard").unwrap().manager.clone();
+        let bytes = torrent_over("W", &[("w.bin", &[1u8; 20_000])], 16384);
+        let dir = s.dir.join("d");
+        std::fs::create_dir_all(&dir).unwrap();
+        let (ih, _) = mgr
+            .add_torrent_bytes_held(&bytes, &dir.to_string_lossy(), true, false)
+            .unwrap();
+        let t = mgr.get(&ih).unwrap();
+        // Read straight after the add returns, before any job has run.
+        assert_eq!(
+            typhon_engine::rpc::dispatch::torrent_core(&t).state,
+            "checking_files"
+        );
+        let hold = t.adopt_proof_hold();
+        assert!(t.held_for_proof());
+        drop(hold);
+        assert!(!t.held_for_proof());
+        assert_ne!(
+            typhon_engine::rpc::dispatch::torrent_core(&t).state,
+            "checking_files"
+        );
+    }
+
+    /// Every way the proof ends lifts the hold: a torrent must not stay held
+    /// for good. The failure path (files that cannot be proven) and the
+    /// isolating add both run the real job.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_hold_is_lifted_when_the_proof_fails_or_succeeds() {
+        let s = crate::api::testing::state_from(
+            "pathclaim-held-lifted",
+            "[dedup]\npath_collision = \"legacy\"\n",
+        );
+        let dir = s.dir.join("d");
+        std::fs::create_dir_all(dir.join("P")).unwrap();
+        std::fs::write(dir.join("P").join("x.nfo"), b"the first notes!").unwrap();
+        add(
+            &s,
+            &torrent_over("P", &[("x.nfo", b"the first notes!")], 16384),
+            &dir,
+            true,
+            true,
+        )
+        .unwrap();
+        let b = add(
+            &s,
+            &torrent_over("P", &[("x.nfo", b"other notes, 16B")], 16384),
+            &dir,
+            true,
+            true,
+        )
+        .unwrap();
+        let mgr = s.state.engines.get("hoard").unwrap().manager.clone();
+        let t = mgr.get(&crate::store::hex20(&b).unwrap()).unwrap();
+        mgr.start_torrent(&t.info_hash).unwrap();
+        // Failure: the job ends in "held" with the file unproven.
+        guarded_recheck(&s.state, "hoard", &t).unwrap();
+        assert!(recent()
+            .iter()
+            .any(|e| e.info_hash == b && e.action == "held"));
+        assert!(!t.held_for_proof(), "still held after a failed proof");
+
+        // Success: an isolating add, held from creation, released by the job.
+        let s2 = crate::api::testing::state("pathclaim-held-lifted-iso");
+        let video: Vec<u8> = (0..32_768u32).map(|i| (i % 251) as u8).collect();
+        let dir2 = s2.dir.join("d2");
+        std::fs::create_dir_all(dir2.join("Film")).unwrap();
+        std::fs::write(dir2.join("Film").join("a.mkv"), &video).unwrap();
+        add(
+            &s2,
+            &torrent_over("Film", &[("a.mkv", &video)], 16384),
+            &dir2,
+            false,
+            true,
+        )
+        .unwrap();
+        let a = add(
+            &s2,
+            &torrent_over(
+                "Film",
+                &[("a.mkv", &video), ("a.nfo", b"release notes...")],
+                16384,
+            ),
+            &dir2,
+            false,
+            false,
+        )
+        .unwrap();
+        let m2 = s2.state.engines.get("hoard").unwrap().manager.clone();
+        let ta = m2.get(&crate::store::hex20(&a).unwrap()).unwrap();
+        assert_ne!(
+            ta.save_path.read().clone(),
+            dir2,
+            "the add was isolated, so a job ran"
+        );
+        assert!(!ta.held_for_proof(), "still held after the proof");
     }
 
     #[tokio::test(flavor = "multi_thread")]
