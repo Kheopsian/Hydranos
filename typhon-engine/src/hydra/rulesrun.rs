@@ -2367,4 +2367,479 @@ mod tests {
         });
         assert!(evaluate(&w, &facts(1)).unwrap_err().contains("nonesuch"));
     }
+
+    // ---------------------------------------------------------------- the delete path
+    //
+    // `link_guard` and the `Delete` arm of `apply`, through the real engine
+    // host: a torrent held by a real engine, real files in a temporary folder,
+    // real hardlinks, and the delete route the API uses as the hook.
+
+    use crate::api::testing::{state_from, TestState};
+
+    /// A bencoded torrent: one file named `name` (`files` empty, `single_len`
+    /// bytes), or a folder `name` holding `files`.
+    fn guard_torrent(name: &str, single_len: usize, files: &[(&str, usize)]) -> Vec<u8> {
+        let total = if files.is_empty() {
+            single_len
+        } else {
+            files.iter().map(|f| f.1).sum()
+        };
+        let pieces = vec![0xEFu8; total.div_ceil(16384) * 20];
+        let mut v = b"d4:infod".to_vec();
+        if files.is_empty() {
+            v.extend_from_slice(format!("6:lengthi{single_len}e").as_bytes());
+        } else {
+            v.extend_from_slice(b"5:filesl");
+            for (path, len) in files {
+                v.extend_from_slice(
+                    format!("d6:lengthi{len}e4:pathl{}:{path}ee", path.len()).as_bytes(),
+                );
+            }
+            v.push(b'e');
+        }
+        v.extend_from_slice(
+            format!(
+                "4:name{}:{name}12:piece lengthi16384e6:pieces{}:",
+                name.len(),
+                pieces.len()
+            )
+            .as_bytes(),
+        );
+        v.extend_from_slice(&pieces);
+        v.extend_from_slice(b"ee");
+        v
+    }
+
+    fn guard_state(tag: &str) -> TestState {
+        let s = state_from(tag, "");
+        std::fs::create_dir_all(s.dir.join("data")).unwrap();
+        s
+    }
+
+    /// Adds the torrent to `engine` (paused: nothing downloads, nothing
+    /// verifies) and returns its hash.
+    fn guard_add(s: &TestState, engine: &str, bytes: &[u8]) -> String {
+        crate::api::add_torrent_bytes(
+            &s.state,
+            bytes,
+            "",
+            s.dir.join("data").to_str().unwrap(),
+            "",
+            true,
+            true,
+            engine,
+        )
+        .unwrap_or_else(|e| panic!("add: {e}"))
+        .0
+    }
+
+    /// Writes `len` bytes at `path`, parents included.
+    fn put_file(path: &std::path::Path, len: usize) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, vec![7u8; len]).unwrap();
+    }
+
+    fn guard_match(hash: &str, engine: &str) -> Match {
+        Match {
+            info_hash: hash.into(),
+            name: "t".into(),
+            engine: engine.into(),
+            total_size: 0.0,
+            actions: vec![Action::Delete { with_files: true }],
+            payload: None,
+        }
+    }
+
+    /// What the scan would have said for a torrent whose files each have
+    /// `links` names, `external` of them held by someone else.
+    fn measured(links: u64, external: u64) -> LinkFacts {
+        LinkFacts {
+            external_links: external,
+            freeable_bytes: 0,
+            link_count: links,
+            data_missing: false,
+        }
+    }
+
+    fn in_engine(s: &TestState, engine: &str, hash: &str) -> bool {
+        s.state
+            .engines
+            .get(engine)
+            .and_then(|e| e.manager.get(&crate::store::hex20(hash).unwrap()))
+            .is_some()
+    }
+
+    /// `apply` on one `Delete` match, with the API's own delete route as the
+    /// hook (the one a workflow pass uses) and a count of how often it ran.
+    fn run_delete(
+        s: &TestState,
+        m: &Match,
+        facts: Option<&LinkFacts>,
+        calls: &std::cell::Cell<usize>,
+    ) -> Result<(), String> {
+        let hook = |engine: &str, hash: &str, with_files: bool| {
+            calls.set(calls.get() + 1);
+            crate::api::remove_one_torrent(
+                &s.state,
+                hash,
+                &[engine.to_string()],
+                engine,
+                with_files,
+            )
+            .map(|_| ())
+        };
+        apply(
+            &s.state.engines,
+            &s.state.store,
+            &wf(vec![], 1),
+            m,
+            &|_, _, _| {},
+            &hook,
+            &|_, _, _, _| Ok(()),
+            &|_, _, _| Ok(false),
+            facts,
+        )
+    }
+
+    /// Nothing changed since the scan: the guard lets the delete through.
+    /// This is the witness the refusals below are measured against.
+    #[tokio::test]
+    async fn the_guard_allows_a_torrent_whose_links_have_not_changed() {
+        let s = guard_state("guard-ok");
+        let h = guard_add(&s, "hoard", &guard_torrent("one.bin", 16384, &[]));
+        put_file(&s.dir.join("data/one.bin"), 16384);
+        let host = &s.state.engines;
+        assert_eq!(
+            link_guard(host, &guard_match(&h, "hoard"), &measured(1, 0)),
+            Ok(())
+        );
+        // A name held outside the catalogue at the scan, still just the one.
+        std::fs::hard_link(s.dir.join("data/one.bin"), s.dir.join("outsider")).unwrap();
+        assert_eq!(
+            link_guard(host, &guard_match(&h, "hoard"), &measured(2, 1)),
+            Ok(()),
+            "a link that was already there is not a new one"
+        );
+    }
+
+    /// A name that appeared since the scan refuses, by the numbers it gives.
+    #[tokio::test]
+    async fn the_guard_refuses_a_link_that_appeared_since_the_scan() {
+        let s = guard_state("guard-new-link");
+        let h = guard_add(&s, "hoard", &guard_torrent("one.bin", 16384, &[]));
+        put_file(&s.dir.join("data/one.bin"), 16384);
+        let host = &s.state.engines;
+        let m = guard_match(&h, "hoard");
+        assert_eq!(link_guard(host, &m, &measured(1, 0)), Ok(()));
+        std::fs::hard_link(s.dir.join("data/one.bin"), s.dir.join("cross-seed")).unwrap();
+        assert_eq!(
+            link_guard(host, &m, &measured(1, 0)),
+            Err("refused: 1 external link(s) now, 0 when the catalogue was scanned".into())
+        );
+        // A second new name on top of a known one refuses as well.
+        std::fs::hard_link(s.dir.join("data/one.bin"), s.dir.join("another")).unwrap();
+        assert_eq!(
+            link_guard(host, &m, &measured(2, 1)),
+            Err("refused: 2 external link(s) now, 1 when the catalogue was scanned".into())
+        );
+    }
+
+    /// The guard reads the torrent it was asked about, not another one of the
+    /// engine: a new link on B must neither refuse A nor be forgiven for B.
+    #[tokio::test]
+    async fn the_guard_looks_at_the_files_of_the_torrent_it_is_asked_about() {
+        let s = guard_state("guard-which");
+        let a = guard_add(&s, "hoard", &guard_torrent("a.bin", 16384, &[]));
+        let b = guard_add(&s, "hoard", &guard_torrent("bb.bin", 16384, &[]));
+        assert_ne!(a, b);
+        put_file(&s.dir.join("data/a.bin"), 16384);
+        put_file(&s.dir.join("data/bb.bin"), 16384);
+        let host = &s.state.engines;
+        let (ma, mb) = (guard_match(&a, "hoard"), guard_match(&b, "hoard"));
+        assert_eq!(link_guard(host, &ma, &measured(1, 0)), Ok(()));
+        assert_eq!(link_guard(host, &mb, &measured(1, 0)), Ok(()));
+
+        // A new name on B only.
+        std::fs::hard_link(s.dir.join("data/bb.bin"), s.dir.join("x-b")).unwrap();
+        assert_eq!(
+            link_guard(host, &ma, &measured(1, 0)),
+            Ok(()),
+            "A's files did not change"
+        );
+        assert!(link_guard(host, &mb, &measured(1, 0))
+            .unwrap_err()
+            .contains("1 external link(s) now"));
+
+        // And the other way round: A gets one, B is cleaned.
+        std::fs::remove_file(s.dir.join("x-b")).unwrap();
+        std::fs::hard_link(s.dir.join("data/a.bin"), s.dir.join("x-a")).unwrap();
+        assert!(link_guard(host, &ma, &measured(1, 0)).is_err());
+        assert_eq!(link_guard(host, &mb, &measured(1, 0)), Ok(()));
+    }
+
+    /// One shared file among several is enough, wherever it sits in the
+    /// folder: the files are the torrent's own, under `save_path/<name>/`.
+    #[tokio::test]
+    async fn the_guard_refuses_when_any_one_file_of_a_folder_torrent_gained_a_link() {
+        let s = guard_state("guard-multi");
+        let h = guard_add(
+            &s,
+            "hoard",
+            &guard_torrent("pack", 0, &[("a.mkv", 16384), ("b.nfo", 100)]),
+        );
+        put_file(&s.dir.join("data/pack/a.mkv"), 16384);
+        put_file(&s.dir.join("data/pack/b.nfo"), 100);
+        let host = &s.state.engines;
+        let m = guard_match(&h, "hoard");
+        assert_eq!(link_guard(host, &m, &measured(1, 0)), Ok(()));
+        std::fs::hard_link(s.dir.join("data/pack/b.nfo"), s.dir.join("nfo-copy")).unwrap();
+        assert!(link_guard(host, &m, &measured(1, 0)).is_err());
+    }
+
+    /// The three ways to have no torrent to check each refuse, with their
+    /// own words: engine not here, hash not held, hash held by ANOTHER engine.
+    #[tokio::test]
+    async fn the_guard_refuses_when_the_engine_or_the_torrent_is_not_there() {
+        let s = guard_state("guard-absent");
+        let h = guard_add(&s, "hoard", &guard_torrent("one.bin", 16384, &[]));
+        put_file(&s.dir.join("data/one.bin"), 16384);
+        let host = &s.state.engines;
+        assert_eq!(
+            link_guard(host, &guard_match(&h, "hoard"), &measured(1, 0)),
+            Ok(()),
+            "witness: it is checkable where it lives"
+        );
+        assert_eq!(
+            link_guard(host, &guard_match(&h, "ghost"), &measured(1, 0)),
+            Err("engine ghost is not running here".into())
+        );
+        assert_eq!(
+            link_guard(
+                host,
+                &guard_match(&"ab".repeat(20), "hoard"),
+                &measured(1, 0)
+            ),
+            Err("torrent is no longer in the engine".into())
+        );
+        assert_eq!(
+            link_guard(host, &guard_match(&h, "race"), &measured(1, 0)),
+            Err("torrent is no longer in the engine".into()),
+            "the race engine does not hold it"
+        );
+    }
+
+    /// No save path: nothing to measure against, so no delete.
+    #[tokio::test]
+    async fn the_guard_refuses_a_torrent_with_no_save_path() {
+        let s = guard_state("guard-nosave");
+        let h = guard_add(&s, "hoard", &guard_torrent("one.bin", 16384, &[]));
+        put_file(&s.dir.join("data/one.bin"), 16384);
+        let host = &s.state.engines;
+        let m = guard_match(&h, "hoard");
+        assert_eq!(link_guard(host, &m, &measured(1, 0)), Ok(()));
+        let t = host
+            .get("hoard")
+            .unwrap()
+            .manager
+            .get(&crate::store::hex20(&h).unwrap())
+            .unwrap();
+        *t.save_path.write() = std::path::PathBuf::new();
+        assert_eq!(
+            link_guard(host, &m, &measured(1, 0)),
+            Err("no save path to check the links against".into())
+        );
+    }
+
+    /// Files that cannot be read now, when they could be at the scan, refuse.
+    #[tokio::test]
+    async fn the_guard_refuses_when_the_files_can_no_longer_be_read() {
+        let s = guard_state("guard-unreadable");
+        let h = guard_add(&s, "hoard", &guard_torrent("one.bin", 16384, &[]));
+        put_file(&s.dir.join("data/one.bin"), 16384);
+        let host = &s.state.engines;
+        let m = guard_match(&h, "hoard");
+        assert_eq!(link_guard(host, &m, &measured(1, 0)), Ok(()));
+        std::fs::remove_file(s.dir.join("data/one.bin")).unwrap();
+        assert_eq!(
+            link_guard(host, &m, &measured(1, 0)),
+            Err("refused: the files are no longer readable".into())
+        );
+    }
+
+    /// A doubt about the numbers refuses too: a scan that recorded no link
+    /// count, or one higher than the file has now, cannot vouch for anyone.
+    #[tokio::test]
+    async fn the_guard_refuses_when_the_scanned_numbers_cannot_vouch() {
+        let s = guard_state("guard-doubt");
+        let h = guard_add(&s, "hoard", &guard_torrent("one.bin", 16384, &[]));
+        put_file(&s.dir.join("data/one.bin"), 16384);
+        let host = &s.state.engines;
+        let m = guard_match(&h, "hoard");
+        assert_eq!(link_guard(host, &m, &measured(1, 0)), Ok(()), "witness");
+        assert_eq!(
+            link_guard(host, &m, &LinkFacts::default()),
+            Err("refused: 1 external link(s) now, 0 when the catalogue was scanned".into()),
+            "no measurement at all"
+        );
+        assert!(
+            link_guard(host, &m, &measured(3, 0)).is_err(),
+            "the scan saw three names, the file has one"
+        );
+    }
+
+    /// A file that cannot be stat'd among others that can: the doubt is on
+    /// that file, which may be held by a name nobody looked at.
+    ///
+    /// Ignored: `linkindex::recheck` skips a file it cannot stat and answers
+    /// for the rest, so this torrent passes the guard. Whether that is a
+    /// defect (a file that errors for a reason other than absence) or the
+    /// harmless direction (a missing file frees nothing) is the owner's call;
+    /// the code is not changed here.
+    #[tokio::test]
+    #[ignore = "recheck skips an unreadable file among readable ones; decision pending"]
+    async fn the_guard_refuses_when_one_file_among_several_cannot_be_read() {
+        let s = guard_state("guard-partial");
+        let h = guard_add(
+            &s,
+            "hoard",
+            &guard_torrent("pack", 0, &[("a.mkv", 16384), ("b.nfo", 100)]),
+        );
+        put_file(&s.dir.join("data/pack/a.mkv"), 16384);
+        // b.nfo never written: not readable.
+        assert!(link_guard(&s.state.engines, &guard_match(&h, "hoard"), &measured(1, 0)).is_err());
+    }
+
+    /// The delete runs through the API's own route: the torrent leaves its
+    /// engine and its files leave the disk.
+    #[tokio::test]
+    async fn a_delete_on_the_engine_that_holds_the_torrent_removes_it_and_its_files() {
+        let s = guard_state("apply-delete");
+        let h = guard_add(&s, "hoard", &guard_torrent("one.bin", 16384, &[]));
+        put_file(&s.dir.join("data/one.bin"), 16384);
+        assert!(in_engine(&s, "hoard", &h));
+        let calls = std::cell::Cell::new(0);
+        assert_eq!(
+            run_delete(&s, &guard_match(&h, "hoard"), None, &calls),
+            Ok(())
+        );
+        assert_eq!(calls.get(), 1);
+        assert!(!in_engine(&s, "hoard", &h), "the torrent is gone");
+        assert!(!s.dir.join("data/one.bin").exists(), "and so are its bytes");
+    }
+
+    /// `with_files: false` removes the torrent and leaves the bytes.
+    #[tokio::test]
+    async fn a_delete_without_files_keeps_the_bytes() {
+        let s = guard_state("apply-keep");
+        let h = guard_add(&s, "hoard", &guard_torrent("one.bin", 16384, &[]));
+        put_file(&s.dir.join("data/one.bin"), 16384);
+        let mut m = guard_match(&h, "hoard");
+        m.actions = vec![Action::Delete { with_files: false }];
+        let calls = std::cell::Cell::new(0);
+        assert_eq!(run_delete(&s, &m, None, &calls), Ok(()));
+        assert!(!in_engine(&s, "hoard", &h));
+        assert!(s.dir.join("data/one.bin").exists());
+    }
+
+    /// An engine this node does not run (stopped, or never here): refused
+    /// BEFORE the hook, whether or not the rule armed the guard, and the
+    /// torrent of the engine that does exist is untouched. The host has two
+    /// engines, so a test of "any engine at all" would pass for the wrong
+    /// reason.
+    #[tokio::test]
+    async fn a_delete_on_an_engine_that_is_not_running_here_is_refused_before_the_hook() {
+        let s = guard_state("apply-ghost");
+        let h = guard_add(&s, "hoard", &guard_torrent("one.bin", 16384, &[]));
+        put_file(&s.dir.join("data/one.bin"), 16384);
+        assert!(s.state.engines.engines().len() >= 2);
+        let calls = std::cell::Cell::new(0);
+        for facts in [None, Some(measured(1, 0))] {
+            assert_eq!(
+                run_delete(&s, &guard_match(&h, "ghost"), facts.as_ref(), &calls),
+                Err("engine ghost is not running here".into())
+            );
+        }
+        assert_eq!(calls.get(), 0, "the hook never ran");
+        assert!(in_engine(&s, "hoard", &h));
+        assert!(s.dir.join("data/one.bin").exists());
+    }
+
+    /// With several engines, the one named by the match is the one passed on
+    /// to the hook, whichever of them it is.
+    #[tokio::test]
+    async fn a_delete_hands_the_hook_the_engine_the_match_names() {
+        let s = guard_state("apply-which-engine");
+        let seen = std::cell::RefCell::new(Vec::new());
+        let hash = "cd".repeat(20);
+        for engine in ["race", "hoard"] {
+            let m = guard_match(&hash, engine);
+            let hook = |e: &str, h: &str, files: bool| {
+                seen.borrow_mut()
+                    .push((e.to_string(), h.to_string(), files));
+                Ok(())
+            };
+            apply(
+                &s.state.engines,
+                &s.state.store,
+                &wf(vec![], 1),
+                &m,
+                &|_, _, _| {},
+                &hook,
+                &|_, _, _, _| Ok(()),
+                &|_, _, _| Ok(false),
+                None,
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            *seen.borrow(),
+            vec![
+                ("race".to_string(), hash.clone(), true),
+                ("hoard".to_string(), hash, true)
+            ]
+        );
+    }
+
+    /// A hash that is not 40 hex digits never reaches the hook.
+    #[tokio::test]
+    async fn a_delete_with_a_malformed_hash_is_refused_before_the_hook() {
+        let s = guard_state("apply-badhash");
+        let calls = std::cell::Cell::new(0);
+        assert_eq!(
+            run_delete(&s, &guard_match("not-a-hash", "hoard"), None, &calls),
+            Err("bad info hash".into())
+        );
+        assert_eq!(calls.get(), 0);
+    }
+
+    /// The guard is armed by the scan's answer: a link that appeared since
+    /// refuses the delete, and torrent and files stay. Then the same torrent
+    /// with nothing changed goes, so the refusal is the guard's and not a
+    /// test that could never delete.
+    #[tokio::test]
+    async fn an_armed_delete_is_refused_on_a_new_link_and_goes_through_without_one() {
+        let s = guard_state("apply-armed");
+        let h = guard_add(&s, "hoard", &guard_torrent("one.bin", 16384, &[]));
+        put_file(&s.dir.join("data/one.bin"), 16384);
+        let m = guard_match(&h, "hoard");
+        let calls = std::cell::Cell::new(0);
+
+        std::fs::hard_link(s.dir.join("data/one.bin"), s.dir.join("cross-seed")).unwrap();
+        let err = run_delete(&s, &m, Some(&measured(1, 0)), &calls).unwrap_err();
+        assert!(err.starts_with("refused: 1 external link(s) now"), "{err}");
+        assert_eq!(calls.get(), 0, "refused before the hook");
+        assert!(in_engine(&s, "hoard", &h));
+        assert!(s.dir.join("data/one.bin").exists());
+        assert!(s.dir.join("cross-seed").exists());
+
+        // The scan now knows about that name: nothing new, the delete goes.
+        assert_eq!(run_delete(&s, &m, Some(&measured(2, 1)), &calls), Ok(()));
+        assert_eq!(calls.get(), 1);
+        assert!(!in_engine(&s, "hoard", &h));
+        assert!(!s.dir.join("data/one.bin").exists());
+        assert!(
+            s.dir.join("cross-seed").exists(),
+            "the outsider's name is not ours to remove"
+        );
+    }
 }
