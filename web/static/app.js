@@ -944,6 +944,7 @@ function importWizard(opts) {
                     // qBittorrent stopped answering: say why the job ended early,
                     // which torrent it was at, and that nothing is lost.
                     title.textContent = t("Import paused");
+                    phase.textContent = labels.paused;
                     bar.style.width = "100%";
                     pauseMsg.style.display = "";
                     pauseMsg.textContent = d.error || t("unknown");
@@ -951,7 +952,9 @@ function importWizard(opts) {
                 if (d.stalled_at) {
                     pauseMsg.style.display = "";
                     pauseMsg.textContent += (pauseMsg.textContent ? " " : "")
-                        + t("Likely trigger: qBittorrent first stopped answering at \"{name}\", after exporting others. Look at that torrent in qBittorrent.", { name: d.stalled_at });
+                        + (d.last_ok
+                            ? t("Likely trigger: \"{last}\", the last torrent qBittorrent exported, or \"{name}\", the first it left unanswered. Look at both in qBittorrent.", { last: d.last_ok, name: d.stalled_at })
+                            : t("Likely trigger: qBittorrent first stopped answering at \"{name}\", after exporting others. Look at that torrent in qBittorrent.", { name: d.stalled_at }));
                 }
                 if (d.stopped) {
                     note.textContent = t("{n} torrents were added stopped, as chosen: nothing announces until you start them from the list.", { n: d.stopped });

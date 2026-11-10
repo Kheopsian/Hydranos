@@ -98,6 +98,10 @@ pub struct Progress {
     /// The first torrent whose export got no answer after others had been
     /// exported: the likely trigger. Empty when there is none.
     pub stalled_at: std::sync::RwLock<String>,
+    /// The last torrent exported before `stalled_at`. The other candidate:
+    /// qBittorrent may have stalled right AFTER answering for it, and then the
+    /// first unanswered one is only a victim.
+    pub last_ok: std::sync::RwLock<String>,
     pub error: std::sync::RwLock<String>,
     pub current: std::sync::RwLock<String>,
 }
@@ -152,6 +156,7 @@ impl Progress {
             "failed": self.failed.load(Ordering::Relaxed),
             "not_attempted": self.not_attempted.load(Ordering::Relaxed),
             "stalled_at": self.stalled_at.read().unwrap().clone(),
+            "last_ok": self.last_ok.read().unwrap().clone(),
             "stopped": self.stopped.load(Ordering::Relaxed),
             "failures": self.failures.lock().unwrap().iter().take(FAILURES_SHOWN).collect::<Vec<_>>(),
             "retryable": self.retry.lock().unwrap().is_some(),
@@ -814,7 +819,12 @@ pub async fn run_job(
             net_streak += 1;
         } else {
             net_streak = 0;
-            exported_any |= bytes.is_ok() && matches!(c.source, Source::Qbit(_));
+            let exported = bytes.is_ok() && matches!(c.source, Source::Qbit(_));
+            exported_any |= exported;
+            // Frozen once a stall is named: it is the answer just before it.
+            if exported && progress.stalled_at.read().unwrap().is_empty() {
+                *progress.last_ok.write().unwrap() = retry_copy.name.clone();
+            }
         }
         let outcome = match bytes {
             Err(e) => Err(e),
@@ -867,9 +877,10 @@ pub async fn run_job(
         if net_streak >= NETWORK_STOP_AFTER {
             let rest: Vec<Candidate> = cands.by_ref().collect();
             if !rest.is_empty() {
+                let n = rest.len();
                 let msg = format!(
-                    "qBittorrent stopped answering at {net_first}; {} torrents not attempted, retry when it is back",
-                    rest.len()
+                    "qBittorrent stopped answering at {net_first}; {n} {} not attempted, retry when it is back",
+                    if n == 1 { "torrent" } else { "torrents" }
                 );
                 tracing::warn!(at = %net_first, not_attempted = rest.len(), "import: qBittorrent stopped answering, job paused");
                 progress.not_attempted.store(rest.len(), Ordering::Relaxed);
@@ -1861,6 +1872,8 @@ mod qbit_session_tests {
         let json = progress.as_json();
         assert_eq!(json["not_attempted"], 5);
         assert_eq!(json["stalled_at"], "torrent 2");
+        // The other candidate: the last torrent qBittorrent answered for.
+        assert_eq!(json["last_ok"], "torrent 1");
         assert_eq!(json["retryable"], true);
         let fails = progress.failures.lock().unwrap().clone();
         assert!(

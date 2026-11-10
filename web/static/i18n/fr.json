@@ -1024,6 +1024,7 @@
   "Paused": "En pause",
   "Import paused": "Import en pause",
   "Likely trigger: qBittorrent first stopped answering at \"{name}\", after exporting others. Look at that torrent in qBittorrent.": "Déclencheur probable : qBittorrent a cessé de répondre pour la première fois à « {name} », après en avoir exporté d'autres. Regardez ce torrent dans qBittorrent.",
+  "Likely trigger: \"{last}\", the last torrent qBittorrent exported, or \"{name}\", the first it left unanswered. Look at both in qBittorrent.": "Déclencheur probable : « {last} », le dernier torrent exporté par qBittorrent, ou « {name} », le premier resté sans réponse. Regardez les deux dans qBittorrent.",
   "…and {n} more, in the log.": "…et {n} de plus, dans le journal.",
   "disk: {used} used of {total}": "disque : {used} utilisés sur {total}",
   "quota": "quota",
