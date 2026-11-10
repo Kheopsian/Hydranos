@@ -58,6 +58,10 @@ pub struct Fingerprint {
     /// Parked because pieces it held were found missing: lifting the park
     /// must reach the record as surely as setting it.
     pub data_lost: bool,
+    /// What the immediate edits change: tracker list, save path, download
+    /// order, file renames. A hash, so a row that ever differs from memory
+    /// for one of them is rewritten by the next sweep, whatever made it so.
+    pub edits: u64,
 }
 
 pub struct StateDb {
@@ -198,6 +202,38 @@ impl StateDb {
         tx.commit()
     }
 
+    /// Upsert one record that is BUILT under the connection lock.
+    ///
+    /// The record is a picture of live memory. Built before the lock is
+    /// taken, it can be older than a write that got in first, and then it
+    /// overwrites that write with stale data. Built here, whoever commits
+    /// last has read memory last. `on_commit` runs on the committed record
+    /// while the lock is still held, so the caller's bookkeeping cannot be
+    /// reordered against another writer either.
+    ///
+    /// ⚠ `build` runs under the connection lock: it may take the torrent's
+    /// own locks, and nothing that holds one of those may wait for this
+    /// connection.
+    pub fn put_with<M>(
+        &self,
+        build: impl FnOnce() -> (ResumeData, M),
+        on_commit: impl FnOnce(&ResumeData, &M),
+    ) -> (ResumeData, Result<(), rusqlite::Error>) {
+        let mut conn = match self.conn.lock() {
+            Ok(c) => c,
+            Err(e) => e.into_inner(),
+        };
+        let (rd, meta) = build();
+        let res = conn.transaction().and_then(|tx| {
+            put_in(&tx, &rd)?;
+            tx.commit()
+        });
+        if res.is_ok() {
+            on_commit(&rd, &meta);
+        }
+        (rd, res)
+    }
+
     /// Upsert many records, a few thousand per transaction. This is the
     /// whole point of the module: the caller hands over only the rows whose
     /// fingerprint moved, and a sweep costs a handful of commits instead of
@@ -220,6 +256,47 @@ impl StateDb {
             tx.commit()?;
         }
         Ok(records.len())
+    }
+
+    /// `put_batch` for records built at commit time: each slice is built
+    /// from `keys` after the connection lock is taken, so a record is never
+    /// older than the write that committed before it (see `put_with`). The
+    /// lock is held for one slice, never across the whole list. `build` may
+    /// return `None` to skip a key (gone, or nothing left to write).
+    /// `on_commit` runs per committed record, lock still held.
+    ///
+    /// Returns the rows written, or the index of the first key of the slice
+    /// that failed (it and every later key are unwritten) with the error.
+    pub fn put_batch_with<K, M>(
+        &self,
+        keys: &[K],
+        mut build: impl FnMut(&K) -> Option<(ResumeData, M)>,
+        mut on_commit: impl FnMut(&K, &ResumeData, &M),
+    ) -> Result<usize, (usize, rusqlite::Error)> {
+        let mut written = 0;
+        for (n, slice) in keys.chunks(PUT_BATCH_SLICE).enumerate() {
+            let at = n * PUT_BATCH_SLICE;
+            let mut conn = match self.conn.lock() {
+                Ok(c) => c,
+                Err(e) => e.into_inner(),
+            };
+            let built: Vec<(&K, ResumeData, M)> = slice
+                .iter()
+                .filter_map(|k| build(k).map(|(rd, m)| (k, rd, m)))
+                .collect();
+            let res = conn.transaction().and_then(|tx| {
+                for (_, rd, _) in &built {
+                    put_in(&tx, rd)?;
+                }
+                tx.commit()
+            });
+            res.map_err(|e| (at, e))?;
+            for (k, rd, m) in &built {
+                on_commit(k, rd, m);
+            }
+            written += built.len();
+        }
+        Ok(written)
     }
 
     pub fn remove(&self, info_hash_hex: &str) -> Result<(), rusqlite::Error> {

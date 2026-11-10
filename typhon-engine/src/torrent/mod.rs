@@ -685,18 +685,7 @@ impl TorrentManager {
         }
     }
 
-    /// Persist one record now.
-    ///
-    /// Every path that used to call `fastresume::save` directly goes through
-    /// here, so there is exactly one place that decides which backend is
-    /// authoritative and whether the legacy mirror is being kept.
-    fn persist(&self, ih: &InfoHash, rd: &fastresume::ResumeData) {
-        // A background save has nobody to tell: the failure is logged, and the
-        // next sweep writes the record again.
-        let _ = self.try_persist(ih, rd);
-    }
-
-    /// `persist`, saying whether the record is now where the next start will
+    /// Persist one record now, saying whether it is now where the next start will
     /// read it. A caller that answers a user's action must not acknowledge a
     /// change the store did not keep: the JSON fallback below is not read
     /// while the table has rows, so it does not count as kept.
@@ -731,6 +720,47 @@ impl TorrentManager {
                 warn!("[resume] {}", e);
                 e
             }),
+        }
+    }
+
+    /// `try_persist` for a torrent the engine holds: the record is BUILT
+    /// under the database lock, from memory as it is then, so an edit's
+    /// write and a sweep's write of the same torrent are ordered by that
+    /// lock and the later one always carries the later memory. Every
+    /// immediate edit goes through here (a record built by the caller,
+    /// before the lock, is what lost to a sweep's older copy).
+    fn try_persist_live(&self, ih: &InfoHash) -> Result<(), String> {
+        let t = self.get(ih).ok_or("torrent not found")?;
+        match &self.state_db {
+            Some(db) => {
+                let mirror = self.mirror_json;
+                let (rd, res) = db.put_with(
+                    || {
+                        let fp = fingerprint_of(&t);
+                        (Self::build_resume_data(&t), fp)
+                    },
+                    |rd, fp| {
+                        self.last_saved.insert(*ih, *fp);
+                        if mirror {
+                            fastresume::save(&self.resume_dir, ih, rd);
+                        }
+                    },
+                );
+                res.map_err(|e| {
+                    warn!(
+                        "[statedb] put {} failed: {} -- writing JSON instead",
+                        &rd.info_hash[..8.min(rd.info_hash.len())],
+                        e
+                    );
+                    fastresume::save(&self.resume_dir, ih, &rd);
+                    format!("the state store did not keep the change: {e}")
+                })
+            }
+            None => fastresume::try_save(&self.resume_dir, ih, &Self::build_resume_data(&t))
+                .map_err(|e| {
+                    warn!("[resume] {}", e);
+                    e
+                }),
         }
     }
 
@@ -2176,42 +2206,67 @@ impl TorrentManager {
         };
 
         let started = std::time::Instant::now();
-        let mut dirty: Vec<fastresume::ResumeData> = Vec::new();
-        let mut hashes: Vec<InfoHash> = Vec::new();
-        let mut fps: Vec<statedb::Fingerprint> = Vec::new();
         let total = self.torrents.len();
+        let dirty = self.collect_dirty();
+        if dirty.is_empty() {
+            return;
+        }
+        self.commit_dirty(&db, dirty, total, started);
+    }
+
+    /// First half of a sweep: which torrents look changed since their last
+    /// save. Hashes only. The records are NOT built here: a record built now
+    /// and committed later can be older than an edit that landed in between,
+    /// and would overwrite it (see `commit_dirty`).
+    pub(crate) fn collect_dirty(&self) -> Vec<InfoHash> {
         let now = crate::torrent::meta::now_secs();
+        let mut dirty = Vec::new();
         for entry in self.torrents.iter() {
             let t = entry.value();
             // Before the fingerprint: the fingerprint reads the counter.
             t.fold_seed_time(now);
-            let fp = fingerprint_of(t);
-            if self
-                .last_saved
-                .get(&t.info_hash)
-                .map(|p| *p.value() == fp)
-                .unwrap_or(false)
-            {
+            if self.is_saved(&t.info_hash, &fingerprint_of(t)) {
                 continue;
             }
-            dirty.push(Self::build_resume_data(t));
-            hashes.push(t.info_hash);
-            fps.push(fp);
+            dirty.push(t.info_hash);
         }
-        if dirty.is_empty() {
-            return;
-        }
+        dirty
+    }
+
+    fn is_saved(&self, ih: &InfoHash, fp: &statedb::Fingerprint) -> bool {
+        self.last_saved
+            .get(ih)
+            .map(|p| *p.value() == *fp)
+            .unwrap_or(false)
+    }
+
+    /// Second half of a sweep: write the collected torrents, each record
+    /// built from live memory at the moment its slice holds the database
+    /// lock -- the lock every immediate edit also writes under, so whoever
+    /// commits last has read memory last and a sweep can never put an older
+    /// copy over an edit. A torrent removed meanwhile is skipped (its row
+    /// is not resurrected), and one an edit already saved in its current
+    /// state is not written twice.
+    pub(crate) fn commit_dirty(
+        &self,
+        db: &statedb::StateDb,
+        dirty: Vec<InfoHash>,
+        total: usize,
+        started: std::time::Instant,
+    ) {
         let mirror = self.mirror_json;
-        match db.put_batch(&dirty) {
-            Ok(n) => {
-                for (ih, fp) in hashes.iter().zip(fps.iter()) {
-                    self.last_saved.insert(*ih, *fp);
-                }
+        let res = db.put_batch_with(
+            &dirty,
+            |ih| self.build_if_unsaved(ih),
+            |ih, rd, fp| {
+                self.last_saved.insert(*ih, *fp);
                 if mirror {
-                    for (rd, ih) in dirty.iter().zip(hashes.iter()) {
-                        fastresume::save(&self.resume_dir, ih, rd);
-                    }
+                    fastresume::save(&self.resume_dir, ih, rd);
                 }
+            },
+        );
+        match res {
+            Ok(n) => {
                 info!(
                     "[statedb] sweep: {} of {} torrents changed, committed in {:.3}s",
                     n,
@@ -2219,17 +2274,43 @@ impl TorrentManager {
                     started.elapsed().as_secs_f64()
                 );
             }
-            Err(e) => {
+            Err((at, e)) => {
                 // Never drop a sweep silently: fall back to the JSON files for
-                // this round rather than leave the changes unpersisted.
+                // the rest of this round rather than leave the changes
+                // unpersisted.
                 warn!(
                     "[statedb] sweep commit failed: {} -- writing {} JSON records instead",
                     e,
-                    dirty.len()
+                    dirty.len() - at
                 );
-                for (rd, ih) in dirty.iter().zip(hashes.iter()) {
-                    fastresume::save(&self.resume_dir, ih, rd);
-                }
+                self.save_json_fallback(&dirty[at..]);
+            }
+        }
+    }
+
+    /// The record of `ih` as memory holds it now, with its fingerprint,
+    /// unless the torrent is gone or its last save already says the same.
+    /// For the sweeps, called under the database lock.
+    fn build_if_unsaved(
+        &self,
+        ih: &InfoHash,
+    ) -> Option<(fastresume::ResumeData, statedb::Fingerprint)> {
+        let t = self.get(ih)?;
+        t.fold_seed_time(crate::torrent::meta::now_secs());
+        // Fingerprint first: a counter that moves between the two reads
+        // leaves the fingerprint behind the record, so the next sweep
+        // writes once more -- never the reverse.
+        let fp = fingerprint_of(&t);
+        if self.is_saved(ih, &fp) {
+            return None;
+        }
+        Some((Self::build_resume_data(&t), fp))
+    }
+
+    fn save_json_fallback(&self, hashes: &[InfoHash]) {
+        for ih in hashes {
+            if let Some(t) = self.get(ih) {
+                fastresume::save(&self.resume_dir, ih, &Self::build_resume_data(&t));
             }
         }
     }
@@ -2283,39 +2364,19 @@ impl TorrentManager {
         let synced = report.synced;
         self.retract_unsynced(report);
 
-        let now = crate::torrent::meta::now_secs();
-        let mut dirty: Vec<fastresume::ResumeData> = Vec::new();
-        let mut hashes: Vec<InfoHash> = Vec::new();
-        let mut fps: Vec<statedb::Fingerprint> = Vec::new();
-        for ih in &moved {
-            let Some(t) = self.get(ih) else { continue };
-            t.fold_seed_time(now);
-            let fp = fingerprint_of(&t);
-            if self
-                .last_saved
-                .get(ih)
-                .map(|p| *p.value() == fp)
-                .unwrap_or(false)
-            {
-                continue;
-            }
-            dirty.push(Self::build_resume_data(&t));
-            hashes.push(*ih);
-            fps.push(fp);
-        }
-        if dirty.is_empty() {
-            return 0;
-        }
-        match db.put_batch(&dirty) {
+        let mirror = self.mirror_json;
+        let res = db.put_batch_with(
+            &moved,
+            |ih| self.build_if_unsaved(ih),
+            |ih, rd, fp| {
+                self.last_saved.insert(*ih, *fp);
+                if mirror {
+                    fastresume::save(&self.resume_dir, ih, rd);
+                }
+            },
+        );
+        match res {
             Ok(n) => {
-                for (ih, fp) in hashes.iter().zip(fps.iter()) {
-                    self.last_saved.insert(*ih, *fp);
-                }
-                if self.mirror_json {
-                    for (rd, ih) in dirty.iter().zip(hashes.iter()) {
-                        fastresume::save(&self.resume_dir, ih, rd);
-                    }
-                }
                 tracing::debug!(
                     "[statedb] quick pass: {} downloads moved, {} files synced, committed in {:.3}s",
                     n,
@@ -2324,15 +2385,13 @@ impl TorrentManager {
                 );
                 n
             }
-            Err(e) => {
+            Err((at, e)) => {
                 warn!(
                     "[statedb] quick pass commit failed: {} -- writing {} JSON records instead",
                     e,
-                    dirty.len()
+                    moved.len() - at
                 );
-                for (rd, ih) in dirty.iter().zip(hashes.iter()) {
-                    fastresume::save(&self.resume_dir, ih, rd);
-                }
+                self.save_json_fallback(&moved[at..]);
                 0
             }
         }
@@ -2384,10 +2443,7 @@ impl TorrentManager {
     }
 
     pub fn persist_completed(&self, ih: &InfoHash) {
-        if let Some(t) = self.get(ih) {
-            let rd = Self::build_resume_data(&t);
-            self.persist(ih, &rd);
-        }
+        let _ = self.try_persist_live(ih);
     }
 
     fn build_resume_data(t: &TorrentState) -> fastresume::ResumeData {
@@ -2443,8 +2499,7 @@ impl TorrentManager {
         t.set_rate_limits(up, down);
         let after = t.rate_limits();
         if after != before {
-            let rd = Self::build_resume_data(&t);
-            if let Err(e) = self.try_persist(info_hash, &rd) {
+            if let Err(e) = self.try_persist_live(info_hash) {
                 // Not kept: the cap in force must be the one the next start
                 // will read, and the caller must not be told it took.
                 t.set_rate_limits(Some(before.0), Some(before.1));
@@ -2470,8 +2525,7 @@ impl TorrentManager {
         let mut order = before.clone();
         edit(&mut order);
         if t.set_download_order(order) {
-            let rd = Self::build_resume_data(&t);
-            if let Err(e) = self.try_persist(info_hash, &rd) {
+            if let Err(e) = self.try_persist_live(info_hash) {
                 // Not kept: the engine must not go on following an order the
                 // next start will not know, nor tell the caller it took.
                 t.set_download_order(before);
@@ -2533,8 +2587,7 @@ impl TorrentManager {
                 "a file was renamed: recheck the torrent before it runs",
             );
         }
-        let rd = Self::build_resume_data(&t);
-        if let Err(e) = self.try_persist(info_hash, &rd) {
+        if let Err(e) = self.try_persist_live(info_hash) {
             // Not kept: the next start would point the file back at its old
             // name, so the caller is not told it took. The retracted pieces
             // stay retracted: a recheck finds them again.
@@ -2644,8 +2697,7 @@ impl TorrentManager {
     ) -> Result<(), String> {
         let t = self.get(info_hash).ok_or("torrent not found")?;
         let before = std::mem::replace(&mut *t.live_trackers.write(), tiers);
-        let rd = Self::build_resume_data(&t);
-        if let Err(e) = self.try_persist(info_hash, &rd) {
+        if let Err(e) = self.try_persist_live(info_hash) {
             // Not kept: announce to the list the next start will read, and
             // do not tell the caller the edit took.
             *t.live_trackers.write() = before;
@@ -2661,8 +2713,7 @@ impl TorrentManager {
         // The old paths are no longer this torrent's: keeping their cached
         // descriptors would pin the files a move is about to unlink.
         crate::disk::evict_fds(&old);
-        let rd = Self::build_resume_data(&t);
-        if let Err(e) = self.try_persist(info_hash, &rd) {
+        if let Err(e) = self.try_persist_live(info_hash) {
             // Not kept: the next start would look for the torrent where it
             // was. The path in memory goes back to the one the record holds,
             // and the caller, who moves files only after an Ok, is told no.
@@ -2945,7 +2996,25 @@ fn fingerprint_of(t: &TorrentState) -> statedb::Fingerprint {
         up_limit: t.rate_limits().0,
         down_limit: t.rate_limits().1,
         data_lost: t.data_lost.load(Ordering::Relaxed),
+        edits: edits_hash(t),
     }
+}
+
+/// A hash of what the immediate edits change and the counters above do not
+/// see: tracker list, save path, download order, renamed files. It moves
+/// only when one of them does, so it dirties no torrent on its own, but a
+/// row that ever differs from memory in one of them is rewritten by the next
+/// sweep. Costs a few hundred bytes of hashing per torrent per sweep.
+fn edits_hash(t: &TorrentState) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    t.live_trackers.read().hash(&mut h);
+    t.save_path.read().hash(&mut h);
+    if let Some(o) = t.stored_download_order() {
+        (o.sequential, o.first_last, &o.file_prio).hash(&mut h);
+    }
+    t.meta.renamed_files().hash(&mut h);
+    h.finish()
 }
 
 pub fn hex_encode(hash: &[u8; 20]) -> String {
@@ -3403,29 +3472,7 @@ impl TorrentManager {
 
         // Persist the verified bitfield so a restart does not re-check from
         // scratch (mirrors the resume written at add / on piece completion).
-        let bitfield = hex_encode_bytes(&picker.lock().unwrap().export_bitfield());
-        let rd = fastresume::ResumeData {
-            info_hash: hex_encode(&ih),
-            save_path: t.save_path.read().to_string_lossy().to_string(),
-            seed_mode: trusted_whole(&t),
-            paused: t.is_paused.load(Ordering::Relaxed),
-            total_uploaded: t.total_uploaded.load(Ordering::Relaxed),
-            total_downloaded: t.total_downloaded.load(Ordering::Relaxed),
-            added_time: t.added_time,
-            completed_time: t.completed_time.load(Ordering::Relaxed),
-            bitfield,
-            trackers: t.live_trackers.read().clone(),
-            // A recheck must not reset the clock: the torrent has already
-            // seeded whatever it seeded, and re-verifying its pieces says
-            // nothing about that.
-            seed_secs: t.seed_time_now(crate::torrent::meta::now_secs()),
-            up_limit: t.rate_limits().0,
-            down_limit: t.rate_limits().1,
-            download_order: t.stored_download_order(),
-            file_renames: t.meta.renamed_files(),
-            data_lost: t.data_lost_msg(),
-        };
-        self.persist(&ih, &rd);
+        let _ = self.try_persist_live(&ih);
         info!(
             "[recheck] {} verified {}/{} pieces -> {}",
             &hex_encode(&ih)[..8],
@@ -4976,6 +5023,100 @@ mod manager_tests {
         mgr.set_save_path(&ih, "/tmp/moved").expect("set");
         let t = mgr.get(&ih).unwrap();
         assert_eq!(t.save_path.read().to_string_lossy(), "/tmp/moved");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The row the state database holds for `ih`.
+    fn stored(mgr: &TorrentManager, ih: &InfoHash) -> fastresume::ResumeData {
+        let hex = hex_encode(ih);
+        mgr.state_db
+            .as_ref()
+            .expect("state db")
+            .load_all()
+            .into_iter()
+            .find(|r| r.info_hash == hex)
+            .expect("row")
+    }
+
+    /// Make a persisted torrent dirty again, so the next sweep collects it.
+    fn make_dirty(mgr: &TorrentManager, ih: &InfoHash) {
+        mgr.save_all_resume();
+        mgr.get(ih)
+            .unwrap()
+            .total_uploaded
+            .fetch_add(4096, Ordering::Relaxed);
+    }
+
+    /// ⭐ An edit that lands while a sweep is between "look at the torrent"
+    /// and "commit the row" must not be overwritten by the older copy. The
+    /// sweep is split in two so the test can place the edit exactly there.
+    #[test]
+    fn a_tracker_edit_during_a_sweep_is_not_overwritten() {
+        let (mgr, root) = manager("race-trackers");
+        let ih = add(&mgr, "alpha");
+        make_dirty(&mgr, &ih);
+        let db = mgr.state_db.clone().unwrap();
+
+        let swept = mgr.collect_dirty();
+        let new = vec![vec!["https://tracker2.example/announce".to_string()]];
+        mgr.set_trackers(&ih, new.clone()).expect("set");
+        mgr.commit_dirty(&db, swept, 1, std::time::Instant::now());
+
+        assert_eq!(stored(&mgr, &ih).trackers, new, "the edit survived");
+        mgr.save_all_resume();
+        assert_eq!(
+            stored(&mgr, &ih).trackers,
+            new,
+            "and a later sweep keeps it"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The worst case: a restart would look for the files at the old path.
+    #[test]
+    fn a_save_path_edit_during_a_sweep_is_not_overwritten() {
+        let (mgr, root) = manager("race-savepath");
+        let ih = add(&mgr, "alpha");
+        make_dirty(&mgr, &ih);
+        let db = mgr.state_db.clone().unwrap();
+
+        let swept = mgr.collect_dirty();
+        mgr.set_save_path(&ih, "/tmp/moved").expect("set");
+        mgr.commit_dirty(&db, swept, 1, std::time::Instant::now());
+
+        assert_eq!(stored(&mgr, &ih).save_path, "/tmp/moved");
+        mgr.save_all_resume();
+        assert_eq!(stored(&mgr, &ih).save_path, "/tmp/moved");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The fingerprint sees what the immediate edits change, so a row that
+    /// ever differs from memory in one of them is rewritten by the next
+    /// sweep; and it does not move on its own, so no torrent turns dirty
+    /// for nothing.
+    #[test]
+    fn the_fingerprint_follows_the_edits_and_only_them() {
+        let (mgr, root) = manager("fp-edits");
+        let ih = add(&mgr, "alpha");
+        let t = mgr.get(&ih).unwrap();
+        let base = fingerprint_of(&t);
+        assert!(base == fingerprint_of(&t), "stable while nothing is edited");
+
+        mgr.set_trackers(&ih, vec![vec!["https://tracker2.example/a".into()]])
+            .unwrap();
+        let after_trackers = fingerprint_of(&t);
+        assert!(after_trackers != base, "trackers");
+        mgr.set_save_path(&ih, "/tmp/elsewhere").unwrap();
+        let after_path = fingerprint_of(&t);
+        assert!(after_path != after_trackers, "save path");
+        mgr.update_download_order(&ih, |o| o.sequential = true)
+            .unwrap();
+        assert!(fingerprint_of(&t) != after_path, "download order");
+
+        // Nothing dirty after the edits were saved, and a sweep with nothing
+        // moved collects nothing.
+        mgr.save_all_resume();
+        assert!(mgr.collect_dirty().is_empty());
         let _ = std::fs::remove_dir_all(root);
     }
 

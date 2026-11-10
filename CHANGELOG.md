@@ -21,6 +21,12 @@ decided when the release is cut, by looking at what went in: whoever tags it
 renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 `HYDRANOS_VERSION` in the same commit.
 
+## Unreleased -- edits made during a save no longer get overwritten
+
+### Fixed
+
+- An edit made while the state was being saved (a tracker list, a save path, a download order, a renamed file) could be overwritten on disk by the older copy and come back after a restart. The saved copy is now read at the moment it is written, and a row that ever differs from the live torrent in one of these is rewritten by the next save.
+
 ## v4.8.2 -- a tracker that changed its host, and exports with the current trackers
 
 ### Added
