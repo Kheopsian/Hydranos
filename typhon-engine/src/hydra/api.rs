@@ -1006,6 +1006,8 @@ async fn post_node_handoff(
     let Some(blob) = blob else {
         return not_found();
     };
+    // The node that receives it announces to what this one does now.
+    let blob = current_torrent_file(&state, &info_hash.to_lowercase(), blob);
 
     // "keep" duplicates, "remove" moves. A move cannot delete now: the target
     // has the metainfo and none of the bytes yet. So it waits for the far side
@@ -10324,6 +10326,31 @@ pub(crate) fn find_torrent(
     None
 }
 
+/// The `.torrent` of `info_hash` as the torrent stands now.
+///
+/// The stored blob keeps the trackers the torrent arrived with: an edit, or a
+/// tracker host move, changes the live list and the resume record only. A file
+/// handed out is written with the live list when an engine holds the torrent,
+/// and is the blob unchanged when none does (or when the live list is what the
+/// blob already says). The info dict is never re-encoded, so the info hash is
+/// the same either way.
+fn current_torrent_file(state: &AppState, info_hash: &str, blob: Vec<u8>) -> Vec<u8> {
+    let Some(tiers) = live_tiers(state, info_hash) else {
+        return blob;
+    };
+    match typhon_engine::torrent::metainfo::parse_torrent_bytes(&blob) {
+        Ok(meta) if meta.trackers == tiers => blob,
+        _ => crate::export::with_trackers(&blob, &tiers).unwrap_or(blob),
+    }
+}
+
+/// The trackers an engine's torrent announces to now, tiers in order.
+fn live_tiers(state: &AppState, info_hash: &str) -> Option<Vec<Vec<String>>> {
+    let (_, torrent) = find_torrent(state, info_hash)?;
+    let tiers = torrent.live_trackers.read().clone();
+    Some(tiers)
+}
+
 /// The .torrent file itself.
 ///
 /// The metainfo has to travel before the data can: a node cannot be told to
@@ -10344,7 +10371,7 @@ async fn get_torrent_file(
     match blob {
         Some(bytes) => (
             [(axum::http::header::CONTENT_TYPE, "application/x-bittorrent")],
-            bytes,
+            current_torrent_file(&state, &info_hash.to_lowercase(), bytes),
         )
             .into_response(),
         None => not_found(),
@@ -10428,10 +10455,11 @@ async fn post_torrent_export(
     let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::export::Chunk>(16);
     let store = state.store.clone();
     tokio::task::spawn_blocking(move || {
+        let live = |hash: &str| live_tiers(&state, hash);
         let started = std::time::Instant::now();
         let asked = hashes.len();
         let mut w = crate::export::ChanWriter::new(tx.clone());
-        match crate::export::run(&store, &hashes, format, strip, &mut w) {
+        match crate::export::run(&store, &hashes, format, strip, &live, &mut w) {
             Ok(s) => tracing::info!(
                 ?format,
                 asked,
@@ -11104,7 +11132,7 @@ async fn qbit_torrent_export(
     match blob {
         Some(bytes) => (
             [(axum::http::header::CONTENT_TYPE, "application/x-bittorrent")],
-            bytes,
+            current_torrent_file(&state, &hash, bytes),
         )
             .into_response(),
         None => not_found(),
@@ -28435,6 +28463,145 @@ mod export_route_tests {
         .await;
         let zip = body(resp).await;
         assert!(!zip.windows(7).any(|w| w == b"PASSKEY"));
+    }
+
+    const NEW_TIERS: [&[&str]; 2] = [
+        &["https://new.example/announce", "https://new2.example/announce"],
+        &["https://new3.example/announce"],
+    ];
+
+    /// Edit the trackers of `hash` through the API, as the editor does.
+    async fn edit_trackers(s: &TestState, hash: &str) {
+        let body = serde_json::json!({"op": "set", "tiers": NEW_TIERS}).to_string();
+        let resp = super::post_torrent_trackers(
+            State(s.state.clone()),
+            axum::extract::Path(hash.to_string()),
+            RawQuery(None),
+            keyed(KEY),
+            body,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK, "the edit must be accepted");
+    }
+
+    /// The bytes of the `info` value: from `4:info` to the dict's closing `e`.
+    /// The test torrents carry `info` as their last key.
+    fn info_bytes(torrent: &[u8]) -> &[u8] {
+        let at = torrent
+            .windows(6)
+            .position(|w| w == b"4:info")
+            .expect("an info key");
+        &torrent[at + 6..torrent.len() - 1]
+    }
+
+    fn tiers_of(torrent: &[u8]) -> Vec<Vec<String>> {
+        typhon_engine::torrent::metainfo::parse_torrent_bytes(torrent)
+            .expect("a parseable .torrent")
+            .trackers
+    }
+
+    fn new_tiers() -> Vec<Vec<String>> {
+        NEW_TIERS
+            .iter()
+            .map(|t| t.iter().map(|u| u.to_string()).collect())
+            .collect()
+    }
+
+    /// A tracker edit changes the live list and the resume record, never the
+    /// stored blob. Every way of handing the `.torrent` out must still carry
+    /// the torrent's CURRENT trackers, with the info dict untouched.
+    #[tokio::test]
+    async fn every_export_path_carries_the_edited_trackers() {
+        use tower::ServiceExt;
+        let (s, hash, original) = populated("export-edited");
+        edit_trackers(&s, &hash).await;
+
+        // zip
+        let resp = super::post_torrent_export(
+            State(s.state.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            form(&[("hashes", &hash)]),
+        )
+        .await;
+        let mut z =
+            zip::ZipArchive::new(std::io::Cursor::new(body(resp).await)).expect("a valid zip");
+        let mut zipped = Vec::new();
+        z.by_index(0).unwrap().read_to_end(&mut zipped).unwrap();
+
+        // native file route
+        let resp = super::get_torrent_file(
+            State(s.state.clone()),
+            axum::extract::Path(hash.clone()),
+            RawQuery(None),
+            keyed(KEY),
+        )
+        .await;
+        let native = body(resp).await;
+
+        // qBittorrent shim, GET and POST
+        let mut all = vec![("zip", zipped), ("native", native)];
+        for (method, uri, payload) in [
+            ("GET", format!("/api/v2/torrents/export?hash={hash}"), String::new()),
+            (
+                "POST",
+                "/api/v2/torrents/export".to_string(),
+                format!("hash={hash}"),
+            ),
+        ] {
+            let req = axum::http::Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("X-API-Key", KEY)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(axum::body::Body::from(payload))
+                .unwrap();
+            let resp = super::router(s.state.clone()).oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            all.push((method, body(resp).await));
+        }
+
+        for (path, got) in all {
+            assert_eq!(tiers_of(&got), new_tiers(), "{path}: the edited trackers");
+            assert_eq!(
+                info_bytes(&got),
+                info_bytes(&original),
+                "{path}: the info dict, so the info hash, is untouched"
+            );
+        }
+
+        // CSV: tracker hosts, never URLs.
+        let resp = super::post_torrent_export(
+            State(s.state.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            form(&[("hashes", &hash), ("format", "csv")]),
+        )
+        .await;
+        let csv = String::from_utf8(body(resp).await).unwrap();
+        assert!(csv.contains("new.example new2.example new3.example"), "{csv}");
+        assert!(!csv.contains("t.example"), "the old host is gone: {csv}");
+    }
+
+    /// `strip_trackers` still removes everything from an edited torrent.
+    #[tokio::test]
+    async fn stripping_still_strips_an_edited_torrent() {
+        let (s, hash, _) = populated("export-edited-strip");
+        edit_trackers(&s, &hash).await;
+        let resp = super::post_torrent_export(
+            State(s.state.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            form(&[("hashes", &hash), ("strip_trackers", "1")]),
+        )
+        .await;
+        let mut z =
+            zip::ZipArchive::new(std::io::Cursor::new(body(resp).await)).expect("a valid zip");
+        let mut got = Vec::new();
+        z.by_index(0).unwrap().read_to_end(&mut got).unwrap();
+        assert!(tiers_of(&got).is_empty(), "no announce survives");
+        assert!(!got.windows(8).any(|w| w == b"announce"));
+        assert!(!got.windows(11).any(|w| w == b"new.example"));
     }
 
     #[tokio::test]

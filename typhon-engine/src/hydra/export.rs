@@ -79,6 +79,12 @@ pub fn clean_hashes(raw: &[String]) -> Vec<String> {
 
 /// Write the export of `hashes` to `out`.
 ///
+/// `live` answers a hash with the trackers its torrent announces to NOW, or
+/// `None` when no engine holds it. The stored blob keeps the trackers the
+/// torrent arrived with; an edit or a host move changes only the live list,
+/// so a file exported from the blob alone would carry a list the torrent no
+/// longer uses.
+///
 /// `hashes` must already be clean (`clean_hashes`). A hash list needs no store
 /// at all: the selection is the answer, including torrents that live on
 /// another node.
@@ -87,6 +93,7 @@ pub fn run<W: Write>(
     hashes: &[String],
     format: Format,
     strip_trackers: bool,
+    live: &dyn Fn(&str) -> Option<Vec<Vec<String>>>,
     out: W,
 ) -> io::Result<Summary> {
     match format {
@@ -109,7 +116,7 @@ pub fn run<W: Write>(
             each_row(store, hashes, |hash, row| {
                 match row {
                     Some(row) => {
-                        out.write_all(csv_line(row).as_bytes())?;
+                        out.write_all(csv_line(row, live(hash).as_deref()).as_bytes())?;
                         summary.written += 1;
                     }
                     // Still a line: dropping it would make the file disagree
@@ -150,7 +157,13 @@ pub fn run<W: Write>(
                         }
                     }
                 } else {
-                    row.torrent.clone()
+                    match live(hash) {
+                        // A blob we cannot splice is handed out as it is: the
+                        // old list is wrong, but no file at all is worse.
+                        Some(tiers) => with_trackers(&row.torrent, &tiers)
+                            .unwrap_or_else(|_| row.torrent.clone()),
+                        None => row.torrent.clone(),
+                    }
                 };
                 zip.add(&entry_name(&name, hash), &data)?;
                 summary.written += 1;
@@ -238,10 +251,64 @@ pub fn entry_name(name: &str, hash: &str) -> String {
 /// outside the info dict, so the info hash -- and the torrent's identity in
 /// every swarm -- is unchanged; the info dict is copied byte for byte.
 pub fn without_trackers(data: &[u8]) -> Result<Vec<u8>, String> {
+    rewrite_trackers(data, &[])
+}
+
+/// The same `.torrent` announcing to `tiers` instead of what it was stored with.
+///
+/// `announce` is the first URL of the first tier; `announce-list` is written
+/// only when the tiers hold more than that one URL. Like `without_trackers`,
+/// only the outer dictionary is rewritten and every other value, `info`
+/// included, is copied byte for byte, so the info hash is unchanged. No URL
+/// at all writes neither key.
+pub fn with_trackers(data: &[u8], tiers: &[Vec<String>]) -> Result<Vec<u8>, String> {
+    rewrite_trackers(data, tiers)
+}
+
+/// Bencode `s` as a string.
+fn bstring(out: &mut Vec<u8>, s: &[u8]) {
+    out.extend_from_slice(s.len().to_string().as_bytes());
+    out.push(b':');
+    out.extend_from_slice(s);
+}
+
+/// The `announce` and `announce-list` entries for `tiers`, ready to splice.
+fn tracker_entries(tiers: &[Vec<String>]) -> Vec<u8> {
+    let tiers: Vec<Vec<&String>> = tiers
+        .iter()
+        .map(|t| t.iter().filter(|u| !u.is_empty()).collect::<Vec<_>>())
+        .filter(|t| !t.is_empty())
+        .collect();
+    let mut out = Vec::new();
+    let Some(first) = tiers.first().and_then(|t| t.first()) else {
+        return out;
+    };
+    bstring(&mut out, b"announce");
+    bstring(&mut out, first.as_bytes());
+    if tiers.len() > 1 || tiers[0].len() > 1 {
+        bstring(&mut out, b"announce-list");
+        out.push(b'l');
+        for tier in &tiers {
+            out.push(b'l');
+            for url in tier {
+                bstring(&mut out, url.as_bytes());
+            }
+            out.push(b'e');
+        }
+        out.push(b'e');
+    }
+    out
+}
+
+/// Copy the outer dictionary without its tracker keys and put `tiers` in their
+/// place, at the position bencode's sorted keys give them.
+fn rewrite_trackers(data: &[u8], tiers: &[Vec<String>]) -> Result<Vec<u8>, String> {
     if data.first() != Some(&b'd') {
         return Err("not a bencoded dictionary".into());
     }
-    let mut out = Vec::with_capacity(data.len());
+    let entries = tracker_entries(tiers);
+    let mut placed = entries.is_empty();
+    let mut out = Vec::with_capacity(data.len() + entries.len());
     out.push(b'd');
     let mut pos = 1;
     loop {
@@ -255,9 +322,16 @@ pub fn without_trackers(data: &[u8]) -> Result<Vec<u8>, String> {
         let key = string_body(&data[pos..key_end]);
         let value_end = skip(data, key_end)?;
         if key != b"announce" && key != b"announce-list" {
+            if !placed && key > b"announce-list".as_slice() {
+                out.extend_from_slice(&entries);
+                placed = true;
+            }
             out.extend_from_slice(&data[pos..value_end]);
         }
         pos = value_end;
+    }
+    if !placed {
+        out.extend_from_slice(&entries);
     }
     out.push(b'e');
     Ok(out)
@@ -332,12 +406,12 @@ fn skip_depth(data: &[u8], pos: usize, depth: usize) -> Result<usize, String> {
 /// Trackers are listed by HOST only: the full URL of a private tracker holds
 /// the passkey, and a spreadsheet is exactly the kind of file that gets passed
 /// around.
-fn csv_line(row: &ExportRow) -> String {
+fn csv_line(row: &ExportRow, live: Option<&[Vec<String>]>) -> String {
     let meta = typhon_engine::torrent::metainfo::parse_torrent_bytes(&row.torrent).ok();
     let (name, size, hosts) = match &meta {
         Some(m) => {
             let mut hosts: Vec<String> = Vec::new();
-            for url in m.trackers.iter().flatten() {
+            for url in live.unwrap_or(&m.trackers).iter().flatten() {
                 let h = tracker_host(url);
                 if !h.is_empty() && !hosts.contains(&h) {
                     hosts.push(h);
@@ -775,6 +849,41 @@ mod tests {
     }
 
     #[test]
+    fn replacing_trackers_keeps_the_info_hash_and_writes_the_new_tiers() {
+        let t = torrent("film.mkv", "https://tracker.example/OLD/announce");
+        let tiers = vec![
+            vec!["https://new.example/a".to_string(), "https://new2.example/a".to_string()],
+            vec!["https://new3.example/a".to_string()],
+        ];
+        let out = with_trackers(&t, &tiers).unwrap();
+        assert_eq!(hash_of(&out), hash_of(&t));
+        assert!(!out.windows(3).any(|w| w == b"OLD"));
+        let meta = typhon_engine::torrent::metainfo::parse_torrent_bytes(&out).unwrap();
+        assert_eq!(meta.trackers, tiers);
+        assert!(out.windows(10).any(|w| w == b"7:comment2"), "other keys stay");
+        // Keys stay sorted: announce, announce-list, comment, info.
+        let at = |needle: &[u8]| out.windows(needle.len()).position(|w| w == needle).unwrap();
+        assert!(at(b"8:announce") < at(b"13:announce-list"));
+        assert!(at(b"13:announce-list") < at(b"7:comment"));
+        assert!(at(b"7:comment") < at(b"4:info"));
+    }
+
+    #[test]
+    fn one_url_is_an_announce_without_a_list_and_none_is_neither() {
+        let t = torrent("film.mkv", "https://tracker.example/OLD/announce");
+        let one = with_trackers(&t, &[vec!["https://new.example/a".to_string()]]).unwrap();
+        assert!(!one.windows(13).any(|w| w == b"announce-list"));
+        let meta = typhon_engine::torrent::metainfo::parse_torrent_bytes(&one).unwrap();
+        assert_eq!(meta.trackers, vec![vec!["https://new.example/a".to_string()]]);
+        assert_eq!(with_trackers(&t, &[]).unwrap(), without_trackers(&t).unwrap());
+        assert_eq!(
+            with_trackers(&t, &[vec![], vec![String::new()]]).unwrap(),
+            without_trackers(&t).unwrap()
+        );
+        assert!(with_trackers(b"not bencode", &[]).is_err());
+    }
+
+    #[test]
     fn removing_trackers_refuses_what_it_cannot_parse() {
         assert!(without_trackers(b"not bencode").is_err());
         assert!(without_trackers(b"d8:announce").is_err());
@@ -820,7 +929,7 @@ mod tests {
         let absent = "f".repeat(40);
         let asked = vec![hashes[0].clone(), absent.clone(), hashes[1].clone()];
         let mut out = Vec::new();
-        let s = run(&store, &asked, Format::Zip, false, &mut out).unwrap();
+        let s = run(&store, &asked, Format::Zip, false, &|_| None, &mut out).unwrap();
         assert_eq!(
             s,
             Summary {
@@ -843,7 +952,7 @@ mod tests {
         let t = torrent("one.mkv", "https://a.example/PASSKEY123/announce");
         let (store, hashes) = store_with(std::slice::from_ref(&t));
         let mut out = Vec::new();
-        run(&store, &hashes, Format::Zip, true, &mut out).unwrap();
+        run(&store, &hashes, Format::Zip, true, &|_| None, &mut out).unwrap();
         let mut z = unzip(out);
         let got = read_entry(&mut z, &entry_name("one.mkv", &hashes[0]));
         assert!(!got.windows(10).any(|w| w == b"PASSKEY123"));
@@ -910,6 +1019,7 @@ mod tests {
             &[hashes[0].clone(), absent.clone()],
             Format::Csv,
             false,
+            &|_| None,
             &mut out,
         )
         .unwrap();
@@ -951,7 +1061,7 @@ mod tests {
             added_time: -5.0,
         };
         assert_eq!(
-            csv_line(&row),
+            csv_line(&row, None),
             format!(
                 "{},'=SUM(1+1),5,'+cat,\"'@t,ok\",'=host.example,-5,'-1+1\n",
                 "a".repeat(40)
@@ -967,7 +1077,7 @@ mod tests {
         let (store, _) = store_with(&[]);
         let asked = vec!["a".repeat(40), "b".repeat(40)];
         let mut out = Vec::new();
-        run(&store, &asked, Format::Txt, false, &mut out).unwrap();
+        run(&store, &asked, Format::Txt, false, &|_| None, &mut out).unwrap();
         assert_eq!(
             String::from_utf8(out).unwrap(),
             format!("{}\n{}\n", asked[0], asked[1])

@@ -29,6 +29,7 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 
 ### Fixed
 
+- A `.torrent` exported or downloaded after its trackers were edited, or after a tracker host move, now carries the torrent's current trackers instead of the ones it was added with (the zip export, the `.torrent` download, the qBittorrent-compatible export, the hand-off to another node and the tracker column of the CSV). The info hash is unchanged, and `strip_trackers` still removes them all.
 - The last check of a workflow's delete refuses a torrent when any one of its files cannot be read, instead of only when none can. A file that cannot be read is one whose hardlinks cannot be counted; the refusal is in the workflow's activity.
 
 ## v4.8.1 -- a torrent held for proof reads as checking
