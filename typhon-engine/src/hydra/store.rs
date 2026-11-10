@@ -7103,6 +7103,106 @@ mod slim_current_tests {
         agrees(&mut s, "hoard");
     }
 
+    /// ⭐ A bulk edit counts what it changed (an edit that changes nothing says
+    /// 0), patches the kept copy itself, and drops its own rows from the queue
+    /// of changes so the next call does not read them again. A target the
+    /// store or the copy does not know is passed over.
+    #[test]
+    fn a_bulk_edit_counts_what_it_changed_and_patches_the_kept_copy() {
+        let mut s = Store::open_in_memory().unwrap();
+        for n in 1..=3 {
+            add(&s, n, "hoard", "", "");
+        }
+        drop(s.slim_facts_current("hoard").unwrap());
+        let key = |n: u8| hex20(&hash(n)).unwrap();
+        let dirty = |s: &Store| -> i64 {
+            s.conn
+                .query_row("SELECT count(*) FROM temp.slim_dirty", [], |r| r.get(0))
+                .unwrap()
+        };
+        let cached = |s: &Store, n: u8| -> (String, Vec<String>, bool) {
+            let f = s.slim.get("hoard").expect("kept");
+            canon(f)[&key(n)].clone()
+        };
+        let strangers = [
+            (hash(99), "hoard".to_string()),
+            ("not a hash".to_string(), "hoard".to_string()),
+        ];
+        let two: Vec<(String, String)> = [1u8, 2]
+            .iter()
+            .map(|n| (hash(*n), "hoard".to_string()))
+            .chain(strangers.iter().cloned())
+            .collect();
+
+        assert_eq!(s.bulk_edit(&[], BulkEdit::Paused(true)).unwrap(), 0);
+
+        assert_eq!(s.bulk_edit(&two, BulkEdit::Paused(true)).unwrap(), 2);
+        assert_eq!(
+            s.bulk_edit(&two, BulkEdit::Paused(true)).unwrap(),
+            0,
+            "already"
+        );
+        assert_eq!(dirty(&s), 0, "its own rows are not queued for a re-read");
+        assert_eq!(cached(&s, 1), (String::new(), vec![], true));
+        assert_eq!(cached(&s, 2), (String::new(), vec![], true));
+        assert_eq!(
+            cached(&s, 3),
+            (String::new(), vec![], false),
+            "not a target"
+        );
+
+        assert_eq!(s.bulk_edit(&two, BulkEdit::Category("Films")).unwrap(), 2);
+        assert_eq!(s.bulk_edit(&two, BulkEdit::Category("Films")).unwrap(), 0);
+        assert_eq!(cached(&s, 1), ("Films".to_string(), vec![], true));
+        assert_eq!(cached(&s, 3).0, "");
+
+        let x = vec!["x".to_string()];
+        let add_x = BulkEdit::Tags {
+            tags: &x,
+            add: true,
+        };
+        assert_eq!(s.bulk_edit(&two, add_x).unwrap(), 2);
+        assert_eq!(s.bulk_edit(&two, add_x).unwrap(), 0, "already worn");
+        assert_eq!(cached(&s, 2).1, vec!["x".to_string()]);
+        assert_eq!(cached(&s, 3).1, Vec::<String>::new());
+        assert_eq!(dirty(&s), 0);
+        agrees(&mut s, "hoard");
+    }
+
+    /// Pinning holds a slot in ONE engine, so it names one copy; unpinning
+    /// clears every copy, as the single-torrent route does.
+    #[test]
+    fn pinning_names_one_copy_and_unpinning_clears_them_all() {
+        let mut s = Store::open_in_memory().unwrap();
+        add(&s, 1, "hoard", "", "");
+        add(&s, 1, "race", "", "");
+        let pinned = |s: &Store, session: &str| -> i64 {
+            s.conn
+                .query_row(
+                    "SELECT pinned FROM torrents WHERE info_hash = ?1 AND session = ?2",
+                    rusqlite::params![hash(1), session],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        let race = [(hash(1), "race".to_string())];
+        let hoard = [(hash(1), "hoard".to_string())];
+
+        assert_eq!(s.bulk_edit(&race, BulkEdit::Pinned(true)).unwrap(), 1);
+        assert_eq!(s.bulk_edit(&race, BulkEdit::Pinned(true)).unwrap(), 0);
+        assert_eq!((pinned(&s, "race"), pinned(&s, "hoard")), (1, 0));
+
+        assert_eq!(s.bulk_edit(&hoard, BulkEdit::Pinned(true)).unwrap(), 1);
+        assert_eq!((pinned(&s, "race"), pinned(&s, "hoard")), (1, 1));
+        assert_eq!(
+            s.bulk_edit(&hoard, BulkEdit::Pinned(false)).unwrap(),
+            2,
+            "the other copy too"
+        );
+        assert_eq!((pinned(&s, "race"), pinned(&s, "hoard")), (0, 0));
+        assert_eq!(s.bulk_edit(&hoard, BulkEdit::Pinned(false)).unwrap(), 0);
+    }
+
     /// The copy is served, not re-read: with no write in between, a second
     /// call hands back the same allocation.
     #[test]
