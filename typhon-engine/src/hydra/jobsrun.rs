@@ -3463,3 +3463,7 @@ mod graduate_tests {
         let _ = s;
     }
 }
+
+#[cfg(test)]
+#[path = "jobsrun_failure_tests.rs"]
+mod move_failure_tests;
