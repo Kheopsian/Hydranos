@@ -111,6 +111,71 @@ async fn a_torrent_moved_to_another_engine_arrives_as_it_was() {
     );
 }
 
+/// ⭐ The folder the store knows is the one the torrent arrives with, and with
+/// no folder in the store the engine's own is kept; it arrives stopped if
+/// either the engine's record or the store says it is.
+#[tokio::test]
+async fn a_move_between_engines_takes_the_stores_folder_and_stops_it_if_either_says_so() {
+    let s = st("eng-move-state");
+    let dir = s.dir.join("payload");
+    let ih = |h: &str| typhon_engine::torrent::hex_decode(h).unwrap();
+    let landed = |h: &str| {
+        let t = s.engines.get("hoard").unwrap().manager.get(&ih(h)).unwrap();
+        let paused = t.is_paused.load(std::sync::atomic::Ordering::Relaxed);
+        let folder = t.save_path.read().clone();
+        (folder, paused)
+    };
+    let resume = |h: &str| {
+        s.engines
+            .get("race")
+            .unwrap()
+            .manager
+            .get(&ih(h))
+            .unwrap()
+            .is_paused
+            .store(false, std::sync::atomic::Ordering::Relaxed)
+    };
+    let store_says = |h: &str, folder: &str, paused: bool| {
+        let store = s.store.lock().unwrap();
+        store.set_paused(h, "race", paused).unwrap();
+        store.execute_batch_for_tests(&format!(
+            "UPDATE torrents SET save_path = '{folder}' WHERE info_hash = '{h}';"
+        ));
+    };
+    let elsewhere = s.dir.join("elsewhere");
+
+    // The store names another folder and says stopped; the engine runs.
+    let a = seed(&s, "race", "st1.bin", &dir);
+    resume(&a);
+    store_says(&a, elsewhere.to_str().unwrap(), true);
+    let (code, v) = to_engine(&s, &a, "", r#"{"engine":"hoard"}"#).await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    assert_eq!(
+        landed(&a),
+        (elsewhere.clone(), true),
+        "the store's folder, stopped by the store"
+    );
+
+    // The store has no folder and says running; the engine is stopped.
+    let b = seed(&s, "race", "st2.bin", &dir);
+    store_says(&b, "", false);
+    let (code, v) = to_engine(&s, &b, "", r#"{"engine":"hoard"}"#).await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    assert_eq!(
+        landed(&b),
+        (dir.clone(), true),
+        "its own folder, stopped by the engine"
+    );
+
+    // Neither says stopped: it arrives running.
+    let c = seed(&s, "race", "st3.bin", &dir);
+    resume(&c);
+    store_says(&c, dir.to_str().unwrap(), false);
+    let (code, v) = to_engine(&s, &c, "", r#"{"engine":"hoard"}"#).await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    assert_eq!(landed(&c), (dir.clone(), false));
+}
+
 /// Everything that is not a move is refused with its reason, and nothing
 /// moves: no engine named, the one it is in, one that is not here, a torrent
 /// nobody holds, the copy that is not in the engine named as the source, and

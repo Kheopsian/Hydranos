@@ -412,6 +412,92 @@ async fn an_upload_takes_the_other_spellings_of_its_fields() {
     );
 }
 
+/// ⭐ Each switch of an upload means what it says in both directions: `true`
+/// and `1` turn it on, anything else (`false`, `0`, a word) leaves it off, and
+/// the canonical names work as well as the aliases.
+#[tokio::test]
+async fn an_upload_switch_is_on_for_true_and_one_and_off_for_anything_else() {
+    let s = st("upl-switches", "");
+    let dir = s.dir.join("incoming");
+    let d = dir.to_str().unwrap();
+    for (name, fields, paused, seed) in [
+        (
+            "sw1.bin",
+            vec![("paused", "true"), ("seed_mode", "true")],
+            true,
+            true,
+        ),
+        (
+            "sw2.bin",
+            vec![("stopped", "1"), ("skip_checking", "1")],
+            true,
+            true,
+        ),
+        (
+            "sw3.bin",
+            vec![("paused", "false"), ("seed_mode", "false")],
+            false,
+            false,
+        ),
+        (
+            "sw4.bin",
+            vec![("stopped", "0"), ("skip_checking", "0")],
+            false,
+            false,
+        ),
+        (
+            "sw5.bin",
+            vec![("paused", "yes"), ("skip_recheck", "on")],
+            false,
+            false,
+        ),
+    ] {
+        let bytes = torrent_bytes(name);
+        let mut all = vec![
+            ("savepath", d),
+            ("engine", "hoard"),
+            ("create_subfolder", "0"),
+        ];
+        all.extend(fields.iter().copied());
+        let (code, v) = upload(&s, &all, Some(("torrents", &bytes)), true).await;
+        assert_eq!(code, StatusCode::OK, "{name}: {v}");
+        let t = held(&s, "hoard", v["info_hash"].as_str().unwrap()).expect("held");
+        assert_eq!(
+            t.is_paused.load(std::sync::atomic::Ordering::Relaxed),
+            paused,
+            "{name} paused"
+        );
+        assert_eq!(t.seed_mode, seed, "{name} seed mode");
+    }
+    // The subfolder switch: on for true/1, off for false/anything else.
+    for (name, value, folder) in [
+        ("sf1.bin", "true", "sf1"),
+        ("sf2.bin", "1", "sf2"),
+        ("sf3.bin", "false", "sf3.bin"),
+        ("sf4.bin", "no", "sf4.bin"),
+    ] {
+        let bytes = torrent_bytes(name);
+        let fields = [
+            ("savepath", d),
+            ("engine", "hoard"),
+            ("create_subfolder", value),
+        ];
+        let (code, v) = upload(&s, &fields, Some(("torrents", &bytes)), true).await;
+        assert_eq!(code, StatusCode::OK, "{name}: {v}");
+        let t = held(&s, "hoard", v["info_hash"].as_str().unwrap()).expect("held");
+        let want = if folder == name {
+            dir.clone()
+        } else {
+            dir.join(folder)
+        };
+        assert_eq!(
+            *t.save_path.read(),
+            want,
+            "{name}: create_subfolder={value}"
+        );
+    }
+}
+
 /// Everything an upload can get wrong is refused with the reason, and nothing
 /// is added: no file, an engine that does not exist, a mode that is neither,
 /// bytes that are no torrent, a torrent already held, and a missing key.
