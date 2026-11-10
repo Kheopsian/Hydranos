@@ -2625,3 +2625,7 @@ mod editor_delete_tests {
         assert!(js_function(js, "_wfTabRow").contains("esc(acts)"));
     }
 }
+
+#[cfg(test)]
+#[path = "rules_lot5_tests.rs"]
+mod rules_lot5_tests;
