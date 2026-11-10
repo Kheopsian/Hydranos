@@ -378,3 +378,85 @@ async fn a_trim_setting_sent_with_another_field_does_not_swallow_it() {
     assert!(v.get("high_watermark").is_some(), "{v}");
     assert!(!saved("/bare").inherited, "today's marks are now its own");
 }
+
+/// ⭐ A quota sent with any one mark, or with "inherit", is both: the quota is
+/// saved and so is the rest. Only a quota alone leaves the marks inherited.
+#[tokio::test]
+async fn a_quota_sent_with_one_other_field_saves_that_field_too() {
+    let s = state_from(
+        "policy-volume-quota-with",
+        &format!(
+            "[daemon]\napi_key = \"{KEY}\"\n[race_drain]\nhigh_watermark_pct = 90\nlow_watermark_pct = 80\n"
+        ),
+    );
+    // Marks of its own first, so that "inherit" has something to give back.
+    volume(
+        &s,
+        serde_json::json!({"volume": "/c", "enabled": true, "high_watermark": 90, "low_watermark": 80}),
+    )
+    .await;
+
+    let (_, v) = volume(
+        &s,
+        serde_json::json!({"volume": "/c", "quota_gb": 1, "inherit": true}),
+    )
+    .await;
+    assert_eq!(v["inherited"], true, "{v}");
+    assert!(policy(&s, "/c").inherited, "inherit was applied");
+
+    let (_, v) = volume(
+        &s,
+        serde_json::json!({"volume": "/c", "quota_gb": 1, "enabled": true}),
+    )
+    .await;
+    assert_eq!(v["enabled"], true, "{v}");
+    assert!(!policy(&s, "/c").inherited, "the switch was saved");
+
+    let (_, v) = volume(
+        &s,
+        serde_json::json!({"volume": "/c", "quota_gb": 1, "high_watermark": 95}),
+    )
+    .await;
+    assert_eq!(v["high_watermark"], 95, "{v}");
+    assert_eq!(policy(&s, "/c").high, 95);
+
+    let (_, v) = volume(
+        &s,
+        serde_json::json!({"volume": "/c", "quota_gb": 1, "low_watermark": 60}),
+    )
+    .await;
+    assert_eq!(v["low_watermark"], 60, "{v}");
+    assert_eq!(policy(&s, "/c").low, 60);
+    assert_eq!(
+        crate::volumes::quota_for(&s.state, "/c"),
+        Some(1_000_000_000)
+    );
+}
+
+/// The marks are percentages: 100 is a mark, 1 is a mark, and the line is
+/// drawn exactly there.
+#[tokio::test]
+async fn the_marks_may_be_as_high_as_100_and_as_low_as_1() {
+    let s = st("policy-volume-edges");
+    let (code, v) = volume(
+        &s,
+        serde_json::json!({"volume": "/e", "enabled": true, "high_watermark": 100, "low_watermark": 50}),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    assert_eq!(policy(&s, "/e").high, 100);
+    let (code, v) = volume(
+        &s,
+        serde_json::json!({"volume": "/e", "enabled": true, "high_watermark": 50, "low_watermark": 1}),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    assert_eq!((policy(&s, "/e").high, policy(&s, "/e").low), (50, 1));
+    let (code, v) = volume(
+        &s,
+        serde_json::json!({"volume": "/e", "high_watermark": 101, "low_watermark": 1}),
+    )
+    .await;
+    assert_eq!(code, StatusCode::BAD_REQUEST, "{v}");
+    assert_eq!(v["error"], "watermarks are percentages");
+}

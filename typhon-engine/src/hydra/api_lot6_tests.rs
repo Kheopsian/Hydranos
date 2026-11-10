@@ -703,6 +703,50 @@ fn a_rename_is_followed_where_a_category_is_named_and_nowhere_else() {
     assert_eq!(graduating["to_category"], "movies");
 }
 
+/// ⭐ A workflow whose only mention of the category is the category it files
+/// into is followed, and counted; watched folders that name no such category
+/// are not rewritten at all (not even into the same list in another spelling),
+/// and a rename that finds nothing says so with zeros.
+#[test]
+fn a_rename_counts_a_workflow_that_only_files_into_the_category_and_rewrites_nothing_else() {
+    let s = state_from("rename-action-only", "");
+    let folders = r#"[{"path":"/w","category":"tv"}]"#;
+    {
+        let store = s.store.lock().unwrap();
+        store.put_setting("watch_folders", folders).unwrap();
+        store
+            .put_workflow(&workflow(
+                "act",
+                cond("name", "eq", "x"),
+                serde_json::json!([{"type": "set_category", "to": "films"}, {"type": "pause"}]),
+            ))
+            .unwrap();
+    }
+
+    let v = rename_category_references(&s.state, "films", "movies").expect("followed");
+
+    assert_eq!(
+        v,
+        serde_json::json!({"rss_rules": 0, "watch_folders": 0, "workflows": 1, "magnets": 0, "jobs": 0})
+    );
+    let store = s.store.lock().unwrap();
+    assert_eq!(
+        store.setting("watch_folders").unwrap().as_deref(),
+        Some(folders),
+        "untouched, byte for byte"
+    );
+    let w: serde_json::Value = serde_json::from_str(&store.workflows().unwrap()[0].body).unwrap();
+    assert_eq!(w["then"][0]["to"], "movies");
+    assert_eq!(w["then"][1]["type"], "pause");
+    drop(store);
+
+    let v = rename_category_references(&s.state, "nothing-like-it", "x").expect("nothing to do");
+    assert_eq!(
+        v,
+        serde_json::json!({"rss_rules": 0, "watch_folders": 0, "workflows": 0, "magnets": 0, "jobs": 0})
+    );
+}
+
 /// A store that refuses one kind of reference does not stop the others from
 /// being followed, and what it refused is named in the answer.
 #[test]
