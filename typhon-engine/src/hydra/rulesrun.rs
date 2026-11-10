@@ -3194,3 +3194,7 @@ mod lot5_tests;
 #[cfg(test)]
 #[path = "rulesrun_lot5b_tests.rs"]
 mod lot5b_tests;
+
+#[cfg(test)]
+#[path = "rulesrun_lot5c_tests.rs"]
+mod lot5c_tests;
