@@ -897,6 +897,57 @@ async fn a_graduation_is_queued_to_the_folder_named_or_the_categorys() {
     assert_eq!(b["to_category"], "pool");
 }
 
+/// ⭐ A graduation across filesystems copies the data, so the target needs
+/// room for exactly those bytes: one byte short is refused with the reason,
+/// exactly enough is queued.
+#[tokio::test]
+async fn a_graduation_needs_room_for_exactly_the_bytes_it_copies() {
+    struct Clean(std::path::PathBuf);
+    impl Drop for Clean {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+            crate::jobs::FREE_SPACE.with(|c| c.set(None));
+        }
+    }
+    let s = st("grad-room", "");
+    let shm = std::path::Path::new("/dev/shm");
+    if !shm.exists() || crate::jobs::same_filesystem(shm, &s.dir) {
+        eprintln!("skipped: /dev/shm is not a separate filesystem here");
+        return;
+    }
+    let src = shm.join(format!("hydra-grad-room-{}", std::process::id()));
+    let _clean = Clean(src.clone());
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("gd"), vec![0u8; SIZE as usize]).unwrap();
+    let (hash, _) = add_torrent_bytes(
+        &s.state,
+        &torrent_bytes("gd"),
+        "",
+        src.to_str().unwrap(),
+        "",
+        true,
+        true,
+        "race",
+    )
+    .expect("added");
+    let body =
+        serde_json::json!({"engine": "hoard", "save_path": s.dir.join("pool").to_str().unwrap()})
+            .to_string();
+
+    crate::jobs::FREE_SPACE.with(|c| c.set(Some(SIZE - 1)));
+    let (code, v) = graduate(&s, &hash, &body).await;
+    assert_eq!(code, StatusCode::CONFLICT, "{v}");
+    assert_eq!(v["reason"], "space");
+    assert_eq!(v["error"], "not enough free space at the target");
+    assert!(s.store.lock().unwrap().list_jobs(10).unwrap().is_empty());
+
+    crate::jobs::FREE_SPACE.with(|c| c.set(Some(SIZE)));
+    let (code, v) = graduate(&s, &hash, &body).await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    assert_eq!(v["plan"]["copy_bytes"], SIZE);
+    assert_eq!(s.store.lock().unwrap().list_jobs(10).unwrap().len(), 1);
+}
+
 // ---------------------------------------------------------------------------
 // The reannounce button
 // ---------------------------------------------------------------------------
