@@ -237,13 +237,12 @@ pub fn rehost(
                     continue;
                 };
                 changed = true;
-                if new == *u {
-                    level.push(new);
-                } else if !existing.contains(new.as_str()) && produced.insert(new.clone()) {
+                // A URL the move left as it was stays. A changed one stays
+                // unless it is already announced to, or two of its URLs became
+                // one: then the copy goes.
+                if new == *u || (!existing.contains(new.as_str()) && produced.insert(new.clone())) {
                     level.push(new);
                 }
-                // Else it is already announced to, or two of its URLs became
-                // one: the copy goes.
             }
             level
         })

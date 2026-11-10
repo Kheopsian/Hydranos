@@ -26790,7 +26790,7 @@ mod write_path_tests {
             .lock()
             .unwrap()
             .job_in_flight_of_kind("tracker_rehost"));
-        assert!(s.state.cfg().announce_passkeys.get("new.example").is_none());
+        assert!(!s.state.cfg().announce_passkeys.contains_key("new.example"));
         assert_eq!(rehost_status(&s).await["state"], "none");
 
         let (code, v) = rehost_call(&s, r#"{"from":"tracker.example","to":"new.example"}"#).await;
