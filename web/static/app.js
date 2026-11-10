@@ -9238,7 +9238,9 @@ async function saveTracker() {
     const host = typed.replace(/:\d+$/, "");
     // Host names are not case-sensitive: a change of case alone moves nothing.
     if (_trkEditing && typed.toLowerCase() !== _trkEditing.toLowerCase()) {
-        if (!await moveTrackerTorrents(_trkEditing, typed)) return;
+        // Declined or failed: nothing is saved. No torrent on the old host:
+        // the settings are simply saved for the new name, as before.
+        if (await moveTrackerTorrents(_trkEditing, typed) === false) return;
         _trkEditing = host;
     }
     try {
@@ -9299,13 +9301,16 @@ async function _trkWatchMove(announceEnd) {
         _trkMoveWatching = false;
     }
 }
-// Ask, then start the move of every torrent of `from` to `to`. True once the
-// job is started; the progress line follows it from there.
+// Ask, then start the move of every torrent of `from` to `to`. "moved" once
+// the job is started (the progress line follows it from there), "none" when
+// no torrent announces to `from` -- a host known only by its settings, whose
+// Save goes on as before the move existed -- and false when the operator
+// declined or the request failed.
 async function moveTrackerTorrents(from, to) {
     const post = dry => api("/api/trackers/rehost", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ from, to, dry_run: dry }) });
     try {
         const dry = await post(true);
-        if (!dry.torrents) { _trkMoveStatus(t("No torrent announces to {host}.", { host: from }), "error"); return false; }
+        if (!dry.torrents) return "none";
         const ok = await hydraConfirm(
             t("Move torrents to a new host"),
             t("Move {n} torrents from {from} to {to}? Each keeps its passkey and path. This runs in the background and can take several minutes.", { n: dry.torrents, from, to }),
@@ -9314,7 +9319,7 @@ async function moveTrackerTorrents(from, to) {
         await post(false);
         _trkMoveStatus(t("Move started."), "");
         _trkWatchMove(true);
-        return true;
+        return "moved";
     } catch (e) { _trkMoveStatus(t("Error: {msg}", { msg: e.message }), "error"); return false; }
 }
 async function cancelTrackerMove() {
