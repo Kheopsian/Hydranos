@@ -1,0 +1,76 @@
+name: fuzz
+
+# Ten minutes of libFuzzer per parser, once a week. Not on push or pull request:
+# a fuzzer finds what it finds by running long, and a gate that waits ten
+# minutes per target would be turned off. Longer runs (hours) are done on a
+# dedicated machine when a commit touches a parser -- see fuzz/README.md.
+#
+# A red run means a `crash-*`, `leak-*` or `timeout-*` artifact: it is uploaded
+# below, and it must become a unit test in typhon-engine before it is fixed.
+# An `oom-*` is not a finding (ASAN's own RSS limit), hence -ignore_ooms=1.
+on:
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: "Seconds per target"
+        default: "600"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzz-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - bencode_decode
+          - bencode_decode_prefix
+          - metainfo_parse
+          - metainfo_info_dict
+          - metainfo_piece_hashes
+          - merkle_root
+          - ext_handshake
+          - metadata_msg
+          - handshake
+          - peer_message
+          - pex
+          - http_announce
+          - http_scrape
+          - udp_tracker
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: nightly
+      # jemalloc, ring and aws-lc build C: same as ci.yml.
+      - name: Build dependencies
+        run: command -v cmake >/dev/null || { sudo apt-get update && sudo apt-get install -y --no-install-recommends cmake; }
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: fuzz
+      - name: Install cargo-fuzz
+        run: command -v cargo-fuzz >/dev/null 2>&1 || cargo install cargo-fuzz --locked
+      # The corpus is the committed seeds; libFuzzer writes what it finds into
+      # it, in the runner's checkout only (grown files are not committed).
+      - name: Fuzz ${{ matrix.target }}
+        env:
+          SECONDS_PER_TARGET: ${{ github.event.inputs.seconds || '600' }}
+        run: |
+          cargo fuzz run --fuzz-dir fuzz ${{ matrix.target }} -- \
+            -max_total_time="$SECONDS_PER_TARGET" -ignore_ooms=1 -rss_limit_mb=3072
+      - name: Upload the crashing input
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}
+          if-no-files-found: ignore

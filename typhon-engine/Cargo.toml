@@ -134,6 +134,11 @@ windows-sys = { version = "0.59", features = [
 [features]
 default = []
 
+# `fuzzing` is set by cargo-fuzz (see ../fuzz), never by a normal build; naming
+# it here keeps `#[cfg(fuzzing)]` from tripping unexpected_cfgs under -D warnings.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }
+
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
 # A paused clock (`start_paused`, `advance`) lets a test cross a 30 s or a 24 h

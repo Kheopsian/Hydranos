@@ -1,0 +1,125 @@
+[package]
+name = "hydranos-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+# Its own workspace, deliberately: typhon-engine's Cargo.lock and its
+# `cargo test` / `cargo llvm-cov` must never see libfuzzer-sys. See README.md.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+bytes = "1"
+tokio-util = { version = "0.7", features = ["codec"] }
+typhon-engine = { path = "../typhon-engine" }
+
+# The same patches as typhon-engine/Cargo.toml: a [patch] only counts in the
+# root manifest of the workspace being built, so it has to be repeated here.
+[patch.crates-io]
+librqbit-dualstack-sockets = { path = "../third_party/librqbit-dualstack-sockets" }
+librqbit-dht = { path = "../third_party/librqbit-dht" }
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "bencode_decode"
+path = "fuzz_targets/bencode_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bencode_decode_prefix"
+path = "fuzz_targets/bencode_decode_prefix.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "metainfo_parse"
+path = "fuzz_targets/metainfo_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "metainfo_info_dict"
+path = "fuzz_targets/metainfo_info_dict.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "metainfo_piece_hashes"
+path = "fuzz_targets/metainfo_piece_hashes.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "merkle_root"
+path = "fuzz_targets/merkle_root.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ext_handshake"
+path = "fuzz_targets/ext_handshake.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "metadata_msg"
+path = "fuzz_targets/metadata_msg.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "handshake"
+path = "fuzz_targets/handshake.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "peer_message"
+path = "fuzz_targets/peer_message.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pex"
+path = "fuzz_targets/pex.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "http_announce"
+path = "fuzz_targets/http_announce.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "http_scrape"
+path = "fuzz_targets/http_scrape.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "udp_tracker"
+path = "fuzz_targets/udp_tracker.rs"
+test = false
+doc = false
+bench = false

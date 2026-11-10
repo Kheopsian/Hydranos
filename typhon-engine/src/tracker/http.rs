@@ -419,7 +419,7 @@ pub(crate) async fn read_prefix(
     Ok((out, false))
 }
 
-fn parse_announce_response(data: &[u8]) -> Result<AnnounceResponse, String> {
+pub(crate) fn parse_announce_response(data: &[u8]) -> Result<AnnounceResponse, String> {
     let value = bencode_decode(data)?;
     let dict = value.as_dict().ok_or("response not a dict")?;
 

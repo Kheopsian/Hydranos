@@ -20,3 +20,9 @@ pub mod tracker;
 pub mod tunneldns;
 pub mod webseed;
 pub mod wire;
+
+// Entry points for the fuzz crate (../fuzz) onto parsers that are private to
+// the crate. Only compiled under `--cfg fuzzing`, which cargo-fuzz sets and a
+// normal build never does: nothing here exists in a shipped binary.
+#[cfg(fuzzing)]
+pub mod fuzz_api;
