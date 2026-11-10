@@ -316,6 +316,10 @@ pub struct TorrentManager {
     /// five minutes regardless of activity, which is what made the old scheme
     /// expensive.
     last_saved: DashMap<InfoHash, statedb::Fingerprint>,
+    /// Test seam: runs inside `remove_torrent_sparing`, between the row's
+    /// deletion and the torrent's leaving the map, where a sweep can land.
+    #[cfg(test)]
+    remove_window_hook: std::sync::Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
     /// Keep mirroring every record into the legacy `resume/` JSON directory.
     /// Off by default: the mirror costs one file write per torrent per sweep,
     /// which is the entire cost the state database exists to remove. Set
@@ -681,6 +685,8 @@ impl TorrentManager {
             completion_hook: std::sync::OnceLock::new(),
             state_db,
             last_saved: DashMap::new(),
+            #[cfg(test)]
+            remove_window_hook: std::sync::Mutex::new(None),
             mirror_json,
         }
     }
@@ -1296,7 +1302,20 @@ impl TorrentManager {
         use std::time::Instant;
         let started = Instant::now();
         let mut tm = RemoveTimings::default();
+        // First of all: from here on no sweep writes this torrent's row. A
+        // sweep builds its records under the database lock and skips a torrent
+        // flagged removed, so the row deleted next cannot be put back by one
+        // that still finds the torrent in the map. (A sweep that built the
+        // row before this flag is deleted just after, as it waits for the
+        // same lock.)
+        if let Some(t) = self.torrents.get(info_hash) {
+            t.is_removed.store(true, Ordering::Relaxed);
+        }
         (tm.statedb_wait, tm.statedb_hold, tm.resume_json) = self.forget_state(info_hash);
+        #[cfg(test)]
+        if let Some(f) = self.remove_window_hook.lock().unwrap().as_ref() {
+            f();
+        }
         // Flag the TorrentState as removed BEFORE dropping the DashMap entry
         // so in-flight peer tasks (which hold Arc<TorrentState>) can observe
         // the flag on their next loop iteration and exit cleanly. Otherwise
@@ -2296,6 +2315,9 @@ impl TorrentManager {
         ih: &InfoHash,
     ) -> Option<(fastresume::ResumeData, statedb::Fingerprint)> {
         let t = self.get(ih)?;
+        if t.is_removed.load(Ordering::Relaxed) {
+            return None;
+        }
         t.fold_seed_time(crate::torrent::meta::now_secs());
         // Fingerprint first: a counter that moves between the two reads
         // leaves the fingerprint behind the record, so the next sweep
@@ -2309,7 +2331,7 @@ impl TorrentManager {
 
     fn save_json_fallback(&self, hashes: &[InfoHash]) {
         for ih in hashes {
-            if let Some(t) = self.get(ih) {
+            if let Some(t) = self.get(ih).filter(|t| !t.is_removed.load(Ordering::Relaxed)) {
                 fastresume::save(&self.resume_dir, ih, &Self::build_resume_data(&t));
             }
         }
@@ -5069,6 +5091,44 @@ mod manager_tests {
             new,
             "and a later sweep keeps it"
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A sweep landing while a removal is half done (row deleted, torrent
+    /// still in the map) must not write the row back.
+    #[test]
+    fn a_sweep_during_a_removal_does_not_bring_the_row_back() {
+        let (mgr, root) = manager("race-remove-window");
+        let ih = add(&mgr, "alpha");
+        make_dirty(&mgr, &ih);
+        let m2 = mgr.clone();
+        *mgr.remove_window_hook.lock().unwrap() = Some(Box::new(move || m2.save_all_resume()));
+        mgr.remove_torrent_timed(&ih, true).0.expect("removed");
+        let hex = hex_encode(&ih);
+        let db = mgr.state_db.as_ref().unwrap();
+        assert!(
+            !db.load_all().iter().any(|r| r.info_hash == hex),
+            "the removed torrent's row came back"
+        );
+        mgr.save_all_resume();
+        assert!(!db.load_all().iter().any(|r| r.info_hash == hex));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The other interleaving: the sweep collected the torrent, then it was
+    /// removed, then the sweep commits.
+    #[test]
+    fn a_sweep_collected_before_a_removal_does_not_bring_the_row_back() {
+        let (mgr, root) = manager("race-remove-collected");
+        let ih = add(&mgr, "alpha");
+        make_dirty(&mgr, &ih);
+        let db = mgr.state_db.clone().unwrap();
+        let swept = mgr.collect_dirty();
+        assert_eq!(swept, vec![ih]);
+        mgr.remove_torrent_timed(&ih, true).0.expect("removed");
+        mgr.commit_dirty(&db, swept, 1, std::time::Instant::now());
+        let hex = hex_encode(&ih);
+        assert!(!db.load_all().iter().any(|r| r.info_hash == hex));
         let _ = std::fs::remove_dir_all(root);
     }
 

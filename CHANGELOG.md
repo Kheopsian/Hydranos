@@ -29,6 +29,7 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 - A network failure of an export now says why (`operation timed out`, `Connection refused`, ...) instead of reqwest's bare `error sending request for url`, in the failure list and the log.
 - A 409 from qBittorrent is no longer always labelled "no metadata yet": the failure shows qBittorrent's own answer, such as `Unable to export torrent file. Error: a piece layer is invalid` for some hybrid torrents on 5.x.
 
+- A torrent removed while a save was running could have its saved state written back by that save, leaving a row for a torrent that no longer exists. A torrent being removed is now skipped by the save from the first moment of the removal.
 
 ### Changed
 
