@@ -92,6 +92,12 @@ pub struct Progress {
     /// outlive the job that needed it.
     pub retry: std::sync::Mutex<Option<RetryKit>>,
     pub finished: AtomicBool,
+    /// Candidates the job never tried because qBittorrent stopped answering.
+    /// They are in the retry kit, not in `failures`.
+    pub not_attempted: AtomicUsize,
+    /// The first torrent whose export got no answer after others had been
+    /// exported: the likely trigger. Empty when there is none.
+    pub stalled_at: std::sync::RwLock<String>,
     pub error: std::sync::RwLock<String>,
     pub current: std::sync::RwLock<String>,
 }
@@ -144,6 +150,8 @@ impl Progress {
             "downloading": self.downloading.load(Ordering::Relaxed),
             "skipped": self.skipped.load(Ordering::Relaxed),
             "failed": self.failed.load(Ordering::Relaxed),
+            "not_attempted": self.not_attempted.load(Ordering::Relaxed),
+            "stalled_at": self.stalled_at.read().unwrap().clone(),
             "stopped": self.stopped.load(Ordering::Relaxed),
             "failures": self.failures.lock().unwrap().iter().take(FAILURES_SHOWN).collect::<Vec<_>>(),
             "retryable": self.retry.lock().unwrap().is_some(),
@@ -217,6 +225,17 @@ fn trimmed_body(body: &str) -> String {
         one
     }
 }
+
+/// Consecutive torrents whose export got no answer at all before the job
+/// stops asking.
+///
+/// Each one has already used every attempt (four, with backoff) and, against
+/// a qBittorrent that hangs, 30 s per attempt: about two minutes. One is a
+/// blip, two can be a restart that overlapped; three in a row on different
+/// torrents is a client that is gone, and every further one costs another two
+/// minutes to learn it. Small enough that a dead client costs minutes rather
+/// than hours, large enough that a passing hiccup does not abandon a library.
+const NETWORK_STOP_AFTER: usize = 3;
 
 /// Attempts at one `.torrent` before the torrent is counted as failed.
 const EXPORT_ATTEMPTS: u32 = 4;
@@ -754,14 +773,25 @@ pub async fn run_job(
 
     progress.set_phase("torrents");
     let mut failed_cands = Vec::new();
-    for c in cands {
+    // Network failures in a row, and the first one's name; a torrent that got
+    // any answer (even a 409) or an export that worked ends the run.
+    let mut net_streak = 0usize;
+    let mut net_first = String::new();
+    let mut exported_any = false;
+    let mut paused = false;
+    let mut cands = cands.into_iter();
+    while let Some(c) = cands.next() {
         *progress.current.write().unwrap() = c.name.clone();
         let stays_stopped = choices.start_stopped || c.stopped;
         // Kept whole for a retry; cheap next to the export it follows.
         let retry_copy = c.clone();
+        let mut network_failure = false;
         let bytes = match &c.source {
             Source::Qbit(hash) => match &qbit {
-                Some(q) => q.export(hash).await.map_err(|e| e.message),
+                Some(q) => q.export(hash).await.map_err(|e| {
+                    network_failure = e.network;
+                    e.message
+                }),
                 None => Err("no qBittorrent session".into()),
             },
             Source::File(path) => {
@@ -771,6 +801,21 @@ pub async fn run_job(
                     .unwrap_or_else(|e| Err(e.to_string()))
             }
         };
+        if network_failure {
+            if net_streak == 0 {
+                net_first = retry_copy.name.clone();
+                if exported_any {
+                    let mut at = progress.stalled_at.write().unwrap();
+                    if at.is_empty() {
+                        *at = net_first.clone();
+                    }
+                }
+            }
+            net_streak += 1;
+        } else {
+            net_streak = 0;
+            exported_any |= bytes.is_ok() && matches!(c.source, Source::Qbit(_));
+        }
         let outcome = match bytes {
             Err(e) => Err(e),
             Ok(bytes) => {
@@ -819,6 +864,21 @@ pub async fn run_job(
             }
         };
         progress.done.fetch_add(1, Ordering::Relaxed);
+        if net_streak >= NETWORK_STOP_AFTER {
+            let rest: Vec<Candidate> = cands.by_ref().collect();
+            if !rest.is_empty() {
+                let msg = format!(
+                    "qBittorrent stopped answering at {net_first}; {} torrents not attempted, retry when it is back",
+                    rest.len()
+                );
+                tracing::warn!(at = %net_first, not_attempted = rest.len(), "import: qBittorrent stopped answering, job paused");
+                progress.not_attempted.store(rest.len(), Ordering::Relaxed);
+                *progress.error.write().unwrap() = msg;
+                failed_cands.extend(rest);
+                paused = true;
+            }
+            break;
+        }
     }
     if !failed_cands.is_empty() {
         *progress.retry.lock().unwrap() = Some(RetryKit {
@@ -827,7 +887,7 @@ pub async fn run_job(
             choices: choices.clone(),
         });
     }
-    progress.set_phase("done");
+    progress.set_phase(if paused { "paused" } else { "done" });
     progress.finished.store(true, Ordering::Relaxed);
 }
 
@@ -1717,6 +1777,149 @@ mod qbit_session_tests {
             Some(Box::new(E("mid", Some(Box::new(E("root", None)))))),
         );
         assert_eq!(error_chain(&e), "top: mid: root");
+    }
+
+    /// Candidates for the fake: the first two answer, the rest hang.
+    fn qbit_cands(n: usize) -> Vec<Candidate> {
+        (0..n)
+            .map(|i| Candidate {
+                source: Source::Qbit(if i < 2 {
+                    format!("ok{i}")
+                } else {
+                    "slow".into()
+                }),
+                name: format!("torrent {i}"),
+                ..file_cand("x", PathBuf::new())
+            })
+            .collect()
+    }
+
+    async fn run(cands: Vec<Candidate>, q: Qbit) -> (Arc<Progress>, Arc<Mutex<usize>>) {
+        let added = Arc::new(Mutex::new(0usize));
+        let counter = added.clone();
+        let add: AddFn = Arc::new(move |_| {
+            *counter.lock().unwrap() += 1;
+            Ok(Added::Seeded)
+        });
+        let cats: CategoryFn = Arc::new(|_| {});
+        let progress = Arc::new(Progress::default());
+        run_job(
+            cands,
+            Some(q),
+            Choices::default(),
+            progress.clone(),
+            cats,
+            add,
+        )
+        .await;
+        (progress, added)
+    }
+
+    /// The same fake, with a client that gives up on a request after 100 ms.
+    async fn fast_qbit(q: &Qbit) -> Qbit {
+        let mut q2 = Qbit::login_with_timeout(q.creds(), std::time::Duration::from_millis(100))
+            .await
+            .unwrap();
+        q2.backoff = std::time::Duration::from_millis(1);
+        q2
+    }
+
+    #[tokio::test]
+    async fn a_client_that_stops_answering_pauses_the_job_and_names_the_suspect() {
+        let (f, q) = fake().await;
+        let q = fast_qbit(&q).await;
+        // 2 exports answer, then 3 hang (the stop), then 5 are never tried.
+        let (progress, added) = run(qbit_cands(10), q).await;
+
+        assert_eq!(*added.lock().unwrap(), 2);
+        assert_eq!(progress.seeded.load(Ordering::Relaxed), 2);
+        assert_eq!(progress.failed.load(Ordering::Relaxed), NETWORK_STOP_AFTER);
+        assert_eq!(progress.not_attempted.load(Ordering::Relaxed), 5);
+        assert_eq!(
+            progress.done.load(Ordering::Relaxed),
+            2 + NETWORK_STOP_AFTER
+        );
+        assert_eq!(
+            calls(&f, "slow"),
+            NETWORK_STOP_AFTER * EXPORT_ATTEMPTS as usize
+        );
+        assert!(progress.finished.load(Ordering::Relaxed));
+        assert_eq!(progress.phase.read().unwrap().as_str(), "paused");
+        let err = progress.error.read().unwrap().clone();
+        assert_eq!(
+            err,
+            "qBittorrent stopped answering at torrent 2; 5 torrents not attempted, retry when it is back"
+        );
+        assert_eq!(progress.stalled_at.read().unwrap().as_str(), "torrent 2");
+        let kit = progress.retry.lock().unwrap().clone().expect("a retry kit");
+        let names: Vec<_> = kit.cands.iter().map(|c| c.name.clone()).collect();
+        assert_eq!(
+            names,
+            (2..10).map(|i| format!("torrent {i}")).collect::<Vec<_>>(),
+            "the failed and the untried, in order"
+        );
+        let json = progress.as_json();
+        assert_eq!(json["not_attempted"], 5);
+        assert_eq!(json["stalled_at"], "torrent 2");
+        assert_eq!(json["retryable"], true);
+        let fails = progress.failures.lock().unwrap().clone();
+        assert!(
+            fails[0].error.to_lowercase().contains("timed out"),
+            "{}",
+            fails[0].error
+        );
+    }
+
+    #[tokio::test]
+    async fn an_answer_ends_the_run_of_network_failures() {
+        // slow, slow, 409, slow, slow: never three in a row, so no pause.
+        let (_f, q) = fake().await;
+        let q = fast_qbit(&q).await;
+        let cands: Vec<Candidate> = ["ok0", "slow", "slow", "magnet", "slow", "slow", "ok1"]
+            .iter()
+            .enumerate()
+            .map(|(i, h)| Candidate {
+                source: Source::Qbit((*h).into()),
+                name: format!("t{i}"),
+                ..file_cand("x", PathBuf::new())
+            })
+            .collect();
+        let (progress, added) = run(cands, q).await;
+        assert_eq!(*added.lock().unwrap(), 2, "the last one still went in");
+        assert_eq!(progress.not_attempted.load(Ordering::Relaxed), 0);
+        assert_eq!(progress.phase.read().unwrap().as_str(), "done");
+        assert!(progress.error.read().unwrap().is_empty());
+        assert_eq!(progress.failed.load(Ordering::Relaxed), 5);
+        assert_eq!(
+            progress.stalled_at.read().unwrap().as_str(),
+            "t1",
+            "the first no-answer after a success"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_client_that_is_down_from_the_start_has_no_suspect_but_still_pauses() {
+        let (_f, mut q) = fake().await;
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        drop(l);
+        q.base = format!("http://127.0.0.1:{port}");
+        let cands = qbit_cands(6).into_iter().skip(2).collect();
+        let (progress, added) = run(cands, q).await;
+        assert_eq!(*added.lock().unwrap(), 0);
+        assert_eq!(progress.not_attempted.load(Ordering::Relaxed), 1);
+        assert!(progress.stalled_at.read().unwrap().is_empty());
+        assert!(progress
+            .error
+            .read()
+            .unwrap()
+            .starts_with("qBittorrent stopped answering at torrent 2;"));
+        let fails = progress.failures.lock().unwrap().clone();
+        assert!(
+            fails[0].error.to_lowercase().contains("refused"),
+            "{}",
+            fails[0].error
+        );
     }
 
     fn file_cand(name: &str, path: PathBuf) -> Candidate {

@@ -21,6 +21,14 @@ decided when the release is cut, by looking at what went in: whoever tags it
 renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 `HYDRANOS_VERSION` in the same commit.
 
+## Unreleased -- a qBittorrent import that stops asking a dead qBittorrent
+
+### Fixed
+
+- A qBittorrent import whose qBittorrent stopped answering used to spend about two minutes on every remaining torrent and fail them all one by one. After 3 torrents in a row that get no answer at all, the import now pauses: it stops exporting, keeps the untried torrents with the failed ones for "Retry", and says `qBittorrent stopped answering at <torrent>; N torrents not attempted, retry when it is back`. The wizard's end summary names that torrent and the first one that stalled after others had been exported (`stalled_at`), the likely trigger.
+- A network failure of an export now says why (`operation timed out`, `Connection refused`, ...) instead of reqwest's bare `error sending request for url`, in the failure list and the log.
+- A 409 from qBittorrent is no longer always labelled "no metadata yet": the failure shows qBittorrent's own answer, such as `Unable to export torrent file. Error: a piece layer is invalid` for some hybrid torrents on 5.x.
+
 ## v4.8.3 -- edits made during a save no longer get overwritten
 
 ### Fixed

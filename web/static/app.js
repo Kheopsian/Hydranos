@@ -900,6 +900,7 @@ function importWizard(opts) {
             <p class="modal-desc" id="qb-stats"></p>
             <p class="modal-desc" id="qb-cur" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;opacity:.7"></p>
             <p class="modal-desc" id="qb-note"></p>
+            <p class="modal-desc" id="qb-pause" style="display:none;color:var(--accent-red)"></p>
             <div id="qb-fails" style="display:none;max-height:160px;overflow:auto;margin-bottom:8px;border:1px solid var(--border);border-radius:4px;padding:6px;font-size:12px"></div>
             <p class="modal-desc" id="qb-retry-msg" style="min-height:1em"></p>
             <div class="modal-actions">
@@ -913,8 +914,8 @@ function importWizard(opts) {
             stats = box.querySelector("#qb-stats"), cur = box.querySelector("#qb-cur"),
             doneBtn = box.querySelector("#qb-done"), note = box.querySelector("#qb-note"),
             fails = box.querySelector("#qb-fails"), retryBtn = box.querySelector("#qb-retry"),
-            retryMsg = box.querySelector("#qb-retry-msg");
-        const labels = { connect: t("Connecting…"), categories: t("Creating categories…"), torrents: t("Importing torrents…"), done: t("Done"), error: t("Error") };
+            retryMsg = box.querySelector("#qb-retry-msg"), pauseMsg = box.querySelector("#qb-pause");
+        const labels = { connect: t("Connecting…"), categories: t("Creating categories…"), torrents: t("Importing torrents…"), done: t("Done"), paused: t("Paused"), error: t("Error") };
         es.onmessage = (ev) => {
             let d; try { d = JSON.parse(ev.data); } catch (e) { return; }
             phase.style.color = ""; phase.textContent = labels[d.phase] || d.phase;
@@ -939,6 +940,19 @@ function importWizard(opts) {
                     title.textContent = t("Import complete");
                     phase.textContent = labels.done; // not the title again
                 }
+                if (d.phase === "paused") {
+                    // qBittorrent stopped answering: say why the job ended early,
+                    // which torrent it was at, and that nothing is lost.
+                    title.textContent = t("Import paused");
+                    bar.style.width = "100%";
+                    pauseMsg.style.display = "";
+                    pauseMsg.textContent = d.error || t("unknown");
+                }
+                if (d.stalled_at) {
+                    pauseMsg.style.display = "";
+                    pauseMsg.textContent += (pauseMsg.textContent ? " " : "")
+                        + t("Likely trigger: qBittorrent first stopped answering at \"{name}\", after exporting others. Look at that torrent in qBittorrent.", { name: d.stalled_at });
+                }
                 if (d.stopped) {
                     note.textContent = t("{n} torrents were added stopped, as chosen: nothing announces until you start them from the list.", { n: d.stopped });
                 }
@@ -950,7 +964,9 @@ function importWizard(opts) {
                 }
                 if (d.retryable) {
                     retryBtn.style.display = "";
-                    retryBtn.textContent = t("Retry the {n} failed", { n: d.failed });
+                    retryBtn.textContent = d.not_attempted
+                        ? t("Retry the {n} failed or not attempted", { n: d.failed + d.not_attempted })
+                        : t("Retry the {n} failed", { n: d.failed });
                     retryBtn.onclick = async () => {
                         retryMsg.style.color = ""; retryMsg.textContent = t("Starting…");
                         try {
