@@ -852,7 +852,10 @@ mod tests {
     fn replacing_trackers_keeps_the_info_hash_and_writes_the_new_tiers() {
         let t = torrent("film.mkv", "https://tracker.example/OLD/announce");
         let tiers = vec![
-            vec!["https://new.example/a".to_string(), "https://new2.example/a".to_string()],
+            vec![
+                "https://new.example/a".to_string(),
+                "https://new2.example/a".to_string(),
+            ],
             vec!["https://new3.example/a".to_string()],
         ];
         let out = with_trackers(&t, &tiers).unwrap();
@@ -860,7 +863,10 @@ mod tests {
         assert!(!out.windows(3).any(|w| w == b"OLD"));
         let meta = typhon_engine::torrent::metainfo::parse_torrent_bytes(&out).unwrap();
         assert_eq!(meta.trackers, tiers);
-        assert!(out.windows(10).any(|w| w == b"7:comment2"), "other keys stay");
+        assert!(
+            out.windows(10).any(|w| w == b"7:comment2"),
+            "other keys stay"
+        );
         // Keys stay sorted: announce, announce-list, comment, info.
         let at = |needle: &[u8]| out.windows(needle.len()).position(|w| w == needle).unwrap();
         assert!(at(b"8:announce") < at(b"13:announce-list"));
@@ -874,8 +880,14 @@ mod tests {
         let one = with_trackers(&t, &[vec!["https://new.example/a".to_string()]]).unwrap();
         assert!(!one.windows(13).any(|w| w == b"announce-list"));
         let meta = typhon_engine::torrent::metainfo::parse_torrent_bytes(&one).unwrap();
-        assert_eq!(meta.trackers, vec![vec!["https://new.example/a".to_string()]]);
-        assert_eq!(with_trackers(&t, &[]).unwrap(), without_trackers(&t).unwrap());
+        assert_eq!(
+            meta.trackers,
+            vec![vec!["https://new.example/a".to_string()]]
+        );
+        assert_eq!(
+            with_trackers(&t, &[]).unwrap(),
+            without_trackers(&t).unwrap()
+        );
         assert_eq!(
             with_trackers(&t, &[vec![], vec![String::new()]]).unwrap(),
             without_trackers(&t).unwrap()

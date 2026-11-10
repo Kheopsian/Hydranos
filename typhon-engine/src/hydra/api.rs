@@ -26767,9 +26767,14 @@ mod write_path_tests {
         assert_eq!(r.status(), StatusCode::OK);
 
         // Refusals first.
-        let (code, _) = rehost_call(&s, r#"{"from":"tracker.example","to":"https://new.example"}"#).await;
+        let (code, _) = rehost_call(
+            &s,
+            r#"{"from":"tracker.example","to":"https://new.example"}"#,
+        )
+        .await;
         assert_eq!(code, StatusCode::BAD_REQUEST);
-        let (code, _) = rehost_call(&s, r#"{"from":"tracker.example","to":"tracker.example"}"#).await;
+        let (code, _) =
+            rehost_call(&s, r#"{"from":"tracker.example","to":"tracker.example"}"#).await;
         assert_eq!(code, StatusCode::BAD_REQUEST);
 
         // A dry run counts and writes nothing.
@@ -26780,12 +26785,15 @@ mod write_path_tests {
         .await;
         assert_eq!(code, StatusCode::OK, "{v}");
         assert_eq!(v["torrents"], 2);
-        assert!(!s.store.lock().unwrap().job_in_flight_of_kind("tracker_rehost"));
+        assert!(!s
+            .store
+            .lock()
+            .unwrap()
+            .job_in_flight_of_kind("tracker_rehost"));
         assert!(s.state.cfg().announce_passkeys.get("new.example").is_none());
         assert_eq!(rehost_status(&s).await["state"], "none");
 
-        let (code, v) =
-            rehost_call(&s, r#"{"from":"tracker.example","to":"new.example"}"#).await;
+        let (code, v) = rehost_call(&s, r#"{"from":"tracker.example","to":"new.example"}"#).await;
         assert_eq!(code, StatusCode::OK, "{v}");
         assert_eq!(v["torrents"], 2);
         assert!(v["job_id"].as_str().is_some_and(|j| !j.is_empty()));
@@ -26796,8 +26804,7 @@ mod write_path_tests {
         assert!(cfg.announce_passkeys.contains_key("tracker.example"));
 
         // One at a time.
-        let (code, _) =
-            rehost_call(&s, r#"{"from":"tracker.example","to":"third.example"}"#).await;
+        let (code, _) = rehost_call(&s, r#"{"from":"tracker.example","to":"third.example"}"#).await;
         assert_eq!(code, StatusCode::CONFLICT);
         assert_eq!(rehost_status(&s).await["state"], "queued");
 
@@ -26807,7 +26814,10 @@ mod write_path_tests {
         assert_eq!(st["state"], "done", "{st}");
         assert_eq!(st["from"], "tracker.example");
         assert_eq!(st["to"], "new.example");
-        assert_eq!((st["total"].as_i64(), st["done"].as_i64()), (Some(2), Some(2)));
+        assert_eq!(
+            (st["total"].as_i64(), st["done"].as_i64()),
+            (Some(2), Some(2))
+        );
         assert_eq!(st["changed"], 2);
         assert_eq!(st["skipped"], 0);
         assert_eq!(st["failed"], 0);
@@ -26821,7 +26831,10 @@ mod write_path_tests {
                 vec![vec!["https://new.example/announce".to_string()]]
             );
             let kept = stored_trackers(&s, h);
-            assert!(kept.contains("new.example") && !kept.contains("tracker.example"), "{kept}");
+            assert!(
+                kept.contains("new.example") && !kept.contains("tracker.example"),
+                "{kept}"
+            );
         }
         let ih = typhon_engine::torrent::hex_decode(&hashes[2]).unwrap();
         assert_eq!(
@@ -26835,8 +26848,7 @@ mod write_path_tests {
         assert_eq!(cfg.announce_passkeys["new.example"], "SECRET");
 
         // The slot is free again, and the job a second time finds nothing.
-        let (code, _) =
-            rehost_call(&s, r#"{"from":"tracker.example","to":"new.example"}"#).await;
+        let (code, _) = rehost_call(&s, r#"{"from":"tracker.example","to":"new.example"}"#).await;
         assert_eq!(code, StatusCode::BAD_REQUEST, "nothing left on that host");
     }
 
@@ -26867,15 +26879,21 @@ mod write_path_tests {
             hashes.push(h);
         }
         s.store.lock().unwrap().delete_torrent(&hashes[1]).unwrap();
-        let (code, v) =
-            rehost_call(&s, r#"{"from":"tracker.example","to":"new.example"}"#).await;
+        let (code, v) = rehost_call(&s, r#"{"from":"tracker.example","to":"new.example"}"#).await;
         assert_eq!(code, StatusCode::OK, "{v}");
         run_rehost_job(&s).expect("the job ends");
         let st = rehost_status(&s).await;
         assert_eq!(st["state"], "done", "{st}");
-        assert_eq!((st["changed"].as_i64(), st["skipped"].as_i64()), (Some(1), Some(1)));
+        assert_eq!(
+            (st["changed"].as_i64(), st["skipped"].as_i64()),
+            (Some(1), Some(1))
+        );
         assert_eq!(st["settings_kept"], true);
-        assert!(s.state.cfg().announce_passkeys.contains_key("tracker.example"));
+        assert!(s
+            .state
+            .cfg()
+            .announce_passkeys
+            .contains_key("tracker.example"));
     }
 
     /// A tracker list or a speed cap the engine's state store could not keep
@@ -28466,7 +28484,10 @@ mod export_route_tests {
     }
 
     const NEW_TIERS: [&[&str]; 2] = [
-        &["https://new.example/announce", "https://new2.example/announce"],
+        &[
+            "https://new.example/announce",
+            "https://new2.example/announce",
+        ],
         &["https://new3.example/announce"],
     ];
 
@@ -28542,7 +28563,11 @@ mod export_route_tests {
         // qBittorrent shim, GET and POST
         let mut all = vec![("zip", zipped), ("native", native)];
         for (method, uri, payload) in [
-            ("GET", format!("/api/v2/torrents/export?hash={hash}"), String::new()),
+            (
+                "GET",
+                format!("/api/v2/torrents/export?hash={hash}"),
+                String::new(),
+            ),
             (
                 "POST",
                 "/api/v2/torrents/export".to_string(),
@@ -28579,7 +28604,10 @@ mod export_route_tests {
         )
         .await;
         let csv = String::from_utf8(body(resp).await).unwrap();
-        assert!(csv.contains("new.example new2.example new3.example"), "{csv}");
+        assert!(
+            csv.contains("new.example new2.example new3.example"),
+            "{csv}"
+        );
         assert!(!csv.contains("t.example"), "the old host is gone: {csv}");
     }
 

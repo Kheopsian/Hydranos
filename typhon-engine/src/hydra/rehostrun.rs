@@ -294,7 +294,10 @@ pub(crate) fn run(state: &AppState, job: &crate::store::Job) -> Result<(), Strin
         };
         if cancelling {
             tracing::info!(job = %job.id, changed = c.changed, "tracker move cancelled");
-            return Err(format!("cancelled; {} torrents were already moved", c.changed));
+            return Err(format!(
+                "cancelled; {} torrents were already moved",
+                c.changed
+            ));
         }
         if crate::shutdown::stopping() {
             return Err(INTERRUPTED.to_string());
@@ -306,7 +309,10 @@ pub(crate) fn run(state: &AppState, job: &crate::store::Job) -> Result<(), Strin
     let left = still_served_by(state, &from);
     let (kept, note) = if left == 0 && c.failed == 0 {
         remove_settings(state, &from);
-        (false, "the settings of the old host were removed".to_string())
+        (
+            false,
+            "the settings of the old host were removed".to_string(),
+        )
     } else {
         (
             true,

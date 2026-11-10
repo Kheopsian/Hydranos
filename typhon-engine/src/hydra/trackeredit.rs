@@ -500,7 +500,10 @@ mod tests {
             "new.example",
         );
         assert!(changed);
-        assert_eq!(out, tiers(&[&["https://new.example/a", "https://new.example/b"]]));
+        assert_eq!(
+            out,
+            tiers(&[&["https://new.example/a", "https://new.example/b"]])
+        );
         // Two URLs that become one.
         let (out, _) = moved(
             &[&["http://tracker.example:80/a", "http://tracker.example:81/a"]],
