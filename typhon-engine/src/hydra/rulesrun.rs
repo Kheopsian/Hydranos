@@ -377,9 +377,12 @@ pub fn engine_save_path(t: &typhon_engine::torrent::meta::TorrentState) -> Strin
 /// name itself at the root of save_path.
 ///
 /// ⚠️ Walking save_path instead would collect the NEIGHBOURS of a torrent that
-/// shares a folder and credit it with their links. And the guard below has to
-/// call the SAME function as the scan: two resolutions that disagree would
-/// protect one set of files while measuring another.
+/// shares a folder and credit it with their links. And the guard has to use
+/// the SAME layout as the scan: two resolutions that disagree would protect one
+/// set of files while measuring another. `link_guard` does not call this
+/// function: it takes the engine's save path (`engine_save_path`) and
+/// resolves each file with `meta.disk_path` itself (leaving out the
+/// zero-length ones), the call this function makes for the scan.
 pub fn torrent_files(
     t: &std::sync::Arc<typhon_engine::torrent::meta::TorrentState>,
     save_path: &str,
@@ -2827,6 +2830,316 @@ mod tests {
             Err("bad info hash".into())
         );
         assert_eq!(calls.get(), 0);
+    }
+
+    // `facts_of`, on torrents built the way the engine builds them. A rule
+    // that deletes reads these values, so each is checked against a number
+    // that nothing else in the test equals.
+
+    use std::sync::atomic::Ordering::Relaxed;
+    use typhon_engine::torrent::meta::{
+        class_code, tracker_key, TorrentState, TorrentStatus, TrackerSlot,
+    };
+
+    /// A torrent as the engine holds it, not seeding, with no piece held:
+    /// 16 KiB pieces, `added` / `completed` as fastresume would give them.
+    fn held(bytes: &[u8], completed: Option<i64>) -> Arc<TorrentState> {
+        let meta = typhon_engine::torrent::metainfo::parse_torrent_bytes(bytes).unwrap();
+        Arc::new(TorrentState::new_with_times(
+            meta,
+            "/data".into(),
+            false,
+            None,
+            completed,
+            true,
+        ))
+    }
+
+    fn store_row() -> crate::store::WorkflowFacts {
+        crate::store::WorkflowFacts {
+            category: "movies".into(),
+            save_path: "/saved".into(),
+            added_time: 400_000.0,
+            tags: vec!["keep".into(), "x".into()],
+            paused: false,
+            ..Default::default()
+        }
+    }
+
+    const NOW: f64 = 1_000_000.0;
+
+    fn facts_now(t: &Arc<TorrentState>, s: crate::store::WorkflowFacts) -> Facts {
+        facts_of(t, "ab".repeat(20), s, "hoard", None, 123.0, NOW, true)
+    }
+
+    #[test]
+    fn a_tracker_error_is_read_from_the_last_message_and_a_torrent_error_from_the_status() {
+        let t = held(&guard_torrent("a.bin", 40000, &[]), None);
+        let quiet = facts_now(&t, store_row());
+        assert!(!quiet.tracker_error, "no message, no error");
+        assert_eq!(quiet.tracker_error_msg, "");
+        assert!(!quiet.torrent_error);
+
+        *t.last_announce_error.lock().unwrap() = "unregistered torrent".into();
+        let loud = facts_now(&t, store_row());
+        assert!(loud.tracker_error);
+        assert_eq!(loud.tracker_error_msg, "unregistered torrent");
+        assert!(
+            !loud.torrent_error,
+            "a tracker's complaint is not the torrent's"
+        );
+
+        for (status, error) in [
+            (TorrentStatus::Stopped, false),
+            (TorrentStatus::Checking, false),
+            (TorrentStatus::Downloading, false),
+            (TorrentStatus::Seeding, false),
+            (TorrentStatus::Error, true),
+        ] {
+            t.status.store(status as u8, Relaxed);
+            assert_eq!(
+                facts_now(&t, store_row()).torrent_error,
+                error,
+                "{status:?}"
+            );
+        }
+    }
+
+    /// The class comes from what each listed tracker last said, the host from
+    /// the first one, and the list only when the workflow asked for it.
+    #[test]
+    fn the_trackers_the_host_and_the_class_come_from_the_live_list() {
+        let t = held(&guard_torrent("a.bin", 40000, &[]), None);
+        let none = facts_now(&t, store_row());
+        assert!(none.trackers.is_empty());
+        assert_eq!(none.tracker_host, "");
+        assert_eq!(
+            none.tracker_error_class, "",
+            "nothing listed, nothing in error"
+        );
+
+        const A: &str = "https://tk-a.example:443/announce";
+        const B: &str = "udp://tk-b.example:1/announce";
+        const C: &str = "http://tk-c.example/announce";
+        *t.live_trackers.write() = vec![vec![A.into(), B.into()], vec![C.into()]];
+        let f = facts_now(&t, store_row());
+        assert_eq!(f.trackers, [A, B, C], "every tier, in order");
+        assert_eq!(f.tracker_host, "tk-a.example");
+        assert_eq!(f.tracker_error_class, "", "no tracker has answered");
+
+        let unwanted = facts_of(
+            &t,
+            "ab".repeat(20),
+            store_row(),
+            "hoard",
+            None,
+            0.0,
+            NOW,
+            false,
+        );
+        assert!(
+            unwanted.trackers.is_empty(),
+            "not gathered unless asked for"
+        );
+        assert_eq!(
+            unwanted.tracker_host, "tk-a.example",
+            "the host is always read"
+        );
+
+        let dead = |url: &str| TrackerSlot {
+            key: tracker_key(url),
+            last_class: class_code("dead"),
+            ..Default::default()
+        };
+        *t.announce_book.lock().unwrap() = vec![dead(A), dead(B), dead(C)];
+        assert_eq!(facts_now(&t, store_row()).tracker_error_class, "dead");
+        t.announce_book.lock().unwrap().pop();
+        assert_eq!(
+            facts_now(&t, store_row()).tracker_error_class,
+            "",
+            "one tracker unheard of: alive until proven otherwise"
+        );
+    }
+
+    #[test]
+    fn progress_is_the_share_of_bytes_held_whatever_this_client_downloaded() {
+        // 40000 bytes in 16384-byte pieces: 16384 + 16384 + 7232.
+        let t = held(&guard_torrent("a.bin", 40000, &[]), None);
+        let progress = |t: &Arc<TorrentState>| facts_now(t, store_row()).progress;
+        let near = |got: f64, want: f64| assert!((got - want).abs() < 1e-9, "{got} != {want}");
+
+        near(progress(&t), 0.0);
+        {
+            let mut p = t.picker.get().unwrap().lock().unwrap();
+            p.set_have(2);
+        }
+        near(progress(&t), 7232.0 / 40000.0 * 100.0);
+        t.picker.get().unwrap().lock().unwrap().set_have(0);
+        near(progress(&t), (7232.0 + 16384.0) / 40000.0 * 100.0);
+        // Nothing was downloaded by this client: the counters do not enter.
+        assert_eq!(facts_now(&t, store_row()).total_downloaded, 0.0);
+
+        t.status.store(TorrentStatus::Seeding as u8, Relaxed);
+        near(progress(&t), 100.0);
+    }
+
+    #[test]
+    fn the_ages_count_from_the_stored_dates_and_never_happened_is_never() {
+        let t = held(&guard_torrent("a.bin", 40000, &[]), Some(900_000));
+        let f = facts_now(&t, store_row());
+        assert_eq!(f.added_age, 600_000.0);
+        assert_eq!(f.completed_age, 100_000.0);
+
+        // One second after the epoch is a date; zero is "no date".
+        let mut s = store_row();
+        s.added_time = 1.0;
+        assert_eq!(
+            facts_now(&held(&guard_torrent("a.bin", 40000, &[]), Some(1)), s).completed_age,
+            NOW - 1.0
+        );
+        let mut s = store_row();
+        s.added_time = 0.0;
+        let never = facts_now(&held(&guard_torrent("a.bin", 40000, &[]), None), s);
+        assert!(
+            never.added_age.is_nan(),
+            "no added date: NEVER, not {}",
+            never.added_age
+        );
+        assert!(
+            never.completed_age.is_nan(),
+            "never completed: NEVER, not {}",
+            never.completed_age
+        );
+        // ... and so no ordering holds, which is what the rules rely on.
+        assert!(!crate::rules::compile(&Node::Cond(Cond {
+            field: "completed_age".into(),
+            op: Op::Lt,
+            value: "1d".into(),
+            hold: None,
+            tag: None,
+        }))
+        .unwrap()(&never));
+    }
+
+    #[test]
+    fn the_counters_and_the_seeding_time_are_read_as_they_stand() {
+        let t = held(&guard_torrent("a.bin", 40000, &[]), None);
+        t.total_downloaded.store(1000, Relaxed);
+        t.total_uploaded.store(3000, Relaxed);
+        t.peers_connected.store(7, Relaxed);
+        t.scrape_seeders.store(3, Relaxed);
+        t.scrape_leechers.store(5, Relaxed);
+        t.seed_secs.store(500, Relaxed);
+        let f = facts_now(&t, store_row());
+        assert_eq!((f.total_downloaded, f.total_uploaded), (1000.0, 3000.0));
+        assert_eq!(f.total_size, 40000.0);
+        assert_eq!(f.ratio, 3.0, "the row's ratio");
+        assert_eq!((f.num_peers, f.num_seeds), (7.0, 3.0));
+        assert_eq!((f.swarm_seeds, f.swarm_leechers), (3.0, 5.0));
+        assert_eq!(f.seeding_time, 500.0, "no interval open");
+        assert_eq!(f.free_space, 123.0);
+        assert_eq!((f.upload_rate, f.download_rate), (0.0, 0.0));
+
+        // An interval still open counts up to `now`, and not past it.
+        t.seed_since.store(990_000, Relaxed);
+        assert_eq!(facts_now(&t, store_row()).seeding_time, 10_500.0);
+    }
+
+    #[test]
+    fn the_store_row_and_the_engine_say_what_the_torrent_is() {
+        let single = held(&guard_torrent("a.bin", 40000, &[]), None);
+        let f = facts_now(&single, store_row());
+        assert_eq!(f.info_hash, "ab".repeat(20));
+        assert_eq!(f.name, "a.bin");
+        assert_eq!(f.category, "movies");
+        assert_eq!(f.tags, ["keep", "x"]);
+        assert_eq!(f.engine, "hoard");
+        assert_eq!(f.save_path, "/saved", "the store's, not the engine's /data");
+        assert!(!f.multi_file && !f.private && !f.user_paused);
+
+        // One file inside a folder is still one file.
+        let lone = held(&guard_torrent("dir", 0, &[("a", 16384)]), None);
+        assert!(!facts_now(&lone, store_row()).multi_file);
+        let two = held(
+            &guard_torrent("dir", 0, &[("a", 20000), ("b", 20000)]),
+            None,
+        );
+        assert!(facts_now(&two, store_row()).multi_file);
+
+        // What a person clicked, against what the engine is doing.
+        let state = |status: TorrentStatus, stopped: bool| {
+            single.status.store(status as u8, Relaxed);
+            let mut s = store_row();
+            s.paused = stopped;
+            let f = facts_now(&single, s);
+            assert_eq!(f.user_paused, stopped);
+            f.state
+        };
+        assert_eq!(state(TorrentStatus::Seeding, false), "seeding");
+        assert_eq!(state(TorrentStatus::Downloading, true), "downloading");
+        assert_eq!(state(TorrentStatus::Stopped, true), "stopped");
+        assert_eq!(state(TorrentStatus::Stopped, false), "queued");
+        assert_eq!(state(TorrentStatus::Error, true), "stopped");
+        assert_eq!(state(TorrentStatus::Error, false), "error");
+    }
+
+    #[test]
+    fn the_link_facts_are_never_before_a_scan_and_the_scan_s_numbers_after() {
+        let t = held(&guard_torrent("a.bin", 40000, &[]), None);
+        let none = facts_now(&t, store_row());
+        for (name, v) in [
+            ("link_count", none.link_count),
+            ("external_links", none.external_links),
+            ("freeable_bytes", none.freeable_bytes),
+        ] {
+            assert!(v.is_nan(), "{name} is NEVER before a scan, not {v}");
+        }
+        assert!(!none.data_missing);
+
+        let scan = LinkFacts {
+            external_links: 2,
+            freeable_bytes: 4096,
+            link_count: 3,
+            data_missing: true,
+        };
+        let f = facts_of(
+            &t,
+            "ab".repeat(20),
+            store_row(),
+            "hoard",
+            Some(&scan),
+            0.0,
+            NOW,
+            true,
+        );
+        assert_eq!(
+            (
+                f.link_count,
+                f.external_links,
+                f.freeable_bytes,
+                f.data_missing
+            ),
+            (3.0, 2.0, 4096.0, true)
+        );
+        let f = facts_of(
+            &t,
+            "ab".repeat(20),
+            store_row(),
+            "hoard",
+            Some(&measured(1, 0)),
+            0.0,
+            NOW,
+            true,
+        );
+        assert_eq!(
+            (
+                f.link_count,
+                f.external_links,
+                f.freeable_bytes,
+                f.data_missing
+            ),
+            (1.0, 0.0, 0.0, false)
+        );
     }
 
     /// The guard is armed by the scan's answer: a link that appeared since
