@@ -21,7 +21,7 @@ decided when the release is cut, by looking at what went in: whoever tags it
 renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 `HYDRANOS_VERSION` in the same commit.
 
-## Unreleased -- the delete path checks every file
+## v4.8.2 -- a tracker that changed its host, and exports with the current trackers
 
 ### Added
 
