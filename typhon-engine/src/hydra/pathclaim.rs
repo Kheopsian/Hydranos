@@ -2122,6 +2122,55 @@ mod tests {
         );
     }
 
+    /// A Start asked while a job is already proving this torrent's files is,
+    /// like a Recheck asked then, nothing to do: the job will release it. Today
+    /// `guarded_start` does not look at the hold and runs a second proof over
+    /// the same files at the same time.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "bug: guarded_start ignores held_for_proof and starts a second proof job while one is running (guarded_recheck returns early)"]
+    async fn a_start_asked_while_a_proof_runs_starts_no_second_proof() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let s = crate::api::testing::state_from(
+            "pathclaim-start-during-proof",
+            "[dedup]\npath_collision = \"legacy\"\n",
+        );
+        let dir = s.dir.join("d");
+        std::fs::create_dir_all(dir.join("P")).unwrap();
+        std::fs::write(dir.join("P").join("x.nfo"), b"the first notes!").unwrap();
+        add(
+            &s,
+            &torrent_over("P", &[("x.nfo", b"the first notes!")], 16384),
+            &dir,
+            true,
+            true,
+        )
+        .unwrap();
+        let b = add(
+            &s,
+            &torrent_over("P", &[("x.nfo", b"other notes, 16B")], 16384),
+            &dir,
+            true,
+            false,
+        )
+        .unwrap();
+        let mgr = s.state.engines.get("hoard").unwrap().manager.clone();
+        let t = mgr.get(&crate::store::hex20(&b).unwrap()).unwrap();
+        let _proof_in_progress = t.hold_for_proof();
+
+        guarded_start(&s.state, "hoard", &t).unwrap();
+
+        assert!(
+            !recent().iter().any(|e| e.info_hash == b),
+            "a second proof ran: {:?}",
+            recent()
+                .iter()
+                .filter(|e| e.info_hash == b)
+                .collect::<Vec<_>>()
+        );
+        assert!(t.is_paused.load(SeqCst), "and it was not started");
+        assert!(t.held_for_proof(), "the proof in progress still holds it");
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn a_second_release_under_the_same_name_gets_its_own_folder() {
         // The production case: one folder name, one file name, two encodes.
