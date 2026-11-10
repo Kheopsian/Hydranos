@@ -21,7 +21,7 @@ decided when the release is cut, by looking at what went in: whoever tags it
 renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 `HYDRANOS_VERSION` in the same commit.
 
-## Unreleased -- edits made during a save no longer get overwritten
+## v4.8.3 -- edits made during a save no longer get overwritten
 
 ### Fixed
 
