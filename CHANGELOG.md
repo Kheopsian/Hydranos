@@ -26,6 +26,7 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 ### Fixed
 
 - An edit made while the state was being saved (a tracker list, a save path, a download order, a renamed file) could be overwritten on disk by the older copy and come back after a restart. The saved copy is now read at the moment it is written, and a row that ever differs from the live torrent in one of these is rewritten by the next save.
+- Renaming, from the Trackers tab, a host that no torrent announces to saves its settings under the new name again. Since 4.8.2 the form stopped at "no torrent announces to" this host and saved nothing.
 
 ## v4.8.2 -- a tracker that changed its host, and exports with the current trackers
 
