@@ -273,6 +273,43 @@ async fn run_now_applies_logs_and_marks_the_run() {
     assert!(list[0]["at"].as_i64().unwrap() > 0);
 }
 
+/// ⭐ An action that fails is counted as failed, not applied, and logged with
+/// the reason; the torrent is as it was and the next one is still tried.
+#[tokio::test]
+async fn an_action_that_fails_is_counted_and_logged_as_failed() {
+    let s = st("lot6-fail");
+    let (a, b) = (add(&s, "mmm.bin"), add(&s, "nnn.bin"));
+    let w = workflow("fail", paused(None), vec![Action::Resume]);
+    save(&s, &w, 0);
+    s.state.store.lock().unwrap().execute_batch_for_tests(
+        "CREATE TRIGGER refuse_resume BEFORE UPDATE OF paused ON torrents \
+         BEGIN SELECT RAISE(ABORT, 'database disk image is malformed'); END;",
+    );
+
+    let (code, v) = run_now_of(&s, "fail", "").await;
+
+    assert_eq!(code, StatusCode::OK, "{v}");
+    assert_eq!(v["matched"], 2);
+    assert_eq!(v["applied"], 0);
+    assert_eq!(v["failed"], 2, "{v}");
+    let rows = activity_rows(&s);
+    assert_eq!(rows.len(), 2);
+    for r in &rows {
+        assert_eq!(
+            (r.action.as_str(), r.outcome.as_str()),
+            ("resume", "failed")
+        );
+        assert!(
+            r.detail.contains("malformed"),
+            "the reason is kept: {}",
+            r.detail
+        );
+    }
+    let store = s.state.store.lock().unwrap();
+    let paused = store.paused_hashes("hoard").unwrap();
+    assert!(paused.contains(&a) && paused.contains(&b), "still stopped");
+}
+
 /// "Run now" refuses what it cannot run, and says why: no such workflow, a
 /// body that does not parse, a workflow that waits for an event, no key.
 #[tokio::test]
