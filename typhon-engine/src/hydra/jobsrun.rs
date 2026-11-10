@@ -130,6 +130,12 @@ pub fn spawn(state: AppState) {
                 Ok(()) => String::new(),
                 Err(e) => e.clone(),
             };
+            // Stopped by the shutdown, not finished: the row stays running so
+            // the next start queues it again (`requeue_running_jobs`).
+            if err == crate::rehostrun::INTERRUPTED {
+                tracing::info!(job = %id, "job interrupted by shutdown; resumes at next start");
+                return;
+            }
             {
                 let store = match state.store.lock() {
                     Ok(s) => s,
@@ -150,6 +156,7 @@ pub(crate) fn run_job(state: &AppState, job: &crate::store::Job) -> Result<(), S
     match job.kind.as_str() {
         "graduate" => graduate(state, job),
         "move_data" => move_data(state, job),
+        "tracker_rehost" => crate::rehostrun::run(state, job),
         other => Err(format!("unknown job type {other}")),
     }
 }

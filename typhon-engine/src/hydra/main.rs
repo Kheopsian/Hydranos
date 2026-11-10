@@ -73,6 +73,7 @@ mod privfiles;
 mod qbitrow;
 mod raceevents;
 mod reconnect;
+mod rehostrun;
 mod row;
 mod rss;
 mod rules;

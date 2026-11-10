@@ -9159,7 +9159,9 @@ function showTrackerForm(host = "", ipmode = "auto", minseed = -1) {
     document.getElementById("trk-minseed").value =
         typeof minseed === "number" && minseed >= 0 ? minseed : "";
     document.getElementById("trk-result").style.display = "none";
+    document.getElementById("trk-newhost").value = "";
     document.getElementById("trk-form").style.display = "block";
+    _trkWatchMove(false);
 }
 function hideTrackerForm() { document.getElementById("trk-form").style.display = "none"; }
 function editTracker(host, ipmode, minseed) { showTrackerForm(host, ipmode, minseed); }
@@ -9243,6 +9245,72 @@ async function saveTracker() {
         _trkResult(t("Saved. Each torrent switches at its next announce, so the change spreads over one announce interval. The detail panel of a torrent shows which identity it last announced with."), true);
         await updateTrackers();
     } catch (e) { _trkResult(t("Error: {msg}", { msg: e.message }), false); }
+}
+// Moving every torrent of a host to a new one is a background job; this form
+// starts it and shows how far it has got.
+let _trkMoveWatching = false;
+let _trkMoveJob = "";
+function _trkMoveStatus(msg, kind) {
+    const r = document.getElementById("trk-move-status");
+    r.textContent = msg; r.className = "result-msg " + (kind || ""); r.style.display = msg ? "block" : "none";
+}
+async function _trkWatchMove(announceEnd) {
+    if (_trkMoveWatching) return;
+    _trkMoveWatching = true;
+    const cancelBtn = document.getElementById("trk-move-cancel");
+    const moveBtn = document.getElementById("trk-move-btn");
+    try {
+        for (;;) {
+            const j = await api("/api/trackers/rehost");
+            const live = j.state === "queued" || j.state === "running" || j.state === "cancelling";
+            _trkMoveJob = live ? j.job_id : "";
+            cancelBtn.style.display = live ? "" : "none";
+            moveBtn.disabled = live;
+            if (live) {
+                _trkMoveStatus(t("Moving torrents: {done} of {total} done.", { done: j.done, total: j.total }), "");
+                await new Promise(r => setTimeout(r, 2000));
+                continue;
+            }
+            if (!announceEnd) { if (j.state === "none") _trkMoveStatus("", ""); break; }
+            if (j.state === "done") {
+                _trkMoveStatus(t("Done: {changed} torrents moved to the new host, {skipped} skipped (no stored .torrent yet), {failed} failed.", { changed: j.changed, skipped: j.skipped, failed: j.failed }) + (j.note ? " " + j.note : ""), j.failed ? "error" : "success");
+            } else {
+                _trkMoveStatus(t("Stopped: {msg}", { msg: j.error || j.state }), "error");
+            }
+            _trackersSig = "";
+            await updateTrackers();
+            break;
+        }
+    } catch (e) {
+        _trkMoveStatus(t("Error: {msg}", { msg: e.message }), "error");
+    } finally {
+        _trkMoveWatching = false;
+        moveBtn.disabled = false;
+    }
+}
+async function moveTrackerTorrents() {
+    const from = _trkHost();
+    const to = document.getElementById("trk-newhost").value.trim();
+    if (!from) { _trkMoveStatus(t("Host required"), "error"); return; }
+    if (!to) { _trkMoveStatus(t("New host required"), "error"); return; }
+    const post = dry => api("/api/trackers/rehost", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ from, to, dry_run: dry }) });
+    try {
+        const dry = await post(true);
+        if (!dry.torrents) { _trkMoveStatus(t("No torrent announces to {host}.", { host: from }), "error"); return; }
+        const ok = await hydraConfirm(
+            t("Move torrents to a new host"),
+            t("Move {n} torrents from {from} to {to}? Each keeps its passkey and path. This runs in the background and can take several minutes.", { n: dry.torrents, from, to }),
+            t("Move torrents"));
+        if (!ok) return;
+        await post(false);
+        _trkMoveStatus(t("Move started."), "");
+        await _trkWatchMove(true);
+    } catch (e) { _trkMoveStatus(t("Error: {msg}", { msg: e.message }), "error"); }
+}
+async function cancelTrackerMove() {
+    if (!_trkMoveJob) return;
+    try { await api("/api/jobs/" + encodeURIComponent(_trkMoveJob), { method: "DELETE" }); }
+    catch (e) { _trkMoveStatus(t("Error: {msg}", { msg: e.message }), "error"); }
 }
 async function clearTrackerPasskey() {
     const host = _trkHost();

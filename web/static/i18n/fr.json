@@ -1173,5 +1173,17 @@
   "computed at {time}": "calculé à {time}",
   "Recalculate": "Recalculer",
   "Workflows are not shown for a torrent of another node.": "Les workflows ne sont pas affichés pour un torrent d'un autre nœud.",
-  "age of tag “{tag}”": "âge du tag « {tag} »"
+  "age of tag “{tag}”": "âge du tag « {tag} »",
+  "New host": "Nouvel hôte",
+  "the tracker changed its domain: every torrent announcing to the host above is moved to this one, keeping its passkey, path and port (a port typed here replaces it). Its passkey, IP family, minimum seed, mute and hide settings follow.": "le tracker a changé de domaine : tous les torrents qui annoncent à l'hôte ci-dessus passent à celui-ci, en gardant leur passkey, leur chemin et leur port (un port saisi ici le remplace). Ses réglages de passkey, famille IP, seed minimum, sourdine et masquage suivent.",
+  "Move torrents": "Déplacer les torrents",
+  "Cancel move": "Annuler le déplacement",
+  "Moving torrents: {done} of {total} done.": "Déplacement des torrents : {done} sur {total}.",
+  "Done: {changed} torrents moved to the new host, {skipped} skipped (no stored .torrent yet), {failed} failed.": "Terminé : {changed} torrents déplacés vers le nouvel hôte, {skipped} ignorés (pas encore de .torrent stocké), {failed} en échec.",
+  "Stopped: {msg}": "Arrêté : {msg}",
+  "New host required": "Nouvel hôte obligatoire",
+  "No torrent announces to {host}.": "Aucun torrent n'annonce à {host}.",
+  "Move torrents to a new host": "Déplacer les torrents vers un nouvel hôte",
+  "Move {n} torrents from {from} to {to}? Each keeps its passkey and path. This runs in the background and can take several minutes.": "Déplacer {n} torrents de {from} vers {to} ? Chacun garde sa passkey et son chemin. Cela s'exécute en arrière-plan et peut prendre plusieurs minutes.",
+  "Move started.": "Déplacement lancé."
 }

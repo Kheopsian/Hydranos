@@ -1069,6 +1069,17 @@
                         <button class="btn-cancel" onclick="hideTrackerForm()">Cancel</button>
                     </div>
                     <div id="trk-result" class="result-msg"></div>
+                    <div class="cat-form-grid" style="margin-top:16px">
+                        <div class="form-group">
+                            <label>New host <span class="sr-desc">the tracker changed its domain: every torrent announcing to the host above is moved to this one, keeping its passkey, path and port (a port typed here replaces it). Its passkey, IP family, minimum seed, mute and hide settings follow.</span></label>
+                            <input type="text" id="trk-newhost" placeholder="new.tracker.example.net" autocomplete="off">
+                        </div>
+                    </div>
+                    <div class="cat-form-actions">
+                        <button class="btn-small" id="trk-move-btn" onclick="moveTrackerTorrents()">Move torrents</button>
+                        <button class="btn-small btn-danger" id="trk-move-cancel" style="display:none" onclick="cancelTrackerMove()">Cancel move</button>
+                    </div>
+                    <div id="trk-move-status" class="result-msg"></div>
                 </div>
             </div>
             <!-- Listing trackers from the catalogue turned 15 rows into 91 on a
@@ -1704,6 +1715,6 @@
     </div>
 
     <script src="/static/i18n.js?v=1.0.0"></script>
-    <script src="/static/app.js?v=1.6.106"></script>
+    <script src="/static/app.js?v=1.6.107"></script>
 </body>
 </html>

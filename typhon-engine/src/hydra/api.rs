@@ -9072,7 +9072,7 @@ where
 }
 
 /// Set or clear one entry of a `host = "value"` table.
-fn set_host_entry(state: &AppState, section: &str, host: &str, value: &str) -> bool {
+pub(crate) fn set_host_entry(state: &AppState, section: &str, host: &str, value: &str) -> bool {
     let key = crate::tomledit::quote_toml_key(host);
     let section = section.to_string();
     if value.is_empty() {
@@ -11648,6 +11648,24 @@ pub(crate) fn add_trackers_to(
     edit_trackers_core(state, info_hash, &req)
         .map(|(_, changed)| changed)
         .map_err(|(_, m)| m)
+}
+
+/// Move one torrent's announce URLs from host `from` to host `to` through the
+/// editor's own path (stored-blob check, persisted resume record, reconnect
+/// ring). The error carries the status the route would have answered.
+pub(crate) fn rehost_torrent(
+    state: &AppState,
+    info_hash: &str,
+    from: &str,
+    to: &str,
+) -> Result<bool, (StatusCode, String)> {
+    let req = TrackerEdit {
+        op: "rehost".into(),
+        from: from.to_string(),
+        to: to.to_string(),
+        ..Default::default()
+    };
+    edit_trackers_core(state, info_hash, &req).map(|(_, changed)| changed)
 }
 
 // A one-off shape; naming it would add an alias that nothing else uses.
@@ -18058,7 +18076,7 @@ async fn delete_job(
         )
             .into_response();
     };
-    if job_state == "running" && kind != "graduate" {
+    if job_state == "running" && kind != "graduate" && kind != "tracker_rehost" {
         return (
             StatusCode::CONFLICT,
             Json(serde_json::json!({"error": "a running move cannot be interrupted safely; it will finish"})),
@@ -19309,6 +19327,10 @@ fn router_with(state: AppState, extra: Router<AppState>) -> Router {
             axum::routing::post(post_add_tracker),
         )
         .route("/api/trackers", get(get_trackers))
+        .route(
+            "/api/trackers/rehost",
+            get(crate::rehostrun::get_rehost).post(crate::rehostrun::post_rehost),
+        )
         .route("/api/fs/browse", get(get_fs_browse))
         .route("/api/fs/list", get(crate::fslist::get_fs_list))
         .route(
@@ -26632,6 +26654,200 @@ mod write_path_tests {
         )
         .await;
         assert!(!resp.status().is_server_error(), "got {:?}", resp.status());
+    }
+
+    async fn rehost_call(s: &TestState, body: &str) -> (StatusCode, serde_json::Value) {
+        let resp = crate::rehostrun::post_rehost(
+            State(s.state.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            body.to_string(),
+        )
+        .await;
+        let code = resp.status();
+        (code, body_json(resp).await)
+    }
+
+    async fn rehost_status(s: &TestState) -> serde_json::Value {
+        body_json(
+            crate::rehostrun::get_rehost(State(s.state.clone()), RawQuery(None), keyed(KEY)).await,
+        )
+        .await
+    }
+
+    /// Run the queued job the way the runner does, to its end.
+    fn run_rehost_job(s: &TestState) -> Result<(), String> {
+        let job = s
+            .store
+            .lock()
+            .unwrap()
+            .claim_next_job()
+            .expect("a queued job");
+        let out = crate::jobsrun::run_job(&s.state, &job);
+        let err = out.clone().err().unwrap_or_default();
+        s.store.lock().unwrap().job_finish(&job.id, &err).unwrap();
+        out
+    }
+
+    fn stored_trackers(s: &TestState, hash: &str) -> String {
+        let conn = rusqlite::Connection::open(s.dir.join("race").join("state.db")).unwrap();
+        conn.query_row(
+            "SELECT trackers FROM torrent_state WHERE info_hash = ?1",
+            [hash],
+            |r| r.get::<_, String>(0),
+        )
+        .unwrap()
+    }
+
+    /// Moving a tracker host: the count first, then a job that rewrites every
+    /// torrent on it, keeps the edit across a restart, carries the host's
+    /// settings to the new one, and refuses a second move while one runs.
+    #[tokio::test]
+    async fn moving_a_tracker_host_rewrites_the_torrents_and_carries_the_settings() {
+        let s = state_from(
+            "rehost",
+            &format!(
+                "[daemon]\napi_key = \"{KEY}\"\n\
+                 [announce_passkeys]\n\"tracker.example\" = \"SECRET\"\n\
+                 [announce_muted]\n\"tracker.example\" = \"1\"\n"
+            ),
+        );
+        let mut hashes = Vec::new();
+        for name in ["alpha", "beta", "gamma"] {
+            let (h, _) = add_torrent_bytes(
+                &s.state,
+                &torrent_bytes(name),
+                "",
+                "/tmp",
+                "",
+                true,
+                true,
+                "race",
+            )
+            .expect("added");
+            hashes.push(h);
+        }
+        // One torrent already elsewhere: it must not count, nor move.
+        let r = super::post_torrent_trackers(
+            State(s.state.clone()),
+            axum::extract::Path(hashes[2].clone()),
+            RawQuery(None),
+            keyed(KEY),
+            r#"{"op":"set","tiers":[["https://other.example/announce"]]}"#.to_string(),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+
+        // Refusals first.
+        let (code, _) = rehost_call(&s, r#"{"from":"tracker.example","to":"https://new.example"}"#).await;
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        let (code, _) = rehost_call(&s, r#"{"from":"tracker.example","to":"tracker.example"}"#).await;
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+
+        // A dry run counts and writes nothing.
+        let (code, v) = rehost_call(
+            &s,
+            r#"{"from":"tracker.example","to":"new.example","dry_run":true}"#,
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK, "{v}");
+        assert_eq!(v["torrents"], 2);
+        assert!(!s.store.lock().unwrap().job_in_flight_of_kind("tracker_rehost"));
+        assert!(s.state.cfg().announce_passkeys.get("new.example").is_none());
+        assert_eq!(rehost_status(&s).await["state"], "none");
+
+        let (code, v) =
+            rehost_call(&s, r#"{"from":"tracker.example","to":"new.example"}"#).await;
+        assert_eq!(code, StatusCode::OK, "{v}");
+        assert_eq!(v["torrents"], 2);
+        assert!(v["job_id"].as_str().is_some_and(|j| !j.is_empty()));
+        // Settings are copied as the job starts, the old ones still there.
+        let cfg = s.state.cfg();
+        assert_eq!(cfg.announce_passkeys["new.example"], "SECRET");
+        assert!(cfg.announce_muted.contains_key("new.example"));
+        assert!(cfg.announce_passkeys.contains_key("tracker.example"));
+
+        // One at a time.
+        let (code, _) =
+            rehost_call(&s, r#"{"from":"tracker.example","to":"third.example"}"#).await;
+        assert_eq!(code, StatusCode::CONFLICT);
+        assert_eq!(rehost_status(&s).await["state"], "queued");
+
+        run_rehost_job(&s).expect("the job ends well");
+
+        let st = rehost_status(&s).await;
+        assert_eq!(st["state"], "done", "{st}");
+        assert_eq!(st["from"], "tracker.example");
+        assert_eq!(st["to"], "new.example");
+        assert_eq!((st["total"].as_i64(), st["done"].as_i64()), (Some(2), Some(2)));
+        assert_eq!(st["changed"], 2);
+        assert_eq!(st["skipped"], 0);
+        assert_eq!(st["failed"], 0);
+        assert_eq!(st["settings_kept"], false);
+
+        let race = s.state.engines.get("race").unwrap();
+        for h in &hashes[..2] {
+            let ih = typhon_engine::torrent::hex_decode(h).unwrap();
+            assert_eq!(
+                *race.manager.get(&ih).unwrap().live_trackers.read(),
+                vec![vec!["https://new.example/announce".to_string()]]
+            );
+            let kept = stored_trackers(&s, h);
+            assert!(kept.contains("new.example") && !kept.contains("tracker.example"), "{kept}");
+        }
+        let ih = typhon_engine::torrent::hex_decode(&hashes[2]).unwrap();
+        assert_eq!(
+            *race.manager.get(&ih).unwrap().live_trackers.read(),
+            vec![vec!["https://other.example/announce".to_string()]]
+        );
+        // Nothing left on the old host: its settings went, the new ones stay.
+        let cfg = s.state.cfg();
+        assert!(!cfg.announce_passkeys.contains_key("tracker.example"));
+        assert!(!cfg.announce_muted.contains_key("tracker.example"));
+        assert_eq!(cfg.announce_passkeys["new.example"], "SECRET");
+
+        // The slot is free again, and the job a second time finds nothing.
+        let (code, _) =
+            rehost_call(&s, r#"{"from":"tracker.example","to":"new.example"}"#).await;
+        assert_eq!(code, StatusCode::BAD_REQUEST, "nothing left on that host");
+    }
+
+    /// A torrent whose .torrent is not stored yet cannot keep the edit: it is
+    /// counted as skipped, stays on the old host, and the old settings stay.
+    #[tokio::test]
+    async fn a_torrent_without_a_stored_blob_is_skipped_and_the_settings_kept() {
+        let s = state_from(
+            "rehost-noblob",
+            &format!(
+                "[daemon]\napi_key = \"{KEY}\"\n\
+                 [announce_passkeys]\n\"tracker.example\" = \"SECRET\"\n"
+            ),
+        );
+        let mut hashes = Vec::new();
+        for name in ["alpha", "beta"] {
+            let (h, _) = add_torrent_bytes(
+                &s.state,
+                &torrent_bytes(name),
+                "",
+                "/tmp",
+                "",
+                true,
+                true,
+                "race",
+            )
+            .expect("added");
+            hashes.push(h);
+        }
+        s.store.lock().unwrap().delete_torrent(&hashes[1]).unwrap();
+        let (code, v) =
+            rehost_call(&s, r#"{"from":"tracker.example","to":"new.example"}"#).await;
+        assert_eq!(code, StatusCode::OK, "{v}");
+        run_rehost_job(&s).expect("the job ends");
+        let st = rehost_status(&s).await;
+        assert_eq!(st["state"], "done", "{st}");
+        assert_eq!((st["changed"].as_i64(), st["skipped"].as_i64()), (Some(1), Some(1)));
+        assert_eq!(st["settings_kept"], true);
+        assert!(s.state.cfg().announce_passkeys.contains_key("tracker.example"));
     }
 
     /// A tracker list or a speed cap the engine's state store could not keep

@@ -3015,6 +3015,42 @@ impl Store {
         self.job(&id)
     }
 
+    /// Move a job's total: a job that only learns its size by walking (or
+    /// that resumes with less left to do) says so here.
+    pub fn job_set_total(&self, id: &str, total: i64) -> anyhow::Result<()> {
+        self.conn.execute(
+            "UPDATE jobs SET total_bytes = ?2, updated_at = ?3 WHERE id = ?1",
+            rusqlite::params![id, total, now_secs()],
+        )?;
+        Ok(())
+    }
+
+    /// Is a job of this kind queued, running or being cancelled?
+    pub fn job_in_flight_of_kind(&self, kind: &str) -> bool {
+        self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM jobs
+                 WHERE type = ?1 AND state IN ('queued','running','cancelling')",
+                [kind],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap_or(0)
+            > 0
+    }
+
+    /// The newest job of a kind, whatever its state.
+    pub fn latest_job_of_kind(&self, kind: &str) -> Option<Job> {
+        let id: String = self
+            .conn
+            .query_row(
+                "SELECT id FROM jobs WHERE type = ?1 ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                [kind],
+                |r| r.get(0),
+            )
+            .ok()?;
+        self.job(&id)
+    }
+
     pub fn job_progress(&self, id: &str, done: i64) -> anyhow::Result<()> {
         self.conn.execute(
             "UPDATE jobs SET progress_bytes = ?2, updated_at = ?3 WHERE id = ?1",

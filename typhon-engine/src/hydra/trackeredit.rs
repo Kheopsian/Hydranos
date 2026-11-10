@@ -153,8 +153,132 @@ pub fn apply(
             Ok((compact(out), true))
         }
 
+        "rehost" => rehost(tiers, from, to),
+
         other => Err(format!("unknown op {other:?}")),
     }
+}
+
+/// A host to move trackers to: a bare name and an optional port.
+///
+/// A name, not a URL: scheme, path and query stay the torrent's own (the
+/// passkey lives in them). An IPv6 literal is not accepted; a tracker that
+/// changed domain has a domain.
+pub fn parse_new_host(raw: &str) -> Result<(String, Option<u16>), String> {
+    let s = raw.trim();
+    if s.is_empty() {
+        return Err("the new host is empty".into());
+    }
+    if s.contains("://") || s.contains(['/', '?', '#', '@', '\\']) {
+        return Err(format!(
+            "{s:?}: give a host name only (and a port if it changes), not a URL"
+        ));
+    }
+    if s.chars().any(|c| c.is_whitespace()) {
+        return Err(format!("{s:?}: a host name has no spaces"));
+    }
+    let (host, port) = match s.split_once(':') {
+        Some((h, p)) => {
+            let port: u16 = p
+                .parse()
+                .ok()
+                .filter(|n| *n != 0)
+                .ok_or_else(|| format!("{s:?}: {p:?} is not a port"))?;
+            (h, Some(port))
+        }
+        None => (s, None),
+    };
+    let ok = !host.is_empty()
+        && !host.starts_with(['.', '-'])
+        && !host.ends_with(['.', '-'])
+        && host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'));
+    if !ok {
+        return Err(format!("{s:?} is not a host name"));
+    }
+    Ok((host.to_string(), port))
+}
+
+/// Move every announce URL of host `from` to host `to`.
+///
+/// `from` is matched the way the Trackers column reads a URL
+/// (`tracker_host_str`), because the operator picks the row of that column.
+/// Scheme, path, query (the passkey) and port are kept; `to` may carry a port,
+/// which then replaces the URL's own. Tiers and order are kept. A rewritten URL
+/// the torrent already announces to is dropped rather than doubled. The bool is
+/// whether any URL was on `from`.
+pub fn rehost(
+    tiers: &[Vec<String>],
+    from: &str,
+    to: &str,
+) -> Result<(Vec<Vec<String>>, bool), String> {
+    let from = from.trim();
+    if from.is_empty() {
+        return Err("the host to move from is empty".into());
+    }
+    let (host, port) = parse_new_host(to)?;
+    if host.eq_ignore_ascii_case(from) && port.is_none() {
+        return Err("the new host is the same as the old one".into());
+    }
+    let existing: std::collections::HashSet<&str> = tiers
+        .iter()
+        .flat_map(|t| t.iter().map(|u| u.as_str()))
+        .collect();
+    let mut produced: std::collections::HashSet<String> = Default::default();
+    let mut changed = false;
+    let out: Vec<Vec<String>> = tiers
+        .iter()
+        .map(|tier| {
+            let mut level = Vec::with_capacity(tier.len());
+            for u in tier {
+                let Some(new) = rehost_url(u, from, &host, port) else {
+                    level.push(u.clone());
+                    continue;
+                };
+                changed = true;
+                if new == *u {
+                    level.push(new);
+                } else if !existing.contains(new.as_str()) && produced.insert(new.clone()) {
+                    level.push(new);
+                }
+                // Else it is already announced to, or two of its URLs became
+                // one: the copy goes.
+            }
+            level
+        })
+        .collect();
+    Ok((compact(out), changed))
+}
+
+/// The part of a URL after `scheme://` when its host is `from`, read as the
+/// Trackers column reads it.
+fn after_scheme_if_on<'a>(url: &'a str, from: &str) -> Option<(&'a str, &'a str)> {
+    let (scheme, rest) = url.split_once("://")?;
+    (typhon_engine::rpc::dispatch::tracker_host_str(url) == from && rest.starts_with(from))
+        .then_some((scheme, rest))
+}
+
+/// Does any announce URL sit on host `from`? What `rehost` would act on.
+pub fn mentions_host(tiers: &[Vec<String>], from: &str) -> bool {
+    tiers
+        .iter()
+        .flatten()
+        .any(|u| after_scheme_if_on(u, from).is_some())
+}
+
+fn rehost_url(url: &str, from: &str, host: &str, port: Option<u16>) -> Option<String> {
+    let (scheme, rest) = after_scheme_if_on(url, from)?;
+    let tail = &rest[from.len()..];
+    let tail = match tail.strip_prefix(':') {
+        Some(after) if port.is_some() => after.trim_start_matches(|c: char| c.is_ascii_digit()),
+        Some(_) => return Some(format!("{scheme}://{host}{tail}")),
+        None => tail,
+    };
+    Some(match port {
+        Some(p) => format!("{scheme}://{host}:{p}{tail}"),
+        None => format!("{scheme}://{host}{tail}"),
+    })
 }
 
 /// Validate an explicit tier structure, as sent by the editor.
@@ -284,5 +408,152 @@ mod tests {
     fn an_unknown_op_is_refused_rather_than_ignored() {
         let err = apply(&tiers(&[&["https://a/announce"]]), "nope", &[], "", "").unwrap_err();
         assert!(err.contains("nope"), "{err}");
+    }
+
+    fn moved(t: &[&[&str]], from: &str, to: &str) -> (Vec<Vec<String>>, bool) {
+        rehost(&tiers(t), from, to).unwrap()
+    }
+
+    #[test]
+    fn rehost_keeps_the_path_and_the_passkey_query() {
+        let (out, changed) = moved(
+            &[&["https://tracker.example/PASSKEY/announce?k=v&x=1"]],
+            "tracker.example",
+            "new.example",
+        );
+        assert!(changed);
+        assert_eq!(
+            out,
+            tiers(&[&["https://new.example/PASSKEY/announce?k=v&x=1"]])
+        );
+    }
+
+    #[test]
+    fn rehost_keeps_the_port_unless_the_new_host_names_one() {
+        let (out, _) = moved(
+            &[&["http://tracker.example:8080/a"]],
+            "tracker.example",
+            "new.example",
+        );
+        assert_eq!(out, tiers(&[&["http://new.example:8080/a"]]));
+        let (out, _) = moved(
+            &[&["http://tracker.example:8080/a", "http://tracker.example/b"]],
+            "tracker.example",
+            "new.example:443",
+        );
+        assert_eq!(
+            out,
+            tiers(&[&["http://new.example:443/a", "http://new.example:443/b"]])
+        );
+    }
+
+    // The column reads the host as written, so a differently cased host is
+    // another row; the new host is kept as typed.
+    #[test]
+    fn rehost_matches_the_host_as_the_column_reads_it() {
+        let (out, changed) = moved(
+            &[&["https://Tracker.Example/a"]],
+            "tracker.example",
+            "new.example",
+        );
+        assert!(!changed);
+        assert_eq!(out, tiers(&[&["https://Tracker.Example/a"]]));
+        let (out, changed) = moved(
+            &[&["https://Tracker.Example/a"]],
+            "Tracker.Example",
+            "New.Example",
+        );
+        assert!(changed);
+        assert_eq!(out, tiers(&[&["https://New.Example/a"]]));
+    }
+
+    #[test]
+    fn rehost_keeps_tiers_and_order_and_leaves_other_hosts() {
+        let (out, changed) = moved(
+            &[
+                &["https://other.example/x", "https://tracker.example/a"],
+                &["https://tracker.example/b"],
+                &["https://third.example/c"],
+            ],
+            "tracker.example",
+            "new.example",
+        );
+        assert!(changed);
+        assert_eq!(
+            out,
+            tiers(&[
+                &["https://other.example/x", "https://new.example/a"],
+                &["https://new.example/b"],
+                &["https://third.example/c"],
+            ])
+        );
+    }
+
+    #[test]
+    fn rehost_drops_a_url_the_torrent_already_has() {
+        let (out, changed) = moved(
+            &[
+                &["https://tracker.example/a"],
+                &["https://new.example/a", "https://tracker.example/b"],
+            ],
+            "tracker.example",
+            "new.example",
+        );
+        assert!(changed);
+        assert_eq!(out, tiers(&[&["https://new.example/a", "https://new.example/b"]]));
+        // Two URLs that become one.
+        let (out, _) = moved(
+            &[&["http://tracker.example:80/a", "http://tracker.example:81/a"]],
+            "tracker.example",
+            "new.example:80",
+        );
+        assert_eq!(out, tiers(&[&["http://new.example:80/a"]]));
+    }
+
+    #[test]
+    fn rehost_moves_a_udp_tracker_and_keeps_its_port() {
+        let (out, changed) = moved(
+            &[&["udp://tracker.example:6969/announce"]],
+            "tracker.example",
+            "new.example",
+        );
+        assert!(changed);
+        assert_eq!(out, tiers(&[&["udp://new.example:6969/announce"]]));
+    }
+
+    #[test]
+    fn rehost_with_nothing_on_the_old_host_changes_nothing() {
+        let current = tiers(&[&["https://other.example/a"]]);
+        let (out, changed) = rehost(&current, "tracker.example", "new.example").unwrap();
+        assert!(!changed);
+        assert_eq!(out, current);
+    }
+
+    #[test]
+    fn rehost_refuses_a_new_host_that_is_not_a_bare_host() {
+        let current = tiers(&[&["https://tracker.example/a"]]);
+        for bad in [
+            "",
+            "  ",
+            "https://new.example",
+            "new.example/announce",
+            "new.example?x=1",
+            "new example",
+            "user@new.example",
+            "new.example:abc",
+            "new.example:0",
+            "new.example:70000",
+            "-new.example",
+            "tracker.example",
+            "TRACKER.example",
+        ] {
+            assert!(
+                rehost(&current, "tracker.example", bad).is_err(),
+                "{bad:?} should be refused"
+            );
+        }
+        assert!(rehost(&current, "", "new.example").is_err());
+        // Same name, new port: that is a change.
+        assert!(rehost(&current, "tracker.example", "tracker.example:8443").is_ok());
     }
 }
