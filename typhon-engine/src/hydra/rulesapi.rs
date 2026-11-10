@@ -3010,3 +3010,7 @@ mod tagage_tests;
 #[cfg(test)]
 #[path = "rulesapi_timeline_tests.rs"]
 mod timeline_tests;
+
+#[cfg(test)]
+#[path = "rulesapi_lot6_tests.rs"]
+mod lot6_tests;
