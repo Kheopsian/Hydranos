@@ -1063,3 +1063,6 @@ fn a_non_ascii_link_is_judged_without_splitting_a_character() {
     );
     assert!(mask_url("Magnet:?xt=urn:btih:ab&tr=http://t.example/k").ends_with("&***"));
 }
+
+#[path = "routes_tests.rs"]
+mod routes_tests;
