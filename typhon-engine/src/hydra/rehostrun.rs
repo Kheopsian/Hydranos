@@ -87,16 +87,36 @@ fn still_served_by(state: &AppState, from: &str) -> usize {
     n
 }
 
-/// Give `to` the settings `from` has and `to` lacks, so a rewritten torrent
-/// keeps its passkey, IP family, minimum seed, mute and hide.
+/// The key of `map` that applies to `host`, read the way the code using that
+/// section reads it. The passkey and the IP family are resolved at announce
+/// time by the most specific key covering the host, a parent domain included
+/// (`announce::policy`); the others are looked up by the exact host.
+fn applying_key<'a>(
+    section: &str,
+    map: &'a std::collections::BTreeMap<String, String>,
+    host: &str,
+) -> Option<&'a str> {
+    use crate::announce::overrides::{longest_override_key, override_host};
+    if matches!(section, "announce_passkeys" | "announce_ip_modes") {
+        longest_override_key(&override_host(host), map.keys().map(|k| k.as_str()))
+    } else {
+        map.keys()
+            .find(|k| k.eq_ignore_ascii_case(host))
+            .map(|k| k.as_str())
+    }
+}
+
+/// Give `to` the settings that apply to `from` and that nothing gives `to`
+/// yet, so a rewritten torrent keeps its passkey, IP family, minimum seed,
+/// mute and hide -- including a value it only had through a parent domain.
 fn copy_settings(state: &AppState, from: &str, to_host: &str) -> bool {
     let cfg = state.cfg();
     let mut ok = true;
     for (section, map) in host_maps(&cfg) {
-        let Some((_, value)) = map.iter().find(|(k, _)| k.eq_ignore_ascii_case(from)) else {
+        let Some(value) = applying_key(section, map, from).and_then(|k| map.get(k)) else {
             continue;
         };
-        if value.is_empty() || map.keys().any(|k| k.eq_ignore_ascii_case(to_host)) {
+        if value.is_empty() || applying_key(section, map, to_host).is_some() {
             continue;
         }
         ok &= crate::api::set_host_entry(state, section, to_host, value);
@@ -148,6 +168,22 @@ pub async fn post_rehost(
     if torrents == 0 {
         return error(StatusCode::BAD_REQUEST, "no torrent announces to that host");
     }
+    let busy = || {
+        let store = state.store.lock().unwrap_or_else(|e| e.into_inner());
+        store.job_in_flight_of_kind(KIND)
+    };
+    if busy() {
+        return error(
+            StatusCode::CONFLICT,
+            "a tracker move is already running; wait for it or cancel it",
+        );
+    }
+    // Before the job exists: the runner may pick it up at once, and a torrent
+    // rewritten before its new host has a passkey or an IP family would
+    // announce without them.
+    if !copy_settings(&state, &from, &to_host) {
+        tracing::warn!("tracker move: the settings of the old host could not all be copied");
+    }
     let id = {
         let store = state.store.lock().unwrap_or_else(|e| e.into_inner());
         if store.job_in_flight_of_kind(KIND) {
@@ -171,9 +207,6 @@ pub async fn post_rehost(
             Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
         }
     };
-    if !copy_settings(&state, &from, &to_host) {
-        tracing::warn!("tracker move: the settings of the old host could not all be copied");
-    }
     Json(json!({"job_id": id, "torrents": torrents})).into_response()
 }
 
@@ -260,7 +293,9 @@ pub(crate) fn run(state: &AppState, job: &crate::store::Job) -> Result<(), Strin
     let (from, to) = (text("from"), text("to"));
     crate::trackeredit::parse_new_host(&to)?;
     // A resumed job: what an earlier run moved no longer matches, so the
-    // total is what it moved plus what is left.
+    // total is what it moved plus what is left. Skipped and failed start
+    // again from zero on purpose: those torrents are still on `from`, so they
+    // are walked (and counted) again.
     let before = p.get("changed").and_then(|v| v.as_i64()).unwrap_or(0);
     let todo = on_host(state, &from);
     let total = before + todo.len() as i64;

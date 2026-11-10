@@ -26727,6 +26727,63 @@ mod write_path_tests {
         .unwrap()
     }
 
+    /// The passkey and IP family an announce uses come from the most specific
+    /// key covering the host, a parent domain included. Moving a subdomain
+    /// whose settings sit on its parent must carry those values to the new
+    /// host, and leave the parent's keys alone: other subdomains still use them.
+    #[tokio::test]
+    async fn moving_a_subdomain_carries_the_settings_its_parent_gave_it() {
+        let s = state_from(
+            "rehost-parent",
+            &format!(
+                "[daemon]\napi_key = \"{KEY}\"\n\
+                 [announce_passkeys]\n\"tracker.example\" = \"SECRET\"\n\
+                 [announce_ip_modes]\n\"tracker.example\" = \"v6\"\n"
+            ),
+        );
+        let (h, _) = add_torrent_bytes(
+            &s.state,
+            &torrent_bytes("parent"),
+            "",
+            "/tmp",
+            "",
+            true,
+            true,
+            "race",
+        )
+        .expect("added");
+        let r = super::post_torrent_trackers(
+            State(s.state.clone()),
+            axum::extract::Path(h.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            r#"{"op":"set","tiers":[["https://tk.tracker.example/announce"]]}"#.to_string(),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+
+        let (code, v) =
+            rehost_call(&s, r#"{"from":"tk.tracker.example","to":"new.example"}"#).await;
+        assert_eq!(code, StatusCode::OK, "{v}");
+        // Carried BEFORE any torrent is rewritten: the job is only queued.
+        let cfg = s.state.cfg();
+        assert_eq!(
+            cfg.announce_passkeys.get("new.example").map(String::as_str),
+            Some("SECRET")
+        );
+        assert_eq!(
+            cfg.announce_ip_modes.get("new.example").map(String::as_str),
+            Some("v6")
+        );
+
+        run_rehost_job(&s).expect("the job ends well");
+        assert_eq!(rehost_status(&s).await["changed"], 1);
+        let cfg = s.state.cfg();
+        assert_eq!(cfg.announce_passkeys["tracker.example"], "SECRET");
+        assert_eq!(cfg.announce_ip_modes["tracker.example"], "v6");
+        assert_eq!(cfg.announce_passkeys["new.example"], "SECRET");
+    }
+
     /// Moving a tracker host: the count first, then a job that rewrites every
     /// torrent on it, keeps the edit across a restart, carries the host's
     /// settings to the new one, and refuses a second move while one runs.
