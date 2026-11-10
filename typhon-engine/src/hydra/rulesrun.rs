@@ -2234,6 +2234,8 @@ mod tests {
         assert_eq!(report.matched, 3);
         assert_eq!(matches.len(), 3);
         assert_eq!(report.skipped, 0);
+        assert_eq!(report.workflow_id, "w1");
+        assert_eq!(report.workflow_name, "test");
     }
 
     /// The convergence rule: a torrent already in the target category is
@@ -2981,6 +2983,17 @@ mod tests {
 
         t.status.store(TorrentStatus::Seeding as u8, Relaxed);
         near(progress(&t), 100.0);
+    }
+
+    /// A torrent of no bytes has no share to be done: 0, not NaN (which no
+    /// rule on progress would ever match, nor its negation).
+    #[test]
+    fn a_torrent_of_no_bytes_reads_zero_progress() {
+        let t = held(&guard_torrent("empty.bin", 0, &[]), None);
+        assert_eq!(t.meta.total_size, 0);
+        let f = facts_now(&t, store_row());
+        assert_eq!(f.progress, 0.0);
+        assert_eq!(f.total_size, 0.0);
     }
 
     #[test]
