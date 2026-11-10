@@ -19,6 +19,17 @@
 #   FILTER=name            run only the tests whose name contains this
 #   CARGO_REGISTRY=/path   cargo registry cache to mount (default: a named volume)
 #   CARGO_TARGET=/path     target directory to mount     (default: a named volume)
+#   COVERAGE=1             run the tests under `cargo llvm-cov --no-report`, ON
+#                          THIS MACHINE instead of in a rust container, and leave
+#                          the profiles in its target directory (CARGO_REGISTRY and
+#                          CARGO_TARGET then do not apply). CI uses it so the lines
+#                          these tests really run are counted with the unit tests':
+#                          profiles only merge between runs of the SAME binaries,
+#                          i.e. the same toolchain and target directory, which a
+#                          container with its own rustc could not share. Run it
+#                          from typhon-engine/, after the unit run it adds to.
+#                          Needs cargo, cargo-llvm-cov and a Linux Docker host
+#                          (the services are reached by their bridge address).
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -82,6 +93,34 @@ for i in $(seq 1 60); do
 done
 
 filter="${FILTER:-interop_}"
+
+if [ "${COVERAGE:-}" = 1 ]; then
+    # On the host: the tests dial the services by the address Docker gave them
+    # (a host has no use for the network's DNS names), and read what
+    # qBittorrent wrote from the shared directory directly.
+    addr() {
+        docker inspect -f "{{(index .NetworkSettings.Networks \"$net\").IPAddress}}" "$1"
+    }
+    ot_ip="$(addr "$ot")"
+    tr_ip="$(addr "$tr")"
+    qb_ip="$(addr "$qb")"
+    export RUSTFLAGS="${RUSTFLAGS:---cfg tokio_unstable}"
+    export HYDRANOS_INTEROP_OPENTRACKER="http://$ot_ip:6969/announce"
+    export HYDRANOS_INTEROP_OPENTRACKER_UDP="udp://$ot_ip:6969/announce"
+    export HYDRANOS_INTEROP_TORRUST="http://$tr_ip:7070/announce"
+    export HYDRANOS_INTEROP_TORRUST_API="http://$tr_ip:1212"
+    export HYDRANOS_INTEROP_TORRUST_TOKEN="$token"
+    export HYDRANOS_INTEROP_QBIT="http://$qb_ip:8080"
+    export HYDRANOS_INTEROP_QBIT_PEER="$qb_ip:6881"
+    export HYDRANOS_INTEROP_SHARED="$scratch/shared"
+    export HYDRANOS_INTEROP_QBIT_SHARED=/interop
+    # --no-report keeps the profiles of earlier runs (a run that reports starts
+    # by deleting them): this one adds to the unit run's instead of replacing it.
+    cargo llvm-cov --no-report --locked --bin hydranos -- "$filter" --ignored --test-threads=1
+    cargo llvm-cov --no-report --locked --test interop_libtorrent -- "$filter" --ignored --test-threads=1 --nocapture
+    exit 0
+fi
+
 registry="${CARGO_REGISTRY:-hydranos-interop-registry}"
 target="${CARGO_TARGET:-hydranos-interop-target}"
 

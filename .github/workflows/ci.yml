@@ -268,8 +268,9 @@ jobs:
           RUSTFLAGS: "--cfg tokio_unstable"
         run: cargo clippy --locked --all-targets -- -D warnings
       # Coverage, as a ratchet rather than a target. It is also the only place
-      # the test suite runs: `cargo llvm-cov` runs `cargo test` instrumented,
-      # so a separate test step would run the same ~2 700 tests twice.
+      # the unit test suite runs: `cargo llvm-cov` runs `cargo test`
+      # instrumented, so a separate test step would run the same ~2 700 tests
+      # twice.
       #
       # Chasing a percentage produces tests written for the metric. What this
       # guards is narrower and worth more: a change cannot arrive with less
@@ -285,7 +286,34 @@ jobs:
           command -v cargo-llvm-cov >/dev/null 2>&1 \
             || cargo install cargo-llvm-cov --locked
           rustup component add llvm-tools-preview
-      - name: Tests, and coverage does not go down
+      # Measured is the UNION of two runs of the same instrumented binaries:
+      # the unit and conformance tests here, then the `interop_*` tests, which
+      # are #[ignore] and need opentracker, Torrust and qBittorrent in Docker
+      # (tools/interop/run.sh, the same script the `interop` job runs). Those
+      # lines are really exercised -- the announcer against real trackers, the
+      # peer wire against libtorrent -- and counting only the first run left
+      # them at 0 %. The profiles can only be merged when they come from the
+      # same binaries, so the interop tests run on THIS runner and target
+      # directory (COVERAGE=1), not in the container of the `interop` job, and
+      # the report is computed once, on both.
+      - name: Tests under coverage
+        working-directory: typhon-engine
+        env:
+          RUSTFLAGS: "--cfg tokio_unstable"
+        run: |
+          # The cached target still holds the instrumented binary of a target
+          # since removed (src/main.rs); measured with the rest, it counted
+          # 7 900 lines no build compiles any more. Clean the workspace's
+          # coverage artifacts first, so only what this tree builds is measured.
+          cargo llvm-cov clean --workspace
+          cargo llvm-cov --workspace --locked --no-report
+      - name: Interop tests under coverage
+        working-directory: typhon-engine
+        env:
+          RUSTFLAGS: "--cfg tokio_unstable"
+          COVERAGE: "1"
+        run: ../tools/interop/run.sh
+      - name: Coverage does not go down
         working-directory: typhon-engine
         env:
           RUSTFLAGS: "--cfg tokio_unstable"
@@ -295,12 +323,7 @@ jobs:
           # puts region, function and line coverage in three columns of the
           # same shape, and picking the wrong one reads a number that is right
           # about something else.
-          # The cached target still holds the instrumented binary of a target
-          # since removed (src/main.rs); measured with the rest, it counted
-          # 7 900 lines no build compiles any more. Clean the workspace's
-          # coverage artifacts first, so only what this tree builds is measured.
-          cargo llvm-cov clean --workspace
-          cargo llvm-cov --workspace --locked --summary-only --json --output-path cov.json
+          cargo llvm-cov report --summary-only --json --output-path cov.json
           pct=$(python3 -c "import json;print(json.load(open('cov.json'))['data'][0]['totals']['lines']['percent'])")
           echo "line coverage: $pct%  (floor $floor%)"
           # The run's logs need an account to read; its annotations do not.
