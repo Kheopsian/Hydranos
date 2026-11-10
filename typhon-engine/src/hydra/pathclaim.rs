@@ -2077,11 +2077,11 @@ mod tests {
             "[dedup]\npath_collision = \"legacy\"\n",
         );
         let dir = s.dir.join("d");
-        std::fs::create_dir_all(dir.join("P")).unwrap();
-        std::fs::write(dir.join("P").join("x.nfo"), b"the first notes!").unwrap();
+        std::fs::create_dir_all(dir.join("H")).unwrap();
+        std::fs::write(dir.join("H").join("h.nfo"), b"held first notes").unwrap();
         add(
             &s,
-            &torrent_over("P", &[("x.nfo", b"the first notes!")], 16384),
+            &torrent_over("H", &[("h.nfo", b"held first notes")], 16384),
             &dir,
             true,
             true,
@@ -2089,7 +2089,7 @@ mod tests {
         .unwrap();
         let b = add(
             &s,
-            &torrent_over("P", &[("x.nfo", b"other notes, 16B")], 16384),
+            &torrent_over("H", &[("h.nfo", b"held other notes")], 16384),
             &dir,
             true,
             // Not vouched for: a torrent added in seed mode starts at once.
@@ -2111,8 +2111,8 @@ mod tests {
         );
         assert!(!t.held_for_proof(), "the hold is lifted once it has ruled");
         assert_eq!(
-            std::fs::read(dir.join("P").join("x.nfo")).unwrap(),
-            b"the first notes!",
+            std::fs::read(dir.join("H").join("h.nfo")).unwrap(),
+            b"held first notes",
             "the other torrent's file is as it was"
         );
         let store = s.state.store.lock().unwrap();
@@ -2132,11 +2132,11 @@ mod tests {
             "[dedup]\npath_collision = \"legacy\"\n",
         );
         let dir = s.dir.join("d");
-        std::fs::create_dir_all(dir.join("P")).unwrap();
-        std::fs::write(dir.join("P").join("x.nfo"), b"the first notes!").unwrap();
+        std::fs::create_dir_all(dir.join("V")).unwrap();
+        std::fs::write(dir.join("V").join("v.nfo"), b"vouch first notes").unwrap();
         add(
             &s,
-            &torrent_over("P", &[("x.nfo", b"the first notes!")], 16384),
+            &torrent_over("V", &[("v.nfo", b"vouch first notes")], 16384),
             &dir,
             true,
             true,
@@ -2144,7 +2144,7 @@ mod tests {
         .unwrap();
         let b = add(
             &s,
-            &torrent_over("P", &[("x.nfo", b"other notes, 16B")], 16384),
+            &torrent_over("V", &[("v.nfo", b"vouch other notes")], 16384),
             &dir,
             true,
             true,
@@ -2178,11 +2178,11 @@ mod tests {
             "[dedup]\npath_collision = \"legacy\"\n",
         );
         let dir = s.dir.join("d");
-        std::fs::create_dir_all(dir.join("P")).unwrap();
-        std::fs::write(dir.join("P").join("x.nfo"), b"the first notes!").unwrap();
+        std::fs::create_dir_all(dir.join("W")).unwrap();
+        std::fs::write(dir.join("W").join("w.nfo"), b"wait first notes!").unwrap();
         add(
             &s,
-            &torrent_over("P", &[("x.nfo", b"the first notes!")], 16384),
+            &torrent_over("W", &[("w.nfo", b"wait first notes!")], 16384),
             &dir,
             true,
             true,
@@ -2190,7 +2190,7 @@ mod tests {
         .unwrap();
         let b = add(
             &s,
-            &torrent_over("P", &[("x.nfo", b"other notes, 16B")], 16384),
+            &torrent_over("W", &[("w.nfo", b"wait other notes!")], 16384),
             &dir,
             true,
             false,
