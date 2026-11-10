@@ -951,7 +951,10 @@ function importWizard(opts) {
                 }
                 if (d.stalled_at) {
                     pauseMsg.style.display = "";
-                    pauseMsg.textContent += (pauseMsg.textContent ? " " : "")
+                    // The server's pause message has no final stop: end its
+                    // sentence before the next one starts.
+                    const prev = pauseMsg.textContent;
+                    pauseMsg.textContent += (prev ? (/[.!?]$/.test(prev) ? " " : ". ") : "")
                         + (d.last_ok
                             ? t("Likely trigger: \"{last}\", the last torrent qBittorrent exported, or \"{name}\", the first it left unanswered. Look at both in qBittorrent.", { last: d.last_ok, name: d.stalled_at })
                             : t("Likely trigger: qBittorrent first stopped answering at \"{name}\", after exporting others. Look at that torrent in qBittorrent.", { name: d.stalled_at }));
