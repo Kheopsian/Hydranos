@@ -1613,6 +1613,588 @@ mod tests {
         );
     }
 
+    // ----- comparisons -----------------------------------------------------
+
+    /// Each operator judged below, at, and above the value: `>` and `>=` (and
+    /// `<`, `<=`) differ only at the value itself.
+    #[test]
+    fn every_number_operator_is_judged_below_at_and_above_the_value() {
+        let at = |peers: f64| Facts {
+            num_peers: peers,
+            ..Default::default()
+        };
+        // (operator, holds at 4, at 5, at 6) against "5".
+        for (op, expected) in [
+            (Op::Eq, [false, true, false]),
+            (Op::Ne, [true, false, true]),
+            (Op::Gt, [false, false, true]),
+            (Op::Ge, [false, true, true]),
+            (Op::Lt, [true, false, false]),
+            (Op::Le, [true, true, false]),
+            // Not a number's operators.
+            (Op::Contains, [false, false, false]),
+            (Op::HasTag, [false, false, false]),
+            (Op::Matches, [false, false, false]),
+        ] {
+            let got = [4.0, 5.0, 6.0].map(|p| m(cond("num_peers", op, "5"), &at(p)));
+            assert_eq!(got, expected, "{op:?}");
+        }
+        assert!(m(
+            cond("ratio", Op::Ge, "1.5"),
+            &Facts {
+                ratio: 1.5,
+                ..Default::default()
+            }
+        ));
+        assert!(!m(
+            cond("ratio", Op::Gt, "1.5"),
+            &Facts {
+                ratio: 1.5,
+                ..Default::default()
+            }
+        ));
+        assert!(m(
+            cond("ratio", Op::Lt, "1.5"),
+            &Facts {
+                ratio: 1.4999,
+                ..Default::default()
+            }
+        ));
+    }
+
+    /// NaN is "it never happened": no operator holds for it, `!=` included.
+    #[test]
+    fn a_fact_that_never_happened_satisfies_no_operator() {
+        let never = Facts {
+            completed_age: NEVER,
+            ..Default::default()
+        };
+        for op in [Op::Eq, Op::Ne, Op::Gt, Op::Ge, Op::Lt, Op::Le] {
+            assert!(!m(cond("completed_age", op, "1d"), &never), "{op:?}");
+            assert!(!m(cond("completed_age", op, "0"), &never), "{op:?} 0");
+        }
+        let thing = |n: f64| cmp_num(Op::Ne, n, 1.0);
+        assert!(thing(2.0) && !thing(f64::NAN) && !thing(1.0));
+    }
+
+    /// Every field a rule can name is read from its own fact: swapping two of
+    /// them, or dropping one, changes which torrents a rule matches.
+    #[test]
+    fn each_field_reads_its_own_fact() {
+        let table = [
+            ("progress", 1.0),
+            ("ratio", 2.0),
+            ("total_size", 3.0),
+            ("total_uploaded", 4.0),
+            ("total_downloaded", 5.0),
+            ("upload_rate", 6.0),
+            ("download_rate", 7.0),
+            ("num_peers", 8.0),
+            ("num_seeds", 9.0),
+            ("swarm_seeds", 10.0),
+            ("swarm_leechers", 11.0),
+            ("seeding_time", 12.0),
+            ("added_age", 13.0),
+            ("completed_age", 14.0),
+            ("free_space", 15.0),
+            ("link_count", 16.0),
+            ("external_links", 17.0),
+            ("freeable_bytes", 18.0),
+        ];
+        let f = Facts {
+            progress: 1.0,
+            ratio: 2.0,
+            total_size: 3.0,
+            total_uploaded: 4.0,
+            total_downloaded: 5.0,
+            upload_rate: 6.0,
+            download_rate: 7.0,
+            num_peers: 8.0,
+            num_seeds: 9.0,
+            swarm_seeds: 10.0,
+            swarm_leechers: 11.0,
+            seeding_time: 12.0,
+            added_age: 13.0,
+            completed_age: 14.0,
+            free_space: 15.0,
+            link_count: 16.0,
+            external_links: 17.0,
+            freeable_bytes: 18.0,
+            ..Default::default()
+        };
+        for (field, v) in table {
+            for (other, w) in table {
+                assert_eq!(
+                    m(cond(field, Op::Eq, &w.to_string()), &f),
+                    v == w,
+                    "{field} == {w} ({other})"
+                );
+            }
+            assert_eq!(
+                current_value(&f, field, None),
+                serde_json::json!(v),
+                "{field}"
+            );
+        }
+
+        let texts = [
+            ("name", "n"),
+            ("info_hash", "h"),
+            ("category", "c"),
+            ("state", "s"),
+            ("engine", "e"),
+            ("save_path", "p"),
+            ("tracker_host", "th"),
+            ("tracker_error_msg", "tm"),
+            ("tracker_error_class", "tc"),
+        ];
+        let f = Facts {
+            name: "n".into(),
+            info_hash: "h".into(),
+            category: "c".into(),
+            state: "s".into(),
+            engine: "e".into(),
+            save_path: "p".into(),
+            tracker_host: "th".into(),
+            tracker_error_msg: "tm".into(),
+            tracker_error_class: "tc".into(),
+            ..Default::default()
+        };
+        for (field, v) in texts {
+            for (other, w) in texts {
+                assert_eq!(
+                    m(cond(field, Op::Eq, w), &f),
+                    v == w,
+                    "{field} == {w} ({other})"
+                );
+            }
+            assert_eq!(
+                current_value(&f, field, None),
+                serde_json::json!(v),
+                "{field}"
+            );
+        }
+
+        let flags = [
+            "tracker_error",
+            "torrent_error",
+            "user_paused",
+            "multi_file",
+            "private",
+            "data_missing",
+        ];
+        for field in flags {
+            let f = Facts {
+                tracker_error: field == "tracker_error",
+                torrent_error: field == "torrent_error",
+                user_paused: field == "user_paused",
+                multi_file: field == "multi_file",
+                private: field == "private",
+                data_missing: field == "data_missing",
+                ..Default::default()
+            };
+            for other in flags {
+                assert_eq!(
+                    m(cond(other, Op::Eq, "true"), &f),
+                    field == other,
+                    "{other} is true ({field} is the one set)"
+                );
+                assert_eq!(
+                    current_value(&f, other, None),
+                    serde_json::json!(field == other)
+                );
+            }
+        }
+        // A field nobody offers is not read.
+        assert_eq!(current_value(&f, "nonesuch", None), serde_json::Value::Null);
+        assert_eq!(number_of(&f, "name"), None);
+        assert_eq!(text_of(&f, "progress"), None);
+        assert_eq!(bool_of(&f, "progress"), None);
+    }
+
+    #[test]
+    fn a_flag_is_compared_with_the_spellings_of_true() {
+        let on = Facts {
+            private: true,
+            ..Default::default()
+        };
+        let off = Facts::default();
+        for yes in ["true", "TRUE", "yes", "1", " true "] {
+            assert!(m(cond("private", Op::Eq, yes), &on), "eq {yes:?}");
+            assert!(!m(cond("private", Op::Eq, yes), &off), "eq {yes:?} off");
+            assert!(!m(cond("private", Op::Ne, yes), &on), "ne {yes:?}");
+            assert!(m(cond("private", Op::Ne, yes), &off), "ne {yes:?} off");
+        }
+        for no in ["false", "no", "0", "", "maybe"] {
+            assert!(!m(cond("private", Op::Eq, no), &on), "eq {no:?}");
+            assert!(m(cond("private", Op::Eq, no), &off), "eq {no:?} off");
+            assert!(m(cond("private", Op::Ne, no), &on), "ne {no:?}");
+            assert!(!m(cond("private", Op::Ne, no), &off), "ne {no:?} off");
+        }
+    }
+
+    #[test]
+    fn text_operators_ignore_case_and_say_what_they_mean() {
+        let f = Facts {
+            name: "Foo Bar Baz".into(),
+            ..Default::default()
+        };
+        let t = |op, v: &str| m(cond("name", op, v), &f);
+        assert!(t(Op::Eq, "foo bar BAZ") && !t(Op::Eq, "foo"));
+        assert!(t(Op::Ne, "foo") && !t(Op::Ne, "FOO BAR BAZ"));
+        assert!(t(Op::Contains, "BAR") && !t(Op::Contains, "qux"));
+        assert!(t(Op::NotContains, "qux") && !t(Op::NotContains, "bar"));
+        assert!(t(Op::StartsWith, "FOO") && !t(Op::StartsWith, "bar"));
+        assert!(t(Op::EndsWith, "BAZ") && !t(Op::EndsWith, "foo"));
+        // A regex is case-sensitive: it is what was typed.
+        assert!(t(Op::Matches, "^Foo") && !t(Op::Matches, "^foo"));
+        // Not a text operator.
+        assert!(!t(Op::Gt, "a") && !t(Op::HasTag, "foo"));
+    }
+
+    #[test]
+    fn tag_operators_say_whether_the_tag_is_worn() {
+        let f = Facts {
+            tags: vec!["keep".into(), "x".into()],
+            ..Default::default()
+        };
+        for (op, worn, absent) in [
+            (Op::HasTag, true, false),
+            (Op::Eq, true, false),
+            (Op::Contains, true, false),
+            (Op::NotHasTag, false, true),
+            (Op::Ne, false, true),
+            (Op::NotContains, false, true),
+        ] {
+            assert_eq!(m(cond("tags", op, " keep "), &f), worn, "{op:?} worn");
+            assert_eq!(m(cond("tags", op, "other"), &f), absent, "{op:?} absent");
+        }
+    }
+
+    /// Sizes, durations and percentages are numbers once compiled, in the
+    /// unit the fact is kept in.
+    #[test]
+    fn a_size_a_duration_and_a_percentage_compile_to_their_own_units() {
+        let f = Facts {
+            total_size: 5e11,
+            seeding_time: 172800.0,
+            progress: 99.5,
+            ..Default::default()
+        };
+        assert!(m(cond("total_size", Op::Eq, "500GB"), &f));
+        assert!(!m(cond("total_size", Op::Eq, "500GiB"), &f));
+        assert!(m(cond("seeding_time", Op::Eq, "2d"), &f));
+        assert!(m(cond("seeding_time", Op::Gt, "47h"), &f));
+        assert!(m(cond("progress", Op::Lt, "100"), &f));
+        assert!(!m(cond("progress", Op::Ge, "99.6"), &f));
+        for bad in [("progress", "much"), ("total_size", "big"), ("ratio", "x")] {
+            assert!(
+                matches!(
+                    compile(&cond(bad.0, Op::Eq, bad.1)).err(),
+                    Some(CompileError::BadValue { .. })
+                ),
+                "{bad:?}"
+            );
+        }
+        // A flag takes no number.
+        assert_eq!(number_for("private", Kind::Bool, "1"), None);
+    }
+
+    // ----- delays ----------------------------------------------------------
+
+    #[test]
+    fn a_delay_under_a_second_is_no_delay_and_the_rest_is_rounded_to_seconds() {
+        let held = |hold: Option<&str>| {
+            hold_secs(&Cond {
+                field: "seeding_time".into(),
+                op: Op::Gt,
+                value: "1d".into(),
+                hold: hold.map(String::from),
+                tag: None,
+            })
+        };
+        assert_eq!(held(None), Ok(None));
+        for judged_now in ["", "   ", "0", "0s", "0.5", "0.99s", "-0"] {
+            assert_eq!(held(Some(judged_now)), Ok(None), "{judged_now:?}");
+        }
+        assert_eq!(held(Some("1")), Ok(Some(1)));
+        assert_eq!(held(Some("1.4s")), Ok(Some(1)));
+        assert_eq!(held(Some("1.5s")), Ok(Some(2)));
+        assert_eq!(held(Some(" 90m ")), Ok(Some(5400)));
+        assert_eq!(held(Some("2D")), Ok(Some(172_800)));
+        assert!(held(Some("soon")).is_err());
+    }
+
+    fn timing_at(now: i64, rows: SinceRows) -> Arc<Timing> {
+        Arc::new(Timing::new(now, rows))
+    }
+
+    fn held_cond(field: &str, op: Op, value: &str, hold: &str) -> Cond {
+        Cond {
+            field: field.into(),
+            op,
+            value: value.into(),
+            hold: Some(hold.into()),
+            tag: None,
+        }
+    }
+
+    /// `for` on an ordinary condition: it holds once `now - since >= for`, the
+    /// since being the recorded row or, without one, the pass itself.
+    #[test]
+    fn a_for_holds_at_exactly_its_length_and_never_before() {
+        const NOW: i64 = 1_000_000;
+        let c = held_cond("progress", Op::Ge, "100", "1h");
+        let done = Facts {
+            info_hash: "h1".into(),
+            progress: 100.0,
+            ..Default::default()
+        };
+        let row = |since: i64| {
+            let mut rows = SinceRows::new();
+            rows.entry(condition_key(&c))
+                .or_default()
+                .insert("h1".into(), since);
+            rows
+        };
+        let node = Node::Cond(c.clone());
+        let judged = |t: &Arc<Timing>, f: &Facts| compile_in(&node, Some(t)).unwrap()(f);
+
+        assert!(
+            judged(&timing_at(NOW, row(NOW - 3600)), &done),
+            "exactly 1h"
+        );
+        assert!(
+            !judged(&timing_at(NOW, row(NOW - 3599)), &done),
+            "a second short"
+        );
+        assert!(judged(&timing_at(NOW, row(NOW - 7200)), &done));
+        // No row: the condition counts from this pass, which is zero seconds.
+        assert!(!judged(&timing_at(NOW, SinceRows::new()), &done));
+        // Another torrent's row is not this one's.
+        let mut other = Facts {
+            info_hash: "h2".into(),
+            ..done.clone()
+        };
+        assert!(!judged(&timing_at(NOW, row(NOW - 7200)), &other));
+        other.info_hash = "h1".into();
+        // The condition itself must hold, however long it has been recorded.
+        other.progress = 50.0;
+        assert!(!judged(&timing_at(NOW, row(NOW - 7200)), &other));
+        // The preview's clock answers "held long enough" ...
+        let ungated = Arc::new(timing_at(NOW, SinceRows::new()).ungated());
+        assert!(judged(&ungated, &done));
+        // ... but still only for a condition that holds.
+        assert!(!judged(&ungated, &other));
+        // Without a record nothing is known to have held.
+        assert!(!compile_in(&node, None).unwrap()(&done));
+        // A moved clock counts: a preview asking when the rule will hold.
+        let t = timing_at(NOW, SinceRows::new());
+        t.set_now(NOW + 3600);
+        assert!(judged(&t, &done));
+        t.set_now(NOW + 3599);
+        assert!(!judged(&t, &done));
+    }
+
+    fn tag_cond(op: Op, value: &str, hold: Option<&str>) -> Cond {
+        Cond {
+            field: "tag_age".into(),
+            op,
+            value: value.into(),
+            hold: hold.map(String::from),
+            tag: Some(" old ".into()),
+        }
+    }
+
+    fn aged(age: f64) -> Facts {
+        Facts {
+            info_hash: "h1".into(),
+            tag_ages: vec![("older".into(), 1.0), ("old".into(), age)],
+            ..Default::default()
+        }
+    }
+
+    /// `tag_age` is judged on the clock of the timing: a tag grows older as a
+    /// preview moves the clock forward, and "older than" holds on the
+    /// ungated clock for any torrent that wears the tag.
+    #[test]
+    fn a_tag_age_is_judged_on_the_clock_of_the_pass() {
+        const NOW: i64 = 1_000_000;
+        let judged = |c: &Cond, f: &Facts, t: &Arc<Timing>| {
+            compile_in(&Node::Cond(c.clone()), Some(t)).unwrap()(f)
+        };
+        let t = timing_at(NOW, SinceRows::new());
+        let gt = tag_cond(Op::Gt, "1d", None);
+        assert!(judged(&gt, &aged(86_401.0), &t));
+        assert!(!judged(&gt, &aged(86_400.0), &t));
+        assert!(
+            !judged(&gt, &Facts::default(), &t),
+            "a tag not worn has no age"
+        );
+        // Ten thousand seconds later the tag has aged by as much.
+        t.set_now(NOW + 10_000);
+        assert!(judged(&gt, &aged(76_401.0), &t));
+        assert!(!judged(&gt, &aged(76_400.0), &t));
+        // Ungated: older-than holds for any torrent that wears the tag, and
+        // nothing else does.
+        let u = Arc::new(timing_at(NOW, SinceRows::new()).ungated());
+        assert!(judged(&gt, &aged(0.0), &u));
+        assert!(judged(&tag_cond(Op::Ge, "1d", None), &aged(0.0), &u));
+        assert!(!judged(&gt, &Facts::default(), &u));
+        assert!(!judged(&tag_cond(Op::Lt, "1d", None), &aged(100_000.0), &u));
+        assert!(judged(&tag_cond(Op::Lt, "1d", None), &aged(10.0), &u));
+        assert!(!judged(&tag_cond(Op::Le, "1d", None), &aged(86_401.0), &u));
+        // No clock at all: the age as read.
+        assert!(compile(&Node::Cond(gt.clone())).unwrap()(&aged(86_401.0)));
+        assert!(!compile(&Node::Cond(gt)).unwrap()(&aged(86_400.0)));
+    }
+
+    /// A tag set on the field of another condition is not that condition's
+    /// business: only `tag_age` reads the tag.
+    #[test]
+    fn a_stray_tag_on_another_field_changes_nothing() {
+        let mut c = held_cond("num_peers", Op::Gt, "3", "0");
+        c.tag = Some("old".into());
+        let t = timing_at(1_000_000, SinceRows::new());
+        let peers = Facts {
+            num_peers: 4.0,
+            tag_ages: vec![("old".into(), 1.0)],
+            ..Default::default()
+        };
+        assert!(compile_in(&Node::Cond(c.clone()), Some(&t)).unwrap()(
+            &peers
+        ));
+        c.hold = None;
+        assert!(compile_in(&Node::Cond(c), Some(&t)).unwrap()(&peers));
+    }
+
+    /// A `for` on a tag age runs from the moment the tag is old enough, not
+    /// from when the pass first looked.
+    #[test]
+    fn a_for_on_a_tag_age_runs_from_the_moment_the_tag_is_old_enough() {
+        const NOW: i64 = 1_000_000;
+        let c = tag_cond(Op::Gt, "1d", Some("1h"));
+        let node = Node::Cond(c.clone());
+        // `due` seconds after the pass, the condition holds and not a second before.
+        let first_true = |f: &Facts, rows: SinceRows| {
+            let t = timing_at(NOW, rows);
+            let judge = compile_in(&node, Some(&t)).unwrap();
+            (0..=7200).find(|e| {
+                t.set_now(NOW + e);
+                judge(f)
+            })
+        };
+        // Old enough for two hours already, no row: one hour from this pass.
+        assert_eq!(first_true(&aged(93_600.0), SinceRows::new()), Some(3600));
+        // Old enough in half an hour (so the age reads true after 1801 s),
+        // then its hour: 1800 + 3600 from this pass; the age is true from 1801 s.
+        assert_eq!(first_true(&aged(84_600.0), SinceRows::new()), Some(5400));
+        // A recorded row wins: the hour is counted from it.
+        let mut rows = SinceRows::new();
+        rows.entry(condition_key(&c))
+            .or_default()
+            .insert("h1".into(), NOW - 100);
+        assert_eq!(first_true(&aged(93_600.0), rows), Some(3500));
+        // The condition false on this torrent: never, whatever the clock.
+        assert_eq!(first_true(&aged(10.0), SinceRows::new()), None);
+        // An `<` condition is not waited for until it holds: no `for` of its
+        // own to carry, so the row (here: none) alone counts.
+        let lt = tag_cond(Op::Lt, "1d", Some("1h"));
+        let t = timing_at(NOW, SinceRows::new());
+        let judge = compile_in(&Node::Cond(lt), Some(&t)).unwrap();
+        assert!(!judge(&aged(10.0)));
+        t.set_now(NOW + 3600);
+        assert!(judge(&aged(10.0)));
+        // On the preview's clock the wait is over.
+        let u = Arc::new(timing_at(NOW, SinceRows::new()).ungated());
+        assert!(compile_in(&node, Some(&u)).unwrap()(&aged(93_600.0)));
+        // With no timing a tag age with a `for` never holds.
+        assert!(!compile_in(&node, None).unwrap()(&aged(93_600.0)));
+    }
+
+    /// When a `for` on a tag age will have held, read straight: the origin of
+    /// the pass plus the `for`, pushed to the moment the tag reaches its age
+    /// only for an "older than" the tag has not reached yet.
+    #[test]
+    fn the_date_a_tag_age_for_comes_due_is_computed_from_the_age_the_tag_reaches() {
+        const NOW: i64 = 1_000_000;
+        let due = |op, f: &Facts, rows: SinceRows| {
+            let t = Timing::new(NOW, rows);
+            tag_age_hold_due(&tag_cond(op, "1d", Some("1h")), f, &t, 3600)
+        };
+        // Reaches 1d in 1800 s: that, plus the hour.
+        assert_eq!(
+            due(Op::Gt, &aged(84_600.4), SinceRows::new()),
+            NOW + 1800 + 3600
+        );
+        assert_eq!(
+            due(Op::Ge, &aged(84_600.4), SinceRows::new()),
+            NOW + 1800 + 3600
+        );
+        // Old enough already: the pass itself, plus the hour.
+        assert_eq!(due(Op::Gt, &aged(93_600.0), SinceRows::new()), NOW + 3600);
+        // Other operators wait from the pass, whatever the age.
+        assert_eq!(due(Op::Lt, &aged(84_600.0), SinceRows::new()), NOW + 3600);
+        assert_eq!(due(Op::Le, &aged(84_600.0), SinceRows::new()), NOW + 3600);
+        // A tag not worn: from the pass.
+        assert_eq!(due(Op::Gt, &Facts::default(), SinceRows::new()), NOW + 3600);
+        // A recorded row: from the row.
+        let c = tag_cond(Op::Gt, "1d", Some("1h"));
+        let mut rows = SinceRows::new();
+        rows.entry(condition_key(&c))
+            .or_default()
+            .insert("h1".into(), NOW - 500);
+        assert_eq!(due(Op::Gt, &aged(84_600.0), rows), NOW - 500 + 3600);
+        // A value that is no duration: from the pass.
+        let mut bad = tag_cond(Op::Gt, "soon", Some("1h"));
+        bad.value = "soon".into();
+        let t = Timing::new(NOW, SinceRows::new());
+        assert_eq!(
+            tag_age_hold_due(&bad, &aged(84_600.0), &t, 3600),
+            NOW + 3600
+        );
+    }
+
+    /// What a rule shows next to a condition: the age of ONE tag, trimmed,
+    /// and null for a tag the torrent does not wear.
+    #[test]
+    fn the_value_shown_for_a_tag_age_is_the_age_of_that_tag() {
+        let f = aged(123.0);
+        assert_eq!(
+            current_value(&f, "tag_age", Some(" old ")),
+            serde_json::json!(123.0)
+        );
+        assert_eq!(
+            current_value(&f, "tag_age", Some("older")),
+            serde_json::json!(1.0)
+        );
+        assert_eq!(
+            current_value(&f, "tag_age", Some("none")),
+            serde_json::Value::Null
+        );
+        assert_eq!(current_value(&f, "tag_age", None), serde_json::Value::Null);
+        assert_eq!(
+            current_value(
+                &Facts {
+                    tags: vec!["a".into()],
+                    ..Default::default()
+                },
+                "tags",
+                None
+            ),
+            serde_json::json!(["a"])
+        );
+        // NEVER shows as null, not as a number.
+        let never = Facts {
+            added_age: NEVER,
+            ..Default::default()
+        };
+        assert_eq!(
+            current_value(&never, "added_age", None),
+            serde_json::Value::Null
+        );
+    }
+
     /// An empty group matches everything, which as a workflow means "do this
     /// to the entire catalogue". Refused rather than obeyed.
     #[test]
