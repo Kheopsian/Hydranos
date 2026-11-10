@@ -350,7 +350,14 @@ impl std::fmt::Display for CompileError {
         match self {
             CompileError::UnknownField(x) => write!(f, "unknown field {x:?}"),
             CompileError::BadValue { field, value } => {
-                write!(f, "{value:?} is not a valid value for {field:?}")
+                write!(f, "{value:?} is not a valid value for {field:?}")?;
+                if field == "for" || field == "tag_age" || kind_of(field) == Some(Kind::Duration) {
+                    write!(
+                        f,
+                        ": a duration is a number of seconds, or a number followed by s, m, h or d, and is never negative"
+                    )?;
+                }
+                Ok(())
             }
             CompileError::BadRegex(e) => write!(f, "invalid regex: {e}"),
             CompileError::Empty => write!(f, "a workflow with no condition would match everything"),
@@ -562,6 +569,12 @@ pub fn current_value(f: &Facts, field: &str, tag: Option<&str>) -> serde_json::V
 }
 
 /// `2d`, `36h`, `90m`, `45s`, or a bare number of seconds.
+///
+/// A length of time is never negative and never `nan` or infinite, though
+/// `f64::parse` accepts all three: `for: -5` or `for: nan` would otherwise read
+/// as a delay that is already over, and `completed_age != nan` as true of every
+/// torrent. They are not durations, so the rule that carries one does not
+/// compile.
 pub fn parse_duration(text: &str) -> Option<f64> {
     let t = text.trim();
     if t.is_empty() {
@@ -574,7 +587,12 @@ pub fn parse_duration(text: &str) -> Option<f64> {
         's' | 'S' => (&t[..t.len() - 1], 1.0),
         _ => (t, 1.0),
     };
-    digits.trim().parse::<f64>().ok().map(|n| n * mult)
+    digits
+        .trim()
+        .parse::<f64>()
+        .ok()
+        .map(|n| n * mult)
+        .filter(|s| s.is_finite() && *s >= 0.0)
 }
 
 /// `500GB` (decimal) and `500GiB` (binary) are different numbers.
@@ -963,9 +981,10 @@ pub fn hold_secs(c: &Cond) -> Result<Option<i64>, CompileError> {
     let Some(text) = c.hold.as_deref().filter(|t| !t.trim().is_empty()) else {
         return Ok(None);
     };
+    // `parse_duration` has already refused a negative or non-finite value.
     match parse_duration(text) {
-        Some(s) if s.is_finite() && s >= 0.0 => Ok((s >= 1.0).then_some(s.round() as i64)),
-        _ => Err(CompileError::BadValue {
+        Some(s) => Ok((s >= 1.0).then_some(s.round() as i64)),
+        None => Err(CompileError::BadValue {
             field: "for".into(),
             value: text.to_string(),
         }),
@@ -1508,6 +1527,90 @@ mod tests {
         assert_eq!(parse_size("500GB"), Some(5e11));
         assert_eq!(parse_size("500GiB"), Some(536870912000.0));
         assert_ne!(parse_size("500GB"), parse_size("500GiB"));
+    }
+
+    /// A duration is a length of time: never negative, never `nan` or
+    /// infinite. `parse_duration` used to hand back whatever `f64::parse`
+    /// accepted, so `-5` and `nan` were durations.
+    #[test]
+    fn a_negative_or_non_finite_duration_is_not_a_duration() {
+        for bad in [
+            "-5", "-5s", "-1d", "-0.5h", "nan", "NaN", "nand", "inf", "-inf", "infinity", "infh",
+            "1e999", "1e999d",
+        ] {
+            assert_eq!(parse_duration(bad), None, "{bad:?} is not a duration");
+        }
+        assert_eq!(parse_duration("0"), Some(0.0));
+        assert_eq!(parse_duration("1.5h"), Some(5400.0));
+        assert_eq!(parse_duration(" 45s "), Some(45.0));
+        assert_eq!(parse_duration("90m"), Some(5400.0));
+    }
+
+    /// The same value in a condition, in a `tag_age` condition and as the
+    /// `for` of a condition: refused when the rule is compiled, with a message
+    /// that says what a duration is. `completed_age != nan` used to compile and
+    /// to hold for every torrent (`!=` against NaN is true).
+    #[test]
+    fn a_rule_with_a_negative_or_non_finite_duration_does_not_compile() {
+        for bad in ["-5", "-2d", "nan", "inf", "1e999"] {
+            let field = |name: &str| CompileError::BadValue {
+                field: name.into(),
+                value: bad.into(),
+            };
+            assert_eq!(
+                compile(&cond("completed_age", Op::Ne, bad)).err(),
+                Some(field("completed_age")),
+                "a condition on {bad:?}"
+            );
+            let mut tag_age = Cond {
+                field: "tag_age".into(),
+                op: Op::Gt,
+                value: bad.into(),
+                hold: None,
+                tag: Some("old".into()),
+            };
+            assert_eq!(
+                compile(&Node::Cond(tag_age.clone())).err(),
+                Some(field("tag_age")),
+                "a tag age of {bad:?}"
+            );
+            tag_age.value = "1d".into();
+            tag_age.hold = Some(bad.into());
+            assert_eq!(
+                compile(&Node::Cond(tag_age)).err(),
+                Some(field("for")),
+                "a tag age held for {bad:?}"
+            );
+            let mut held = Cond {
+                field: "seeding_time".into(),
+                op: Op::Gt,
+                value: "1d".into(),
+                hold: Some(bad.into()),
+                tag: None,
+            };
+            assert_eq!(
+                hold_secs(&held).err(),
+                Some(field("for")),
+                "a for of {bad:?}"
+            );
+            assert_eq!(
+                compile(&Node::Cond(held.clone())).err(),
+                Some(field("for")),
+                "a compiled for of {bad:?}"
+            );
+            // A delay is the one thing a rule may omit: blank or zero judge now.
+            held.hold = Some("0".into());
+            assert_eq!(hold_secs(&held), Ok(None));
+        }
+        let msg = CompileError::BadValue {
+            field: "for".into(),
+            value: "-5".into(),
+        }
+        .to_string();
+        assert!(
+            msg.contains("\"-5\"") && msg.contains("never negative"),
+            "the message names the value and what a duration is: {msg}"
+        );
     }
 
     /// An empty group matches everything, which as a workflow means "do this

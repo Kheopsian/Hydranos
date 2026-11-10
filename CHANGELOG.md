@@ -30,11 +30,11 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 - A 409 from qBittorrent is no longer always labelled "no metadata yet": the failure shows qBittorrent's own answer, such as `Unable to export torrent file. Error: a piece layer is invalid` for some hybrid torrents on 5.x.
 - A torrent removed while a save was running could have its saved state written back by that save, leaving a row for a torrent that no longer exists. A torrent being removed is now skipped by the save from the first moment of the removal.
 - The startup report lists a torrent that exists but was refused (its stored metainfo does not match its key) even when thousands of leftover rows without metainfo fill the list. Until now such a torrent was only counted.
+- A rule whose duration is negative or not a number (`-5`, `nan`, `inf`) is now refused when it is saved, with a message that says what a duration is. Such a value used to be accepted: a `for` of `-5` read as no delay at all, and a condition like `completed age != nan` held for every torrent.
 
 ### Changed
 
 - The SQLite bundled in Hydranos is updated to 3.54 (rusqlite 0.41), which carries the upstream fixes since 3.46. The database files and their format are unchanged.
-
 
 ## v4.8.3 -- edits made during a save no longer get overwritten
 
