@@ -731,3 +731,298 @@ fn a_reference_the_store_refuses_is_named_and_the_others_are_still_followed() {
         rules[0].1
     );
 }
+
+// ---------------------------------------------------------------------------
+// Graduating a torrent by hand
+// ---------------------------------------------------------------------------
+
+async fn graduate(s: &TestState, hash: &str, body: &str) -> (StatusCode, serde_json::Value) {
+    let resp = post_torrent_graduate(
+        State(s.state.clone()),
+        Path(hash.to_string()),
+        RawQuery(None),
+        keyed(KEY),
+        body.to_string(),
+    )
+    .await;
+    let code = resp.status();
+    (code, body_json(resp).await)
+}
+
+/// ⭐ The route queues a move of the DATA to another engine, and says no, with
+/// the reason, to everything that is not one: nothing is queued by any of them.
+#[tokio::test]
+async fn a_graduation_asked_for_wrongly_is_refused_and_queues_nothing() {
+    let s = st("grad-refused", "");
+    let (hash, file) = seed(&s, "race", "ga", "", 100);
+    let pool = s.dir.join("pool");
+
+    let (code, v) = graduate(&s, &"0".repeat(40), r#"{"engine":"hoard"}"#).await;
+    assert_eq!(code, StatusCode::NOT_FOUND, "{v}");
+    for (body, error) in [
+        ("{}", "engine is required"),
+        (r#"{"engine":"race"}"#, "already in race"),
+        (r#"{"engine":"nope"}"#, "no engine named nope"),
+        (
+            r#"{"engine":"hoard"}"#,
+            "save_path is required (or a category that has one)",
+        ),
+        (
+            r#"{"engine":"hoard","category":"unknown"}"#,
+            "save_path is required (or a category that has one)",
+        ),
+        ("not json at all", "engine is required"),
+    ] {
+        let (code, v) = graduate(&s, &hash, body).await;
+        assert_eq!(code, StatusCode::BAD_REQUEST, "{body}: {v}");
+        assert_eq!(v["error"], error, "{body}");
+    }
+
+    // Files already at the destination are never moved onto.
+    std::fs::create_dir_all(&pool).unwrap();
+    std::fs::write(pool.join("ga"), b"somebody else's").unwrap();
+    let body = serde_json::json!({"engine": "hoard", "save_path": pool.to_str().unwrap()});
+    let (code, v) = graduate(&s, &hash, &body.to_string()).await;
+    assert_eq!(code, StatusCode::CONFLICT, "{v}");
+    assert_eq!(v["reason"], "destination_taken");
+
+    assert!(s.store.lock().unwrap().list_jobs(10).unwrap().is_empty());
+    assert!(file.exists() && in_store(&s, &hash));
+    assert_eq!(std::fs::read(pool.join("ga")).unwrap(), b"somebody else's");
+}
+
+/// The destination is the one named, or else the category's folder; a
+/// second ask while the first is queued is refused.
+#[tokio::test]
+async fn a_graduation_is_queued_to_the_folder_named_or_the_categorys() {
+    let s = st("grad-queued", "");
+    let (named, _) = seed(&s, "race", "gb", "", 100);
+    let (by_category, _) = seed(&s, "race", "gc", "", 100);
+    let (pool, elsewhere) = (s.dir.join("pool"), s.dir.join("elsewhere"));
+    s.store
+        .lock()
+        .unwrap()
+        .put_meta(
+            "categories",
+            &serde_json::json!({
+                "pool": {"save_path": pool.to_str().unwrap(), "mode": "hoard"},
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+    let body = serde_json::json!({
+        "engine": "hoard", "category": "pool", "save_path": elsewhere.to_str().unwrap(),
+    });
+    let (code, v) = graduate(&s, &named, &body.to_string()).await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    assert_eq!(v["status"], "queued");
+    assert_eq!(v["plan"]["to"], elsewhere.to_str().unwrap(), "{v}");
+    let job_named = v["job"].as_str().unwrap().to_string();
+
+    let (code, v) = graduate(&s, &named, &body.to_string()).await;
+    assert_eq!(code, StatusCode::CONFLICT, "{v}");
+    assert_eq!(
+        v["error"],
+        "a move is already queued or running for this torrent"
+    );
+
+    let (code, v) = graduate(&s, &by_category, r#"{"engine":"hoard","category":"pool"}"#).await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    let job_category = v["job"].as_str().unwrap().to_string();
+
+    let jobs = s.store.lock().unwrap().list_jobs(10).unwrap();
+    assert_eq!(jobs.len(), 2);
+    let params = |h: &str, answered: &str| -> serde_json::Value {
+        let j = jobs.iter().find(|j| j.info_hash == h).unwrap();
+        assert_eq!(j.kind, "graduate");
+        assert_eq!(j.id, answered, "the answer names the job it queued");
+        serde_json::from_str(&j.params).unwrap()
+    };
+    let a = params(&named, &job_named);
+    assert_eq!(a["save_path"], elsewhere.to_str().unwrap());
+    assert_eq!(a["to_engine"], "hoard");
+    assert_eq!(a["from_engine"], "race");
+    assert_eq!(a["to_category"], "pool");
+    let b = params(&by_category, &job_category);
+    assert_eq!(
+        b["save_path"],
+        pool.to_str().unwrap(),
+        "the category's folder"
+    );
+    assert_eq!(b["to_category"], "pool");
+}
+
+// ---------------------------------------------------------------------------
+// The reannounce button
+// ---------------------------------------------------------------------------
+
+use crate::announce::scheduler::{BumpOutcome, BumpReq};
+
+async fn reannounce(s: &TestState, hash: &str) -> (StatusCode, serde_json::Value) {
+    let resp = reannounce_one(
+        State(s.state.clone()),
+        Path(hash.to_string()),
+        RawQuery(None),
+        keyed(KEY),
+    )
+    .await;
+    let code = resp.status();
+    (code, body_json(resp).await)
+}
+
+/// What the scheduler would answer: one reply per request, as scripted, and
+/// the requests it was handed.
+fn scheduler_answering(
+    s: &TestState,
+    replies: Vec<BumpOutcome>,
+) -> std::sync::Arc<std::sync::Mutex<Vec<(String, bool)>>> {
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<BumpReq>(8);
+    s.engines.get("hoard").unwrap().bump.set(tx).ok().unwrap();
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let log = seen.clone();
+    tokio::spawn(async move {
+        let mut replies = replies.into_iter();
+        while let Some(req) = rx.recv().await {
+            log.lock()
+                .unwrap()
+                .push((req.info_hash.clone(), req.forced));
+            if let (Some(o), Some(reply)) = (replies.next(), req.reply) {
+                let _ = reply.send(o);
+            }
+        }
+    });
+    seen
+}
+
+/// ⭐ What the button says is what the scheduler said, not that the message
+/// was sent: bumped, already announcing, in cooldown (with the wait, rounded
+/// up), and not on the network at all.
+#[tokio::test]
+async fn the_reannounce_button_says_what_the_scheduler_answered() {
+    let s = st("reann", "");
+    let (hash, _) = seed(&s, "hoard", "ra", "", 0);
+    let upper = hash.to_uppercase();
+
+    let (code, v) = reannounce(&s, &"0".repeat(40)).await;
+    assert_eq!(code, StatusCode::NOT_FOUND, "{v}");
+    let (code, v) = reannounce(&s, &hash).await;
+    assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE, "{v}");
+    assert_eq!(v["error"], "engine is not announcing");
+
+    let seen = scheduler_answering(
+        &s,
+        vec![
+            BumpOutcome::Bumped,
+            BumpOutcome::InFlight,
+            BumpOutcome::Cooldown {
+                retry_in: std::time::Duration::from_secs(30),
+            },
+        ],
+    );
+    let (code, v) = reannounce(&s, &upper).await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    assert_eq!(
+        v,
+        serde_json::json!({"status": "ok", "engine": "hoard", "bumped": true})
+    );
+    let (code, v) = reannounce(&s, &hash).await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    assert_eq!(
+        v,
+        serde_json::json!({"status": "in_flight", "engine": "hoard", "bumped": false})
+    );
+    let (code, v) = reannounce(&s, &hash).await;
+    assert_eq!(code, StatusCode::TOO_MANY_REQUESTS, "{v}");
+    assert_eq!(
+        v,
+        serde_json::json!({
+            "status": "cooldown", "engine": "hoard", "bumped": false, "retry_after_secs": 31
+        })
+    );
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![
+            (hash.clone(), true),
+            (hash.clone(), true),
+            (hash.clone(), true)
+        ],
+        "a hand-pressed announce is forced, and the hash is lower case"
+    );
+}
+
+/// A scheduler that does not answer in time is "queued", one that went away
+/// is "not announcing", and a queue that is full refuses the click.
+#[tokio::test(start_paused = true)]
+async fn a_reannounce_nobody_answered_is_queued_dropped_or_refused() {
+    let s = st("reann-silent", "");
+    let (hash, _) = seed(&s, "hoard", "rb", "", 0);
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<BumpReq>(1);
+    s.engines.get("hoard").unwrap().bump.set(tx).ok().unwrap();
+
+    // Nobody reads: the first fills the queue's one place and waits out the
+    // five seconds, the second finds it full.
+    let (code, v) = reannounce(&s, &hash).await;
+    assert_eq!(code, StatusCode::ACCEPTED, "{v}");
+    assert_eq!(
+        v,
+        serde_json::json!({"status": "queued", "engine": "hoard", "bumped": false})
+    );
+    let (code, v) = reannounce(&s, &hash).await;
+    assert_eq!(code, StatusCode::TOO_MANY_REQUESTS, "{v}");
+    assert_eq!(v["error"], "announce queue is busy, try again");
+
+    // The scheduler wakes up and drops every request without a word.
+    tokio::spawn(async move { while rx.recv().await.is_some() {} });
+    tokio::task::yield_now().await;
+    let (code, v) = reannounce(&s, &hash).await;
+    assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE, "{v}");
+    assert_eq!(v["error"], "engine is not announcing");
+}
+
+// ---------------------------------------------------------------------------
+// The add that the race disk cannot hold
+// ---------------------------------------------------------------------------
+
+/// ⭐ Refused BEFORE anything is written, with the numbers, when what the disk
+/// has left after what is promised and the reserve is less than the torrent;
+/// only a race engine is guarded, and only when the operator switched it on.
+#[test]
+fn a_race_the_disk_cannot_hold_is_refused_before_a_file_is_written() {
+    let full = "\n[race_drain]\nadd_block_enabled = true\nreserve_free_gb = 100000000\n";
+    let add = |s: &TestState, name: &str, engine: &str| {
+        let dir = s.dir.join("incoming");
+        add_torrent_bytes(
+            &s.state,
+            &torrent_bytes(name),
+            "",
+            dir.to_str().unwrap(),
+            "",
+            true,
+            true,
+            engine,
+        )
+    };
+
+    let s = st("admit-full", full);
+    let err = add(&s, "aa", "race").expect_err("the reserve is more than any disk");
+    assert!(err.starts_with("race disk full: "), "{err}");
+    assert!(err.contains(", 100000000 GB reserved; "), "{err}");
+    assert!(err.ends_with("this torrent needs 0 GB"), "{err}");
+    assert!(manager(&s, "race").all().is_empty(), "nothing was added");
+    assert!(
+        s.store
+            .read()
+            .unwrap()
+            .all_hashes("race")
+            .unwrap()
+            .is_empty(),
+        "nor stored"
+    );
+    add(&s, "ab", "hoard").expect("the hoard is not the race disk's business");
+
+    let off = st("admit-off", "\n[race_drain]\nreserve_free_gb = 100000000\n");
+    add(&off, "ac", "race").expect("switched off: no refusal");
+    let roomy = st("admit-roomy", "\n[race_drain]\nadd_block_enabled = true\n");
+    add(&roomy, "ad", "race").expect("no reserve: the disk holds 16 KiB");
+}
