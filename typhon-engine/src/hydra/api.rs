@@ -20854,6 +20854,10 @@ mod api_access_tests;
 mod api_rename_tests;
 
 #[cfg(test)]
+#[path = "api_lot6_tests.rs"]
+mod api_lot6_tests;
+
+#[cfg(test)]
 mod event_stream_tests {
     use super::testing::*;
     use super::*;
