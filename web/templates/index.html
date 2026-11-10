@@ -1043,7 +1043,7 @@
                 <div class="card-body">
                     <div class="cat-form-grid">
                         <div class="form-group">
-                            <label>Host <span class="sr-desc">as shown in the Tracker column; passkey and IP family also cover its subdomains</span></label>
+                            <label>Host <span class="sr-desc">as shown in the Tracker column; passkey and IP family also cover its subdomains. Changed from Edit, Save moves every torrent of this tracker to the new host, passkey and path kept</span></label>
                             <input type="text" id="trk-host" placeholder="tracker.example.net" autocomplete="off">
                         </div>
                         <div class="form-group">
@@ -1069,17 +1069,10 @@
                         <button class="btn-cancel" onclick="hideTrackerForm()">Cancel</button>
                     </div>
                     <div id="trk-result" class="result-msg"></div>
-                    <div class="cat-form-grid" style="margin-top:16px">
-                        <div class="form-group">
-                            <label>New host <span class="sr-desc">the tracker changed its domain: every torrent announcing to the host above is moved to this one, keeping its passkey, path and port (a port typed here replaces it). Its passkey, IP family, minimum seed, mute and hide settings follow.</span></label>
-                            <input type="text" id="trk-newhost" placeholder="new.tracker.example.net" autocomplete="off">
-                        </div>
-                    </div>
-                    <div class="cat-form-actions">
-                        <button class="btn-small" id="trk-move-btn" onclick="moveTrackerTorrents()">Move torrents</button>
-                        <button class="btn-small btn-danger" id="trk-move-cancel" style="display:none" onclick="cancelTrackerMove()">Cancel move</button>
-                    </div>
                     <div id="trk-move-status" class="result-msg"></div>
+                    <div class="cat-form-actions" id="trk-move-actions" style="display:none">
+                        <button class="btn-small btn-danger" id="trk-move-cancel" onclick="cancelTrackerMove()">Cancel move</button>
+                    </div>
                 </div>
             </div>
             <!-- Listing trackers from the catalogue turned 15 rows into 91 on a
