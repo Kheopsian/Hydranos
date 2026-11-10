@@ -485,6 +485,73 @@ async fn an_upload_that_cannot_be_added_says_why_and_adds_nothing() {
     assert_eq!(held_count(), 1, "still only the one");
 }
 
+/// ⭐ Which engine an upload's `engine` and `mode` name: an engine by its id
+/// first, a mode by the engine called after it, and only then by any engine
+/// that has the role. A node that renamed its roles gets the engine whose role
+/// it is, never one that merely carries the name.
+#[test]
+fn a_mode_names_the_engine_called_after_it_then_any_engine_with_the_role() {
+    let engine = |s: &TestState, id: &str, mode: &str| add_target_engine(&s.state, id, mode);
+
+    let s = st("mode-default", "");
+    assert_eq!(engine(&s, "", "race"), Ok("race".into()));
+    assert_eq!(engine(&s, "", "hoard"), Ok("hoard".into()));
+    assert_eq!(
+        engine(&s, "", " HoArD "),
+        Ok("hoard".into()),
+        "trimmed, any case"
+    );
+    assert_eq!(
+        engine(&s, "", ""),
+        Ok(String::new()),
+        "the category decides"
+    );
+    assert_eq!(
+        engine(&s, "", "cold"),
+        Err("mode must be race or hoard, not \"cold\"".into())
+    );
+    assert_eq!(
+        engine(&s, " hoard ", "race"),
+        Ok("hoard".into()),
+        "an id wins over a mode"
+    );
+    assert_eq!(engine(&s, "ghost", "race"), Err("no engine ghost".into()));
+
+    let extra = st(
+        "mode-extra",
+        "\n[[engine]]\nengine_id = \"vpn1\"\nrole = \"race\"\n[engine.session]\nlisten_port = 26981\n",
+    );
+    assert_eq!(engine(&extra, "", "race"), Ok("race".into()), "not vpn1");
+    assert_eq!(engine(&extra, "vpn1", ""), Ok("vpn1".into()));
+
+    // `race` is now a hoard-role engine: nothing is called after the race role,
+    // and the one engine that has it is named by its role.
+    let swapped = st(
+        "mode-swapped",
+        "\n[[engine]]\nengine_id = \"race\"\nrole = \"hoard\"\n[engine.session]\nlisten_port = 26982\n",
+    );
+    assert_eq!(
+        engine(&swapped, "", "hoard"),
+        Ok("hoard".into()),
+        "the one called hoard"
+    );
+    assert_eq!(
+        engine(&swapped, "", "race"),
+        Err("no engine has the race role".into()),
+        "an engine named race that is not one"
+    );
+    let fallback = st(
+        "mode-fallback",
+        "\n[[engine]]\nengine_id = \"race\"\nrole = \"hoard\"\n[engine.session]\nlisten_port = 26983\n\
+         [[engine]]\nengine_id = \"vpn9\"\nrole = \"race\"\n[engine.session]\nlisten_port = 26984\n",
+    );
+    assert_eq!(
+        engine(&fallback, "", "race"),
+        Ok("vpn9".into()),
+        "by its role"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // What a category rename carries
 // ---------------------------------------------------------------------------
