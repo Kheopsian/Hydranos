@@ -2153,6 +2153,13 @@ mod tests {
         let mgr = s.state.engines.get("hoard").unwrap().manager.clone();
         let t = mgr.get(&crate::store::hex20(&b).unwrap()).unwrap();
         assert!(t.seed_mode && t.is_paused.load(SeqCst));
+        // Vouched for, and not complete as far as its status says: the voucher
+        // is what lets it through, not what it has.
+        t.status.store(
+            typhon_engine::torrent::meta::TorrentStatus::Downloading as u8,
+            SeqCst,
+        );
+        assert!(!crate::workers::holds_everything(&t));
 
         guarded_start(&s.state, "hoard", &t).unwrap();
 
