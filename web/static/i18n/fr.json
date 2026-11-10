@@ -1182,5 +1182,6 @@
   "No torrent announces to {host}.": "Aucun torrent n'annonce à {host}.",
   "Move torrents to a new host": "Déplacer les torrents vers un nouvel hôte",
   "Move {n} torrents from {from} to {to}? Each keeps its passkey and path. This runs in the background and can take several minutes.": "Déplacer {n} torrents de {from} vers {to} ? Chacun garde sa passkey et son chemin. Cela s'exécute en arrière-plan et peut prendre plusieurs minutes.",
-  "Move started.": "Déplacement lancé."
+  "Move started.": "Déplacement lancé.",
+  "{done} / {total} torrents": "{done} / {total} torrents"
 }

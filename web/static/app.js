@@ -10866,7 +10866,10 @@ async function loadJobs() {
         const progressCell = j.state === "failed"
             ? `<td class="job-error">${esc(j.error)}</td>`
             : `<td><div class="progress-bar"><div class="progress-fill${running ? " downloading" : ""}" style="width:${pct.toFixed(1)}%"></div></div>` +
-              `<div class="progress-text">${pct.toFixed(1)}% ${j.total_bytes ? "(" + formatBytes(j.progress_bytes) + " / " + formatBytes(j.total_bytes) + ")" : ""}</div></td>`;
+              `<div class="progress-text">${pct.toFixed(1)}% ${!j.total_bytes ? "" : j.type === "tracker_rehost"
+                  // A tracker host move counts torrents, not bytes.
+                  ? "(" + t("{done} / {total} torrents", { done: j.progress_bytes, total: j.total_bytes }) + ")"
+                  : "(" + formatBytes(j.progress_bytes) + " / " + formatBytes(j.total_bytes) + ")"}</div></td>`;
         const action = running
             ? `<td><button class="btn btn-small" data-id="${esc(j.id)}" onclick="cancelJob(this.dataset.id)">${t("Cancel")}</button></td>`
             : "<td></td>";
