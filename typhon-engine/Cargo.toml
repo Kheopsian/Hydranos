@@ -87,7 +87,7 @@ parking_lot = "0.12"
 # the system library, for the same reason sha1-ring is preferred over the
 # OpenSSL-backed hash above: a release tarball must not depend on whatever
 # libsqlite3 happens to be installed on the host.
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 
 # jemalloc (heap profiling of the Linux leak) and nix are Unix-only; the
 # system allocator is used on Windows.

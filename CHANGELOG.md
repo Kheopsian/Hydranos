@@ -29,6 +29,12 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 - A network failure of an export now says why (`operation timed out`, `Connection refused`, ...) instead of reqwest's bare `error sending request for url`, in the failure list and the log.
 - A 409 from qBittorrent is no longer always labelled "no metadata yet": the failure shows qBittorrent's own answer, such as `Unable to export torrent file. Error: a piece layer is invalid` for some hybrid torrents on 5.x.
 
+
+### Changed
+
+- The SQLite bundled in Hydranos is updated to 3.54 (rusqlite 0.41), which carries the upstream fixes since 3.46. The database files and their format are unchanged.
+
+
 ## v4.8.3 -- edits made during a save no longer get overwritten
 
 ### Fixed

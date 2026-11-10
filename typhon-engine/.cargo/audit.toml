@@ -8,11 +8,4 @@ ignore = [
     # bytes, which have no Drop. The fix is ringbuf 0.5, which librqbit-utp
     # does not accept yet.
     "RUSTSEC-2026-0293",
-    # libsqlite3-sys 0.30.1 (bundled SQLite before 3.54.0), through rusqlite
-    # 0.32: the advisory needs a database and its -wal written by a less
-    # trusted party. Hydranos only opens its own databases, in its data
-    # directory; no import or upload path opens an SQLite file. The fix is
-    # rusqlite 0.41 (libsqlite3-sys 0.39), a bump of the store's driver that
-    # goes through its own bench.
-    "RUSTSEC-2026-0459",
 ]
