@@ -3070,3 +3070,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "mcp_more_tests.rs"]
+mod more_tests;
