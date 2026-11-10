@@ -3186,3 +3186,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "rulesrun_lot5_tests.rs"]
+mod lot5_tests;
