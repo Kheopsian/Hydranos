@@ -20866,6 +20866,10 @@ mod api_listing_tests;
 mod api_policy_tests;
 
 #[cfg(test)]
+#[path = "api_engines_tests.rs"]
+mod api_engines_tests;
+
+#[cfg(test)]
 mod event_stream_tests {
     use super::testing::*;
     use super::*;
