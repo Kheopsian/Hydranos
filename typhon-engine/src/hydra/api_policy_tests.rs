@@ -306,3 +306,75 @@ async fn a_quota_or_a_trim_setting_leaves_the_marks_inherited() {
     assert_eq!(v["trim_after_drain"], false);
     assert!(!crate::volumes::trim_enabled(&s.state, "/q"));
 }
+
+/// ⭐ A TRIM setting sent together with anything else is not "only trim": each
+/// of the other fields is still applied. Sent alone it answers at once, and a
+/// body that names nothing but the volume is a save of the marks, not a trim.
+#[tokio::test]
+async fn a_trim_setting_sent_with_another_field_does_not_swallow_it() {
+    let s = state_from(
+        "policy-volume-trim-with",
+        &format!(
+            "[daemon]\napi_key = \"{KEY}\"\n[race_drain]\nhigh_watermark_pct = 90\nlow_watermark_pct = 80\n"
+        ),
+    );
+    let saved = |id: &str| policy(&s, id);
+
+    // Marks first, so that "inherit" has something to give back.
+    volume(
+        &s,
+        serde_json::json!({"volume": "/t", "enabled": true, "high_watermark": 90, "low_watermark": 80}),
+    )
+    .await;
+    assert!(!saved("/t").inherited);
+
+    let (_, v) = volume(
+        &s,
+        serde_json::json!({"volume": "/t", "trim_after_drain": true, "inherit": true}),
+    )
+    .await;
+    assert_eq!(v["inherited"], true, "{v}");
+    assert!(saved("/t").inherited, "inherit was applied");
+    assert!(crate::volumes::trim_enabled(&s.state, "/t"));
+
+    let (_, v) = volume(
+        &s,
+        serde_json::json!({"volume": "/t", "trim_after_drain": true, "quota_gb": 2}),
+    )
+    .await;
+    assert_eq!(v["quota"], 2_000_000_000u64, "{v}");
+    assert_eq!(
+        crate::volumes::quota_for(&s.state, "/t"),
+        Some(2_000_000_000)
+    );
+
+    let (_, v) = volume(
+        &s,
+        serde_json::json!({"volume": "/t", "trim_after_drain": true, "enabled": false}),
+    )
+    .await;
+    assert_eq!(v["enabled"], false, "{v}");
+    assert!(!saved("/t").enabled);
+
+    let (_, v) = volume(
+        &s,
+        serde_json::json!({"volume": "/t", "trim_after_drain": true, "high_watermark": 95}),
+    )
+    .await;
+    assert_eq!(v["high_watermark"], 95, "{v}");
+    assert_eq!(saved("/t").high, 95);
+
+    let (_, v) = volume(
+        &s,
+        serde_json::json!({"volume": "/t", "trim_after_drain": true, "low_watermark": 50}),
+    )
+    .await;
+    assert_eq!(v["low_watermark"], 50, "{v}");
+    assert_eq!(saved("/t").low, 50);
+
+    // A body that names only the volume saves the marks the volume has.
+    let (_, v) = volume(&s, serde_json::json!({"volume": "/bare"})).await;
+    assert_eq!(v["inherited"], false, "{v}");
+    assert!(v.get("high_watermark").is_some(), "{v}");
+    assert!(!saved("/bare").inherited, "today's marks are now its own");
+}

@@ -1026,3 +1026,46 @@ fn a_race_the_disk_cannot_hold_is_refused_before_a_file_is_written() {
     let roomy = st("admit-roomy", "\n[race_drain]\nadd_block_enabled = true\n");
     add(&roomy, "ad", "race").expect("no reserve: the disk holds 16 KiB");
 }
+
+/// ⭐ What is already promised to downloads in flight counts against the room:
+/// with a quota of exactly two torrents' worth, a second race is admitted; one
+/// byte less and it is refused, because the first has not written its bytes
+/// yet.
+#[test]
+fn what_is_promised_to_downloads_in_flight_counts_against_the_room() {
+    let add_race = |s: &TestState, name: &str| {
+        let dir = s.dir.join("incoming");
+        add_torrent_bytes(
+            &s.state,
+            &torrent_bytes(name),
+            "",
+            dir.to_str().unwrap(),
+            "",
+            true,
+            false,
+            "race",
+        )
+    };
+    for (quota, admitted) in [(2 * SIZE, true), (2 * SIZE - 1, false), (3 * SIZE, true)] {
+        let s = st(
+            &format!("admit-promised-{quota}"),
+            "\n[race_drain]\nadd_block_enabled = true\n",
+        );
+        crate::volumes::save_quota(&s.state, &mount(&s), Some(quota)).unwrap();
+        add_race(&s, "first").expect("the first has the whole quota to itself");
+        assert_eq!(
+            manager(&s, "race").all()[0].meta.total_size,
+            SIZE,
+            "and it has written nothing yet"
+        );
+        let second = add_race(&s, "second");
+        assert_eq!(second.is_ok(), admitted, "quota {quota}: {second:?}");
+        if let Err(e) = second {
+            assert!(e.starts_with("race disk full: "), "{e}");
+        }
+        assert_eq!(
+            manager(&s, "race").all().len(),
+            if admitted { 2 } else { 1 }
+        );
+    }
+}
