@@ -3092,6 +3092,50 @@ mod decision_tests {
         assert!(hoard.get(&ih).is_some(), "and untouched in hoard");
     }
 
+    /// A drain that leaves torrents behind because the target already holds
+    /// them says so once, with each category and how many; a drain that left
+    /// nothing for that reason is silent about it.
+    #[test]
+    fn a_drain_blocked_by_a_target_that_holds_the_torrents_names_the_categories() {
+        let log = capture();
+        let s = graduation_state("dec-drain-held-log", "72", "hoard");
+        let mgr = engine_manager(&s, "race");
+        let elsewhere = s.dir.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        for n in ["ma", "mb"] {
+            put(&s, "race", n, "ssd", TRACKER, 3600);
+            engine_manager(&s, "hoard")
+                .add_torrent_bytes(&torrent_bytes(n), elsewhere.to_str().unwrap(), true, true)
+                .unwrap();
+        }
+        let v = volume_on(&s, NO_SUCH_MOUNT, 100_000, 99_000, 80);
+        let out = drain_once(&s.state, &mgr, &v, &s.cfg(), "race");
+        assert_eq!((out.deleted, out.graduated, out.stuck), (0, 0, 2));
+        let said = lines(&log, "the target engine already holds these torrents");
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(
+            said[0].starts_with("WARN") && said[0].contains("categories=ssd x2"),
+            "{said:?}"
+        );
+
+        // Nothing held by the target: the pass graduates it and says nothing of the kind.
+        let s = graduation_state("dec-drain-held-log-none", "72", "hoard");
+        put(&s, "race", "mc", "ssd", TRACKER, 3600);
+        let out = drain_once(
+            &s.state,
+            &engine_manager(&s, "race"),
+            &volume_on(&s, NO_SUCH_MOUNT, 100_000, 99_000, 80),
+            &s.cfg(),
+            "race",
+        );
+        assert_eq!((out.graduated, out.stuck), (1, 0));
+        assert_eq!(
+            lines(&log, "the target engine already holds these torrents").len(),
+            1,
+            "still only the first pass's line"
+        );
+    }
+
     /// Mixed fates in one pass: the one that has paid is deleted, the one that
     /// has not graduates.
     #[test]
