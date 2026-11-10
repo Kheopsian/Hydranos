@@ -1984,6 +1984,144 @@ mod tests {
         assert!(!ta.held_for_proof(), "still held after the proof");
     }
 
+    /// Start and Recheck on an engine this node does not host say which one
+    /// they could not find, and touch nothing.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn start_and_recheck_name_the_engine_they_cannot_find() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let s = crate::api::testing::state("pathclaim-no-engine");
+        let dir = s.dir.join("d");
+        std::fs::create_dir_all(&dir).unwrap();
+        let h = add(
+            &s,
+            &torrent_over("Solo", &[("a.bin", &[3u8; 20_000])], 16384),
+            &dir,
+            true,
+            true,
+        )
+        .unwrap();
+        let mgr = s.state.engines.get("hoard").unwrap().manager.clone();
+        let t = mgr.get(&crate::store::hex20(&h).unwrap()).unwrap();
+
+        assert_eq!(
+            guarded_start(&s.state, "ghost", &t),
+            Err("no engine ghost".to_string())
+        );
+        assert_eq!(
+            guarded_recheck(&s.state, "ghost", &t),
+            Err("no engine ghost".to_string())
+        );
+        assert!(t.is_paused.load(SeqCst), "it was not started");
+        assert!(!t.rechecking.load(SeqCst), "nor rechecked");
+    }
+
+    /// A torrent whose files nobody else names starts at once, and so does a
+    /// cross-seed over the very same bytes: there is nothing to prove.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_start_with_nothing_shared_or_only_identical_bytes_goes_straight_through() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let s = crate::api::testing::state_from(
+            "pathclaim-start-clear",
+            "[dedup]\npath_collision = \"legacy\"\n",
+        );
+        let dir = s.dir.join("d");
+        std::fs::create_dir_all(dir.join("P")).unwrap();
+        std::fs::write(dir.join("P").join("x.nfo"), b"the first notes!").unwrap();
+        let mgr = s.state.engines.get("hoard").unwrap().manager.clone();
+        let solo = add(
+            &s,
+            &torrent_over("Q", &[("y.nfo", b"sixteen bytes!!!")], 16384),
+            &dir,
+            true,
+            true,
+        )
+        .unwrap();
+        let t = mgr.get(&crate::store::hex20(&solo).unwrap()).unwrap();
+        assert!(t.is_paused.load(SeqCst));
+        guarded_start(&s.state, "hoard", &t).unwrap();
+        assert!(!t.is_paused.load(SeqCst), "started");
+        assert!(
+            !recent().iter().any(|e| e.info_hash == solo),
+            "no proof was run for it"
+        );
+
+        let first = add(
+            &s,
+            &torrent_over("P", &[("x.nfo", b"the first notes!")], 16384),
+            &dir,
+            true,
+            true,
+        )
+        .unwrap();
+        // The same bytes in a torrent of another info hash (a private flag):
+        // a cross-seed.
+        let mut twin = torrent_over("P", &[("x.nfo", b"the first notes!")], 16384);
+        let end = twin.len() - 2;
+        twin.splice(end..end, b"7:privatei1e".iter().copied());
+        let second = add(&s, &twin, &dir, true, true).unwrap();
+        assert_ne!(first, second, "two torrents");
+        let t2 = mgr.get(&crate::store::hex20(&second).unwrap()).unwrap();
+        guarded_start(&s.state, "hoard", &t2).unwrap();
+        assert!(!t2.is_paused.load(SeqCst), "identical bytes start at once");
+        assert!(!recent().iter().any(|e| e.info_hash == second));
+    }
+
+    /// ⭐ Start on a torrent whose file another torrent names with other
+    /// bytes does not start it: the proof runs first, fails, and the torrent
+    /// stays stopped, saying why. The file is not written.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_start_over_a_file_with_other_bytes_is_held_and_writes_nothing() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let s = crate::api::testing::state_from(
+            "pathclaim-start-held",
+            "[dedup]\npath_collision = \"legacy\"\n",
+        );
+        let dir = s.dir.join("d");
+        std::fs::create_dir_all(dir.join("P")).unwrap();
+        std::fs::write(dir.join("P").join("x.nfo"), b"the first notes!").unwrap();
+        add(
+            &s,
+            &torrent_over("P", &[("x.nfo", b"the first notes!")], 16384),
+            &dir,
+            true,
+            true,
+        )
+        .unwrap();
+        let b = add(
+            &s,
+            &torrent_over("P", &[("x.nfo", b"other notes, 16B")], 16384),
+            &dir,
+            true,
+            // Not vouched for: a torrent added in seed mode starts at once.
+            false,
+        )
+        .unwrap();
+        let mgr = s.state.engines.get("hoard").unwrap().manager.clone();
+        let t = mgr.get(&crate::store::hex20(&b).unwrap()).unwrap();
+
+        guarded_start(&s.state, "hoard", &t).unwrap();
+
+        assert!(t.is_paused.load(SeqCst), "it was not started");
+        assert!(
+            recent()
+                .iter()
+                .any(|e| e.info_hash == b && e.action == "held"),
+            "{:?}",
+            recent()
+        );
+        assert!(!t.held_for_proof(), "the hold is lifted once it has ruled");
+        assert_eq!(
+            std::fs::read(dir.join("P").join("x.nfo")).unwrap(),
+            b"the first notes!",
+            "the other torrent's file is as it was"
+        );
+        let store = s.state.store.lock().unwrap();
+        assert!(
+            store.paused_hashes("hoard").unwrap().contains(&b),
+            "stopped in the store too"
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn a_second_release_under_the_same_name_gets_its_own_folder() {
         // The production case: one folder name, one file name, two encodes.
