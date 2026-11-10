@@ -2163,6 +2163,36 @@ mod tests {
                 .any(|e| e.info_hash == b && e.action == "held"),
             "no proof was asked for"
         );
+
+        // The same for a torrent that was not vouched for but holds every byte
+        // (it finished downloading): nothing to fetch, so nothing to overwrite.
+        // Straight into the engine: the API's add would start a recheck of its own.
+        let (ihc, _) = mgr
+            .add_torrent_bytes(
+                &torrent_over("V", &[("v.nfo", b"vouch third note!")], 16384),
+                &dir.to_string_lossy(),
+                true,
+                false,
+            )
+            .unwrap();
+        let c = typhon_engine::torrent::hex_encode(&ihc);
+        let tc = mgr.get(&ihc).unwrap();
+        assert!(!tc.seed_mode);
+        tc.status.store(
+            typhon_engine::torrent::meta::TorrentStatus::Seeding as u8,
+            SeqCst,
+        );
+        guarded_start(&s.state, "hoard", &tc).unwrap();
+        assert!(
+            !tc.is_paused.load(SeqCst),
+            "a complete torrent starts at once"
+        );
+        assert!(
+            !recent()
+                .iter()
+                .any(|e| e.info_hash == c && e.action == "held"),
+            "and asks for no proof"
+        );
     }
 
     /// A Start asked while a job is already proving this torrent's files is,

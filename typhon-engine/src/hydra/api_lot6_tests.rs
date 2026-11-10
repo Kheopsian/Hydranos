@@ -377,6 +377,7 @@ async fn an_upload_lands_where_it_says_with_what_it_says() {
     assert!(!t.seed_mode, "the data was not declared good");
     let store = s.store.lock().unwrap();
     assert_eq!(store.category_of(&hash, "hoard").unwrap(), "films");
+    assert_eq!(store.tags_of(&hash), ["a", "b"], "the tags it was given");
 }
 
 /// The other spellings clients use for the same fields: `file`, `save_path`,
