@@ -197,7 +197,7 @@ async fn a_volumes_marks_are_saved_kept_and_given_back() {
     .await;
     assert_eq!(v["status"], "ok");
     assert_eq!(v["inherited"], true);
-    assert_eq!(policy(&s, "/mnt/ssd").inherited, true);
+    assert!(policy(&s, "/mnt/ssd").inherited);
     assert_eq!(policy(&s, "/mnt/ssd").high, inherited.high);
 }
 

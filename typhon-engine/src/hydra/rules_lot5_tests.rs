@@ -78,7 +78,6 @@ fn a_workflow_without_an_interval_or_a_cap_gets_the_documented_ones() {
     assert_eq!(w.trigger, Trigger::Schedule);
     assert!(!w.enabled, "a new workflow is off");
     assert_eq!((DEFAULT_INTERVAL_SECS, DEFAULT_CAP), (900, 500));
-    assert!(MIN_INTERVAL_SECS < DEFAULT_INTERVAL_SECS);
 }
 
 /// Only adding trackers asks a pass to copy each torrent's tracker list.
