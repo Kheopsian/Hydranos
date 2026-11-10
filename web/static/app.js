@@ -9236,7 +9236,8 @@ async function saveTracker() {
     // A port typed with a new host goes into the announce URLs; the settings
     // are keyed by the host alone.
     const host = typed.replace(/:\d+$/, "");
-    if (_trkEditing && typed !== _trkEditing) {
+    // Host names are not case-sensitive: a change of case alone moves nothing.
+    if (_trkEditing && typed.toLowerCase() !== _trkEditing.toLowerCase()) {
         if (!await moveTrackerTorrents(_trkEditing, typed)) return;
         _trkEditing = host;
     }

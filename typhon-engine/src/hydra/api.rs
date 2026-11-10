@@ -26784,6 +26784,57 @@ mod write_path_tests {
         assert_eq!(cfg.announce_passkeys["new.example"], "SECRET");
     }
 
+    /// The new host may already be covered by a parent domain's key with
+    /// ANOTHER passkey. Leaving it at that would announce the moved torrents
+    /// with the parent's passkey once the old host's key is removed: the old
+    /// host's own value is written for the new host instead.
+    #[tokio::test]
+    async fn moving_onto_a_parent_with_another_passkey_keeps_the_torrents_own() {
+        let s = state_from(
+            "rehost-other-parent",
+            &format!(
+                "[daemon]\napi_key = \"{KEY}\"\n\
+                 [announce_passkeys]\n\"tracker.example\" = \"OWN\"\n\"parent.example\" = \"PARENT\"\n"
+            ),
+        );
+        let (h, _) = add_torrent_bytes(
+            &s.state,
+            &torrent_bytes("own"),
+            "",
+            "/tmp",
+            "",
+            true,
+            true,
+            "race",
+        )
+        .expect("added");
+        let r = super::post_torrent_trackers(
+            State(s.state.clone()),
+            axum::extract::Path(h.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            r#"{"op":"set","tiers":[["https://tracker.example/announce"]]}"#.to_string(),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+
+        let (code, v) = rehost_call(
+            &s,
+            r#"{"from":"tracker.example","to":"new.parent.example"}"#,
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK, "{v}");
+        run_rehost_job(&s).expect("the job ends well");
+        let cfg = s.state.cfg();
+        assert_eq!(
+            cfg.announce_passkeys
+                .get("new.parent.example")
+                .map(String::as_str),
+            Some("OWN")
+        );
+        assert_eq!(cfg.announce_passkeys["parent.example"], "PARENT");
+    }
+
     /// Moving a tracker host: the count first, then a job that rewrites every
     /// torrent on it, keeps the edit across a restart, carries the host's
     /// settings to the new one, and refuses a second move while one runs.

@@ -106,9 +106,12 @@ fn applying_key<'a>(
     }
 }
 
-/// Give `to` the settings that apply to `from` and that nothing gives `to`
-/// yet, so a rewritten torrent keeps its passkey, IP family, minimum seed,
-/// mute and hide -- including a value it only had through a parent domain.
+/// Give `to` the settings that apply to `from`, so a rewritten torrent keeps
+/// its passkey, IP family, minimum seed, mute and hide -- including a value it
+/// only had through a parent domain. A key written for `to` itself is the
+/// operator's and is kept; a value `to` would only get through a parent
+/// domain is not enough when it differs, since the torrents would announce
+/// with it once the old host's key is gone.
 fn copy_settings(state: &AppState, from: &str, to_host: &str) -> bool {
     let cfg = state.cfg();
     let mut ok = true;
@@ -116,7 +119,9 @@ fn copy_settings(state: &AppState, from: &str, to_host: &str) -> bool {
         let Some(value) = applying_key(section, map, from).and_then(|k| map.get(k)) else {
             continue;
         };
-        if value.is_empty() || applying_key(section, map, to_host).is_some() {
+        let already = applying_key(section, map, to_host)
+            .is_some_and(|k| k.eq_ignore_ascii_case(to_host) || map.get(k) == Some(value));
+        if value.is_empty() || already {
             continue;
         }
         ok &= crate::api::set_host_entry(state, section, to_host, value);
@@ -161,7 +166,15 @@ pub async fn post_rehost(
         return error(StatusCode::BAD_REQUEST, &e);
     }
     let (to_host, _) = crate::trackeredit::parse_new_host(&req.to).expect("checked above");
-    let torrents = on_host(&state, &from).len();
+    // A walk of the whole catalogue (about a second at a million torrents):
+    // off the async workers.
+    let torrents = {
+        let (state, from) = (state.clone(), from.clone());
+        match tokio::task::spawn_blocking(move || on_host(&state, &from).len()).await {
+            Ok(n) => n,
+            Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+        }
+    };
     if req.dry_run {
         return Json(json!({"dry_run": true, "torrents": torrents})).into_response();
     }
