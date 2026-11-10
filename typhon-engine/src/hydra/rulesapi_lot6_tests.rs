@@ -187,12 +187,18 @@ async fn a_dry_run_that_matches_nothing_says_so_in_the_activity() {
     let w = workflow("none", never, delete());
     save(&s, &w, 0);
 
+    let before = crate::store::now_secs();
     let v = run_one(&s.state, &w, true);
 
     assert_eq!(v["would_apply"], 0, "{v}");
     assert_eq!(v["matched"], 0);
     let rows = activity_rows(&s);
     assert_eq!(rows.len(), 1);
+    assert!(
+        rows[0].at >= before && rows[0].at <= crate::store::now_secs(),
+        "dated now, not at the start of time: {}",
+        rows[0].at
+    );
     assert_eq!(
         (
             rows[0].workflow_id.as_str(),

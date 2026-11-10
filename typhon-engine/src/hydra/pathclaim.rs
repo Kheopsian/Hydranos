@@ -2122,6 +2122,49 @@ mod tests {
         );
     }
 
+    /// A torrent added in seed mode is vouched for by whoever added it: Start
+    /// goes straight through, whatever another torrent names the same file.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_start_of_a_torrent_vouched_for_goes_straight_through_whatever_it_shares() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let s = crate::api::testing::state_from(
+            "pathclaim-start-vouched",
+            "[dedup]\npath_collision = \"legacy\"\n",
+        );
+        let dir = s.dir.join("d");
+        std::fs::create_dir_all(dir.join("P")).unwrap();
+        std::fs::write(dir.join("P").join("x.nfo"), b"the first notes!").unwrap();
+        add(
+            &s,
+            &torrent_over("P", &[("x.nfo", b"the first notes!")], 16384),
+            &dir,
+            true,
+            true,
+        )
+        .unwrap();
+        let b = add(
+            &s,
+            &torrent_over("P", &[("x.nfo", b"other notes, 16B")], 16384),
+            &dir,
+            true,
+            true,
+        )
+        .unwrap();
+        let mgr = s.state.engines.get("hoard").unwrap().manager.clone();
+        let t = mgr.get(&crate::store::hex20(&b).unwrap()).unwrap();
+        assert!(t.seed_mode && t.is_paused.load(SeqCst));
+
+        guarded_start(&s.state, "hoard", &t).unwrap();
+
+        assert!(!t.is_paused.load(SeqCst), "started at once");
+        assert!(
+            !recent()
+                .iter()
+                .any(|e| e.info_hash == b && e.action == "held"),
+            "no proof was asked for"
+        );
+    }
+
     /// A Start asked while a job is already proving this torrent's files is,
     /// like a Recheck asked then, nothing to do: the job will release it. Today
     /// `guarded_start` does not look at the hold and runs a second proof over

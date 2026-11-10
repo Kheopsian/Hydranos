@@ -397,3 +397,76 @@ fn a_metainfo_the_engine_refuses_puts_the_files_back_and_says_the_undo_is_incomp
     );
     assert!(!m.dst.join("pair/a").exists());
 }
+
+/// A move with no engine or no folder is refused before anything is looked
+/// up, and says which of the two it lacks as one sentence.
+#[test]
+fn a_move_with_no_engine_or_no_folder_is_refused_before_anything_is_looked_at() {
+    let Some(m) = moving("mvf-no-params", &[("a", 16384)], false, false, "move_data") else {
+        return;
+    };
+    let ask = |engine: &str, save_path: &str| {
+        let mut j = m.job.clone();
+        j.params = serde_json::json!({"engine": engine, "save_path": save_path}).to_string();
+        move_data(&m.s.state, &j)
+    };
+    for (engine, folder) in [("race", ""), ("", "/somewhere"), ("", "")] {
+        assert_eq!(
+            ask(engine, folder),
+            Err("a move needs an engine and a save path".to_string()),
+            "engine {engine:?}, folder {folder:?}"
+        );
+    }
+    assert_eq!(
+        ask("ghost", "/somewhere"),
+        Err("the engine is gone".to_string()),
+        "both given: it goes on to look the engine up"
+    );
+    assert!(bytes_of(m.src.join("pair/a"), 1, 16384));
+    m.still_served_from_the_source();
+}
+
+/// A move on one filesystem renames, and the job counts every file it
+/// renamed as moved: the progress ends at the size of the torrent.
+#[test]
+fn a_rename_move_reports_every_renamed_file_as_progress() {
+    let Some(m) = moving(
+        "mvf-progress",
+        &[("a", 8000), ("b", 16384)],
+        false,
+        false,
+        "move_data",
+    ) else {
+        return;
+    };
+
+    move_data(&m.s.state, &m.job).expect("moved");
+
+    assert!(bytes_of(m.dst.join("pair/a"), 1, 8000));
+    assert!(bytes_of(m.dst.join("pair/b"), 2, 16384));
+    let jobs = m.s.state.store.lock().unwrap().list_jobs(10).unwrap();
+    assert_eq!(jobs[0].progress_bytes, 8000 + 16384);
+}
+
+/// ⭐ A name of the same file already at the destination is not "moved onto":
+/// renaming one name onto another name of the same file does nothing, and the
+/// move does not go on to delete the name it did not move. The old name is a
+/// link somebody else may be reading.
+#[test]
+fn a_move_onto_another_name_of_the_same_file_deletes_neither_name() {
+    let Some(m) = moving("mvf-same-file", &[("a", 16384)], false, false, "move_data") else {
+        return;
+    };
+    std::fs::create_dir_all(m.dst.join("pair")).unwrap();
+    std::fs::hard_link(m.src.join("pair/a"), m.dst.join("pair/a")).unwrap();
+
+    move_data(&m.s.state, &m.job).expect("moved");
+
+    assert!(bytes_of(m.dst.join("pair/a"), 1, 16384), "the new place");
+    assert!(
+        bytes_of(m.src.join("pair/a"), 1, 16384),
+        "the other name of the file is still there"
+    );
+    let t = m.engine().get(&m.ih).expect("still in race");
+    assert_eq!(*t.save_path.read(), m.dst);
+}
