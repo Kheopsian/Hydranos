@@ -128,7 +128,8 @@ pub struct StartupIssue {
     pub detail: String,
 }
 
-/// The issues are listed up to this many; the count is not capped.
+/// The issues are listed up to this many per group (skipped rows, and every
+/// other kind apart); the count is not capped.
 pub const MAX_STARTUP_ISSUES: usize = 500;
 
 // A one-off shape; naming it would add an alias that nothing else uses.
@@ -1782,7 +1783,17 @@ impl TorrentManager {
     fn note_startup_issue(&self, info_hash: &str, kind: &'static str, detail: String) {
         if let Ok(mut g) = self.startup_issues.lock() {
             g.0 += 1;
-            if g.1.len() < MAX_STARTUP_ISSUES {
+            // `resume_skipped` is the bulk kind (a state row whose metainfo is
+            // absent: thousands after removals that left their row). It may
+            // use the list only up to the cap; every other kind -- a refused
+            // or unreadable record, a database in trouble -- is a torrent
+            // that exists and does not load, and keeps its own room.
+            let listed = if kind == "resume_skipped" {
+                g.1.iter().filter(|i| i.kind == "resume_skipped").count()
+            } else {
+                g.1.iter().filter(|i| i.kind != "resume_skipped").count()
+            };
+            if listed < MAX_STARTUP_ISSUES {
                 g.1.push(StartupIssue {
                     info_hash: info_hash.to_string(),
                     kind,
@@ -2331,7 +2342,10 @@ impl TorrentManager {
 
     fn save_json_fallback(&self, hashes: &[InfoHash]) {
         for ih in hashes {
-            if let Some(t) = self.get(ih).filter(|t| !t.is_removed.load(Ordering::Relaxed)) {
+            if let Some(t) = self
+                .get(ih)
+                .filter(|t| !t.is_removed.load(Ordering::Relaxed))
+            {
                 fastresume::save(&self.resume_dir, ih, &Self::build_resume_data(&t));
             }
         }
@@ -5090,6 +5104,26 @@ mod manager_tests {
             stored(&mgr, &ih).trackers,
             new,
             "and a later sweep keeps it"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Rows whose metainfo is absent can be thousands (a state row left
+    /// behind by a removal); they fill the list. A record the loader REFUSED
+    /// holds a row of the store and a torrent that never loads: it must still
+    /// be listed, not only counted.
+    #[test]
+    fn a_refused_record_is_listed_even_when_skipped_rows_fill_the_list() {
+        let (mgr, root) = manager("issues-cap");
+        for i in 0..(MAX_STARTUP_ISSUES + 50) {
+            mgr.note_startup_issue(&format!("{i:040x}"), "resume_skipped", "no metainfo".into());
+        }
+        mgr.note_startup_issue("ff", "resume_refused", "blob disagrees".into());
+        let (n, issues) = mgr.startup_issues();
+        assert_eq!(n, MAX_STARTUP_ISSUES + 51, "all counted");
+        assert!(
+            issues.iter().any(|i| i.kind == "resume_refused"),
+            "the refused record is listed"
         );
         let _ = std::fs::remove_dir_all(root);
     }
