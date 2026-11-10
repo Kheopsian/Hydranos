@@ -167,6 +167,57 @@ pub struct Qbit {
     backoff: std::time::Duration,
 }
 
+/// How long one request to qBittorrent may take before it counts as lost.
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Why an export failed: the text, and whether qBittorrent answered at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportError {
+    pub message: String,
+    /// The request never got an answer (timeout, refused, reset, unreachable).
+    /// A 409 or a 500 is an answer, so qBittorrent is up: not this.
+    pub network: bool,
+}
+
+impl std::fmt::Display for ExportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+/// An error and everything under it: `A: B: C`.
+///
+/// reqwest's own message is "error sending request for url (...)" and nothing
+/// more; whether that was a timeout, a refusal or a reset is in the sources.
+/// A source whose text the parent already carries is not repeated.
+fn error_chain(e: &(dyn std::error::Error + 'static)) -> String {
+    let mut out = e.to_string();
+    let mut cur = e.source();
+    while let Some(s) = cur {
+        let t = s.to_string();
+        if !t.is_empty() && !out.contains(&t) {
+            out.push_str(": ");
+            out.push_str(&t);
+        }
+        cur = s.source();
+    }
+    out
+}
+
+/// Longest stretch of qBittorrent's own answer kept in an error.
+const BODY_SHOWN: usize = 200;
+
+/// qBittorrent's answer body, on one line and capped.
+fn trimmed_body(body: &str) -> String {
+    let one: String = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    if one.chars().count() > BODY_SHOWN {
+        let cut: String = one.chars().take(BODY_SHOWN).collect();
+        format!("{cut}...")
+    } else {
+        one
+    }
+}
+
 /// Attempts at one `.torrent` before the torrent is counted as failed.
 const EXPORT_ATTEMPTS: u32 = 4;
 
@@ -210,6 +261,14 @@ impl Qbit {
     /// it is a CSRF guard, and without the header the answer is "Fails." with
     /// a 200, which reads as success to anything that only checks the status.
     pub async fn login(creds: &QbitCreds) -> Result<Self, String> {
+        Self::login_with_timeout(creds, REQUEST_TIMEOUT).await
+    }
+
+    /// `login` with the per-request timeout chosen by the caller.
+    pub async fn login_with_timeout(
+        creds: &QbitCreds,
+        timeout: std::time::Duration,
+    ) -> Result<Self, String> {
         let base = creds.url.trim().trim_end_matches('/').to_string();
         if base.is_empty() {
             return Err("empty qBittorrent URL".into());
@@ -221,7 +280,7 @@ impl Qbit {
             format!("http://{base}")
         };
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
+            .timeout(timeout)
             .build()
             .map_err(|e| format!("http client: {e}"))?;
         let cookie = Self::authenticate(&client, &base, creds).await?;
@@ -325,8 +384,11 @@ impl Qbit {
     /// restarting, or behind a flaky VPN) drops a few requests, and 4.3 counted
     /// each of those as a torrent that could not be imported. A session that
     /// expired mid-import is renewed rather than failing everything after it.
-    pub async fn export(&self, hash: &str) -> Result<Vec<u8>, String> {
-        let mut last = String::new();
+    pub async fn export(&self, hash: &str) -> Result<Vec<u8>, ExportError> {
+        let mut last = ExportError {
+            message: String::new(),
+            network: false,
+        };
         let mut wait = self.backoff;
         for attempt in 1..=EXPORT_ATTEMPTS {
             let (err, retry) = match self.export_once(hash).await {
@@ -338,7 +400,7 @@ impl Qbit {
                 Retry::Never => return Err(last),
                 Retry::Relogin => {
                     if let Err(e) = self.relogin().await {
-                        last = format!("{last}; login again: {e}");
+                        last.message = format!("{}; login again: {e}", last.message);
                     }
                 }
                 Retry::Later => {}
@@ -348,10 +410,23 @@ impl Qbit {
                 wait *= 2;
             }
         }
-        Err(format!("{last} (gave up after {EXPORT_ATTEMPTS} attempts)"))
+        last.message = format!(
+            "{} (gave up after {EXPORT_ATTEMPTS} attempts)",
+            last.message
+        );
+        Err(last)
     }
 
-    async fn export_once(&self, hash: &str) -> Result<Vec<u8>, (String, Retry)> {
+    async fn export_once(&self, hash: &str) -> Result<Vec<u8>, (ExportError, Retry)> {
+        let lost = |what: &str, e: reqwest::Error| {
+            (
+                ExportError {
+                    message: format!("export {hash}{what}: {}", error_chain(&e)),
+                    network: true,
+                },
+                Retry::Later,
+            )
+        };
         let resp = self
             .get(&format!(
                 "/api/v2/torrents/export?hash={}",
@@ -359,23 +434,31 @@ impl Qbit {
             ))
             .send()
             .await
-            .map_err(|e| (format!("export {hash}: {e}"), Retry::Later))?;
+            .map_err(|e| lost("", e))?;
         let status = resp.status().as_u16();
         if !(200..300).contains(&status) {
-            let why = if status == 409 {
-                " (no metadata yet in qBittorrent)"
-            } else {
-                ""
+            // qBittorrent says why in the body: a 409 is "no metadata yet" for
+            // a magnet, but 5.x also answers it for a hybrid torrent whose
+            // piece layer is invalid. Show what it said, not our guess.
+            let body = resp.text().await.unwrap_or_default();
+            let body = trimmed_body(&body);
+            let why = match (status, body.is_empty()) {
+                (_, false) => format!(": {body}"),
+                (409, true) => " (no body; for a magnet this is no metadata yet)".to_string(),
+                (_, true) => String::new(),
             };
             return Err((
-                format!("export {hash}: http {status}{why}"),
+                ExportError {
+                    message: format!("export {hash}: http {status}{why}"),
+                    network: false,
+                },
                 export_retry(status),
             ));
         }
         resp.bytes()
             .await
             .map(|b| b.to_vec())
-            .map_err(|e| (format!("export {hash} body: {e}"), Retry::Later))
+            .map_err(|e| lost(" body", e))
     }
 }
 
@@ -678,7 +761,7 @@ pub async fn run_job(
         let retry_copy = c.clone();
         let bytes = match &c.source {
             Source::Qbit(hash) => match &qbit {
-                Some(q) => q.export(hash).await,
+                Some(q) => q.export(hash).await.map_err(|e| e.message),
                 None => Err("no qBittorrent session".into()),
             },
             Source::File(path) => {
@@ -1489,6 +1572,16 @@ mod qbit_session_tests {
             "flaky" if n <= 2 => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
             "expired" if cookie == "SID=1" => StatusCode::FORBIDDEN.into_response(),
             "magnet" => StatusCode::CONFLICT.into_response(),
+            "hybrid" => (
+                StatusCode::CONFLICT,
+                "Unable to export torrent file. Error: a piece layer is invalid\n",
+            )
+                .into_response(),
+            "novel" => (StatusCode::CONFLICT, "x".repeat(5000)).into_response(),
+            "slow" => {
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                ok
+            }
             "down" => StatusCode::SERVICE_UNAVAILABLE.into_response(),
             _ => ok,
         }
@@ -1541,7 +1634,8 @@ mod qbit_session_tests {
     async fn a_magnet_without_metadata_is_not_asked_again() {
         let (f, q) = fake().await;
         let err = q.export("magnet").await.unwrap_err();
-        assert!(err.contains("no metadata"), "{err}");
+        assert!(err.message.contains("http 409"), "{err}");
+        assert!(!err.network, "qBittorrent answered");
         assert_eq!(calls(&f, "magnet"), 1);
     }
 
@@ -1549,8 +1643,80 @@ mod qbit_session_tests {
     async fn a_client_that_stays_down_fails_after_a_bounded_number_of_tries() {
         let (f, q) = fake().await;
         let err = q.export("down").await.unwrap_err();
-        assert!(err.contains("gave up"), "{err}");
+        assert!(err.message.contains("gave up"), "{err}");
         assert_eq!(calls(&f, "down"), EXPORT_ATTEMPTS as usize);
+    }
+
+    #[tokio::test]
+    async fn a_409_carries_what_qbittorrent_said() {
+        let (_f, q) = fake().await;
+        let err = q.export("hybrid").await.unwrap_err();
+        assert!(
+            err.message.ends_with(
+                "http 409: Unable to export torrent file. Error: a piece layer is invalid"
+            ),
+            "{err}"
+        );
+        assert!(!err.message.contains("no metadata"), "{err}");
+        let long = q.export("novel").await.unwrap_err();
+        assert!(
+            long.message.len() < 300 && long.message.ends_with("..."),
+            "capped: {}",
+            long.message.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_connection_names_its_cause() {
+        let (_f, mut q) = fake().await;
+        // A port nothing listens on: bind one, then drop it.
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        drop(l);
+        q.base = format!("http://127.0.0.1:{port}");
+        let err = q.export("aa").await.unwrap_err();
+        assert!(err.network);
+        assert!(err.message.contains("error sending request"), "{err}");
+        assert!(
+            err.message.to_lowercase().contains("refused"),
+            "the cause must follow: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_timeout_names_its_cause() {
+        let (_f, q) = fake().await;
+        let creds = q.creds().clone();
+        let q = Qbit::login_with_timeout(&creds, std::time::Duration::from_millis(150))
+            .await
+            .unwrap();
+        let err = q.export_once("slow").await.unwrap_err().0;
+        assert!(err.network);
+        assert!(
+            err.message.to_lowercase().contains("timed out"),
+            "the cause must follow: {err}"
+        );
+    }
+
+    #[test]
+    fn a_source_already_in_the_parent_text_is_not_repeated() {
+        #[derive(Debug)]
+        struct E(&'static str, Option<Box<E>>);
+        impl std::fmt::Display for E {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(self.0)
+            }
+        }
+        impl std::error::Error for E {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                self.1.as_deref().map(|e| e as _)
+            }
+        }
+        let e = E(
+            "top: mid",
+            Some(Box::new(E("mid", Some(Box::new(E("root", None)))))),
+        );
+        assert_eq!(error_chain(&e), "top: mid: root");
     }
 
     fn file_cand(name: &str, path: PathBuf) -> Candidate {
