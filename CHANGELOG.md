@@ -21,6 +21,12 @@ decided when the release is cut, by looking at what went in: whoever tags it
 renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 `HYDRANOS_VERSION` in the same commit.
 
+## Unreleased -- tracker errors that read as words
+
+### Fixed
+
+- A tracker error answered with an HTML page (a proxy's `429 Too Many Requests`, a `403` challenge page) was shown as its raw markup, which filled the error and cut off whatever the page actually said. The error now quotes the page's title and first heading, without the one that only repeats the status, or its text when it has neither: `http 429 Too Many Requests [retry-after 60s]` instead of `http 429 Too Many Requests: <html> <head><title>...`. A plain-text answer is quoted as before. The tracker error list will show the new, shorter messages as new entries for the first hour after the upgrade.
+
 ## v4.8.4 -- a tracker that changed its announce format, and a qBittorrent import that stops asking a dead qBittorrent
 
 ### Added

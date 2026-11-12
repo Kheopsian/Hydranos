@@ -775,11 +775,81 @@ async fn http_error(resp: reqwest::Response) -> String {
         .and_then(|v| v.trim().parse::<u64>().ok());
     // 200 characters are at most 800 bytes of UTF-8: nothing past that is read.
     let (body, _) = read_prefix(resp, 800).await.unwrap_or_default();
-    let snip: String = String::from_utf8_lossy(&body).chars().take(200).collect();
+    let text = String::from_utf8_lossy(&body);
+    let status = st.to_string();
+    let snip: String = html_reason(&text, &status)
+        .unwrap_or_else(|| text.trim().to_string())
+        .chars()
+        .take(200)
+        .collect();
+    // A page that only repeats the status ("429 Too Many Requests") says
+    // nothing the status does not.
+    let head = match snip.trim() {
+        s if s.is_empty() || s == status => format!("http {st}"),
+        s => format!("http {st}: {s}"),
+    };
     match retry_after {
-        Some(secs) => format!("http {}: {} [retry-after {}s]", st, snip.trim(), secs),
-        None => format!("http {}: {}", st, snip.trim()),
+        Some(secs) => format!("{head} [retry-after {secs}s]"),
+        None => head,
     }
+}
+
+/// The words of an HTML error page: its `<title>` and its first `<h1>`, each
+/// once and without the ones that only repeat `status`; the page's whole text
+/// when it has neither. `None` when the body is not HTML, so a tracker's
+/// plain-text reason is quoted as it came.
+///
+/// ⚠️ Why: a reverse proxy in front of a tracker answers a 429 or a 502 with
+/// its own page, and quoting that page raw fills the error with markup and
+/// pushes the tracker's actual words past the 200 characters kept. Both the
+/// title and the heading, because a proxy's title is often generic ("Just a
+/// moment...") while the heading carries the reason, or the other way round.
+fn html_reason(body: &str, status: &str) -> Option<String> {
+    let start = body.trim_start();
+    let lower = start.to_ascii_lowercase();
+    if !(lower.starts_with("<!doctype html") || lower.starts_with("<html")) {
+        return None;
+    }
+    // ASCII lowercasing keeps every byte where it was, so an index found in
+    // `lower` cuts `start` at the same place.
+    let inner = |tag: &str| {
+        let open = lower.find(&format!("<{tag}"))?;
+        let from = open + lower[open..].find('>')? + 1;
+        let to = from + lower[from..].find(&format!("</{tag}"))?;
+        Some(words(&start[from..to]))
+    };
+    let parts: Vec<String> = [inner("title"), inner("h1")]
+        .into_iter()
+        .flatten()
+        .collect();
+    if parts.is_empty() {
+        return Some(words(start));
+    }
+    let mut kept: Vec<String> = Vec::new();
+    for p in parts {
+        if !p.is_empty() && p != status && !kept.contains(&p) {
+            kept.push(p);
+        }
+    }
+    Some(kept.join(" - "))
+}
+
+/// The text of an HTML fragment: tags out, whitespace runs folded to one space.
+fn words(html: &str) -> String {
+    let mut out = String::new();
+    let mut in_tag = false;
+    for c in html.chars() {
+        match c {
+            '<' => {
+                in_tag = true;
+                out.push(' ');
+            }
+            '>' => in_tag = false,
+            c if !in_tag => out.push(c),
+            _ => {}
+        }
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Parse one tracker answer. Shared by both families.
@@ -967,6 +1037,66 @@ mod announce_wire_tests {
         assert!(
             e.contains("503") && e.contains("busy xxx"),
             "the start of the body is quoted: {e}"
+        );
+    }
+
+    /// A reverse proxy's HTML page is read for its words: nothing when it only
+    /// repeats the status, its title and heading when they say more, its text
+    /// when it has neither.
+    #[tokio::test]
+    async fn an_html_error_page_is_quoted_by_its_words_not_its_markup() {
+        use axum::http::{header, StatusCode};
+        const NGINX_429: &str = "<html>\r\n<head><title>429 Too Many Requests</title></head>\r\n<body>\r\n<center><h1>429 Too Many Requests</h1></center>\r\n<hr><center>nginx</center>\r\n</body>\r\n</html>\r\n";
+        const BANNED: &str =
+            "<!DOCTYPE html><html><body><p>Client  banned:\n ratio too low</p></body></html>";
+        const CHALLENGE: &str = "<!DOCTYPE html><html><head><title>Just a moment...</title></head><body><h1>Sorry, you have been <b>blocked</b></h1><p>Ray ID 1</p></body></html>";
+        let app = Router::new()
+            .route(
+                "/a",
+                get(|| async {
+                    (
+                        StatusCode::TOO_MANY_REQUESTS,
+                        [
+                            (header::RETRY_AFTER, "60"),
+                            (header::CONTENT_TYPE, "text/html"),
+                        ],
+                        NGINX_429,
+                    )
+                }),
+            )
+            .route("/b", get(|| async { (StatusCode::FORBIDDEN, BANNED) }))
+            .route("/c", get(|| async { (StatusCode::FORBIDDEN, CHALLENGE) }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let ask = |path: &'static str| {
+            let url = format!("http://{addr}/{path}");
+            async move {
+                announce(&url, &[0xABu8; 20], &[0xCDu8; 20], 16371, 0, 0, 0, "")
+                    .await
+                    .expect_err("a refusal is an error")
+            }
+        };
+        assert_eq!(
+            ask("a").await,
+            "http 429 Too Many Requests [retry-after 60s]"
+        );
+        assert_eq!(
+            ask("b").await,
+            "http 403 Forbidden: Client banned: ratio too low"
+        );
+        assert_eq!(
+            ask("c").await,
+            "http 403 Forbidden: Just a moment... - Sorry, you have been blocked",
+            "a generic title does not hide the heading that gives the reason"
+        );
+        assert_eq!(
+            retry_hint(&ask("a").await),
+            Some(RetryHint::After(std::time::Duration::from_secs(60)))
         );
     }
 
