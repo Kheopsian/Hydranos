@@ -51,6 +51,22 @@ pub fn plan(source: &Path, target: &Path) -> std::io::Result<Plan> {
     Ok(Plan::CopyThenDelete { bytes: meta.len() })
 }
 
+/// For a test that needs a second filesystem (/dev/shm) and did not find one:
+/// it FAILS, so a cross-filesystem test cannot pass green without having run.
+/// A machine that truly has none says so with
+/// `HYDRANOS_TEST_ALLOW_NO_SECOND_FS=1`, and the test is then skipped loudly.
+#[cfg(test)]
+pub(crate) fn no_second_filesystem() {
+    if std::env::var_os("HYDRANOS_TEST_ALLOW_NO_SECOND_FS").is_some() {
+        eprintln!("skipped: /dev/shm is not a separate filesystem here (allowed by HYDRANOS_TEST_ALLOW_NO_SECOND_FS)");
+        return;
+    }
+    panic!(
+        "this test needs /dev/shm on another filesystem than the test dir; \
+         set HYDRANOS_TEST_ALLOW_NO_SECOND_FS=1 to skip it on a machine without one"
+    );
+}
+
 /// Whether two paths live on the same device.
 ///
 /// The target usually does not exist yet, so its nearest existing ancestor is

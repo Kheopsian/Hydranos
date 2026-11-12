@@ -1066,7 +1066,7 @@ async fn a_graduation_needs_room_for_exactly_the_bytes_it_copies() {
     let s = st("grad-room", "");
     let shm = std::path::Path::new("/dev/shm");
     if !shm.exists() || crate::jobs::same_filesystem(shm, &s.dir) {
-        eprintln!("skipped: /dev/shm is not a separate filesystem here");
+        crate::jobs::no_second_filesystem();
         return;
     }
     let src = shm.join(format!("hydra-grad-room-{}", std::process::id()));

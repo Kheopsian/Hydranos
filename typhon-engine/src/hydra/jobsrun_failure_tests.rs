@@ -65,8 +65,9 @@ impl Moving {
 }
 
 /// File n holds the byte n + 1. `across`: the files start on /dev/shm, so the
-/// move to the temp dir is a copy; `None` when /dev/shm is not another
-/// filesystem here (then there is no copy to test).
+/// move to the temp dir is a copy. When /dev/shm is not another filesystem
+/// here the test fails (`jobs::no_second_filesystem`); `None` only when
+/// `HYDRANOS_TEST_ALLOW_NO_SECOND_FS` lets it skip.
 fn moving(
     tag: &str,
     files: &[(&str, usize)],
@@ -79,7 +80,7 @@ fn moving(
     let (root, shm) = if across {
         let shm_dir = Path::new("/dev/shm");
         if !shm_dir.exists() || crate::jobs::same_filesystem(shm_dir, &s.dir) {
-            eprintln!("skipped: /dev/shm is not a separate filesystem here");
+            crate::jobs::no_second_filesystem();
             return None;
         }
         let r = shm_dir.join(format!("hydra-mvf-{}-{tag}", std::process::id()));

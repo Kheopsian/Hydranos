@@ -2195,7 +2195,7 @@ mod tests {
     /// Across filesystems a hardlinked file is copied, which breaks the link:
     /// asked first (409), done only with consent. Needs /dev/shm to be another
     /// filesystem than the temp dir, which it is in the build container; where
-    /// it is not, there is no cross-filesystem move to test.
+    /// it is not, the test fails (see `jobs::no_second_filesystem`).
     #[tokio::test]
     async fn hardlinks_are_asked_before_a_copy_breaks_them() {
         let s = st("mv-hardlink");
@@ -2204,7 +2204,7 @@ mod tests {
         let dst = s.dir.join("dst");
         std::fs::create_dir_all(&dst).unwrap();
         if !shm.exists() || crate::jobs::same_filesystem(shm, &dst) {
-            eprintln!("skipped: /dev/shm is not a separate filesystem here");
+            crate::jobs::no_second_filesystem();
             return;
         }
         let h = add_on_disk(&s, &src, "linked.bin");

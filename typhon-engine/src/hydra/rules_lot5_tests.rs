@@ -5,6 +5,10 @@
 
 use super::*;
 
+// The floor a workflow's interval is raised to must stay below the default it
+// gets when it names none: checked at compile time, it cannot be lost to a lint.
+const _: () = assert!(MIN_INTERVAL_SECS < DEFAULT_INTERVAL_SECS);
+
 fn cond(field: &str, op: Op, value: &str, tag: Option<&str>) -> Node {
     Node::Cond(Cond {
         field: field.into(),
