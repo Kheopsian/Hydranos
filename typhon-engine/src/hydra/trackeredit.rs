@@ -740,20 +740,19 @@ pub fn reformat_with(tiers: &[Vec<String>], fmt: &Format) -> (Vec<Vec<String>>, 
 
 /// A template for the URLs of `url`'s host, with the passkey as `{passkey}`,
 /// when it can be told apart: exactly one query value or path segment that
-/// looks like a key (16 or more letters, digits, `-` or `_`). More than one,
-/// or none, gives `None`: the operator types it. The key itself is never in
-/// the answer.
+/// looks like a key (`tracker::looks_like_key`, the rule the per-host passkey
+/// override uses), and it is the very slot that override would rewrite
+/// (`announce::policy::passkey_slot`). More than one, none, or a disagreement
+/// gives `None`: the operator types it. The key itself is never in the answer.
 pub fn guess_format(url: &str) -> Option<String> {
     let url = url.trim();
     let (scheme, rest) = url.split_once("://")?;
     if url.contains(['{', '}', '#']) {
         return None;
     }
-    let keyish = |v: &str| {
-        v.len() >= 16
-            && v.chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
-    };
+    let keyish = |v: &str| typhon_engine::tracker::looks_like_key(v);
+    // The override's own idea of where the key sits: the guess must agree.
+    let slot = crate::announce::policy::passkey_slot(url).map(|r| url[r].to_string());
     let end = rest.find(['/', '?']).unwrap_or(rest.len());
     let (authority, tail) = rest.split_at(end);
     let (path, query) = match tail.split_once('?') {
@@ -761,12 +760,14 @@ pub fn guess_format(url: &str) -> Option<String> {
         None => (tail, None),
     };
     let mut hits = 0;
+    let mut found: Option<&str> = None;
     let mut path_out = String::new();
     if !path.is_empty() {
         for seg in path[1..].split('/') {
             path_out.push('/');
             if keyish(seg) {
                 hits += 1;
+                found = Some(seg);
                 path_out.push_str("{passkey}");
             } else {
                 path_out.push_str(seg);
@@ -782,13 +783,14 @@ pub fn guess_format(url: &str) -> Option<String> {
             query_out.push('=');
             if keyish(val) {
                 hits += 1;
+                found = Some(val);
                 query_out.push_str("{passkey}");
             } else {
                 query_out.push_str(val);
             }
         }
     }
-    if hits != 1 {
+    if hits != 1 || found.map(str::to_string) != slot {
         return None;
     }
     let out = format!("{scheme}://{authority}{path_out}{query_out}");
@@ -1351,5 +1353,11 @@ mod tests {
             "https://old.example.invalid/announce?a={KEY}&b={KEY2}"
         ))
         .is_none());
+        // A key-like value the per-host override would not rewrite (a query
+        // parameter not named passkey) is not offered as the format either:
+        // both must point at the same place.
+        assert!(
+            guess_format(&format!("https://old.example.invalid/announce?token={KEY}")).is_none()
+        );
     }
 }
