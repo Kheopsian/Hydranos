@@ -9182,6 +9182,12 @@ function showTrackerForm(host = "", ipmode = "auto", minseed = -1) {
         typeof minseed === "number" && minseed >= 0 ? minseed : "";
     document.getElementById("trk-result").style.display = "none";
     document.getElementById("trk-form").style.display = "block";
+    // The format move is only for an existing row (editTracker shows it).
+    document.getElementById("trk-fmt-wrap").style.display = "none";
+    document.getElementById("trk-fmt-box").style.display = "none";
+    document.getElementById("trk-fmt-from").value = "";
+    document.getElementById("trk-fmt-to").value = "";
+    document.getElementById("trk-fmt-preview").style.display = "none";
     _trkEditing = "";
     _trkWatchMove(false);
 }
@@ -9191,7 +9197,76 @@ function hideTrackerForm() { document.getElementById("trk-form").style.display =
 // "+ Manual host" leaves it empty, so typing a host there still just names
 // the host the settings are for.
 let _trkEditing = "";
-function editTracker(host, ipmode, minseed) { showTrackerForm(host, ipmode, minseed); _trkEditing = host; }
+function editTracker(host, ipmode, minseed) {
+    showTrackerForm(host, ipmode, minseed);
+    _trkEditing = host;
+    document.getElementById("trk-fmt-wrap").style.display = "";
+}
+// Changing the shape of the announce URL (the passkey moving from the query to
+// the path, say) rather than only its host: the same background job, with two
+// templates. The old format is prefilled from a real URL of the host, the key
+// replaced by {passkey}, when it can be told; the server never sends the key.
+function _trkFmtOpen() { return document.getElementById("trk-fmt-box").style.display !== "none"; }
+async function toggleTrackerFormat() {
+    const box = document.getElementById("trk-fmt-box");
+    const open = box.style.display === "none";
+    box.style.display = open ? "block" : "none";
+    const from = document.getElementById("trk-fmt-from");
+    if (!open || from.value || !_trkEditing) return;
+    try {
+        const g = await api("/api/trackers/rehost/format?host=" + encodeURIComponent(_trkEditing));
+        if (g.format && !from.value) from.value = g.format;
+    } catch (e) { /* the operator types it */ }
+}
+function _trkFmtBody(dry) {
+    return {
+        from_template: document.getElementById("trk-fmt-from").value.trim(),
+        to_template: document.getElementById("trk-fmt-to").value.trim(),
+        dry_run: dry,
+    };
+}
+function _trkFmtPost(dry) {
+    return api("/api/trackers/rehost", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(_trkFmtBody(dry)) });
+}
+// What a dry run found, as text: counts, then samples with every value cut.
+function _trkFmtSummary(d) {
+    let msg = t("{n} torrents would change, {m} torrents on the old host do not match the old format and stay as they are.", { n: d.torrents, m: d.unmatched });
+    for (const x of d.samples || []) msg += "\n" + x.before + "\n  -> " + x.after;
+    return msg;
+}
+async function previewTrackerFormat() {
+    const box = document.getElementById("trk-fmt-preview");
+    try {
+        const d = await _trkFmtPost(true);
+        box.textContent = _trkFmtSummary(d);
+        box.className = "result-msg " + (d.torrents ? "success" : "error");
+    } catch (e) {
+        box.textContent = t("Error: {msg}", { msg: e.message });
+        box.className = "result-msg error";
+    }
+    box.style.display = "block";
+}
+// Ask, then start the format move. Same answers as moveTrackerTorrents, but
+// "none" is a refusal here: nothing fits the old format, so there is no
+// settings-only save to go on with.
+async function reformatTrackerTorrents() {
+    try {
+        const dry = await _trkFmtPost(true);
+        if (!dry.torrents) {
+            _trkMoveStatus(t("No torrent has an announce URL in the old format."), "error");
+            return false;
+        }
+        const ok = await hydraConfirm(
+            t("Change the announce format"),
+            _trkFmtSummary(dry) + "\n\n" + t("Rewrite {n} torrents? This runs in the background and can take several minutes.", { n: dry.torrents }),
+            t("Rewrite torrents"));
+        if (!ok) return false;
+        await _trkFmtPost(false);
+        _trkMoveStatus(t("Move started."), "");
+        _trkWatchMove(true);
+        return "moved";
+    } catch (e) { _trkMoveStatus(t("Error: {msg}", { msg: e.message }), "error"); return false; }
+}
 function _trkResult(msg, ok) {
     const r = document.getElementById("trk-result");
     r.textContent = msg; r.className = "result-msg " + (ok ? "success" : "error"); r.style.display = "block";
@@ -9257,7 +9332,26 @@ async function saveTracker() {
     if (!typed) { _trkResult(t("Host required"), false); return; }
     // A port typed with a new host goes into the announce URLs; the settings
     // are keyed by the host alone.
-    const host = typed.replace(/:\d+$/, "");
+    let host = typed.replace(/:\d+$/, "");
+    if (_trkEditing && _trkFmtOpen() && (document.getElementById("trk-fmt-from").value.trim() || document.getElementById("trk-fmt-to").value.trim())) {
+        // A format move: the hosts come from the formats, not from the field.
+        if (typed.toLowerCase() !== _trkEditing.toLowerCase()) {
+            _trkResult(t("Change either the host or the announce format, not both at once."), false);
+            return;
+        }
+        if (await reformatTrackerTorrents() === false) return;
+        const m = /^[a-z]+:\/\/([^\/?#:]+)/i.exec(document.getElementById("trk-fmt-to").value.trim());
+        // Started: a second Save must not ask for it again.
+        document.getElementById("trk-fmt-from").value = "";
+        document.getElementById("trk-fmt-to").value = "";
+        document.getElementById("trk-fmt-box").style.display = "none";
+        document.getElementById("trk-fmt-preview").style.display = "none";
+        if (m) {
+            host = m[1].toLowerCase();
+            document.getElementById("trk-host").value = host;
+            _trkEditing = host;
+        }
+    } else
     // Host names are not case-sensitive: a change of case alone moves nothing.
     if (_trkEditing && typed.toLowerCase() !== _trkEditing.toLowerCase()) {
         // Declined or failed: nothing is saved. No torrent on the old host:

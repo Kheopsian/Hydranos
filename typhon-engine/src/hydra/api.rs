@@ -11696,6 +11696,22 @@ pub(crate) fn rehost_torrent(
     edit_trackers_core(state, info_hash, &req).map(|(_, changed)| changed)
 }
 
+/// The same for a format move: `from` and `to` are the two templates.
+pub(crate) fn reformat_torrent(
+    state: &AppState,
+    info_hash: &str,
+    from: &str,
+    to: &str,
+) -> Result<bool, (StatusCode, String)> {
+    let req = TrackerEdit {
+        op: "reformat".into(),
+        from: from.to_string(),
+        to: to.to_string(),
+        ..Default::default()
+    };
+    edit_trackers_core(state, info_hash, &req).map(|(_, changed)| changed)
+}
+
 // A one-off shape; naming it would add an alias that nothing else uses.
 #[allow(clippy::type_complexity)]
 fn edit_trackers_core(
@@ -19359,6 +19375,10 @@ fn router_with(state: AppState, extra: Router<AppState>) -> Router {
             "/api/trackers/rehost",
             get(crate::rehostrun::get_rehost).post(crate::rehostrun::post_rehost),
         )
+        .route(
+            "/api/trackers/rehost/format",
+            get(crate::rehostrun::get_format_guess),
+        )
         .route("/api/fs/browse", get(get_fs_browse))
         .route("/api/fs/list", get(crate::fslist::get_fs_list))
         .route(
@@ -26974,6 +26994,243 @@ mod write_path_tests {
         // The slot is free again, and the job a second time finds nothing.
         let (code, _) = rehost_call(&s, r#"{"from":"tracker.example","to":"new.example"}"#).await;
         assert_eq!(code, StatusCode::BAD_REQUEST, "nothing left on that host");
+    }
+
+    /// A format move: the passkey goes from the query to a path segment. The
+    /// dry run counts and shows masked samples, the job rewrites what matches,
+    /// persists it, carries the settings, and leaves a URL that does not match
+    /// the template exactly as it was.
+    #[tokio::test]
+    async fn moving_a_tracker_format_rewrites_the_matching_urls_only() {
+        const K1: &str = "0123abcd0123abcd0123abcd0123abcd0123abcd0123abcd0123abcd0123abcd";
+        const K2: &str = "fedc9876fedc9876fedc9876fedc9876fedc9876fedc9876fedc9876fedc9876";
+        const FROM: &str = "https://old.example.invalid/tracker/announce?passkey={passkey}";
+        const TO: &str = "https://new.example.invalid/{passkey}/announce";
+        let s = state_from(
+            "reformat",
+            &format!(
+                "[daemon]\napi_key = \"{KEY}\"\n\
+                 [announce_passkeys]\n\"old.example.invalid\" = \"SECRET\"\n\
+                 [announce_muted]\n\"old.example.invalid\" = \"1\"\n"
+            ),
+        );
+        let urls = [
+            format!("https://old.example.invalid/tracker/announce?passkey={K1}"),
+            format!("https://old.example.invalid/tracker/announce?passkey={K2}"),
+            // On the old host, but not in that format: left alone.
+            "https://old.example.invalid/other/announce".to_string(),
+            format!("https://old.example.invalid/tracker/announce?passkey={K1}&extra=1"),
+            // Elsewhere: not this move's business.
+            format!("https://elsewhere.example.invalid/tracker/announce?passkey={K1}"),
+        ];
+        let mut hashes = Vec::new();
+        for (name, url) in ["alpha", "beta", "gamma", "delta", "eps"].iter().zip(&urls) {
+            let (h, _) = add_torrent_bytes(
+                &s.state,
+                &torrent_bytes(name),
+                "",
+                "/tmp",
+                "",
+                true,
+                true,
+                "race",
+            )
+            .expect("added");
+            let r = super::post_torrent_trackers(
+                State(s.state.clone()),
+                axum::extract::Path(h.clone()),
+                RawQuery(None),
+                keyed(KEY),
+                serde_json::json!({"op": "set", "tiers": [[url]]}).to_string(),
+            )
+            .await;
+            assert_eq!(r.status(), StatusCode::OK);
+            hashes.push(h);
+        }
+        let body =
+            |extra: &str| format!(r#"{{"from_template":"{FROM}","to_template":"{TO}"{extra}}}"#);
+
+        // Refusals: a hole the old format lacks, a mix with nothing to match.
+        let (code, _) = rehost_call(
+            &s,
+            &format!(
+                r#"{{"from_template":"{FROM}","to_template":"https://new.example.invalid/{{uid}}"}}"#
+            ),
+        )
+        .await;
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        let (code, _) = rehost_call(
+            &s,
+            &format!(r#"{{"from_template":"{FROM}","to_template":"{FROM}"}}"#),
+        )
+        .await;
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+
+        // A dry run counts, masks, and writes nothing.
+        let (code, v) = rehost_call(&s, &body(r#","dry_run":true"#)).await;
+        assert_eq!(code, StatusCode::OK, "{v}");
+        assert_eq!(v["torrents"], 2);
+        assert_eq!(v["unmatched"], 2);
+        let samples = v["samples"].as_array().unwrap();
+        assert_eq!(samples.len(), 2);
+        let shown = v.to_string();
+        assert!(!shown.contains(K1) && !shown.contains(K2), "{shown}");
+        assert!(
+            !shown.contains(&K1[..8]) && !shown.contains(&K2[..8]),
+            "{shown}"
+        );
+        assert!(
+            samples.iter().all(|x| {
+                x["before"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("https://old.example.invalid/tracker/announce?passkey=")
+                    && x["after"]
+                        .as_str()
+                        .unwrap()
+                        .starts_with("https://new.example.invalid/")
+            }),
+            "{shown}"
+        );
+        assert!(!s
+            .store
+            .lock()
+            .unwrap()
+            .job_in_flight_of_kind("tracker_rehost"));
+        assert!(!s
+            .state
+            .cfg()
+            .announce_passkeys
+            .contains_key("new.example.invalid"));
+        assert_eq!(rehost_status(&s).await["state"], "none");
+
+        // The job.
+        let (code, v) = rehost_call(&s, &body("")).await;
+        assert_eq!(code, StatusCode::OK, "{v}");
+        assert_eq!(
+            (v["torrents"].as_i64(), v["unmatched"].as_i64()),
+            (Some(2), Some(2))
+        );
+        let cfg = s.state.cfg();
+        assert_eq!(cfg.announce_passkeys["new.example.invalid"], "SECRET");
+        assert!(cfg.announce_muted.contains_key("new.example.invalid"));
+        let (code, _) = rehost_call(&s, &body("")).await;
+        assert_eq!(code, StatusCode::CONFLICT);
+
+        run_rehost_job(&s).expect("the job ends well");
+        let st = rehost_status(&s).await;
+        assert_eq!(st["state"], "done", "{st}");
+        assert_eq!(st["mode"], "format");
+        assert_eq!(
+            (
+                st["changed"].as_i64(),
+                st["skipped"].as_i64(),
+                st["failed"].as_i64()
+            ),
+            (Some(2), Some(0), Some(0))
+        );
+        assert_eq!(st["unmatched"], 2);
+        assert_eq!(st["from"], "old.example.invalid");
+        assert_eq!(st["to"], "new.example.invalid");
+        assert!(!st.to_string().contains(K1), "{st}");
+
+        let race = s.state.engines.get("race").unwrap();
+        let live = |i: usize| {
+            let ih = typhon_engine::torrent::hex_decode(&hashes[i]).unwrap();
+            let t = race.manager.get(&ih).unwrap().live_trackers.read().clone();
+            t
+        };
+        assert_eq!(
+            live(0),
+            vec![vec![format!("https://new.example.invalid/{K1}/announce")]]
+        );
+        assert_eq!(
+            live(1),
+            vec![vec![format!("https://new.example.invalid/{K2}/announce")]]
+        );
+        for (i, url) in urls.iter().enumerate().skip(2) {
+            assert_eq!(
+                live(i),
+                vec![vec![url.clone()]],
+                "torrent {i} must not change"
+            );
+        }
+        // Persisted: what state.db holds is the new URL.
+        let kept = stored_trackers(&s, &hashes[0]);
+        assert!(
+            kept.contains(&format!("new.example.invalid/{K1}/announce"))
+                && !kept.contains("old.example.invalid"),
+            "{kept}"
+        );
+        assert!(stored_trackers(&s, &hashes[2]).contains("old.example.invalid/other/announce"));
+        // Torrents still on the old host: its settings stay.
+        let cfg = s.state.cfg();
+        assert!(cfg.announce_passkeys.contains_key("old.example.invalid"));
+        assert_eq!(st["settings_kept"], true);
+
+        // Nothing matches any more.
+        let (code, _) = rehost_call(&s, &body("")).await;
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        let (code, v) = rehost_call(&s, &body(r#","dry_run":true"#)).await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(
+            (v["torrents"].as_i64(), v["unmatched"].as_i64()),
+            (Some(0), Some(2))
+        );
+    }
+
+    /// The form prefills the old format from a real URL of the host, with the
+    /// passkey as a hole and never in the answer.
+    #[tokio::test]
+    async fn the_format_of_a_host_is_guessed_without_its_passkey() {
+        const K1: &str = "0123abcd0123abcd0123abcd0123abcd0123abcd0123abcd0123abcd0123abcd";
+        let s = state_from(
+            "reformat-guess",
+            &format!("[daemon]\napi_key = \"{KEY}\"\n"),
+        );
+        let (h, _) = add_torrent_bytes(
+            &s.state,
+            &torrent_bytes("g"),
+            "",
+            "/tmp",
+            "",
+            true,
+            true,
+            "race",
+        )
+        .expect("added");
+        let r = super::post_torrent_trackers(
+            State(s.state.clone()),
+            axum::extract::Path(h),
+            RawQuery(None),
+            keyed(KEY),
+            serde_json::json!({"op": "set", "tiers": [[format!("https://old.example.invalid/tracker/announce?passkey={K1}")]]}).to_string(),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let v = body_json(
+            crate::rehostrun::get_format_guess(
+                State(s.state.clone()),
+                RawQuery(Some("host=old.example.invalid".into())),
+                keyed(KEY),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(
+            v["format"],
+            "https://old.example.invalid/tracker/announce?passkey={passkey}"
+        );
+        let v = body_json(
+            crate::rehostrun::get_format_guess(
+                State(s.state.clone()),
+                RawQuery(Some("host=nobody.example.invalid".into())),
+                keyed(KEY),
+            )
+            .await,
+        )
+        .await;
+        assert!(v["format"].is_null());
     }
 
     /// A torrent whose .torrent is not stored yet cannot keep the edit: it is

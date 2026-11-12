@@ -146,6 +146,177 @@ struct Req {
     to: String,
     #[serde(default)]
     dry_run: bool,
+    /// A format move instead of a host move: the two templates, see
+    /// `trackeredit::Format`.
+    #[serde(default)]
+    from_template: String,
+    #[serde(default)]
+    to_template: String,
+}
+
+/// What a walk of the catalogue finds for a format move.
+#[derive(Default)]
+struct FormatWalk {
+    /// Torrents with at least one URL the move would change.
+    torrents: usize,
+    /// Torrents on the old host with no URL matching the old format.
+    unmatched: usize,
+    samples: Vec<(String, String)>,
+    hashes: Vec<typhon_engine::torrent::meta::InfoHash>,
+}
+
+const SAMPLES: usize = 5;
+
+/// Visited in place, like `on_host`. Samples are masked here, so no caller can
+/// print a whole value; `hashes` is only filled when the job needs it.
+fn walk_format(
+    state: &AppState,
+    fmt: &crate::trackeredit::Format,
+    want_hashes: bool,
+) -> FormatWalk {
+    let mut w = FormatWalk::default();
+    for engine in state.engines.engines() {
+        engine.manager.for_each(|t| {
+            let tiers = t.live_trackers.read();
+            let (changes, unmatched) = fmt.scan(&tiers);
+            if changes > 0 {
+                w.torrents += 1;
+                if want_hashes {
+                    w.hashes.push(t.info_hash);
+                }
+                if w.samples.len() < SAMPLES {
+                    let hit = tiers
+                        .iter()
+                        .flatten()
+                        .find(|u| fmt.convert(u).is_some_and(|n| n != **u))
+                        .and_then(|u| fmt.masked(u));
+                    w.samples.extend(hit);
+                }
+            } else if unmatched > 0 {
+                w.unmatched += 1;
+            }
+        });
+    }
+    w
+}
+
+/// `POST /api/trackers/rehost` with `from_template` and `to_template`.
+async fn post_reformat(state: AppState, req: Req) -> Response {
+    let fmt = match crate::trackeredit::Format::parse(&req.from_template, &req.to_template) {
+        Ok(f) => f,
+        Err(e) => return error(StatusCode::BAD_REQUEST, &e),
+    };
+    let walk = {
+        let (state, fmt) = (state.clone(), fmt.clone());
+        match tokio::task::spawn_blocking(move || walk_format(&state, &fmt, false)).await {
+            Ok(w) => w,
+            Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+        }
+    };
+    if req.dry_run {
+        let samples: Vec<_> = walk
+            .samples
+            .iter()
+            .map(|(before, after)| json!({"before": before, "after": after}))
+            .collect();
+        return Json(json!({
+            "dry_run": true, "mode": "format",
+            "torrents": walk.torrents, "unmatched": walk.unmatched,
+            "samples": samples,
+        }))
+        .into_response();
+    }
+    if walk.torrents == 0 {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "no torrent has an announce URL in that format",
+        );
+    }
+    let busy = || {
+        let store = state.store.lock().unwrap_or_else(|e| e.into_inner());
+        store.job_in_flight_of_kind(KIND)
+    };
+    if busy() {
+        return error(
+            StatusCode::CONFLICT,
+            "a tracker move is already running; wait for it or cancel it",
+        );
+    }
+    let (from_host, to_host) = (fmt.old_host().to_string(), fmt.new_host().to_string());
+    // Same reason as for a host move: before the job exists. Nothing to copy
+    // when the host stays.
+    if !from_host.eq_ignore_ascii_case(&to_host) && !copy_settings(&state, &from_host, &to_host) {
+        tracing::warn!("tracker move: the settings of the old host could not all be copied");
+    }
+    let id = {
+        let store = state.store.lock().unwrap_or_else(|e| e.into_inner());
+        if store.job_in_flight_of_kind(KIND) {
+            return error(
+                StatusCode::CONFLICT,
+                "a tracker move is already running; wait for it or cancel it",
+            );
+        }
+        // Hosts and templates only: a template has holes, not values. The job
+        // never stores a URL of a torrent.
+        let params = json!({
+            "mode": "format",
+            "name": format!("{from_host} -> {to_host} (format)"),
+            "target": to_host,
+            "from": from_host, "to": to_host,
+            "from_template": req.from_template.trim(),
+            "to_template": req.to_template.trim(),
+            "total": walk.torrents, "done": 0, "changed": 0, "skipped": 0, "failed": 0,
+            "unmatched": walk.unmatched,
+        })
+        .to_string();
+        match store.create_job(KIND, "", &params, walk.torrents as i64) {
+            Ok(id) => id,
+            Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+        }
+    };
+    Json(json!({"job_id": id, "torrents": walk.torrents, "unmatched": walk.unmatched}))
+        .into_response()
+}
+
+/// `GET /api/trackers/rehost/format?host=`: the format of a host's URLs with
+/// the passkey as `{passkey}`, to prefill the form; `null` when it cannot be
+/// told. Never carries a key.
+pub async fn get_format_guess(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+    let host = crate::api::query_param(&query, "host").unwrap_or_default();
+    let host = host.trim().to_string();
+    if host.is_empty() {
+        return error(StatusCode::BAD_REQUEST, "host required");
+    }
+    let guess = tokio::task::spawn_blocking(move || {
+        let mut found: Option<String> = None;
+        for engine in state.engines.engines() {
+            engine.manager.for_each(|t| {
+                if found.is_some() {
+                    return;
+                }
+                found = t
+                    .live_trackers
+                    .read()
+                    .iter()
+                    .flatten()
+                    .find(|u| {
+                        typhon_engine::rpc::dispatch::tracker_host_str(u)
+                            .eq_ignore_ascii_case(&host)
+                    })
+                    .and_then(|u| crate::trackeredit::guess_format(u));
+            });
+        }
+        found
+    })
+    .await
+    .unwrap_or(None);
+    Json(json!({ "format": guess })).into_response()
 }
 
 /// `POST /api/trackers/rehost`
@@ -160,6 +331,9 @@ pub async fn post_rehost(
     let Ok(req) = serde_json::from_str::<Req>(&body) else {
         return error(StatusCode::BAD_REQUEST, "invalid body");
     };
+    if !req.from_template.trim().is_empty() || !req.to_template.trim().is_empty() {
+        return post_reformat(state, req).await;
+    }
     let from = req.from.trim().to_string();
     // The same checks the rewrite makes, before anything is counted or queued.
     if let Err(e) = crate::trackeredit::rehost(&[], &from, &req.to) {
@@ -256,7 +430,14 @@ pub async fn get_rehost(
     if !job.error.is_empty() {
         out["error"] = json!(job.error);
     }
-    for k in ["settings_kept", "note"] {
+    for k in [
+        "settings_kept",
+        "note",
+        "mode",
+        "from_template",
+        "to_template",
+        "unmatched",
+    ] {
         if let Some(v) = p.get(k) {
             out[k] = v.clone();
         }
@@ -304,13 +485,29 @@ pub(crate) fn run(state: &AppState, job: &crate::store::Job) -> Result<(), Strin
         serde_json::from_str(&job.params).map_err(|e| format!("bad job params: {e}"))?;
     let text = |k: &str| p.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
     let (from, to) = (text("from"), text("to"));
-    crate::trackeredit::parse_new_host(&to)?;
+    // A format move keeps the hosts in `from` and `to` for the settings and
+    // the report; what it rewrites is told by the templates.
+    let format = if text("mode") == "format" {
+        Some(crate::trackeredit::Format::parse(
+            &text("from_template"),
+            &text("to_template"),
+        )?)
+    } else {
+        crate::trackeredit::parse_new_host(&to)?;
+        None
+    };
     // A resumed job: what an earlier run moved no longer matches, so the
     // total is what it moved plus what is left. Skipped and failed start
     // again from zero on purpose: those torrents are still on `from`, so they
     // are walked (and counted) again.
     let before = p.get("changed").and_then(|v| v.as_i64()).unwrap_or(0);
-    let todo = on_host(state, &from);
+    let (todo, unmatched) = match &format {
+        Some(fmt) => {
+            let w = walk_format(state, fmt, true);
+            (w.hashes, Some(w.unmatched))
+        }
+        None => (on_host(state, &from), None),
+    };
     let total = before + todo.len() as i64;
     let mut c = Counts {
         changed: before,
@@ -322,7 +519,16 @@ pub(crate) fn run(state: &AppState, job: &crate::store::Job) -> Result<(), Strin
     for (n, batch) in todo.chunks(BATCH).enumerate() {
         for ih in batch {
             let hex = typhon_engine::torrent::hex_encode(ih);
-            match crate::api::rehost_torrent(state, &hex, &from, &to) {
+            let done = match &format {
+                Some(_) => crate::api::reformat_torrent(
+                    state,
+                    &hex,
+                    &text("from_template"),
+                    &text("to_template"),
+                ),
+                None => crate::api::rehost_torrent(state, &hex, &from, &to),
+            };
+            match done {
                 Ok(true) => c.changed += 1,
                 // Moved meanwhile by another edit.
                 Ok(false) => {}
@@ -355,7 +561,13 @@ pub(crate) fn run(state: &AppState, job: &crate::store::Job) -> Result<(), Strin
     }
 
     let left = still_served_by(state, &from);
-    let (kept, note) = if left == 0 && c.failed == 0 {
+    let (kept, note) = if format.is_some() && from.eq_ignore_ascii_case(&to) {
+        // Only the format changed: the host and its settings are the same.
+        (
+            true,
+            "the host did not change; its settings were kept".to_string(),
+        )
+    } else if left == 0 && c.failed == 0 {
         remove_settings(state, &from);
         (
             false,
@@ -368,6 +580,9 @@ pub(crate) fn run(state: &AppState, job: &crate::store::Job) -> Result<(), Strin
         )
     };
     let mut extra = vec![("settings_kept", json!(kept)), ("note", json!(note))];
+    if let Some(n) = unmatched {
+        extra.push(("unmatched", json!(n)));
+    }
     if !last_error.is_empty() {
         extra.push(("last_error", json!(last_error)));
     }

@@ -23,6 +23,10 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 
 ## Unreleased -- a qBittorrent import that stops asking a dead qBittorrent
 
+### Added
+
+- The tracker move can now follow a tracker that changed the shape of its announce URL, not only its host (the passkey going from `?passkey=...` to a path segment, say). In the Trackers tab, open a host with Edit and use "Advanced: change the announce format": write the old and the new format with the passkey as `{passkey}` (the old one is filled in from a real URL of the host when it can be told), press Preview to see how many torrents would change, how many on the old host do not fit the old format, and up to 5 examples with every value cut after its first characters, then Save. An announce URL is rewritten only when it fits the old format exactly (scheme, host, path, and its query parameters by name, in any order); one with another parameter, an empty or unusual value is left as it is and counted, nothing is guessed. Tiers, order, duplicates, resume after a restart, cancel and the copy of the host's settings work as for a host move. `POST /api/trackers/rehost` takes `from_template` and `to_template` (with `dry_run`), see `docs/API.md`. The passkey is never shown in the preview, the answer or the job's log.
+
 ### Fixed
 
 - A qBittorrent import whose qBittorrent stopped answering used to spend about two minutes on every remaining torrent and fail them all one by one. After 3 torrents in a row that get no answer at all, the import now pauses: it stops exporting, keeps the untried torrents with the failed ones for "Retry", and says `qBittorrent stopped answering at <torrent>; N torrents not attempted, retry when it is back`. The wizard's end summary names the two likely triggers: the first torrent left unanswered after others had been exported (`stalled_at`) and the last one exported before it (`last_ok`).

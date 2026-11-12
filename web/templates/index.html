@@ -1063,6 +1063,26 @@
                             </select>
                         </div>
                     </div>
+                    <div id="trk-fmt-wrap" style="display:none;margin:8px 0">
+                        <a href="#" id="trk-fmt-toggle" onclick="toggleTrackerFormat();return false">Advanced: change the announce format</a>
+                        <div id="trk-fmt-box" style="display:none;margin-top:8px">
+                            <p class="sr-desc" style="margin:0 0 8px">For a tracker that changed the shape of its announce URL, not only its host. Write each URL with {passkey} where the passkey goes (another name, such as {uid}, works too). An announce URL has to fit the old format exactly to be rewritten; the others are left as they are and counted.</p>
+                            <div class="cat-form-grid">
+                                <div class="form-group">
+                                    <label>Old format</label>
+                                    <input type="text" id="trk-fmt-from" placeholder="https://tracker.example.net/announce?passkey={passkey}" autocomplete="off" spellcheck="false">
+                                </div>
+                                <div class="form-group">
+                                    <label>New format</label>
+                                    <input type="text" id="trk-fmt-to" placeholder="https://tracker.example.net/{passkey}/announce" autocomplete="off" spellcheck="false">
+                                </div>
+                            </div>
+                            <div class="cat-form-actions">
+                                <button class="btn-small" onclick="previewTrackerFormat()">Preview</button>
+                            </div>
+                            <div id="trk-fmt-preview" class="result-msg" style="display:none;white-space:pre-wrap;word-break:break-all"></div>
+                        </div>
+                    </div>
                     <div class="cat-form-actions">
                         <button class="btn-primary" onclick="saveTracker()">Save</button>
                         <button class="btn-small btn-danger" onclick="clearTrackerPasskey()">Clear passkey</button>
@@ -1708,6 +1728,6 @@
     </div>
 
     <script src="/static/i18n.js?v=1.0.0"></script>
-    <script src="/static/app.js?v=1.6.108"></script>
+    <script src="/static/app.js?v=1.6.109"></script>
 </body>
 </html>

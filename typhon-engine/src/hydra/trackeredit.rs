@@ -155,6 +155,9 @@ pub fn apply(
 
         "rehost" => rehost(tiers, from, to),
 
+        // `from` and `to` carry the two templates.
+        "reformat" => reformat(tiers, from, to).map(|(out, changed, _)| (out, changed > 0)),
+
         other => Err(format!("unknown op {other:?}")),
     }
 }
@@ -278,6 +281,518 @@ fn rehost_url(url: &str, from: &str, host: &str, port: Option<u16>) -> Option<St
         Some(p) => format!("{scheme}://{host}:{p}{tail}"),
         None => format!("{scheme}://{host}{tail}"),
     })
+}
+
+// ---------------------------------------------------------------------------
+// A format move: the announce URL changes shape, not only host.
+// ---------------------------------------------------------------------------
+//
+// A template is a URL whose path segments and query values may be holes,
+// `{name}`: `https://old.example.invalid/tracker/announce?passkey={passkey}`.
+// A hole fills a whole path segment or a whole query value, never part of
+// one. `{rest}` is the one catch-all: it is the LAST path segment and takes
+// everything after the literal part of the path (slashes included); it is not
+// allowed in a query.
+//
+// A URL matches the `from` template only when it matches EXACTLY: scheme, host
+// (case-insensitive, port included when the template has one), every literal
+// path segment, and the query parameters by name, in any order. A URL with a
+// query parameter the template does not name, a fragment, a hole value that is
+// empty or holds a character a URL does not keep as is, does NOT match and is
+// left untouched: nothing is rewritten by guess. Percent-encoding in a value is
+// kept as it is.
+
+#[derive(Debug, Clone, PartialEq)]
+enum Part {
+    Lit(String),
+    Hole(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct Template {
+    scheme: String,
+    host: String,
+    port: Option<String>,
+    path: Vec<Part>,
+    has_path: bool,
+    query: Vec<(String, Part)>,
+}
+
+fn is_hole_name(n: &str) -> bool {
+    !n.is_empty()
+        && n.chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+        && !n.starts_with(|c: char| c.is_ascii_digit())
+}
+
+fn parse_part(s: &str) -> Result<Part, String> {
+    if let Some(name) = s.strip_prefix('{').and_then(|r| r.strip_suffix('}')) {
+        if !is_hole_name(name) {
+            return Err(format!(
+                "{{{name}}} is not a hole name: lower case letters, digits and _"
+            ));
+        }
+        return Ok(Part::Hole(name.to_string()));
+    }
+    if s.contains(['{', '}']) {
+        return Err("a {hole} must fill a whole path segment or query value".into());
+    }
+    if s.chars().any(|c| c.is_whitespace() || c == '#') {
+        return Err("a format has no spaces and no #".into());
+    }
+    Ok(Part::Lit(s.to_string()))
+}
+
+/// Characters a hole value may hold: what a URL keeps as it is. `%` must start
+/// a two-digit escape, which is carried through unchanged.
+fn safe_value(v: &str, allow_slash: bool) -> bool {
+    if v.is_empty() {
+        return false;
+    }
+    let b = v.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        match c {
+            b'%' => {
+                if i + 2 >= b.len()
+                    || !b[i + 1].is_ascii_hexdigit()
+                    || !b[i + 2].is_ascii_hexdigit()
+                {
+                    return false;
+                }
+                i += 3;
+                continue;
+            }
+            b'/' if allow_slash => {}
+            c if c.is_ascii_alphanumeric() || matches!(c, b'-' | b'.' | b'_' | b'~' | b'+') => {}
+            _ => return false,
+        }
+        i += 1;
+    }
+    true
+}
+
+/// Show the start of a hole value, never all of it: a quarter of it, at most 4
+/// characters.
+pub fn mask_value(v: &str) -> String {
+    let n = v.chars().count();
+    let keep = (n / 4).min(4);
+    format!("{}…", v.chars().take(keep).collect::<String>())
+}
+
+impl Template {
+    pub fn parse(raw: &str) -> Result<Template, String> {
+        let s = raw.trim();
+        let Some((scheme, rest)) = s.split_once("://") else {
+            return Err("a format starts with http://, https:// or udp://".into());
+        };
+        let scheme = scheme.to_ascii_lowercase();
+        if !matches!(scheme.as_str(), "http" | "https" | "udp") {
+            return Err("a format starts with http://, https:// or udp://".into());
+        }
+        let auth_end = rest.find(['/', '?']).unwrap_or(rest.len());
+        let (authority, tail) = rest.split_at(auth_end);
+        let (host, port) = match authority.split_once(':') {
+            Some((h, p)) => {
+                if p.is_empty() || !p.chars().all(|c| c.is_ascii_digit()) {
+                    return Err(format!("{p:?} is not a port"));
+                }
+                (h, Some(p.to_string()))
+            }
+            None => (authority, None),
+        };
+        let host_ok = !host.is_empty()
+            && !host.starts_with(['.', '-'])
+            && !host.ends_with(['.', '-'])
+            && host
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'));
+        if !host_ok {
+            return Err("the host of a format is a plain host name; it cannot hold a hole".into());
+        }
+        let (path_str, query_str) = match tail.split_once('?') {
+            Some((p, q)) => (p, Some(q)),
+            None => (tail, None),
+        };
+        let mut path = Vec::new();
+        if !path_str.is_empty() {
+            for seg in path_str[1..].split('/') {
+                path.push(parse_part(seg)?);
+            }
+        }
+        for (i, p) in path.iter().enumerate() {
+            if *p == Part::Hole("rest".into()) && i + 1 != path.len() {
+                return Err("{rest} can only be the last path segment".into());
+            }
+        }
+        let mut query = Vec::new();
+        if let Some(q) = query_str {
+            for pair in q.split('&') {
+                let Some((name, val)) = pair.split_once('=') else {
+                    return Err("every query parameter of a format is name=value".into());
+                };
+                if name.is_empty() || name.contains(['{', '}']) {
+                    return Err("a query parameter name is plain text".into());
+                }
+                if query.iter().any(|(n, _): &(String, Part)| n == name) {
+                    return Err(format!("the query parameter {name:?} appears twice"));
+                }
+                let part = parse_part(val)?;
+                if part == Part::Hole("rest".into()) {
+                    return Err("{rest} is for the path, not for a query value".into());
+                }
+                query.push((name.to_string(), part));
+            }
+        }
+        Ok(Template {
+            scheme,
+            host: host.to_ascii_lowercase(),
+            port,
+            path,
+            has_path: !path_str.is_empty(),
+            query,
+        })
+    }
+
+    fn parts(&self) -> impl Iterator<Item = &Part> {
+        self.path.iter().chain(self.query.iter().map(|(_, p)| p))
+    }
+
+    fn hole_names(&self) -> Vec<&str> {
+        self.parts()
+            .filter_map(|p| match p {
+                Part::Hole(n) => Some(n.as_str()),
+                Part::Lit(_) => None,
+            })
+            .collect()
+    }
+
+    fn render_with(&self, mut show: impl FnMut(&Part) -> String) -> String {
+        let mut out = format!("{}://{}", self.scheme, self.host);
+        if let Some(p) = &self.port {
+            out.push(':');
+            out.push_str(p);
+        }
+        if self.has_path {
+            for seg in &self.path {
+                out.push('/');
+                out.push_str(&show(seg));
+            }
+        }
+        for (i, (name, part)) in self.query.iter().enumerate() {
+            out.push(if i == 0 { '?' } else { '&' });
+            out.push_str(name);
+            out.push('=');
+            out.push_str(&show(part));
+        }
+        out
+    }
+
+    /// The template as written, holes as `{name}`.
+    fn shape(&self) -> String {
+        self.render_with(|p| match p {
+            Part::Lit(s) => s.clone(),
+            Part::Hole(n) => format!("{{{n}}}"),
+        })
+    }
+
+    fn render(&self, vals: &[(String, String)]) -> Option<String> {
+        let mut missing = false;
+        let out = self.render_with(|p| match p {
+            Part::Lit(s) => s.clone(),
+            Part::Hole(n) => match vals.iter().find(|(k, _)| k == n) {
+                Some((_, v)) => v.clone(),
+                None => {
+                    missing = true;
+                    String::new()
+                }
+            },
+        });
+        (!missing).then_some(out)
+    }
+
+    /// The hole values of `url`, when it matches this template exactly.
+    fn capture(&self, url: &str) -> Option<Vec<(String, String)>> {
+        let (scheme, rest) = url.split_once("://")?;
+        if !scheme.eq_ignore_ascii_case(&self.scheme) || url.contains('#') {
+            return None;
+        }
+        let auth_end = rest.find(['/', '?']).unwrap_or(rest.len());
+        let (authority, tail) = rest.split_at(auth_end);
+        let want = match &self.port {
+            Some(p) => format!("{}:{p}", self.host),
+            None => self.host.clone(),
+        };
+        if !authority.eq_ignore_ascii_case(&want) {
+            return None;
+        }
+        let (path_str, query_str) = match tail.split_once('?') {
+            Some((p, q)) => (p, Some(q)),
+            None => (tail, None),
+        };
+        let mut vals: Vec<(String, String)> = Vec::new();
+        if self.has_path == path_str.is_empty() {
+            return None;
+        }
+        if self.has_path {
+            let segs: Vec<&str> = path_str[1..].split('/').collect();
+            let catch_all = matches!(self.path.last(), Some(Part::Hole(n)) if n == "rest");
+            let fixed = if catch_all {
+                self.path.len() - 1
+            } else {
+                self.path.len()
+            };
+            if segs.len() < self.path.len() || (!catch_all && segs.len() != self.path.len()) {
+                return None;
+            }
+            for (part, seg) in self.path[..fixed].iter().zip(&segs) {
+                match part {
+                    Part::Lit(l) if l == seg => {}
+                    Part::Lit(_) => return None,
+                    Part::Hole(n) => {
+                        if !safe_value(seg, false) {
+                            return None;
+                        }
+                        vals.push((n.clone(), (*seg).to_string()));
+                    }
+                }
+            }
+            if catch_all {
+                let rest = segs[fixed..].join("/");
+                if !safe_value(&rest, true) {
+                    return None;
+                }
+                vals.push(("rest".into(), rest));
+            }
+        }
+        let pairs: Vec<(&str, &str)> = match query_str {
+            None => Vec::new(),
+            Some(q) => {
+                let mut v = Vec::new();
+                for pair in q.split('&') {
+                    v.push(pair.split_once('=')?);
+                }
+                v
+            }
+        };
+        // A parameter the template does not name makes the URL a different
+        // kind of URL than the one described: not matched.
+        if pairs.len() != self.query.len() {
+            return None;
+        }
+        for (name, part) in &self.query {
+            let mut found = pairs.iter().filter(|(n, _)| n == name);
+            let (_, val) = found.next()?;
+            if found.next().is_some() {
+                return None;
+            }
+            match part {
+                Part::Lit(l) if l == val => {}
+                Part::Lit(_) => return None,
+                Part::Hole(n) => {
+                    if !safe_value(val, false) {
+                        return None;
+                    }
+                    vals.push((n.clone(), (*val).to_string()));
+                }
+            }
+        }
+        Some(vals)
+    }
+}
+
+/// A validated pair of templates: what a format move applies.
+#[derive(Debug, Clone)]
+pub struct Format {
+    from: Template,
+    to: Template,
+}
+
+impl Format {
+    pub fn parse(from: &str, to: &str) -> Result<Format, String> {
+        let from = Template::parse(from.trim()).map_err(|e| format!("old format: {e}"))?;
+        let to = Template::parse(to.trim()).map_err(|e| format!("new format: {e}"))?;
+        let known = from.hole_names();
+        for (i, n) in known.iter().enumerate() {
+            if known[..i].contains(n) {
+                return Err(format!("old format: {{{n}}} appears twice"));
+            }
+        }
+        for n in to.hole_names() {
+            if !known.contains(&n) {
+                return Err(format!("new format: {{{n}}} is not in the old format"));
+            }
+        }
+        if from.shape() == to.shape() {
+            return Err("the new format is the same as the old one".into());
+        }
+        // The new format has to give a tracker URL for any value.
+        let dummy: Vec<(String, String)> = known
+            .iter()
+            .map(|n| (n.to_string(), "x".to_string()))
+            .collect();
+        let sample = to.render(&dummy).expect("every hole is known");
+        normalise_url(&sample)
+            .map_err(|_| "new format: it does not give a tracker URL".to_string())?;
+        Ok(Format { from, to })
+    }
+
+    /// The old and the new host, without port.
+    pub fn old_host(&self) -> &str {
+        &self.from.host
+    }
+    pub fn new_host(&self) -> &str {
+        &self.to.host
+    }
+
+    /// Is this URL on the old format's host? What "not matching" is counted
+    /// against: a URL elsewhere is not this move's business.
+    pub fn on_host(&self, url: &str) -> bool {
+        let Some((_, rest)) = url.split_once("://") else {
+            return false;
+        };
+        let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+        let host = rest[..end].split(':').next().unwrap_or("");
+        host.eq_ignore_ascii_case(&self.from.host)
+    }
+
+    /// The URL in the new format, when it matches the old one.
+    pub fn convert(&self, url: &str) -> Option<String> {
+        let vals = self.from.capture(url)?;
+        let out = self.to.render(&vals)?;
+        normalise_url(&out).ok()
+    }
+
+    /// The same, with every hole value masked, and the old URL shown in the
+    /// old format too: what a preview may print.
+    pub fn masked(&self, url: &str) -> Option<(String, String)> {
+        let vals: Vec<(String, String)> = self
+            .from
+            .capture(url)?
+            .into_iter()
+            .map(|(k, v)| (k, mask_value(&v)))
+            .collect();
+        Some((self.from.render(&vals)?, self.to.render(&vals)?))
+    }
+
+    /// For one torrent: how many of its URLs a move would change, and how many
+    /// are on the old host without matching.
+    pub fn scan(&self, tiers: &[Vec<String>]) -> (usize, usize) {
+        let (mut changes, mut unmatched) = (0, 0);
+        for u in tiers.iter().flatten() {
+            match self.convert(u) {
+                Some(new) if new != *u => changes += 1,
+                Some(_) => {}
+                None if self.on_host(u) => unmatched += 1,
+                None => {}
+            }
+        }
+        (changes, unmatched)
+    }
+}
+
+/// Rewrite every announce URL matching `from_tpl` into `to_tpl`.
+///
+/// Tiers, their order and the dedupe rule are `rehost`'s: a rewritten URL the
+/// torrent already has, or that two of its URLs became, is dropped rather than
+/// doubled. Returns the tiers, how many URLs changed, and how many URLs on the
+/// old host did not match the template (left as they were).
+pub fn reformat(
+    tiers: &[Vec<String>],
+    from_tpl: &str,
+    to_tpl: &str,
+) -> Result<(Vec<Vec<String>>, usize, usize), String> {
+    Ok(reformat_with(tiers, &Format::parse(from_tpl, to_tpl)?))
+}
+
+pub fn reformat_with(tiers: &[Vec<String>], fmt: &Format) -> (Vec<Vec<String>>, usize, usize) {
+    let existing: std::collections::HashSet<&str> = tiers
+        .iter()
+        .flat_map(|t| t.iter().map(|u| u.as_str()))
+        .collect();
+    let mut produced: std::collections::HashSet<String> = Default::default();
+    let (mut changed, mut unmatched) = (0, 0);
+    let out: Vec<Vec<String>> = tiers
+        .iter()
+        .map(|tier| {
+            let mut level = Vec::with_capacity(tier.len());
+            for u in tier {
+                let Some(new) = fmt.convert(u) else {
+                    unmatched += usize::from(fmt.on_host(u));
+                    level.push(u.clone());
+                    continue;
+                };
+                if new == *u {
+                    level.push(new);
+                    continue;
+                }
+                changed += 1;
+                if !existing.contains(new.as_str()) && produced.insert(new.clone()) {
+                    level.push(new);
+                }
+            }
+            level
+        })
+        .collect();
+    (compact(out), changed, unmatched)
+}
+
+/// A template for the URLs of `url`'s host, with the passkey as `{passkey}`,
+/// when it can be told apart: exactly one query value or path segment that
+/// looks like a key (16 or more letters, digits, `-` or `_`). More than one,
+/// or none, gives `None`: the operator types it. The key itself is never in
+/// the answer.
+pub fn guess_format(url: &str) -> Option<String> {
+    let url = url.trim();
+    let (scheme, rest) = url.split_once("://")?;
+    if url.contains(['{', '}', '#']) {
+        return None;
+    }
+    let keyish = |v: &str| {
+        v.len() >= 16
+            && v.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+    };
+    let end = rest.find(['/', '?']).unwrap_or(rest.len());
+    let (authority, tail) = rest.split_at(end);
+    let (path, query) = match tail.split_once('?') {
+        Some((p, q)) => (p, Some(q)),
+        None => (tail, None),
+    };
+    let mut hits = 0;
+    let mut path_out = String::new();
+    if !path.is_empty() {
+        for seg in path[1..].split('/') {
+            path_out.push('/');
+            if keyish(seg) {
+                hits += 1;
+                path_out.push_str("{passkey}");
+            } else {
+                path_out.push_str(seg);
+            }
+        }
+    }
+    let mut query_out = String::new();
+    if let Some(q) = query {
+        for (i, pair) in q.split('&').enumerate() {
+            let (name, val) = pair.split_once('=')?;
+            query_out.push(if i == 0 { '?' } else { '&' });
+            query_out.push_str(name);
+            query_out.push('=');
+            if keyish(val) {
+                hits += 1;
+                query_out.push_str("{passkey}");
+            } else {
+                query_out.push_str(val);
+            }
+        }
+    }
+    if hits != 1 {
+        return None;
+    }
+    let out = format!("{scheme}://{authority}{path_out}{query_out}");
+    Template::parse(&out).ok().map(|_| out)
 }
 
 /// Validate an explicit tier structure, as sent by the editor.
@@ -557,5 +1072,284 @@ mod tests {
         assert!(rehost(&current, "", "new.example").is_err());
         // Same name, new port: that is a change.
         assert!(rehost(&current, "tracker.example", "tracker.example:8443").is_ok());
+    }
+
+    const KEY: &str = "0123abcd0123abcd0123abcd0123abcd0123abcd0123abcd0123abcd0123abcd";
+    const KEY2: &str = "fedc9876fedc9876fedc9876fedc9876fedc9876fedc9876fedc9876fedc9876";
+    const OLD_Q: &str = "https://old.example.invalid/tracker/announce?passkey={passkey}";
+    const NEW_P: &str = "https://new.example.invalid/{passkey}/announce";
+
+    fn one(url: &str) -> Vec<Vec<String>> {
+        vec![vec![url.to_string()]]
+    }
+
+    #[test]
+    fn a_passkey_moves_from_the_query_to_a_path_segment() {
+        let cur = one(&format!(
+            "https://old.example.invalid/tracker/announce?passkey={KEY}"
+        ));
+        let (out, changed, unmatched) = reformat(&cur, OLD_Q, NEW_P).unwrap();
+        assert_eq!(
+            out,
+            one(&format!("https://new.example.invalid/{KEY}/announce"))
+        );
+        assert_eq!((changed, unmatched), (1, 0));
+    }
+
+    #[test]
+    fn a_passkey_moves_from_a_path_segment_to_the_query() {
+        let cur = one(&format!("https://new.example.invalid/{KEY}/announce"));
+        let (out, changed, _) = reformat(&cur, NEW_P, OLD_Q).unwrap();
+        assert_eq!(
+            out,
+            one(&format!(
+                "https://old.example.invalid/tracker/announce?passkey={KEY}"
+            ))
+        );
+        assert_eq!(changed, 1);
+    }
+
+    #[test]
+    fn a_template_can_change_only_the_host() {
+        let cur = one(&format!(
+            "https://old.example.invalid/tracker/announce?passkey={KEY}"
+        ));
+        let (out, changed, _) = reformat(
+            &cur,
+            OLD_Q,
+            "https://new.example.invalid/tracker/announce?passkey={passkey}",
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            one(&format!(
+                "https://new.example.invalid/tracker/announce?passkey={KEY}"
+            ))
+        );
+        assert_eq!(changed, 1);
+    }
+
+    #[test]
+    fn the_host_is_matched_without_regard_to_case_and_query_order() {
+        let cur = one(&format!(
+            "https://OLD.Example.invalid/tracker/announce?uid=7&passkey={KEY}"
+        ));
+        let (out, changed, _) = reformat(
+            &cur,
+            "https://old.example.invalid/tracker/announce?passkey={passkey}&uid={uid}",
+            "https://new.example.invalid/{uid}/{passkey}",
+        )
+        .unwrap();
+        assert_eq!(out, one(&format!("https://new.example.invalid/7/{KEY}")));
+        assert_eq!(changed, 1);
+    }
+
+    #[test]
+    fn a_url_with_a_query_parameter_the_template_does_not_name_is_left_alone() {
+        let url = format!("https://old.example.invalid/tracker/announce?passkey={KEY}&extra=1");
+        let (out, changed, unmatched) = reformat(&one(&url), OLD_Q, NEW_P).unwrap();
+        assert_eq!(out, one(&url));
+        assert_eq!((changed, unmatched), (0, 1));
+    }
+
+    #[test]
+    fn urls_that_do_not_fit_are_not_matched() {
+        for url in [
+            // another path
+            format!("https://old.example.invalid/other/announce?passkey={KEY}"),
+            // a path segment more
+            format!("https://old.example.invalid/tracker/announce/x?passkey={KEY}"),
+            // an empty value
+            "https://old.example.invalid/tracker/announce?passkey=".to_string(),
+            // a value that is not URL-safe
+            "https://old.example.invalid/tracker/announce?passkey=a%zzb".to_string(),
+            // a repeated parameter
+            format!("https://old.example.invalid/tracker/announce?passkey={KEY}&passkey={KEY}"),
+            // a fragment
+            format!("https://old.example.invalid/tracker/announce?passkey={KEY}#f"),
+            // no query at all
+            "https://old.example.invalid/tracker/announce".to_string(),
+        ] {
+            let (out, changed, unmatched) = reformat(&one(&url), OLD_Q, NEW_P).unwrap();
+            assert_eq!(out, one(&url), "{url}");
+            assert_eq!((changed, unmatched), (0, 1), "{url}");
+        }
+        // Another host is not this move's business: not even counted.
+        let other = one("https://elsewhere.example.invalid/tracker/announce?passkey=abcd");
+        assert_eq!(reformat(&other, OLD_Q, NEW_P).unwrap().2, 0);
+    }
+
+    #[test]
+    fn percent_encoding_in_a_value_is_kept_as_it_is() {
+        let cur = one("https://old.example.invalid/tracker/announce?passkey=ab%2Fcd%41");
+        let (out, _, _) = reformat(&cur, OLD_Q, NEW_P).unwrap();
+        assert_eq!(out, one("https://new.example.invalid/ab%2Fcd%41/announce"));
+    }
+
+    #[test]
+    fn templates_that_cannot_work_are_refused() {
+        // A hole in the new format missing from the old one.
+        let e = reformat(&[], OLD_Q, "https://new.example.invalid/{uid}/announce").unwrap_err();
+        assert!(e.contains("uid"), "{e}");
+        // The same format twice.
+        assert!(reformat(&[], OLD_Q, OLD_Q).is_err());
+        // Not a tracker scheme.
+        assert!(reformat(&[], OLD_Q, "ftp://new.example.invalid/{passkey}").is_err());
+        assert!(reformat(&[], OLD_Q, "new.example.invalid/{passkey}").is_err());
+        // A hole inside a segment, a hole in the host, an unnamed query value.
+        assert!(reformat(&[], OLD_Q, "https://new.example.invalid/a{passkey}b").is_err());
+        assert!(reformat(&[], OLD_Q, "https://{passkey}.example.invalid/x").is_err());
+        assert!(reformat(&[], "https://old.example.invalid/x?{passkey}", NEW_P).is_err());
+        // A hole twice in the old format.
+        assert!(reformat(
+            &[],
+            "https://old.example.invalid/{passkey}/{passkey}",
+            NEW_P
+        )
+        .is_err());
+        // A UDP tracker needs a port.
+        assert!(reformat(&[], OLD_Q, "udp://new.example.invalid/{passkey}").is_err());
+        // {rest} is the last path segment, and only there.
+        assert!(reformat(&[], "https://old.example.invalid/{rest}/x", NEW_P).is_err());
+        assert!(reformat(&[], "https://old.example.invalid/x?k={rest}", NEW_P).is_err());
+    }
+
+    #[test]
+    fn a_literal_only_old_format_is_allowed_when_it_differs() {
+        let cur = one("https://old.example.invalid/announce");
+        let (out, changed, _) = reformat(
+            &cur,
+            "https://old.example.invalid/announce",
+            "https://new.example.invalid/announce",
+        )
+        .unwrap();
+        assert_eq!(out, one("https://new.example.invalid/announce"));
+        assert_eq!(changed, 1);
+    }
+
+    #[test]
+    fn the_rest_hole_carries_the_remaining_path() {
+        let cur = one("https://old.example.invalid/t/a/b/c");
+        let (out, changed, _) = reformat(
+            &cur,
+            "https://old.example.invalid/t/{rest}",
+            "https://new.example.invalid/u/{rest}",
+        )
+        .unwrap();
+        assert_eq!(out, one("https://new.example.invalid/u/a/b/c"));
+        assert_eq!(changed, 1);
+        // Nothing after the literal part: no value, no match.
+        let bare = one("https://old.example.invalid/t");
+        assert_eq!(
+            reformat(
+                &bare,
+                "https://old.example.invalid/t/{rest}",
+                "https://new.example.invalid/u/{rest}"
+            )
+            .unwrap()
+            .1,
+            0
+        );
+    }
+
+    #[test]
+    fn tiers_and_order_are_kept_and_only_matching_urls_change() {
+        let a = format!("https://old.example.invalid/tracker/announce?passkey={KEY}");
+        let b = format!("https://old.example.invalid/tracker/announce?passkey={KEY2}");
+        let cur = vec![
+            vec![a, "https://keep.example.invalid/announce".to_string()],
+            vec![b],
+        ];
+        let (out, changed, unmatched) = reformat(&cur, OLD_Q, NEW_P).unwrap();
+        assert_eq!(
+            out,
+            vec![
+                vec![
+                    format!("https://new.example.invalid/{KEY}/announce"),
+                    "https://keep.example.invalid/announce".to_string()
+                ],
+                vec![format!("https://new.example.invalid/{KEY2}/announce")],
+            ]
+        );
+        assert_eq!((changed, unmatched), (2, 0));
+    }
+
+    #[test]
+    fn a_url_that_becomes_a_duplicate_is_dropped() {
+        let old = format!("https://old.example.invalid/tracker/announce?passkey={KEY}");
+        let already = format!("https://new.example.invalid/{KEY}/announce");
+        // The rewritten URL is already in another tier.
+        let cur = vec![vec![old.clone()], vec![already.clone()]];
+        let (out, changed, _) = reformat(&cur, OLD_Q, NEW_P).unwrap();
+        assert_eq!(out, vec![vec![already.clone()]]);
+        assert_eq!(changed, 1);
+        // Two URLs that become one.
+        let twice = vec![vec![old.clone(), old]];
+        let (out, _, _) = reformat(&twice, OLD_Q, NEW_P).unwrap();
+        assert_eq!(out, one(&already));
+    }
+
+    #[test]
+    fn a_udp_tracker_can_be_reformatted() {
+        let cur = one(&format!("udp://old.example.invalid:6969/{KEY}/announce"));
+        let (out, changed, _) = reformat(
+            &cur,
+            "udp://old.example.invalid:6969/{passkey}/announce",
+            "udp://new.example.invalid:7070/announce/{passkey}",
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            one(&format!("udp://new.example.invalid:7070/announce/{KEY}"))
+        );
+        assert_eq!(changed, 1);
+        // The port is part of the host the template names.
+        let other_port = one(&format!("udp://old.example.invalid:1111/{KEY}/announce"));
+        assert_eq!(
+            reformat(
+                &other_port,
+                "udp://old.example.invalid:6969/{passkey}/announce",
+                "udp://new.example.invalid:7070/announce/{passkey}"
+            )
+            .unwrap()
+            .1,
+            0
+        );
+    }
+
+    #[test]
+    fn a_preview_never_shows_a_whole_value() {
+        let fmt = Format::parse(OLD_Q, NEW_P).unwrap();
+        let url = format!("https://old.example.invalid/tracker/announce?passkey={KEY}");
+        let (before, after) = fmt.masked(&url).unwrap();
+        assert_eq!(
+            before,
+            "https://old.example.invalid/tracker/announce?passkey=0123…"
+        );
+        assert_eq!(after, "https://new.example.invalid/0123…/announce");
+        for shown in [&before, &after] {
+            assert!(!shown.contains(&KEY[..8]), "{shown}");
+        }
+        // A short value is cut further: never all of it.
+        assert_eq!(mask_value("abcdefgh"), "ab…");
+        assert_eq!(mask_value("abc"), "…");
+        assert!(fmt.masked("https://old.example.invalid/nope").is_none());
+    }
+
+    #[test]
+    fn the_format_of_a_row_is_guessed_without_its_key() {
+        let g = guess_format(&format!(
+            "https://old.example.invalid/tracker/announce?passkey={KEY}"
+        ))
+        .unwrap();
+        assert_eq!(g, OLD_Q);
+        let g = guess_format(&format!("https://new.example.invalid/{KEY}/announce")).unwrap();
+        assert_eq!(g, NEW_P);
+        // No key to find, or two: the operator types it.
+        assert!(guess_format("https://old.example.invalid/announce").is_none());
+        assert!(guess_format(&format!(
+            "https://old.example.invalid/announce?a={KEY}&b={KEY2}"
+        ))
+        .is_none());
     }
 }
