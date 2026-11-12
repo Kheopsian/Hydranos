@@ -5434,6 +5434,10 @@ struct TrackerRow {
     announces: i64,
     errors: i64,
     passkey_set: bool,
+    /// A passkey is set for this host but an announce found no place for it in
+    /// a torrent's URL (see `policy::passkey_slot`): the override is not live
+    /// for those torrents.
+    passkey_unplaced: bool,
     ip_mode: String,
     /// Kept out of the tab by the operator. A view decision, not a mute:
     /// see Config::announce_hidden.
@@ -5553,6 +5557,8 @@ async fn get_trackers(
                 announces: seen.map(|(n, _)| *n).unwrap_or(0),
                 errors: 0,
                 passkey_set: cfg.announce_passkeys.contains_key(&host),
+                passkey_unplaced: cfg.announce_passkeys.contains_key(&host)
+                    && crate::announce::policy::passkey_unplaced(&host),
                 hidden: cfg.announce_hidden.contains_key(&host),
                 // -1 = nothing declared, which is NOT 0. The drain protects
                 // the first and releases the second, so a row that cannot tell
@@ -26362,6 +26368,47 @@ mod write_path_tests {
             }
         }
         s.state.store.lock().unwrap().execute_batch_for_tests(&sql);
+    }
+
+    /// A passkey override the announce path could not place in any URL shows
+    /// on the host's row, so the operator is not left believing it is live.
+    #[tokio::test]
+    async fn the_tracker_row_flags_a_passkey_that_could_not_be_placed() {
+        let s = state_from(
+            "row-unplaced",
+            &format!(
+                "[daemon]\napi_key = \"{KEY}\"\n\
+                 [announce_passkeys]\n\"row-unplaced.example.invalid\" = \"0123abcd\"\n\
+                 \"row-placed.example.invalid\" = \"0123abcd\"\n"
+            ),
+        );
+        let mut p = crate::announce::policy::Policy::default();
+        p.passkeys
+            .insert("row-unplaced.example.invalid".into(), "0123abcd".into());
+        crate::announce::policy::keyed_url(
+            &p,
+            "https://row-unplaced.example.invalid/tracker/announce",
+        );
+        let body = body_json(
+            super::get_trackers(State(s.state.clone()), RawQuery(None), keyed(KEY)).await,
+        )
+        .await;
+        let row = |h: &str| {
+            body.as_array()
+                .and_then(|a| a.iter().find(|r| r["host"] == h))
+                .unwrap_or_else(|| panic!("no row {h}: {body}"))
+                .clone()
+        };
+        assert_eq!(
+            row("row-unplaced.example.invalid")["passkey_unplaced"],
+            true,
+            "{body}"
+        );
+        assert_eq!(
+            row("row-placed.example.invalid")["passkey_unplaced"],
+            false,
+            "{body}"
+        );
     }
 
     /// The writes that come AFTER the engine has acted -- a copy, a move, a

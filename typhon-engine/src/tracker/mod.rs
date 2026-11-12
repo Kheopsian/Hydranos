@@ -7,7 +7,7 @@ pub mod udp;
 /// characters with at least one digit and one letter, so `announce`,
 /// `announce.php` and compound words like `public-tracker-announce` never
 /// qualify.
-fn looks_like_key(s: &str) -> bool {
+pub fn looks_like_key(s: &str) -> bool {
     s.len() >= 16
         && s.bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')

@@ -135,27 +135,133 @@ pub fn ip_mode_for(policy: &Policy, tracker_url: &str) -> typhon_engine::tracker
     }
 }
 
-/// Rewrite the passkey segment of a tracker URL.
+/// Where the passkey sits in a tracker URL: the byte range of its value, or
+/// `None` when no position can be identified (the URL then cannot take an
+/// override, and `apply_passkey` leaves it as it is).
 ///
-/// The passkey is the last path segment on every tracker that puts it in the
-/// path (`/announce/<key>`), which is the shape 3.x rewrites. A tracker that
-/// carries it in the query is left alone -- guessing which query parameter is
-/// the credential would be worse than not rewriting.
-pub fn apply_passkey(tracker_url: &str, passkey: &str) -> String {
-    let (base, query) = match tracker_url.split_once('?') {
-        Some((b, q)) => (b, Some(q)),
-        None => (tracker_url, None),
+/// The rule, first match wins:
+/// 1. a query parameter named `passkey` (any case): its value, whatever it
+///    looks like. Only that name: another name is a guess at which parameter
+///    is the credential, and a wrong guess overwrites something else;
+/// 2. a path segment next to a segment named `announce` that looks like a key
+///    (`tracker::looks_like_key`: 16+ characters of letters, digits, `-`, `_`,
+///    with a digit and a letter): the one after `announce` first, else the one
+///    before it (`/<key>/announce`);
+/// 3. the last path segment, as 3.x did (`/announce/<key>`, `/<key>`), unless
+///    it is empty or starts with `announce` (`/announce`, `/announce.php`).
+///
+/// The scheme does not matter: `udp://host:port/announce` has no key and
+/// answers `None`.
+pub fn passkey_slot(tracker_url: &str) -> Option<std::ops::Range<usize>> {
+    let url = tracker_url;
+    let auth = url.find("://").map(|i| i + 3).unwrap_or(0);
+    let path_start = auth
+        + url[auth..]
+            .find(['/', '?', '#'])
+            .unwrap_or(url.len() - auth);
+    let end = url[path_start..]
+        .find('#')
+        .map(|i| path_start + i)
+        .unwrap_or(url.len());
+    let (path_end, query) = match url[path_start..end].find('?') {
+        Some(i) => (path_start + i, Some(path_start + i + 1)),
+        None => (end, None),
     };
-    let rewritten = match base.rsplit_once('/') {
-        Some((head, last)) if !last.is_empty() && last != "announce" => {
-            format!("{head}/{passkey}")
+
+    if let Some(q) = query {
+        let mut off = q;
+        for piece in url[q..end].split('&') {
+            if let Some(eq) = piece.find('=') {
+                if piece[..eq].eq_ignore_ascii_case("passkey") {
+                    return Some(off + eq + 1..off + piece.len());
+                }
+            }
+            off += piece.len() + 1;
         }
-        _ => base.to_string(),
-    };
-    match query {
-        Some(q) => format!("{rewritten}?{q}"),
-        None => rewritten,
     }
+
+    let path = &url[path_start..path_end];
+    if !path.starts_with('/') {
+        return None;
+    }
+    let mut segs: Vec<(std::ops::Range<usize>, &str)> = Vec::new();
+    let mut off = path_start + 1;
+    for seg in path[1..].split('/') {
+        segs.push((off..off + seg.len(), seg));
+        off += seg.len() + 1;
+    }
+    if let Some(i) = segs
+        .iter()
+        .position(|(_, s)| s.eq_ignore_ascii_case("announce"))
+    {
+        let after = segs
+            .get(i + 1)
+            .filter(|(_, s)| typhon_engine::tracker::looks_like_key(s));
+        let before = i
+            .checked_sub(1)
+            .and_then(|b| segs.get(b))
+            .filter(|(_, s)| typhon_engine::tracker::looks_like_key(s));
+        if let Some((r, _)) = after.or(before) {
+            return Some(r.clone());
+        }
+    }
+    let (r, last) = segs.last()?;
+    let is_announce = last
+        .get(..8)
+        .is_some_and(|p| p.eq_ignore_ascii_case("announce"));
+    (!last.is_empty() && !is_announce).then(|| r.clone())
+}
+
+/// Rewrite the passkey of a tracker URL, where `passkey_slot` finds it.
+/// A URL with no identifiable slot comes back unchanged.
+pub fn apply_passkey(tracker_url: &str, passkey: &str) -> String {
+    let mut out = tracker_url.to_string();
+    if let Some(r) = passkey_slot(tracker_url) {
+        out.replace_range(r, passkey);
+    }
+    out
+}
+
+/// Hosts that have an override which could not be placed in one of their URLs.
+fn unplaced_hosts() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    static SEEN: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    SEEN.get_or_init(Default::default)
+}
+
+/// Records that `host` has an override its URL cannot take; true the first
+/// time, so the warning is once per host and not once per announce.
+fn note_unplaced(host: &str) -> bool {
+    unplaced_hosts()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(host.to_string())
+}
+
+/// Whether an announce or scrape to `host` since start found an override it
+/// could not place (the `passkey_unplaced` of `/api/trackers`).
+pub fn passkey_unplaced(host: &str) -> bool {
+    unplaced_hosts()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains(host)
+}
+
+/// The tracker URL with the host's passkey override applied. When an override
+/// exists but the URL has no slot for it, the URL is returned as it was, the
+/// host is remembered for the Trackers tab and a warning is logged once.
+pub fn keyed_url(policy: &Policy, tracker_url: &str) -> String {
+    let Some(k) = passkey_for(policy, tracker_url) else {
+        return tracker_url.to_string();
+    };
+    if passkey_slot(tracker_url).is_none() {
+        let host = override_host(tracker_url);
+        if note_unplaced(&host) {
+            // The host only: the URL may carry the passkey.
+            tracing::warn!(tracker = %host, "a passkey is set for this host but its announce URL has no place for it (no passkey= parameter, no key beside /announce, no last path segment): torrents keep announcing with the key in their own URL");
+        }
+    }
+    apply_passkey(tracker_url, k)
 }
 
 /// The URL for one announce, and the User-Agent to send it with.
@@ -214,10 +320,7 @@ pub fn prepare(
             tracing::warn!(tracker = %host, "announce URL carries a passkey over plain http://; set announce_cleartext_passkey to \"refuse\" to stop announcing to it");
         }
     }
-    let url_with_key = match passkey_for(policy, tracker_url) {
-        Some(k) => apply_passkey(tracker_url, k),
-        None => tracker_url.to_string(),
-    };
+    let url_with_key = keyed_url(policy, tracker_url);
 
     let peer_id = policy.peer_id.clone();
     let user_agent = policy.user_agent.clone();
@@ -676,5 +779,156 @@ mod tests {
         );
         assert!(r.url.contains("peer_id=-TY0001-abcdefghijkl"));
         assert_eq!(r.user_agent, "Hydra/4.0.0");
+    }
+
+    const K1: &str = "0123abcd0123abcd0123abcd";
+    const K2: &str = "fedc9876fedc9876fedc9876";
+
+    #[test]
+    fn the_override_replaces_a_passkey_query_parameter() {
+        for scheme in ["http", "https"] {
+            assert_eq!(
+                apply_passkey(
+                    &format!("{scheme}://tracker.example.invalid/tracker/announce?passkey={K1}"),
+                    K2
+                ),
+                format!("{scheme}://tracker.example.invalid/tracker/announce?passkey={K2}")
+            );
+        }
+        // Other parameters stay, in their order, on both sides of the key.
+        assert_eq!(
+            apply_passkey(
+                &format!("https://tracker.example.invalid/announce?passkey={K1}&other=1"),
+                K2
+            ),
+            format!("https://tracker.example.invalid/announce?passkey={K2}&other=1")
+        );
+        assert_eq!(
+            apply_passkey(
+                &format!("https://tracker.example.invalid/announce?a=1&passkey={K1}&b=2"),
+                K2
+            ),
+            format!("https://tracker.example.invalid/announce?a=1&passkey={K2}&b=2")
+        );
+        // A short key still goes: the name says what it is.
+        assert_eq!(
+            apply_passkey("https://tracker.example.invalid/announce?passkey=old", K2),
+            format!("https://tracker.example.invalid/announce?passkey={K2}")
+        );
+    }
+
+    #[test]
+    fn the_override_replaces_a_key_before_announce() {
+        for scheme in ["http", "https"] {
+            assert_eq!(
+                apply_passkey(
+                    &format!("{scheme}://tracker.example.invalid/{K1}/announce"),
+                    K2
+                ),
+                format!("{scheme}://tracker.example.invalid/{K2}/announce")
+            );
+        }
+        assert_eq!(
+            apply_passkey(
+                &format!("https://tracker.example.invalid/{K1}/announce?x=1"),
+                K2
+            ),
+            format!("https://tracker.example.invalid/{K2}/announce?x=1")
+        );
+    }
+
+    #[test]
+    fn the_last_segment_forms_still_work() {
+        assert_eq!(
+            apply_passkey("https://tracker.example.invalid/announce/old", K2),
+            format!("https://tracker.example.invalid/announce/{K2}")
+        );
+        assert_eq!(
+            apply_passkey("http://tracker.example.invalid/old", K2),
+            format!("http://tracker.example.invalid/{K2}")
+        );
+        assert_eq!(
+            apply_passkey(
+                &format!("udp://tracker.example.invalid:6969/announce/{K1}"),
+                K2
+            ),
+            format!("udp://tracker.example.invalid:6969/announce/{K2}")
+        );
+    }
+
+    #[test]
+    fn a_url_with_no_identifiable_key_is_not_rewritten_and_says_so() {
+        for url in [
+            "https://tracker.example.invalid/announce",
+            "https://tracker.example.invalid/tracker/announce",
+            "https://tracker.example.invalid/announce.php",
+            "https://tracker.example.invalid/announce?foo=1",
+            "https://tracker.example.invalid/announce/",
+            "https://tracker.example.invalid",
+            "https://tracker.example.invalid/",
+            "udp://tracker.example.invalid:6969/announce",
+            "udp://tracker.example.invalid:6969",
+        ] {
+            assert_eq!(passkey_slot(url), None, "{url}");
+            assert_eq!(apply_passkey(url, K2), url, "{url}");
+        }
+        // And the ones that do have a place say where it is.
+        let url = format!("https://tracker.example.invalid/{K1}/announce");
+        assert_eq!(
+            passkey_slot(&url).map(|r| url[r].to_string()),
+            Some(K1.to_string())
+        );
+        let url = "https://tracker.example.invalid/announce?x=1&passkey=old";
+        assert_eq!(
+            passkey_slot(url).map(|r| url[r].to_string()),
+            Some("old".to_string())
+        );
+    }
+
+    #[test]
+    fn an_override_that_cannot_be_placed_is_noted_once_per_host() {
+        let mut p = Policy::default();
+        p.passkeys
+            .insert("unplaced-a.example.invalid".into(), K2.into());
+        p.passkeys
+            .insert("placed-a.example.invalid".into(), K2.into());
+        let bad = "https://unplaced-a.example.invalid/tracker/announce";
+        assert!(!passkey_unplaced("unplaced-a.example.invalid"));
+        assert_eq!(keyed_url(&p, bad), bad, "left as it was");
+        assert!(passkey_unplaced("unplaced-a.example.invalid"));
+        assert!(
+            !note_unplaced("unplaced-a.example.invalid"),
+            "the second sighting is not news"
+        );
+        // A host whose URL takes the key is not flagged, nor one with no override.
+        let good = format!("https://placed-a.example.invalid/{K1}/announce");
+        assert_eq!(
+            keyed_url(&p, &good),
+            format!("https://placed-a.example.invalid/{K2}/announce")
+        );
+        assert!(!passkey_unplaced("placed-a.example.invalid"));
+        keyed_url(&p, "https://other-a.example.invalid/announce");
+        assert!(!passkey_unplaced("other-a.example.invalid"));
+    }
+
+    #[test]
+    fn prepare_applies_the_override_to_a_query_key() {
+        let mut p = policy();
+        p.passkeys.insert("tr-q.test".into(), K2.into());
+        let r = prepare(
+            &p,
+            &format!("https://tr-q.test/tracker/announce?passkey={K1}"),
+            &"ab".repeat(20),
+            16171,
+            0,
+            0,
+            0,
+            "started",
+            None,
+            None,
+        )
+        .expect("prepared");
+        assert!(r.url.contains(&format!("passkey={K2}")), "{}", r.url);
+        assert!(!r.url.contains(K1), "{}", r.url);
     }
 }

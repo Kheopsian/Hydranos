@@ -8907,8 +8907,12 @@ async function updateTrackers() {
                     + esc("announce self-check, " + vv.age_secs + "s ago, swarm " + vv.swarm)
                     + '">' + esc(vv.verdict) + '</span>';
             }
+            // "set, not applied": the override exists but a torrent's URL has
+            // no place for it, so those torrents keep announcing with their own key.
             const passkey = r.passkey_set
-                ? '<span class="mode-tag mode-hoard">set</span>'
+                ? (r.passkey_unplaced
+                    ? '<span class="mode-tag mode-race" title="' + esc("A passkey is set, but an announce URL of this tracker has no place for it (no passkey= parameter, no key next to /announce, no last path segment): those torrents keep the key in their own URL.") + '">set, not applied</span>'
+                    : '<span class="mode-tag mode-hoard">set</span>')
                 : '<span class="sr-desc">-</span>';
             // "-" is not 0: an undeclared tracker is one the drain refuses to
             // delete from, which is the opposite of "no constraint".

@@ -137,7 +137,7 @@ Status: ✓ works · ◐ works with a caveat. Stub routes appear only in *Routes
 | `/api/hoard/torrents/:info_hash/{pin,unpin}` | POST | Force download (starts the torrent, past the queue) / stop forcing. | ✓ |
 | `/api/hoard/torrents/:info_hash/verify` | POST | Recheck (`?engine=` picks the copy). | ✓ |
 | `/api/race/torrents/:info_hash/purge` | POST | Remove the **race copy** (engine first). Its data is deleted when no other copy of the torrent remains; files another torrent reads are kept. Other copies are untouched. `404` if the torrent is not in race. | ✓ |
-| `/api/race/timeline/:info_hash`, `/api/trackers` | GET | Race timeline; Trackers tab table. | ✓ |
+| `/api/race/timeline/:info_hash`, `/api/trackers` | GET | Race timeline; Trackers tab table. A row's `passkey_set` says an override is configured; `passkey_unplaced` is true when, since start, an announce or scrape found a torrent URL of that host with no place for it (no `passkey=` query parameter, no key-looking segment next to `announce`, no last path segment), so the override is not applied to that URL. | ✓ |
 
 How an add picks its engine and save path: [Categories and Routing](https://github.com/Kheopsian/Hydranos/wiki/Categories-and-Routing). Without `engine` or `mode`, the category decides. `create_subfolder` gives a single-file torrent a folder of its own, named after the torrent.
 

@@ -27,7 +27,7 @@ use typhon_engine::tracker::scrape::{self as tscrape, ScrapeEntry, BATCH};
 
 use super::breaker::Breaker;
 use super::cache::Cache;
-use super::policy::{apply_passkey, passkey_for, refused_for_cleartext, Policy};
+use super::policy::{keyed_url, refused_for_cleartext, Policy};
 
 /// First pass after the engine starts, then between passes.
 const FIRST: Duration = Duration::from_secs(90);
@@ -69,10 +69,7 @@ pub fn target_for(policy: &Policy, tracker_url: &str) -> Option<Target> {
     if refused_for_cleartext(policy, tracker_url) {
         return None;
     }
-    let url = match passkey_for(policy, tracker_url) {
-        Some(k) => apply_passkey(tracker_url, k),
-        None => tracker_url.to_string(),
-    };
+    let url = keyed_url(policy, tracker_url);
     tscrape::scrape_url(&url).map(Target::Http)
 }
 
@@ -280,9 +277,12 @@ mod tests {
         // which BEP 48 gives no scrape URL -- such a tracker is not scraped
         // rather than scraped with the key the announces replace.
         assert_eq!(target_for(&p, "https://t.example/announce/OLDKEY"), None);
+        // A `passkey=` query parameter takes the override too, as the announce does.
         assert_eq!(
             target_for(&p, "https://t.example/announce?passkey=K"),
-            Some(Target::Http("https://t.example/scrape?passkey=K".into()))
+            Some(Target::Http(
+                "https://t.example/scrape?passkey=SECRET".into()
+            ))
         );
         let now = Instant::now();
         let ts = vec![(
