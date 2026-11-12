@@ -21,7 +21,7 @@ decided when the release is cut, by looking at what went in: whoever tags it
 renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 `HYDRANOS_VERSION` in the same commit.
 
-## Unreleased -- a qBittorrent import that stops asking a dead qBittorrent
+## v4.8.4 -- a tracker that changed its announce format, and a qBittorrent import that stops asking a dead qBittorrent
 
 ### Added
 
@@ -35,7 +35,7 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 - A 409 from qBittorrent is no longer always labelled "no metadata yet": the failure shows qBittorrent's own answer, such as `Unable to export torrent file. Error: a piece layer is invalid` for some hybrid torrents on 5.x.
 - A torrent removed while a save was running could have its saved state written back by that save, leaving a row for a torrent that no longer exists. A torrent being removed is now skipped by the save from the first moment of the removal.
 - The startup report lists a torrent that exists but was refused (its stored metainfo does not match its key) even when thousands of leftover rows without metainfo fill the list. Until now such a torrent was only counted.
-- A rule whose duration is negative or not a number (`-5`, `nan`, `inf`) is now refused when it is saved, with a message that says what a duration is. Such a value used to be accepted: a `for` of `-5` read as no delay at all, and a condition like `completed age != nan` held for every torrent.
+- A rule whose duration is negative or not a number (`-5`, `nan`, `inf`) is now refused when it is saved, with a message that says what a duration is. Such a value used to be accepted: a `for` of `-5` read as no delay at all, and a condition like `completed age != nan` held for every torrent. A rule already saved with such a duration stops at its next pass with an error naming the field, instead of matching every torrent.
 - An edit made while a torrent was being removed (trackers, save path, download order, file rename, speed limits) could write the torrent's saved state back after the removal had deleted it, and the legacy JSON save did the same. Both now skip a torrent being removed, and the edit is refused with `torrent is being removed`.
 
 ### Changed
