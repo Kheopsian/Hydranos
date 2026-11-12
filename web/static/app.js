@@ -9403,7 +9403,10 @@ async function _trkWatchMove(announceEnd) {
             if (!announceEnd) { if (j.state === "none") _trkMoveStatus("", ""); break; }
             if (j.state === "done") {
                 const note = j.note ? " " + j.note.charAt(0).toUpperCase() + j.note.slice(1) + "." : "";
-                _trkMoveStatus(t("Done: {changed} torrents moved to the new host, {skipped} skipped (no stored .torrent yet), {failed} failed.", { changed: j.changed, skipped: j.skipped, failed: j.failed }) + note, j.failed ? "error" : "success");
+                const done = j.mode === "format"
+                    ? t("Done: {changed} torrents moved to the new announce format, {unmatched} left as they were (their URL does not fit the old format), {skipped} skipped (no stored .torrent yet), {failed} failed.", { changed: j.changed, unmatched: j.unmatched || 0, skipped: j.skipped, failed: j.failed })
+                    : t("Done: {changed} torrents moved to the new host, {skipped} skipped (no stored .torrent yet), {failed} failed.", { changed: j.changed, skipped: j.skipped, failed: j.failed });
+                _trkMoveStatus(done + note, j.failed ? "error" : "success");
             } else {
                 _trkMoveStatus(t("Stopped: {msg}", { msg: j.error || j.state }), "error");
             }
