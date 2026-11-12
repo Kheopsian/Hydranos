@@ -736,15 +736,26 @@ impl TorrentManager {
     /// lock and the later one always carries the later memory. Every
     /// immediate edit goes through here (a record built by the caller,
     /// before the lock, is what lost to a sweep's older copy).
+    ///
+    /// A torrent flagged removed is not written: its row is deleted (or about
+    /// to be) and an edit must not bring it back. The flag is read inside the
+    /// builder, under the database lock `forget_state` also waits for, so an
+    /// edit either wrote before the delete (which then removes it) or sees the
+    /// flag. The edit is told `torrent is being removed`, so its caller puts
+    /// memory back as for any other refused write.
     fn try_persist_live(&self, ih: &InfoHash) -> Result<(), String> {
+        const GONE: &str = "torrent is being removed";
         let t = self.get(ih).ok_or("torrent not found")?;
         match &self.state_db {
             Some(db) => {
                 let mirror = self.mirror_json;
-                let (rd, res) = db.put_with(
+                let Some((rd, res)) = db.put_with(
                     || {
+                        if t.is_removed.load(Ordering::Relaxed) {
+                            return None;
+                        }
                         let fp = fingerprint_of(&t);
-                        (Self::build_resume_data(&t), fp)
+                        Some((Self::build_resume_data(&t), fp))
                     },
                     |rd, fp| {
                         self.last_saved.insert(*ih, *fp);
@@ -752,7 +763,9 @@ impl TorrentManager {
                             fastresume::save(&self.resume_dir, ih, rd);
                         }
                     },
-                );
+                ) else {
+                    return Err(GONE.into());
+                };
                 res.map_err(|e| {
                     warn!(
                         "[statedb] put {} failed: {} -- writing JSON instead",
@@ -763,11 +776,19 @@ impl TorrentManager {
                     format!("the state store did not keep the change: {e}")
                 })
             }
-            None => fastresume::try_save(&self.resume_dir, ih, &Self::build_resume_data(&t))
-                .map_err(|e| {
-                    warn!("[resume] {}", e);
-                    e
-                }),
+            None => {
+                // No lock to order against here: this narrows the window to
+                // the gap between the check and the file write.
+                if t.is_removed.load(Ordering::Relaxed) {
+                    return Err(GONE.into());
+                }
+                fastresume::try_save(&self.resume_dir, ih, &Self::build_resume_data(&t)).map_err(
+                    |e| {
+                        warn!("[resume] {}", e);
+                        e
+                    },
+                )
+            }
         }
     }
 
@@ -2227,6 +2248,11 @@ impl TorrentManager {
                 let now = crate::torrent::meta::now_secs();
                 for entry in self.torrents.iter() {
                     let t = entry.value();
+                    // A torrent being removed has had its file deleted, or
+                    // is about to: writing it would bring it back.
+                    if t.is_removed.load(Ordering::Relaxed) {
+                        continue;
+                    }
                     t.fold_seed_time(now);
                     let rd = Self::build_resume_data(t);
                     fastresume::save(&self.resume_dir, &t.info_hash, &rd);
@@ -5146,6 +5172,55 @@ mod manager_tests {
         );
         mgr.save_all_resume();
         assert!(!db.load_all().iter().any(|r| r.info_hash == hex));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// An immediate edit (not a sweep) landing in the same window must not
+    /// write the row back either, and must say it did not take.
+    #[test]
+    fn an_edit_during_a_removal_does_not_bring_the_row_back() {
+        let (mgr, root) = manager("race-remove-edit");
+        let ih = add(&mgr, "alpha");
+        make_dirty(&mgr, &ih);
+        let seen: Arc<std::sync::Mutex<Option<Result<(), String>>>> = Default::default();
+        let (m2, s2) = (mgr.clone(), seen.clone());
+        *mgr.remove_window_hook.lock().unwrap() = Some(Box::new(move || {
+            let r = m2.set_trackers(&ih, vec![vec!["https://tracker2.example/a".into()]]);
+            *s2.lock().unwrap() = Some(r);
+        }));
+        mgr.remove_torrent_timed(&ih, true).0.expect("removed");
+        let hex = hex_encode(&ih);
+        let db = mgr.state_db.as_ref().unwrap();
+        assert!(
+            !db.load_all().iter().any(|r| r.info_hash == hex),
+            "an edit made during the removal brought the row back"
+        );
+        let r = seen.lock().unwrap().take().expect("the hook ran");
+        assert!(r.is_err(), "the edit claimed to take: {r:?}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Same window, legacy store (no database): the JSON sweep skips a
+    /// torrent being removed.
+    #[test]
+    fn a_json_sweep_during_a_removal_does_not_bring_the_file_back() {
+        let (mut mgr, root) = manager("race-remove-json");
+        Arc::get_mut(&mut mgr).expect("sole owner").state_db = None;
+        let ih = add(&mgr, "alpha");
+        mgr.save_all_resume();
+        let file_back = || {
+            std::fs::read_dir(root.join("resume")).unwrap().any(|e| {
+                e.unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .contains(&hex_encode(&ih))
+            })
+        };
+        assert!(file_back(), "the legacy sweep wrote the file");
+        let m2 = mgr.clone();
+        *mgr.remove_window_hook.lock().unwrap() = Some(Box::new(move || m2.save_all_resume()));
+        mgr.remove_torrent_timed(&ih, true).0.expect("removed");
+        assert!(!file_back(), "the removed torrent's file came back");
         let _ = std::fs::remove_dir_all(root);
     }
 

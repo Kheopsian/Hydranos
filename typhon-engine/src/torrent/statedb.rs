@@ -211,19 +211,22 @@ impl StateDb {
     /// while the lock is still held, so the caller's bookkeeping cannot be
     /// reordered against another writer either.
     ///
+    /// `build` may return `None` to write nothing (the torrent is being
+    /// removed): the call then returns `None` without touching the store.
+    ///
     /// ⚠ `build` runs under the connection lock: it may take the torrent's
     /// own locks, and nothing that holds one of those may wait for this
     /// connection.
     pub fn put_with<M>(
         &self,
-        build: impl FnOnce() -> (ResumeData, M),
+        build: impl FnOnce() -> Option<(ResumeData, M)>,
         on_commit: impl FnOnce(&ResumeData, &M),
-    ) -> (ResumeData, Result<(), rusqlite::Error>) {
+    ) -> Option<(ResumeData, Result<(), rusqlite::Error>)> {
         let mut conn = match self.conn.lock() {
             Ok(c) => c,
             Err(e) => e.into_inner(),
         };
-        let (rd, meta) = build();
+        let (rd, meta) = build()?;
         let res = conn.transaction().and_then(|tx| {
             put_in(&tx, &rd)?;
             tx.commit()
@@ -231,7 +234,7 @@ impl StateDb {
         if res.is_ok() {
             on_commit(&rd, &meta);
         }
-        (rd, res)
+        Some((rd, res))
     }
 
     /// Upsert many records, a few thousand per transaction. This is the
