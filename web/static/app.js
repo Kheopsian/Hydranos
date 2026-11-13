@@ -10807,11 +10807,16 @@ function netModeCollect() {
     const num = id => { const el = document.getElementById(id); return el ? Number(el.value || 0) : 0; };
     const str = id => { const el = document.getElementById(id); return el ? el.value.trim() : ""; };
     const bool = id => { const el = document.getElementById(id); return el ? !!el.checked : false; };
-    if (!document.getElementById("net-race-port")) return null;
+    // The IPv6 box is drawn with the ports block whatever the mode; a port box
+    // is not: it is hidden for an engine whose provider grants its port.
+    if (!document.getElementById("net-ipv6")) return null;
     const prev = (_netState && _netState.fields) || {};
+    // A hidden port box keeps the stored port. Read as 0, it made the page
+    // look edited forever, and saving it was refused (port out of range).
+    const port = (id, key) => document.getElementById(id) ? num(id) : (prev[key] || 0);
     return {
-        race_listen_port: num("net-race-port"),
-        hoard_listen_port: num("net-hoard-port"),
+        race_listen_port: port("net-race-port", "race_listen_port"),
+        hoard_listen_port: port("net-hoard-port", "hoard_listen_port"),
         enable_ipv6: bool("net-ipv6"),
         // Empty where the platform cannot apply it: the daemon refuses any
         // value there, so carrying an old one back would block every save.

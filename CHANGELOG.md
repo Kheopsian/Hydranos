@@ -26,6 +26,7 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 ### Fixed
 
 - A tracker error answered with an HTML page (a proxy's `429 Too Many Requests`, a `403` challenge page) was shown as its raw markup, which filled the error and cut off whatever the page actually said. The error now quotes the page's title and first heading, without the one that only repeats the status, or its text when it has neither: `http 429 Too Many Requests [retry-after 60s]` instead of `http 429 Too Many Requests: <html> <head><title>...`. A plain-text answer is quoted as before. The tracker error list will show the new, shorter messages as new entries for the first hour after the upgrade.
+- With managed WireGuard and a provider that grants the port (Proton, any NAT-PMP one), the Network settings counted the hidden listen port box of that engine as changed to 0: leaving Settings always asked to save, and "Save and restart" was refused (port out of range), so the question came back after every restart. A hidden port box now keeps the stored port. The same check no longer gives up on the whole Network form when it is the race engine whose port box is hidden.
 
 ## v4.8.4 -- a tracker that changed its announce format, and a qBittorrent import that stops asking a dead qBittorrent
 
