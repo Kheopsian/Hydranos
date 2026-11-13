@@ -17202,11 +17202,63 @@ async fn post_network_mode(
         .iter()
         .map(|e| (e.id.clone(), e.session.clone()))
         .collect();
+    // A listen port that is the only change is moved on the running listener,
+    // as `POST /api/engines/:id/listen-port` does; the rest waits for a restart.
+    let mut applied_live: Vec<serde_json::Value> = Vec::new();
+    let mut port_applied: Vec<String> = Vec::new();
+    let mut live_warnings: Vec<String> = Vec::new();
+    for wanted in now.local_engines() {
+        let Some(eng) = state.engines.get(&wanted.id) else {
+            continue;
+        };
+        let was = eng.manager.listen_port_now(eng.listen_port);
+        let new = wanted.session.listen_port;
+        let mut base = eng.session.clone();
+        base.listen_port = new;
+        if new == 0
+            || !eng.listening.load(std::sync::atomic::Ordering::Relaxed)
+            || !crate::netmode::same_apart_from_port(&base, &wanted.session)
+            || eng.session.listen_port == new && was == new
+            || forwarded_port_owner(&state, &wanted.id).is_some()
+            || eng.session.gluetun_port_forward
+        {
+            continue;
+        }
+        if was == new {
+            // Moved by an earlier save: the file now says what the listener does.
+            port_applied.push(wanted.id.clone());
+            continue;
+        }
+        if let Some(other) = state
+            .engines
+            .engines()
+            .iter()
+            .find(|o| o.id != wanted.id && o.manager.listen_port_now(o.listen_port) == new)
+        {
+            live_warnings.push(format!(
+                "{}: port {new} is {}'s listen port, restart to apply it",
+                wanted.id, other.id
+            ));
+            continue;
+        }
+        match eng.manager.rebind_listener(new).await {
+            Ok(port) => {
+                port_applied.push(wanted.id.clone());
+                applied_live.push(serde_json::json!({"engine": wanted.id, "port": port}));
+            }
+            Err(e) => live_warnings.push(format!(
+                "{}: the listen port could not be moved live ({e}), restart to apply it",
+                wanted.id
+            )),
+        }
+    }
     // The mode also decides which engines the kill switch keeps off the
     // network, which is settled at boot too.
-    let restart_required = crate::netmode::restart_required(&now, &running)
-        || crate::killswitch::blocking_changed(&now, &state.engines);
-    let warnings = crate::netmode::warnings(&now, &|id: &str| engine_lists_udp(&state, id));
+    let restart_required =
+        crate::netmode::restart_required_ignoring_port(&now, &running, &port_applied)
+            || crate::killswitch::blocking_changed(&now, &state.engines);
+    let mut warnings = crate::netmode::warnings(&now, &|id: &str| engine_lists_udp(&state, id));
+    warnings.extend(live_warnings);
     // Another mode switches the tunnels off now, not at the next boot: the
     // engines pinned to them stop reaching anybody until the restart this
     // save asks for, and never fall back to the host's route meanwhile.
@@ -17220,6 +17272,7 @@ async fn post_network_mode(
         "status": "ok",
         "mode": mode,
         "restart_required": restart_required,
+        "applied_live": applied_live,
         "warnings": warnings,
         "tunnels_down": tunnels_down,
     }))
@@ -30312,6 +30365,102 @@ mod network_mode_tests {
             fields[k] = v.clone();
         }
         serde_json::json!({"mode": mode, "fields": fields})
+    }
+
+    /// Put a test state's engine on the network: the real listener
+    /// supervisor, TCP and uTP, on a free port.
+    async fn listening(s: &TestState, id: &str) -> u16 {
+        let eng = s.state.engines.get(id).expect("engine");
+        let port = free_port();
+        let binding = typhon_engine::config::ResolvedBinding {
+            id: 0,
+            addr: std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+            peer_id: [b'-'; 20],
+            egress: Default::default(),
+            advertised_port: port,
+            only_v6: false,
+        };
+        let utp = typhon_engine::peer::UtpHandle::bind(port, None)
+            .await
+            .expect("uTP binds");
+        let (m, d, flag) = (eng.manager.clone(), eng.disk.clone(), eng.listening.clone());
+        tokio::spawn(async move {
+            let _ = typhon_engine::peer::listen(vec![binding], port, m, d, utp, flag).await;
+        });
+        for _ in 0..100 {
+            if eng.listening.load(std::sync::atomic::Ordering::Relaxed) {
+                return port;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("the listener never came up");
+    }
+
+    /// A port nothing holds right now, TCP and UDP.
+    fn free_port() -> u16 {
+        loop {
+            let t = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let p = t.local_addr().unwrap().port();
+            if std::net::UdpSocket::bind(("0.0.0.0", p)).is_ok() {
+                return p;
+            }
+        }
+    }
+
+    /// ⭐ A listen port that is the only change moves on the running listener:
+    /// no restart is asked for, the answer says what was applied, and the
+    /// engine really accepts on the new port.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_port_only_save_moves_the_listener_without_a_restart() {
+        let s = state_from("netmode-port-live", DIRECT_FILE);
+        let old = listening(&s, "hoard").await;
+        let new = free_port();
+        let (status, body) = save(
+            &s,
+            serde_json::json!({"mode": "direct", "fields": {
+                "race_listen_port": 16171, "hoard_listen_port": new}}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["restart_required"], false, "{body}");
+        assert_eq!(
+            body["applied_live"],
+            serde_json::json!([{"engine": "hoard", "port": new}]),
+            "{body}"
+        );
+        let eng = s.state.engines.get("hoard").unwrap();
+        assert_eq!(eng.manager.listen_port_now(eng.listen_port), new);
+        assert!(
+            std::net::TcpStream::connect(("127.0.0.1", new)).is_ok(),
+            "TCP on the new port"
+        );
+        assert!(
+            std::net::TcpStream::connect(("127.0.0.1", old)).is_err(),
+            "the old port is let go"
+        );
+        assert_eq!(
+            s.state.cfg().hoard.listen_port,
+            new,
+            "and the file keeps it"
+        );
+    }
+
+    /// A port change together with another one still asks for the restart.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_port_save_with_another_change_still_needs_a_restart() {
+        let s = state_from("netmode-port-and-ipv6", DIRECT_FILE);
+        listening(&s, "hoard").await;
+        let new = free_port();
+        let (status, body) = save(
+            &s,
+            serde_json::json!({"mode": "direct", "fields": {
+                "race_listen_port": 16171, "hoard_listen_port": new,
+                "enable_ipv6": true}}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["restart_required"], true, "{body}");
+        assert_eq!(body["applied_live"], serde_json::json!([]), "{body}");
     }
 
     /// ⭐ A save that sends only what it changes keeps everything else. Absent

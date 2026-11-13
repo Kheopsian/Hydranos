@@ -1044,6 +1044,22 @@ function _settingsDirtyCount() {
     return _pendingEdits().count;
 }
 
+// True when the network form differs from what was loaded only by the race
+// and/or hoard listen port, in the same mode.
+function _netOnlyPortsChanged(cur) {
+    try {
+        const orig = JSON.parse(_netOrig);
+        if (!orig || orig.mode !== _netState.mode) return false;
+        const strip = (f) => {
+            const c = Object.assign({}, f);
+            delete c.race_listen_port;
+            delete c.hoard_listen_port;
+            return _stableJson(c);
+        };
+        return strip(orig.fields || {}) === strip(cur);
+    } catch (e) { return false; }
+}
+
 // Counts the edits and says whether applying them needs a restart, so the
 // dialog can offer the action that actually finishes the job.
 function _pendingEdits() {
@@ -1060,8 +1076,9 @@ function _pendingEdits() {
         if (cur && _stableJson({ mode: _netState.mode, fields: cur }) !== _netOrig) {
             count++;
             // The network mode rewrites the engines' listen and proxy keys,
-            // which only take effect on restart.
-            needsRestart = true;
+            // which only take effect on restart. A listen port alone is the
+            // exception: the daemon moves it on the running listener.
+            if (!_netOnlyPortsChanged(cur)) needsRestart = true;
         }
     }
     return { count: count, needsRestart: needsRestart };
@@ -10886,7 +10903,10 @@ async function netModeSave() {
             _setRestartBanner(t("Saved. The engines need a restart to apply the new network settings.") +
                 ` <button class="btn-small btn-danger" onclick="restartDaemon()" style="margin-left:8px">${t("Apply &amp; restart")}</button>`);
         } else {
-            extra = `<div class="result-msg success" style="margin:.3em 0">${esc(t("Saved and applied, no restart needed."))}</div>` + extra;
+            // A listen port moved on the running listener says so; the
+            // other keys are read at boot, so "applied" is for the ports.
+            const live = (r.applied_live || []).length > 0;
+            extra = `<div class="result-msg success" style="margin:.3em 0">${esc(live ? t("Applied live, no restart needed") : t("Saved and applied, no restart needed."))}</div>` + extra;
         }
         out.innerHTML = extra;
     } catch (e) {

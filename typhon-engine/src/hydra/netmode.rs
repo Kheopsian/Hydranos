@@ -129,6 +129,25 @@ fn fingerprint(s: &Session) -> String {
 /// file: two saves in a row, the second undoing the first, need no restart,
 /// and a save after an unapplied one still does.
 pub fn restart_required(cfg: &Config, running: &[(String, Session)]) -> bool {
+    restart_required_ignoring_port(cfg, running, &[])
+}
+
+/// The listen port of a session, ignored: what a fingerprint says once the
+/// port has been moved live and no longer needs a restart to be honoured.
+fn fingerprint_without_port(s: &Session) -> String {
+    let mut s = s.clone();
+    s.listen_port = 0;
+    fingerprint(&s)
+}
+
+/// As [`restart_required`], except that the listen port of the engines in
+/// `port_applied` does not count: their listener is already on the port the
+/// file asks for.
+pub fn restart_required_ignoring_port(
+    cfg: &Config,
+    running: &[(String, Session)],
+    port_applied: &[String],
+) -> bool {
     let wanted = cfg.local_engines();
     if wanted.len() != running.len() {
         return true;
@@ -136,9 +155,18 @@ pub fn restart_required(cfg: &Config, running: &[(String, Session)]) -> bool {
     wanted
         .iter()
         .any(|e| match running.iter().find(|(id, _)| *id == e.id) {
+            Some((_, s)) if port_applied.contains(&e.id) => {
+                fingerprint_without_port(s) != fingerprint_without_port(&e.session)
+            }
             Some((_, s)) => fingerprint(s) != fingerprint(&e.session),
             None => true,
         })
+}
+
+/// Whether two sessions ask for the same network in everything but the
+/// listen port, so that moving the port is all a change between them needs.
+pub fn same_apart_from_port(running: &Session, wanted: &Session) -> bool {
+    fingerprint_without_port(running) == fingerprint_without_port(wanted)
 }
 
 /// The warning for an engine whose announces go through a proxy while it
