@@ -23,6 +23,10 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 
 ## Unreleased -- tracker errors that read as words
 
+### Added
+
+- `[daemon] preallocate = true` (default `false`, read at startup, Linux only) reserves a torrent's files when it first writes in this process, like qBittorrent's "Pre-allocate disk space for all files": every wanted file shorter than its declared size is reserved at that size with `fallocate`, so a disk that is too small fails on the first piece with a message naming the file and the size, not half way. A file that was not wanted (priority 0) is left alone and reserved at the next write once it is. Nothing is ever written as zeros: a file system that cannot reserve (some FUSE ones) is left as it is and the log says so once. It does not guarantee space on ZFS or btrfs. A file not yet downloaded then already has its final size, so for such files use a recheck, not skip checking, when adding the torrent: skip checking would pass the size check and announce data that is not there.
+
 ### Fixed
 
 - A tracker error answered with an HTML page (a proxy's `429 Too Many Requests`, a `403` challenge page) was shown as its raw markup, which filled the error and cut off whatever the page actually said. The error now quotes the page's title and first heading, without the one that only repeats the status, or its text when it has neither: `http 429 Too Many Requests [retry-after 60s]` instead of `http 429 Too Many Requests: <html> <head><title>...`. A plain-text answer is quoted as before. The tracker error list will show the new, shorter messages as new entries for the first hour after the upgrade.

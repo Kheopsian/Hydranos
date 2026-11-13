@@ -111,6 +111,11 @@ pub struct Daemon {
     /// A negative value is refused when the file is read.
     #[serde(default)]
     pub memory_alert_mb: i64,
+    /// Reserve a torrent's files (`fallocate`) at its first write in this
+    /// process, so a disk too small fails on the first piece. Linux only.
+    /// Default off; read at startup, a change needs a restart.
+    #[serde(default)]
+    pub preallocate: bool,
 }
 
 /// The echo service asked when `[daemon] exit_probe_url` is empty.

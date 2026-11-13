@@ -84,6 +84,145 @@ fn get_or_open_rw(path: &PathBuf) -> std::io::Result<Arc<File>> {
     Ok(f)
 }
 
+// ---------------------------------------------------------------------------
+// `[daemon] preallocate`: reserve a torrent's files at its first write.
+// ---------------------------------------------------------------------------
+
+static PREALLOCATE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static PREALLOC_UNSUPPORTED_WARNED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Set once at startup from `[daemon] preallocate`. Global, like the fd cache
+/// it sits beside: the setting is the daemon's, not a torrent's.
+pub fn set_preallocate(on: bool) {
+    PREALLOCATE.store(on, Ordering::Relaxed);
+}
+
+/// What one torrent still has to reserve: every wanted file (priority above 0)
+/// with a length, as a path below the save path and its declared size, and the
+/// fingerprint of that set. Empty when the option is off or the set is the one
+/// already reserved.
+fn prealloc_plan(
+    torrent: &TorrentState,
+    save_path: &std::path::Path,
+) -> (Vec<(PathBuf, u64)>, u64) {
+    if !PREALLOCATE.load(Ordering::Relaxed) {
+        return (Vec::new(), 0);
+    }
+    // FNV-1a over the save path and the indices of the wanted files; the
+    // result is kept off 0, which means "never reserved".
+    let print = torrent.with_file_priorities(|prio| {
+        let mut h: u64 = 0xcbf29ce484222325;
+        for b in save_path.as_os_str().as_encoded_bytes() {
+            h = (h ^ *b as u64).wrapping_mul(0x100000001b3);
+        }
+        for (i, f) in torrent.meta.files.iter().enumerate() {
+            let p = prio
+                .get(i)
+                .copied()
+                .unwrap_or(crate::torrent::piece_picker::PRIO_NORMAL);
+            if f.length > 0 && p != 0 {
+                h = (h ^ (i as u64 + 1)).wrapping_mul(0x100000001b3);
+            }
+        }
+        h | 1
+    });
+    if torrent.prealloc_print.load(Ordering::Relaxed) == print {
+        return (Vec::new(), print);
+    }
+    let order = torrent.download_order();
+    let plan = torrent
+        .meta
+        .files
+        .iter()
+        .enumerate()
+        .filter(|(i, f)| f.length > 0 && order.file_priority(*i) != 0)
+        .map(|(i, f)| (torrent.meta.disk_rel(i), f.length))
+        .collect();
+    (plan, print)
+}
+
+/// Reserve `len` bytes of `file` with `fallocate(2)` mode 0: it extends, never
+/// truncates and never rewrites a byte that is there. NOT `posix_fallocate`,
+/// which glibc answers with a write of zeros when the file system cannot.
+#[cfg(target_os = "linux")]
+fn reserve(file: &File, len: u64) -> std::io::Result<()> {
+    use std::os::unix::io::AsRawFd;
+    if file.metadata()?.len() >= len {
+        return Ok(());
+    }
+    loop {
+        // SAFETY: a valid open descriptor, and plain integers.
+        let r = unsafe { libc::fallocate(file.as_raw_fd(), 0, 0, len as libc::off_t) };
+        if r == 0 {
+            return Ok(());
+        }
+        let e = std::io::Error::last_os_error();
+        if e.raw_os_error() != Some(libc::EINTR) {
+            return Err(e);
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn reserve(_file: &File, _len: u64) -> std::io::Result<()> {
+    Ok(())
+}
+
+/// Reserve every file of `plan`. `skip` names the ones that must not be
+/// touched before they are compared (another torrent or hardlink names them).
+/// ENOSPC fails with a message that says so; a file system with no fallocate
+/// is said once and the write goes on.
+fn preallocate(
+    save_path: &std::path::Path,
+    plan: &[(PathBuf, u64)],
+    skip: impl Fn(&std::path::Path) -> bool,
+) -> Result<(), String> {
+    for (rel, len) in plan {
+        if skip(rel) {
+            continue;
+        }
+        let full = save_path.join(rel);
+        if let Some(parent) = full.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("create folder {:?}: {}", parent, e))?;
+        }
+        let file = get_or_open_rw(&full).map_err(|e| format!("open write {:?}: {}", full, e))?;
+        match reserve(&file, *len) {
+            Ok(()) => {}
+            Err(e) => {
+                #[cfg(unix)]
+                let code = e.raw_os_error();
+                #[cfg(not(unix))]
+                let code: Option<i32> = None;
+                #[cfg(target_os = "linux")]
+                {
+                    if matches!(code, Some(libc::EOPNOTSUPP) | Some(libc::ENOSYS)) {
+                        if !PREALLOC_UNSUPPORTED_WARNED.swap(true, Ordering::Relaxed) {
+                            tracing::warn!(
+                                path = %full.display(),
+                                "preallocate: this file system does not support reserving space \
+                                 (fallocate); files are written as they come, nothing is reserved"
+                            );
+                        }
+                        // The same file system answers the same for the rest.
+                        return Ok(());
+                    }
+                    if code == Some(libc::ENOSPC) {
+                        return Err(format!(
+                            "not enough space to reserve {:?} ({} bytes): {}",
+                            full, len, e
+                        ));
+                    }
+                }
+                let _ = code;
+                return Err(format!("reserve {:?} ({} bytes): {}", full, len, e));
+            }
+        }
+    }
+    Ok(())
+}
+
 use bytes::Bytes;
 use lru::LruCache;
 use std::num::NonZeroUsize;
@@ -429,6 +568,8 @@ impl DiskManager {
 
         let ops = torrent.meta.map_block(piece, 0, data.len() as u32);
         let save_path = torrent.save_path.read().clone();
+        let (prealloc, prealloc_print) = prealloc_plan(torrent, &save_path);
+        let prealloc_planned = !prealloc.is_empty();
         let written = self.written.clone();
         let info_hash = torrent.info_hash;
 
@@ -491,6 +632,17 @@ impl DiskManager {
                     at += len;
                 }
             }
+            // The first piece of a torrent in this process reserves ALL its
+            // wanted files, so a disk too small fails here, not half way. The
+            // torrent is marked (in its state, once the piece is down) only
+            // after every file is done: after an ENOSPC the next piece tries again. A file wanted later is reserved at
+            // the next write (the set's fingerprint moved).
+            if !prealloc.is_empty() {
+                preallocate(&save_path, &prealloc, |rel| {
+                    guard.contains(rel)
+                        || must_compare(&verdicts, &probe, &info_hash, &save_path, rel)
+                })?;
+            }
             let mut data_offset = 0usize;
             for (i, op) in ops.into_iter().enumerate() {
                 // Alignment padding: zeros no file holds.
@@ -542,6 +694,13 @@ impl DiskManager {
         })
         .await
         .map_err(|e| format!("spawn_blocking: {}", e))?;
+        // A piece that went down passed the reservation: remember it, in the
+        // state, so only a new state (or a new set of wanted files) redoes it.
+        if prealloc_planned && matches!(outcome, Ok(true)) {
+            torrent
+                .prealloc_print
+                .store(prealloc_print, Ordering::Relaxed);
+        }
         if let Err(why) = &outcome {
             if why.starts_with(REFUSED) {
                 // Not a disk fault to retry three times: the file is not ours
@@ -1156,6 +1315,37 @@ mod disk_tests {
     }
 
     fn fixture_in_pieces(tag: &str, content: &[u8], piece_len: usize) -> Fixture {
+        fixture_from(
+            tag,
+            torrent_bytes_in_pieces("payload.bin", content, piece_len),
+        )
+    }
+
+    /// A torrent of several files (`multi/<name>`), pieces over their
+    /// concatenation, with the real hashes.
+    fn multi_torrent_bytes(files: &[(&str, &[u8])], piece_len: usize) -> Vec<u8> {
+        let all: Vec<u8> = files.iter().flat_map(|(_, c)| c.iter().copied()).collect();
+        let mut info = Vec::new();
+        info.extend_from_slice(b"d5:filesl");
+        for (name, c) in files {
+            info.extend_from_slice(
+                format!("d6:lengthi{}e4:pathl{}:{name}ee", c.len(), name.len()).as_bytes(),
+            );
+        }
+        info.extend_from_slice(b"e4:name5:multi");
+        let hashes: Vec<u8> = all.chunks(piece_len).flat_map(sha1_of).collect();
+        info.extend_from_slice(
+            format!("12:piece lengthi{piece_len}e6:pieces{}:", hashes.len()).as_bytes(),
+        );
+        info.extend_from_slice(&hashes);
+        info.push(b'e');
+        let mut out = b"d4:info".to_vec();
+        out.extend_from_slice(&info);
+        out.push(b'e');
+        out
+    }
+
+    fn fixture_from(tag: &str, torrent_file: Vec<u8>) -> Fixture {
         let root = std::env::temp_dir().join(format!(
             "typhon-disk-{tag}-{}-{:?}",
             std::process::id(),
@@ -1179,16 +1369,11 @@ mod disk_tests {
         // none refuses to verify, which is the right call and makes every
         // write look like a hash mismatch. Set before the add: the state
         // copies the source when it is built.
-        let blob = torrent_bytes_in_pieces("payload.bin", content, piece_len);
+        let blob = torrent_file.clone();
         mgr.set_blob_source(Arc::new(move |_hash: &str| Some(blob.clone())));
 
         let (ih, _) = mgr
-            .add_torrent_bytes(
-                &torrent_bytes_in_pieces("payload.bin", content, piece_len),
-                data.to_string_lossy().as_ref(),
-                true,
-                false,
-            )
+            .add_torrent_bytes(&torrent_file, data.to_string_lossy().as_ref(), true, false)
             .expect("the fixture torrent parses");
         let torrent = mgr.get(&ih).expect("just added");
         Fixture {
@@ -1196,6 +1381,190 @@ mod disk_tests {
             torrent,
             disk,
             root,
+        }
+    }
+
+    /// `set_preallocate` is a process-wide setting: the tests that flip it run
+    /// one at a time and put it back.
+    async fn prealloc_lock() -> tokio::sync::MutexGuard<'static, ()> {
+        static L: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+        L.lock().await
+    }
+
+    struct PreallocOn;
+    impl PreallocOn {
+        fn new() -> Self {
+            set_preallocate(true);
+            PreallocOn
+        }
+    }
+    impl Drop for PreallocOn {
+        fn drop(&mut self) {
+            set_preallocate(false);
+        }
+    }
+
+    fn pattern(seed: u8, n: usize) -> Vec<u8> {
+        (0..n)
+            .map(|i| (i as u8).wrapping_mul(7).wrapping_add(seed))
+            .collect()
+    }
+
+    fn len_and_reserved(path: &std::path::Path) -> (u64, u64) {
+        use std::os::unix::fs::MetadataExt;
+        let m = std::fs::metadata(path).unwrap();
+        (m.len(), m.blocks() * 512)
+    }
+
+    /// ⭐ With `preallocate`, the first piece written of a torrent reserves
+    /// every wanted file at its declared size -- the one it lands in and the
+    /// ones it does not touch -- without a byte of zeros being written.
+    #[tokio::test]
+    async fn preallocate_reserves_every_wanted_file_at_the_first_piece() {
+        let _l = prealloc_lock().await;
+        let _on = PreallocOn::new();
+        let a = pattern(11, 12288);
+        let b = pattern(23, 8192);
+        let f = fixture_from(
+            "prealloc-on",
+            multi_torrent_bytes(&[("a.bin", &a), ("b.bin", &b)], 4096),
+        );
+        assert!(f
+            .disk
+            .write_piece(&f.torrent, 0, a[..4096].to_vec())
+            .await
+            .unwrap());
+        for (name, want) in [("a.bin", 12288u64), ("b.bin", 8192)] {
+            let (len, reserved) = len_and_reserved(&f.root.join("data/multi").join(name));
+            assert_eq!(len, want, "{name} must have its declared size");
+            assert!(
+                reserved >= want,
+                "{name}: {reserved} bytes allocated, {want} declared"
+            );
+        }
+        // The piece itself is intact.
+        let back = f.disk.read_block(&f.torrent, 0, 0, 4096).await.unwrap();
+        assert_eq!(&back[..], &a[..4096]);
+    }
+
+    /// Off (the default): the file is as long as what was written.
+    #[tokio::test]
+    async fn without_preallocate_a_file_is_as_long_as_what_was_written() {
+        let _l = prealloc_lock().await;
+        set_preallocate(false);
+        let a = pattern(31, 12288);
+        let b = pattern(41, 8192);
+        let f = fixture_from(
+            "prealloc-off",
+            multi_torrent_bytes(&[("a.bin", &a), ("b.bin", &b)], 4096),
+        );
+        assert!(f
+            .disk
+            .write_piece(&f.torrent, 0, a[..4096].to_vec())
+            .await
+            .unwrap());
+        assert_eq!(len_and_reserved(&f.root.join("data/multi/a.bin")).0, 4096);
+        assert!(!f.root.join("data/multi/b.bin").exists());
+    }
+
+    /// A file at priority 0 is never reserved whole, even when a piece that
+    /// straddles it writes a few bytes into it; given a priority again, the
+    /// next write reserves it.
+    #[tokio::test]
+    async fn preallocate_skips_a_file_at_priority_zero_until_it_is_wanted() {
+        use crate::torrent::piece_picker::DownloadOrder;
+        let _l = prealloc_lock().await;
+        let _on = PreallocOn::new();
+        let a = pattern(51, 6000);
+        let b = pattern(61, 6000);
+        let f = fixture_from(
+            "prealloc-prio",
+            multi_torrent_bytes(&[("a.bin", &a), ("b.bin", &b)], 4096),
+        );
+        f.torrent.set_download_order(DownloadOrder {
+            file_prio: vec![1, 0],
+            ..Default::default()
+        });
+        let all: Vec<u8> = a.iter().chain(b.iter()).copied().collect();
+        // Piece 1 = a[4096..] + b[..2192]: straddles the two files.
+        assert!(f
+            .disk
+            .write_piece(&f.torrent, 1, all[4096..8192].to_vec())
+            .await
+            .unwrap());
+        let (la, ra) = len_and_reserved(&f.root.join("data/multi/a.bin"));
+        assert_eq!(la, 6000);
+        assert!(ra >= 6000);
+        assert_eq!(
+            len_and_reserved(&f.root.join("data/multi/b.bin")).0,
+            2192,
+            "the unwanted file holds only what was written, not its declared size"
+        );
+        // Wanted after all: the next piece written reserves it.
+        f.torrent.set_download_order(DownloadOrder::default());
+        assert!(f
+            .disk
+            .write_piece(&f.torrent, 0, all[..4096].to_vec())
+            .await
+            .unwrap());
+        let (lb, rb) = len_and_reserved(&f.root.join("data/multi/b.bin"));
+        assert_eq!(lb, 6000, "b.bin is reserved once it is wanted");
+        assert!(rb >= 6000);
+    }
+
+    /// A torrent that is removed with its files and added again at the same
+    /// path (same process) is a new state: it is reserved again, whatever was
+    /// remembered of the old one.
+    #[tokio::test]
+    async fn preallocate_reserves_again_a_torrent_added_anew() {
+        let _l = prealloc_lock().await;
+        let _on = PreallocOn::new();
+        let a = pattern(71, 12288);
+        let b = pattern(83, 8192);
+        let torrent_file = multi_torrent_bytes(&[("a.bin", &a), ("b.bin", &b)], 4096);
+        let f = fixture_from("prealloc-again", torrent_file.clone());
+        assert!(f
+            .disk
+            .write_piece(&f.torrent, 0, a[..4096].to_vec())
+            .await
+            .unwrap());
+        let a_path = f.root.join("data/multi/a.bin");
+        let b_path = f.root.join("data/multi/b.bin");
+        assert_eq!(len_and_reserved(&b_path).0, 8192);
+
+        // Removed with its files: the handles go, the folder goes.
+        evict_fds(&[a_path.clone(), b_path.clone()]);
+        std::fs::remove_dir_all(f.root.join("data/multi")).unwrap();
+
+        // Added again, same info-hash, same save path: a new state.
+        let resume = f.root.join("resume2");
+        std::fs::create_dir_all(&resume).unwrap();
+        let mgr = Arc::new(crate::torrent::TorrentManager::new(
+            f.root.join("data").to_string_lossy().into_owned(),
+            resume.to_string_lossy().into_owned(),
+            f.disk.clone(),
+        ));
+        let blob = torrent_file.clone();
+        mgr.set_blob_source(Arc::new(move |_hash: &str| Some(blob.clone())));
+        let (ih, _) = mgr
+            .add_torrent_bytes(
+                &torrent_file,
+                f.root.join("data").to_string_lossy().as_ref(),
+                true,
+                false,
+            )
+            .expect("the torrent is added again");
+        let again = mgr.get(&ih).expect("just added");
+        assert!(!Arc::ptr_eq(&again, &f.torrent), "a new state");
+        assert!(f
+            .disk
+            .write_piece(&again, 0, a[..4096].to_vec())
+            .await
+            .unwrap());
+        for (path, want) in [(&a_path, 12288u64), (&b_path, 8192)] {
+            let (len, reserved) = len_and_reserved(path);
+            assert_eq!(len, want, "{path:?} is reserved again");
+            assert!(reserved >= want);
         }
     }
 

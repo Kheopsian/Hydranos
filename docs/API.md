@@ -93,7 +93,7 @@ curl -s -H "X-Api-Key: $KEY" \
   -F "torrents=@show.s01e01.torrent" -F "category=tv" "$HY/api/torrents/upload"
 ```
 
-Add `-F "seed_mode=true"` to seed data already on disk without hashing it (**seed mode**; risks: [Adding Torrents and Existing Data](https://github.com/Kheopsian/Hydranos/wiki/Adding-Torrents-and-Existing-Data)).
+With `[daemon] preallocate = true` (Linux, default off, read at startup) a torrent's files are reserved at their full size at its first write, so a file not yet downloaded already has its final size: seed mode (`skip_checking`) on such files passes the presence and size check and would announce data that is not there, so recheck them instead. Not a guarantee of space on ZFS or btrfs. Add `-F "seed_mode=true"` to seed data already on disk without hashing it (**seed mode**; risks: [Adding Torrents and Existing Data](https://github.com/Kheopsian/Hydranos/wiki/Adding-Torrents-and-Existing-Data)).
 
 Stop every hoard torrent of category `old` (a **bulk action** by filter; count first, send the count as `expect`):
 

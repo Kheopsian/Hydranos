@@ -777,6 +777,10 @@ pub struct TorrentState {
     /// and never otherwise: on a million-torrent hoard almost none carries
     /// one, and an empty `OnceLock<Box<_>>` is all the rest pay.
     own_rates: std::sync::OnceLock<Box<crate::torrent::ratelimit::RatePair>>,
+    /// `[daemon] preallocate`: fingerprint of the wanted files and save path
+    /// last reserved in full by this state; 0 = never. Lives and dies with
+    /// the state, so a torrent added again starts from zero.
+    pub prealloc_print: AtomicU64,
     /// File priorities, sequential, first/last piece: `None` for the default,
     /// which is what a million seeding torrents carry -- a null pointer each,
     /// nothing allocated. See `set_download_order`.
@@ -1206,6 +1210,15 @@ impl TorrentState {
             .unwrap_or_default()
     }
 
+    /// Run `f` on the per-file priorities as stored (empty = all normal),
+    /// without copying them.
+    pub fn with_file_priorities<R>(&self, f: impl FnOnce(&[u8]) -> R) -> R {
+        match self.download_order.read().as_deref() {
+            Some(o) => f(&o.file_prio),
+            None => f(&[]),
+        }
+    }
+
     /// `(sequential, first_last)` without copying the per-file list: what a
     /// listing row reports, read for every torrent of a page.
     pub fn download_order_flags(&self) -> (bool, bool) {
@@ -1511,6 +1524,7 @@ impl TorrentState {
             limiter: std::sync::OnceLock::new(),
             rates: std::sync::OnceLock::new(),
             own_rates: std::sync::OnceLock::new(),
+            prealloc_print: AtomicU64::new(0),
             download_order: RwLock::new(None),
             completed_tx: std::sync::OnceLock::new(),
             blob_source: std::sync::OnceLock::new(),

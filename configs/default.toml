@@ -37,6 +37,19 @@ create_torrent_folder = false
 # the kernel's out-of-memory killer takes the process without a word. Checked
 # every 30 s. 0 = off (the default); a negative value is refused at startup.
 # memory_alert_mb = 0
+# Pre-allocate disk space: at a torrent's first write after the daemon starts,
+# reserve the full size of every file it wants that is shorter than its declared
+# size, so a disk that is too small fails on the first piece, not half way
+# (the same as qBittorrent's "Pre-allocate disk space for all files"). Linux
+# only. NOT a guarantee of space on ZFS or btrfs (copy on write: the reserved
+# blocks are not the ones later writes land in). On a file system that cannot
+# reserve (some FUSE ones) nothing is done and the log says so once. Default
+# false; read at startup, so a change needs a restart.
+# ⚠ With it on, a file not yet downloaded already has its final size. A torrent
+# added with seed mode / skip checking on such files passes the presence and
+# size check and would be announced as a seed of data that is not there: use a
+# recheck, not skip checking, on pre-allocated files.
+# preallocate = false
 # Interface the daemon's own requests are bound to when they go "direct" or
 # through "proxy". The engines have their own, in [race]/[hoard].
 # bind_interface = "wg0"
