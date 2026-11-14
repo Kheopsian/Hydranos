@@ -2062,6 +2062,12 @@ async fn get_announce_health(
 ///         `announce_rate_limit = 0.0` is what earns the 429s.
 /// muted / hidden : seen and accepted, kept out of every count.
 /// Torrents the tracker deleted are NOT a fault: nothing to fix.
+///
+/// A self-check that finds us in neither family ("absent") is no fault
+/// either: a tracker usually leaves the announcing peer out of its own
+/// answer (`announce::cache::Verify`), and in a swarm of one there is nobody
+/// else to list. Only the asymmetry -- one family seen, the other not -- says
+/// the tracker dropped an address.
 pub(crate) fn tracker_severity(
     hidden: bool,
     muted: bool,
@@ -2072,8 +2078,7 @@ pub(crate) fn tracker_severity(
         "hidden"
     } else if muted {
         "muted"
-    } else if classes.contains(&"invalid_passkey")
-        || matches!(verdict, "v4_missing" | "v6_missing" | "absent")
+    } else if classes.contains(&"invalid_passkey") || matches!(verdict, "v4_missing" | "v6_missing")
     {
         "red"
     } else if classes
@@ -2083,6 +2088,39 @@ pub(crate) fn tracker_severity(
         "amber"
     } else {
         "none"
+    }
+}
+
+#[cfg(test)]
+mod tracker_severity_tests {
+    use super::tracker_severity;
+
+    /// Not listing us is what a tracker does: no error and an "absent"
+    /// self-check is a quiet row, not one that asks for action.
+    #[test]
+    fn a_tracker_that_does_not_list_us_needs_no_action() {
+        assert_eq!(tracker_severity(false, false, &[], "absent"), "none");
+        assert_eq!(
+            tracker_severity(false, false, &["rate_limited"], "absent"),
+            "amber"
+        );
+    }
+
+    /// What still asks for action today.
+    #[test]
+    fn a_dropped_family_or_a_refused_passkey_is_red() {
+        assert_eq!(tracker_severity(false, false, &[], "v4_missing"), "red");
+        assert_eq!(tracker_severity(false, false, &[], "v6_missing"), "red");
+        assert_eq!(
+            tracker_severity(false, false, &["invalid_passkey"], "ok"),
+            "red"
+        );
+        assert_eq!(tracker_severity(false, false, &[], "ok"), "none");
+        assert_eq!(
+            tracker_severity(false, true, &["invalid_passkey"], "absent"),
+            "muted"
+        );
+        assert_eq!(tracker_severity(true, false, &[], "v4_missing"), "hidden");
     }
 }
 
