@@ -32,6 +32,15 @@ if [ ! -f "$CFG_DIR/default.toml" ]; then
     cp /app/configs/default.toml "$CFG_DIR/default.toml"
     # Keep data_dir consistent with the chosen config directory.
     sed -i "s#^data_dir = .*#data_dir = \"$CFG_DIR\"#" "$CFG_DIR/default.toml"
+    # The same mark the daemon puts in a config it writes itself: torrents
+    # already in the store stay off the network until the network mode is
+    # chosen, rather than leaving by the default route of a config that was
+    # lost and recreated.
+    if grep -q '^\[network\]' "$CFG_DIR/default.toml"; then
+        sed -i '/^\[network\]/a mode_unconfirmed = true' "$CFG_DIR/default.toml"
+    else
+        printf '\n[network]\nmode_unconfirmed = true\n' >> "$CFG_DIR/default.toml"
+    fi
     echo "hydranos: seeded $CFG_DIR/default.toml from image defaults (first run)"
 fi
 # Always a --config, quoted as one argv entry: a config directory containing a

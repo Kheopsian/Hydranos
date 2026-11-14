@@ -46,4 +46,16 @@ check "  /data itself handed over" 1000 "$(stat -c %u /data)"
 check "  what is inside /data left alone" 0 "$(stat -c %u /data/old)"
 check "PUID=99 PGID=100" "99:100" "$(run PUID=99 PGID=100)"
 check "PUID=0 PGID=0 keeps root" "0:0" "$(run PUID=0 PGID=0)"
+# A config seeded on first run carries the "network mode to confirm" mark, once,
+# under [network]; an existing config is not touched.
+run >/dev/null
+check "seeded config marked" 1 "$(grep -c '^mode_unconfirmed = true$' /config/default.toml)"
+check "  under [network]" "[network]" "$(grep -B1 '^mode_unconfirmed = true$' /config/default.toml | head -1)"
+printf '[network]\nmode = "direct"\n' > /app/configs/default.toml
+run >/dev/null
+check "template with [network]: marked once" 1 "$(grep -c '^mode_unconfirmed = true$' /config/default.toml)"
+printf 'data_dir = "/config"\n' > /app/configs/default.toml
+mkdir -p /config && printf 'data_dir = "/config"\n' > /config/default.toml
+env sh /src/entrypoint.sh >/dev/null 2>&1
+check "existing config left unmarked" 0 "$(grep -c 'mode_unconfirmed' /config/default.toml || true)"
 exit $fail

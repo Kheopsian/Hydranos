@@ -1324,17 +1324,17 @@ mod tests {
     }
 }
 
-/// Whether engines may open sockets at all.
-///
-/// Off only for a bench: an instance holding the production catalogue must be
-/// able to answer questions about it without telling 244k torrents' trackers
-/// about a machine nobody meant to publish.
 /// Whether the store already holds a torrent, whatever engine owns it.
 fn store_has_torrents(config: &Config) -> bool {
     let db = std::path::Path::new(&config.daemon.data_dir).join("hydra.db");
     crate::store::Store::open(&db, true).is_ok_and(|s| s.has_torrents())
 }
 
+/// Whether engines may open sockets at all.
+///
+/// Off only for a bench: an instance holding the production catalogue must be
+/// able to answer questions about it without telling 244k torrents' trackers
+/// about a machine nobody meant to publish.
 fn networking_enabled() -> bool {
     networking_enabled_by(std::env::var("HYDRANOS_ENGINE_NET").ok().as_deref())
 }
