@@ -612,6 +612,8 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
         // The file could not be rewritten: the placeholder is refused as a key.
         config::warn_placeholder_key_refused();
     }
+    let has_torrents = config::store_has_torrents(&config.daemon.data_dir);
+    config::clear_unconfirmed_mark_on_empty_store(&mut config, &config_path, has_torrents);
     let config = config;
     workers::start_memory_watch(config.daemon.memory_alert_bytes());
     typhon_engine::disk::set_preallocate(config.daemon.preallocate);
@@ -1824,6 +1826,65 @@ mod seed_tests {
         let text = std::fs::read_to_string(&path).unwrap();
         let cfg: config::Config = toml::from_str(&text).unwrap();
         assert!(cfg.network.mode_unconfirmed, "{text}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A new install started twice: empty store first, then torrents added
+    /// before the second start. The first start removes the mark, so the
+    /// second blocks nothing. A config recreated over a store that already
+    /// holds torrents keeps it.
+    #[test]
+    fn network_mode_new_install_second_start_is_not_held() {
+        let dir = std::env::temp_dir().join(format!("hydra-seed2-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("default.toml");
+        seed_config(&path);
+        let data_dir = dir.join("data");
+        let _ = std::fs::create_dir_all(&data_dir);
+        let data = data_dir.to_string_lossy().to_string();
+
+        // First start: no torrent yet.
+        let mut cfg = config::Config::load(&path).unwrap();
+        assert!(cfg.network.mode_unconfirmed);
+        let has = config::store_has_torrents(&data);
+        assert!(!has);
+        config::clear_unconfirmed_mark_on_empty_store(&mut cfg, &path, has);
+        assert!(!cfg.network.mode_unconfirmed);
+
+        // Torrents added, then the second start.
+        let store = crate::store::Store::open(&data_dir.join("hydra.db"), false).unwrap();
+        store
+            .insert_torrent(
+                &format!("{:040x}", 1),
+                "race",
+                b"d4:infod4:name1:xee",
+                "",
+                "",
+                0.0,
+                false,
+                "",
+            )
+            .unwrap();
+        drop(store);
+        let mut cfg = config::Config::load(&path).unwrap();
+        let has = config::store_has_torrents(&data);
+        assert!(has);
+        config::clear_unconfirmed_mark_on_empty_store(&mut cfg, &path, has);
+        assert_eq!(
+            crate::killswitch::confirm_hold(&cfg, has, false),
+            None,
+            "second start held"
+        );
+
+        // A config recreated over that store keeps its mark and holds.
+        let _ = std::fs::remove_file(&path);
+        seed_config(&path);
+        let mut cfg = config::Config::load(&path).unwrap();
+        assert!(!config::clear_unconfirmed_mark_on_empty_store(
+            &mut cfg, &path, true
+        ));
+        assert!(cfg.network.mode_unconfirmed);
+        assert!(crate::killswitch::confirm_hold(&cfg, true, false).is_some());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

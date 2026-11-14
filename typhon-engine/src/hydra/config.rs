@@ -438,6 +438,40 @@ pub fn with_unconfirmed_mark(template: &str) -> String {
     .unwrap_or_else(|_| template.to_string())
 }
 
+/// At startup: the mark on a store that holds no torrent is a new install,
+/// with nothing that could leave by the wrong route. It is removed from the
+/// file then, so it survives only where it serves -- a config recreated or
+/// reset while torrents were already there. Left in place, it blocked every
+/// new install from its second start on. Returns whether it was removed.
+pub fn clear_unconfirmed_mark_on_empty_store(
+    config: &mut Config,
+    path: &Path,
+    store_has_torrents: bool,
+) -> bool {
+    if !config.network.mode_unconfirmed || store_has_torrents {
+        return false;
+    }
+    let _writer = crate::cfgfile::lock();
+    let Ok(doc) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let edited = crate::tomledit::delete_toml_key(&doc, "network", "mode_unconfirmed");
+    if let Err(e) = crate::cfgfile::write_atomic(path, &edited) {
+        tracing::warn!(error = %e, path = %path.display(), "cannot remove [network] mode_unconfirmed from a new install's config");
+        return false;
+    }
+    config.network.mode_unconfirmed = false;
+    tracing::info!("new install (no torrent yet): [network] mode_unconfirmed removed");
+    true
+}
+
+/// Whether the store under `data_dir` holds at least one torrent. A store
+/// that cannot be opened (none yet) holds none.
+pub fn store_has_torrents(data_dir: &str) -> bool {
+    let db = Path::new(data_dir).join("hydra.db");
+    crate::store::Store::open(&db, true).is_ok_and(|s| s.has_torrents())
+}
+
 impl Session {
     /// A section the file does not have at all: the same defaults as one
     /// that is present but empty.
