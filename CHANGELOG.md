@@ -21,7 +21,7 @@ decided when the release is cut, by looking at what went in: whoever tags it
 renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 `HYDRANOS_VERSION` in the same commit.
 
-## Unreleased -- tracker errors that read as words
+## v4.9.0 -- disk preallocation, listen ports changed without a restart, and tracker errors that read as words
 
 ### Added
 
@@ -31,7 +31,6 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 
 - A tracker error answered with an HTML page (a proxy's `429 Too Many Requests`, a `403` challenge page) was shown as its raw markup, which filled the error and cut off whatever the page actually said. The error now quotes the page's title and first heading, without the one that only repeats the status, or its text when it has neither: `http 429 Too Many Requests [retry-after 60s]` instead of `http 429 Too Many Requests: <html> <head><title>...`. A plain-text answer is quoted as before. The tracker error list will show the new, shorter messages as new entries for the first hour after the upgrade.
 - With managed WireGuard and a provider that grants the port (Proton, any NAT-PMP one), the Network settings counted the hidden listen port box of that engine as changed to 0: leaving Settings always asked to save, and "Save and restart" was refused (port out of range), so the question came back after every restart. A hidden port box now keeps the stored port. The same check no longer gives up on the whole Network form when it is the race engine whose port box is hidden.
-
 - Changing only a listen port in the Network settings no longer asks for a restart. Saving moves the port of each running engine on its live listener (TCP and uTP, announces and port mapping follow), exactly as `POST /api/engines/:id/listen-port` does, and the answer lists what was moved in a new `applied_live` field (`[{"engine", "port"}]`, empty when nothing was). The page says "Applied live, no restart needed" and the "Unsaved settings" window offers "Save and leave" instead of "Save and restart". Any other change in the same save, an engine whose port comes from gluetun or a WireGuard port forward, a port another engine holds, or a port that cannot be bound keeps the restart (the last two say why in `warnings`).
 
 ## v4.8.4 -- a tracker that changed its announce format, and a qBittorrent import that stops asking a dead qBittorrent
