@@ -5793,6 +5793,10 @@ async fn get_network_mode(
         mode: &'a str,
         fields: NetworkFields<'a>,
         env_overrides: Option<serde_json::Value>,
+        /// The config was written from the template and the mode never
+        /// chosen: engines of an install that already has torrents stay off
+        /// the network until a save of this tab (`POST`) removes the mark.
+        mode_unconfirmed: bool,
         warnings: Option<serde_json::Value>,
         extra_engines: Vec<serde_json::Value>,
         /// Whether managed WireGuard can work on this host, and why not.
@@ -5878,6 +5882,7 @@ async fn get_network_mode(
         mode,
         fields,
         env_overrides,
+        mode_unconfirmed: cfg.network.mode_unconfirmed,
         warnings: (!warnings.is_empty()).then(|| serde_json::json!(warnings)),
         extra_engines,
         wireguard,
@@ -7639,6 +7644,8 @@ async fn post_wireguard_engines(
                 "network",
                 &[("mode".to_string(), q("wireguard"))],
             )?;
+            // Choosing the network through this block is the confirmation.
+            out = crate::tomledit::delete_toml_key(&out, "network", "mode_unconfirmed");
         }
         Ok(out)
     });
@@ -15881,7 +15888,9 @@ async fn post_settings_reset(
     let live: toml::Value =
         toml::from_str(&current).unwrap_or(toml::Value::Table(Default::default()));
 
-    let mut doc = DEFAULT_CONFIG_TOML.to_string();
+    // Marked like the file written at first start: the template chooses no
+    // network mode (`config::Network::mode_unconfirmed`).
+    let mut doc = crate::config::with_unconfirmed_mark(DEFAULT_CONFIG_TOML);
     let mut kept: Vec<String> = Vec::new();
     for (section, key) in RESET_PRESERVED {
         // Strings only, and non-empty ones: an empty credential is not worth
@@ -17159,6 +17168,8 @@ async fn post_network_mode(
             "network",
             &[("mode".to_string(), mode_value.clone())],
         )?;
+        // Saving the tab, direct mode included, is the confirmation.
+        out = crate::tomledit::delete_toml_key(&out, "network", "mode_unconfirmed");
         for e in &extras {
             let Some(id) = e.get("id").and_then(|v| v.as_str()) else {
                 continue;
@@ -30359,6 +30370,45 @@ mod network_mode_tests {
         body_json(get_network_mode(State(s.clone()), RawQuery(None), keyed(KEY)).await).await
     }
 
+    const MARKED_FILE: &str = "[daemon]\napi_key = \"0123456789abcdef0123456789abcdef\"\n\n\
+        [network]\nmode_unconfirmed = true\n\n\
+        [race]\nlisten_port = 16171\n\n[hoard]\nlisten_port = 16172\n";
+
+    /// Saving the Network tab, direct mode included, is the confirmation: the
+    /// mark leaves the file, the GET stops reporting it, and an engine the
+    /// running process holds off the network because of it asks for a restart.
+    #[tokio::test]
+    async fn network_mode_save_removes_the_unconfirmed_mark() {
+        let s = state_from("netconfirm-save", MARKED_FILE);
+        for e in s.state.engines.engines() {
+            let _ = e.blocked.set(crate::killswitch::CONFIRM_HOLD.to_string());
+        }
+        assert_eq!(load(&s.state).await["mode_unconfirmed"], true);
+        let (st, body) = save(&s.state, form("direct", serde_json::json!({}))).await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        let text = std::fs::read_to_string(&s.config_path).unwrap();
+        assert!(!text.contains("mode_unconfirmed"), "{text}");
+        assert!(text.contains("mode = \"direct\""), "{text}");
+        assert!(!s.cfg().network.mode_unconfirmed);
+        assert_eq!(load(&s.state).await["mode_unconfirmed"], false);
+        assert_eq!(body["restart_required"], true, "{body}");
+    }
+
+    /// Both ways the daemon writes its own template carry the mark: the file
+    /// created at startup, and the reset to defaults of the API.
+    #[tokio::test]
+    async fn network_mode_reset_to_defaults_writes_the_unconfirmed_mark() {
+        let s = state_from("netconfirm-reset", DIRECT_FILE);
+        assert!(!s.cfg().network.mode_unconfirmed);
+        let r = post_settings_reset(State(s.state.clone()), RawQuery(None), keyed(KEY)).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let text = std::fs::read_to_string(&s.config_path).unwrap();
+        let written: Config = toml::from_str(&text).unwrap();
+        assert!(written.network.mode_unconfirmed, "{text}");
+        assert!(s.cfg().network.mode_unconfirmed);
+        assert_eq!(load(&s.state).await["mode_unconfirmed"], true);
+    }
+
     fn form(mode: &str, extra: serde_json::Value) -> serde_json::Value {
         let mut fields = serde_json::json!({"race_listen_port": 16171, "hoard_listen_port": 16172});
         for (k, v) in extra.as_object().unwrap() {
@@ -31173,6 +31223,42 @@ mod wireguard_route_tests {
             mode["wireguard"]["reason"],
             crate::wgtunnel::NEEDS_NET_ADMIN
         );
+        crate::wgtunnel::force_support(None);
+    }
+
+    /// Choosing the network through the WireGuard block alone is a choice
+    /// too: the "network to confirm" mark leaves the file, the GET stops
+    /// reporting it, and engines held for it ask for a restart.
+    #[tokio::test]
+    async fn network_mode_wireguard_assignment_removes_the_unconfirmed_mark() {
+        crate::wgtunnel::force_support(Some(Ok(())));
+        let data = std::env::temp_dir().join(format!("hydra-wg-mark-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data);
+        let s = state_from(
+            "wg-mark",
+            &format!(
+                "[daemon]\napi_key = \"{KEY}\"\ndata_dir = \"{}\"\n\n\
+                 [network]\nmode_unconfirmed = true\n\n\
+                 [race]\nlisten_port = 16171\n\n[hoard]\nlisten_port = 16172\n",
+                data.display()
+            ),
+        );
+        for e in s.state.engines.engines() {
+            let _ = e.blocked.set(crate::killswitch::CONFIRM_HOLD.to_string());
+        }
+        upload_raw(&s, "a.conf", CONF).await;
+        let get = |s: &AppState| {
+            let s = s.clone();
+            async move { body_json(get_network_mode(State(s), RawQuery(None), keyed(KEY)).await).await }
+        };
+        assert_eq!(get(&s).await["mode_unconfirmed"], true);
+        let (st, body) = assign(&s, race_on("a.conf")).await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        let text = std::fs::read_to_string(&s.config_path).unwrap();
+        assert!(!text.contains("mode_unconfirmed"), "{text}");
+        assert!(!s.cfg().network.mode_unconfirmed);
+        assert_eq!(get(&s).await["mode_unconfirmed"], false);
+        assert_eq!(body["restart_required"], true, "{body}");
         crate::wgtunnel::force_support(None);
     }
 

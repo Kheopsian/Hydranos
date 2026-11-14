@@ -453,7 +453,7 @@ fn seed_config(path: &Path) {
     } else {
         dir.join("data")
     };
-    let template = include_str!("../../../configs/default.toml");
+    let template = config::with_unconfirmed_mark(include_str!("../../../configs/default.toml"));
     let seeded = template.replace(
         "data_dir = \"/config\"",
         &format!(
@@ -1805,6 +1805,25 @@ mod rotating_log_tests {
             assert!(dir.join(format!("hydranos.log.{i}")).exists(), "{i}");
         }
         assert!(!dir.join(format!("hydranos.log.{}", LOG_KEEP + 1)).exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod seed_tests {
+    use super::*;
+
+    /// The config the daemon creates at first start carries the mark that
+    /// keeps its engines off the network until the Network tab is saved.
+    #[test]
+    fn network_mode_starting_config_carries_the_unconfirmed_mark() {
+        let dir = std::env::temp_dir().join(format!("hydra-seed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("default.toml");
+        seed_config(&path);
+        let text = std::fs::read_to_string(&path).unwrap();
+        let cfg: config::Config = toml::from_str(&text).unwrap();
+        assert!(cfg.network.mode_unconfirmed, "{text}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

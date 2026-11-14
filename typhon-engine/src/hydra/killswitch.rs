@@ -60,6 +60,31 @@ pub fn armed_why(cfg: &Config) -> String {
     }
 }
 
+/// Why the engines are held when the network mode was never chosen. Names
+/// the way out for someone with no browser.
+pub const CONFIRM_HOLD: &str = "the configuration was reset and the network mode was never chosen: engines stay off the network until the network mode is saved (Network settings, or POST /api/network/mode)";
+
+/// Whether every engine is kept off the network because the config is one
+/// Hydranos wrote from its template (`[network] mode_unconfirmed`) on an
+/// install that already has torrents.
+///
+/// Both facts are needed: the mark alone is the first start of a new install
+/// (nothing to leak yet), and torrents alone are every existing install,
+/// which must not be blocked by an update. A network override of the
+/// environment (`TYPHON_ANNOUNCE_PROXY`) is a network choice and counts as
+/// the confirmation. The environment is passed in, not read here.
+///
+/// Limit: a config restored from a backup or written by hand has no mark, so
+/// this does not cover it.
+pub fn confirm_hold(
+    cfg: &Config,
+    store_has_torrents: bool,
+    env_network_override: bool,
+) -> Option<&'static str> {
+    (cfg.network.mode_unconfirmed && store_has_torrents && !env_network_override)
+        .then_some(CONFIRM_HOLD)
+}
+
 /// What the kill switch decides for one engine.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Coverage {
@@ -444,6 +469,11 @@ pub fn blocking_changed(cfg: &Config, host: &crate::engines::EngineHost) -> bool
     // An engine kept off by `gluetun_verify = "block"` is not the plan's
     // doing: it is decided at boot from the live exit, not from the file.
     host.engines().iter().any(|e| {
+        // Held for the unconfirmed mode: lifted by the save that removed the
+        // mark (the restart is the unblocking), and the plan knows nothing of it.
+        if e.blocked.get().is_some_and(|w| w == CONFIRM_HOLD) {
+            return !cfg.network.mode_unconfirmed;
+        }
         let verify = e
             .blocked
             .get()
@@ -739,6 +769,19 @@ mod tests {
 
     fn cfg(toml_text: &str) -> Config {
         toml::from_str(toml_text).unwrap()
+    }
+
+    /// The decision, with the environment passed in rather than read: the
+    /// mark, a torrent in the store and no network override hold the engines;
+    /// a network override from the environment is a choice and lifts it.
+    #[test]
+    fn killswitch_confirm_hold_decision_and_environment_override() {
+        let marked = cfg("[network]\nmode_unconfirmed = true\n");
+        let unmarked = cfg("[network]\nmode = \"direct\"\n");
+        assert_eq!(confirm_hold(&marked, true, false), Some(CONFIRM_HOLD));
+        assert_eq!(confirm_hold(&marked, true, true), None, "environment proxy");
+        assert_eq!(confirm_hold(&marked, false, false), None, "empty store");
+        assert_eq!(confirm_hold(&unmarked, true, false), None, "no mark");
     }
 
     /// The plan as a test sees it: no tunnel known, `eth0` holds the default

@@ -10637,6 +10637,9 @@ function netModeRender() {
     }</div>`;
 
     let warn = "";
+    // The config was written from the template: engines of an install that has
+    // torrents are held off the network until this tab is saved.
+    if (_netState.mode_unconfirmed) warn += `<div class="result-msg error" style="margin:.3em 0">${esc(t("The network mode was never chosen. If this install already has torrents, its engines stay off the network until you pick a mode below and save it. Direct counts as a choice."))}</div>`;
     for (const w of (_netState.warnings || [])) warn += `<div class="result-msg info" style="margin:.3em 0">${esc(t(w))}</div>`;
 
     let env = "";

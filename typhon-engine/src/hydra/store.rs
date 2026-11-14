@@ -4091,6 +4091,13 @@ impl Store {
         Ok(rows.filter_map(Result::ok).collect())
     }
 
+    /// Whether any torrent is stored, in any session.
+    pub fn has_torrents(&self) -> bool {
+        self.conn
+            .query_row("SELECT 1 FROM torrents LIMIT 1", [], |_| Ok(()))
+            .is_ok()
+    }
+
     /// Every info hash of one session, sorted.
     pub fn all_hashes(&self, session: &str) -> anyhow::Result<Vec<String>> {
         let mut stmt = self

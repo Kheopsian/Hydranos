@@ -410,6 +410,32 @@ pub struct Network {
     /// picked. Empty (a file from before 4.4) = deduced as before.
     #[serde(default)]
     pub mode: String,
+    /// "Network to confirm": written by Hydranos itself when it creates a
+    /// config from its template (first start, or the reset to defaults),
+    /// because the template chooses no network mode and the mode is then
+    /// deduced as "direct". While it is present and the store already holds
+    /// torrents, the engines stay off the network (`killswitch::confirm_hold`);
+    /// saving the Network tab (`POST /api/network/mode`) removes it.
+    ///
+    /// Limit, on purpose: only a config Hydranos wrote from its template
+    /// carries it. A config restored from a backup or rewritten by hand does
+    /// not, and this protection does not cover it.
+    #[serde(default)]
+    pub mode_unconfirmed: bool,
+}
+
+/// The starting template with the "network to confirm" mark added.
+///
+/// Added when the text is written rather than kept in `configs/default.toml`:
+/// that file is also the documented example, and a person copying it by hand
+/// should not inherit a mark that blocks their engines.
+pub fn with_unconfirmed_mark(template: &str) -> String {
+    crate::tomledit::set_toml_table(
+        template,
+        "network",
+        &[("mode_unconfirmed".to_string(), "true".to_string())],
+    )
+    .unwrap_or_else(|_| template.to_string())
 }
 
 impl Session {

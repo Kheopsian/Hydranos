@@ -425,6 +425,14 @@ impl EngineHost {
         // Which engines the kill switch keeps off the network. Before the
         // switch below, so a bench run with the network off still says it.
         let plan = crate::killswitch::plan(config);
+        // The mode never chosen on an install that has torrents: decided here,
+        // before any engine reaches the network.
+        let hold = crate::killswitch::confirm_hold(
+            config,
+            config.network.mode_unconfirmed
+                && (self.total_torrents() > 0 || store_has_torrents(config)),
+            typhon_engine::tracker::http::env_announce_proxy().is_some(),
+        );
         // `[daemon] gluetun_verify = "block"`: decided once for the node, like
         // the rest of the kill switch.
         let verify_block = if networking_enabled() {
@@ -436,6 +444,14 @@ impl EngineHost {
             // The engine's own merged session. NOT config.race / config.hoard:
             // an engine that is neither is a legitimate configuration.
             let session = &engine.session;
+            if let Some(why) = hold {
+                tracing::warn!(
+                    engine = %engine.id,
+                    "kill switch: BLOCKED, kept off the network (no listener, no dial, no announce, no DHT, no LSD): {why}"
+                );
+                let _ = engine.blocked.set(why.to_string());
+                continue;
+            }
             if let Some(why) = plan.blocked(&engine.id) {
                 tracing::warn!(
                     engine = %engine.id,
@@ -1018,6 +1034,96 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A node in direct mode written by `seed`, with `torrents` rows already
+    /// in its store, started for real.
+    async fn confirm_hold_host(
+        tag: &str,
+        network: &str,
+        torrents: usize,
+    ) -> (EngineHost, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("hydra-hold-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::create_dir_all(&dir);
+        if torrents > 0 {
+            let store = crate::store::Store::open(&dir.join("hydra.db"), false).unwrap();
+            for i in 0..torrents {
+                store
+                    .insert_torrent(
+                        &format!("{:040x}", i + 1),
+                        "race",
+                        b"d4:infod4:name1:xee",
+                        "",
+                        "",
+                        0.0,
+                        false,
+                        "",
+                    )
+                    .unwrap();
+            }
+        }
+        let text = format!(
+            "[daemon]\ndata_dir = {:?}\n{network}\n[race]\nlisten_port = {}\n[hoard]\nlisten_port = {}\n",
+            dir.to_string_lossy(),
+            free_port(),
+            free_port()
+        );
+        let config: Config = toml::from_str(&text).unwrap();
+        let phase = crate::startup::phase();
+        let host = EngineHost::start(&config, &dir).await;
+        crate::startup::set_phase(phase);
+        (host, dir)
+    }
+
+    /// A config the daemon wrote from its template (the mark is there) and a
+    /// store that already holds a torrent: no engine goes on the network, and
+    /// the reason names the way out.
+    #[tokio::test]
+    async fn killswitch_unconfirmed_mode_with_torrents_blocks_every_engine() {
+        let (host, dir) =
+            confirm_hold_host("blocked", "[network]\nmode_unconfirmed = true\n", 1).await;
+        for e in host.engines() {
+            let why = e
+                .blocked
+                .get()
+                .unwrap_or_else(|| panic!("{} was not blocked", e.id));
+            assert_eq!(why, crate::killswitch::CONFIRM_HOLD);
+            assert!(why.contains("POST /api/network/mode"), "{why}");
+            assert!(
+                e.engine_config.get().is_none(),
+                "{}: no network config",
+                e.id
+            );
+            assert!(
+                !e.listening.load(std::sync::atomic::Ordering::Relaxed),
+                "{}: no listener",
+                e.id
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// First start of a new install: the mark is there, the store is empty.
+    #[tokio::test]
+    async fn killswitch_unconfirmed_mode_with_an_empty_store_blocks_nothing() {
+        let (host, dir) =
+            confirm_hold_host("empty", "[network]\nmode_unconfirmed = true\n", 0).await;
+        for e in host.engines() {
+            assert!(e.blocked.get().is_none(), "{}: {:?}", e.id, e.blocked.get());
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An existing install: no mark, torrents in the store. Updating must
+    /// not block anybody.
+    #[tokio::test]
+    async fn killswitch_config_without_the_mark_and_torrents_blocks_nothing() {
+        let (host, dir) = confirm_hold_host("nomark", "", 3).await;
+        for e in host.engines() {
+            assert!(e.blocked.get().is_none(), "{}: {:?}", e.id, e.blocked.get());
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Two local servers: an address-echo service and a gluetun control
     /// server, each answering one fixed address.
     async fn echo_and_control(echo_ip: &'static str, control_ip: &'static str) -> (String, String) {
@@ -1223,6 +1329,12 @@ mod tests {
 /// Off only for a bench: an instance holding the production catalogue must be
 /// able to answer questions about it without telling 244k torrents' trackers
 /// about a machine nobody meant to publish.
+/// Whether the store already holds a torrent, whatever engine owns it.
+fn store_has_torrents(config: &Config) -> bool {
+    let db = std::path::Path::new(&config.daemon.data_dir).join("hydra.db");
+    crate::store::Store::open(&db, true).is_ok_and(|s| s.has_torrents())
+}
+
 fn networking_enabled() -> bool {
     networking_enabled_by(std::env::var("HYDRANOS_ENGINE_NET").ok().as_deref())
 }
