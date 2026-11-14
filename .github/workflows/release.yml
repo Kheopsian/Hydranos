@@ -210,7 +210,12 @@ jobs:
           ref: ${{ github.event.inputs.tag || github.ref_name }}
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch of the action; the compiler is pinned below
+        with:
+          # The compiler, pinned: "stable" moved to 1.100 on the day of a
+          # release and changed both clippy and the coverage measure under
+          # unchanged code. Raised on purpose, with the floor re-checked.
+          toolchain: 1.99.1
 
       # aws-lc-sys assembles its primitives with NASM on Windows and panics
       # outright when it is missing ("NASM command not found! Build cannot
