@@ -612,8 +612,7 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
         // The file could not be rewritten: the placeholder is refused as a key.
         config::warn_placeholder_key_refused();
     }
-    let has_torrents = config::store_has_torrents(&config.daemon.data_dir);
-    config::clear_unconfirmed_mark_on_empty_store(&mut config, &config_path, has_torrents);
+    config::settle_unconfirmed_mark_at_start(&mut config, &config_path);
     let config = config;
     workers::start_memory_watch(config.daemon.memory_alert_bytes());
     typhon_engine::disk::set_preallocate(config.daemon.preallocate);
@@ -1846,9 +1845,8 @@ mod seed_tests {
         // First start: no torrent yet.
         let mut cfg = config::Config::load(&path).unwrap();
         assert!(cfg.network.mode_unconfirmed);
-        let has = config::store_has_torrents(&data);
-        assert!(!has);
-        config::clear_unconfirmed_mark_on_empty_store(&mut cfg, &path, has);
+        assert!(!config::store_has_torrents(&data).unwrap());
+        config::settle_unconfirmed_mark_at_start(&mut cfg, &path);
         assert!(!cfg.network.mode_unconfirmed);
 
         // Torrents added, then the second start.
@@ -1867,9 +1865,9 @@ mod seed_tests {
             .unwrap();
         drop(store);
         let mut cfg = config::Config::load(&path).unwrap();
-        let has = config::store_has_torrents(&data);
+        let has = config::store_has_torrents(&data).unwrap();
         assert!(has);
-        config::clear_unconfirmed_mark_on_empty_store(&mut cfg, &path, has);
+        config::settle_unconfirmed_mark_at_start(&mut cfg, &path);
         assert_eq!(
             crate::killswitch::confirm_hold(&cfg, has, false),
             None,
@@ -1885,6 +1883,38 @@ mod seed_tests {
         ));
         assert!(cfg.network.mode_unconfirmed);
         assert!(crate::killswitch::confirm_hold(&cfg, true, false).is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A store that is there and cannot be read is not "empty": the start
+    /// keeps the mark and the engines stay held.
+    #[test]
+    fn network_mode_unreadable_store_keeps_the_mark() {
+        let dir = std::env::temp_dir().join(format!("hydra-seed3-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("default.toml");
+        seed_config(&path);
+        let data_dir = dir.join("data");
+        let _ = std::fs::create_dir_all(&data_dir);
+        std::fs::write(
+            data_dir.join("hydra.db"),
+            b"this is not a sqlite database at all, just bytes",
+        )
+        .unwrap();
+        let data = data_dir.to_string_lossy().to_string();
+
+        let mut cfg = config::Config::load(&path).unwrap();
+        config::settle_unconfirmed_mark_at_start(&mut cfg, &path);
+        assert!(
+            cfg.network.mode_unconfirmed,
+            "mark dropped on an unreadable store"
+        );
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("mode_unconfirmed = true"), "{text}");
+        assert!(
+            config::store_has_torrents(&data).is_err(),
+            "unreadable read as a count"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

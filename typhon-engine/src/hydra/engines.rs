@@ -1324,10 +1324,14 @@ mod tests {
     }
 }
 
-/// Whether the store already holds a torrent, whatever engine owns it.
+/// Whether the store already holds a torrent, whatever engine owns it. A
+/// store that cannot be read counts as holding some: the guard stays shut
+/// when it does not know.
 fn store_has_torrents(config: &Config) -> bool {
-    let db = std::path::Path::new(&config.daemon.data_dir).join("hydra.db");
-    crate::store::Store::open(&db, true).is_ok_and(|s| s.has_torrents())
+    crate::config::store_has_torrents(&config.daemon.data_dir).unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "cannot tell whether the store holds torrents: counted as holding some");
+        true
+    })
 }
 
 /// Whether engines may open sockets at all.

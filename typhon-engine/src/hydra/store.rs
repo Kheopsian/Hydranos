@@ -4091,11 +4091,18 @@ impl Store {
         Ok(rows.filter_map(Result::ok).collect())
     }
 
-    /// Whether any torrent is stored, in any session.
-    pub fn has_torrents(&self) -> bool {
-        self.conn
+    /// Whether any torrent is stored, in any session. `Ok(false)` only when
+    /// the query answers with no row: a locked, damaged or table-less store is
+    /// an error, never "empty" -- a guard that reads it as empty opens.
+    pub fn has_torrents(&self) -> anyhow::Result<bool> {
+        match self
+            .conn
             .query_row("SELECT 1 FROM torrents LIMIT 1", [], |_| Ok(()))
-            .is_ok()
+        {
+            Ok(()) => Ok(true),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false),
+            Err(e) => Err(e.into()),
+        }
     }
 
     /// Every info hash of one session, sorted.

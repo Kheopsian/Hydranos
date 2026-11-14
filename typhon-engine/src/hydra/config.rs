@@ -465,11 +465,34 @@ pub fn clear_unconfirmed_mark_on_empty_store(
     true
 }
 
-/// Whether the store under `data_dir` holds at least one torrent. A store
-/// that cannot be opened (none yet) holds none.
-pub fn store_has_torrents(data_dir: &str) -> bool {
+/// The startup step: the mark goes on a store known to be empty, and stays
+/// on one that holds torrents or that cannot be read -- unknown is not empty.
+pub fn settle_unconfirmed_mark_at_start(config: &mut Config, path: &Path) {
+    if !config.network.mode_unconfirmed {
+        return;
+    }
+    let has_torrents = store_has_torrents(&config.daemon.data_dir).unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "cannot tell whether the store holds torrents: [network] mode_unconfirmed kept");
+        true
+    });
+    clear_unconfirmed_mark_on_empty_store(config, path, has_torrents);
+}
+
+/// Whether the store under `data_dir` holds at least one torrent.
+///
+/// `Ok(false)` in two cases only: there is no `hydra.db` yet, or it answers
+/// with no torrent row. A store that is there and cannot be opened or read
+/// (permissions after a PUID change, a WAL a read-only connection cannot
+/// replay, damage) is an error: the callers keep the guard shut on it.
+pub fn store_has_torrents(data_dir: &str) -> anyhow::Result<bool> {
     let db = Path::new(data_dir).join("hydra.db");
-    crate::store::Store::open(&db, true).is_ok_and(|s| s.has_torrents())
+    // Not `exists()`: it says false for a file it may not look at.
+    match std::fs::metadata(&db) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e.into()),
+        Ok(_) => {}
+    }
+    crate::store::Store::open(&db, true)?.has_torrents()
 }
 
 impl Session {
