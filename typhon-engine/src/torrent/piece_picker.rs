@@ -720,11 +720,11 @@ impl PiecePicker {
     /// Import a BT bitfield into `have`. Silently clamps to num_pieces.
     pub fn import_bitfield(&mut self, bitfield: &[u8]) {
         let num = self.num_pieces as usize;
-        for i in 0..num {
+        for (i, have) in self.have.iter_mut().enumerate().take(num) {
             let byte_idx = i / 8;
             let bit_idx = 7 - (i % 8);
             if byte_idx < bitfield.len() && (bitfield[byte_idx] >> bit_idx) & 1 == 1 {
-                self.have[i] = true;
+                *have = true;
             }
         }
     }
