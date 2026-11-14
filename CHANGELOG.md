@@ -23,6 +23,10 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 
 ## v4.9.0 -- disk preallocation, listen ports changed without a restart, and tracker errors that read as words
 
+### Security
+
+- `quinn-udp` goes from 0.5.14 to 0.5.16 (RUSTSEC-2026-0538: its receive loop could spin after a truncated datagram) and `anyhow` from 1.0.102 to 1.0.104 (RUSTSEC-2026-0190).
+
 ### Added
 
 - `[daemon] preallocate = true` (default `false`, read at startup, Linux only) reserves a torrent's files when it first writes in this process, like qBittorrent's "Pre-allocate disk space for all files": every wanted file shorter than its declared size is reserved at that size with `fallocate`, so a disk that is too small fails on the first piece with a message naming the file and the size, not half way. A file that was not wanted (priority 0) is left alone and reserved at the next write once it is. Nothing is ever written as zeros: a file system that cannot reserve (some FUSE ones) is left as it is and the log says so once. It does not guarantee space on ZFS or btrfs. A file not yet downloaded then already has its final size, so for such files use a recheck, not skip checking, when adding the torrent: skip checking would pass the size check and announce data that is not there.
