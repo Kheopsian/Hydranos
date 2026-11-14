@@ -150,7 +150,7 @@ jobs:
           # release and changed both clippy and the coverage measure under
           # unchanged code. Raised on purpose, with the floor re-checked.
           toolchain: 1.99.1
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: typhon-engine
       - name: Tools
