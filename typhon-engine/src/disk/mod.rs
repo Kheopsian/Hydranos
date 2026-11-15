@@ -164,40 +164,24 @@ fn reserve(file: &File, len: u64) -> std::io::Result<()> {
     }
 }
 
-/// Reserve `len` bytes of `file` by setting its allocation size
-/// (`FileAllocationInfo`): the clusters are taken, the end of file does not
-/// move and no zero is written. NOT `set_len`: that moves the end of file, and
-/// Windows then writes zeros over the gap at the next write past it.
+/// Reserve `len` bytes of `file` by growing it to `len` (`set_len`, which is
+/// `SetEndOfFile`): NTFS allocates the clusters, and the allocation lasts. A
+/// bare allocation size (`FileAllocationInfo`) does not: NTFS hands back what
+/// lies past the end of file when the last handle closes, and the descriptor
+/// cache closes handles on its own. Never shorter than the file is already,
+/// no `SetFileValidData` (it needs an administrator privilege): a write past
+/// the old end of file is zero-filled by Windows, with or without this call.
 #[cfg(windows)]
 fn reserve(file: &File, len: u64) -> std::io::Result<()> {
-    use std::os::windows::io::AsRawHandle;
-    use windows_sys::Win32::Storage::FileSystem::{
-        FileAllocationInfo, SetFileInformationByHandle, FILE_ALLOCATION_INFO,
-    };
-    if win_allocated(file)? >= len {
+    if file.metadata()?.len() >= len {
         return Ok(());
     }
-    let info = FILE_ALLOCATION_INFO {
-        AllocationSize: i64::try_from(len)
-            .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?,
-    };
-    // SAFETY: a valid open handle, and a struct of the size announced.
-    let ok = unsafe {
-        SetFileInformationByHandle(
-            file.as_raw_handle() as _,
-            FileAllocationInfo,
-            &info as *const FILE_ALLOCATION_INFO as *const core::ffi::c_void,
-            std::mem::size_of::<FILE_ALLOCATION_INFO>() as u32,
-        )
-    };
-    if ok == 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(())
+    file.set_len(len)
 }
 
 /// The bytes the file system has set aside for `file` (its allocation size).
-#[cfg(windows)]
+/// Only the tests ask.
+#[cfg(all(windows, test))]
 fn win_allocated(file: &File) -> std::io::Result<u64> {
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Storage::FileSystem::{
@@ -226,7 +210,7 @@ fn reserve(_file: &File, _len: u64) -> std::io::Result<()> {
 }
 
 /// Whether `[daemon] preallocate` does anything on this system: Linux
-/// (`fallocate`) and Windows (allocation size). Elsewhere the switch is a
+/// (`fallocate`) and Windows (the file grown to its size). Elsewhere the switch is a
 /// no-op, and the Settings tab says so.
 pub const PREALLOCATE_SUPPORTED: bool = cfg!(any(target_os = "linux", windows));
 
@@ -279,7 +263,8 @@ fn preallocate(
                 #[cfg(windows)]
                 {
                     use windows_sys::Win32::Foundation::{
-                        ERROR_DISK_FULL, ERROR_INVALID_FUNCTION, ERROR_NOT_SUPPORTED,
+                        ERROR_DISK_FULL, ERROR_HANDLE_DISK_FULL, ERROR_INVALID_FUNCTION,
+                        ERROR_NOT_SUPPORTED,
                     };
                     if matches!(
                         code,
@@ -289,12 +274,15 @@ fn preallocate(
                             tracing::warn!(
                                 path = %full.display(),
                                 "preallocate: this file system does not support reserving space \
-                                 (allocation size); files are written as they come, nothing is reserved"
+                                 (growing the file); files are written as they come, nothing is reserved"
                             );
                         }
                         return Ok(());
                     }
-                    if code == Some(ERROR_DISK_FULL as i32) {
+                    if matches!(
+                        code,
+                        Some(c) if c == ERROR_DISK_FULL as i32 || c == ERROR_HANDLE_DISK_FULL as i32
+                    ) {
                         return Err(format!(
                             "not enough space to reserve {:?} ({} bytes): {}",
                             full, len, e
@@ -1512,17 +1500,6 @@ mod disk_tests {
         }
     }
 
-    /// The length a reserved file has: Linux's `fallocate` extends the file to
-    /// the declared size, Windows' allocation size does not move the end of
-    /// file (nothing is written as zeros), so there it is what was written.
-    fn len_when_reserved(declared: u64, written: u64) -> u64 {
-        if cfg!(windows) {
-            written
-        } else {
-            declared
-        }
-    }
-
     /// ⭐ With `preallocate`, the first piece written of a torrent reserves
     /// every wanted file at its declared size -- the one it lands in and the
     /// ones it does not touch -- without a byte of zeros being written.
@@ -1541,13 +1518,9 @@ mod disk_tests {
             .write_piece(&f.torrent, 0, a[..4096].to_vec())
             .await
             .unwrap());
-        for (name, want, written) in [("a.bin", 12288u64, 4096u64), ("b.bin", 8192, 0)] {
+        for (name, want) in [("a.bin", 12288u64), ("b.bin", 8192)] {
             let (len, reserved) = len_and_reserved(&f.root.join("data/multi").join(name));
-            assert_eq!(
-                len,
-                len_when_reserved(want, written),
-                "{name} must have its declared size (Linux) or what was written (Windows)"
-            );
+            assert_eq!(len, want, "{name} must have its declared size");
             assert!(
                 reserved >= want,
                 "{name}: {reserved} bytes allocated, {want} declared"
@@ -1619,11 +1592,7 @@ mod disk_tests {
             .await
             .unwrap());
         let (lb, rb) = len_and_reserved(&f.root.join("data/multi/b.bin"));
-        assert_eq!(
-            lb,
-            len_when_reserved(6000, 2192),
-            "b.bin is reserved once it is wanted"
-        );
+        assert_eq!(lb, 6000, "b.bin is reserved once it is wanted");
         assert!(rb >= 6000);
     }
 
@@ -1645,7 +1614,7 @@ mod disk_tests {
             .unwrap());
         let a_path = f.root.join("data/multi/a.bin");
         let b_path = f.root.join("data/multi/b.bin");
-        assert_eq!(len_and_reserved(&b_path).0, len_when_reserved(8192, 0));
+        assert_eq!(len_and_reserved(&b_path).0, 8192);
 
         // Removed with its files: the handles go, the folder goes.
         evict_fds(&[a_path.clone(), b_path.clone()]);
@@ -1676,14 +1645,46 @@ mod disk_tests {
             .write_piece(&again, 0, a[..4096].to_vec())
             .await
             .unwrap());
-        for (path, want, written) in [(&a_path, 12288u64, 4096u64), (&b_path, 8192, 0)] {
+        for (path, want) in [(&a_path, 12288u64), (&b_path, 8192)] {
             let (len, reserved) = len_and_reserved(path);
-            assert_eq!(
-                len,
-                len_when_reserved(want, written),
-                "{path:?} is reserved again"
-            );
+            assert_eq!(len, want, "{path:?} is reserved again");
             assert!(reserved >= want);
+        }
+    }
+
+    /// ⭐ The reservation outlives the handle. The descriptors are closed
+    /// (evicted, as the cache does on its own) and the files read again from
+    /// the disk: each still has its declared size and the space is still
+    /// taken. A reservation that lives only while a handle is open (Windows
+    /// gives back an allocation past the end of file when the last handle
+    /// closes) fails here, and is lost without a sound in the daemon, which
+    /// reserves once per torrent and per process.
+    #[tokio::test]
+    async fn preallocate_survives_closing_every_handle() {
+        let _l = prealloc_lock().await;
+        let _on = PreallocOn::new();
+        let a = pattern(91, 12288);
+        let b = pattern(97, 8192);
+        let f = fixture_from(
+            "prealloc-closed",
+            multi_torrent_bytes(&[("a.bin", &a), ("b.bin", &b)], 4096),
+        );
+        assert!(f
+            .disk
+            .write_piece(&f.torrent, 0, a[..4096].to_vec())
+            .await
+            .unwrap());
+        let a_path = f.root.join("data/multi/a.bin");
+        let b_path = f.root.join("data/multi/b.bin");
+        // Closed, and not added again: nothing reserves a second time.
+        evict_fds(&[a_path.clone(), b_path.clone()]);
+        for (path, want) in [(&a_path, 12288u64), (&b_path, 8192)] {
+            let (len, reserved) = len_and_reserved(path);
+            assert_eq!(len, want, "{path:?} keeps its declared size once closed");
+            assert!(
+                reserved >= want,
+                "{path:?}: {reserved} bytes allocated once closed, {want} declared"
+            );
         }
     }
 

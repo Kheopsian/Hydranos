@@ -41,11 +41,12 @@ create_torrent_folder = false
 # reserve the full size of every file it wants that is shorter than its declared
 # size, so a disk that is too small fails on the first piece, not half way
 # (the same as qBittorrent's "Pre-allocate disk space for all files"). Linux
-# (fallocate) and Windows (the file's allocation size; the end of file does not
-# move and no zero is written); elsewhere the setting does nothing. NOT a guarantee of space on ZFS or btrfs (copy on write: the reserved
-# blocks are not the ones later writes land in). On a file system that cannot
-# reserve (some FUSE ones) nothing is done and the log says so once. Default
-# false; read at startup, so a change needs a restart.
+# (fallocate) and Windows (the file is grown to its declared size, as
+# qBittorrent does); elsewhere the setting does nothing. The file has its final
+# size from the reservation on. NOT a guarantee of space on ZFS or btrfs (copy
+# on write: the reserved blocks are not the ones later writes land in). On a
+# file system that cannot reserve (some FUSE ones) nothing is done and the log
+# says so once. Default false; read at startup, so a change needs a restart.
 # ⚠ With it on, a file not yet downloaded already has its final size. A torrent
 # added with seed mode / skip checking on such files passes the presence and
 # size check and would be announced as a seed of data that is not there: use a
