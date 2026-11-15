@@ -4253,6 +4253,27 @@ mod lifecycle_tests {
     }
 
     #[tokio::test]
+    async fn a_stopped_incomplete_recheck_does_not_start_downloading() {
+        let (mgr, root, ih, t) = whole_two_piece_torrent("checkstoppedpartial");
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(root.join("data/whole"))
+            .unwrap()
+            .set_len(16384)
+            .unwrap();
+        mgr.stop_torrent(&ih).unwrap();
+        mgr.recheck(&ih).unwrap();
+        wait_recheck_end(&t).await;
+        assert_eq!(t.picker.get().unwrap().lock().unwrap().num_have(), 1);
+        assert!(t.is_paused.load(Ordering::Relaxed));
+        assert_eq!(
+            t.status.load(Ordering::Relaxed),
+            TorrentStatus::Stopped as u8
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
     async fn a_cancelled_recheck_cannot_publish_even_when_its_reads_finish() {
         let (mgr, root, ih, t) = whole_two_piece_torrent("cancelverdict");
         t.picker.get().unwrap().lock().unwrap().set_have(0);
