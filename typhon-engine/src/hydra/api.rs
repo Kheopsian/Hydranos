@@ -6538,6 +6538,10 @@ fn status_payload(state: &AppState) -> serde_json::Value {
         },
         "server_ts": now,
         "tunnels": [],
+        // The most one `.torrent` add request may carry, whole body included,
+        // on `/api/torrents/upload` and `/api/v2/torrents/add`. A client groups
+        // its files under it; past it the request is refused with 413.
+        "upload_limit_bytes": ADD_BODY_LIMIT,
         // Seconds with a fraction, as 3.x publishes it.
         "uptime": (now - state.started_at) as f64,
         "version": HYDRANOS_VERSION,
@@ -14380,8 +14384,9 @@ async fn qbit_torrent_add(
     // end the loop quietly: the torrents read so far were added, the rest
     // dropped, and the client told "Ok." for all of them.
     let cut_short = |e: axum::extract::multipart::MultipartError| {
-        tracing::warn!(error = %e, "qbit add refused: the upload could not be read whole");
-        (StatusCode::BAD_REQUEST, "Fails.").into_response()
+        let (status, why) = unreadable_upload(&e);
+        tracing::warn!(error = %why, "qbit add refused");
+        (status, "Fails.").into_response()
     };
     loop {
         let field = match multipart.next_field().await {
@@ -14619,11 +14624,40 @@ async fn qbit_torrent_add(
     (StatusCode::OK, "Ok.").into_response()
 }
 
-/// How large an add request may be: both `.torrent` routes, a batch of a
-/// hundred included. axum's 2 MB default ended a batch part way, and a read
+/// How large one `.torrent` add request may be, whole body included, on both
+/// add routes. Published as `upload_limit_bytes` in `/api/status`.
+///
+/// Per request, not per torrent, on purpose: the request is held in memory
+/// until it has been read whole (nothing is added from a request cut short),
+/// so this bounds what one add can hold, while a torrent of any size still
+/// gets in -- a client sends files in groups that fit under it, a large one
+/// alone if need be. axum's 2 MB default ended a batch part way, and a read
 /// loop that stopped quietly added the first torrents and answered as though
-/// it had them all. Past this the request is refused whole, with nothing added.
+/// it had them all.
+///
+/// If groups ever cost too much, the ways out are spooling the parts to disk
+/// while reading (any size, little memory, same all-or-nothing reading) or
+/// adding each file as it arrives (one file in memory, but the fields would
+/// have to come first and a cut request would leave the files before the cut
+/// added). Neither is done: a limit a client can read is the smallest change.
 pub(crate) const ADD_BODY_LIMIT: usize = 64 << 20;
+
+/// Why an add request could not be read, and the status to answer: 413 with
+/// the limit and what to do when it is past `ADD_BODY_LIMIT`, the reader's own
+/// status (400 for a malformed or cut-off body) otherwise.
+fn unreadable_upload(e: &axum::extract::multipart::MultipartError) -> (StatusCode, String) {
+    let status = e.status();
+    let why = if status == StatusCode::PAYLOAD_TOO_LARGE {
+        format!(
+            "this request is over the upload limit of {ADD_BODY_LIMIT} bytes \
+             (upload_limit_bytes in /api/status); nothing was added: send the files \
+             in smaller groups"
+        )
+    } else {
+        format!("the upload could not be read whole; nothing was added: {e}")
+    };
+    (status, why)
+}
 
 /// What became of one file of a native upload.
 enum UploadOutcome {
@@ -14712,6 +14746,16 @@ async fn post_torrent_upload(
             .into_response()
     };
 
+    let unreadable = |e: axum::extract::multipart::MultipartError| {
+        let (status, why) = unreadable_upload(&e);
+        tracing::warn!(error = %why, "upload refused");
+        (
+            status,
+            Json(serde_json::json!({"error": why, "upload_limit_bytes": ADD_BODY_LIMIT})),
+        )
+            .into_response()
+    };
+
     let mut files: Vec<Vec<u8>> = Vec::new();
     let (mut category, mut save_path, mut tags, mut engine) =
         (String::new(), String::new(), String::new(), String::new());
@@ -14725,20 +14769,20 @@ async fn post_torrent_upload(
         let field = match multipart.next_field().await {
             Ok(Some(f)) => f,
             Ok(None) => break,
-            Err(e) => return bad(format!("the upload could not be read whole: {e}")),
+            Err(e) => return unreadable(e),
         };
         let name = field.name().unwrap_or_default().to_string();
         if name == "torrents" || name == "torrent" || name == "file" {
             match field.bytes().await {
                 Ok(b) if !b.is_empty() => files.push(b.to_vec()),
                 Ok(_) => {}
-                Err(e) => return bad(format!("the upload could not be read whole: {e}")),
+                Err(e) => return unreadable(e),
             }
             continue;
         }
         let value = match field.text().await {
             Ok(v) => v,
-            Err(e) => return bad(format!("the upload could not be read whole: {e}")),
+            Err(e) => return unreadable(e),
         };
         match name.as_str() {
             "category" => category = value,

@@ -1233,3 +1233,54 @@ async fn a_shim_add_cut_short_fails_and_adds_nothing() {
         "the first file was not added either"
     );
 }
+
+/// A shim add over the limit is 413 `Fails.` and adds nothing, the files that
+/// fit before the cut included.
+#[tokio::test]
+async fn a_shim_add_over_the_limit_is_413_and_adds_nothing() {
+    let s = st("shim-over-limit", "");
+    let a = single("over-alpha");
+    let boundary = "shimboundary";
+    let mut body: Vec<u8> = Vec::new();
+    body.extend_from_slice(
+        format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"savepath\"\r\n\r\n{}\r\n",
+            data(&s)
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(
+        format!("--{boundary}\r\nContent-Disposition: form-data; name=\"torrents\"; filename=\"t.torrent\"\r\nContent-Type: application/x-bittorrent\r\n\r\n").as_bytes(),
+    );
+    body.extend_from_slice(&a);
+    body.extend_from_slice(
+        format!("\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"pad\"\r\n\r\n")
+            .as_bytes(),
+    );
+    body.resize(body.len() + super::ADD_BODY_LIMIT + 1, b'x');
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    let req = axum::http::Request::builder()
+        .method("POST")
+        .uri("/api/v2/torrents/add")
+        .header("X-API-Key", KEY)
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .body(axum::body::Body::from(body))
+        .unwrap();
+    let resp = super::router(s.state.clone()).oneshot(req).await.unwrap();
+    let status = resp.status();
+    let text = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        (status, &text[..]),
+        (StatusCode::PAYLOAD_TOO_LARGE, &b"Fails."[..])
+    );
+    assert_eq!(
+        engine_of(&s, &hash_of(&a)),
+        None,
+        "the file before the cut was not added"
+    );
+}

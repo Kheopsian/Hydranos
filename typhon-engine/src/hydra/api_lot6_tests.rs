@@ -754,6 +754,71 @@ async fn an_upload_cut_short_is_refused_and_adds_nothing() {
     assert!(manager(&s, "race").all().is_empty() && manager(&s, "hoard").all().is_empty());
 }
 
+/// ⭐ A request over the limit is refused whole with 413, saying the limit and
+/// what to do, and adds nothing -- not even the files that fit before the
+/// cut. The limit is per request, so the same files sent in groups get in.
+#[tokio::test]
+async fn an_upload_over_the_limit_is_413_names_the_limit_and_adds_nothing() {
+    let s = st("upl-over-limit", "");
+    let dir = s.dir.join("incoming");
+    let d = dir.to_str().unwrap();
+    let (a, b) = (torrent_bytes("over-a.bin"), torrent_bytes("over-b.bin"));
+    // The torrents first, then the weight: what fits is read before the cut.
+    let (ct, mut body) = multipart_many(&[("savepath", d)], &[&a, &b]);
+    let close = b"--uploadboundary--
+"
+    .len();
+    body.truncate(body.len() - close);
+    body.extend_from_slice(
+        b"--uploadboundary
+Content-Disposition: form-data; name=\"pad\"
+
+",
+    );
+    body.resize(body.len() + super::ADD_BODY_LIMIT + 1, b'x');
+    body.extend_from_slice(
+        b"
+--uploadboundary--
+",
+    );
+    let (code, v) = upload_raw(&s, ct, body).await;
+    assert_eq!(code, StatusCode::PAYLOAD_TOO_LARGE, "{v}");
+    assert_eq!(
+        v["upload_limit_bytes"].as_u64(),
+        Some(super::ADD_BODY_LIMIT as u64)
+    );
+    assert!(
+        v["error"].as_str().unwrap().contains("smaller groups"),
+        "{v}"
+    );
+    assert!(manager(&s, "race").all().is_empty() && manager(&s, "hoard").all().is_empty());
+
+    // The same two files in groups under the limit: both get in.
+    for t in [&a, &b] {
+        let (code, v) = upload(&s, &[("savepath", d)], Some(("torrents", t)), true).await;
+        assert_eq!(code, StatusCode::OK, "{v}");
+    }
+}
+
+/// The limit is published, so a client sizes its groups before it sends.
+#[tokio::test]
+async fn the_status_publishes_the_upload_limit() {
+    let s = st("upl-limit-status", "");
+    let req = axum::http::Request::builder()
+        .uri("/api/status")
+        .header("X-API-Key", KEY)
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let resp = router(s.state.clone()).oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v = body_json(resp).await;
+    assert_eq!(
+        v["upload_limit_bytes"].as_u64(),
+        Some(super::ADD_BODY_LIMIT as u64),
+        "{v}"
+    );
+}
+
 /// ⭐ Which engine an upload's `engine` and `mode` name: an engine by its id
 /// first, a mode by the engine called after it, and only then by any engine
 /// that has the role. A node that renamed its roles gets the engine whose role

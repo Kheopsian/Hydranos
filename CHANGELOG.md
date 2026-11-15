@@ -30,7 +30,7 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 
 ### Fixed
 
-- A batch of `.torrent` files past 2 MB sent to `/api/v2/torrents/add` lost the files after the 2 MB mark without a word: the torrents read before it were added and the client was told `Ok.` for all of them. Both `.torrent` add routes now accept up to 64 MB, and a request that cannot be read whole (past the limit, cut off) is refused (`Fails.` on the qBittorrent route, a 400 on `/api/torrents/upload`) with nothing added.
+- A batch of `.torrent` files past 2 MB sent to `/api/v2/torrents/add` lost the files after the 2 MB mark without a word: the torrents read before it were added and the client was told `Ok.` for all of them. Both `.torrent` add routes now accept up to 64 MB per request, published as `upload_limit_bytes` in `/api/status`. The limit is per request, not per torrent: a client sends its files in groups that fit under it, a large torrent on its own if need be. A request past the limit is refused with 413 and says so (`Fails.` on the qBittorrent route, `{"error","upload_limit_bytes"}` on `/api/torrents/upload`); one cut off or malformed is refused with 400. Either way nothing from it is added, not even the files read before the cut.
 
 ## v4.9.2 -- an import from qBittorrent that finds a single file in its own folder
 
