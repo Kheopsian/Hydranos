@@ -1081,7 +1081,9 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
                 if !shutdown::tick(&mut tick).await {
                     return;
                 }
-                api::save_daily_traffic(&state);
+                if let Err(e) = api::save_daily_traffic(state.clone()).await {
+                    tracing::warn!(error = %format!("{e:#}"), "daily traffic checkpoint failed");
+                }
             }
         });
     }
@@ -1224,8 +1226,19 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
     engines_for_shutdown
         .depart_all(std::time::Duration::from_secs(5))
         .await;
+    // Save before the potentially long resume flush; a stuck store must not
+    // remove the shutdown deadline.
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        api::save_daily_traffic(state_for_shutdown),
+    )
+    .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => tracing::warn!(error = %format!("{e:#}"), "daily traffic checkpoint failed"),
+        Err(_) => tracing::warn!("daily traffic checkpoint timed out during shutdown"),
+    }
     flush_on_shutdown(&engines_for_shutdown, stop_budget).await;
-    api::save_daily_traffic(&state_for_shutdown);
     // After the flush, not before: the departures above leave through the
     // tunnels. Under --network host the devices would outlive the process.
     let tunnels = engines_for_shutdown.wireguard_down().await;
