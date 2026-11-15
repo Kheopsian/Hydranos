@@ -885,6 +885,7 @@ pub struct TorrentState {
     /// meanwhile would read and hash the whole torrent again, and the two
     /// verdicts would land in whichever order they finish.
     pub rechecking: AtomicBool,
+    pub recheck_stop: std::sync::Mutex<Option<crate::stop::Stop>>,
     /// How many proofs hold this torrent (see `ProofHold`). Above 0 it is read
     /// as checking: it is stopped at 0 % only because a job is still hashing
     /// what it shares with another torrent, and a verification asked in that
@@ -1575,6 +1576,7 @@ impl TorrentState {
             serving_suspended: AtomicBool::new(false),
             is_removed: AtomicBool::new(false),
             rechecking: AtomicBool::new(false),
+            recheck_stop: std::sync::Mutex::new(None),
             proof_holds: AtomicU32::new(0),
             recheck_done: AtomicU32::new(0),
             overwrite_guard: RwLock::new(Arc::new(std::collections::HashSet::new())),

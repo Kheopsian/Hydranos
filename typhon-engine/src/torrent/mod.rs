@@ -1571,6 +1571,9 @@ impl TorrentManager {
         t.is_paused.store(true, Ordering::Relaxed);
         t.status
             .store(TorrentStatus::Stopped as u8, Ordering::Relaxed);
+        if let Some(stop) = t.recheck_stop.lock().unwrap().as_ref() {
+            stop.begin();
+        }
         // BEP 3: tell the trackers we are leaving. Without it a stop is silent
         // and every tracker keeps us in the swarm until the entry goes stale,
         // handing our address to leechers we will not answer.
@@ -3330,27 +3333,33 @@ impl TorrentManager {
     /// Hash-check data already on disk and populate the picker with the pieces
     /// that verify. Runs in the background: the torrent shows status Checking
     /// until done, then Seeding (all pieces valid) or Downloading (the picker
-    /// fetches whatever did not verify). Requires a picker (download-mode add);
-    /// a seed_mode torrent has none and is rejected -- its data is trusted by
-    /// explicit skip_checking, which stays the trust-fast path.
+    /// fetches whatever did not verify). Stop cancels the check and keeps the
+    /// previous piece map. Seed-mode torrents get a picker on demand.
     pub fn recheck(self: &Arc<Self>, info_hash: &InfoHash) -> Result<(), String> {
         let t = self.get(info_hash).ok_or("torrent not found")?;
+        let mut cancellation = t.recheck_stop.lock().unwrap();
         // One at a time per torrent: the one under way reads the files as
         // they are now anyway.
         if t.rechecking.swap(true, Ordering::SeqCst) {
             return Ok(());
         }
+        let stop = crate::stop::Stop::new();
+        *cancellation = Some(stop.clone());
+        drop(cancellation);
         // A seed_mode torrent has no picker (data trusted; no bitfield -> cheap at
-        // scale). To recheck it, create an all-missing picker on demand so
-        // run_recheck can populate it from disk. Only rechecked torrents pay for a
+        // scale). To recheck it, create a picker on demand so run_recheck can
+        // replace its trusted pieces with a disk verdict. Only rechecked torrents pay for a
         // picker; download.rs gates piece requests on picker presence, so a recheck
         // that finds missing/corrupt pieces will refetch them.
         let mut created = false;
         let _ = t.picker.get_or_init(|| {
             created = true;
-            std::sync::Arc::new(std::sync::Mutex::new(
-                crate::torrent::piece_picker::PiecePicker::new(t.meta.num_pieces()),
-            ))
+            let mut picker = crate::torrent::piece_picker::PiecePicker::new(t.meta.num_pieces());
+            // Preserve trusted seed-mode progress until a complete verdict replaces it.
+            for piece in 0..t.meta.num_pieces() {
+                picker.set_have(piece);
+            }
+            std::sync::Arc::new(std::sync::Mutex::new(picker))
         });
         // A new picker starts with no order: give it the torrent's, in case
         // the recheck finds pieces to fetch.
@@ -3375,8 +3384,14 @@ impl TorrentManager {
         let mgr = self.clone();
         let ih = *info_hash;
         tokio::spawn(async move {
-            let _permit = recheck_sem().acquire().await;
-            mgr.run_recheck(ih, t.clone()).await;
+            tokio::select! {
+                biased;
+                _ = stop.wait() => {},
+                _ = async {
+                    let _permit = recheck_sem().acquire().await;
+                    mgr.run_recheck(ih, t.clone()).await;
+                } => {},
+            }
             if was_error {
                 let back = t.status.load(Ordering::Relaxed);
                 if back == TorrentStatus::Downloading as u8 || back == TorrentStatus::Seeding as u8
@@ -3394,6 +3409,8 @@ impl TorrentManager {
             }
             // The counter goes first: a reader seeing `rechecking` false must
             // not find a figure left over from this check.
+            let mut cancellation = t.recheck_stop.lock().unwrap();
+            *cancellation = None;
             t.recheck_done.store(0, Ordering::SeqCst);
             t.rechecking.store(false, Ordering::SeqCst);
         });
@@ -4227,6 +4244,57 @@ mod lifecycle_tests {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
         panic!("the recheck does not end");
+    }
+
+    #[tokio::test]
+    async fn stop_cancels_a_queued_recheck_without_waiting_for_a_slot() {
+        let (mgr, root, ih, t) = whole_two_piece_torrent("cancelqueued");
+        t.picker.get().unwrap().lock().unwrap().set_have(0);
+        let hold = recheck_sem().acquire_many(4).await.unwrap();
+        mgr.recheck(&ih).unwrap();
+        tokio::task::yield_now().await;
+        mgr.stop_torrent(&ih).unwrap();
+        wait_recheck_end(&t).await;
+        assert_eq!(crate::rpc::dispatch::torrent_to_json(&t)["state"], "paused");
+        assert_eq!(t.recheck_done.load(Ordering::SeqCst), 0);
+        assert_eq!(t.picker.get().unwrap().lock().unwrap().num_have(), 1);
+        drop(hold);
+        mgr.recheck(&ih).unwrap();
+        wait_recheck_end(&t).await;
+        assert_eq!(t.picker.get().unwrap().lock().unwrap().num_have(), 2);
+        assert!(t.is_paused.load(Ordering::Relaxed));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn stop_cancels_an_active_recheck_without_publishing_partial_results() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let (mgr, root, ih, t) = whole_two_piece_torrent("cancelactive");
+            t.picker.get().unwrap().lock().unwrap().set_have(0);
+            let (release, wait) = std::sync::mpsc::channel();
+            let (entered, ready) = tokio::sync::oneshot::channel();
+            let blocker = tokio::task::spawn_blocking(move || {
+                entered.send(()).unwrap();
+                wait.recv().unwrap();
+            });
+            ready.await.unwrap();
+            mgr.recheck(&ih).unwrap();
+            // The checker acquires its slot and waits for a disk worker.
+            tokio::task::yield_now().await;
+            assert!(t.rechecking.load(Ordering::SeqCst));
+            mgr.stop_torrent(&ih).unwrap();
+            wait_recheck_end(&t).await;
+            release.send(()).unwrap();
+            blocker.await.unwrap();
+            assert_eq!(t.picker.get().unwrap().lock().unwrap().num_have(), 1);
+            assert_eq!(crate::rpc::dispatch::torrent_to_json(&t)["state"], "paused");
+            std::fs::remove_dir_all(root).ok();
+        });
     }
 
     /// ⭐ A recheck on a STOPPED torrent left it displayed as stopped for the
