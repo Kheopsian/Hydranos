@@ -4297,11 +4297,19 @@ const JOB_DONE_AUTOCLOSE_MS = 30000;
 // outcome the operator must act on (_bulkNoteworthy). The deadline lives on the
 // panel itself, so the polls and re-renders never restart it, and it fires once. A card not docked when the
 // deadline passes is closed as soon as it is docked.
+//
+// The conditions are checked again when the timer fires: the caller of a bulk
+// run adds its note (_bulkNote) after the last render that armed it, and a card
+// that now carries something to read must stay.
+function _bulkQuiet(p) {
+    return !(p.lost || p.closed || p.note || _bulkNoteworthy(p.job));
+}
+
 function _bulkAutoClose(p, running) {
-    if (running || p.lost || p.closed || p.note || _bulkNoteworthy(p.job)) return false;
+    if (running || !_bulkQuiet(p)) return false;
     if (!p.autoCloseAt) {
         p.autoCloseAt = Date.now() + JOB_DONE_AUTOCLOSE_MS;
-        p.autoCloseTimer = setTimeout(() => { if (p.docked) _bulkClose(p); }, JOB_DONE_AUTOCLOSE_MS);
+        p.autoCloseTimer = setTimeout(() => { if (p.docked && _bulkQuiet(p)) _bulkClose(p); }, JOB_DONE_AUTOCLOSE_MS);
     } else if (p.docked && Date.now() >= p.autoCloseAt) {
         _bulkClose(p);
         return true;
@@ -4393,6 +4401,11 @@ function _bulkNote(j, note) {
     if (!p || p.closed) return;
     p.job = Object.assign({}, j, { _panel: undefined });
     if (note) p.note = note;
+    // Something to read now: no automatic close for this card.
+    if (!_bulkQuiet(p)) {
+        clearTimeout(p.autoCloseTimer);
+        p.autoCloseAt = 0;
+    }
     if (p.shown) _bulkRender(p);
     else if (note || _bulkNoteworthy(p.job)) _bulkShow(p, false);
 }
