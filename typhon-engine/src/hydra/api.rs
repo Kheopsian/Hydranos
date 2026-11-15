@@ -14368,6 +14368,12 @@ async fn qbit_torrent_add(
     let mut auto_tmm = false;
     let mut sequential = false;
     let mut first_last = false;
+    // Hydranos' own fields, the native upload's: where the batch goes, by
+    // engine id or by role. Absent, the category decides, as it always has.
+    // qBittorrent has neither and ignores what it does not know, so a client
+    // may send them to both.
+    let mut engine = String::new();
+    let mut mode = String::new();
     let mut ignored: Vec<String> = Vec::new();
 
     while let Ok(Some(field)) = multipart.next_field().await {
@@ -14428,6 +14434,8 @@ async fn qbit_torrent_add(
                     // which come at all.
                     "sequentialDownload" => sequential = value == "true" || value == "1",
                     "firstLastPiecePrio" => first_last = value == "true" || value == "1",
+                    "engine" => engine = value,
+                    "mode" => mode = value,
                     // Accepted and without effect, said in the log once per
                     // add: `rename` (the name is the .torrent's), `cookie`.
                     other => {
@@ -14446,6 +14454,16 @@ async fn qbit_torrent_add(
     if !ignored.is_empty() {
         tracing::info!(fields = ?ignored, "qbit add: these fields have no effect in Hydranos");
     }
+    // Named and unknown is refused, never a quiet fallback to the category:
+    // a batch meant for hoard that lands in race is then moved by somebody,
+    // and a move in the middle of the add's recheck loses the recheck.
+    let engine = match add_target_engine(&state, &engine, &mode) {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::warn!(error = %e, "qbit add refused");
+            return (StatusCode::BAD_REQUEST, "Fails.").into_response();
+        }
+    };
     // autoTMM: the category's folder, never the one sent alongside -- that is
     // what qBittorrent does with a managed torrent's savepath.
     if auto_tmm && !category.is_empty() && !placement(&state, &category, "").1.is_empty() {
@@ -14494,6 +14512,7 @@ async fn qbit_torrent_add(
         let outcome = if crate::rss::is_magnet(u) {
             let (st, u2) = (state.clone(), u.clone());
             let (c, sp, tg) = (category.clone(), save_path.clone(), tags.clone());
+            let eng = engine.clone();
             let shared = share_at_add.clone();
             // Kept with the request: applied once the metadata is in.
             let opts = crate::magnets::AddOptions {
@@ -14506,7 +14525,7 @@ async fn qbit_torrent_add(
             };
             tokio::task::spawn_blocking(move || {
                 crate::magnets::request_with_options(
-                    &st, &u2, &c, &sp, &tg, paused, seed_mode, "", &opts,
+                    &st, &u2, &c, &sp, &tg, paused, seed_mode, &eng, &opts,
                 )
                 .map(|hash| {
                     // Keyed by hash, so a magnet's limits wait for it in the
@@ -14551,16 +14570,17 @@ async fn qbit_torrent_add(
             failed += 1;
             continue;
         }
-        let save_path = match add_save_path(&state, bytes, &category, "", &save_path, subfolder) {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::warn!(error = %e, "qbit add refused");
-                failed += 1;
-                continue;
-            }
-        };
+        let save_path =
+            match add_save_path(&state, bytes, &category, &engine, &save_path, subfolder) {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!(error = %e, "qbit add refused");
+                    failed += 1;
+                    continue;
+                }
+            };
         match add_torrent_bytes(
-            &state, bytes, &category, &save_path, &tags, paused, seed_mode, "",
+            &state, bytes, &category, &save_path, &tags, paused, seed_mode, &engine,
         ) {
             // upLimit / dlLimit and the download order land on the torrent
             // the moment it exists, and persist with it. A magnet keeps them
