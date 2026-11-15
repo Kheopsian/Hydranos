@@ -999,7 +999,16 @@ mod tests {
             .contains("direct mode"));
         // The daemon's own interface is a way out.
         let p = plan_of("[daemon]\nkill_switch = true\nbind_interface = \"lo\"\n");
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         assert!(p.daemon.route.preflight().is_ok());
+        // Elsewhere an interface cannot be bound at all, and says so.
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        assert!(p
+            .daemon
+            .route
+            .preflight()
+            .unwrap_err()
+            .contains("cannot be applied on this platform"));
     }
 
     /// ⭐ `[daemon] egress = "auto"` in each mode, and a way out that is not

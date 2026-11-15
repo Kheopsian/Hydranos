@@ -33,7 +33,9 @@ impl Drop for Shm {
 }
 
 /// Puts the copy hooks back to a normal disk, whatever the test did.
+#[cfg(target_os = "linux")] // only the /dev/shm tests use it
 struct Disk;
+#[cfg(target_os = "linux")]
 impl Drop for Disk {
     fn drop(&mut self) {
         crate::jobs::COPY_FULL_AFTER.with(|c| c.set(None));

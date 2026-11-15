@@ -1718,8 +1718,9 @@ mod tests {
                 ],
             )],
         );
-        assert_eq!(ov.conflicts, vec![PathBuf::from("/d/S02/E01.mkv")]);
-        assert_eq!(ov.unproven, vec![PathBuf::from("/d/S02/E04.mkv")]);
+        // Reported as compared: case-folded on Windows (`path_key`).
+        assert_eq!(ov.conflicts, vec![path_key(Path::new("/d/S02/E01.mkv"))]);
+        assert_eq!(ov.unproven, vec![path_key(Path::new("/d/S02/E04.mkv"))]);
         assert_eq!(ov.with, vec!["other".to_string()]);
     }
 
@@ -1734,7 +1735,7 @@ mod tests {
                 claimant("b", false, &[("/d/P/a.nfo", 18793)]),
             ],
         );
-        assert_eq!(ov.conflicts, vec![PathBuf::from("/d/P/a.nfo")]);
+        assert_eq!(ov.conflicts, vec![path_key(Path::new("/d/P/a.nfo"))]);
         assert!(ov.unproven.is_empty());
         assert_eq!(ov.with.len(), 2);
     }

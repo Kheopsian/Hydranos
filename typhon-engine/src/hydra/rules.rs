@@ -2594,7 +2594,8 @@ mod editor_delete_tests {
                 "no {panel} div, hidden at first"
             );
             assert!(html.contains(&format!("id=\"{body}\"")), "no {body}");
-            let f = js_function(js, switch);
+            // The load below spans two lines; a CRLF checkout must match too.
+            let f = js_function(js, switch).replace("\r\n", "\n");
             assert!(
                 f.contains(&format!(
                     "getElementById(\"{panel}\").style.display = tab === \"workflows\""

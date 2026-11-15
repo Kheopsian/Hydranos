@@ -322,6 +322,7 @@ mod tests {
     /// the echo service's name like the engine does. With the switch on and
     /// no tunnel DNS for the device, the name is refused (no address); with
     /// it off, the host's resolver answers as before.
+    #[cfg(target_os = "linux")] // binds to the `lo` interface, a Linux name
     #[tokio::test]
     async fn a_bound_echo_does_not_resolve_its_name_by_the_host_when_refused() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

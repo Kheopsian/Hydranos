@@ -1018,6 +1018,17 @@ pub fn plan_move(
     }
 }
 
+/// `rename`, with the POSIX answer for two names of one file on every
+/// platform: nothing happens and both names stay. Windows would replace the
+/// target with the source and leave one name, which deletes a hardlink
+/// somebody else may be reading.
+fn rename_file(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+    if from != to && same_file(from, to) {
+        return Ok(());
+    }
+    std::fs::rename(from, to)
+}
+
 /// Two names of one file: renaming one onto the other loses nothing.
 fn same_file(a: &std::path::Path, b: &std::path::Path) -> bool {
     #[cfg(unix)]
@@ -1094,7 +1105,7 @@ fn roll_back(
     let old_root = std::path::Path::new(&original.save_path);
     let mut problems = Vec::new();
     for (from, to) in renamed.iter().rev() {
-        if let Err(e) = std::fs::rename(to, from) {
+        if let Err(e) = rename_file(to, from) {
             problems.push(format!("could not put {} back: {e}", from.display()));
         }
     }
@@ -1279,7 +1290,7 @@ fn move_data(state: &AppState, job: &crate::store::Job) -> Result<(), String> {
             f.to.parent()
                 .map(std::fs::create_dir_all)
                 .unwrap_or(Ok(()))
-                .and_then(|_| std::fs::rename(&f.from, &f.to));
+                .and_then(|_| rename_file(&f.from, &f.to));
         if let Err(e) = r {
             let undo = roll_back(engine, &metainfo, &original, &renamed, &copied);
             return Err(format!("renaming {}: {e}; {undo}", f.from.display()));

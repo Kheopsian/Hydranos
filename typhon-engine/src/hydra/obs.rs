@@ -1593,7 +1593,11 @@ mod tests {
             .find(|p| p["check"] == "volume")
             .expect("a volume problem");
         assert_eq!(p["severity"], "fail");
-        assert!(p["volume"].as_str().unwrap().starts_with('/'), "{v:#}");
+        // A mount point: `/...`, or a drive root like `C:\` on Windows.
+        assert!(
+            std::path::Path::new(p["volume"].as_str().unwrap()).is_absolute(),
+            "{v:#}"
+        );
         assert!(p["detail"].as_str().unwrap().contains("3 of 3"), "{v:#}");
         // The disk is dealt with: errors cleared, torrents seeding again.
         for (h, e) in hashes.iter().zip(["race", "hoard", "vpn7"]) {

@@ -1181,10 +1181,14 @@ mod tests {
         let got = Candidate::from_qbit(&t);
         assert!(!got.complete);
         assert!(got.stopped);
+        // Joined with this platform's separator: `\` on Windows.
         assert_eq!(
-            got.content, "/downloads/films/Film",
+            got.content,
+            join("/downloads/films", "Film"),
             "no content_path: save_path/name"
         );
+        #[cfg(unix)]
+        assert_eq!(got.content, "/downloads/films/Film");
         assert_eq!(got.tags, vec!["a", "b"]);
         assert_eq!(got.source, Source::Qbit("ab".into()));
         let done = Candidate::from_qbit(&QbitTorrent {
@@ -1632,6 +1636,9 @@ mod transmission_tests {
             (a.name.as_str(), a.category.as_str(), a.save_path.as_str()),
             ("Alpha", "films", "/data/films")
         );
+        // Joined with this platform's separator: `\` on Windows.
+        assert_eq!(a.content, join("/data/films", "Alpha"));
+        #[cfg(unix)]
         assert_eq!(a.content, "/data/films/Alpha");
         assert!(a.complete);
         assert_eq!((a.uploaded, a.tags.clone()), (9, vec!["x".to_string()]));
@@ -1887,7 +1894,7 @@ mod qbit_session_tests {
         assert!(err.network);
         assert!(err.message.contains("error sending request"), "{err}");
         assert!(
-            err.message.to_lowercase().contains("refused"),
+            names_a_refusal(&err.message),
             "the cause must follow: {err}"
         );
     }
@@ -2066,11 +2073,12 @@ mod qbit_session_tests {
             .unwrap()
             .starts_with("qBittorrent stopped answering at torrent 2;"));
         let fails = progress.failures.lock().unwrap().clone();
-        assert!(
-            fails[0].error.to_lowercase().contains("refused"),
-            "{}",
-            fails[0].error
-        );
+        assert!(names_a_refusal(&fails[0].error), "{}", fails[0].error);
+    }
+
+    /// The OS wording is translated on Windows; its code (WSAECONNREFUSED) is not.
+    fn names_a_refusal(msg: &str) -> bool {
+        msg.to_lowercase().contains("refused") || msg.contains("os error 10061")
     }
 
     fn file_cand(name: &str, path: PathBuf) -> Candidate {

@@ -20072,14 +20072,20 @@ mod bulk_body_tests {
     /// location"-ed to it, re-added at the trimmed name, and stayed in error.
     #[test]
     fn a_location_keeps_the_trailing_space_of_its_folder() {
-        let p = location_path("/data/sw_1/Purity  2016 ").unwrap();
-        assert_eq!(p, std::path::PathBuf::from("/data/sw_1/Purity  2016 "));
+        // `/data` is only absolute on Unix; Windows needs a drive.
+        let root = if cfg!(windows) { "C:" } else { "" };
+        let p = location_path(&format!("{root}/data/sw_1/Purity  2016 ")).unwrap();
         assert_eq!(
-            location_path("/data/tv/").unwrap(),
-            std::path::PathBuf::from("/data/tv")
+            p,
+            std::path::PathBuf::from(format!("{root}/data/sw_1/Purity  2016 "))
+        );
+        assert!(p.to_string_lossy().ends_with("Purity  2016 "));
+        assert_eq!(
+            location_path(&format!("{root}/data/tv/")).unwrap(),
+            std::path::PathBuf::from(format!("{root}/data/tv"))
         );
         assert!(location_path("   ").is_err());
-        assert!(location_path(" /data").is_err());
+        assert!(location_path(&format!(" {root}/data")).is_err());
     }
 
     /// ⭐ THE REGRESSION TEST FOR 2026-09-16.
@@ -32386,7 +32392,11 @@ mod detail_panel_tests {
             format!(".added_time: {} vs {added}", STORE_ADDED),
             format!(".category: \"{category}\" vs \"\""),
             format!(".completed_time: {STORE_COMPLETED} vs {ENGINE_COMPLETED}"),
-            format!(".save_path: \"{STORE_SAVE}\" vs \"{engine_save}\""),
+            // As JSON prints it: a Windows path's backslashes come escaped.
+            format!(
+                ".save_path: \"{STORE_SAVE}\" vs {}",
+                serde_json::Value::from(engine_save.as_str())
+            ),
             format!(".share_limits.engine: \"{engine}\" vs \"{role}\""),
         ];
         assert_eq!(diff, expected, "exactly the fields 61555df0 fixed differ");
