@@ -31071,7 +31071,7 @@ mod wireguard_route_tests {
         state_from(
             tag,
             &format!(
-                "[daemon]\napi_key = \"{KEY}\"\ndata_dir = \"{}\"\n\n\
+                "[daemon]\napi_key = \"{KEY}\"\ndata_dir = '{}'\n\n\
                  [race]\nlisten_port = 16171\nsocks5_outbound_host = \"10.0.0.1\"\n\n\
                  [hoard]\nlisten_port = 16172\n",
                 data.display()

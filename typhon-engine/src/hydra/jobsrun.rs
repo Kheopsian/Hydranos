@@ -1030,7 +1030,16 @@ fn same_file(a: &std::path::Path, b: &std::path::Path) -> bool {
     }
     #[cfg(not(unix))]
     {
-        matches!((std::fs::canonicalize(a), std::fs::canonicalize(b)), (Ok(x), Ok(y)) if x == y)
+        // Two hardlinks canonicalize to two paths: the volume and file index
+        // are what say they are one file, as `(dev, ino)` does above.
+        match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+            (Ok(x), Ok(y)) if x == y => true,
+            (Ok(x), Ok(y)) => matches!(
+                (crate::platform::file_id(&x), crate::platform::file_id(&y)),
+                (Some(i), Some(j)) if i.volume == j.volume && i.index == j.index
+            ),
+            _ => false,
+        }
     }
 }
 
@@ -2634,8 +2643,11 @@ mod graduate_tests {
         let s = state_from("grad-rollback-short", "");
         let src = s.dir.join("race-data");
         let dst = s.dir.join("hoard-data");
-        let (sa, sb) = (src.join("pair/x/a"), src.join("pair/y/b"));
-        let (da, db) = (dst.join("pair/x/a"), dst.join("pair/y/b"));
+        // One component per join, so a path the error names displays the same
+        // on Windows, where `join("pair/x/a")` keeps its forward slashes.
+        let at = |root: &std::path::Path, d: &str, f: &str| root.join("pair").join(d).join(f);
+        let (sa, sb) = (at(&src, "x", "a"), at(&src, "y", "b"));
+        let (da, db) = (at(&dst, "x", "a"), at(&dst, "y", "b"));
         std::fs::create_dir_all(sa.parent().unwrap()).unwrap();
         std::fs::create_dir_all(sb.parent().unwrap()).unwrap();
         std::fs::write(&sa, vec![1u8; 16384]).unwrap();

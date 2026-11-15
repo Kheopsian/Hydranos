@@ -2196,6 +2196,7 @@ mod tests {
     /// asked first (409), done only with consent. Needs /dev/shm to be another
     /// filesystem than the temp dir, which it is in the build container; where
     /// it is not, the test fails (see `jobs::no_second_filesystem`).
+    #[cfg(target_os = "linux")] // needs /dev/shm as a second filesystem
     #[tokio::test]
     async fn hardlinks_are_asked_before_a_copy_breaks_them() {
         let s = st("mv-hardlink");
@@ -2615,7 +2616,7 @@ mod tests {
         let s = state_from(
             tag,
             &format!(
-                "[daemon]\napi_key = \"{KEY}\"\ndata_dir = \"{}\"\n\n[mcp]\ntorrent_roots = [\"{}\"]\n",
+                "[daemon]\napi_key = \"{KEY}\"\ndata_dir = '{}'\n\n[mcp]\ntorrent_roots = ['{}']\n",
                 data.display(),
                 root.display()
             ),

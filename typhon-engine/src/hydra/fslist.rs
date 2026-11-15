@@ -484,7 +484,7 @@ mod tests {
         let s = state_from(
             "fsl-data",
             &format!(
-                "[daemon]\napi_key = \"{KEY}\"\ndata_dir = \"{}\"\n",
+                "[daemon]\napi_key = \"{KEY}\"\ndata_dir = '{}'\n",
                 data.display()
             ),
         );
