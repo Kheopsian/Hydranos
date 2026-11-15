@@ -3238,6 +3238,10 @@ fn remove_empty_dirs_recursive(dir: &std::path::Path) {
 /// add / per explicit request (never a boot-wide O(N) scan), but a burst of
 /// re-adds could otherwise thrash the disk -- cap concurrent checks.
 fn recheck_sem() -> &'static Semaphore {
+    #[cfg(test)]
+    if let Some(own) = TEST_RECHECK_SEM.with(std::cell::Cell::get) {
+        return own;
+    }
     static S: OnceLock<Semaphore> = OnceLock::new();
     // Deux rechecks simultanes lisant leurs pieces une par une plafonnaient a
     // ~2 Mo/s sur un pool qui en sert 500. Reparer 573 torrents aurait pris des
@@ -3267,6 +3271,15 @@ pub async fn recheck_slot() -> tokio::sync::SemaphorePermit<'static> {
         .acquire()
         .await
         .expect("the recheck semaphore is never closed")
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Check slots of this test alone, for a test that counts them: the global
+    /// ones are shared with every test running beside it. Seen by the check's
+    /// task only on a current-thread runtime, where it runs on this thread.
+    static TEST_RECHECK_SEM: std::cell::Cell<Option<&'static Semaphore>> =
+        const { std::cell::Cell::new(None) };
 }
 
 /// Why a seed_mode torrent cannot be what it claims, or None when every file
@@ -4330,15 +4343,19 @@ mod lifecycle_tests {
                 wait.recv().unwrap();
             });
             ready.await.unwrap();
-            let hold = recheck_sem().acquire_many(3).await.unwrap();
+            // Slots of its own: another test's check could take the global
+            // fourth one, and the counts below would be about that test.
+            let slots: &'static Semaphore = Box::leak(Box::new(Semaphore::new(4)));
+            TEST_RECHECK_SEM.with(|own| own.set(Some(slots)));
+            let hold = slots.acquire_many(3).await.unwrap();
             mgr.recheck(&ih).unwrap();
             // The last slot belongs to this checker; its disk worker is blocked.
             tokio::task::yield_now().await;
-            assert_eq!(recheck_sem().available_permits(), 0);
+            assert_eq!(slots.available_permits(), 0);
             assert!(t.rechecking.load(Ordering::SeqCst));
             mgr.stop_torrent(&ih).unwrap();
             wait_recheck_end(&t).await;
-            assert_eq!(recheck_sem().available_permits(), 1);
+            assert_eq!(slots.available_permits(), 1);
             drop(hold);
             release.send(()).unwrap();
             blocker.await.unwrap();
