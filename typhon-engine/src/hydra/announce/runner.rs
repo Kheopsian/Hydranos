@@ -642,9 +642,10 @@ pub(super) async fn announce_one(
                             Entry {
                                 complete: resp.complete as i64,
                                 incomplete: resp.incomplete as i64,
-                                tracker: tracker_url.clone(),
+                                tracker: typhon_engine::torrent::meta::intern_host(
+                                    &super::cache::host_of(tracker_url),
+                                ),
                                 at: std::time::Instant::now(),
-                                interval,
                             },
                         );
                         // Publish the answer onto the torrent itself.

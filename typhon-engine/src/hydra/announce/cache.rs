@@ -13,6 +13,14 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
+use typhon_engine::torrent::meta::InfoHash;
+
+/// What an entry is filed under: the 20 bytes the hex spells, not the 40
+/// characters. A string that spells no info hash names no torrent.
+fn key(info_hash: &str) -> Option<InfoHash> {
+    typhon_engine::torrent::hex_decode(info_hash).ok()
+}
+
 /// The host part of a tracker announce URL.
 ///
 /// The entry may hold either a full URL or a bare host depending on which code
@@ -25,18 +33,20 @@ pub(crate) fn host_of(tracker: &str) -> String {
 }
 
 /// The last answer one tracker gave about one torrent.
+///
+/// One of these is kept per torrent that ever got an answer, so every field
+/// is paid 300k times over.
 #[derive(Debug, Clone)]
 pub struct Entry {
     /// Seeders, as the tracker counts them.
     pub complete: i64,
     /// Leechers.
     pub incomplete: i64,
-    /// The tracker that answered.
-    pub tracker: String,
+    /// The host of the tracker that answered, as `host_of` gives it, and
+    /// shared (`intern_host`): a few hosts answer for a whole catalogue. Not
+    /// the announce URL, which is long and carries the passkey.
+    pub tracker: Arc<str>,
     pub at: Instant,
-    // Stored with the record; no code reads it today.
-    #[allow(dead_code)]
-    pub interval: Duration,
 }
 
 /// What one announce self-check observed about our own presence.
@@ -200,7 +210,7 @@ impl Window {
 
 #[derive(Default)]
 pub struct Cache {
-    entries: RwLock<HashMap<String, Entry>>,
+    entries: RwLock<HashMap<InfoHash, Entry>>,
     /// Lifetime announce outcomes for this engine. Monotonic: the bench
     /// sampler turns them into a per-second rate by differencing two samples,
     /// and a counter that reset would draw a negative spike.
@@ -436,12 +446,11 @@ impl Cache {
 
     pub fn record(&self, info_hash: &str, entry: Entry) {
         use std::sync::atomic::Ordering;
+        let Some(k) = key(info_hash) else {
+            return;
+        };
         let (seeds, leechers) = (entry.complete, entry.incomplete);
-        let previous = self
-            .entries
-            .write()
-            .unwrap()
-            .insert(info_hash.to_string(), entry);
+        let previous = self.entries.write().unwrap().insert(k, entry);
         let (old_seeds, old_leechers) = previous
             .map(|e| (e.complete, e.incomplete))
             .unwrap_or((0, 0));
@@ -469,11 +478,11 @@ impl Cache {
     /// Has any tracker answered an announce for this torrent? Without the
     /// copy `get` makes.
     pub fn has(&self, info_hash: &str) -> bool {
-        self.entries.read().unwrap().contains_key(info_hash)
+        key(info_hash).is_some_and(|k| self.entries.read().unwrap().contains_key(&k))
     }
 
     pub fn get(&self, info_hash: &str) -> Option<Entry> {
-        self.entries.read().unwrap().get(info_hash).cloned()
+        self.entries.read().unwrap().get(&key(info_hash)?).cloned()
     }
 
     /// Seeders last reported for this torrent, or zero when no tracker has
@@ -487,7 +496,10 @@ impl Cache {
 
     pub fn forget(&self, info_hash: &str) {
         use std::sync::atomic::Ordering;
-        if let Some(e) = self.entries.write().unwrap().remove(info_hash) {
+        let Some(k) = key(info_hash) else {
+            return;
+        };
+        if let Some(e) = self.entries.write().unwrap().remove(&k) {
             self.swarm_seeds_total
                 .fetch_sub(e.complete, Ordering::Relaxed);
             self.swarm_leechers_total
@@ -558,27 +570,75 @@ mod tests {
             incomplete: 0,
             tracker: "tr-a.test".into(),
             at: Instant::now(),
-            interval: Duration::from_secs(1800),
         }
+    }
+
+    /// A torrent's hash, spelled as the callers spell it.
+    fn aa() -> String {
+        "aa".repeat(20)
     }
 
     #[test]
     fn a_torrent_no_tracker_answered_for_sorts_last() {
         let c = Cache::default();
-        c.record("aa", entry(42));
-        assert_eq!(c.swarm_seeds("aa"), 42);
-        assert_eq!(c.swarm_seeds("never-announced"), 0);
+        c.record(&aa(), entry(42));
+        assert_eq!(c.swarm_seeds(&aa()), 42);
+        assert_eq!(c.swarm_seeds(&"bb".repeat(20)), 0);
     }
 
     #[test]
     fn the_latest_answer_replaces_the_previous_one() {
         let c = Cache::default();
-        c.record("aa", entry(1));
-        c.record("aa", entry(9));
-        assert_eq!(c.swarm_seeds("aa"), 9);
+        c.record(&aa(), entry(1));
+        c.record(&aa(), entry(9));
+        assert_eq!(c.swarm_seeds(&aa()), 9);
         assert_eq!(c.len(), 1, "one entry per torrent, not one per announce");
-        c.forget("aa");
+        c.forget(&aa());
         assert!(c.is_empty());
+    }
+
+    /// Filed by the bytes the hex spells: the same torrent in either case is
+    /// one entry, and a string that spells no hash names nothing -- it is
+    /// neither stored nor counted in the swarm totals.
+    #[test]
+    fn entries_are_filed_by_the_hash_the_hex_spells() {
+        let c = Cache::default();
+        c.record(&aa(), entry(3));
+        assert!(c.has(&aa().to_uppercase()));
+        assert_eq!(c.swarm_seeds(&aa().to_uppercase()), 3);
+
+        c.record("not-a-hash", entry(1000));
+        assert_eq!(c.len(), 1, "a non-hash was filed");
+        assert!(!c.has("not-a-hash"));
+        assert_eq!(c.swarm_totals().0, 3, "a non-hash moved the totals");
+        c.forget("not-a-hash");
+        assert_eq!(c.len(), 1);
+    }
+
+    /// The trackers tab counts per host whether the entries hold a host or,
+    /// as before, a full URL.
+    #[test]
+    fn per_tracker_counts_each_host_once() {
+        let c = Cache::default();
+        c.record(&aa(), entry(1));
+        c.record(
+            &"bb".repeat(20),
+            Entry {
+                tracker: "tr-a.test".into(),
+                ..entry(2)
+            },
+        );
+        c.record(
+            &"cc".repeat(20),
+            Entry {
+                tracker: "https://tr-b.test:443/announce/secret".into(),
+                ..entry(3)
+            },
+        );
+        let p = c.per_tracker();
+        assert_eq!(p.len(), 2, "{p:?}");
+        assert_eq!(p["tr-a.test"].0, 2);
+        assert_eq!(p["tr-b.test"].0, 1);
     }
 
     /// ⭐ The point of the whole change: an hour after it stopped failing, a

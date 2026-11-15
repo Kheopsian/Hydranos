@@ -3833,7 +3833,6 @@ mod decision_tests {
                 incomplete: 0,
                 tracker: "tracker.example".into(),
                 at: std::time::Instant::now(),
-                interval: Duration::from_secs(1800),
             },
         );
     }
