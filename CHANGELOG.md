@@ -21,11 +21,16 @@ decided when the release is cut, by looking at what went in: whoever tags it
 renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 `HYDRANOS_VERSION` in the same commit.
 
-## Unreleased -- a batch of adds sent straight to hoard
+## Unreleased -- batches of adds sent straight to hoard, with a result per torrent
 
 ### Added
 
 - The qBittorrent add (`/api/v2/torrents/add`) takes Hydranos' own `mode` (`race`/`hoard`) and `engine` fields, as `/api/torrents/upload` already did, so a client can send a batch of `.torrent` files straight to hoard in one request. Without them the category decides, as before, and an uncategorised add still goes to race. A `mode` or `engine` that does not exist refuses the whole request with `Fails.` and adds nothing, rather than landing in race. qBittorrent ignores fields it does not know, so a client can send them to both. Until now a client that wanted a batch in hoard without a hoard category added it to race and then moved it; a move made while the add's recheck was still queued dropped the check, and hoard took the torrent as a download at 0% and fetched again data already on disk, which held memory for every such torrent until a restart.
+- `/api/torrents/upload` takes several `.torrent` files in one request. They are added with the same fields, and the answer has one result per file, in the order sent: `added` (with its engine), `present` (already held) or `refused` (with the reason), plus the counts. A client no longer has to list the torrents afterwards to learn which ones went in. `batch=true` gives a single file the same answer; without it, one file answers as before.
+
+### Fixed
+
+- A batch of `.torrent` files past 2 MB sent to `/api/v2/torrents/add` lost the files after the 2 MB mark without a word: the torrents read before it were added and the client was told `Ok.` for all of them. Both `.torrent` add routes now accept up to 64 MB, and a request that cannot be read whole (past the limit, cut off) is refused (`Fails.` on the qBittorrent route, a 400 on `/api/torrents/upload`) with nothing added.
 
 ## v4.9.2 -- an import from qBittorrent that finds a single file in its own folder
 

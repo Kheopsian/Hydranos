@@ -1182,3 +1182,54 @@ async fn an_unknown_mode_or_engine_is_refused_and_adds_nothing() {
         );
     }
 }
+
+/// A shim add cut short is `Fails.` and adds nothing. The read loop used to
+/// stop at the first error -- axum's 2 MB limit, in practice -- and add the
+/// torrents read so far while answering "Ok." for the whole batch.
+#[tokio::test]
+async fn a_shim_add_cut_short_fails_and_adds_nothing() {
+    let s = st("shim-cut-short", "");
+    let (a, b) = (single("cut-alpha"), single("cut-bravo"));
+    let boundary = "shimboundary";
+    let mut body: Vec<u8> = Vec::new();
+    body.extend_from_slice(
+        format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"savepath\"\r\n\r\n{}\r\n",
+            data(&s)
+        )
+        .as_bytes(),
+    );
+    for t in [&a, &b] {
+        body.extend_from_slice(
+            format!("--{boundary}\r\nContent-Disposition: form-data; name=\"torrents\"; filename=\"t.torrent\"\r\nContent-Type: application/x-bittorrent\r\n\r\n").as_bytes(),
+        );
+        body.extend_from_slice(t);
+        body.extend_from_slice(b"\r\n");
+    }
+    // The second file's bytes stop before its end and no closing boundary follows.
+    body.truncate(body.len() - 40);
+    let req = axum::http::Request::builder()
+        .method("POST")
+        .uri("/api/v2/torrents/add")
+        .header("X-API-Key", KEY)
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .body(axum::body::Body::from(body))
+        .unwrap();
+    let resp = super::router(s.state.clone()).oneshot(req).await.unwrap();
+    let status = resp.status();
+    let text = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        (status, &text[..]),
+        (StatusCode::BAD_REQUEST, &b"Fails."[..])
+    );
+    assert_eq!(
+        engine_of(&s, &hash_of(&a)),
+        None,
+        "the first file was not added either"
+    );
+}
