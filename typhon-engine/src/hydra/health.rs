@@ -274,7 +274,7 @@ pub fn scan_engine(
         if report.skip_outage {
             continue;
         }
-        'tiers: for tier in &t.meta.trackers {
+        'tiers: for tier in t.live_trackers.read().iter() {
             for url in tier {
                 let host = crate::announce::overrides::override_host(url);
                 if !host.is_empty() && host_in_outage(&host) {

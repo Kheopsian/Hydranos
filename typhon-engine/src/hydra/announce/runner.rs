@@ -678,7 +678,7 @@ pub(super) async fn announce_one(
                                 g.clear();
                             }
                             if let Ok(mut g) = torrent.current_tracker.lock() {
-                                *g = host.clone();
+                                *g = Some(typhon_engine::torrent::meta::intern_host(&host));
                             }
                         }
                         if verify_this {
@@ -788,7 +788,7 @@ pub(super) async fn announce_one(
                             *g = redact(&e).to_string();
                         }
                         if let Ok(mut g) = torrent.current_tracker.lock() {
-                            *g = host.clone();
+                            *g = Some(typhon_engine::torrent::meta::intern_host(&host));
                         }
                         break;
                     }

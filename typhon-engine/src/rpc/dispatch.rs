@@ -275,7 +275,8 @@ pub fn torrent_to_json(t: &Arc<crate::torrent::meta::TorrentState>) -> Value {
     let current_tracker = t
         .current_tracker
         .lock()
-        .map(|s| s.clone())
+        .ok()
+        .and_then(|s| s.as_deref().map(str::to_string))
         .unwrap_or_default();
     let scrape_seeders = t.scrape_seeders.load(Ordering::Relaxed);
     let scrape_leechers = t.scrape_leechers.load(Ordering::Relaxed);

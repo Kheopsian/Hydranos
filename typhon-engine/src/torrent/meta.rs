@@ -104,6 +104,9 @@ pub struct TorrentMeta {
     pub piece_length: u32,
     pub total_size: u64,
     pub files: Vec<FileEntry>,
+    /// The tiers the .torrent lists. Moved into `TorrentState::live_trackers`
+    /// when a state is built, and EMPTY on `TorrentState::meta` from then on:
+    /// a second copy of every announce URL on every torrent bought nothing.
     pub trackers: Vec<Vec<String>>,
     /// BEP 19 `url-list`: HTTP mirrors that serve this torrent's payload.
     /// Empty for almost every torrent (an empty Vec is 24 bytes), which is
@@ -798,6 +801,20 @@ pub fn tracker_error_class(
         .unwrap_or("")
 }
 
+/// One shared copy of `host`. The pool only grows, by one entry per distinct
+/// tracker host ever announced to: a few dozen on a large node.
+pub fn intern_host(host: &str) -> Arc<str> {
+    static POOL: std::sync::LazyLock<Mutex<std::collections::HashSet<Arc<str>>>> =
+        std::sync::LazyLock::new(Default::default);
+    let mut pool = POOL.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(h) = pool.get(host) {
+        return h.clone();
+    }
+    let h: Arc<str> = Arc::from(host);
+    pool.insert(h.clone());
+    h
+}
+
 /// The key a tracker URL is filed under in the announce book.
 pub fn tracker_key(url: &str) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
@@ -811,10 +828,10 @@ pub fn tracker_key(url: &str) -> u64 {
 // A one-off shape; naming it would add an alias that nothing else uses.
 #[allow(clippy::type_complexity)]
 pub struct TorrentState {
-    /// Parsed straight from the .torrent. `meta.trackers` is the SEED for
-    /// `live_trackers` and nothing else reads it: the operator can edit the
-    /// tracker list at runtime, so what the file said and what we announce
-    /// to are two different facts.
+    /// Parsed straight from the .torrent, except `meta.trackers`, which is
+    /// moved into `live_trackers` and left empty here: the operator can edit
+    /// the tracker list at runtime, and what we announce to is the one fact
+    /// worth keeping. What the file said is in the stored metainfo.
     pub meta: TorrentMeta,
     /// The tracker list actually announced to, in tiers. Edited in place by
     /// the set_trackers command; the announce loop takes a snapshot each
@@ -999,7 +1016,10 @@ pub struct TorrentState {
     // Tracker scrape data
     pub scrape_seeders: AtomicU32,
     pub scrape_leechers: AtomicU32,
-    pub current_tracker: Mutex<String>,
+    /// The host last announced to, interned (`intern_host`): a few distinct
+    /// hosts serve a whole catalogue, so 290,000 torrents share a handful of
+    /// strings instead of each holding its own.
+    pub current_tracker: Mutex<Option<Arc<str>>>,
     pub last_announce_ok: AtomicBool,
     pub last_announce_error: Mutex<String>,
     /// Unix seconds of the last SUCCESSFUL announce, 0 = never. Failures
@@ -1558,7 +1578,7 @@ impl TorrentState {
     /// Create a TorrentState, optionally restoring added_time / completed_time
     /// from fastresume. `None` falls back to `SystemTime::now()` (fresh add).
     pub fn new_with_times(
-        meta: TorrentMeta,
+        mut meta: TorrentMeta,
         save_path: PathBuf,
         seed_mode: bool,
         added_time_override: Option<i64>,
@@ -1591,7 +1611,7 @@ impl TorrentState {
         // so skip the 256-slot ring allocation for every seeder.
         // Built lazily by `have_sender`; a seeder never asks for one.
         Self {
-            live_trackers: RwLock::new(meta.trackers.clone()),
+            live_trackers: RwLock::new(std::mem::take(&mut meta.trackers)),
             announced_peer_id: RwLock::new(None),
             meta,
             save_path: RwLock::new(save_path),
@@ -1639,7 +1659,7 @@ impl TorrentState {
             download_rate: RateTracker::new(),
             scrape_seeders: AtomicU32::new(0),
             scrape_leechers: AtomicU32::new(0),
-            current_tracker: Mutex::new(String::new()),
+            current_tracker: Mutex::new(None),
             last_announce_ok: AtomicBool::new(false),
             last_announce_error: Mutex::new(String::new()),
             disk_write_failures: AtomicU32::new(0),
@@ -2119,6 +2139,25 @@ mod tests {
             st.overwrite_guard.read().is_none(),
             "an empty guard allocated"
         );
+    }
+
+    /// The tracker list is kept once, as the live list, not twice.
+    #[test]
+    fn the_tracker_list_is_kept_once() {
+        let (st, _, _) = state_for("trackersonce", 1);
+        assert!(st.meta.trackers.is_empty(), "the .torrent's copy was kept");
+        assert_eq!(
+            *st.live_trackers.read(),
+            vec![vec!["http://tracker/annc".to_string()]]
+        );
+    }
+
+    #[test]
+    fn interned_hosts_are_shared() {
+        let a = intern_host("tracker.example");
+        let b = intern_host(&String::from("tracker.example"));
+        assert!(Arc::ptr_eq(&a, &b), "two copies of one host");
+        assert_eq!(&*a, "tracker.example");
     }
 
     fn peer(addr: std::net::SocketAddr) -> Arc<PeerStats> {

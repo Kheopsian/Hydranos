@@ -32187,7 +32187,7 @@ mod detail_panel_tests {
                 .as_secs() as i64;
             t.last_announce_at.store(now - 30, Ordering::Relaxed);
             t.next_announce_at.store(now + 1800, Ordering::Relaxed);
-            *t.current_tracker.lock().unwrap() = "https://one.example/announce".into();
+            *t.current_tracker.lock().unwrap() = Some("https://one.example/announce".into());
 
             for (n, (port, client, enc, fast)) in [
                 (51413u16, "qBittorrent 4.6.0", true, true),
