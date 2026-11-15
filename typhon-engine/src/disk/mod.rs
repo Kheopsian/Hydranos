@@ -164,10 +164,71 @@ fn reserve(file: &File, len: u64) -> std::io::Result<()> {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+/// Reserve `len` bytes of `file` by setting its allocation size
+/// (`FileAllocationInfo`): the clusters are taken, the end of file does not
+/// move and no zero is written. NOT `set_len`: that moves the end of file, and
+/// Windows then writes zeros over the gap at the next write past it.
+#[cfg(windows)]
+fn reserve(file: &File, len: u64) -> std::io::Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FileAllocationInfo, SetFileInformationByHandle, FILE_ALLOCATION_INFO,
+    };
+    if win_allocated(file)? >= len {
+        return Ok(());
+    }
+    let info = FILE_ALLOCATION_INFO {
+        AllocationSize: i64::try_from(len)
+            .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?,
+    };
+    // SAFETY: a valid open handle, and a struct of the size announced.
+    let ok = unsafe {
+        SetFileInformationByHandle(
+            file.as_raw_handle() as _,
+            FileAllocationInfo,
+            &info as *const FILE_ALLOCATION_INFO as *const core::ffi::c_void,
+            std::mem::size_of::<FILE_ALLOCATION_INFO>() as u32,
+        )
+    };
+    if ok == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// The bytes the file system has set aside for `file` (its allocation size).
+#[cfg(windows)]
+fn win_allocated(file: &File) -> std::io::Result<u64> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FileStandardInfo, GetFileInformationByHandleEx, FILE_STANDARD_INFO,
+    };
+    // SAFETY: zeroed plain integers, filled by the call below.
+    let mut info: FILE_STANDARD_INFO = unsafe { std::mem::zeroed() };
+    // SAFETY: a valid open handle and a buffer of the size announced.
+    let ok = unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle() as _,
+            FileStandardInfo,
+            &mut info as *mut FILE_STANDARD_INFO as *mut core::ffi::c_void,
+            std::mem::size_of::<FILE_STANDARD_INFO>() as u32,
+        )
+    };
+    if ok == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(info.AllocationSize.max(0) as u64)
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
 fn reserve(_file: &File, _len: u64) -> std::io::Result<()> {
     Ok(())
 }
+
+/// Whether `[daemon] preallocate` does anything on this system: Linux
+/// (`fallocate`) and Windows (allocation size). Elsewhere the switch is a
+/// no-op, and the Settings tab says so.
+pub const PREALLOCATE_SUPPORTED: bool = cfg!(any(target_os = "linux", windows));
 
 /// Reserve every file of `plan`. `skip` names the ones that must not be
 /// touched before they are compared (another torrent or hardlink names them).
@@ -194,7 +255,7 @@ fn preallocate(
                 #[cfg(unix)]
                 let code = e.raw_os_error();
                 #[cfg(not(unix))]
-                let code: Option<i32> = None;
+                let code: Option<i32> = e.raw_os_error();
                 #[cfg(target_os = "linux")]
                 {
                     if matches!(code, Some(libc::EOPNOTSUPP) | Some(libc::ENOSYS)) {
@@ -209,6 +270,31 @@ fn preallocate(
                         return Ok(());
                     }
                     if code == Some(libc::ENOSPC) {
+                        return Err(format!(
+                            "not enough space to reserve {:?} ({} bytes): {}",
+                            full, len, e
+                        ));
+                    }
+                }
+                #[cfg(windows)]
+                {
+                    use windows_sys::Win32::Foundation::{
+                        ERROR_DISK_FULL, ERROR_INVALID_FUNCTION, ERROR_NOT_SUPPORTED,
+                    };
+                    if matches!(
+                        code,
+                        Some(c) if c == ERROR_INVALID_FUNCTION as i32 || c == ERROR_NOT_SUPPORTED as i32
+                    ) {
+                        if !PREALLOC_UNSUPPORTED_WARNED.swap(true, Ordering::Relaxed) {
+                            tracing::warn!(
+                                path = %full.display(),
+                                "preallocate: this file system does not support reserving space \
+                                 (allocation size); files are written as they come, nothing is reserved"
+                            );
+                        }
+                        return Ok(());
+                    }
+                    if code == Some(ERROR_DISK_FULL as i32) {
                         return Err(format!(
                             "not enough space to reserve {:?} ({} bytes): {}",
                             full, len, e
@@ -1410,10 +1496,31 @@ mod disk_tests {
             .collect()
     }
 
+    /// The length of the file and the bytes the file system holds for it:
+    /// `blocks() * 512` on Unix, the allocation size on Windows.
     fn len_and_reserved(path: &std::path::Path) -> (u64, u64) {
-        use std::os::unix::fs::MetadataExt;
         let m = std::fs::metadata(path).unwrap();
-        (m.len(), m.blocks() * 512)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            (m.len(), m.blocks() * 512)
+        }
+        #[cfg(windows)]
+        {
+            let f = File::open(path).unwrap();
+            (m.len(), win_allocated(&f).unwrap())
+        }
+    }
+
+    /// The length a reserved file has: Linux's `fallocate` extends the file to
+    /// the declared size, Windows' allocation size does not move the end of
+    /// file (nothing is written as zeros), so there it is what was written.
+    fn len_when_reserved(declared: u64, written: u64) -> u64 {
+        if cfg!(windows) {
+            written
+        } else {
+            declared
+        }
     }
 
     /// ⭐ With `preallocate`, the first piece written of a torrent reserves
@@ -1434,9 +1541,13 @@ mod disk_tests {
             .write_piece(&f.torrent, 0, a[..4096].to_vec())
             .await
             .unwrap());
-        for (name, want) in [("a.bin", 12288u64), ("b.bin", 8192)] {
+        for (name, want, written) in [("a.bin", 12288u64, 4096u64), ("b.bin", 8192, 0)] {
             let (len, reserved) = len_and_reserved(&f.root.join("data/multi").join(name));
-            assert_eq!(len, want, "{name} must have its declared size");
+            assert_eq!(
+                len,
+                len_when_reserved(want, written),
+                "{name} must have its declared size (Linux) or what was written (Windows)"
+            );
             assert!(
                 reserved >= want,
                 "{name}: {reserved} bytes allocated, {want} declared"
@@ -1508,7 +1619,11 @@ mod disk_tests {
             .await
             .unwrap());
         let (lb, rb) = len_and_reserved(&f.root.join("data/multi/b.bin"));
-        assert_eq!(lb, 6000, "b.bin is reserved once it is wanted");
+        assert_eq!(
+            lb,
+            len_when_reserved(6000, 2192),
+            "b.bin is reserved once it is wanted"
+        );
         assert!(rb >= 6000);
     }
 
@@ -1530,7 +1645,7 @@ mod disk_tests {
             .unwrap());
         let a_path = f.root.join("data/multi/a.bin");
         let b_path = f.root.join("data/multi/b.bin");
-        assert_eq!(len_and_reserved(&b_path).0, 8192);
+        assert_eq!(len_and_reserved(&b_path).0, len_when_reserved(8192, 0));
 
         // Removed with its files: the handles go, the folder goes.
         evict_fds(&[a_path.clone(), b_path.clone()]);
@@ -1561,9 +1676,13 @@ mod disk_tests {
             .write_piece(&again, 0, a[..4096].to_vec())
             .await
             .unwrap());
-        for (path, want) in [(&a_path, 12288u64), (&b_path, 8192)] {
+        for (path, want, written) in [(&a_path, 12288u64, 4096u64), (&b_path, 8192, 0)] {
             let (len, reserved) = len_and_reserved(path);
-            assert_eq!(len, want, "{path:?} is reserved again");
+            assert_eq!(
+                len,
+                len_when_reserved(want, written),
+                "{path:?} is reserved again"
+            );
             assert!(reserved >= want);
         }
     }

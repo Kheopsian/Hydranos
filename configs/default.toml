@@ -41,7 +41,8 @@ create_torrent_folder = false
 # reserve the full size of every file it wants that is shorter than its declared
 # size, so a disk that is too small fails on the first piece, not half way
 # (the same as qBittorrent's "Pre-allocate disk space for all files"). Linux
-# only. NOT a guarantee of space on ZFS or btrfs (copy on write: the reserved
+# (fallocate) and Windows (the file's allocation size; the end of file does not
+# move and no zero is written); elsewhere the setting does nothing. NOT a guarantee of space on ZFS or btrfs (copy on write: the reserved
 # blocks are not the ones later writes land in). On a file system that cannot
 # reserve (some FUSE ones) nothing is done and the log says so once. Default
 # false; read at startup, so a change needs a restart.

@@ -109,6 +109,10 @@ windows-sys = { version = "0.59", features = [
     # out of the crate unless Win32_Security is on -- even though nothing here
     # passes anything but a null pointer for it.
     "Win32_Security",
+    # Also carries SetFileInformationByHandle / GetFileInformationByHandleEx and
+    # FILE_ALLOCATION_INFO / FILE_STANDARD_INFO, which the disk preallocation
+    # uses: their signatures only name Win32_Foundation, already on, so no
+    # further feature is needed.
     "Win32_Storage_FileSystem",
     # AttachConsole / AllocConsole / SetStdHandle: with windows_subsystem =
     # "windows" the process starts with no standard handles, and these give

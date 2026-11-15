@@ -5844,6 +5844,7 @@ async fn get_network_mode(
         engine_state: Vec<serde_json::Value>,
         /// Whether `bind_interface` can be applied on this platform, and why not.
         bind_interface: serde_json::Value,
+        preallocate_supported: bool,
         /// The kill switch: armed or not and why, each engine's verdict
         /// (covered / direct / blocked), the daemon's way out, and the same
         /// lines the startup log said (`killswitch::report_of`).
@@ -5931,6 +5932,9 @@ async fn get_network_mode(
             "supported": typhon_engine::netpin::DEVICE_PIN_SUPPORTED,
             "reason": (!typhon_engine::netpin::DEVICE_PIN_SUPPORTED).then_some(typhon_engine::netpin::UNSUPPORTED),
         }),
+        // Linux and Windows (`disk::PREALLOCATE_SUPPORTED`): the Settings tab
+        // disables the Pre-allocate switch elsewhere.
+        preallocate_supported: typhon_engine::disk::PREALLOCATE_SUPPORTED,
         kill_switch: crate::killswitch::live(&state),
     })
     .into_response()
@@ -23722,6 +23726,21 @@ mod body_route_tests {
         assert_eq!(
             v["bind_interface"]["supported"],
             cfg!(target_os = "linux"),
+            "{v}"
+        );
+    }
+
+    /// The Settings tab is told whether Pre-allocate does anything here.
+    #[tokio::test]
+    async fn the_settings_tab_is_told_whether_preallocate_applies() {
+        let s = st("netmode-prealloc");
+        let v = body_json(
+            super::get_network_mode(State(s.state.clone()), RawQuery(None), keyed(KEY)).await,
+        )
+        .await;
+        assert_eq!(
+            v["preallocate_supported"],
+            cfg!(any(target_os = "linux", windows)),
             "{v}"
         );
     }

@@ -32,6 +32,7 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 
 - A torrent in error now shows its error under its name in the torrent list, on one line cut by an ellipsis (the full text in the tooltip): red for a torrent error, orange for a tracker error. The `ERR` and `!` badges stay.
 - The card of a bulk action that ended cleanly now closes itself 30 seconds after the page saw it finish, as if its x had been clicked. A card that failed, was cancelled, was lost, or carries an outcome to read or act on (refused, not applicable, waiting for an answer) stays until closed.
+- Disk preallocation (`[daemon] preallocate`) now works on Windows too, not only Linux: a torrent's wanted files are reserved at their declared size by setting their allocation size, which takes the space without moving the end of file or writing zeros. A full disk fails on the first piece with the same "not enough space to reserve" message, and a volume that cannot reserve is said once in the log and left as it is. `GET /api/network/mode` carries `preallocate_supported`, and the Settings tab disables the switch, with "Not supported on this system", on a platform where it does nothing.
 - Disk preallocation (`[daemon] preallocate`) can now be turned on from the Settings tab: a "Pre-allocate disk space" switch sits beside the duplicate-data method, and saving it creates the key in the file when it is absent. It is read at startup, so the tab asks for a restart. Until now the option could only be set by editing the file.
 
 ### Fixed

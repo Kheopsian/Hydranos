@@ -8544,6 +8544,19 @@ async function loadPreallocate() {
         const cfg = await api("/api/settings");
         box.checked = !!(cfg && cfg.daemon && cfg.daemon.preallocate === true);
     } catch (e) {}
+    // Linux and Windows only: the answer of the Network tab says whether this
+    // system can reserve (absent = an older daemon, which only did on Linux).
+    try {
+        const net = await api("/api/network/mode");
+        if (net && net.preallocate_supported === false) {
+            box.disabled = true;
+            box.checked = false;
+            const btn = box.closest(".sr-field").querySelector("button");
+            if (btn) btn.disabled = true;
+            const note = document.getElementById("prealloc-note");
+            if (note) { note.textContent = t("Not supported on this system"); note.style.display = ""; }
+        }
+    } catch (e) {}
 }
 
 async function savePreallocate() {
