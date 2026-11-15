@@ -1027,11 +1027,11 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
     {
         Ok(Some(saved)) => {
             if let Err(e) = odo.restore(&saved) {
-                tracing::warn!("daily traffic restore failed: {e:#}");
+                tracing::warn!(error = %format!("{e:#}"), "daily traffic restore failed");
             }
         }
         Ok(None) => {}
-        Err(e) => tracing::warn!("daily traffic read failed: {e:#}"),
+        Err(e) => tracing::warn!(error = %format!("{e:#}"), "daily traffic read failed"),
     }
     let odometer: api::Odo = Arc::new(std::sync::Mutex::new(odo));
 
