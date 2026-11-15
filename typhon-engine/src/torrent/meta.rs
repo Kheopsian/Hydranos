@@ -1050,6 +1050,14 @@ pub struct TorrentState {
     /// into a stop.
     pub disk_write_failures: AtomicU32,
 
+    /// What the resume sweep last wrote for this torrent, so the next one
+    /// can skip its row when nothing moved: the `digest` of the
+    /// `statedb::Fingerprint` written (0: nothing written since it was
+    /// loaded or added), and that fingerprint's piece count, which the quick
+    /// download pass compares on its own. Kept by the `TorrentManager`.
+    pub(crate) saved_fingerprint: AtomicU64,
+    pub(crate) saved_num_have: AtomicU32,
+
     /// The peers connected now: inserted at handshake, removed at disconnect,
     /// both by `PeerGuard`. Each peer task holds its own `Arc<PeerStats>`, so
     /// the transfer hot path never looks here. Read by the peer panel, the
@@ -1670,6 +1678,8 @@ impl TorrentState {
             piece_mem: OnceLock::new(),
             files_checked: std::sync::atomic::AtomicU8::new(0),
             peers: PeerRegistry::default(),
+            saved_fingerprint: AtomicU64::new(0),
+            saved_num_have: AtomicU32::new(0),
         }
     }
 
