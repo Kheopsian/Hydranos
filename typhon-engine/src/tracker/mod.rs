@@ -569,7 +569,9 @@ pub fn start_announce_loop(
 
 use crate::crypto::stream::CryptoStream;
 use crate::peer::transport::PeerTransport;
-use tokio::net::{TcpSocket, TcpStream};
+#[cfg(unix)]
+use tokio::net::TcpSocket;
+use tokio::net::TcpStream;
 
 /// One TCP connection to `dest`, leaving by the egress the engine was given.
 ///

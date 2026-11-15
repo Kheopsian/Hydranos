@@ -23479,6 +23479,7 @@ mod body_route_tests {
 
     /// An HTTP echo on loopback: the first request (the default route,
     /// measured first) gets `first`, every later one `then`.
+    #[cfg(target_os = "linux")]
     async fn echo_server(first: &'static str, then: &'static str) -> String {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
