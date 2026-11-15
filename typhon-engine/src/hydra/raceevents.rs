@@ -165,7 +165,7 @@ pub fn spawn(engines: Arc<crate::engines::EngineHost>, bench: crate::benchdb::Sh
                     num("total_upload"),
                     // Stamped by the announce runner on every successful
                     // announce; a new one means the tracker just answered.
-                    engine.announce_cache.get(&info_hash).map(|e| e.at),
+                    engine.announce_cache.get(&torrent.info_hash).map(|e| e.at),
                     now,
                 );
                 if moments.is_empty() {

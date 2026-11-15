@@ -25,7 +25,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
 use typhon_engine::torrent::meta::InfoHash;
 
-use super::runner::{hex, parse_hex};
+use typhon_engine::torrent::{hex_decode, hex_encode};
 
 /// Tasks spawned once: the most announces in flight across every tracker.
 /// Idle ones cost a parked future each, not a thread.
@@ -470,9 +470,19 @@ pub async fn run<C, F, Fut>(
             _ = stop.wait() => return,
             _ = tokio::time::sleep_until(next) => {}
             Some((outcome, took)) = result_rx.recv() => {
-                pool.done(&outcome, took);
-                // The job's hex was written from a key, so it reads back.
-                let Some(key) = parse_hex(&outcome.info_hash) else {
+                // `dispatch` wrote the job's hex from a key, so it reads back,
+                // once, for both uses below. One that does not is a runner
+                // answering for a torrent it was never sent -- said loudly,
+                // because whatever was sent stays "in flight" for good.
+                let key = hex_decode(&outcome.info_hash).ok();
+                debug_assert!(
+                    key.is_some(),
+                    "an outcome for {:?}, which no job named",
+                    outcome.info_hash
+                );
+                pool.done(key.as_ref(), &outcome, took);
+                let Some(key) = key else {
+                    tracing::error!(info_hash = %outcome.info_hash, "announce outcome for a hash the scheduler never sent");
                     continue;
                 };
                 let Some(state) = states.get_mut(&key) else {
@@ -700,7 +710,7 @@ impl Pool {
                     continue;
                 }
                 let job = Job {
-                    info_hash: hex(&d.info_hash),
+                    info_hash: hex_encode(&d.info_hash),
                     first: state.first_announce,
                     forced: state.forced_next,
                 };
@@ -724,9 +734,10 @@ impl Pool {
         }
     }
 
-    fn done(&mut self, outcome: &Outcome, took: Duration) {
+    /// `key` is the outcome's hash, read once by the caller.
+    fn done(&mut self, key: Option<&InfoHash>, outcome: &Outcome, took: Duration) {
         self.in_flight = self.in_flight.saturating_sub(1);
-        if let Some(host) = parse_hex(&outcome.info_hash).and_then(|k| self.holding.remove(&k)) {
+        if let Some(host) = key.and_then(|k| self.holding.remove(k)) {
             if let Some(t) = self.trackers.get_mut(&host) {
                 t.done(outcome, took);
             }
@@ -1027,15 +1038,28 @@ mod tests {
         h
     }
 
+    /// One of each per torrent the scheduler holds: they must not grow by
+    /// accident (a hex `String` back in a deadline would be a heap
+    /// allocation per torrent). The bounds are the sizes measured on x86_64
+    /// when this was written.
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn a_deadline_and_a_state_do_not_grow() {
+        let d = std::mem::size_of::<Deadline>();
+        assert!(d <= 48, "Deadline grew to {d} bytes");
+        let s = std::mem::size_of::<State>();
+        assert!(s <= 48, "State grew to {s} bytes");
+    }
+
     /// A worker reads the job's hash as hex, and its answer comes back in
     /// the same spelling: the round trip must land on the key it left.
     #[test]
     fn a_job_hash_reads_back_to_its_key() {
         let key: InfoHash = std::array::from_fn(|i| (i as u8).wrapping_mul(37) ^ 0xf0);
-        let spelled = hex(&key);
+        let spelled = hex_encode(&key);
         assert_eq!(spelled.len(), 40);
         assert_eq!(spelled, spelled.to_lowercase());
-        assert_eq!(parse_hex(&spelled), Some(key));
+        assert_eq!(hex_decode(&spelled), Ok(key));
     }
 
     #[test]
@@ -1592,7 +1616,7 @@ mod tests {
         pool.dispatch(now, &mut heap, &mut states, &tx);
         let mut sent = Vec::new();
         while let Ok(j) = rx.try_recv() {
-            sent.push(parse_hex(&j.info_hash).expect("a job is spelled in hex"));
+            sent.push(hex_decode(&j.info_hash).expect("a job is spelled in hex"));
         }
         assert_eq!(
             sent.iter().filter(|h| h[0] == b'f').count(),
@@ -1617,15 +1641,17 @@ mod tests {
         let first = *sent.iter().find(|h| h[0] == b's').unwrap();
         states.get_mut(&first).unwrap().in_flight = false;
         pool.done(
+            Some(&first),
             &Outcome {
-                info_hash: hex(&first),
+                info_hash: hex_encode(&first),
                 ..answered(false)
             },
             Duration::from_millis(100),
         );
         pool.dispatch(now, &mut heap, &mut states, &tx);
         assert_eq!(
-            rx.try_recv().map(|j| parse_hex(&j.info_hash).map(|h| h[0])),
+            rx.try_recv()
+                .map(|j| hex_decode(&j.info_hash).ok().map(|h| h[0])),
             Ok(Some(b's'))
         );
     }

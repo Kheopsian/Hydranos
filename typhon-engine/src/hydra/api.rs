@@ -10397,9 +10397,12 @@ fn current_torrent_file(state: &AppState, info_hash: &str, blob: Vec<u8>) -> Vec
     let Some(tiers) = live_tiers(state, info_hash) else {
         return blob;
     };
-    match typhon_engine::torrent::metainfo::parse_torrent_bytes(&blob) {
-        Ok(meta) if meta.trackers == tiers => blob,
-        _ => crate::export::with_trackers(&blob, &tiers).unwrap_or(blob),
+    let unchanged = typhon_engine::torrent::metainfo::parse_torrent_bytes(&blob)
+        .is_ok_and(|meta| meta.into_trackers() == tiers);
+    if unchanged {
+        blob
+    } else {
+        crate::export::with_trackers(&blob, &tiers).unwrap_or(blob)
     }
 }
 
@@ -15306,7 +15309,7 @@ fn remove_one_inner(
             return Err(e);
         }
         let stage = Instant::now();
-        engine.announce_cache.forget(hash);
+        engine.announce_cache.forget(&torrent.info_hash);
         tm.announce_forget += stage.elapsed();
         // AFTER the engine let go, never before: absorbing a torrent the engine
         // then refuses to drop counts its bytes twice, once in the carry-over
@@ -15834,7 +15837,7 @@ async fn post_torrent_engine(
         )
             .into_response();
     }
-    src.announce_cache.forget(&hash);
+    src.announce_cache.forget(&ih);
     let stored = state
         .store
         .lock()
@@ -15900,7 +15903,7 @@ fn remove_torrent_everywhere(
                     tracing::warn!(hash = %hash, "engine refused removal: {e}");
                     return Err(e.to_string());
                 }
-                engine.announce_cache.forget(&hash);
+                engine.announce_cache.forget(&ih);
                 if let Err(e) = absorb_checked(state, &engine.id, &copy, &hash, Some(&engine.id)).2
                 {
                     refused = Some(e);
@@ -29385,7 +29388,7 @@ mod export_route_tests {
     fn tiers_of(torrent: &[u8]) -> Vec<Vec<String>> {
         typhon_engine::torrent::metainfo::parse_torrent_bytes(torrent)
             .expect("a parseable .torrent")
-            .trackers
+            .into_trackers()
     }
 
     fn new_tiers() -> Vec<Vec<String>> {

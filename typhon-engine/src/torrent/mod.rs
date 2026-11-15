@@ -3095,8 +3095,9 @@ fn edits_hash(t: &TorrentState) -> u64 {
     h.finish()
 }
 
+/// Lower-case hex of an info hash, in one allocation.
 pub fn hex_encode(hash: &[u8; 20]) -> String {
-    hash.iter().map(|b| format!("{:02x}", b)).collect()
+    hex_encode_bytes(hash)
 }
 
 pub fn hex_decode(hex: &str) -> Result<InfoHash, String> {
@@ -3116,8 +3117,17 @@ pub fn hex_decode(hex: &str) -> Result<InfoHash, String> {
     Ok(hash)
 }
 
-fn hex_encode_bytes(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+/// Lower-case hex of `bytes`, in one allocation: no `format!` per byte,
+/// which was a String each, and this runs per torrent per pass in several
+/// places.
+pub fn hex_encode_bytes(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        s.push(char::from(DIGITS[usize::from(b >> 4)]));
+        s.push(char::from(DIGITS[usize::from(b & 0x0f)]));
+    }
+    s
 }
 
 /// Is every piece already present in this resume bitfield?
@@ -3684,7 +3694,21 @@ mod full_bitfield_tests {
 
 #[cfg(test)]
 mod hex_decode_tests {
-    use super::hex_decode;
+    use super::{hex_decode, hex_encode, hex_encode_bytes};
+
+    /// What `format!("{:02x}")` wrote, without its allocations, and what
+    /// `hex_decode` reads back, in either case.
+    #[test]
+    fn a_hash_encodes_lower_case_and_reads_back() {
+        let h: [u8; 20] = std::array::from_fn(|i| (i as u8).wrapping_mul(37) ^ 0xf0);
+        let s = hex_encode(&h);
+        let want: String = h.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(s, want);
+        assert_eq!(hex_decode(&s), Ok(h));
+        assert_eq!(hex_decode(&s.to_uppercase()), Ok(h));
+        assert_eq!(hex_encode_bytes(&[]), "");
+        assert_eq!(hex_encode_bytes(&[0x00, 0xff, 0x0a]), "00ff0a");
+    }
 
     #[test]
     fn a_hex_hash_decodes() {

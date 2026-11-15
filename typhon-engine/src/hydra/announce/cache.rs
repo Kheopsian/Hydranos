@@ -15,21 +15,14 @@ use std::time::{Duration, Instant};
 
 use typhon_engine::torrent::meta::InfoHash;
 
-/// What an entry is filed under: the 20 bytes the hex spells, not the 40
-/// characters. A string that spells no info hash names no torrent.
-fn key(info_hash: &str) -> Option<InfoHash> {
-    typhon_engine::torrent::hex_decode(info_hash).ok()
-}
-
-/// The host part of a tracker announce URL.
-///
-/// The entry may hold either a full URL or a bare host depending on which code
-/// path recorded it, so both are accepted. Port and path are dropped: the tab
-/// groups by host, and `tracker.example:2810` and `tracker.example` are the
-/// same tracker to an operator.
-pub(crate) fn host_of(tracker: &str) -> String {
+/// The host part of a tracker announce URL (a bare host is returned as it
+/// is). Port and path are dropped: the tab groups by host, and
+/// `tracker.example:2810` and `tracker.example` are the same tracker to an
+/// operator. Borrowed from `tracker`, so a caller that interns it allocates
+/// only for a host it has never seen.
+pub(crate) fn host_of(tracker: &str) -> &str {
     let s = tracker.split("://").nth(1).unwrap_or(tracker);
-    s.split(['/', ':']).next().unwrap_or("").to_string()
+    s.split(['/', ':']).next().unwrap_or("")
 }
 
 /// The last answer one tracker gave about one torrent.
@@ -42,10 +35,10 @@ pub struct Entry {
     pub complete: i64,
     /// Leechers.
     pub incomplete: i64,
-    /// The host of the tracker that answered, as `host_of` gives it, and
-    /// shared (`intern_host`): a few hosts answer for a whole catalogue. Not
-    /// the announce URL, which is long and carries the passkey.
-    pub tracker: Arc<str>,
+    /// The tracker that answered, by host as `host_of` gives it, and shared
+    /// (`intern_host`): a few hosts answer for a whole catalogue. Not the
+    /// announce URL, which is long and carries the passkey.
+    pub host: Arc<str>,
     pub at: Instant,
 }
 
@@ -444,13 +437,10 @@ impl Cache {
         )
     }
 
-    pub fn record(&self, info_hash: &str, entry: Entry) {
+    pub fn record(&self, info_hash: &InfoHash, entry: Entry) {
         use std::sync::atomic::Ordering;
-        let Some(k) = key(info_hash) else {
-            return;
-        };
         let (seeds, leechers) = (entry.complete, entry.incomplete);
-        let previous = self.entries.write().unwrap().insert(k, entry);
+        let previous = self.entries.write().unwrap().insert(*info_hash, entry);
         let (old_seeds, old_leechers) = previous
             .map(|e| (e.complete, e.incomplete))
             .unwrap_or((0, 0));
@@ -477,12 +467,12 @@ impl Cache {
 
     /// Has any tracker answered an announce for this torrent? Without the
     /// copy `get` makes.
-    pub fn has(&self, info_hash: &str) -> bool {
-        key(info_hash).is_some_and(|k| self.entries.read().unwrap().contains_key(&k))
+    pub fn has(&self, info_hash: &InfoHash) -> bool {
+        self.entries.read().unwrap().contains_key(info_hash)
     }
 
-    pub fn get(&self, info_hash: &str) -> Option<Entry> {
-        self.entries.read().unwrap().get(&key(info_hash)?).cloned()
+    pub fn get(&self, info_hash: &InfoHash) -> Option<Entry> {
+        self.entries.read().unwrap().get(info_hash).cloned()
     }
 
     /// Seeders last reported for this torrent, or zero when no tracker has
@@ -490,16 +480,17 @@ impl Cache {
     ///
     /// Zero and "unknown" are deliberately the same answer here: a torrent
     /// nobody has heard about should sort last, and that is what zero does.
-    pub fn swarm_seeds(&self, info_hash: &str) -> i64 {
-        self.get(info_hash).map(|e| e.complete).unwrap_or(0)
+    pub fn swarm_seeds(&self, info_hash: &InfoHash) -> i64 {
+        self.entries
+            .read()
+            .unwrap()
+            .get(info_hash)
+            .map_or(0, |e| e.complete)
     }
 
-    pub fn forget(&self, info_hash: &str) {
+    pub fn forget(&self, info_hash: &InfoHash) {
         use std::sync::atomic::Ordering;
-        let Some(k) = key(info_hash) else {
-            return;
-        };
-        if let Some(e) = self.entries.write().unwrap().remove(&k) {
+        if let Some(e) = self.entries.write().unwrap().remove(info_hash) {
             self.swarm_seeds_total
                 .fetch_sub(e.complete, Ordering::Relaxed);
             self.swarm_leechers_total
@@ -515,20 +506,30 @@ impl Cache {
     /// client override for it. Listing only the declared ones showed a single
     /// row on a node announcing to several trackers.
     pub fn per_tracker(&self) -> HashMap<String, (i64, Duration)> {
-        let mut out: HashMap<String, (i64, Duration)> = HashMap::new();
+        // Grouped by the shared host string: a pass over every entry costs an
+        // allocation per host, not one per torrent.
+        let mut by_host: HashMap<Arc<str>, (i64, Duration)> = HashMap::new();
         for entry in self.entries.read().unwrap().values() {
-            let host = host_of(&entry.tracker);
-            if host.is_empty() {
+            if entry.host.is_empty() {
                 continue;
             }
             let age = entry.at.elapsed();
-            let slot = out.entry(host).or_insert((0, age));
-            slot.0 += 1;
-            if age < slot.1 {
-                slot.1 = age;
+            match by_host.get_mut(&*entry.host) {
+                Some(slot) => {
+                    slot.0 += 1;
+                    if age < slot.1 {
+                        slot.1 = age;
+                    }
+                }
+                None => {
+                    by_host.insert(entry.host.clone(), (1, age));
+                }
             }
         }
-        out
+        by_host
+            .into_iter()
+            .map(|(host, slot)| (host.to_string(), slot))
+            .collect()
     }
 
     pub fn len(&self) -> usize {
@@ -568,70 +569,54 @@ mod tests {
         Entry {
             complete,
             incomplete: 0,
-            tracker: "tr-a.test".into(),
+            host: "tr-a.test".into(),
             at: Instant::now(),
         }
     }
 
-    /// A torrent's hash, spelled as the callers spell it.
-    fn aa() -> String {
-        "aa".repeat(20)
+    /// One per torrent that ever got an answer: it must not grow by accident.
+    /// The bound is the size measured on x86_64 when this was written.
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn an_entry_does_not_grow() {
+        let n = std::mem::size_of::<Entry>();
+        assert!(n <= 48, "cache::Entry grew to {n} bytes");
     }
+
+    const AA: InfoHash = [0xaa; 20];
+    const BB: InfoHash = [0xbb; 20];
 
     #[test]
     fn a_torrent_no_tracker_answered_for_sorts_last() {
         let c = Cache::default();
-        c.record(&aa(), entry(42));
-        assert_eq!(c.swarm_seeds(&aa()), 42);
-        assert_eq!(c.swarm_seeds(&"bb".repeat(20)), 0);
+        c.record(&AA, entry(42));
+        assert_eq!(c.swarm_seeds(&AA), 42);
+        assert_eq!(c.swarm_seeds(&BB), 0);
     }
 
     #[test]
     fn the_latest_answer_replaces_the_previous_one() {
         let c = Cache::default();
-        c.record(&aa(), entry(1));
-        c.record(&aa(), entry(9));
-        assert_eq!(c.swarm_seeds(&aa()), 9);
+        c.record(&AA, entry(1));
+        c.record(&AA, entry(9));
+        assert_eq!(c.swarm_seeds(&AA), 9);
+        assert_eq!(c.swarm_totals().0, 9, "the totals follow the replacement");
         assert_eq!(c.len(), 1, "one entry per torrent, not one per announce");
-        c.forget(&aa());
+        c.forget(&AA);
         assert!(c.is_empty());
+        assert_eq!(c.swarm_totals().0, 0);
     }
 
-    /// Filed by the bytes the hex spells: the same torrent in either case is
-    /// one entry, and a string that spells no hash names nothing -- it is
-    /// neither stored nor counted in the swarm totals.
-    #[test]
-    fn entries_are_filed_by_the_hash_the_hex_spells() {
-        let c = Cache::default();
-        c.record(&aa(), entry(3));
-        assert!(c.has(&aa().to_uppercase()));
-        assert_eq!(c.swarm_seeds(&aa().to_uppercase()), 3);
-
-        c.record("not-a-hash", entry(1000));
-        assert_eq!(c.len(), 1, "a non-hash was filed");
-        assert!(!c.has("not-a-hash"));
-        assert_eq!(c.swarm_totals().0, 3, "a non-hash moved the totals");
-        c.forget("not-a-hash");
-        assert_eq!(c.len(), 1);
-    }
-
-    /// The trackers tab counts per host whether the entries hold a host or,
-    /// as before, a full URL.
+    /// The trackers tab counts each host once.
     #[test]
     fn per_tracker_counts_each_host_once() {
         let c = Cache::default();
-        c.record(&aa(), entry(1));
+        c.record(&AA, entry(1));
+        c.record(&BB, entry(2));
         c.record(
-            &"bb".repeat(20),
+            &[0xcc; 20],
             Entry {
-                tracker: "tr-a.test".into(),
-                ..entry(2)
-            },
-        );
-        c.record(
-            &"cc".repeat(20),
-            Entry {
-                tracker: "https://tr-b.test:443/announce/secret".into(),
+                host: "tr-b.test".into(),
                 ..entry(3)
             },
         );
@@ -639,6 +624,17 @@ mod tests {
         assert_eq!(p.len(), 2, "{p:?}");
         assert_eq!(p["tr-a.test"].0, 2);
         assert_eq!(p["tr-b.test"].0, 1);
+    }
+
+    /// What an entry holds is what `host_of` leaves of the announce URL.
+    #[test]
+    fn host_of_keeps_the_host_only() {
+        assert_eq!(
+            host_of("https://tr-b.test:443/announce/secret"),
+            "tr-b.test"
+        );
+        assert_eq!(host_of("udp://tr-a.test:6969"), "tr-a.test");
+        assert_eq!(host_of("tr-a.test"), "tr-a.test");
     }
 
     /// ⭐ The point of the whole change: an hour after it stopped failing, a

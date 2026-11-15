@@ -137,7 +137,7 @@ impl Catalogue for EngineCatalogue {
             .iter()
             .flatten()
             .next()
-            .map(|u| super::cache::host_of(u))
+            .map(|u| super::cache::host_of(u).to_string())
             .unwrap_or_default()
     }
 }
@@ -156,7 +156,7 @@ pub async fn depart(
     policy: Arc<Policy>,
     port: u16,
 ) -> usize {
-    let ih = hex(&torrent.info_hash);
+    let ih = typhon_engine::torrent::hex_encode(&torrent.info_hash);
     let uploaded = torrent.session_uploaded() as i64;
     let downloaded = torrent.session_downloaded() as i64;
     let left = torrent.bytes_left() as i64;
@@ -233,10 +233,6 @@ pub async fn depart(
         slot.tracker_id = None;
     }
     acknowledged
-}
-
-pub(super) fn hex(hash: &[u8; 20]) -> String {
-    hash.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Start announcing this engine's torrents. Returns immediately; the scheduler
@@ -370,11 +366,11 @@ pub(super) async fn announce_one(
         registration_retry: false,
     };
 
-    let Some(hash) = parse_hex(&job.info_hash) else {
+    let Some(hash) = typhon_engine::torrent::hex_decode(&job.info_hash).ok() else {
         return gone;
     };
     let Some(torrent) = manager.get(&hash) else {
-        cache.forget(&job.info_hash);
+        cache.forget(&hash);
         return gone;
     };
 
@@ -638,12 +634,12 @@ pub(super) async fn announce_one(
                         // The swarm counts only exist here. Nothing else in the
                         // process can tell how many seeders a parked torrent has.
                         cache.record(
-                            &job.info_hash,
+                            &hash,
                             Entry {
                                 complete: resp.complete as i64,
                                 incomplete: resp.incomplete as i64,
-                                tracker: typhon_engine::torrent::meta::intern_host(
-                                    &super::cache::host_of(tracker_url),
+                                host: typhon_engine::torrent::meta::intern_host(
+                                    super::cache::host_of(tracker_url),
                                 ),
                                 at: std::time::Instant::now(),
                             },
@@ -926,17 +922,15 @@ fn scrub_url_secrets(message: &str, url: &str) -> String {
     out
 }
 
-pub(super) fn parse_hex(s: &str) -> Option<[u8; 20]> {
-    if s.len() != 40 {
-        return None;
-    }
-    let mut out = [0u8; 20];
-    for (i, chunk) in s.as_bytes().chunks(2).enumerate() {
-        let hi = (chunk[0] as char).to_digit(16)?;
-        let lo = (chunk[1] as char).to_digit(16)?;
-        out[i] = (hi * 16 + lo) as u8;
-    }
-    Some(out)
+// The crate's hex helpers, under the names the test modules below were
+// written with.
+#[cfg(test)]
+fn hex(h: &[u8; 20]) -> String {
+    typhon_engine::torrent::hex_encode(h)
+}
+#[cfg(test)]
+fn parse_hex(s: &str) -> Option<[u8; 20]> {
+    typhon_engine::torrent::hex_decode(s).ok()
 }
 
 #[cfg(test)]
@@ -2419,7 +2413,7 @@ mod announce_one_tests {
             "the path, as BEP 41 URL data"
         );
         assert_eq!(
-            cache.get(&hash).map(|e| e.complete),
+            cache.get(&parse_hex(&hash).unwrap()).map(|e| e.complete),
             Some(5),
             "the swarm count is recorded like an HTTP one"
         );

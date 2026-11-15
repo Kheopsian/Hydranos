@@ -31,21 +31,15 @@ const OUR_ID: [u8; 20] = *b"-TY4R00-aaaaaaaaaaaa";
 const THEIR_ID: [u8; 20] = *b"-qB5220-bbbbbbbbbbbb";
 
 fn meta(num_pieces: u32) -> TorrentMeta {
-    TorrentMeta {
-        info_hash: [0x5A; 20],
-        name: "session-under-test".into(),
-        num_pieces,
-        piece_length: 16384,
-        total_size: num_pieces as u64 * 16384,
-        files: Vec::new(),
-        trackers: Vec::new(),
-        url_list: Vec::new(),
-        private: false,
-        multi_file: false,
-        info_dict_len: 0,
-        v2: false,
-        renames: Default::default(),
-    }
+    // Field by field: `trackers` is the crate's own, so a literal from out
+    // here cannot name it. Every field not set is its default.
+    let mut m = TorrentMeta::default();
+    m.info_hash = [0x5A; 20];
+    m.name = "session-under-test".into();
+    m.num_pieces = num_pieces;
+    m.piece_length = 16384;
+    m.total_size = num_pieces as u64 * 16384;
+    m
 }
 
 /// A torrent we hold in full: `seed_mode` skips the picker, which is what a

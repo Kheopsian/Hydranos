@@ -148,7 +148,7 @@ pub fn latest() -> Option<std::sync::Arc<(i64, u64, Report)>> {
 pub fn scan_engine(
     engine: &str,
     torrents: &[std::sync::Arc<TorrentState>],
-    seeds_in_swarm: impl Fn(&str) -> i64,
+    seeds_in_swarm: impl Fn(&typhon_engine::torrent::meta::InfoHash) -> i64,
     host_in_outage: impl Fn(&str) -> bool,
     report: &mut Report,
 ) {
@@ -260,7 +260,7 @@ pub fn scan_engine(
             && peers == 0
             && !t.is_paused.load(Ordering::Relaxed)
         {
-            let seeds = seeds_in_swarm(&hash());
+            let seeds = seeds_in_swarm(&t.info_hash);
             if seeds > 0 {
                 report.add(anomaly(
                     STARVED,
@@ -568,7 +568,7 @@ mod scan_tests {
         assert!(r.truncated());
     }
 
-    fn no_seeds(_: &str) -> i64 {
+    fn no_seeds(_: &typhon_engine::torrent::meta::InfoHash) -> i64 {
         0
     }
     fn no_outage(_: &str) -> bool {

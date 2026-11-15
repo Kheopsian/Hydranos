@@ -8,27 +8,20 @@ use typhon_engine::rpc::dispatch::torrent_to_json;
 use typhon_engine::torrent::meta::{FileEntry, TorrentMeta, TorrentState};
 
 fn make_torrent(i: u32) -> Arc<TorrentState> {
-    let meta = TorrentMeta {
-        info_hash: [i as u8; 20],
-        name: format!("torrent-{}", i),
-        num_pieces: 500,       // hashes live in the .torrent
-        piece_length: 1 << 20, // 1 MB pieces
-        total_size: 500 * (1 << 20),
-        files: vec![FileEntry {
-            path: PathBuf::from(format!("file-{}.bin", i)),
-            offset: 0,
-            length: 500 * (1 << 20),
-        }],
-        trackers: vec![vec!["http://t.example/announce".to_string()]],
-        private: false,
-        multi_file: false,
-        // Size of the raw info dict, as metainfo parsing fills it. The bench
-        // never sends metadata pieces, but the field is not optional.
-        info_dict_len: 0,
-        v2: false,
-        renames: Default::default(),
-        url_list: Vec::new(),
-    };
+    // Field by field: `trackers` is the crate's own, so a literal from out
+    // here cannot name it. Every field not set is its default.
+    let mut meta =
+        TorrentMeta::default().with_trackers(vec![vec!["http://t.example/announce".to_string()]]);
+    meta.info_hash = [i as u8; 20];
+    meta.name = format!("torrent-{}", i);
+    meta.num_pieces = 500; // hashes live in the .torrent
+    meta.piece_length = 1 << 20; // 1 MB pieces
+    meta.total_size = 500 * (1 << 20);
+    meta.files = vec![FileEntry {
+        path: PathBuf::from(format!("file-{}.bin", i)),
+        offset: 0,
+        length: 500 * (1 << 20),
+    }];
     let save_path = PathBuf::from("/data");
     Arc::new(TorrentState::new(meta, save_path, true))
 }
