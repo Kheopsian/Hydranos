@@ -1019,12 +1019,21 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
         api::refresh_records(bench_path.clone(), records.clone());
     }
 
-    // "Today" is the session minus what it was at the last local midnight;
-    // the day this process starts on begins at zero. The session itself needs
-    // no mark: the engines count what they move from zero (see
-    // `TorrentManager::moved`), so the lifetime history their torrents load
-    // with is never mistaken for this boot's traffic.
-    let odometer: api::Odo = Arc::new(std::sync::Mutex::new(api::Odometer::at_boot()));
+    let mut odo = api::Odometer::at_boot();
+    match shared_store
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .setting(api::DAILY_TRAFFIC_KEY)
+    {
+        Ok(Some(saved)) => {
+            if let Err(e) = odo.restore(&saved) {
+                tracing::warn!("daily traffic restore failed: {e:#}");
+            }
+        }
+        Ok(None) => {}
+        Err(e) => tracing::warn!("daily traffic read failed: {e:#}"),
+    }
+    let odometer: api::Odo = Arc::new(std::sync::Mutex::new(odo));
 
     let state = api::AppState {
         imports: Default::default(),
@@ -1072,7 +1081,7 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
                 if !shutdown::tick(&mut tick).await {
                     return;
                 }
-                let _ = api::session_and_day(&state);
+                api::save_daily_traffic(&state);
             }
         });
     }
@@ -1164,6 +1173,7 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
     // Taken before the router consumes the state: `flush_on_shutdown` needs the
     // engines, and by then `state` has been moved.
     let engines_for_shutdown = state.engines.clone();
+    let state_for_shutdown = state.clone();
 
     // The notification-area icon, as the 3.x Windows package had. A no-op on
     // Unix. The closure is what it shows on hover, rebuilt every couple of
@@ -1215,6 +1225,7 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
         .depart_all(std::time::Duration::from_secs(5))
         .await;
     flush_on_shutdown(&engines_for_shutdown, stop_budget).await;
+    api::save_daily_traffic(&state_for_shutdown);
     // After the flush, not before: the departures above leave through the
     // tunnels. Under --network host the devices would outlive the process.
     let tunnels = engines_for_shutdown.wireguard_down().await;

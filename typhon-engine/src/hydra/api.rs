@@ -95,7 +95,7 @@ pub fn refresh_records(path: std::path::PathBuf, cache: Records) {
     });
 }
 
-/// Where "today" starts: the session total at the last Europe/Paris midnight.
+/// Where "today" starts, including bytes checkpointed by earlier processes.
 ///
 /// "This session" needs no mark of its own. Each engine counts the bytes it
 /// moves from zero at boot (`TorrentManager::moved`), so it is never a lifetime
@@ -108,7 +108,7 @@ pub fn refresh_records(path: std::path::PathBuf, cache: Records) {
 /// ever adds what moved cannot be moved by a delete.
 #[derive(Default)]
 pub struct Odometer {
-    /// Session totals at the last Europe/Paris midnight rollover.
+    /// Session totals at midnight, or negative carried totals after a restart.
     pub day_baseline: (i64, i64),
     /// The date that baseline belongs to, `YYYY-MM-DD` in Europe/Paris. Empty
     /// until the first read, which then opens the day where the session is.
@@ -116,6 +116,21 @@ pub struct Odometer {
 }
 
 impl Odometer {
+    /// Restore today's bytes as an offset against the new process's zero counters.
+    pub fn restore(&mut self, saved: &str) -> anyhow::Result<()> {
+        let (date, up, down): (String, i64, i64) = serde_json::from_str(saved)?;
+        anyhow::ensure!(up >= 0 && down >= 0, "negative daily traffic totals");
+        if date == self.day_date {
+            self.day_baseline = (-up, -down);
+        }
+        Ok(())
+    }
+
+    fn checkpoint(&mut self, session: (i64, i64), today: &str) -> String {
+        let (up, down) = self.day(session, today);
+        serde_json::to_string(&(today, up, down)).expect("daily traffic tuple serializes")
+    }
+
     /// The odometer of a process that has moved nothing yet: today starts at
     /// zero, on today's date.
     pub fn at_boot() -> Self {
@@ -128,8 +143,7 @@ impl Odometer {
     /// Today's bytes, given the session total and today's local date. Rolls
     /// the baseline when the date changes.
     ///
-    /// No clamp: the session only ever grows, so it cannot fall under a
-    /// baseline it was once equal to.
+    /// A restored baseline can be negative, carrying earlier processes' bytes.
     pub fn day(&mut self, session: (i64, i64), today: &str) -> (i64, i64) {
         if self.day_date != today {
             self.day_date = today.to_string();
@@ -143,6 +157,22 @@ impl Odometer {
 }
 
 pub type Odo = Arc<std::sync::Mutex<Odometer>>;
+
+pub const DAILY_TRAFFIC_KEY: &str = "daily_traffic";
+
+/// Serialize checkpoints under the odometer lock so concurrent saves cannot regress.
+pub fn save_daily_traffic(state: &AppState) {
+    let mut odo = state.odometer.lock().unwrap_or_else(|e| e.into_inner());
+    let saved = odo.checkpoint(state.engines.moved_totals(), &local_date());
+    let result = state
+        .store
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .put_setting(DAILY_TRAFFIC_KEY, &saved);
+    if let Err(e) = result {
+        tracing::warn!("daily traffic checkpoint failed: {e:#}");
+    }
+}
 
 /// Today's date in the daemon's local zone, `YYYY-MM-DD`.
 ///
@@ -20136,6 +20166,31 @@ mod bulk_body_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn daily_traffic_survives_restarts_and_expires_at_midnight() {
+        let mut odo = Odometer::at_boot();
+        let today = odo.day_date.clone();
+        let saved = odo.checkpoint((700, 10), &today);
+        let mut restarted = Odometer::at_boot();
+        restarted.restore(&saved).unwrap();
+        assert_eq!(restarted.day((0, 0), &today), (700, 10));
+        assert_eq!(restarted.day((20, 3), &today), (720, 13));
+        let saved = restarted.checkpoint((20, 3), &today);
+        let mut again = Odometer::at_boot();
+        again.restore(&saved).unwrap();
+        assert_eq!(again.day((5, 2), &today), (725, 15));
+        assert_eq!(again.day((6, 3), "2099-01-01"), (0, 0));
+        assert_eq!(again.day((9, 7), "2099-01-01"), (3, 4));
+        let mut tomorrow = Odometer {
+            day_date: "2099-01-01".into(),
+            ..Default::default()
+        };
+        tomorrow.restore(&saved).unwrap();
+        assert_eq!(tomorrow.day((5, 2), "2099-01-01"), (5, 2));
+        assert!(tomorrow.restore("broken").is_err());
+        assert!(tomorrow.restore(r#"["2099-01-01",-1,0]"#).is_err());
+    }
 
     /// The day is the session minus its value at the last local midnight.
     #[test]
