@@ -7969,6 +7969,10 @@ const NET_OWNED_KEYS = new Set([
 // Where those keys live: the engines' own sections, and [daemon] / [proxy]
 // for the daemon's traffic. Elsewhere a key of the same name is not the tab's.
 const _NET_OWNED_SECTIONS = new Set(["race", "hoard", "daemon", "proxy"]);
+// Keys with their own control elsewhere in the tab ("section::key"): the
+// Pre-allocate disk space switch of the Duplicate data card. Hidden from the
+// flat lists so there is one control for the key, not two that can disagree.
+const _CARD_OWNED_KEYS = new Set(["daemon::preallocate"]);
 
 // Keys and sections nothing reads ("section::key", or a whole "section" and its
 // sub-tables). A file carried over from 3.x still holds them, and listed here
@@ -8264,6 +8268,7 @@ async function updateSettings() {
     // The duplicate-data card lives in this tab, so it refreshes with it
     // rather than on a timer: the counts only move when torrents are added.
     loadDedup();
+    loadPreallocate();
     try {
         const cfg = _withLiveEngineKeys(await api("/api/settings"));
         _settingsOrig = {};
@@ -8306,6 +8311,7 @@ async function updateSettings() {
                 let rows = "";
                 for (const [k, v] of scalars) {
                     if (NET_OWNED_KEYS.has(k) && _NET_OWNED_SECTIONS.has(path)) continue;
+                    if (_CARD_OWNED_KEYS.has(path + "::" + k)) continue;
                     // The mode the Network tab saved: only that tab may change it.
                     if (path === "network") continue;
                     if (_isDeadSetting(path, k)) continue;
@@ -8490,6 +8496,38 @@ function pickDedupMethod(m) {
         b.classList.toggle("on", on);
         b.setAttribute("aria-checked", on ? "true" : "false");
     });
+}
+
+// [daemon] preallocate: absent from most files, so absent reads as off. The
+// route creates the key when it is missing; the daemon reads it at startup.
+async function loadPreallocate() {
+    const box = document.getElementById("prealloc-toggle");
+    if (!box) return;
+    try {
+        const cfg = await api("/api/settings");
+        box.checked = !!(cfg && cfg.daemon && cfg.daemon.preallocate === true);
+    } catch (e) {}
+}
+
+async function savePreallocate() {
+    const box = document.getElementById("prealloc-toggle");
+    const banner = document.getElementById("prealloc-result");
+    banner.style.display = "block";
+    banner.className = "result-msg info";
+    banner.textContent = t("Saving…");
+    try {
+        await api("/api/settings", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ changes: [{ section: "daemon", key: "preallocate", value: box.checked }] }),
+        });
+        banner.className = "result-msg ok";
+        banner.innerHTML = esc(t("Saved. A restart is required for this to take effect.")) +
+            ` <button class="btn-small btn-danger" onclick="restartDaemon()" style="margin-left:8px">${t("Apply &amp; restart")}</button>`;
+    } catch (e) {
+        banner.className = "result-msg err";
+        banner.textContent = String(e);
+    }
 }
 
 async function saveDedupMode() {

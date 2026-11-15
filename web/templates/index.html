@@ -1259,6 +1259,17 @@
                     </div>
                     <div id="dedup-result" class="result-msg" style="display:none;margin-top:8px"></div>
                     <div id="dedup-stats" class="dedup-stats"></div>
+                    <div class="settings-row">
+                        <div class="sr-label">
+                            <span class="sr-key">Pre-allocate disk space</span>
+                            <span class="sr-desc">Sets [daemon] preallocate. Reserves the space of a torrent's files when it first writes to them, so a full disk is found at the start and not halfway through. Taken into account at the next restart. On ZFS and btrfs the space is not guaranteed (copy on write). With it on, a file not yet downloaded already has its final size, so prefer a recheck to skip_checking.</span>
+                        </div>
+                        <div class="sr-field dd-field">
+                            <label class="settings-adv-toggle"><span class="toggle"><input type="checkbox" id="prealloc-toggle"><span class="toggle-track"></span></span></label>
+                            <button class="btn-small btn-accent" onclick="savePreallocate()">Save</button>
+                        </div>
+                    </div>
+                    <div id="prealloc-result" class="result-msg" style="display:none;margin-top:8px"></div>
                 </div>
             </div>
             <div class="card">
@@ -1728,6 +1739,6 @@
     </div>
 
     <script src="/static/i18n.js?v=1.0.0"></script>
-    <script src="/static/app.js?v=1.6.112"></script>
+    <script src="/static/app.js?v=1.6.113"></script>
 </body>
 </html>

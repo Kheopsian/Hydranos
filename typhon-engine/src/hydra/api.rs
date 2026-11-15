@@ -11998,8 +11998,12 @@ async fn post_settings(
         // nowhere; a name on this short list cannot be a typo.
         // `enable_lsd` too: no file from before 4.4 has it, and its switch is
         // offered in the settings tab all the same (applied at restart).
-        let creatable = (change.section == "race" || change.section == "hoard")
-            && (LIVE_SESSION_KEYS.contains(&change.key.as_str()) || change.key == "enable_lsd");
+        // `[daemon] preallocate` likewise: the key is commented out in the
+        // template, so it is absent from nearly every file, and its switch is
+        // offered next to the duplicate-data method (applied at restart).
+        let creatable = ((change.section == "race" || change.section == "hoard")
+            && (LIVE_SESSION_KEYS.contains(&change.key.as_str()) || change.key == "enable_lsd"))
+            || (change.section == "daemon" && change.key == "preallocate");
         let edited =
             match crate::tomledit::set_toml_value(&doc, &change.section, &change.key, &literal) {
                 Err(_) if creatable => crate::tomledit::set_toml_table(
@@ -26681,6 +26685,34 @@ mod write_path_tests {
         // Whether it takes {"content": ...} or the raw document, it must not
         // answer a server error.
         assert!(!resp.status().is_server_error(), "got {:?}", resp.status());
+    }
+
+    /// `[daemon] preallocate` is commented out in the template, so the switch
+    /// offered in the settings tab must be able to create it; only a boolean.
+    #[tokio::test]
+    async fn settings_create_daemon_preallocate_when_absent() {
+        let s = state_from("set-prealloc", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+        let post = |value: serde_json::Value| {
+            super::post_settings(
+                State(s.state.clone()),
+                RawQuery(None),
+                keyed(KEY),
+                serde_json::json!({"changes":[{"section":"daemon","key":"preallocate","value":value}]})
+                    .to_string(),
+            )
+        };
+        let bad = post(serde_json::json!("yes")).await;
+        assert_eq!(bad.status(), StatusCode::BAD_REQUEST, "non-boolean refused");
+        let resp = post(serde_json::json!(true)).await;
+        assert!(resp.status().is_success(), "got {:?}", resp.status());
+        let file = std::fs::read_to_string(&s.state.config_path).unwrap();
+        let cfg: toml::Value = toml::from_str(&file).unwrap();
+        assert_eq!(
+            cfg["daemon"]["preallocate"].as_bool(),
+            Some(true),
+            "not written under [daemon]: {file}"
+        );
+        assert!(s.state.cfg().daemon.preallocate);
     }
 
     /// A settings document that is not valid TOML is refused rather than
