@@ -946,11 +946,14 @@ pub struct TorrentState {
     /// Files (below the save path) that another torrent names or that have
     /// another hardlink: `write_piece` writes into none of them, it only reads
     /// the range back and accepts the piece when the bytes are already there.
-    /// Empty for nearly every torrent. See `guard_files`.
-    overwrite_guard: RwLock<Arc<std::collections::HashSet<PathBuf>>>,
+    /// Empty for nearly every torrent, and then `None`: no allocation. See
+    /// `guard_files`.
+    overwrite_guard: RwLock<Option<Arc<std::collections::HashSet<PathBuf>>>>,
     /// What `write_piece` found out about each file it writes into, once: see
-    /// `WriteVerdicts`.
-    write_verdicts: Arc<parking_lot::Mutex<WriteVerdicts>>,
+    /// `WriteVerdicts`. Built by the first write and dropped when the torrent
+    /// starts seeding (`release_piece_hashes`): a seed writes nothing, and a
+    /// table on each of 290,000 seeds was ~23 MB of empty maps.
+    write_verdicts: parking_lot::Mutex<Option<Arc<parking_lot::Mutex<WriteVerdicts>>>>,
     /// See `FreeLinks`. Empty for nearly every torrent.
     free_links: Arc<parking_lot::Mutex<FreeLinks>>,
     /// `error_msg` holds a note a recheck left (nothing was found where it was
@@ -1505,6 +1508,9 @@ impl TorrentState {
             Err(poisoned) => poisoned.into_inner(),
         };
         *v2 = None;
+        drop(v2);
+        // A seed writes nothing: what the writes found out goes too.
+        self.forget_write_verdicts();
     }
 
     /// Whether a whole piece -- alignment padding included, as `map_block`
@@ -1621,8 +1627,8 @@ impl TorrentState {
             rechecking: AtomicBool::new(false),
             proof_holds: AtomicU32::new(0),
             recheck_done: AtomicU32::new(0),
-            overwrite_guard: RwLock::new(Arc::new(std::collections::HashSet::new())),
-            write_verdicts: Arc::default(),
+            overwrite_guard: RwLock::new(None),
+            write_verdicts: parking_lot::Mutex::new(None),
             free_links: Arc::default(),
             recheck_note: AtomicBool::new(false),
             piece_hashes: Mutex::new(None),
@@ -1929,33 +1935,44 @@ impl TorrentState {
     /// there. A byte that differs refuses the piece and parks the torrent, the
     /// file untouched. Replaces the previous set.
     pub fn guard_files(&self, files: std::collections::HashSet<PathBuf>) {
-        *self.overwrite_guard.write() = Arc::new(files);
+        *self.overwrite_guard.write() = (!files.is_empty()).then(|| Arc::new(files));
     }
 
     /// The per-file verdicts of `write_piece`, to share with its blocking task.
+    /// Built on first use.
     pub fn write_verdicts(&self) -> Arc<parking_lot::Mutex<WriteVerdicts>> {
-        self.write_verdicts.clone()
+        self.write_verdicts
+            .lock()
+            .get_or_insert_with(Arc::default)
+            .clone()
     }
 
     /// Forget what was found about the files: the next piece asks again. A
-    /// recheck calls it, so a file linked or claimed since is seen.
+    /// recheck calls it, so a file linked or claimed since is seen. A write in
+    /// flight keeps the table it holds; the next one starts a new one.
     pub fn forget_write_verdicts(&self) {
-        *self.write_verdicts.lock() = WriteVerdicts::default();
+        *self.write_verdicts.lock() = None;
     }
 
-    /// The files `guard_files` set, cheap to clone.
+    /// The files `guard_files` set, cheap to clone. One shared empty set
+    /// stands for "none", so the torrents without a guard allocate nothing.
     pub fn guarded(&self) -> Arc<std::collections::HashSet<PathBuf>> {
-        self.overwrite_guard.read().clone()
+        static NONE: std::sync::LazyLock<Arc<std::collections::HashSet<PathBuf>>> =
+            std::sync::LazyLock::new(Arc::default);
+        self.overwrite_guard
+            .read()
+            .clone()
+            .unwrap_or_else(|| NONE.clone())
     }
 
     /// Stop guarding `rel`: the file under that name is the torrent's own
     /// now (see `FreeLinks`).
     pub fn unguard_file(&self, rel: &std::path::Path) {
         let mut g = self.overwrite_guard.write();
-        if g.contains(rel) {
-            let mut files = (**g).clone();
+        if let Some(set) = g.as_ref().filter(|set| set.contains(rel)) {
+            let mut files = (**set).clone();
             files.remove(rel);
-            *g = Arc::new(files);
+            *g = (!files.is_empty()).then(|| Arc::new(files));
         }
     }
 
@@ -2073,6 +2090,35 @@ mod tests {
     fn an_empty_peer_registry_is_two_words() {
         assert_eq!(std::mem::size_of::<PeerRegistry>(), 16);
         assert!(PeerRegistry::default().0.read().is_none());
+    }
+
+    /// The write-path state costs nothing until something is written, and
+    /// is dropped again once the torrent seeds.
+    #[test]
+    fn write_state_is_built_on_first_write_and_dropped_on_seeding() {
+        let (st, _, _) = state_for("writestate", 2);
+        assert!(st.overwrite_guard.read().is_none(), "a guard was allocated");
+        assert!(
+            st.write_verdicts.lock().is_none(),
+            "verdicts were allocated"
+        );
+        assert!(st.guarded().is_empty());
+
+        st.write_verdicts()
+            .lock()
+            .files
+            .insert(PathBuf::from("a"), true);
+        assert_eq!(st.write_verdicts().lock().files.len(), 1, "not kept");
+        st.release_piece_hashes();
+        assert!(st.write_verdicts.lock().is_none(), "kept by a seed");
+
+        st.guard_files(std::iter::once(PathBuf::from("a")).collect());
+        assert!(st.guarded().contains(&PathBuf::from("a")));
+        st.guard_files(Default::default());
+        assert!(
+            st.overwrite_guard.read().is_none(),
+            "an empty guard allocated"
+        );
     }
 
     fn peer(addr: std::net::SocketAddr) -> Arc<PeerStats> {
