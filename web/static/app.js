@@ -4504,12 +4504,36 @@ document.addEventListener("keydown", e => {
     // Never steal Ctrl+A from a text field.
     const t = e.target;
     if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
-    // Only meaningful while the hoard list is the visible table.
-    const tbody = document.getElementById("hoard-tbody");
-    if (!tbody || !tbody.offsetParent) return;
-    e.preventDefault();
-    _selectAllFiltered();
+    // Only meaningful while a torrent list is the visible table.
+    const hoard = document.getElementById("hoard-tbody");
+    if (hoard && hoard.offsetParent) {
+        e.preventDefault();
+        _selectAllFiltered();
+        return;
+    }
+    const race = document.getElementById("race-tbody");
+    if (race && race.offsetParent) {
+        e.preventDefault();
+        _selectAllRace();
+    }
 });
+
+// Race is served whole and filtered in the page (renderRaceTable), so its
+// Ctrl+A is the rows the search box matches, picked as rows -- no filter for
+// the daemon to resolve, unlike hoard.
+function _selectAllRace() {
+    const query = (document.getElementById("race-search")?.value || "").trim().toLowerCase();
+    const torrents = _raceTorrents || [];
+    const matched = query ? torrents.filter(t => _searchMatches(t, query)) : torrents;
+    if (!matched.length) return;
+    _clearSelection();
+    for (const t of matched) {
+        const agent = t.agent || "local";
+        _selected.set(_selKeyOf(t.info_hash, agent), { hash: t.info_hash, mode: "race", agent: agent });
+    }
+    _anchorHash = null;
+    _updateRowHighlights();
+}
 
 function handleRowClick(e, hash, mode) {
     const row = e.target.closest(".t-row");
