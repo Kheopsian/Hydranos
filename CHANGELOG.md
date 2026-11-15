@@ -30,6 +30,7 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 
 ### Added
 
+- A torrent in error now shows its error under its name in the torrent list, on one line cut by an ellipsis (the full text in the tooltip): red for a torrent error, orange for a tracker error. The `ERR` and `!` badges stay.
 - Disk preallocation (`[daemon] preallocate`) can now be turned on from the Settings tab: a "Pre-allocate disk space" switch sits beside the duplicate-data method, and saving it creates the key in the file when it is absent. It is read at startup, so the tab asks for a restart. Until now the option could only be set by editing the file.
 
 ### Fixed

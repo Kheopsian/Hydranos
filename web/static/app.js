@@ -9850,7 +9850,12 @@ function PEER_COLS() {
 }
 const TABLE_COLS = {
     "hoard-table": [
-        { id: "name", label: "Name", sort: "name", mobile: true, render: t => `<td title="${esc(t.torrent_error ? (t.torrent_error_msg || 'Torrent error') : (t.tracker_error ? (t.tracker_error_msg || 'Tracker error') : t.info_hash))}">${esc(incoName(t))}${t.tracker_error ? ' <span class="tracker-warn">!</span>' : ''}${t.torrent_error ? ' <span class="torrent-err-badge">ERR</span>' : ''}</td>` },
+        { id: "name", label: "Name", sort: "name", mobile: true, render: t => `<td title="${esc(t.torrent_error ? (t.torrent_error_msg || 'Torrent error') : (t.tracker_error ? (t.tracker_error_msg || 'Tracker error') : t.info_hash))}">${esc(incoName(t))}${t.tracker_error ? ' <span class="tracker-warn">!</span>' : ''}${t.torrent_error ? ' <span class="torrent-err-badge">ERR</span>' : ''}${(() => {
+            // The reason under the name, so a torrent in error is readable
+            // without hovering; a torrent error outranks a tracker one.
+            const m = t.torrent_error ? (t.torrent_error_msg || 'Torrent error') : (t.tracker_error ? (t.tracker_error_msg || 'Tracker error') : '');
+            return m ? `<div class="name-err${t.torrent_error ? '' : ' tracker'}" title="${esc(m)}">${esc(m)}</div>` : '';
+        })()}</td>` },
         { id: "total_size", label: "Size", sort: "total_size", render: t => `<td>${t.total_size ? formatBytes(t.total_size) : "-"}</td>` },
         { id: "state", label: "State", sort: "state", mobile: true, render: t => { const d = displayState(t); return `<td><span class="state-badge ${d.cls}" title="${esc(d.title)}">${d.label}</span></td>`; } },
         { id: "progress", label: "Progress", sort: "progress", mobile: true, render: t => { const pct = (t.progress * 100).toFixed(1); return `<td><div class="progress-bar"><div class="progress-fill" style="width:${pct}%"></div></div><div class="progress-text">${pct}%</div></td>`; } },

@@ -2359,6 +2359,22 @@ footer {
 .chip-err-other { border-color: var(--border); color: var(--text-secondary); }
 .chip-torrent-err { border-color: rgba(248, 81, 73, 0.4); color: var(--accent-red); }
 .chip-torrent-err.active { background: rgba(248, 81, 73, 0.2); border-color: var(--accent-red); }
+/* The reason under a torrent's name. width:0 + min-width:100% keeps a long
+   message from widening the column: it fills the cell and is cut by the
+   ellipsis instead. */
+.name-err {
+    display: block;
+    width: 0;
+    min-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 11px;
+    font-weight: 400;
+    line-height: 1.3;
+    color: var(--accent-red);
+}
+.name-err.tracker { color: var(--accent-orange, #f0883e); }
 .torrent-err-badge {
     display: inline-block;
     background: var(--accent-red);
