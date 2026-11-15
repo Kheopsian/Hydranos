@@ -107,7 +107,7 @@ struct EngineCatalogue {
 }
 
 impl Catalogue for EngineCatalogue {
-    fn hashes(&self) -> Vec<String> {
+    fn hashes(&self) -> Vec<typhon_engine::torrent::meta::InfoHash> {
         self.manager
             .all()
             .iter()
@@ -124,15 +124,12 @@ impl Catalogue for EngineCatalogue {
                         & typhon_engine::torrent::meta::ANNOUNCE_EVENT_STOPPED
                         != 0
             })
-            .map(|t| hex(&t.info_hash))
+            .map(|t| t.info_hash)
             .collect()
     }
 
-    fn host_of(&self, info_hash: &str) -> String {
-        let Some(ih) = parse_hex(info_hash) else {
-            return String::new();
-        };
-        let Some(t) = self.manager.get(&ih) else {
+    fn host_of(&self, info_hash: &typhon_engine::torrent::meta::InfoHash) -> String {
+        let Some(t) = self.manager.get(info_hash) else {
             return String::new();
         };
         let tiers = t.live_trackers.read();
@@ -238,7 +235,7 @@ pub async fn depart(
     acknowledged
 }
 
-fn hex(hash: &[u8; 20]) -> String {
+pub(super) fn hex(hash: &[u8; 20]) -> String {
     hash.iter().map(|b| format!("{b:02x}")).collect()
 }
 
@@ -297,7 +294,7 @@ pub fn start(
         let tx = bump_tx.clone();
         hook_manager.set_announce_hook(Arc::new(move |ih: [u8; 20]| {
             let _ = tx.try_send(scheduler::BumpReq {
-                info_hash: hex(&ih),
+                info_hash: ih,
                 reply: None,
                 forced: false,
             });
@@ -928,7 +925,7 @@ fn scrub_url_secrets(message: &str, url: &str) -> String {
     out
 }
 
-fn parse_hex(s: &str) -> Option<[u8; 20]> {
+pub(super) fn parse_hex(s: &str) -> Option<[u8; 20]> {
     if s.len() != 40 {
         return None;
     }

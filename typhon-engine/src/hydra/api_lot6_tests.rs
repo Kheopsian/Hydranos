@@ -1407,7 +1407,7 @@ fn scheduler_answering(
         while let Some(req) = rx.recv().await {
             log.lock()
                 .unwrap()
-                .push((req.info_hash.clone(), req.forced));
+                .push((crate::magnets::hex(&req.info_hash), req.forced));
             if let (Some(o), Some(reply)) = (replies.next(), req.reply) {
                 let _ = reply.send(o);
             }

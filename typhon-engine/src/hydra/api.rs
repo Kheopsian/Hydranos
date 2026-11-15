@@ -12194,10 +12194,10 @@ async fn qbit_add_trackers(
             .get("hash")
             .map(|h| h.trim().to_lowercase())
             .unwrap_or_default();
-        for (id, _) in copies_of(&state, &hash) {
+        for (id, copy) in copies_of(&state, &hash) {
             if let Some(bump) = state.engines.get(&id).and_then(|e| e.bump.get()) {
                 let _ = bump.try_send(crate::announce::scheduler::BumpReq {
-                    info_hash: hash.clone(),
+                    info_hash: copy.info_hash,
                     reply: None,
                     forced: false,
                 });
@@ -13570,7 +13570,7 @@ async fn reannounce_one(
     // announcing anything: there was no way to ask for an announce at all, so
     // the button in the Trackers tab had never done a thing. The scheduler owns
     // the queue, so asking is sending it a message.
-    let Some((engine_id, _torrent)) = find_selected(&state, &query, &info_hash) else {
+    let Some((engine_id, torrent)) = find_selected(&state, &query, &info_hash) else {
         return not_found();
     };
     let Some(engine) = state.engines.get(&engine_id) else {
@@ -13595,7 +13595,7 @@ async fn reannounce_one(
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     if bump
         .try_send(crate::announce::scheduler::BumpReq {
-            info_hash: info_hash.to_lowercase(),
+            info_hash: torrent.info_hash,
             reply: Some(reply_tx),
             // A person pressed it: past `min interval`, like qBittorrent.
             forced: true,
@@ -18416,7 +18416,7 @@ async fn qbit_reannounce(
     let mut not_announcing = 0usize;
     let mut queue_full = 0usize;
     for hash in resolved {
-        for (id, _copy) in copies_of(&state, &hash) {
+        for (id, copy) in copies_of(&state, &hash) {
             let Some(engine) = state.engines.get(&id) else {
                 continue;
             };
@@ -18426,7 +18426,7 @@ async fn qbit_reannounce(
                 continue;
             };
             match bump.try_send(crate::announce::scheduler::BumpReq {
-                info_hash: hash.to_lowercase(),
+                info_hash: copy.info_hash,
                 reply: None,
                 forced: true,
             }) {

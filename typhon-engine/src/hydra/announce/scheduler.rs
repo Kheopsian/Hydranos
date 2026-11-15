@@ -23,6 +23,9 @@ use std::time::Duration;
 
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
+use typhon_engine::torrent::meta::InfoHash;
+
+use super::runner::{hex, parse_hex};
 
 /// Tasks spawned once: the most announces in flight across every tracker.
 /// Idle ones cost a parked future each, not a thread.
@@ -127,24 +130,24 @@ fn admit_quota(total: usize) -> usize {
 /// only version of this that can be tested -- and an untestable guard is how
 /// the unbounded race burst survived a whole release.
 ///
-/// FNV-1a over the hash: no dependency, and hex info hashes differing in one
-/// character land far apart.
+/// FNV-1a over the hash: no dependency, and info hashes differing in one byte
+/// land far apart.
 ///
 /// Salted with a value drawn once per process: stable for the whole session,
 /// so everything above holds, but the phase is not a function of the info hash
 /// alone -- it differs between two installs and across a restart.
-fn spread(info_hash: &str, window: Duration) -> Duration {
+fn spread(info_hash: &InfoHash, window: Duration) -> Duration {
     static SALT: OnceLock<u64> = OnceLock::new();
     spread_with_salt(*SALT.get_or_init(rand::random::<u64>), info_hash, window)
 }
 
-fn spread_with_salt(salt: u64, info_hash: &str, window: Duration) -> Duration {
+fn spread_with_salt(salt: u64, info_hash: &[u8], window: Duration) -> Duration {
     let millis = window.as_millis() as u64;
     if millis == 0 {
         return Duration::ZERO;
     }
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in salt.to_le_bytes().iter().chain(info_hash.as_bytes()) {
+    for b in salt.to_le_bytes().iter().chain(info_hash) {
         h ^= *b as u64;
         h = h.wrapping_mul(0x1000_0000_01b3);
     }
@@ -208,7 +211,7 @@ pub enum BumpOutcome {
 /// `reply` is an `Option` so an internal caller can still fire and forget
 /// without inventing a receiver it will never read.
 pub struct BumpReq {
-    pub info_hash: String,
+    pub info_hash: InfoHash,
     /// A re-announce a person asked for (the button, the API). It is allowed
     /// past each tracker's `min interval`, as qBittorrent's "Force reannounce"
     /// is (libtorrent's `ignore_min_interval`). An internal bump -- an owed
@@ -218,11 +221,9 @@ pub struct BumpReq {
     pub reply: Option<oneshot::Sender<BumpOutcome>>,
 }
 
-/// What one torrent owes the scheduler.
+/// What one torrent owes the scheduler. Its hash is the key it is filed
+/// under in `states`, and nowhere else.
 struct State {
-    // Kept with the state; no code reads it today.
-    #[allow(dead_code)]
-    info_hash: String,
     first_announce: bool,
     /// The next dispatch carries a forced bump. Cleared once it has.
     forced_next: bool,
@@ -248,10 +249,14 @@ struct State {
 
 /// A deadline in the heap. Ordered by time only; the hash breaks ties so the
 /// order is total and the heap is deterministic.
+///
+/// The hash is held inline, 20 bytes. It used to be the hex `String`, which is
+/// a 40-byte heap allocation on every deadline of every torrent, next to two
+/// more of the same in `states` (its key, and a copy in `State`).
 #[derive(PartialEq, Eq)]
 struct Deadline {
     at: Instant,
-    info_hash: String,
+    info_hash: InfoHash,
     epoch: u64,
 }
 
@@ -270,7 +275,9 @@ impl PartialOrd for Deadline {
     }
 }
 
-/// A torrent handed to a worker.
+/// A torrent handed to a worker. Its hash is spelled in hex, as the runner
+/// uses it; the scheduler writes it from its key and reads the `Outcome`'s
+/// back.
 pub struct Job {
     pub info_hash: String,
     // Carried on the job; no worker reads it today.
@@ -305,10 +312,10 @@ pub struct Outcome {
 /// What the scheduler needs from the engine it serves.
 pub trait Catalogue: Send + Sync + 'static {
     /// Every torrent that should be announced right now.
-    fn hashes(&self) -> Vec<String>;
+    fn hashes(&self) -> Vec<InfoHash>;
     /// The host of the tracker this torrent announces to first. Torrents of
     /// one host share its concurrency limit.
-    fn host_of(&self, _info_hash: &str) -> String {
+    fn host_of(&self, _info_hash: &InfoHash) -> String {
         String::new()
     }
 }
@@ -433,7 +440,7 @@ pub async fn run<C, F, Fut>(
     }
     drop(result_tx);
 
-    let mut states: HashMap<String, State> = HashMap::new();
+    let mut states: HashMap<InfoHash, State> = HashMap::new();
     let mut heap: BinaryHeap<Reverse<Deadline>> = BinaryHeap::new();
     let mut reconcile = tokio::time::interval(RECONCILE);
     let mut pool = Pool::default();
@@ -464,12 +471,16 @@ pub async fn run<C, F, Fut>(
             _ = tokio::time::sleep_until(next) => {}
             Some((outcome, took)) = result_rx.recv() => {
                 pool.done(&outcome, took);
-                let Some(state) = states.get_mut(&outcome.info_hash) else {
+                // The job's hex was written from a key, so it reads back.
+                let Some(key) = parse_hex(&outcome.info_hash) else {
+                    continue;
+                };
+                let Some(state) = states.get_mut(&key) else {
                     continue;
                 };
                 state.in_flight = false;
                 if outcome.gone {
-                    states.remove(&outcome.info_hash);
+                    states.remove(&key);
                     continue;
                 }
                 state.first_announce = false;
@@ -479,14 +490,11 @@ pub async fn run<C, F, Fut>(
                 // same millisecond, thirty minutes later, for ever. The offset
                 // is a fraction of the wait and is capped, so it disperses the
                 // pack without meaningfully delaying any single torrent.
-                let jitter = spread(
-                    &outcome.info_hash,
-                    (wait / JITTER_FRACTION).min(MAX_JITTER),
-                );
+                let jitter = spread(&key, (wait / JITTER_FRACTION).min(MAX_JITTER));
                 state.interval_s = wait.as_secs().clamp(1, u32::MAX as u64) as u32;
                 heap.push(Reverse(Deadline {
                     at: Instant::now() + wait + jitter,
-                    info_hash: outcome.info_hash,
+                    info_hash: key,
                     epoch: state.epoch,
                 }));
             }
@@ -639,7 +647,7 @@ impl Tracker {
 struct Pool {
     trackers: HashMap<Arc<str>, Tracker>,
     /// Which tracker each in-flight torrent holds a slot on.
-    holding: HashMap<String, Arc<str>>,
+    holding: HashMap<InfoHash, Arc<str>>,
     in_flight: usize,
     /// Latency across all answers, for display only.
     latency_s: f64,
@@ -657,7 +665,7 @@ impl Pool {
         &mut self,
         now: Instant,
         heap: &mut BinaryHeap<Reverse<Deadline>>,
-        states: &mut HashMap<String, State>,
+        states: &mut HashMap<InfoHash, State>,
         work_tx: &mpsc::Sender<Job>,
     ) {
         while let Some(Reverse(d)) = heap.peek() {
@@ -692,7 +700,7 @@ impl Pool {
                     continue;
                 }
                 let job = Job {
-                    info_hash: d.info_hash.clone(),
+                    info_hash: hex(&d.info_hash),
                     first: state.first_announce,
                     forced: state.forced_next,
                 };
@@ -718,7 +726,7 @@ impl Pool {
 
     fn done(&mut self, outcome: &Outcome, took: Duration) {
         self.in_flight = self.in_flight.saturating_sub(1);
-        if let Some(host) = self.holding.remove(&outcome.info_hash) {
+        if let Some(host) = parse_hex(&outcome.info_hash).and_then(|k| self.holding.remove(&k)) {
             if let Some(t) = self.trackers.get_mut(&host) {
                 t.done(outcome, took);
             }
@@ -817,7 +825,7 @@ impl Health {
 /// deadline still in the heap. Stale entries (older epochs, forgotten
 /// torrents, torrents a worker holds) are not lateness and are skipped.
 fn measure(
-    states: &HashMap<String, State>,
+    states: &HashMap<InfoHash, State>,
     heap: &BinaryHeap<Reverse<Deadline>>,
     pool: &Pool,
     now: Instant,
@@ -880,7 +888,7 @@ fn off_the_runtime<R>(f: impl FnOnce() -> R) -> R {
 /// what left.
 fn reconcile_now<C: Catalogue>(
     catalogue: &Arc<C>,
-    states: &mut HashMap<String, State>,
+    states: &mut HashMap<InfoHash, State>,
     heap: &mut BinaryHeap<Reverse<Deadline>>,
     admission: &Admission,
     hosts: &mut HashMap<String, Arc<str>>,
@@ -893,7 +901,7 @@ fn reconcile_now<C: Catalogue>(
     let mut seen = std::collections::HashSet::with_capacity(live.len());
     let mut added = 0usize;
     for hash in live {
-        seen.insert(hash.clone());
+        seen.insert(hash);
         if states.contains_key(&hash) {
             continue;
         }
@@ -904,9 +912,8 @@ fn reconcile_now<C: Catalogue>(
         }
         added += 1;
         states.insert(
-            hash.clone(),
+            hash,
             State {
-                info_hash: hash.clone(),
                 first_announce: true,
                 forced_next: false,
                 in_flight: false,
@@ -961,14 +968,13 @@ fn reconcile_now<C: Catalogue>(
 /// outside the admission quota: that quota exists to stop a whole catalogue
 /// arriving at once, and one person pressing one button is not a herd.
 fn bump_now(
-    states: &mut HashMap<String, State>,
+    states: &mut HashMap<InfoHash, State>,
     heap: &mut BinaryHeap<Reverse<Deadline>>,
-    hash: String,
+    hash: InfoHash,
     forced: bool,
 ) -> BumpOutcome {
     let now = Instant::now();
-    let state = states.entry(hash.clone()).or_insert_with(|| State {
-        info_hash: hash.clone(),
+    let state = states.entry(hash).or_insert_with(|| State {
         first_announce: true,
         forced_next: false,
         in_flight: false,
@@ -1006,28 +1012,58 @@ fn bump_now(
 mod tests {
     use super::*;
 
+    /// A key from a short label: the label's bytes, zero-padded. Labels keep
+    /// their order, so "a" < "b" as keys too.
+    fn k(label: &str) -> InfoHash {
+        let mut h = [0u8; 20];
+        h[..label.len()].copy_from_slice(label.as_bytes());
+        h
+    }
+
+    /// The `i`-th of a run of distinct keys.
+    fn nth(i: usize) -> InfoHash {
+        let mut h = [0u8; 20];
+        h[12..].copy_from_slice(&(i as u64).to_be_bytes());
+        h
+    }
+
+    /// A worker reads the job's hash as hex, and its answer comes back in
+    /// the same spelling: the round trip must land on the key it left.
+    #[test]
+    fn a_job_hash_reads_back_to_its_key() {
+        let key: InfoHash = std::array::from_fn(|i| (i as u8).wrapping_mul(37) ^ 0xf0);
+        let spelled = hex(&key);
+        assert_eq!(spelled.len(), 40);
+        assert_eq!(spelled, spelled.to_lowercase());
+        assert_eq!(parse_hex(&spelled), Some(key));
+    }
+
     #[test]
     fn deadlines_come_out_earliest_first() {
         let mut heap = BinaryHeap::new();
         let now = Instant::now();
         heap.push(Reverse(Deadline {
             at: now + Duration::from_secs(30),
-            info_hash: "c".into(),
+            info_hash: k("c"),
             epoch: 0,
         }));
         heap.push(Reverse(Deadline {
             at: now + Duration::from_secs(10),
-            info_hash: "a".into(),
+            info_hash: k("a"),
             epoch: 0,
         }));
         heap.push(Reverse(Deadline {
             at: now + Duration::from_secs(20),
-            info_hash: "b".into(),
+            info_hash: k("b"),
             epoch: 0,
         }));
-        let order: Vec<String> =
+        let order: Vec<InfoHash> =
             std::iter::from_fn(|| heap.pop().map(|Reverse(d)| d.info_hash)).collect();
-        assert_eq!(order, ["a", "b", "c"], "a min-heap, not a max-heap");
+        assert_eq!(
+            order,
+            [k("a"), k("b"), k("c")],
+            "a min-heap, not a max-heap"
+        );
     }
 
     #[test]
@@ -1037,12 +1073,12 @@ mod tests {
         let now = Instant::now();
         let a = Deadline {
             at: now,
-            info_hash: "aaa".into(),
+            info_hash: k("aaa"),
             epoch: 0,
         };
         let b = Deadline {
             at: now,
-            info_hash: "bbb".into(),
+            info_hash: k("bbb"),
             epoch: 0,
         };
         assert!(a < b);
@@ -1095,8 +1131,8 @@ mod tests {
     fn admission_is_published_as_the_catalogue_joins() {
         struct Big(usize);
         impl Catalogue for Big {
-            fn hashes(&self) -> Vec<String> {
-                (0..self.0).map(|i| format!("{i:040x}")).collect()
+            fn hashes(&self) -> Vec<InfoHash> {
+                (0..self.0).map(nth).collect()
             }
         }
         let catalogue = Arc::new(Big(MIN_NEW_PER_CYCLE * 3));
@@ -1215,7 +1251,7 @@ mod tests {
     fn the_offset_spreads_a_group_across_the_window() {
         let window = RECONCILE;
         let offsets: Vec<u128> = (0..500)
-            .map(|i| spread(&format!("{i:040x}"), window).as_millis())
+            .map(|i| spread(&nth(i), window).as_millis())
             .collect();
 
         assert!(
@@ -1238,11 +1274,11 @@ mod tests {
     /// group that was spread apart stays apart instead of re-converging.
     #[test]
     fn the_offset_is_stable_for_a_given_torrent() {
-        let h = "a".repeat(40);
+        let h = [0xaa; 20];
         assert_eq!(spread(&h, RECONCILE), spread(&h, RECONCILE));
         assert_ne!(
             spread(&h, RECONCILE),
-            spread(&"b".repeat(40), RECONCILE),
+            spread(&[0xbb; 20], RECONCILE),
             "two torrents must not share one offset"
         );
         assert_eq!(
@@ -1258,7 +1294,7 @@ mod tests {
     /// from its hash by anyone outside.
     #[test]
     fn the_offset_changes_with_the_process_salt() {
-        let h = "a".repeat(40);
+        let h = [0xaa; 20];
         let window = RECONCILE;
         assert_eq!(
             spread_with_salt(1, &h, window),
@@ -1273,9 +1309,8 @@ mod tests {
         );
     }
 
-    fn fresh(hash: &str) -> State {
+    fn fresh() -> State {
         State {
-            info_hash: hash.into(),
             first_announce: false,
             forced_next: false,
             in_flight: false,
@@ -1306,7 +1341,7 @@ mod tests {
         if busy {
             t.pending.push_back(Deadline {
                 at: Instant::now(),
-                info_hash: "q".into(),
+                info_hash: k("q"),
                 epoch: 0,
             });
         } else {
@@ -1388,7 +1423,7 @@ mod tests {
             }
             t.pending.push_back(Deadline {
                 at: Instant::now(),
-                info_hash: "q".into(),
+                info_hash: k("q"),
                 epoch: 0,
             });
             t.adjust();
@@ -1524,12 +1559,12 @@ mod tests {
         let slow: Arc<str> = Arc::from("slow.example");
         let fast: Arc<str> = Arc::from("fast.example");
         for i in 0..100 {
-            let h = format!("s{i}");
+            let h = k(&format!("s{i}"));
             states.insert(
-                h.clone(),
+                h,
                 State {
                     host: slow.clone(),
-                    ..fresh(&h)
+                    ..fresh()
                 },
             );
             heap.push(Reverse(Deadline {
@@ -1539,12 +1574,12 @@ mod tests {
             }));
         }
         for i in 0..10 {
-            let h = format!("f{i}");
+            let h = k(&format!("f{i}"));
             states.insert(
-                h.clone(),
+                h,
                 State {
                     host: fast.clone(),
-                    ..fresh(&h)
+                    ..fresh()
                 },
             );
             heap.push(Reverse(Deadline {
@@ -1557,15 +1592,15 @@ mod tests {
         pool.dispatch(now, &mut heap, &mut states, &tx);
         let mut sent = Vec::new();
         while let Ok(j) = rx.try_recv() {
-            sent.push(j.info_hash);
+            sent.push(parse_hex(&j.info_hash).expect("a job is spelled in hex"));
         }
         assert_eq!(
-            sent.iter().filter(|h| h.starts_with('f')).count(),
+            sent.iter().filter(|h| h[0] == b'f').count(),
             10,
             "every fast torrent went out"
         );
         assert_eq!(
-            sent.iter().filter(|h| h.starts_with('s')).count(),
+            sent.iter().filter(|h| h[0] == b's').count(),
             HOST_START,
             "the slow tracker got its limit, no more"
         );
@@ -1579,19 +1614,19 @@ mod tests {
             "nothing due is left in the heap to spin on"
         );
         // A freed slot on the slow tracker takes the next in its queue.
-        let first = sent.iter().find(|h| h.starts_with('s')).unwrap().clone();
+        let first = *sent.iter().find(|h| h[0] == b's').unwrap();
         states.get_mut(&first).unwrap().in_flight = false;
         pool.done(
             &Outcome {
-                info_hash: first,
+                info_hash: hex(&first),
                 ..answered(false)
             },
             Duration::from_millis(100),
         );
         pool.dispatch(now, &mut heap, &mut states, &tx);
         assert_eq!(
-            rx.try_recv().map(|j| j.info_hash.starts_with('s')),
-            Ok(true)
+            rx.try_recv().map(|j| parse_hex(&j.info_hash).map(|h| h[0])),
+            Ok(Some(b's'))
         );
     }
 
@@ -1601,33 +1636,33 @@ mod tests {
     fn lateness_is_measured_on_live_deadlines_only() {
         let now = Instant::now() + Duration::from_secs(1000);
         let mut states = HashMap::new();
-        states.insert("late".to_string(), fresh("late"));
+        states.insert(k("late"), fresh());
         states.insert(
-            "soon".to_string(),
+            k("soon"),
             State {
                 interval_s: 60,
-                ..fresh("soon")
+                ..fresh()
             },
         );
         states.insert(
-            "held".to_string(),
+            k("held"),
             State {
                 in_flight: true,
-                ..fresh("held")
+                ..fresh()
             },
         );
         states.insert(
-            "bumped".to_string(),
+            k("bumped"),
             State {
                 epoch: 1,
-                ..fresh("bumped")
+                ..fresh()
             },
         );
         let mut heap = BinaryHeap::new();
         let d = |h: &str, at: Instant, epoch: u64| {
             Reverse(Deadline {
                 at,
-                info_hash: h.into(),
+                info_hash: k(h),
                 epoch,
             })
         };
@@ -1648,11 +1683,11 @@ mod tests {
     fn a_deadline_just_due_is_not_late() {
         let now = Instant::now() + Duration::from_secs(100);
         let mut states = HashMap::new();
-        states.insert("a".to_string(), fresh("a"));
+        states.insert(k("a"), fresh());
         let mut heap = BinaryHeap::new();
         heap.push(Reverse(Deadline {
             at: now - Duration::from_secs(2),
-            info_hash: "a".into(),
+            info_hash: k("a"),
             epoch: 0,
         }));
         assert_eq!(
@@ -1667,18 +1702,18 @@ mod tests {
     fn a_person_s_bump_is_forced_and_an_internal_one_is_not() {
         let (mut states, mut heap) = (HashMap::new(), BinaryHeap::new());
         assert_eq!(
-            bump_now(&mut states, &mut heap, "ev".into(), false),
+            bump_now(&mut states, &mut heap, k("ev"), false),
             BumpOutcome::Bumped
         );
         assert!(
-            !states["ev"].forced_next,
+            !states[&k("ev")].forced_next,
             "an owed event is not a forced re-announce"
         );
         assert_eq!(
-            bump_now(&mut states, &mut heap, "btn".into(), true),
+            bump_now(&mut states, &mut heap, k("btn"), true),
             BumpOutcome::Bumped
         );
-        assert!(states["btn"].forced_next, "the button is");
+        assert!(states[&k("btn")].forced_next, "the button is");
     }
 
     /// Only a registration retry comes back in seconds; any other sub-minute
@@ -1707,29 +1742,30 @@ mod tests {
     fn a_bump_goes_to_the_head_of_the_queue() {
         let mut states = HashMap::new();
         let mut heap = BinaryHeap::new();
-        states.insert("a".to_string(), fresh("a"));
-        states.insert("b".to_string(), fresh("b"));
+        states.insert(k("a"), fresh());
+        states.insert(k("b"), fresh());
         let now = Instant::now();
         // "a" is not due for half an hour.
         heap.push(Reverse(Deadline {
             at: now + DEFAULT_INTERVAL,
-            info_hash: "a".into(),
+            info_hash: k("a"),
             epoch: 0,
         }));
         heap.push(Reverse(Deadline {
             at: now + Duration::from_secs(60),
-            info_hash: "b".into(),
+            info_hash: k("b"),
             epoch: 0,
         }));
 
         assert_eq!(
-            bump_now(&mut states, &mut heap, "a".into(), true),
+            bump_now(&mut states, &mut heap, k("a"), true),
             BumpOutcome::Bumped
         );
 
         let Reverse(head) = heap.peek().expect("a deadline");
         assert_eq!(
-            head.info_hash, "a",
+            head.info_hash,
+            k("a"),
             "the bumped torrent must come out first"
         );
         assert!(
@@ -1744,19 +1780,19 @@ mod tests {
     fn a_deadline_made_before_a_bump_is_stale() {
         let mut states = HashMap::new();
         let mut heap = BinaryHeap::new();
-        states.insert("a".to_string(), fresh("a"));
+        states.insert(k("a"), fresh());
         heap.push(Reverse(Deadline {
             at: Instant::now(),
-            info_hash: "a".into(),
+            info_hash: k("a"),
             epoch: 0,
         }));
 
         assert_eq!(
-            bump_now(&mut states, &mut heap, "a".into(), true),
+            bump_now(&mut states, &mut heap, k("a"), true),
             BumpOutcome::Bumped
         );
 
-        let epoch = states["a"].epoch;
+        let epoch = states[&k("a")].epoch;
         assert_eq!(epoch, 1);
         let stale = heap.iter().filter(|Reverse(d)| d.epoch != epoch).count();
         let live = heap.iter().filter(|Reverse(d)| d.epoch == epoch).count();
@@ -1772,16 +1808,16 @@ mod tests {
     fn a_second_bump_inside_the_cooldown_is_refused() {
         let mut states = HashMap::new();
         let mut heap = BinaryHeap::new();
-        states.insert("a".to_string(), fresh("a"));
+        states.insert(k("a"), fresh());
 
         assert_eq!(
-            bump_now(&mut states, &mut heap, "a".into(), true),
+            bump_now(&mut states, &mut heap, k("a"), true),
             BumpOutcome::Bumped,
             "first press works"
         );
         assert!(
             matches!(
-                bump_now(&mut states, &mut heap, "a".into(), true),
+                bump_now(&mut states, &mut heap, k("a"), true),
                 BumpOutcome::Cooldown { .. }
             ),
             "second press is refused"
@@ -1796,13 +1832,13 @@ mod tests {
     fn a_refused_bump_says_why_and_when_to_come_back() {
         let mut states = HashMap::new();
         let mut heap = BinaryHeap::new();
-        states.insert("a".to_string(), fresh("a"));
+        states.insert(k("a"), fresh());
 
         assert_eq!(
-            bump_now(&mut states, &mut heap, "a".into(), true),
+            bump_now(&mut states, &mut heap, k("a"), true),
             BumpOutcome::Bumped
         );
-        match bump_now(&mut states, &mut heap, "a".into(), true) {
+        match bump_now(&mut states, &mut heap, k("a"), true) {
             BumpOutcome::Cooldown { retry_in } => {
                 assert!(retry_in <= BUMP_COOLDOWN, "never longer than the cooldown");
                 assert!(
@@ -1816,14 +1852,14 @@ mod tests {
         // A torrent already with a worker is refused for its own reason: the
         // announce being asked for is the one in progress.
         states.insert(
-            "b".to_string(),
+            k("b"),
             State {
                 in_flight: true,
-                ..fresh("b")
+                ..fresh()
             },
         );
         assert_eq!(
-            bump_now(&mut states, &mut heap, "b".into(), true),
+            bump_now(&mut states, &mut heap, k("b"), true),
             BumpOutcome::InFlight
         );
     }
@@ -1837,16 +1873,16 @@ mod tests {
         let mut heap = BinaryHeap::new();
 
         assert_eq!(
-            bump_now(&mut states, &mut heap, "new".into(), true),
+            bump_now(&mut states, &mut heap, k("new"), true),
             BumpOutcome::Bumped
         );
 
         assert!(
-            states.contains_key("new"),
+            states.contains_key(&k("new")),
             "admitted outside MIN_NEW_PER_CYCLE"
         );
         assert!(
-            states["new"].first_announce,
+            states[&k("new")].first_announce,
             "and it announces as a first announce"
         );
         assert_eq!(heap.len(), 1);
