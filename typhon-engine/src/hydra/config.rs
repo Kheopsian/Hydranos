@@ -875,7 +875,7 @@ pub(crate) fn fresh_api_key() -> String {
     use rand::RngCore;
     let mut bytes = [0u8; 24];
     rand::rngs::OsRng.fill_bytes(&mut bytes);
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    typhon_engine::torrent::hex_encode_bytes(&bytes)
 }
 
 /// Give this instance an API key of its own before it serves anything.

@@ -521,7 +521,7 @@ fn sha256_hex(data: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
     h.update(data);
-    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
+    typhon_engine::torrent::hex_encode_bytes(&h.finalize())
 }
 
 // ---------------------------------------------------------------------------

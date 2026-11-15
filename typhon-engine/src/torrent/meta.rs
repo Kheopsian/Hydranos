@@ -1543,11 +1543,7 @@ impl TorrentState {
 
     /// The info-hash as lowercase hex, which is how the store keys it.
     pub fn info_hash_hex(&self) -> String {
-        let mut out = String::with_capacity(40);
-        for b in self.info_hash.iter() {
-            out.push_str(&format!("{:02x}", b));
-        }
-        out
+        crate::torrent::hex_encode(&self.info_hash)
     }
 
     /// Drop the piece hash table.

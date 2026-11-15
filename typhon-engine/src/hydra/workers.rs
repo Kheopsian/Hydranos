@@ -1852,7 +1852,7 @@ fn reconcile_pass(engines: &crate::engines::EngineHost, store: &crate::store::St
             .manager
             .all()
             .iter()
-            .map(|t| t.info_hash.iter().map(|b| format!("{b:02x}")).collect())
+            .map(|t| typhon_engine::torrent::hex_encode(&t.info_hash))
             .collect();
         // An engine that failed to load its resume data reports
         // nothing, and taking that at face value would empty its half

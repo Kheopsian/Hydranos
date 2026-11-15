@@ -1008,10 +1008,7 @@ pub fn condition_key(c: &Cond) -> String {
         h.update([0]);
         h.update(tag.as_bytes());
     }
-    h.finalize()[..8]
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    typhon_engine::torrent::hex_encode_bytes(&h.finalize()[..8])
 }
 
 /// A condition of a workflow that carries a `for`.

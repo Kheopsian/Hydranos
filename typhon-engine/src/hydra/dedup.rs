@@ -90,7 +90,7 @@ fn sha1_hex(data: &[u8]) -> String {
     use sha1::{Digest, Sha1};
     let mut h = Sha1::new();
     h.update(data);
-    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
+    typhon_engine::torrent::hex_encode_bytes(&h.finalize())
 }
 
 /// One file of a torrent, as the payload stream orders them.

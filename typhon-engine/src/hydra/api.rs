@@ -739,10 +739,7 @@ async fn post_node_enrol(
     // check and is never run.
     let sha: String = {
         use sha2::{Digest, Sha256};
-        Sha256::digest(INSTALL_SCRIPT.as_bytes())
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect()
+        typhon_engine::torrent::hex_encode_bytes(&Sha256::digest(INSTALL_SCRIPT.as_bytes()))
     };
     Json(serde_json::json!({
         "token": token,
@@ -25586,10 +25583,9 @@ mod node_route_tests {
             .as_str()
             .unwrap()
             .to_string();
-        let sha: String = Sha256::digest(include_str!("../../../install.sh").as_bytes())
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect();
+        let sha: String = typhon_engine::torrent::hex_encode_bytes(&Sha256::digest(
+            include_str!("../../../install.sh").as_bytes(),
+        ));
         assert!(
             !cmd.contains("install.sh |"),
             "the download is not piped into a shell: {cmd}"

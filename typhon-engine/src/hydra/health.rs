@@ -332,7 +332,7 @@ pub fn scan_dual_seed(
             if t.status.load(Ordering::Relaxed) != TorrentStatus::Seeding as u8 {
                 continue;
             }
-            let hash: String = t.info_hash.iter().map(|b| format!("{b:02x}")).collect();
+            let hash: String = typhon_engine::torrent::hex_encode(&t.info_hash);
             seen.entry(hash).or_default().push(engine.clone());
         }
     }
