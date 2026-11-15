@@ -1564,6 +1564,7 @@ impl TorrentManager {
 
     pub fn stop_torrent(&self, info_hash: &InfoHash) -> Result<(), String> {
         let t = self.get(info_hash).ok_or("torrent not found")?;
+        let cancellation = t.recheck_stop.lock();
         // Closed BEFORE the pause flag goes up, so the interval that just
         // ended is credited. After it, fold_seed_time would see a paused
         // torrent and drop the open interval on the floor.
@@ -1571,9 +1572,10 @@ impl TorrentManager {
         t.is_paused.store(true, Ordering::Relaxed);
         t.status
             .store(TorrentStatus::Stopped as u8, Ordering::Relaxed);
-        if let Some(stop) = t.recheck_stop.lock().unwrap().as_ref() {
+        if let Some(stop) = cancellation.as_ref() {
             stop.begin();
         }
+        drop(cancellation);
         // BEP 3: tell the trackers we are leaving. Without it a stop is silent
         // and every tracker keeps us in the swarm until the entry goes stale,
         // handing our address to leechers we will not answer.
@@ -3337,7 +3339,7 @@ impl TorrentManager {
     /// previous piece map. Seed-mode torrents get a picker on demand.
     pub fn recheck(self: &Arc<Self>, info_hash: &InfoHash) -> Result<(), String> {
         let t = self.get(info_hash).ok_or("torrent not found")?;
-        let mut cancellation = t.recheck_stop.lock().unwrap();
+        let mut cancellation = t.recheck_stop.lock();
         // One at a time per torrent: the one under way reads the files as
         // they are now anyway.
         if t.rechecking.swap(true, Ordering::SeqCst) {
@@ -3345,7 +3347,6 @@ impl TorrentManager {
         }
         let stop = crate::stop::Stop::new();
         *cancellation = Some(stop.clone());
-        drop(cancellation);
         // A seed_mode torrent has no picker (data trusted; no bitfield -> cheap at
         // scale). To recheck it, create a picker on demand so run_recheck can
         // replace its trusted pieces with a disk verdict. Only rechecked torrents pay for a
@@ -3369,10 +3370,6 @@ impl TorrentManager {
             }
             t.apply_download_order();
         }
-        // A recheck is somebody saying the underlying problem is dealt with.
-        // Without this the torrent came back working and went on displaying the
-        // fault it no longer had.
-        t.clear_error();
         // A torrent in error told its trackers `stopped` (or owes it) and the
         // announcer will not look at it again for half an hour. If this
         // recheck brings it back, that wait is not its own.
@@ -3381,9 +3378,11 @@ impl TorrentManager {
             t.status
                 .store(TorrentStatus::Checking as u8, Ordering::Relaxed);
         }
+        drop(cancellation);
         let mgr = self.clone();
         let ih = *info_hash;
         tokio::spawn(async move {
+            // Partial results are local; dropping the scan cannot publish them.
             tokio::select! {
                 biased;
                 _ = stop.wait() => {},
@@ -3409,7 +3408,7 @@ impl TorrentManager {
             }
             // The counter goes first: a reader seeing `rechecking` false must
             // not find a figure left over from this check.
-            let mut cancellation = t.recheck_stop.lock().unwrap();
+            let mut cancellation = t.recheck_stop.lock();
             *cancellation = None;
             t.recheck_done.store(0, Ordering::SeqCst);
             t.rechecking.store(false, Ordering::SeqCst);
@@ -3482,9 +3481,15 @@ impl TorrentManager {
             .filter_map(|r| async move { r })
             .collect()
             .await;
-        if t.is_removed.load(Ordering::Relaxed) {
-            return; // torrent removed mid-check -> do not publish a verdict
+        // Stop either wins before publication or observes a finished verdict.
+        let cancellation = t.recheck_stop.lock();
+        if t.is_removed.load(Ordering::Relaxed)
+            || cancellation.as_ref().is_some_and(crate::stop::Stop::is_set)
+        {
+            return;
         }
+        // Cancellation must preserve the fault as well as the known pieces.
+        t.clear_error();
         // The disk refused a read: that is no verdict on the pieces. Clearing
         // them and writing the result down would turn a fault of the volume
         // into a torrent at 0%, and lose the record of what had been
@@ -3566,6 +3571,7 @@ impl TorrentManager {
                 .store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
         }
 
+        drop(cancellation);
         // Persist the verified bitfield so a restart does not re-check from
         // scratch (mirrors the resume written at add / on piece completion).
         let _ = self.try_persist_live(&ih);
@@ -4247,8 +4253,25 @@ mod lifecycle_tests {
     }
 
     #[tokio::test]
+    async fn a_cancelled_recheck_cannot_publish_even_when_its_reads_finish() {
+        let (mgr, root, ih, t) = whole_two_piece_torrent("cancelverdict");
+        t.picker.get().unwrap().lock().unwrap().set_have(0);
+        let stop = crate::stop::Stop::new();
+        *t.recheck_stop.lock() = Some(stop);
+        mgr.stop_torrent(&ih).unwrap();
+        mgr.run_recheck(ih, t.clone()).await;
+        assert_eq!(t.picker.get().unwrap().lock().unwrap().num_have(), 1);
+        assert_eq!(
+            t.status.load(Ordering::Relaxed),
+            TorrentStatus::Stopped as u8
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
     async fn stop_cancels_a_queued_recheck_without_waiting_for_a_slot() {
         let (mgr, root, ih, t) = whole_two_piece_torrent("cancelqueued");
+        t.mark_error("disk needs repair");
         t.picker.get().unwrap().lock().unwrap().set_have(0);
         let hold = recheck_sem().acquire_many(4).await.unwrap();
         mgr.recheck(&ih).unwrap();
@@ -4257,12 +4280,15 @@ mod lifecycle_tests {
         wait_recheck_end(&t).await;
         assert_eq!(crate::rpc::dispatch::torrent_to_json(&t)["state"], "paused");
         assert_eq!(t.recheck_done.load(Ordering::SeqCst), 0);
+        assert_eq!(*t.error_msg.lock().unwrap(), "disk needs repair");
+        assert!(t.serving_suspended.load(Ordering::Relaxed));
         assert_eq!(t.picker.get().unwrap().lock().unwrap().num_have(), 1);
         drop(hold);
         mgr.recheck(&ih).unwrap();
         wait_recheck_end(&t).await;
         assert_eq!(t.picker.get().unwrap().lock().unwrap().num_have(), 2);
         assert!(t.is_paused.load(Ordering::Relaxed));
+        assert!(t.error_msg.lock().unwrap().is_empty());
         std::fs::remove_dir_all(root).ok();
     }
 
@@ -4283,12 +4309,16 @@ mod lifecycle_tests {
                 wait.recv().unwrap();
             });
             ready.await.unwrap();
+            let hold = recheck_sem().acquire_many(3).await.unwrap();
             mgr.recheck(&ih).unwrap();
-            // The checker acquires its slot and waits for a disk worker.
+            // The last slot belongs to this checker; its disk worker is blocked.
             tokio::task::yield_now().await;
+            assert_eq!(recheck_sem().available_permits(), 0);
             assert!(t.rechecking.load(Ordering::SeqCst));
             mgr.stop_torrent(&ih).unwrap();
             wait_recheck_end(&t).await;
+            assert_eq!(recheck_sem().available_permits(), 1);
+            drop(hold);
             release.send(()).unwrap();
             blocker.await.unwrap();
             assert_eq!(t.picker.get().unwrap().lock().unwrap().num_have(), 1);
