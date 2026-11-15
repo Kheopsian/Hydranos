@@ -288,8 +288,8 @@ pub fn free_space(path: &Path) -> Option<u64> {
 // Page size and resident set
 // ---------------------------------------------------------------------------
 
-#[cfg(unix)]
-pub fn page_size() -> u64 {
+#[cfg(target_os = "linux")]
+fn page_size() -> u64 {
     unsafe { libc::sysconf(libc::_SC_PAGESIZE) as u64 }
 }
 

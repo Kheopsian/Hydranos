@@ -707,6 +707,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn the_fd_count_is_this_processs_own() {
         // At least stdin, stdout, stderr and the directory handle being read.
@@ -984,7 +985,14 @@ mod tests {
             0.0,
             "the first sample has no predecessor to difference against"
         );
+        #[cfg(target_os = "linux")]
         assert!(f("open_fds") >= 4.0);
+        #[cfg(not(target_os = "linux"))]
+        assert_eq!(
+            f("open_fds"),
+            0.0,
+            "no /proc file-descriptor metric on this platform"
+        );
 
         // The extra engine has its own row; it is in neither the race nor the hoard column.
         let extra = bench

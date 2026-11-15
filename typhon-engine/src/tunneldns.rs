@@ -474,6 +474,7 @@ pub(crate) mod tests {
 
     /// A DNS server on loopback that answers every A query with `answer` and
     /// counts what it was asked.
+    #[cfg(target_os = "linux")]
     pub(crate) async fn fake_server(
         answer: [u8; 4],
     ) -> (SocketAddr, Arc<std::sync::Mutex<Vec<String>>>) {
@@ -514,6 +515,7 @@ pub(crate) mod tests {
 
     /// The server is registered with its real port: `set_servers` takes the
     /// `.conf`'s addresses and assumes 53, the test needs another one.
+    #[cfg(target_os = "linux")]
     pub(crate) fn register(device: &str, server: SocketAddr) {
         cache().lock().unwrap().retain(|(d, _), _| d != device);
         let entry = Arc::new(Entry {
@@ -529,6 +531,7 @@ pub(crate) mod tests {
 
     /// The tests that register `lo` take turns: the registry is keyed
     /// by device and they would otherwise overwrite each other's server.
+    #[cfg(target_os = "linux")]
     pub(crate) static LO: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     #[cfg(target_os = "linux")]
