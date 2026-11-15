@@ -4232,6 +4232,7 @@ function _bulkForget(p) {
 function _bulkClose(p) {
     p.shown = false;
     p.closed = true;
+    clearTimeout(p.autoCloseTimer);
     if (p.overlay) { p.overlay.remove(); p.overlay = null; }
     if (p.box) p.box.remove();
     _bulkDropEmptyDock();
@@ -4286,6 +4287,28 @@ function _bulkOutcomesHTML(j) {
     return parts.join('<span class="bulk-sep"> · </span>');
 }
 
+// A card for a job that ended cleanly has nothing left to say once it has been
+// glanced at, and piling up until someone clicks x buries the ones that need
+// attention. The delay is long enough to read the outcome.
+const JOB_DONE_AUTOCLOSE_MS = 30000;
+
+// Close a docked card JOB_DONE_AUTOCLOSE_MS after this browser first saw its job
+// finished with nothing to read: not failed, cancelled, lost, noted, or in an
+// outcome the operator must act on (_bulkNoteworthy). The deadline lives on the
+// panel itself, so the polls and re-renders never restart it, and it fires once. A card not docked when the
+// deadline passes is closed as soon as it is docked.
+function _bulkAutoClose(p, running) {
+    if (running || p.lost || p.closed || p.note || _bulkNoteworthy(p.job)) return false;
+    if (!p.autoCloseAt) {
+        p.autoCloseAt = Date.now() + JOB_DONE_AUTOCLOSE_MS;
+        p.autoCloseTimer = setTimeout(() => { if (p.docked) _bulkClose(p); }, JOB_DONE_AUTOCLOSE_MS);
+    } else if (p.docked && Date.now() >= p.autoCloseAt) {
+        _bulkClose(p);
+        return true;
+    }
+    return false;
+}
+
 function _bulkRender(p) {
     if (!p.box || !p.shown) return;
     const j = p.job || {};
@@ -4297,6 +4320,7 @@ function _bulkRender(p) {
         lost: t("Lost"), cancelled: t("Cancelled"), finished: t("Finished"),
         cancelling: t("Cancelling..."), running: t("Running"),
     }[stateKey];
+    if (_bulkAutoClose(p, running)) return;
     const count = `${fmtInt(done)} / ${fmtInt(total)}`;
     let timing = "";
     const ms = j.elapsed_ms || 0;
