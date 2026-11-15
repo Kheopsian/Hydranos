@@ -14349,7 +14349,9 @@ async fn qbit_torrent_add(
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
 
-    let mut files: Vec<Vec<u8>> = Vec::new();
+    // `Bytes` as the reader hands them: a batch of up to `ADD_BODY_LIMIT` is
+    // not copied a second time.
+    let mut files: Vec<axum::body::Bytes> = Vec::new();
     let mut category = String::new();
     let mut save_path = String::new();
     let mut tags = String::new();
@@ -14397,7 +14399,7 @@ async fn qbit_torrent_add(
         let name = field.name().unwrap_or_default().to_string();
         match name.as_str() {
             "torrents" | "file" | "fileselect" => match field.bytes().await {
-                Ok(data) => files.push(data.to_vec()),
+                Ok(data) => files.push(data),
                 Err(e) => return cut_short(e),
             },
             _ => {
@@ -14525,7 +14527,6 @@ async fn qbit_torrent_add(
             }
         }
     });
-    let mut failed = 0;
     let mut url_failed = 0;
     for u in &urls {
         let outcome = if crate::rss::is_magnet(u) {
@@ -14557,7 +14558,7 @@ async fn qbit_torrent_add(
         } else {
             match crate::mcp::fetch_torrent(u).await {
                 Ok(b) => {
-                    files.push(b);
+                    files.push(b.into());
                     Ok(())
                 }
                 Err(e) => Err(e),
@@ -14580,45 +14581,60 @@ async fn qbit_torrent_add(
             (StatusCode::OK, "Ok.").into_response()
         };
     }
-    for bytes in &files {
-        if no_subfolder
-            && typhon_engine::torrent::metainfo::parse_torrent_bytes(bytes)
-                .is_ok_and(|m| m.multi_file)
-        {
-            tracing::warn!("qbit add refused: contentLayout NoSubfolder on a multi-file torrent is not supported");
-            failed += 1;
-            continue;
-        }
-        let save_path =
-            match add_save_path(&state, bytes, &category, &engine, &save_path, subfolder) {
-                Ok(p) => p,
+    // Off the async runtime: each add takes the store's lock, writes SQLite,
+    // stats the save path and may wait on a path reservation. A batch of a
+    // hundred run inline held a runtime worker for all of it.
+    let total = files.len();
+    let st = state.clone();
+    let failed = tokio::task::spawn_blocking(move || {
+        let state = st;
+        let mut failed = 0usize;
+        for bytes in &files {
+            if no_subfolder
+                && typhon_engine::torrent::metainfo::parse_torrent_bytes(bytes)
+                    .is_ok_and(|m| m.multi_file)
+            {
+                tracing::warn!("qbit add refused: contentLayout NoSubfolder on a multi-file torrent is not supported");
+                failed += 1;
+                continue;
+            }
+            let save_path =
+                match add_save_path(&state, bytes, &category, &engine, &save_path, subfolder) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "qbit add refused");
+                        failed += 1;
+                        continue;
+                    }
+                };
+            match add_torrent_bytes(
+                &state, bytes, &category, &save_path, &tags, paused, seed_mode, &engine,
+            ) {
+                // upLimit / dlLimit and the download order land on the torrent
+                // the moment it exists, and persist with it. A magnet keeps them
+                // with its request until then (`magnets::AddOptions`).
+                Ok((hash, _)) => {
+                    apply_add_options(&state, &hash, up_limit, dl_limit, sequential, first_last);
+                    share_at_add(&state, hash);
+                }
+                // "already added" is not a failure to a client that retries a
+                // release it has seen before; qBit answers Ok. for it too.
+                Err(e) if e.contains("already added") => {}
                 Err(e) => {
                     tracing::warn!(error = %e, "qbit add refused");
                     failed += 1;
-                    continue;
                 }
-            };
-        match add_torrent_bytes(
-            &state, bytes, &category, &save_path, &tags, paused, seed_mode, &engine,
-        ) {
-            // upLimit / dlLimit and the download order land on the torrent
-            // the moment it exists, and persist with it. A magnet keeps them
-            // with its request until then (`magnets::AddOptions`).
-            Ok((hash, _)) => {
-                share_at_add(&state, hash.clone());
-                apply_add_options(&state, &hash, up_limit, dl_limit, sequential, first_last);
-            }
-            // "already added" is not a failure to a client that retries a
-            // release it has seen before; qBit answers Ok. for it too.
-            Err(e) if e.contains("already added") => continue,
-            Err(e) => {
-                tracing::warn!(error = %e, "qbit add refused");
-                failed += 1;
             }
         }
-    }
+        failed
+    })
+    .await
+    .unwrap_or_else(|e| {
+        tracing::error!(error = %e, "qbit add: the add task ended abnormally");
+        total
+    });
 
-    if failed == files.len() && url_failed == urls.len() {
+    if failed == total && url_failed == urls.len() {
         return (StatusCode::BAD_REQUEST, "Fails.").into_response();
     }
     (StatusCode::OK, "Ok.").into_response()
@@ -14659,60 +14675,128 @@ fn unreadable_upload(e: &axum::extract::multipart::MultipartError) -> (StatusCod
     (status, why)
 }
 
-/// What became of one file of a native upload.
+/// What became of one file of a native upload, as the batch answer writes it:
+/// `{"status":"added"|"present"|"refused", ...}`.
+#[derive(Debug, serde::Serialize)]
+#[serde(tag = "status", rename_all = "lowercase")]
 enum UploadOutcome {
     Added {
-        hash: String,
+        info_hash: String,
         name: String,
         engine: String,
+        mode: String,
     },
-    /// Held already, by the engine the add was routed to.
-    Present {
-        hash: String,
-        error: String,
-    },
+    /// Held already by the engine the add was routed to.
+    Present { info_hash: String, error: String },
+    /// `info_hash` is `None` for bytes that are no torrent.
     Refused {
-        hash: Option<String>,
+        info_hash: Option<String>,
         error: String,
     },
 }
 
-/// One file of a native upload: its folder, then the add.
-// Every argument is a distinct input of the request; a struct would only move the list.
-#[allow(clippy::too_many_arguments)]
-fn upload_one(
-    state: &AppState,
-    bytes: &[u8],
-    category: &str,
-    save_path: &str,
-    tags: &str,
+/// The fields of a native upload, applied to every file of it.
+struct UploadFields {
+    category: String,
+    save_path: String,
+    tags: String,
     paused: bool,
     seed_mode: bool,
-    engine: &str,
+    /// Resolved by `add_target_engine`; empty lets the category decide.
+    engine: String,
     subfolder: bool,
-) -> UploadOutcome {
-    // Parsed for the hash alone: a refused file is still named, so a client
-    // can tell which of its files the refusal is about.
-    let hash = typhon_engine::torrent::metainfo::parse_torrent_bytes(bytes)
-        .ok()
-        .map(|m| typhon_engine::torrent::hex_encode(&m.info_hash));
-    let save_path = match add_save_path(state, bytes, category, engine, save_path, subfolder) {
+}
+
+/// One file of a native upload: its folder, then the add.
+///
+/// Blocking: the add takes the store's lock and touches the disk, so it runs
+/// on a blocking thread, never on the async runtime.
+fn upload_one(state: &AppState, f: &UploadFields, bytes: &[u8]) -> UploadOutcome {
+    // The hash of a file the add did not take, for the answer to name it. Only
+    // then: a successful add hands the hash back, and a `.torrent` can be
+    // megabytes long.
+    let hash_of = || {
+        typhon_engine::torrent::metainfo::parse_torrent_bytes(bytes)
+            .ok()
+            .map(|m| typhon_engine::torrent::hex_encode(&m.info_hash))
+    };
+    let save_path = match add_save_path(
+        state,
+        bytes,
+        &f.category,
+        &f.engine,
+        &f.save_path,
+        f.subfolder,
+    ) {
         Ok(p) => p,
-        Err(error) => return UploadOutcome::Refused { hash, error },
+        Err(error) => {
+            return UploadOutcome::Refused {
+                info_hash: hash_of(),
+                error,
+            }
+        }
     };
     match add_torrent_bytes(
-        state, bytes, category, &save_path, tags, paused, seed_mode, engine,
+        state,
+        bytes,
+        &f.category,
+        &save_path,
+        &f.tags,
+        f.paused,
+        f.seed_mode,
+        &f.engine,
     ) {
-        Ok((hash, name)) => UploadOutcome::Added {
-            hash,
-            name,
-            engine: placement(state, category, engine).0,
+        Ok((info_hash, name)) => {
+            let engine = placement(state, &f.category, &f.engine).0;
+            let mode = engine_role(state, &engine);
+            UploadOutcome::Added {
+                info_hash,
+                name,
+                engine,
+                mode,
+            }
+        }
+        // The engines' refusal is a string; this is how every add route tells
+        // a duplicate from a failure.
+        Err(error) if error.contains("already added") => match hash_of() {
+            Some(info_hash) => UploadOutcome::Present { info_hash, error },
+            None => UploadOutcome::Refused {
+                info_hash: None,
+                error,
+            },
         },
-        Err(error) if error.contains("already added") => match hash {
-            Some(hash) => UploadOutcome::Present { hash, error },
-            None => UploadOutcome::Refused { hash, error },
+        Err(error) => UploadOutcome::Refused {
+            info_hash: hash_of(),
+            error,
         },
-        Err(error) => UploadOutcome::Refused { hash, error },
+    }
+}
+
+/// The answer to a batch upload: the counts, then one result per file in the
+/// order sent.
+#[derive(Debug, Default, serde::Serialize)]
+struct BatchAnswer {
+    added: usize,
+    present: usize,
+    refused: usize,
+    results: Vec<UploadOutcome>,
+}
+
+impl FromIterator<UploadOutcome> for BatchAnswer {
+    fn from_iter<I: IntoIterator<Item = UploadOutcome>>(outcomes: I) -> Self {
+        let mut answer = Self::default();
+        for outcome in outcomes {
+            match &outcome {
+                UploadOutcome::Added { .. } => answer.added += 1,
+                UploadOutcome::Present { .. } => answer.present += 1,
+                UploadOutcome::Refused { info_hash, error } => {
+                    answer.refused += 1;
+                    tracing::warn!(info_hash = ?info_hash, error = %error, "upload: one file of a batch refused");
+                }
+            }
+            answer.results.push(outcome);
+        }
+        answer
     }
 }
 
@@ -14725,10 +14809,10 @@ fn upload_one(
 ///
 /// One file part answers as it always has: the torrent, or an error with its
 /// status (409 already added). Several (or `batch=true`) answer `200` with one
-/// result per file, in the order sent -- `added`, `present` or `refused` --
-/// so a client knows what became of each without listing the torrents again.
-/// The fields apply to every file; only a bad `engine`/`mode`, an unreadable
-/// request or no file at all refuse the request as a whole.
+/// result per file part, in the order sent -- `added`, `present` or `refused`
+/// -- so a client knows what became of each without listing the torrents
+/// again. The fields apply to every file; only a bad `engine`/`mode`, an
+/// unreadable request or no file at all refuse the request as a whole.
 async fn post_torrent_upload(
     State(state): State<AppState>,
     RawQuery(query): RawQuery,
@@ -14745,7 +14829,6 @@ async fn post_torrent_upload(
         )
             .into_response()
     };
-
     let unreadable = |e: axum::extract::multipart::MultipartError| {
         let (status, why) = unreadable_upload(&e);
         tracing::warn!(error = %why, "upload refused");
@@ -14756,7 +14839,9 @@ async fn post_torrent_upload(
             .into_response()
     };
 
-    let mut files: Vec<Vec<u8>> = Vec::new();
+    // `Bytes` as the reader hands them: a request of up to `ADD_BODY_LIMIT` is
+    // not copied a second time.
+    let mut files: Vec<axum::body::Bytes> = Vec::new();
     let (mut category, mut save_path, mut tags, mut engine) =
         (String::new(), String::new(), String::new(), String::new());
     let (mut paused, mut seed_mode, mut batch) = (false, false, false);
@@ -14773,9 +14858,10 @@ async fn post_torrent_upload(
         };
         let name = field.name().unwrap_or_default().to_string();
         if name == "torrents" || name == "torrent" || name == "file" {
+            // An empty part is kept: it gets its own "refused" result, so the
+            // results still line up with the parts sent.
             match field.bytes().await {
-                Ok(b) if !b.is_empty() => files.push(b.to_vec()),
-                Ok(_) => {}
+                Ok(b) => files.push(b),
                 Err(e) => return unreadable(e),
             }
             continue;
@@ -14799,7 +14885,7 @@ async fn post_torrent_upload(
             _ => {}
         }
     }
-    if files.is_empty() {
+    if files.iter().all(axum::body::Bytes::is_empty) {
         return bad("no torrent file in request".into());
     }
     // A named engine that does not exist is refused rather than quietly
@@ -14809,54 +14895,60 @@ async fn post_torrent_upload(
         Ok(e) => e,
         Err(e) => return bad(e),
     };
+    let fields = UploadFields {
+        category,
+        save_path,
+        tags,
+        paused,
+        seed_mode,
+        engine,
+        subfolder,
+    };
+    let single = files.len() == 1 && !batch;
 
-    let add = |bytes: &[u8]| {
-        upload_one(
-            &state, bytes, &category, &save_path, &tags, paused, seed_mode, &engine, subfolder,
-        )
+    // Off the async runtime: each add takes the store's lock, writes SQLite,
+    // stats the save path and may wait on a path reservation.
+    let st = state.clone();
+    let outcomes = tokio::task::spawn_blocking(move || {
+        files
+            .iter()
+            .map(|bytes| upload_one(&st, &fields, bytes))
+            .collect::<Vec<_>>()
+    })
+    .await;
+    let mut outcomes = match outcomes {
+        Ok(o) => o,
+        Err(e) => {
+            tracing::error!(error = %e, "upload: the add task ended abnormally");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "the add did not complete; list the torrents to see what went in"})),
+            )
+                .into_response();
+        }
     };
 
-    if files.len() == 1 && !batch {
-        return match add(&files[0]) {
-            UploadOutcome::Added { hash, name, engine } => Json(serde_json::json!({
-                "info_hash": hash, "name": name, "engine": engine, "mode": engine_role(&state, &engine)
+    if single {
+        return match outcomes.pop() {
+            Some(UploadOutcome::Added {
+                info_hash,
+                name,
+                engine,
+                mode,
+            }) => Json(serde_json::json!({
+                "info_hash": info_hash, "name": name, "engine": engine, "mode": mode
             }))
             .into_response(),
-            UploadOutcome::Present { error, .. } => (
+            Some(UploadOutcome::Present { error, .. }) => (
                 StatusCode::CONFLICT,
                 Json(serde_json::json!({"error": error})),
             )
                 .into_response(),
-            UploadOutcome::Refused { error, .. } => bad(error),
+            Some(UploadOutcome::Refused { error, .. }) => bad(error),
+            None => bad("no torrent file in request".into()),
         };
     }
-
-    let (mut added, mut present, mut refused) = (0usize, 0usize, 0usize);
-    let mut results: Vec<serde_json::Value> = Vec::with_capacity(files.len());
-    for bytes in &files {
-        results.push(match add(bytes) {
-            UploadOutcome::Added { hash, name, engine } => {
-                added += 1;
-                serde_json::json!({
-                    "status": "added", "info_hash": hash, "name": name,
-                    "engine": engine, "mode": engine_role(&state, &engine)
-                })
-            }
-            UploadOutcome::Present { hash, error } => {
-                present += 1;
-                serde_json::json!({"status": "present", "info_hash": hash, "error": error})
-            }
-            UploadOutcome::Refused { hash, error } => {
-                refused += 1;
-                tracing::warn!(error = %error, "upload: one file of a batch refused");
-                serde_json::json!({"status": "refused", "info_hash": hash, "error": error})
-            }
-        });
-    }
-    Json(serde_json::json!({
-        "added": added, "present": present, "refused": refused, "results": results
-    }))
-    .into_response()
+    Json(outcomes.into_iter().collect::<BatchAnswer>()).into_response()
 }
 
 /// Remove a torrent from Hydra.

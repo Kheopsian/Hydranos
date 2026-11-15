@@ -690,6 +690,30 @@ async fn a_batch_upload_answers_one_result_per_file_in_order() {
     );
 }
 
+/// An empty file part is a result of its own, refused: dropping it would
+/// shift every result after it onto the wrong file.
+#[tokio::test]
+async fn an_empty_part_in_a_batch_keeps_the_results_in_step() {
+    let s = st("upl-batch-empty", "");
+    let dir = s.dir.join("incoming");
+    let (a, b) = (torrent_bytes("step-a.bin"), torrent_bytes("step-b.bin"));
+    let (ct, body) = multipart_many(&[("savepath", dir.to_str().unwrap())], &[&a, &[], &b]);
+    let (code, v) = upload_raw(&s, ct, body).await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    let r = v["results"].as_array().expect("results");
+    assert_eq!(r.len(), 3, "{v}");
+    assert_eq!(
+        (r[0]["status"].as_str(), r[0]["info_hash"].as_str()),
+        (Some("added"), Some(hash_of(&a).as_str()))
+    );
+    assert_eq!(r[1]["status"], "refused");
+    assert!(r[1]["info_hash"].is_null());
+    assert_eq!(
+        (r[2]["status"].as_str(), r[2]["info_hash"].as_str()),
+        (Some("added"), Some(hash_of(&b).as_str()))
+    );
+}
+
 /// `batch=true` gives one file the batch answer, so a client sends any count
 /// and reads one shape. Without it one file answers as it always has (the
 /// tests above), and a refusal keeps its status there.
