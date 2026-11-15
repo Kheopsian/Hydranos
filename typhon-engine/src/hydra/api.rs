@@ -32223,8 +32223,7 @@ mod detail_panel_tests {
             tokio::time::sleep(std::time::Duration::from_millis(600)).await;
             t.upload_rate.update(600_000);
             t.download_rate.update(60_000);
-            for e in t.peer_stats.iter() {
-                let p = e.value();
+            for p in t.peers.snapshot() {
                 p.dl_rate.update(p.total_downloaded.load(Ordering::Relaxed));
                 p.ul_rate.update(p.total_uploaded.load(Ordering::Relaxed));
             }
@@ -32436,14 +32435,14 @@ mod detail_panel_tests {
                 );
             }
             let peers = p["peers"].as_array().expect("peers");
-            assert_eq!(peers.len(), t.peer_stats.len());
+            assert_eq!(peers.len(), t.peers.len());
             assert_eq!(peers.len(), 2);
             for peer in peers {
                 let addr: std::net::SocketAddr =
                     format!("{}:{}", peer["ip"].as_str().unwrap(), peer["port"])
                         .parse()
                         .unwrap();
-                let st = t.peer_stats.get(&addr).expect("a peer of the session");
+                let st = t.peers.get(&addr).expect("a peer of the session");
                 assert_eq!(peer["client"], st.client.as_str());
                 assert_eq!(
                     peer["total_upload"],

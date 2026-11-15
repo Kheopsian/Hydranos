@@ -198,7 +198,7 @@ fn a_live_session_is_counted_on_the_torrent() {
 
         assert_eq!(torrent.peers_connected.load(Ordering::Relaxed), 1);
         assert!(
-            torrent.peer_stats.iter().next().is_some(),
+            !torrent.peers.is_empty(),
             "and it is in the peer table the choking engine reads"
         );
     });
@@ -226,10 +226,7 @@ fn a_peer_that_hangs_up_is_released() {
             );
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        assert!(
-            torrent.peer_stats.is_empty(),
-            "and the table is empty again"
-        );
+        assert!(torrent.peers.is_empty(), "and the table is empty again");
     });
 }
 
@@ -248,9 +245,10 @@ fn an_interested_peer_is_recorded_as_interested() {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         loop {
             let interested = torrent
-                .peer_stats
+                .peers
+                .snapshot()
                 .iter()
-                .any(|e| e.value().interested.load(Ordering::Relaxed));
+                .any(|p| p.interested.load(Ordering::Relaxed));
             if interested {
                 break;
             }

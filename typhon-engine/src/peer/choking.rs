@@ -133,14 +133,13 @@ fn choke_pass(
 /// Unchoke every peer of a torrent the choker had choked. Answers how many.
 fn release_torrent(t: &TorrentState) -> usize {
     let mut n = 0;
-    for e in t.peer_stats.iter() {
-        let s = e.value();
+    t.peers.for_each(|s| {
         if s.choked.swap(false, Ordering::Relaxed) {
             s.choking_gen.fetch_add(1, Ordering::Relaxed);
             s.punch_wake.notify_one();
             n += 1;
         }
-    }
+    });
     n
 }
 
@@ -166,10 +165,10 @@ fn rank_torrent(t: &TorrentState) -> Option<Vec<Cand>> {
     let num_pieces = t.meta.num_pieces();
     // Snapshot (addr, Arc<PeerStats>) for interested peers.
     let mut cands: Vec<Cand> = t
-        .peer_stats
-        .iter()
-        .filter_map(|e| {
-            let s = e.value().clone();
+        .peers
+        .snapshot()
+        .into_iter()
+        .filter_map(|s| {
             if !s.interested.load(Ordering::Relaxed) {
                 return None;
             }
@@ -367,7 +366,7 @@ mod tests {
         s.num_pieces_have.store(have, Ordering::Relaxed);
         s.interested.store(interested, Ordering::Relaxed);
         s.uploaded_last_tick.store(bytes, Ordering::Relaxed);
-        t.peer_stats.insert(addr, s.clone());
+        t.peers.insert(addr, s.clone());
         s
     }
 

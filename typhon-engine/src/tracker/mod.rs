@@ -999,7 +999,7 @@ pub async fn dial_peer(
         return;
     }
     // Skip if we're already connected to this peer on this torrent.
-    if torrent.connected_addrs.contains_key(&addr) {
+    if torrent.peers.contains_key(&addr) {
         DIAL_SKIPPED_CONNECTED.fetch_add(1, AtomicOrdering::Relaxed);
         if traced {
             info!("[dialtrace] {} SKIPPED already connected", addr);

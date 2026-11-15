@@ -1,5 +1,4 @@
 use bytes::Bytes;
-use dashmap::DashMap;
 use parking_lot::RwLock;
 use std::path::PathBuf;
 use std::sync::atomic::{
@@ -540,19 +539,12 @@ pub struct PeerGuard {
 impl PeerGuard {
     pub fn new(torrent: Arc<TorrentState>, stats: Arc<PeerStats>) -> Self {
         let addr = stats.addr;
-        torrent.peer_stats.insert(addr, stats);
+        torrent.peers.insert(addr, stats);
         torrent.peers_connected.fetch_add(1, Ordering::Relaxed);
         // Process-wide live connection count backing `max_connections`.
         // Maintained here rather than at the dial site so inbound sessions are
         // counted too, and so the decrement is RAII-guaranteed below.
         torrent.limiter().connection_opened();
-        // Connected-addr dedup: tracker/DHT both check `connected_addrs`
-        // before dialing a peer to avoid spawning N parallel sockets to
-        // the same address. This insert is the missing half — without it
-        // the contains() check in tracker/mod.rs and dht.rs is always
-        // false and every announce cycle re-dials known peers, fragmenting
-        // throughput across redundant connections.
-        torrent.connected_addrs.insert(addr, ());
         Self {
             torrent,
             addr,
@@ -576,10 +568,9 @@ impl PeerGuard {
 
 impl Drop for PeerGuard {
     fn drop(&mut self) {
-        self.torrent.peer_stats.remove(&self.addr);
+        self.torrent.peers.remove(&self.addr);
         self.torrent.peers_connected.fetch_sub(1, Ordering::Relaxed);
         self.torrent.limiter().connection_closed();
-        self.torrent.connected_addrs.remove(&self.addr);
         if self.was_interested.load(Ordering::Relaxed) {
             self.torrent
                 .peers_interested
@@ -588,27 +579,85 @@ impl Drop for PeerGuard {
     }
 }
 
-/// Runtime state for an active torrent.
-/// Shard count for the two per-torrent concurrent maps below.
+/// The peers connected to one torrent, by address.
 ///
-/// `DashMap::new()` sizes its shard array from the machine: `(nproc * 4)`
-/// rounded up to a power of two. On a 12-core box that is 64 shards, and
-/// dashmap allocates the whole array up front, at construction, before a
-/// single entry exists. Each shard is a `CachePadded<RwLock<HashMap>>` = 128
-/// bytes, so one empty `DashMap` costs 8 KiB and a `TorrentState` carrying two
-/// of them costs ~16.7 KiB of untouched shards.
+/// One map, allocated when the first peer connects and freed when the last
+/// one leaves. Most torrents of a large catalogue have no peer at any given
+/// moment, and they pay 16 bytes here and nothing on the heap.
 ///
-/// Measured on prod 2026-08-28: 204,893 torrents, 167k of them with zero
-/// peers, 3.43 GB of RAM in shard arrays that never held anything.
+/// It used to be two `DashMap`s, `peer_stats` and `connected_addrs`, always
+/// holding the same keys. Even at 2 shards each, an empty one costs 256 bytes
+/// of padded shards on the heap plus 40 inline, so a torrent with no peer paid
+/// ~600 bytes: ~170 MB across 290,000 torrents. (Built with `DashMap::new()`,
+/// which sizes its shards from the core count, they had cost 3.43 GB over
+/// 204,893 torrents, measured on prod 2026-08-28.) Sharding bought nothing:
+/// the map belongs to one torrent, and every write is one insert or remove on
+/// a small map.
 ///
-/// Sharding buys nothing here. These maps are per torrent, not global: they
-/// are written on peer connect/disconnect and read by the PEX tick, the dial
-/// dedup and `get_peers`. Contention is bounded by one torrent's peer count,
-/// and every critical section is a single insert/remove on a small map. The
-/// global maps in `TorrentManager` (`torrents`, `skey_index`) keep the default
-/// sharding -- those are genuinely hot across 200k entries.
-/// 2, not 1: dashmap asserts `shard_amount > 1` at construction.
-const PER_TORRENT_SHARDS: usize = 2;
+/// The closures given to `for_each` run under the read lock: they must not
+/// block, and must not touch this registry.
+#[derive(Default)]
+#[allow(clippy::box_collection)] // boxed: one word on the many torrents with no peer
+pub struct PeerRegistry(RwLock<Option<Box<PeerMap>>>);
+
+type PeerMap = std::collections::HashMap<std::net::SocketAddr, Arc<PeerStats>>;
+
+impl PeerRegistry {
+    /// Register `stats` under `addr`. Replaces (and returns) a peer already
+    /// registered there.
+    pub fn insert(
+        &self,
+        addr: std::net::SocketAddr,
+        stats: Arc<PeerStats>,
+    ) -> Option<Arc<PeerStats>> {
+        self.0
+            .write()
+            .get_or_insert_with(Box::default)
+            .insert(addr, stats)
+    }
+
+    /// Unregister `addr`. The map is freed with its last peer.
+    pub fn remove(&self, addr: &std::net::SocketAddr) -> Option<Arc<PeerStats>> {
+        let mut g = self.0.write();
+        let map = g.as_mut()?;
+        let gone = map.remove(addr);
+        if map.is_empty() {
+            *g = None;
+        }
+        gone
+    }
+
+    pub fn get(&self, addr: &std::net::SocketAddr) -> Option<Arc<PeerStats>> {
+        self.0.read().as_ref()?.get(addr).cloned()
+    }
+
+    pub fn contains_key(&self, addr: &std::net::SocketAddr) -> bool {
+        self.0.read().as_ref().is_some_and(|m| m.contains_key(addr))
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.read().is_none()
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.read().as_ref().map_or(0, |m| m.len())
+    }
+
+    /// Visit every peer, under the read lock. See the type's note.
+    pub fn for_each(&self, mut f: impl FnMut(&Arc<PeerStats>)) {
+        if let Some(m) = self.0.read().as_ref() {
+            m.values().for_each(&mut f);
+        }
+    }
+
+    /// The peers as they are now, to work on without holding the lock.
+    pub fn snapshot(&self) -> Vec<Arc<PeerStats>> {
+        self.0
+            .read()
+            .as_ref()
+            .map_or_else(Vec::new, |m| m.values().cloned().collect())
+    }
+}
 
 /// No announce event is owed.
 pub const ANNOUNCE_EVENT_NONE: u8 = 0;
@@ -978,17 +1027,12 @@ pub struct TorrentState {
     /// into a stop.
     pub disk_write_failures: AtomicU32,
 
-    // Peer registry: insert at connect, remove at disconnect (via PeerGuard).
-    // Each peer task holds its own Arc<PeerStats>, so hot-path updates do
-    // NOT need lookups — zero contention during piece transfers.
-    // This is only accessed during get_peers (user opens peer panel = rare).
-    pub peer_stats: DashMap<std::net::SocketAddr, Arc<PeerStats>>,
-
-    /// Addresses of peers currently connected on this torrent. Maintained by
-    /// peer tasks (insert at handshake success, remove on disconnect). Used by
-    /// PEX (BEP 11) to compute added/dropped between ticks and by the dial
-    /// dedup path ("don't redial a peer we already serve").
-    pub connected_addrs: DashMap<std::net::SocketAddr, ()>,
+    /// The peers connected now: inserted at handshake, removed at disconnect,
+    /// both by `PeerGuard`. Each peer task holds its own `Arc<PeerStats>`, so
+    /// the transfer hot path never looks here. Read by the peer panel, the
+    /// choker, PEX, and the dial dedup of tracker, DHT and LSD ("don't redial
+    /// a peer we already serve").
+    pub peers: PeerRegistry,
 }
 
 /// Unix seconds. The seed counter needs a wall clock, not a monotonic one:
@@ -1599,8 +1643,7 @@ impl TorrentState {
             data_lost: std::sync::atomic::AtomicBool::new(false),
             piece_mem: OnceLock::new(),
             files_checked: std::sync::atomic::AtomicU8::new(0),
-            peer_stats: DashMap::with_shard_amount(PER_TORRENT_SHARDS),
-            connected_addrs: DashMap::with_shard_amount(PER_TORRENT_SHARDS),
+            peers: PeerRegistry::default(),
         }
     }
 
@@ -2024,38 +2067,16 @@ impl TorrentMeta {
 mod tests {
     use super::*;
 
-    /// The two per-torrent maps must NOT be sharded by core count.
-    ///
-    /// `DashMap::new()` allocates `(nproc * 4).next_power_of_two()` shards up
-    /// front -- 64 on a 12-core box, 128 bytes each, per map, per torrent,
-    /// before a single peer exists. At 200k torrents that was 3.43 GB of empty
-    /// shard arrays. Revert either constructor to `::new()` and this test goes
-    /// from 2 to nproc*4 on the CI runner.
+    /// A torrent with no peer must cost one lock and a null pointer, nothing
+    /// on the heap: most torrents of a large catalogue have none.
     #[test]
-    fn per_torrent_maps_are_not_sharded_by_core_count() {
-        let stats: DashMap<std::net::SocketAddr, Arc<PeerStats>> =
-            DashMap::with_shard_amount(PER_TORRENT_SHARDS);
-        let addrs: DashMap<std::net::SocketAddr, ()> =
-            DashMap::with_shard_amount(PER_TORRENT_SHARDS);
-        assert_eq!(
-            stats.shards().len(),
-            PER_TORRENT_SHARDS,
-            "peer_stats regained shards"
-        );
-        assert_eq!(
-            addrs.shards().len(),
-            PER_TORRENT_SHARDS,
-            "connected_addrs regained shards"
-        );
+    fn an_empty_peer_registry_is_two_words() {
+        assert_eq!(std::mem::size_of::<PeerRegistry>(), 16);
+        assert!(PeerRegistry::default().0.read().is_none());
+    }
 
-        // Proof the default is what we are avoiding: if dashmap ever stops
-        // sizing from the core count, this assert fires and the constant can
-        // go away.
-        let default_shards = DashMap::<u8, u8>::new().shards().len();
-        assert!(
-            default_shards > PER_TORRENT_SHARDS,
-            "dashmap no longer shards by core count; PER_TORRENT_SHARDS is moot"
-        );
+    fn peer(addr: std::net::SocketAddr) -> Arc<PeerStats> {
+        Arc::new(PeerStats::new(addr, [0; 20], String::new(), false, false))
     }
 
     fn torrent_bytes(n: usize) -> (Vec<u8>, Vec<[u8; 20]>) {
@@ -2299,24 +2320,33 @@ mod tests {
         );
     }
 
-    /// One shard still has to behave like the set it replaced.
+    /// The registry behaves like the map it replaced, and frees itself with
+    /// its last peer.
     #[test]
-    fn single_shard_map_still_stores_and_removes() {
-        let addrs: DashMap<std::net::SocketAddr, ()> =
-            DashMap::with_shard_amount(PER_TORRENT_SHARDS);
+    fn peer_registry_stores_removes_and_frees() {
+        let peers = PeerRegistry::default();
         let a: std::net::SocketAddr = "10.0.0.1:6881".parse().unwrap();
         let b: std::net::SocketAddr = "10.0.0.2:6881".parse().unwrap();
-        assert!(addrs.insert(a, ()).is_none(), "first insert was not new");
-        assert!(addrs.insert(b, ()).is_none());
         assert!(
-            addrs.insert(a, ()).is_some(),
+            peers.insert(a, peer(a)).is_none(),
+            "first insert was not new"
+        );
+        assert!(peers.insert(b, peer(b)).is_none());
+        assert!(
+            peers.insert(a, peer(a)).is_some(),
             "duplicate insert must report the old entry"
         );
-        assert_eq!(addrs.len(), 2, "duplicate must not grow the map");
-        assert!(addrs.contains_key(&a));
-        assert!(addrs.remove(&a).is_some());
-        assert!(!addrs.contains_key(&a));
-        assert_eq!(addrs.len(), 1);
+        assert_eq!(peers.len(), 2, "duplicate must not grow the map");
+        assert!(peers.contains_key(&a));
+        assert_eq!(peers.get(&b).map(|p| p.addr), Some(b));
+        assert_eq!(peers.snapshot().len(), 2);
+        assert!(peers.remove(&a).is_some());
+        assert!(!peers.contains_key(&a));
+        assert_eq!(peers.len(), 1);
+        assert!(peers.remove(&a).is_none(), "removed twice");
+        assert!(peers.remove(&b).is_some());
+        assert!(peers.is_empty());
+        assert!(peers.0.read().is_none(), "the last peer must free the map");
     }
 
     /// A torrent whose pieces are all held, saved under `save`.

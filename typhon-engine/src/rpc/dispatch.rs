@@ -140,12 +140,12 @@ pub fn torrent_core(t: &Arc<crate::torrent::meta::TorrentState>) -> TorrentCore 
 pub fn peers_json(t: &Arc<crate::torrent::meta::TorrentState>) -> Value {
     let now = std::time::SystemTime::now();
     let total_pieces = t.meta.num_pieces();
-    // Iterate DashMap snapshot — called on-demand when user opens peer panel
+    // A snapshot, called on demand when the user opens the peer panel.
     let peers: Vec<Value> = t
-        .peer_stats
+        .peers
+        .snapshot()
         .iter()
-        .map(|entry| {
-            let p = entry.value();
+        .map(|p| {
             let dur = now
                 .duration_since(p.connected_at)
                 .unwrap_or_default()

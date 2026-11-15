@@ -277,7 +277,7 @@ mod tests {
             false,
             false,
         ));
-        t.peer_stats.insert(addr, p.clone());
+        t.peers.insert(addr, p.clone());
         p
     }
 

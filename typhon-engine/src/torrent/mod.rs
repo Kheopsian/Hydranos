@@ -362,12 +362,12 @@ impl TorrentManager {
     pub fn wake_filtered_peers(&self) -> usize {
         let mut n = 0;
         for t in self.all() {
-            for p in t.peer_stats.iter() {
-                if crate::ipfilter::blocked(p.key().ip()) {
-                    p.value().punch_wake.notify_one();
+            t.peers.for_each(|p| {
+                if crate::ipfilter::blocked(p.addr.ip()) {
+                    p.punch_wake.notify_one();
                     n += 1;
                 }
-            }
+            });
         }
         n
     }
@@ -2200,12 +2200,11 @@ impl TorrentManager {
     pub fn update_unseeded_count(&self) {
         let mut total = 0usize;
         for entry in self.torrents.iter() {
-            total += entry
-                .value()
-                .peer_stats
-                .iter()
-                .filter(|e| !e.value().is_seed.load(Ordering::Relaxed))
-                .count();
+            entry.value().peers.for_each(|p| {
+                if !p.is_seed.load(Ordering::Relaxed) {
+                    total += 1;
+                }
+            });
         }
         self.cached_unseeded_peers.store(total, Ordering::Relaxed);
     }
