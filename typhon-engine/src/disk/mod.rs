@@ -870,18 +870,33 @@ impl DiskManager {
         // name is no longer under the guard the proof set, and nothing cached
         // of the linked file's bytes may be served for the new one.
         if !free_spans.is_empty() {
+            // Once per file, not at every piece: lifting the guard and
+            // dropping the whole file from the read cache costs in proportion
+            // to the file, and doing it at every piece grew with the square of
+            // its size. The file stays in `undone`, so every write into it
+            // still opens it fresh (see above): only this cleanup is settled.
             let undone: Vec<(PathBuf, u64, u64)> = {
                 let f = free.lock();
                 free_spans
                     .iter()
-                    .filter(|(p, _, _)| f.undone.contains(p))
+                    .filter(|(p, _, _)| f.undone.contains(p) && !f.settled.contains(p))
                     .cloned()
                     .collect()
             };
-            for (rel, offset, len) in undone {
-                torrent.unguard_file(&rel);
+            for (rel, offset, len) in &undone {
+                torrent.unguard_file(rel);
                 let from = (offset / CACHE_BLOCK_SIZE) * CACHE_BLOCK_SIZE;
                 self.invalidate(torrent.info_hash, from, offset + len);
+            }
+            // Settled only once a piece went down into the new file; a write
+            // that failed leaves it to the next piece.
+            if matches!(outcome, Ok(true)) && !undone.is_empty() {
+                let mut f = free.lock();
+                for (rel, _, _) in &undone {
+                    if f.settled.insert(rel.clone()) {
+                        f.settlements += 1;
+                    }
+                }
             }
         }
         if let Err(why) = &outcome {

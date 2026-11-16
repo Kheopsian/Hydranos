@@ -3909,6 +3909,16 @@ mod tests {
         assert_eq!(stamp(&original), before, "the original changed");
         assert_eq!(std::fs::read(&original).unwrap(), on_disk);
         assert_eq!(std::fs::read(dir.join("info.nfo")).unwrap(), nfo_a);
+        // Three pieces went into the new file: settled once, not three times,
+        // and still marked given up, so every write opened the file fresh
+        // rather than through a cached handle a racing read could have left
+        // on the original.
+        let f = t.free_links();
+        let f = f.lock();
+        let rel = std::path::Path::new("movieB.mkv");
+        assert_eq!(f.settlements, 1, "settled at every piece");
+        assert!(f.settled.contains(rel));
+        assert!(f.undone.contains(rel), "no longer written fresh");
     }
 
     /// The same film after a restart: what the proof job set (the guard, the

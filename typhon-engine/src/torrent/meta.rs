@@ -75,7 +75,16 @@ pub struct FreeLinks {
     pub linked: std::collections::HashSet<PathBuf>,
     /// Unlinked by `write_piece`: the file under that name is now the
     /// torrent's own download, and the guard set before is not about it.
+    /// Kept for good: every write into it opens the file fresh, since a read
+    /// racing the unlink may have put the old inode's handle back in the
+    /// descriptor cache.
     pub undone: std::collections::HashSet<PathBuf>,
+    /// The ones of `undone` whose guard is lifted and whose cached bytes are
+    /// dropped: done once, after the first piece written into the new file,
+    /// rather than over the whole file at every piece.
+    pub settled: std::collections::HashSet<PathBuf>,
+    /// How many times a given-up file was settled. Read by the tests.
+    pub settlements: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -1914,6 +1923,8 @@ impl TorrentState {
             at: save_path,
             linked: files,
             undone: Default::default(),
+            settled: Default::default(),
+            settlements: 0,
         };
     }
 
