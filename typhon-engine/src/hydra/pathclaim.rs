@@ -39,6 +39,13 @@
 //! torrent's pieces before a single link is made, so a restart in the middle
 //! leaves no unproven link behind: at worst a paused torrent with an empty
 //! folder, which downloads what it needs when resumed.
+//!
+//! The isolated folder also takes, unproven, the files of the incoming torrent
+//! that are already on disk at their original path, regular, and named by no
+//! torrent at all: they are nobody else's, the recheck validates them piece by
+//! piece, and without them a film already on the disk would be downloaded again
+//! because of an `.nfo`. They are linked after the proof, so the restart case
+//! above is unchanged for every file another torrent names.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -656,6 +663,9 @@ pub struct AddPlan {
     pub hold: bool,
     /// Isolated: files to prove from the original location and link in.
     pub isolate_from: Option<(PathBuf, HashSet<PathBuf>)>,
+    /// Isolated: the files (below the root) no other torrent names. Those that
+    /// are already on disk at their original path are linked in unproven.
+    pub free: HashSet<PathBuf>,
     /// Where it asked, held until these files are proven in place.
     pub prove_in_place: Option<HashSet<PathBuf>>,
     pub note: Option<String>,
@@ -703,6 +713,7 @@ pub fn check_add(
         save_path: save_path.to_string(),
         hold: false,
         isolate_from: None,
+        free: HashSet::new(),
         prove_in_place: None,
         note: None,
         _reservation: reservation,
@@ -756,6 +767,14 @@ pub fn check_add(
                 .iter()
                 .filter_map(|p| rel_of.get(p).cloned())
                 .collect();
+            // Isolation is for the files another torrent holds; one nobody
+            // names stays this torrent's to reuse, or it would download a
+            // film that is already on the disk.
+            plan.free = all
+                .iter()
+                .filter(|(a, _, _)| !claimed.contains(&path_key(a)))
+                .map(|(_, r, _)| r.clone())
+                .collect();
             record(
                 engine_id,
                 hash,
@@ -807,6 +826,7 @@ pub fn finish(
         engine_id: engine_id.to_string(),
         hash: hash.to_string(),
         isolate_from: plan.isolate_from.clone(),
+        free: plan.free.clone(),
         prove_in_place: plan.prove_in_place.clone(),
         resume,
         rt: tokio::runtime::Handle::try_current().ok(),
@@ -846,12 +866,32 @@ static PROOFS_MAX: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsi
 #[cfg(test)]
 static PROOFS_DONE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
+/// Hardlink `from` at `to`, creating its folders. Never replaces a file that
+/// is already there; a failed link (another filesystem, permissions) leaves
+/// the file to download.
+fn link_into(from: &Path, to: &Path) -> bool {
+    if to.exists() {
+        return false;
+    }
+    if let Some(parent) = to.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    match std::fs::hard_link(from, to) {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::debug!(from = %from.display(), to = %to.display(), error = %e, "path claim: link failed, the file is fetched");
+            false
+        }
+    }
+}
+
 struct Job {
     metainfo: Option<Vec<u8>>,
     state: AppState,
     engine_id: String,
     hash: String,
     isolate_from: Option<(PathBuf, HashSet<PathBuf>)>,
+    free: HashSet<PathBuf>,
     prove_in_place: Option<HashSet<PathBuf>>,
     resume: bool,
     rt: Option<tokio::runtime::Handle>,
@@ -923,30 +963,42 @@ impl Job {
             let mut linked = 0usize;
             let mut shared: HashSet<PathBuf> = HashSet::new();
             for rel in proven.iter().chain(&interior) {
-                let (from, to) = (src_root.join(rel), root.join(rel));
-                if to.exists() {
-                    continue;
-                }
-                if let Some(parent) = to.parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
-                if std::fs::hard_link(&from, &to).is_ok() {
+                if link_into(&src_root.join(rel), &root.join(rel)) {
                     linked += 1;
                     shared.insert(rel.clone());
                 }
             }
             t.guard_files(shared);
-            if !candidates.is_empty() {
+            // A file no torrent names needs no proof: it is nobody else's, and
+            // the recheck below validates it piece by piece. Linked after the
+            // proof, so a restart during it leaves nothing; not guarded, so a
+            // wrong piece can still be fetched into it. Only a regular file:
+            // a symlink or a folder is not something to link.
+            let mut free_linked = 0usize;
+            let mut free: Vec<&PathBuf> = self.free.iter().collect();
+            free.sort();
+            for rel in free {
+                let from = src_root.join(rel);
+                let regular = std::fs::symlink_metadata(&from)
+                    .map(|m| m.file_type().is_file())
+                    .unwrap_or(false);
+                if regular && link_into(&from, &root.join(rel)) {
+                    free_linked += 1;
+                }
+            }
+            if !candidates.is_empty() || free_linked > 0 {
                 record(
                     &self.engine_id,
                     &self.hash,
                     &name,
                     "proven",
                     format!(
-                        "{} of {} same-size file(s) proven identical and linked, {} to download",
+                        "{} of {} same-size file(s) proven identical and linked, {} to download, \
+                         {} file(s) of its own already on disk linked",
                         linked,
                         candidates.len(),
-                        candidates.len() - linked
+                        candidates.len() - linked,
+                        free_linked
                     ),
                 );
             }
@@ -1462,6 +1514,7 @@ pub fn guarded_recheck(
         engine_id: engine_id.to_string(),
         hash,
         isolate_from: None,
+        free: HashSet::new(),
         prove_in_place: Some(plan_files),
         resume: was_running,
         rt: tokio::runtime::Handle::try_current().ok(),
@@ -1520,6 +1573,7 @@ pub fn guarded_start(
         engine_id: engine_id.to_string(),
         hash,
         isolate_from: None,
+        free: HashSet::new(),
         prove_in_place: Some(guarded),
         resume: true,
         rt: tokio::runtime::Handle::try_current().ok(),
@@ -3385,6 +3439,128 @@ mod tests {
             "the linked video changed"
         );
     }
+    /// Flat torrents in one folder (`movies/`), the way a library keeps them:
+    /// A is `movieA.mkv` + `info.nfo`, complete; `movieB.mkv` sits there too,
+    /// named by no torrent. B will be `movieB.mkv` + an `info.nfo` of the same
+    /// size as A's, which isolates it.
+    #[cfg(unix)]
+    async fn flat_library(
+        name: &str,
+    ) -> (crate::api::testing::TestState, PathBuf, Vec<u8>, Vec<u8>) {
+        let s = crate::api::testing::state(name);
+        let dir = s.dir.join("movies");
+        std::fs::create_dir_all(&dir).unwrap();
+        let movie_a: Vec<u8> = (0..20_000u32).map(|i| (i % 241) as u8).collect();
+        let movie_b: Vec<u8> = (0..32_768u32).map(|i| (i % 251) as u8).collect();
+        let nfo_a = b"release notes of the first one.".to_vec();
+        std::fs::write(dir.join("movieA.mkv"), &movie_a).unwrap();
+        std::fs::write(dir.join("info.nfo"), &nfo_a).unwrap();
+        std::fs::write(dir.join("movieB.mkv"), &movie_b).unwrap();
+        let ta = torrent_over("", &[("movieA.mkv", &movie_a), ("info.nfo", &nfo_a)], 16384);
+        add(&s, &ta, &dir, true, true).unwrap();
+        (s, dir, movie_b, nfo_a)
+    }
+
+    /// B over `movieB.mkv` and `nfo`, added for real; the folder it got.
+    #[cfg(unix)]
+    async fn add_movie_b(
+        s: &crate::api::testing::TestState,
+        dir: &Path,
+        movie_b: &[u8],
+        nfo: &[u8],
+    ) -> (Arc<TorrentState>, PathBuf) {
+        let tb = torrent_over("", &[("movieB.mkv", movie_b), ("info.nfo", nfo)], 16384);
+        // Read before the add: it starts a check of its own.
+        wire_one(s, &tb);
+        let b = add(s, &tb, dir, false, false).unwrap();
+        let t = held(s, &b);
+        settled(&t).await;
+        let own = engine_save_path(s, &b);
+        assert_ne!(own, dir, "not isolated");
+        assert_eq!(own, dir.join(format!(" [{}]", &b[..8])));
+        (t, own)
+    }
+
+    /// The measured case: the film B names is on the disk and no torrent has
+    /// it, but B is isolated because of an `.nfo` it shares with A by name and
+    /// size. The film is B's to reuse: linked into its folder, so only the
+    /// `.nfo` is left to download.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_isolated_torrent_reuses_a_file_on_disk_that_nobody_names() {
+        use std::os::unix::fs::MetadataExt;
+        let (s, dir, movie_b, nfo_a) = flat_library("pathclaim-free-reuse").await;
+        let other_nfo: Vec<u8> = nfo_a.iter().map(|c| c ^ 0x20).collect();
+        let (t, own) = add_movie_b(&s, &dir, &movie_b, &other_nfo).await;
+        let linked = own.join("movieB.mkv");
+        assert_eq!(
+            std::fs::metadata(&linked)
+                .expect("movieB.mkv not linked")
+                .ino(),
+            std::fs::metadata(dir.join("movieB.mkv")).unwrap().ino(),
+            "copied, not linked"
+        );
+        assert!(!own.join("info.nfo").exists(), "A's .nfo came along");
+        assert!(!is_error(&t), "{}", why(&t));
+        assert_eq!(missing(&t), vec![2], "only the .nfo is left");
+        assert!(recent().iter().any(|e| e.action == "proven"
+            && e.detail
+                .contains("1 file(s) of its own already on disk linked")));
+        assert_eq!(std::fs::read(dir.join("info.nfo")).unwrap(), nfo_a);
+    }
+
+    /// Same, the `.nfo` being the very same bytes as A's: proven, linked, and
+    /// B is complete with nothing to download.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_isolated_torrent_with_every_file_on_disk_is_complete() {
+        let (s, dir, movie_b, nfo_a) = flat_library("pathclaim-free-complete").await;
+        let (t, own) = add_movie_b(&s, &dir, &movie_b, &nfo_a).await;
+        assert!(own.join("movieB.mkv").exists());
+        assert!(own.join("info.nfo").exists());
+        assert!(!is_error(&t), "{}", why(&t));
+        assert!(missing(&t).is_empty(), "{:?}", missing(&t));
+    }
+
+    /// A file at its original path that another torrent names, whatever size
+    /// that one expects, is not B's to take: no link.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_file_another_torrent_names_at_another_size_is_not_linked() {
+        let (s, dir, movie_b, nfo_a) = flat_library("pathclaim-free-claimed").await;
+        let tc = torrent_over(
+            "",
+            &[("movieB.mkv", b"a much shorter file".as_slice())],
+            16384,
+        );
+        add(&s, &tc, &dir, true, true).unwrap();
+        let other_nfo: Vec<u8> = nfo_a.iter().map(|c| c ^ 0x20).collect();
+        let (t, own) = add_movie_b(&s, &dir, &movie_b, &other_nfo).await;
+        assert!(
+            std::fs::symlink_metadata(own.join("movieB.mkv")).is_err(),
+            "a file another torrent names was linked"
+        );
+        assert_eq!(missing(&t), vec![0, 1, 2]);
+    }
+
+    /// A symbolic link at the original path is not a file to link.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_symlink_at_the_original_path_is_not_linked() {
+        let (s, dir, movie_b, nfo_a) = flat_library("pathclaim-free-symlink").await;
+        let real = s.dir.join("elsewhere.mkv");
+        std::fs::write(&real, &movie_b).unwrap();
+        std::fs::remove_file(dir.join("movieB.mkv")).unwrap();
+        std::os::unix::fs::symlink(&real, dir.join("movieB.mkv")).unwrap();
+        let other_nfo: Vec<u8> = nfo_a.iter().map(|c| c ^ 0x20).collect();
+        let (t, own) = add_movie_b(&s, &dir, &movie_b, &other_nfo).await;
+        assert!(
+            std::fs::symlink_metadata(own.join("movieB.mkv")).is_err(),
+            "a symlink was linked"
+        );
+        assert_eq!(missing(&t), vec![0, 1, 2]);
+    }
+
     /// The diagnostic counts the files that are not where the torrent expects
     /// them -- guarded or not -- and cites them first: a video loose in the
     /// parent folder is absent, and the one thing that does not match is only
