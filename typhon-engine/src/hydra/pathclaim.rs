@@ -974,16 +974,48 @@ impl Job {
             // proof, so a restart during it leaves nothing; not guarded, so a
             // wrong piece can still be fetched into it. Only a regular file:
             // a symlink or a folder is not something to link.
+            //
+            // Only a file this torrent could really own: of the size it
+            // declares (another release or a truncated copy is not its
+            // file), with no other name (a library copy, whose inode a
+            // download would rewrite or grow), and that no torrent named
+            // since the plan was made -- the proof may have waited a long
+            // time for its slot, and a torrent added meanwhile does not see
+            // this one.
             let mut free_linked = 0usize;
             let mut free: Vec<&PathBuf> = self.free.iter().collect();
             free.sort();
+            let declared: HashMap<PathBuf, u64> = files_of(&t.meta, &root)
+                .into_iter()
+                .map(|(_, rel, len)| (rel, len))
+                .collect();
+            let mut own: Vec<(PathBuf, &PathBuf)> = Vec::new();
             for rel in free {
                 let from = src_root.join(rel);
-                let regular = std::fs::symlink_metadata(&from)
-                    .map(|m| m.file_type().is_file())
+                let regular_of_declared_size = std::fs::symlink_metadata(&from)
+                    .map(|m| {
+                        m.file_type().is_file()
+                            && Some(&m.len()) == declared.get(rel).as_ref().copied()
+                    })
                     .unwrap_or(false);
-                if regular && link_into(&from, &root.join(rel)) {
-                    free_linked += 1;
+                if regular_of_declared_size && crate::jobs::link_count(&from) <= 1 {
+                    own.push((from, rel));
+                }
+            }
+            if !own.is_empty() {
+                let mine: Vec<(PathBuf, u64)> = own.iter().map(|(f, _)| (f.clone(), 0)).collect();
+                let me = t.meta.info_hash;
+                let skip = move |o: &TorrentState| o.meta.info_hash == me;
+                let top = t.meta.common_root();
+                let named: HashSet<PathBuf> =
+                    claimants(&self.state, &[], src_root, top.as_deref(), &mine, &skip)
+                        .iter()
+                        .flat_map(|c| c.files.iter().map(|(p, _)| path_key(p)))
+                        .collect();
+                for (from, rel) in own {
+                    if !named.contains(&path_key(&from)) && link_into(&from, &root.join(rel)) {
+                        free_linked += 1;
+                    }
                 }
             }
             if !candidates.is_empty() || free_linked > 0 {
@@ -3559,6 +3591,160 @@ mod tests {
             "a symlink was linked"
         );
         assert_eq!(missing(&t), vec![0, 1, 2]);
+    }
+
+    /// A file nobody names whose size is not the one B declares (another
+    /// release, a truncated copy) is not B's file: no link, the original left
+    /// as it was, and B downloads the whole film into its own folder.
+    #[cfg(unix)]
+    async fn a_free_file_of_another_size_is_not_linked(name: &str, on_disk: Vec<u8>) {
+        let (s, dir, movie_b, nfo_a) = flat_library(name).await;
+        let original = dir.join("movieB.mkv");
+        std::fs::write(&original, &on_disk).unwrap();
+        age(&original);
+        let before = stamp(&original);
+        let other_nfo: Vec<u8> = nfo_a.iter().map(|c| c ^ 0x20).collect();
+        let (t, own) = add_movie_b(&s, &dir, &movie_b, &other_nfo).await;
+        assert!(
+            std::fs::symlink_metadata(own.join("movieB.mkv")).is_err(),
+            "a file of another size was linked"
+        );
+        assert_eq!(missing(&t), vec![0, 1, 2]);
+        assert_eq!(stamp(&original), before, "the original changed");
+        let stream: Vec<u8> = movie_b.iter().chain(other_nfo.iter()).copied().collect();
+        let (sent, owned) = fetch_missing(&s, &t, &stream).await;
+        assert_eq!((sent, owned), (3, 3), "{}", why(&t));
+        assert_eq!(std::fs::read(own.join("movieB.mkv")).unwrap(), movie_b);
+        assert_eq!(
+            stamp(&original),
+            before,
+            "the download reached the original"
+        );
+        assert!(missing(&t).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_shorter_free_file_is_not_linked() {
+        let short: Vec<u8> = (0..20_000u32).map(|i| (i % 251) as u8).collect();
+        a_free_file_of_another_size_is_not_linked("pathclaim-free-short", short).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_longer_free_file_is_not_linked() {
+        let long: Vec<u8> = (0..40_000u32).map(|i| (i % 251) as u8).collect();
+        a_free_file_of_another_size_is_not_linked("pathclaim-free-long", long).await;
+    }
+
+    /// A free file of the right size with one wrong piece: linked, that piece
+    /// is missing after the check, and the right piece that then arrives is
+    /// never written through the link into the original, byte for byte.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_right_piece_never_rewrites_a_linked_free_file() {
+        use std::os::unix::fs::MetadataExt;
+        let (s, dir, movie_b, nfo_a) = flat_library("pathclaim-free-badpiece").await;
+        let original = dir.join("movieB.mkv");
+        let mut wrong = movie_b.clone();
+        wrong[20_000] ^= 0xff;
+        std::fs::write(&original, &wrong).unwrap();
+        age(&original);
+        let before = stamp(&original);
+        let other_nfo: Vec<u8> = nfo_a.iter().map(|c| c ^ 0x20).collect();
+        let (t, own) = add_movie_b(&s, &dir, &movie_b, &other_nfo).await;
+        assert_eq!(
+            std::fs::metadata(own.join("movieB.mkv")).unwrap().ino(),
+            before.0,
+            "not linked"
+        );
+        assert_eq!(missing(&t), vec![1, 2], "{}", why(&t));
+
+        let stream: Vec<u8> = movie_b.iter().chain(other_nfo.iter()).copied().collect();
+        let (sent, owned) = fetch_missing(&s, &t, &stream).await;
+        eprintln!(
+            "bad piece: sent {sent} owned {owned} error {} why {:?} missing {:?}",
+            is_error(&t),
+            why(&t),
+            missing(&t)
+        );
+        assert_eq!(stamp(&original), before, "the original was rewritten");
+        assert_eq!(std::fs::read(&original).unwrap(), wrong);
+        assert!(owned < sent, "the piece was accepted over the link");
+        assert!(is_error(&t), "B is silent about a piece it can never take");
+        assert!(why(&t).contains("refused to overwrite"), "{}", why(&t));
+    }
+
+    /// A file nobody names but that has another name (a library copy imported
+    /// as a hardlink) is not linked: a download into B's folder must not be
+    /// able to touch that inode. Neither after the check nor after the right
+    /// pieces arrive.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_free_file_with_another_name_is_not_linked() {
+        let (s, dir, movie_b, nfo_a) = flat_library("pathclaim-free-multilink").await;
+        let original = dir.join("movieB.mkv");
+        let library = s.dir.join("library");
+        std::fs::create_dir_all(&library).unwrap();
+        let mut other: Vec<u8> = movie_b.iter().map(|b| b ^ 0x5a).collect();
+        other[0] = 1;
+        std::fs::write(&original, &other).unwrap();
+        std::fs::hard_link(&original, library.join("film.mkv")).unwrap();
+        age(&original);
+        let before = stamp(&original);
+        let other_nfo: Vec<u8> = nfo_a.iter().map(|c| c ^ 0x20).collect();
+        let (t, own) = add_movie_b(&s, &dir, &movie_b, &other_nfo).await;
+        assert!(
+            std::fs::symlink_metadata(own.join("movieB.mkv")).is_err(),
+            "a file with another name was linked"
+        );
+        assert_eq!(missing(&t), vec![0, 1, 2]);
+        assert_eq!(stamp(&original), before);
+        assert_eq!(stamp(&library.join("film.mkv")), before);
+        let stream: Vec<u8> = movie_b.iter().chain(other_nfo.iter()).copied().collect();
+        let (sent, owned) = fetch_missing(&s, &t, &stream).await;
+        assert_eq!((sent, owned), (3, 3), "{}", why(&t));
+        assert_eq!(std::fs::read(own.join("movieB.mkv")).unwrap(), movie_b);
+        assert_eq!(stamp(&original), before, "the library copy changed");
+        assert_eq!(stamp(&library.join("film.mkv")), before);
+    }
+
+    /// B's plan said movieB.mkv was nobody's; before its proof gets a slot,
+    /// another torrent names that path. The link is not made.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_file_named_while_the_proof_waits_is_not_linked() {
+        let (s, dir, movie_b, nfo_a) = flat_library("pathclaim-free-window").await;
+        let other_nfo: Vec<u8> = nfo_a.iter().map(|c| c ^ 0x20).collect();
+        let tb = torrent_over(
+            "",
+            &[("movieB.mkv", &movie_b), ("info.nfo", &other_nfo)],
+            16384,
+        );
+        wire_one(&s, &tb);
+        let held_a = typhon_engine::torrent::recheck_slot().await;
+        let held_b = typhon_engine::torrent::recheck_slot().await;
+        THREADED.with(|t| t.set(true));
+        let b = add(&s, &tb, &dir, false, false).unwrap();
+        THREADED.with(|t| t.set(false));
+        let tc = torrent_over(
+            "",
+            &[("movieB.mkv", b"a much shorter file".as_slice())],
+            16384,
+        );
+        add(&s, &tc, &dir, true, true).unwrap();
+        wire_one(&s, &tb);
+        drop((held_a, held_b));
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        let t = held(&s, &b);
+        settled(&t).await;
+        let own = engine_save_path(&s, &b);
+        assert_ne!(own, dir, "not isolated");
+        assert!(
+            std::fs::symlink_metadata(own.join("movieB.mkv")).is_err(),
+            "a file named since the plan was linked"
+        );
+        assert_eq!(std::fs::read(dir.join("movieB.mkv")).unwrap(), movie_b);
     }
 
     /// The diagnostic counts the files that are not where the torrent expects
