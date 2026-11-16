@@ -671,7 +671,11 @@ pub fn placement(
     // A folder of its own inside the save path, not any folder: one outside
     // it (qBittorrent's folder for incomplete torrents) would become the
     // torrent's home, and nothing would move it once complete.
-    if !multi_file && path.file_name().is_some_and(|f| f.to_string_lossy() == name) {
+    if !multi_file
+        && path
+            .file_name()
+            .is_some_and(|f| f.to_string_lossy() == name)
+    {
         if let Some(dir) = path
             .parent()
             .filter(|d| !d.as_os_str().is_empty() && d.starts_with(save_path))
@@ -2118,7 +2122,15 @@ mod qbit_session_tests {
             Ok(Added::Seeded)
         });
         let cats: CategoryFn = Arc::new(|_| {});
-        run_job(cands, None, choices, Arc::new(Progress::default()), cats, add).await;
+        run_job(
+            cands,
+            None,
+            choices,
+            Arc::new(Progress::default()),
+            cats,
+            add,
+        )
+        .await;
         let out = plans.lock().unwrap().clone();
         out
     }
@@ -2174,7 +2186,10 @@ mod qbit_session_tests {
         std::fs::write(dir.join("incomplete/Temp.mkv"), b"x").unwrap();
         let mut temp = file_cand("Temp.mkv", torrent_file(&dir, "Temp.mkv", &[]));
         temp.save_path = save.to_string_lossy().into_owned();
-        temp.content = dir.join("incomplete/Temp.mkv").to_string_lossy().into_owned();
+        temp.content = dir
+            .join("incomplete/Temp.mkv")
+            .to_string_lossy()
+            .into_owned();
         let start = Choices {
             path_map: BTreeMap::new(),
             start_stopped: false,
@@ -2255,7 +2270,15 @@ mod qbit_session_tests {
             start_stopped: false,
         };
         let cats: CategoryFn = Arc::new(|_| {});
-        run_job(vec![c], None, start, Arc::new(Progress::default()), cats, add).await;
+        run_job(
+            vec![c],
+            None,
+            start,
+            Arc::new(Progress::default()),
+            cats,
+            add,
+        )
+        .await;
         let (plan, note) = seen.lock().unwrap()[0].clone();
         assert!(!plan.paused && !plan.seed_mode, "{plan:?}");
         assert_eq!(note, None);
@@ -2286,7 +2309,11 @@ mod qbit_session_tests {
         run_job(vec![c.clone()], None, start, progress.clone(), cats, add).await;
         let note = notes.lock().unwrap()[0].clone().expect("a note");
         assert!(note.contains(&c.content), "{note}");
-        assert_eq!(progress.stopped.load(Ordering::Relaxed), 1, "counted stopped");
+        assert_eq!(
+            progress.stopped.load(Ordering::Relaxed),
+            1,
+            "counted stopped"
+        );
         assert_eq!(
             preview(&[c], |_| true).data_elsewhere,
             1,
