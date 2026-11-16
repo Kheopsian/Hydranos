@@ -649,8 +649,8 @@ pub enum Placement {
 /// file's for a single-file torrent; `multi_file` as the info dict says;
 /// `lone_file` the path (`name/...`) of a folder torrent's only file.
 ///
-/// Paths are compared by component, so a separator written `\` or doubled
-/// does not make the same place look like another one.
+/// Paths are compared by component, so a doubled or trailing `/` does not
+/// make the same place look like another one (nor, on Windows, a `\`).
 pub fn placement(
     save_path: &str,
     content: &str,
