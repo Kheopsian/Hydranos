@@ -54,6 +54,30 @@ pub struct WriteVerdicts {
     pub claimed: Option<Arc<std::collections::HashSet<PathBuf>>>,
 }
 
+/// The files of a torrent given a folder of its own (path claim) that were
+/// already on the disk at the path it asked for, named by no torrent, and that
+/// the proof hardlinked into that folder. Such a file is this torrent's alone
+/// to give up: when a piece it fetched carries other bytes than the linked file
+/// holds (an edge byte the proof could not read, the neighbour being absent),
+/// `write_piece` removes the torrent's own name for it (never the original
+/// one), counts its pieces as missing again and downloads it into a new file of
+/// that folder, instead of refusing the piece and parking the torrent.
+///
+/// In memory only. After a restart the link is still there with two names, so
+/// the write path compares and refuses as it does for any shared file: the
+/// torrent is parked, nothing is written. Safe; only the way out is lost.
+#[derive(Debug, Default)]
+pub struct FreeLinks {
+    /// The save path the links were made in. A torrent moved since is not
+    /// undone: the name below its new save path may be another file's.
+    pub at: PathBuf,
+    /// Still linked (paths below the save path, as `FileOp::path`).
+    pub linked: std::collections::HashSet<PathBuf>,
+    /// Unlinked by `write_piece`: the file under that name is now the
+    /// torrent's own download, and the guard set before is not about it.
+    pub undone: std::collections::HashSet<PathBuf>,
+}
+
 #[derive(Debug, Clone)]
 pub struct FileEntry {
     pub path: PathBuf,
@@ -869,6 +893,8 @@ pub struct TorrentState {
     /// What `write_piece` found out about each file it writes into, once: see
     /// `WriteVerdicts`.
     write_verdicts: Arc<parking_lot::Mutex<WriteVerdicts>>,
+    /// See `FreeLinks`. Empty for nearly every torrent.
+    free_links: Arc<parking_lot::Mutex<FreeLinks>>,
     /// `error_msg` holds a note a recheck left (nothing was found where it was
     /// expected), not a fault: the first piece that lands clears it.
     recheck_note: AtomicBool,
@@ -1544,6 +1570,7 @@ impl TorrentState {
             recheck_done: AtomicU32::new(0),
             overwrite_guard: RwLock::new(Arc::new(std::collections::HashSet::new())),
             write_verdicts: Arc::default(),
+            free_links: Arc::default(),
             recheck_note: AtomicBool::new(false),
             piece_hashes: Mutex::new(None),
             v2_checks: Mutex::new(None),
@@ -1867,6 +1894,32 @@ impl TorrentState {
     /// The files `guard_files` set, cheap to clone.
     pub fn guarded(&self) -> Arc<std::collections::HashSet<PathBuf>> {
         self.overwrite_guard.read().clone()
+    }
+
+    /// Stop guarding `rel`: the file under that name is the torrent's own
+    /// now (see `FreeLinks`).
+    pub fn unguard_file(&self, rel: &std::path::Path) {
+        let mut g = self.overwrite_guard.write();
+        if g.contains(rel) {
+            let mut files = (**g).clone();
+            files.remove(rel);
+            *g = Arc::new(files);
+        }
+    }
+
+    /// Record the free files the path-claim proof linked below `save_path`
+    /// (see `FreeLinks`). Replaces what was recorded.
+    pub fn set_free_links(&self, save_path: PathBuf, files: std::collections::HashSet<PathBuf>) {
+        *self.free_links.lock() = FreeLinks {
+            at: save_path,
+            linked: files,
+            undone: Default::default(),
+        };
+    }
+
+    /// The free links, to share with the blocking task of `write_piece`.
+    pub fn free_links(&self) -> Arc<parking_lot::Mutex<FreeLinks>> {
+        self.free_links.clone()
     }
 
     /// The files of this torrent (paths below the save path) that are not on

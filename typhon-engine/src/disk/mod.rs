@@ -84,6 +84,21 @@ fn get_or_open_rw(path: &PathBuf) -> std::io::Result<Arc<File>> {
     Ok(f)
 }
 
+/// `get_or_open_rw`, but always a handle on the file the path names now, which
+/// then replaces whatever the cache held for it.
+fn open_rw_fresh(path: &PathBuf) -> std::io::Result<Arc<File>> {
+    let f = Arc::new(
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)?,
+    );
+    fd_cache().lock().put(path.clone(), f.clone());
+    Ok(f)
+}
+
 // ---------------------------------------------------------------------------
 // `[daemon] preallocate`: reserve a torrent's files at its first write.
 // ---------------------------------------------------------------------------
@@ -662,10 +677,37 @@ impl DiskManager {
         let guard = torrent.guarded();
         let verdicts = torrent.write_verdicts();
         let probe = self.claim_probe.get().cloned();
+        // The free links this piece touches (see `FreeLinks`), with the
+        // pieces of each: nearly always none, and then nothing below changes.
+        let free = torrent.free_links();
+        let plen = torrent.meta.piece_length as u64;
+        let free_spans: Vec<(PathBuf, u64, u64)> = {
+            let f = free.lock();
+            if f.linked.is_empty() && f.undone.is_empty() {
+                Vec::new()
+            } else {
+                ops.iter()
+                    .filter(|op| {
+                        !op.pad && (f.linked.contains(&op.path) || f.undone.contains(&op.path))
+                    })
+                    .filter_map(|op| {
+                        file_span(&torrent.meta, &op.path).map(|(o, l)| (op.path.clone(), o, l))
+                    })
+                    .collect()
+            }
+        };
+        let picker = torrent.picker.get().cloned();
+        let (free_task, spans_task) = (free.clone(), free_spans.clone());
         let outcome = tokio::task::spawn_blocking(move || {
             if !check.matches(&data) {
                 return Ok(false);
             }
+            // A piece over a free link is written by one task at a time, from
+            // the comparison to the last byte: two edge pieces of the same
+            // file must not both decide on the linked file, nor one compare
+            // with it while the other replaces it.
+            let mut free_now = (!spans_task.is_empty()).then(|| free_task.lock());
+            let mut give_up: Vec<PathBuf> = Vec::new();
             // Before a byte goes down: the ranges that fall in a file this
             // torrent must not write into (another torrent names it, or it has
             // another hardlink) are read back. Identical bytes need no write
@@ -676,12 +718,18 @@ impl DiskManager {
                 let mut at = 0usize;
                 for (i, op) in ops.iter().enumerate() {
                     let len = op.length as usize;
+                    // A free link given up already: the file under that name
+                    // is the torrent's own download, guarded only as any file
+                    // it created (another name appearing, another torrent).
+                    let undone = free_now
+                        .as_ref()
+                        .is_some_and(|f| f.undone.contains(&op.path));
                     // Whatever the process remembers: a torrent resumed after
                     // a restart has no guard, and a file that was already
                     // shared with a library when the torrent started writing
                     // is shared all the same.
                     if !op.pad
-                        && (guard.contains(&op.path)
+                        && ((!undone && guard.contains(&op.path))
                             || must_compare(&verdicts, &probe, &info_hash, &save_path, &op.path))
                     {
                         let full_path = save_path.join(&op.path);
@@ -689,6 +737,18 @@ impl DiskManager {
                             Ok(Some(true)) => same[i] = true,
                             // Not there: creating it overwrites nothing.
                             Ok(None) => {}
+                            // A free file the proof linked in: the piece is
+                            // right (hashed above), so the file is not this
+                            // torrent's after all. Given up below, once the
+                            // rest of the piece is known to be writable.
+                            Ok(Some(false))
+                                if !undone
+                                    && free_now.as_ref().is_some_and(|f| {
+                                        f.at == save_path && f.linked.contains(&op.path)
+                                    }) =>
+                            {
+                                give_up.push(op.path.clone());
+                            }
                             Ok(Some(false)) => {
                                 return Err(format!(
                                     "{REFUSED} {}: piece {piece} carries other bytes than the file \
@@ -704,6 +764,27 @@ impl DiskManager {
                         }
                     }
                     at += len;
+                }
+            }
+            if let Some(f) = free_now.as_mut() {
+                for rel in &give_up {
+                    let pieces = spans_task
+                        .iter()
+                        .find(|(p, _, _)| p == rel)
+                        .filter(|(_, _, l)| *l > 0 && plen > 0)
+                        .map(|(_, o, l)| {
+                            ((o / plen) as u32..=((o + l - 1) / plen) as u32).collect()
+                        })
+                        .unwrap_or_default();
+                    give_up_free_link(
+                        f,
+                        &verdicts,
+                        picker.as_deref(),
+                        &save_path,
+                        rel,
+                        pieces,
+                        piece,
+                    )?;
                 }
             }
             // The first piece of a torrent in this process reserves ALL its
@@ -741,8 +822,18 @@ impl DiskManager {
                         .map_err(|e| format!("create folder {:?}: {}", parent, e))?;
                 }
 
-                let file = get_or_open_rw(&full_path)
-                    .map_err(|e| format!("open write {:?}: {}", full_path, e))?;
+                // A free link given up: never through a cached handle, which
+                // a read may have opened on the linked file before its name
+                // went, and which would write into the original.
+                let given_up = free_now
+                    .as_ref()
+                    .is_some_and(|f| f.undone.contains(&op.path));
+                let file = if given_up {
+                    open_rw_fresh(&full_path)
+                } else {
+                    get_or_open_rw(&full_path)
+                }
+                .map_err(|e| format!("open write {:?}: {}", full_path, e))?;
 
                 {
                     let chunk = &data[data_offset..data_offset + op.length as usize];
@@ -774,6 +865,24 @@ impl DiskManager {
             torrent
                 .prealloc_print
                 .store(prealloc_print, Ordering::Relaxed);
+        }
+        // A free link given up (or found given up by another piece): its
+        // name is no longer under the guard the proof set, and nothing cached
+        // of the linked file's bytes may be served for the new one.
+        if !free_spans.is_empty() {
+            let undone: Vec<(PathBuf, u64, u64)> = {
+                let f = free.lock();
+                free_spans
+                    .iter()
+                    .filter(|(p, _, _)| f.undone.contains(p))
+                    .cloned()
+                    .collect()
+            };
+            for (rel, offset, len) in undone {
+                torrent.unguard_file(&rel);
+                let from = (offset / CACHE_BLOCK_SIZE) * CACHE_BLOCK_SIZE;
+                self.invalidate(torrent.info_hash, from, offset + len);
+            }
         }
         if let Err(why) = &outcome {
             if why.starts_with(REFUSED) {
@@ -886,6 +995,83 @@ fn linked_elsewhere(_m: &std::fs::Metadata) -> bool {
 
 /// How a refusal to write into a guarded file starts.
 const REFUSED: &str = "refused to overwrite";
+
+/// Where the file `rel` (below the save path) lies in the torrent: (offset,
+/// length).
+fn file_span(
+    meta: &crate::torrent::meta::TorrentMeta,
+    rel: &std::path::Path,
+) -> Option<(u64, u64)> {
+    meta.files
+        .iter()
+        .enumerate()
+        .find(|(i, _)| meta.disk_rel(*i) == rel)
+        .map(|(_, f)| (f.offset, f.length))
+}
+
+/// Give up the free link `rel` (see `FreeLinks`): a verified piece carries
+/// other bytes than it holds, so it is not the torrent's file.
+///
+/// In this order: every other piece that touches the file stops counting as
+/// held (the serve path asks the picker before it reads, so none of them is
+/// offered from the file about to go); the cached handle is closed; the
+/// torrent's own name for it, below its save path, is removed -- the original
+/// name, elsewhere, keeps the inode and its bytes, back to one link; the
+/// verdict kept for the file is forgotten, so the file the piece now creates
+/// under that name is judged as any file the torrent creates. The piece being
+/// written is not cleared: it is about to land in the new file. A name that
+/// cannot be removed puts the pieces back and refuses the piece as before.
+fn give_up_free_link(
+    free: &mut crate::torrent::meta::FreeLinks,
+    verdicts: &parking_lot::Mutex<crate::torrent::meta::WriteVerdicts>,
+    picker: Option<&std::sync::Mutex<crate::torrent::piece_picker::PiecePicker>>,
+    save_path: &std::path::Path,
+    rel: &std::path::Path,
+    pieces: Vec<u32>,
+    piece: u32,
+) -> Result<(), String> {
+    let pieces: Vec<u32> = pieces.into_iter().filter(|p| *p != piece).collect();
+    let mut cleared: Vec<u32> = Vec::new();
+    if let Some(picker) = picker {
+        let mut p = picker.lock().unwrap_or_else(|e| e.into_inner());
+        for x in &pieces {
+            if p.has_piece(*x) {
+                p.clear_have(*x);
+                cleared.push(*x);
+            }
+        }
+    }
+    let full_path = save_path.join(rel);
+    evict_fds(std::slice::from_ref(&full_path));
+    match std::fs::remove_file(&full_path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            if let Some(picker) = picker {
+                let mut p = picker.lock().unwrap_or_else(|e| e.into_inner());
+                for x in &cleared {
+                    p.set_have(*x);
+                }
+            }
+            return Err(format!(
+                "{REFUSED} {}: it holds other bytes than the torrent and its link could not be \
+                 removed: {e}",
+                rel.display()
+            ));
+        }
+    }
+    verdicts.lock().files.remove(rel);
+    free.linked.remove(rel);
+    free.undone.insert(rel.to_path_buf());
+    tracing::warn!(
+        file = %full_path.display(),
+        piece,
+        pieces_missing_again = cleared.len(),
+        "path claim: a file reused from the disk holds other bytes than piece {piece}; its link \
+         is removed (the original is left as it was) and it is downloaded on its own"
+    );
+    Ok(())
+}
 
 /// Whether the file at `path` holds exactly `want` from `offset`: `None` when
 /// there is no such file, `Some(false)` when it is shorter than that or any

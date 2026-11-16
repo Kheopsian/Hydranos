@@ -44,11 +44,28 @@
 //! already on disk at their original path, regular, of the declared size, with
 //! no other name, and named by no torrent at all, without which a film already
 //! on the disk would be downloaded again because of an `.nfo`. They go through
-//! the very same proof as the files another torrent names, and are linked only
-//! once proven identical, piece by piece: a file that is not (a preallocated
-//! leftover of a deleted torrent, a truncated copy completed with zeros) is
-//! downloaded into the isolated folder, and the original is never written. They
-//! are linked after the proof, so the restart case above is unchanged.
+//! the very same proof as the files another torrent names, and are linked on
+//! the same terms: every piece verifies, or every piece wholly inside the file
+//! does. The pieces at its edges that it shares with a file the torrent does
+//! not have (its `.nfo`) cannot be read, so they are NOT proven: a film whose
+//! size is not a multiple of the piece size is linked on its interior, and
+//! one whose edge bytes are wrong (a preallocated leftover stopped one piece
+//! short) is linked all the same. A file with a wrong interior piece (a
+//! leftover of zeros, a truncated copy completed with zeros) is not linked: it
+//! is downloaded into the isolated folder. They are linked after the proof, so
+//! the restart case above is unchanged.
+//!
+//! An edge piece is checked when it arrives: written through the byte
+//! comparison of the guard, which accepts it only if the linked file already
+//! holds those bytes. A colliding file that does not is refused and the
+//! torrent parked, as for any file another torrent holds. A free file that
+//! does not is given up instead (`typhon_engine::torrent::meta::FreeLinks`):
+//! the torrent's own name for it is removed -- never the original, which keeps
+//! its inode and bytes --, its pieces count as missing again and it is
+//! downloaded into a new file of the isolated folder. The original is never
+//! written. That way out is in memory: after a restart the link (two names)
+//! is compared and refused like a shared file, the torrent parked, nothing
+//! written.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -67,8 +84,8 @@ pub const PATH_COLLISION: &str = "path_collision";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Mode {
-    /// A folder of its own next to the one it asked for, with the files
-    /// proven identical hardlinked in. Nobody is refused and nothing is
+    /// A folder of its own next to the one it asked for, with the files whose
+    /// own pieces verify hardlinked in. Nobody is refused and nothing is
     /// overwritten, which is why it is the default.
     #[default]
     Isolate,
@@ -981,25 +998,25 @@ impl Job {
                 }
             }
             // One proof, one read, for both kinds: the files another torrent
-            // names at the same size and the free ones. A free file is linked
-            // only once proven, exactly like the others: an unproven one that
-            // is linked has a second name, and the write guard would then
-            // refuse every piece that differs, for ever -- a preallocated
-            // leftover of a deleted torrent, a truncated copy completed with
-            // zeros. Unproven, it is downloaded into B's own folder and the
-            // original is never written. The permit of the proof is the one
-            // `run_capped` took for the whole job.
+            // names at the same size and the free ones, linked on the same
+            // terms. One whose interior fails (a leftover of zeros, a
+            // truncated copy completed with zeros) is not linked: it is
+            // downloaded into B's own folder and the original is never
+            // written. The permit of the proof is the one `run_capped` took
+            // for the whole job.
             let mut to_prove: HashSet<PathBuf> = candidates.clone();
             to_prove.extend(own.iter().map(|(_, rel)| (*rel).clone()));
             let (proven, interior) =
                 prove_torrent_detail(&t, self.metainfo.as_deref(), src_root, &to_prove, false);
             let interior = accepted_interior(interior, INTERIOR_ONLY_OK);
-            // A file only its interior proves is linked too: the pieces it
-            // shares with a file this torrent does not have (another .nfo
-            // there) are written through the byte comparison, which leaves the
-            // other torrent's file alone, so the disk cost stays that of the
-            // files that really differ. The same rule for a free file as for
-            // a colliding one.
+            // A file only its interior proves is linked too, although its
+            // edge pieces (shared with a file this torrent does not have,
+            // another .nfo there) are not proven: they are written through the
+            // byte comparison, which never changes a byte of the linked file,
+            // so the disk cost stays that of the files that really differ.
+            // An edge piece the linked file does not hold refuses the piece
+            // and parks B for a colliding file; a free one is given up instead
+            // and downloaded (`FreeLinks`, below).
             let is_proven = |rel: &PathBuf| proven.contains(rel) || interior.contains(rel);
             let mut linked = 0usize;
             let mut shared: HashSet<PathBuf> = HashSet::new();
@@ -1014,6 +1031,7 @@ impl Job {
             // plan was made -- the proof may have waited a long time for its
             // slot, and a torrent added meanwhile does not see this one.
             let mut free_linked = 0usize;
+            let mut free_links: HashSet<PathBuf> = HashSet::new();
             let own_total = own.len();
             let own: Vec<(PathBuf, &PathBuf)> =
                 own.into_iter().filter(|(_, rel)| is_proven(rel)).collect();
@@ -1031,9 +1049,14 @@ impl Job {
                     if !named.contains(&path_key(&from)) && link_into(&from, &root.join(rel)) {
                         free_linked += 1;
                         shared.insert(rel.clone());
+                        free_links.insert(rel.clone());
                     }
                 }
             }
+            // Guarded like the others; and, being nobody's but this
+            // torrent's, given up rather than refused when a piece it fetches
+            // shows that one is not its file after all (`FreeLinks`).
+            t.set_free_links(root.clone(), free_links);
             t.guard_files(shared);
             if !candidates.is_empty() || own_total > 0 {
                 record(
@@ -1042,9 +1065,9 @@ impl Job {
                     &name,
                     "proven",
                     format!(
-                        "{} of {} same-size file(s) proven identical and linked, {} to download; \
-                         {} of {} file(s) of its own on disk proven identical and linked, {} not \
-                         proven, to download",
+                        "{} of {} same-size file(s) linked, every piece of their own verified, {} \
+                         to download; {} of {} file(s) of its own on disk linked on the same proof, \
+                         {} not, to download",
                         linked,
                         candidates.len(),
                         candidates.len() - linked,
@@ -3499,18 +3522,28 @@ mod tests {
     async fn flat_library(
         name: &str,
     ) -> (crate::api::testing::TestState, PathBuf, Vec<u8>, Vec<u8>) {
+        let movie_b: Vec<u8> = (0..32_768u32).map(|i| (i % 251) as u8).collect();
+        let (s, dir, nfo_a) = flat_library_over(name, &movie_b);
+        (s, dir, movie_b, nfo_a)
+    }
+
+    /// `flat_library` with `movie_b` on the disk, of any size.
+    #[cfg(unix)]
+    fn flat_library_over(
+        name: &str,
+        movie_b: &[u8],
+    ) -> (crate::api::testing::TestState, PathBuf, Vec<u8>) {
         let s = crate::api::testing::state(name);
         let dir = s.dir.join("movies");
         std::fs::create_dir_all(&dir).unwrap();
         let movie_a: Vec<u8> = (0..20_000u32).map(|i| (i % 241) as u8).collect();
-        let movie_b: Vec<u8> = (0..32_768u32).map(|i| (i % 251) as u8).collect();
         let nfo_a = b"release notes of the first one.".to_vec();
         std::fs::write(dir.join("movieA.mkv"), &movie_a).unwrap();
         std::fs::write(dir.join("info.nfo"), &nfo_a).unwrap();
-        std::fs::write(dir.join("movieB.mkv"), &movie_b).unwrap();
+        std::fs::write(dir.join("movieB.mkv"), movie_b).unwrap();
         let ta = torrent_over("", &[("movieA.mkv", &movie_a), ("info.nfo", &nfo_a)], 16384);
         add(&s, &ta, &dir, true, true).unwrap();
-        (s, dir, movie_b, nfo_a)
+        (s, dir, nfo_a)
     }
 
     /// B over `movieB.mkv` and `nfo`, added for real; the folder it got.
@@ -3557,7 +3590,7 @@ mod tests {
         assert_eq!(missing(&t), vec![2], "only the .nfo is left");
         assert!(recent().iter().any(|e| e.action == "proven"
             && e.detail.contains(
-                "1 of 1 file(s) of its own on disk proven identical and linked, 0 not proven"
+                "1 of 1 file(s) of its own on disk linked on the same proof, 0 not, to download"
             )));
         assert_eq!(std::fs::read(dir.join("info.nfo")).unwrap(), nfo_a);
     }
@@ -3774,6 +3807,209 @@ mod tests {
             "a file named since the plan was linked"
         );
         assert_eq!(std::fs::read(dir.join("movieB.mkv")).unwrap(), movie_b);
+    }
+
+    /// B's film for the edge cases: 40 000 bytes over pieces of 16 384, so its
+    /// last piece (2) also holds the first bytes of B's `info.nfo`, a file B
+    /// does not have. Pieces 0 and 1 are the film's own.
+    #[cfg(unix)]
+    fn unaligned_movie_b() -> Vec<u8> {
+        (0..40_000u32).map(|i| (i % 251) as u8 + 1).collect()
+    }
+
+    /// The `.nfo` of B: A's, other bytes, the same size (which isolates B).
+    #[cfg(unix)]
+    fn other_nfo_of(nfo_a: &[u8]) -> Vec<u8> {
+        nfo_a.iter().map(|c| c ^ 0x20).collect()
+    }
+
+    /// An unaligned free film that is right: proven by its own pieces, linked,
+    /// and the edge piece it shares with the `.nfo` writes the `.nfo` alone.
+    /// B finishes, the film never written.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_unaligned_free_film_is_linked_and_only_the_nfo_is_fetched() {
+        use std::os::unix::fs::MetadataExt;
+        let movie_b = unaligned_movie_b();
+        let (s, dir, nfo_a) = flat_library_over("pathclaim-free-unaligned-ok", &movie_b);
+        let original = dir.join("movieB.mkv");
+        age(&original);
+        let before = stamp(&original);
+        let other_nfo = other_nfo_of(&nfo_a);
+        let (t, own) = add_movie_b(&s, &dir, &movie_b, &other_nfo).await;
+        assert_eq!(
+            stamp(&own.join("movieB.mkv")).0,
+            before.0,
+            "the film was not linked"
+        );
+        assert!(!is_error(&t), "{}", why(&t));
+        assert_eq!(missing(&t), vec![2], "only the edge piece is left");
+
+        let stream: Vec<u8> = movie_b.iter().chain(other_nfo.iter()).copied().collect();
+        let (sent, owned) = fetch_missing(&s, &t, &stream).await;
+        assert_eq!((sent, owned), (1, 1), "{}", why(&t));
+        assert!(!is_error(&t), "{}", why(&t));
+        assert!(crate::workers::holds_everything(&t), "not at 100 %");
+        assert_eq!(std::fs::read(own.join("info.nfo")).unwrap(), other_nfo);
+        assert_eq!(stamp(&original), before, "the film was written to");
+        assert_eq!(stamp(&own.join("movieB.mkv")), before);
+        assert_eq!(std::fs::metadata(&original).unwrap().nlink(), 2);
+        assert_eq!(std::fs::read(dir.join("info.nfo")).unwrap(), nfo_a);
+    }
+
+    /// The case the interior proof lets through: a free film whose own pieces
+    /// verify but whose edge bytes are wrong (here zeros, a preallocated
+    /// leftover stopped just short of the end). It is linked; the edge piece,
+    /// once fetched, cannot be written without changing it. The link is undone
+    /// -- B's name removed, never the original -- the film's pieces count as
+    /// missing again and are downloaded into a new file of B's folder. B
+    /// finishes, not in error, and the original is the same inode with the
+    /// same bytes, back to a single name.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_linked_free_film_with_a_wrong_edge_is_unlinked_and_downloaded() {
+        use std::os::unix::fs::MetadataExt;
+        let movie_b = unaligned_movie_b();
+        let mut on_disk = movie_b.clone();
+        on_disk[32_768..].fill(0);
+        let (s, dir, nfo_a) = flat_library_over("pathclaim-free-unaligned-edge", &on_disk);
+        let original = dir.join("movieB.mkv");
+        age(&original);
+        let before = stamp(&original);
+        let other_nfo = other_nfo_of(&nfo_a);
+        let (t, own) = add_movie_b(&s, &dir, &movie_b, &other_nfo).await;
+        let mine = own.join("movieB.mkv");
+        assert_eq!(stamp(&mine).0, before.0, "the film was not linked");
+        assert_eq!(missing(&t), vec![2], "the interior was not proven");
+
+        // The edge piece: refused over the linked film, which is then given
+        // up -- its own pieces are missing again, the piece itself is held.
+        let stream: Vec<u8> = movie_b.iter().chain(other_nfo.iter()).copied().collect();
+        let (sent, owned) = fetch_missing(&s, &t, &stream).await;
+        assert_eq!((sent, owned), (1, 1), "the edge piece: {}", why(&t));
+        assert!(!is_error(&t), "B in error: {}", why(&t));
+        assert_eq!(missing(&t), vec![0, 1], "the film's pieces still counted");
+        assert_eq!(stamp(&original), before, "the original was written to");
+        assert_eq!(std::fs::metadata(&original).unwrap().nlink(), 1);
+        assert_ne!(
+            std::fs::metadata(&mine).unwrap().ino(),
+            before.0,
+            "B's film is still the original"
+        );
+
+        // The rest of the film, into B's new file.
+        let (sent, owned) = fetch_missing(&s, &t, &stream).await;
+        assert_eq!((sent, owned), (2, 2), "{}", why(&t));
+        assert!(!is_error(&t), "{}", why(&t));
+        assert!(missing(&t).is_empty());
+        assert!(crate::workers::holds_everything(&t), "not at 100 %");
+        assert_eq!(std::fs::read(&mine).unwrap(), movie_b);
+        assert_eq!(std::fs::metadata(&mine).unwrap().nlink(), 1);
+        assert_eq!(std::fs::read(own.join("info.nfo")).unwrap(), other_nfo);
+        assert_eq!(stamp(&original), before, "the original changed");
+        assert_eq!(std::fs::read(&original).unwrap(), on_disk);
+        assert_eq!(std::fs::read(dir.join("info.nfo")).unwrap(), nfo_a);
+    }
+
+    /// The same film after a restart: what the proof job set (the guard, the
+    /// free links, the verdicts) is forgotten, the link with its two names is
+    /// still there. The edge piece is compared and refused as for any shared
+    /// file: B in error, nothing written, no name removed.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_linked_free_film_with_a_wrong_edge_after_a_restart_is_refused() {
+        use std::os::unix::fs::MetadataExt;
+        let movie_b = unaligned_movie_b();
+        let mut on_disk = movie_b.clone();
+        on_disk[32_768..].fill(0);
+        let (s, dir, nfo_a) = flat_library_over("pathclaim-free-edge-restart", &on_disk);
+        let original = dir.join("movieB.mkv");
+        age(&original);
+        let before = stamp(&original);
+        let other_nfo = other_nfo_of(&nfo_a);
+        let (t, own) = add_movie_b(&s, &dir, &movie_b, &other_nfo).await;
+        let mine = own.join("movieB.mkv");
+        assert_eq!(stamp(&mine).0, before.0, "the film was not linked");
+        t.set_free_links(PathBuf::new(), HashSet::new());
+        t.guard_files(HashSet::new());
+        t.forget_write_verdicts();
+
+        let stream: Vec<u8> = movie_b.iter().chain(other_nfo.iter()).copied().collect();
+        let (sent, owned) = fetch_missing(&s, &t, &stream).await;
+        assert_eq!((sent, owned), (1, 0), "the piece was accepted");
+        assert!(is_error(&t), "no error");
+        assert!(why(&t).contains("refused to overwrite"), "{}", why(&t));
+        assert_eq!(missing(&t), vec![2]);
+        assert_eq!(stamp(&mine), before, "B's link went or changed");
+        assert_eq!(stamp(&original), before, "the original changed");
+        assert_eq!(std::fs::metadata(&original).unwrap().nlink(), 2);
+        assert!(!own.join("info.nfo").exists(), "half a piece was written");
+    }
+
+    /// The way out is for a free file alone. A film another torrent names,
+    /// linked into B's folder on its interior, whose edge bytes differ: the
+    /// edge piece is refused as before -- B in error, nothing written, B's
+    /// name for the film kept, A's file untouched.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_linked_claimed_film_with_a_wrong_edge_is_still_refused() {
+        use std::os::unix::fs::MetadataExt;
+        let s = crate::api::testing::state("pathclaim-claimed-edge");
+        let dir = s.dir.join("save");
+        std::fs::create_dir_all(dir.join("movie1")).unwrap();
+        let video = unaligned_movie_b();
+        let mut a_video = video.clone();
+        a_video[32_768..].fill(0);
+        let nfo1 = b"first release notes, 36 bytes...".to_vec();
+        let nfo2 = b"another team's notes, a different length and other bytes".to_vec();
+        let (mkv, nfo) = (dir.join("movie1/movie1.mkv"), dir.join("movie1/movie1.nfo"));
+        std::fs::write(&mkv, &a_video).unwrap();
+        std::fs::write(&nfo, &nfo1).unwrap();
+        age(&mkv);
+        age(&nfo);
+        add(
+            &s,
+            &torrent_over(
+                "movie1",
+                &[("movie1.mkv", &a_video), ("movie1.nfo", &nfo1)],
+                16384,
+            ),
+            &dir,
+            true,
+            true,
+        )
+        .unwrap();
+        let (mkv_before, nfo_before) = (stamp(&mkv), stamp(&nfo));
+
+        let bytes_b = torrent_over(
+            "movie1",
+            &[("movie1.mkv", &video), ("movie1.nfo", &nfo2)],
+            16384,
+        );
+        wire_one(&s, &bytes_b);
+        let b = add(&s, &bytes_b, &dir, false, false).unwrap();
+        let t = held(&s, &b);
+        settled(&t).await;
+        let own = dir.join(format!("movie1 [{}]", &b[..8]));
+        assert_eq!(engine_save_path(&s, &b), own, "not isolated");
+        let mine = own.join("movie1/movie1.mkv");
+        assert_eq!(stamp(&mine).0, mkv_before.0, "the video was not linked");
+        assert_eq!(missing(&t), vec![2]);
+
+        let stream: Vec<u8> = video.iter().chain(nfo2.iter()).copied().collect();
+        let (sent, owned) = fetch_missing(&s, &t, &stream).await;
+        assert_eq!((sent, owned), (1, 0), "the piece was accepted");
+        assert!(is_error(&t), "no error");
+        assert!(why(&t).contains("refused to overwrite"), "{}", why(&t));
+        assert_eq!(missing(&t), vec![2], "pieces were given up");
+        assert_eq!(stamp(&mine), mkv_before, "B's name for the video went");
+        assert_eq!(std::fs::metadata(&mkv).unwrap().nlink(), 2);
+        assert_eq!(stamp(&mkv), mkv_before, "A's video changed");
+        assert_eq!(stamp(&nfo), nfo_before, "A's .nfo changed");
+        assert!(
+            !own.join("movie1/movie1.nfo").exists(),
+            "half a piece was written"
+        );
     }
 
     /// The diagnostic counts the files that are not where the torrent expects
