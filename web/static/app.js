@@ -4190,6 +4190,9 @@ function _bulkPlace(p, docked) {
     }
     p.docked = docked;
     p.shape = "";
+    // The deadline passed while the card was open in the middle: closing it the
+    // instant it is minimized would skip the dock, so the delay restarts here.
+    if (docked && p.autoCloseAt && Date.now() >= p.autoCloseAt && _bulkQuiet(p)) _bulkArmAutoClose(p);
     if (docked) {
         let dock = document.getElementById("bulk-dock");
         if (!dock) {
@@ -4302,14 +4305,21 @@ const JOB_DONE_AUTOCLOSE_MS = 30000;
 // run adds its note (_bulkNote) after the last render that armed it, and a card
 // that now carries something to read must stay.
 function _bulkQuiet(p) {
-    return !(p.lost || p.closed || p.note || _bulkNoteworthy(p.job));
+    // noteActs, not note: a note that only reports a success (see _bulkNote)
+    // leaves nothing to do, so it does not keep the card.
+    return !(p.lost || p.closed || p.noteActs || _bulkNoteworthy(p.job));
+}
+
+function _bulkArmAutoClose(p) {
+    p.autoCloseAt = Date.now() + JOB_DONE_AUTOCLOSE_MS;
+    clearTimeout(p.autoCloseTimer);
+    p.autoCloseTimer = setTimeout(() => { if (p.docked && _bulkQuiet(p)) _bulkClose(p); }, JOB_DONE_AUTOCLOSE_MS);
 }
 
 function _bulkAutoClose(p, running) {
     if (running || !_bulkQuiet(p)) return false;
     if (!p.autoCloseAt) {
-        p.autoCloseAt = Date.now() + JOB_DONE_AUTOCLOSE_MS;
-        p.autoCloseTimer = setTimeout(() => { if (p.docked && _bulkQuiet(p)) _bulkClose(p); }, JOB_DONE_AUTOCLOSE_MS);
+        _bulkArmAutoClose(p);
     } else if (p.docked && Date.now() >= p.autoCloseAt) {
         _bulkClose(p);
         return true;
@@ -4396,11 +4406,18 @@ function _bulkRender(p) {
 // move", "follow them in Jobs") to its panel, opening the panel if the job was
 // too quick to have one. `j` may be a job the caller merged from two runs: its
 // counts replace the panel's.
-function _bulkNote(j, note) {
+//
+// `opts.info` marks a note that only reports a success and asks for nothing
+// (Moved, Sent, Seeding...). Anything unmarked is taken to need a gesture
+// (follow it in Jobs, a warning, a question) and keeps the card open.
+function _bulkNote(j, note, opts) {
     const p = j && j._panel;
     if (!p || p.closed) return;
     p.job = Object.assign({}, j, { _panel: undefined });
-    if (note) p.note = note;
+    if (note) {
+        p.note = note;
+        p.noteActs = !(opts && opts.info);
+    }
     // Something to read now: no automatic close for this card.
     if (!_bulkQuiet(p)) {
         clearTimeout(p.autoCloseTimer);
@@ -4789,7 +4806,7 @@ async function _fetchFromNode(nodeName, fromEngine, engine) {
     if (!j) return;
     const ok = (j.tally && j.tally.ok) || 0;
     // Failures and their errors are on the progress panel already.
-    _bulkNote(j, j.failed ? "" : t("Fetching {ok} into \"{target}\" from \"{node}\".", { ok: ok, target: "local-" + engine, node: nodeName }));
+    _bulkNote(j, j.failed ? "" : t("Fetching {ok} into \"{target}\" from \"{node}\".", { ok: ok, target: "local-" + engine, node: nodeName }), { info: true });
     fetchHoardPage(true);
 }
 
@@ -4799,7 +4816,7 @@ async function _moveOnNode(nodeName, engine) {
     const j = await _runSelection("node-move", { node: nodeName, engine: engine }, t("Move to engine"));
     if (!j) return;
     const ok = (j.tally && j.tally.ok) || 0;
-    _bulkNote(j, j.failed ? "" : t("Moved {ok} to \"{target}\". The files did not move.", { ok: ok, target: nodeName + "-" + engine }));
+    _bulkNote(j, j.failed ? "" : t("Moved {ok} to \"{target}\". The files did not move.", { ok: ok, target: nodeName + "-" + engine }), { info: true });
     fetchHoardPage(true);
 }
 
@@ -4812,7 +4829,7 @@ async function _copyToLocalEngine(engine) {
     const j = await _runSelection("copy", { engine: engine }, t("Duplicate to engine"));
     if (!j) return;
     const ok = (j.tally && j.tally.ok) || 0;
-    _bulkNote(j, j.failed ? "" : t("Seeding {ok} more from \"{target}\". Same files, second identity in the swarm.", { ok: ok, target: "local-" + engine }));
+    _bulkNote(j, j.failed ? "" : t("Seeding {ok} more from \"{target}\". Same files, second identity in the swarm.", { ok: ok, target: "local-" + engine }), { info: true });
     fetchHoardPage(true);
     updateRaceTorrents();
 }
@@ -4828,7 +4845,7 @@ async function _moveToLocalEngine(engine) {
     const j = await _runSelection("move-engine", { engine: engine }, t("Move to engine"));
     if (!j) return;
     const ok = (j.tally && j.tally.ok) || 0;
-    _bulkNote(j, j.failed ? "" : t("Moved {ok} to \"{target}\". The files did not move.", { ok: ok, target: "local-" + engine }));
+    _bulkNote(j, j.failed ? "" : t("Moved {ok} to \"{target}\". The files did not move.", { ok: ok, target: "local-" + engine }), { info: true });
     _scheduleHoardRender();
     fetchHoardPage(true);
 }
@@ -4851,10 +4868,10 @@ async function _sendToEngineSelected(nodeName, engine, then) {
         _bulkNote(j, "");
     } else if (then === "remove") {
         _bulkNote(j, t("Sent {ok} to \"{target}\". The local copy goes once the far side reports complete.",
-            { ok: sent, target: target }));
+            { ok: sent, target: target }), { info: true });
     } else {
         _bulkNote(j, t("Sent {ok} to \"{target}\". They fetch the data from here; this node keeps its copy.",
-            { ok: sent, target: target }));
+            { ok: sent, target: target }), { info: true });
     }
 }
 
