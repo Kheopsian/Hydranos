@@ -631,6 +631,95 @@ pub fn map_path(p: &str, map: &BTreeMap<String, String>) -> String {
     }
 }
 
+/// Where a torrent's data goes, given where the source client says it is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Placement {
+    /// `save_path/name`, where Hydranos looks for it anyway.
+    AsNamed,
+    /// A single file the source keeps in a folder of its own, as qBittorrent's
+    /// "Create subfolder" layout does: added with that folder as save path.
+    In(String),
+    /// A layout Hydranos does not reproduce -- a renamed file, a multi-file
+    /// torrent without its root folder. Its data is not where it will look.
+    Elsewhere,
+}
+
+/// Compare where Hydranos will look (`save_path/name`) with where the source
+/// client says the data is (`content`). `name` is the torrent's own, the
+/// file's for a single-file torrent; `multi_file` as the info dict says;
+/// `lone_file` the path (`name/...`) of a folder torrent's only file.
+///
+/// Paths are compared by component, so a separator written `\` or doubled
+/// does not make the same place look like another one.
+pub fn placement(
+    save_path: &str,
+    content: &str,
+    name: &str,
+    multi_file: bool,
+    lone_file: Option<&str>,
+) -> Placement {
+    let path = Path::new(content);
+    if content.is_empty() || path == Path::new(save_path).join(name) {
+        return Placement::AsNamed;
+    }
+    // qBittorrent names the file, not the folder, of a torrent whose `files`
+    // list has one entry (`save/Pack/Movie.mkv`). That file exactly: renamed,
+    // it is not where Hydranos will look for it.
+    if lone_file.is_some_and(|f| path == Path::new(save_path).join(f)) {
+        return Placement::AsNamed;
+    }
+    // A folder of its own inside the save path, not any folder: one outside
+    // it (qBittorrent's folder for incomplete torrents) would become the
+    // torrent's home, and nothing would move it once complete.
+    if !multi_file && path.file_name().is_some_and(|f| f.to_string_lossy() == name) {
+        if let Some(dir) = path
+            .parent()
+            .filter(|d| !d.as_os_str().is_empty() && d.starts_with(save_path))
+        {
+            return Placement::In(dir.to_string_lossy().into_owned());
+        }
+    }
+    Placement::Elsewhere
+}
+
+/// How one candidate is added once its torrent file is read, and the note it
+/// carries when its data is not where Hydranos will look.
+///
+/// Elsewhere is added stopped and untrusted whatever the wizard chose: trusted,
+/// it would sit in error over files it cannot find; checked and started, it
+/// would download the whole payload a second time next to the copy it has.
+pub fn plan_placed(
+    c: &Candidate,
+    choices: &Choices,
+    content_present: bool,
+    name: &str,
+    multi_file: bool,
+    lone_file: Option<&str>,
+) -> (AddPlan, Option<String>) {
+    let mut p = plan(c, choices, content_present);
+    let content = map_path(&c.content, &choices.path_map);
+    match placement(&p.save_path, &content, name, multi_file, lone_file) {
+        Placement::AsNamed => (p, None),
+        Placement::In(dir) => {
+            p.save_path = dir;
+            (p, None)
+        }
+        // Nothing there either: there is no copy to protect, and a note
+        // pointing at it would send the operator looking for nothing. Added
+        // as it was, which fetches it, as the source client would have.
+        Placement::Elsewhere if !content_present => (p, None),
+        Placement::Elsewhere => {
+            p.paused = true;
+            p.seed_mode = false;
+            let note = format!(
+                "imported stopped: the source client keeps this torrent's data at {content}, not at {}. Put the data there or move the torrent to where it is, then recheck it",
+                join(&p.save_path, name)
+            );
+            (p, Some(note))
+        }
+    }
+}
+
 /// Torrents whose data is looked for in the preview. A sample: on a library of
 /// a million, statting every payload is minutes of disk on a cold pool.
 const DATA_SAMPLE: usize = 64;
@@ -646,7 +735,11 @@ pub struct Preview {
     pub categories: Vec<CategoryPlan>,
     pub path_prefixes: Vec<String>,
     pub data_checked: usize,
+    /// Sampled torrents whose data is where the import will add them.
     pub data_found: usize,
+    /// Sampled torrents whose data exists, but in a layout the import does not
+    /// reproduce: they go in stopped, with a note saying where it is.
+    pub data_elsewhere: usize,
     /// Files that could not be read (Transmission): skipped.
     pub problems: Vec<String>,
     /// Torrents with no resume file, so no save path (Transmission): skipped.
@@ -677,7 +770,25 @@ pub fn preview(cands: &[Candidate], exists: impl Fn(&Path) -> bool) -> Preview {
     let step = (cands.len() / DATA_SAMPLE).max(1);
     for c in cands.iter().step_by(step).take(DATA_SAMPLE) {
         p.data_checked += 1;
-        p.data_found += exists(Path::new(&c.content)) as usize;
+        if !exists(Path::new(&c.content)) {
+            continue;
+        }
+        // The torrent file is not read yet, so its layout is guessed from the
+        // paths alone: data at or under `save_path/name` (a folder torrent,
+        // or its only file), or a file of that name in a folder of its own,
+        // counts as found. The add decides on the torrent's own name and
+        // files; a lone file renamed in the source client only shows there.
+        let at_or_under = under(
+            c.content.trim_end_matches('/'),
+            join(&c.save_path, &c.name).trim_end_matches('/'),
+        );
+        if !at_or_under
+            && placement(&c.save_path, &c.content, &c.name, false, None) == Placement::Elsewhere
+        {
+            p.data_elsewhere += 1;
+        } else {
+            p.data_found += 1;
+        }
     }
     p
 }
@@ -745,6 +856,8 @@ pub struct AddRequest {
     pub plan: AddPlan,
     pub uploaded: u64,
     pub downloaded: u64,
+    /// Shown on the torrent once added: why it came in stopped.
+    pub note: Option<String>,
 }
 
 pub type AddFn = Arc<dyn Fn(AddRequest) -> Result<Added, String> + Send + Sync>;
@@ -826,32 +939,53 @@ pub async fn run_job(
                 *progress.last_ok.write().unwrap() = retry_copy.name.clone();
             }
         }
-        let outcome = match bytes {
-            Err(e) => Err(e),
+        let (outcome, held_stopped) = match bytes {
+            Err(e) => (Err(e), false),
             Ok(bytes) => {
                 let add = add.clone();
                 let choices = choices.clone();
                 tokio::task::spawn_blocking(move || {
                     let content = map_path(&c.content, &choices.path_map);
                     let present = Path::new(&content).exists();
-                    add(AddRequest {
+                    // The torrent's own name and layout, not the source's
+                    // display name. Unreadable: the add refuses it anyway.
+                    let (plan, note) =
+                        match typhon_engine::torrent::metainfo::parse_torrent_bytes(&bytes) {
+                            Ok(meta) => {
+                                let lone = (meta.multi_file && meta.files.len() == 1)
+                                    .then(|| meta.disk_rel(0).to_string_lossy().into_owned());
+                                plan_placed(
+                                    &c,
+                                    &choices,
+                                    present,
+                                    &meta.name,
+                                    meta.multi_file,
+                                    lone.as_deref(),
+                                )
+                            }
+                            Err(_) => (plan(&c, &choices, present), None),
+                        };
+                    let held = note.is_some();
+                    let added = add(AddRequest {
                         bytes,
                         category: c.category.clone(),
                         tags: c.tags.join(","),
-                        plan: plan(&c, &choices, present),
+                        plan,
                         uploaded: c.uploaded,
                         downloaded: c.downloaded,
-                    })
+                        note,
+                    });
+                    (added, held)
                 })
                 .await
-                .unwrap_or_else(|e| Err(e.to_string()))
+                .unwrap_or_else(|e| (Err(e.to_string()), false))
             }
         };
         if matches!(outcome, Ok(Added::Seeded) | Ok(Added::Resumed)) {
             progress
                 .carried_uploaded
                 .fetch_add(retry_copy.uploaded, Ordering::Relaxed);
-            if stays_stopped {
+            if stays_stopped || held_stopped {
                 progress.stopped.fetch_add(1, Ordering::Relaxed);
             }
         }
@@ -1948,6 +2082,217 @@ mod qbit_session_tests {
             tags: Vec::new(),
             source: Source::File(path),
         }
+    }
+
+    /// A one-piece torrent: one file `name` when `files` is empty, else a
+    /// `name/` folder holding `files` (a `files` list of one entry included).
+    fn torrent_file(dir: &Path, name: &str, files: &[&str]) -> PathBuf {
+        let mut info = Vec::new();
+        if files.is_empty() {
+            info.extend_from_slice(b"d6:lengthi2e");
+        } else {
+            info.extend_from_slice(b"d5:filesl");
+            for f in files {
+                info.extend_from_slice(format!("d6:lengthi1e4:pathl{}:{f}ee", f.len()).as_bytes());
+            }
+            info.push(b'e');
+        }
+        info.extend_from_slice(format!("4:name{}:{name}", name.len()).as_bytes());
+        info.extend_from_slice(b"12:piece lengthi16384e6:pieces20:");
+        info.extend_from_slice(&[7u8; 20]);
+        info.push(b'e');
+        let mut out = b"d4:info".to_vec();
+        out.extend_from_slice(&info);
+        out.push(b'e');
+        let path = dir.join(format!("{name}.torrent"));
+        std::fs::write(&path, out).unwrap();
+        path
+    }
+
+    /// How the import would add these: every plan, in order.
+    async fn plans_for(cands: Vec<Candidate>, choices: Choices) -> Vec<AddPlan> {
+        let plans = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = plans.clone();
+        let add: AddFn = Arc::new(move |r| {
+            seen.lock().unwrap().push(r.plan.clone());
+            Ok(Added::Seeded)
+        });
+        let cats: CategoryFn = Arc::new(|_| {});
+        run_job(cands, None, choices, Arc::new(Progress::default()), cats, add).await;
+        let out = plans.lock().unwrap().clone();
+        out
+    }
+
+    /// A single-file torrent that qBittorrent's "Create subfolder" layout put
+    /// in a folder of its own is added in that folder, trusted as complete:
+    /// added at qBit's save path, it went into error over a file it could not
+    /// find, and only moving it by hand brought it back.
+    #[tokio::test]
+    async fn a_single_file_kept_in_a_subfolder_is_added_in_that_subfolder() {
+        let dir = std::env::temp_dir().join(format!("imp-subfolder-{}", std::process::id()));
+        let save = dir.join("films");
+        std::fs::create_dir_all(save.join("Movie")).unwrap();
+        std::fs::write(save.join("Movie/Movie.mkv"), b"xx").unwrap();
+        let mut c = file_cand("Movie.mkv", torrent_file(&dir, "Movie.mkv", &[]));
+        c.save_path = save.to_string_lossy().into_owned();
+        c.content = save.join("Movie/Movie.mkv").to_string_lossy().into_owned();
+        let plans = plans_for(vec![c], Choices::default()).await;
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].save_path, save.join("Movie").to_string_lossy());
+        assert!(plans[0].seed_mode, "its data is where it is now added");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// Data the source keeps in a layout the import does not reproduce -- a
+    /// renamed file, a multi-file torrent without its folder -- goes in stopped
+    /// and untrusted, even when the wizard says start: trusted, it sat in
+    /// error; started, a check finding nothing would download it all again.
+    #[tokio::test]
+    async fn data_kept_where_hydranos_does_not_look_is_added_stopped_and_untrusted() {
+        let dir = std::env::temp_dir().join(format!("imp-elsewhere-{}", std::process::id()));
+        let save = dir.join("dl");
+        std::fs::create_dir_all(&save).unwrap();
+        std::fs::write(save.join("renamed.mkv"), b"xx").unwrap();
+        std::fs::write(save.join("a"), b"x").unwrap();
+        let mut renamed = file_cand("Show.mkv", torrent_file(&dir, "Show.mkv", &[]));
+        renamed.save_path = save.to_string_lossy().into_owned();
+        renamed.content = save.join("renamed.mkv").to_string_lossy().into_owned();
+        // qBit's "Don't create subfolder": the files sit in the save path.
+        let mut rootless = file_cand("Pack", torrent_file(&dir, "Pack", &["a", "b"]));
+        rootless.save_path = save.to_string_lossy().into_owned();
+        rootless.content = save.to_string_lossy().into_owned();
+        // A folder torrent's only file, renamed: in the right folder, under
+        // a name Hydranos will not look for.
+        std::fs::create_dir_all(save.join("Solo")).unwrap();
+        std::fs::write(save.join("Solo/renamed.mkv"), b"x").unwrap();
+        let mut lone = file_cand("Solo", torrent_file(&dir, "Solo", &["Movie.mkv"]));
+        lone.save_path = save.to_string_lossy().into_owned();
+        lone.content = save.join("Solo/renamed.mkv").to_string_lossy().into_owned();
+        // A single file in a folder outside the save path (qBittorrent's
+        // folder for incomplete torrents): not made the torrent's home.
+        std::fs::create_dir_all(dir.join("incomplete")).unwrap();
+        std::fs::write(dir.join("incomplete/Temp.mkv"), b"x").unwrap();
+        let mut temp = file_cand("Temp.mkv", torrent_file(&dir, "Temp.mkv", &[]));
+        temp.save_path = save.to_string_lossy().into_owned();
+        temp.content = dir.join("incomplete/Temp.mkv").to_string_lossy().into_owned();
+        let start = Choices {
+            path_map: BTreeMap::new(),
+            start_stopped: false,
+        };
+        let plans = plans_for(vec![renamed, rootless, lone, temp], start).await;
+        assert_eq!(plans.len(), 4);
+        assert_eq!(plans[3].save_path, save.to_string_lossy());
+        for p in &plans {
+            assert!(p.paused, "{p:?}");
+            assert!(!p.seed_mode, "{p:?}");
+        }
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// A folder torrent holding one file is where Hydranos looks: qBittorrent
+    /// names that file as its content (`save/Pack/Movie.mkv`), not the folder,
+    /// and that is no reason to hold it. Added trusted, as the wizard says.
+    #[tokio::test]
+    async fn a_folder_torrent_of_one_file_in_place_is_added_as_it_is() {
+        let dir = std::env::temp_dir().join(format!("imp-onefile-{}", std::process::id()));
+        let save = dir.join("dl");
+        std::fs::create_dir_all(save.join("Pack")).unwrap();
+        std::fs::write(save.join("Pack/Movie.mkv"), b"x").unwrap();
+        let mut c = file_cand("Pack", torrent_file(&dir, "Pack", &["Movie.mkv"]));
+        c.save_path = save.to_string_lossy().into_owned();
+        c.content = save.join("Pack/Movie.mkv").to_string_lossy().into_owned();
+        let start = Choices {
+            path_map: BTreeMap::new(),
+            start_stopped: false,
+        };
+        let plans = plans_for(vec![c.clone()], start).await;
+        assert_eq!(plans[0].save_path, save.to_string_lossy());
+        assert!(!plans[0].paused && plans[0].seed_mode, "{:?}", plans[0]);
+        let p = preview(&[c], |_| true);
+        assert_eq!((p.data_found, p.data_elsewhere), (1, 0));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// The wizard's "data found" counts what the import will find: a file in
+    /// its own subfolder is found, data in a layout it does not reproduce is
+    /// not -- counting it promised a seed that ended in error.
+    #[test]
+    fn the_preview_counts_only_data_the_import_will_find() {
+        let cand = |name: &str, content: &str| Candidate {
+            name: name.into(),
+            save_path: "/dl".into(),
+            content: content.into(),
+            ..file_cand(name, PathBuf::new())
+        };
+        let cands = vec![
+            cand("Film.mkv", "/dl/Film.mkv"),
+            cand("Movie.mkv", "/dl/Movie/Movie.mkv"),
+            cand("Show.mkv", "/dl/renamed.mkv"),
+        ];
+        let p = preview(&cands, |_| true);
+        assert_eq!(p.data_checked, 3);
+        assert_eq!(p.data_found, 2);
+    }
+
+    /// Data that is gone is not held: its source path does not match where
+    /// Hydranos looks, but nothing is there to protect, so it goes in as the
+    /// wizard says, without a note naming an empty place.
+    #[tokio::test]
+    async fn data_that_is_gone_is_neither_held_nor_noted() {
+        let dir = std::env::temp_dir().join(format!("imp-gone-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("dl")).unwrap();
+        let mut c = file_cand("Show.mkv", torrent_file(&dir, "Show.mkv", &[]));
+        c.save_path = dir.join("dl").to_string_lossy().into_owned();
+        c.content = dir.join("dl/renamed.mkv").to_string_lossy().into_owned();
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = seen.clone();
+        let add: AddFn = Arc::new(move |r| {
+            log.lock().unwrap().push((r.plan.clone(), r.note.clone()));
+            Ok(Added::Resumed)
+        });
+        let start = Choices {
+            path_map: BTreeMap::new(),
+            start_stopped: false,
+        };
+        let cats: CategoryFn = Arc::new(|_| {});
+        run_job(vec![c], None, start, Arc::new(Progress::default()), cats, add).await;
+        let (plan, note) = seen.lock().unwrap()[0].clone();
+        assert!(!plan.paused && !plan.seed_mode, "{plan:?}");
+        assert_eq!(note, None);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// The torrent says why it came in stopped, and where its data is.
+    #[tokio::test]
+    async fn a_torrent_held_stopped_carries_a_note_naming_its_data() {
+        let dir = std::env::temp_dir().join(format!("imp-note-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("dl")).unwrap();
+        std::fs::write(dir.join("dl/renamed.mkv"), b"xx").unwrap();
+        let mut c = file_cand("Show.mkv", torrent_file(&dir, "Show.mkv", &[]));
+        c.save_path = dir.join("dl").to_string_lossy().into_owned();
+        c.content = dir.join("dl/renamed.mkv").to_string_lossy().into_owned();
+        let notes = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = notes.clone();
+        let add: AddFn = Arc::new(move |r| {
+            seen.lock().unwrap().push(r.note.clone());
+            Ok(Added::Resumed)
+        });
+        let progress = Arc::new(Progress::default());
+        let cats: CategoryFn = Arc::new(|_| {});
+        let start = Choices {
+            path_map: BTreeMap::new(),
+            start_stopped: false,
+        };
+        run_job(vec![c.clone()], None, start, progress.clone(), cats, add).await;
+        let note = notes.lock().unwrap()[0].clone().expect("a note");
+        assert!(note.contains(&c.content), "{note}");
+        assert_eq!(progress.stopped.load(Ordering::Relaxed), 1, "counted stopped");
+        assert_eq!(
+            preview(&[c], |_| true).data_elsewhere,
+            1,
+            "and announced as such before the import"
+        );
+        std::fs::remove_dir_all(dir).ok();
     }
 
     /// The summary says what is stopped, and a failed torrent is kept, whole,

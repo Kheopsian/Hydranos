@@ -816,9 +816,10 @@ function importWizard(opts) {
             <p class="modal-desc" style="margin-bottom:4px">${t("Path mapping (qBit path → what Hydranos sees). Fix these if Hydranos mounts the data elsewhere:")}</p>
             <div style="max-height:160px;overflow:auto;margin-bottom:8px;border:1px solid var(--border);border-radius:4px;padding:6px">${rows || `<i>${t("no paths detected")}</i>`}</div>
             <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
-                <p class="modal-desc" id="qb-data" style="margin:0;flex:1${d.data_checked && d.data_found === 0 ? ";color:var(--accent-red);font-weight:600" : ""}">${!d.data_checked ? "" : (d.data_found === 0
+                <p class="modal-desc" id="qb-data" style="margin:0;flex:1${d.data_checked && d.data_found === 0 && !d.data_elsewhere ? ";color:var(--accent-red);font-weight:600" : ""}">${!d.data_checked ? "" : (d.data_found === 0 && !d.data_elsewhere
                     ? t("No data found for any of the {checked} torrents sampled. Nothing is reachable at these paths, so every torrent would restart from zero. Fix the mapping above.", { checked: d.data_checked })
-                    : t("Data found for {found} of {checked} torrents sampled.", { found: d.data_found, checked: d.data_checked }))}</p>
+                    : t("Data found for {found} of {checked} torrents sampled.", { found: d.data_found, checked: d.data_checked })
+                      + (d.data_elsewhere ? " " + t("{n} more have their data in a layout Hydranos does not reproduce (a renamed file, or files without their torrent's folder): those are added stopped, with a note saying where their data is.", { n: d.data_elsewhere }) : ""))}</p>
                 <button id="qb-check" style="flex:0 0 auto;width:auto">${t("Re-check paths")}</button>
             </div>
             <label style="display:block;margin-bottom:6px"><input type="checkbox" id="qb-stopped" checked> ${t("Import everything stopped, no announce until you start them")}</label>

@@ -16120,15 +16120,20 @@ fn import_add(state: &AppState) -> crate::importer::AddFn {
             r.plan.seed_mode,
             &engine_id,
         )?;
-        // The source client's lifetime counters come along, as history: not
-        // this session's traffic, so not counted in the day or session totals.
-        if r.uploaded > 0 || r.downloaded > 0 {
-            if let Some(t) = state
-                .engines
-                .get(&engine_id)
-                .and_then(|e| e.manager.get(&meta.info_hash))
-            {
+        let added = state
+            .engines
+            .get(&engine_id)
+            .and_then(|e| e.manager.get(&meta.info_hash));
+        if let Some(t) = &added {
+            // The source client's lifetime counters come along, as history: not
+            // this session's traffic, so not counted in the day or session totals.
+            if r.uploaded > 0 || r.downloaded > 0 {
                 t.restore_lifetime(r.uploaded, r.downloaded);
+            }
+            // Why it came in stopped, where its row shows a fault. In memory:
+            // a restart forgets it, the torrent stays stopped.
+            if let Some(note) = &r.note {
+                t.set_recheck_note(note);
             }
         }
         Ok(if r.plan.seed_mode {
