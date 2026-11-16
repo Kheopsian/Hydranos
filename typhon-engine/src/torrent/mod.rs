@@ -3247,6 +3247,23 @@ fn recheck_sem() -> &'static Semaphore {
     })
 }
 
+/// A slot of the recheck limit, taken without waiting, or `None` when every
+/// slot is in use. For a caller that is not async and wants to say it waits.
+pub fn try_recheck_slot() -> Option<tokio::sync::SemaphorePermit<'static>> {
+    recheck_sem().try_acquire().ok()
+}
+
+/// A slot of the recheck limit, waited for. Whatever reads a whole torrent
+/// back from disk besides a recheck (the path-claim proof) takes one, so the
+/// two together never go over `TYPHON_RECHECK_TORRENTS`. The holder must not
+/// wait for a recheck while it holds it: a recheck needs a slot of its own.
+pub async fn recheck_slot() -> tokio::sync::SemaphorePermit<'static> {
+    recheck_sem()
+        .acquire()
+        .await
+        .expect("the recheck semaphore is never closed")
+}
+
 /// Why a seed_mode torrent cannot be what it claims, or None when every file
 /// is on disk at its declared size.
 ///

@@ -811,15 +811,40 @@ pub fn finish(
         resume,
         rt: tokio::runtime::Handle::try_current().ok(),
     };
-    if cfg!(test) {
+    if inline_under_test() {
         job.run();
     } else {
         std::thread::Builder::new()
             .name("pathclaim-proof".into())
-            .spawn(move || job.run())
+            .spawn(move || job.run_capped())
             .ok();
     }
 }
+
+/// Under test a job runs inline, so a test sees the outcome when the add
+/// returns, unless the test asked for the real threaded path on this thread.
+fn inline_under_test() -> bool {
+    #[cfg(test)]
+    {
+        !THREADED.with(|t| t.get())
+    }
+    #[cfg(not(test))]
+    {
+        false
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static THREADED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+/// Proofs reading right now, the most there were at once, and how many ended.
+#[cfg(test)]
+static PROOFS_NOW: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+static PROOFS_MAX: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+static PROOFS_DONE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 struct Job {
     metainfo: Option<Vec<u8>>,
@@ -837,6 +862,43 @@ struct Job {
 }
 
 impl Job {
+    /// `run`, once a slot of the recheck limit is free.
+    ///
+    /// A proof reads every file it shares back from disk, as a recheck does;
+    /// a bulk add (cross-seed injection, a client import) used to start one
+    /// such read per torrent at once. The slot is the recheck semaphore's own,
+    /// so proofs and rechecks together stay within `TYPHON_RECHECK_TORRENTS`.
+    /// No deadlock: `run` only *starts* the recheck (`manager.recheck` spawns
+    /// a task and returns), it never waits for it, so the slot is back before
+    /// that task needs one. The wait is on this thread, off the runtime, and
+    /// the torrent reads as checking meanwhile (`_hold`).
+    fn run_capped(self) {
+        let _slot = self.rt.clone().map(|rt| {
+            typhon_engine::torrent::try_recheck_slot().unwrap_or_else(|| {
+                tracing::info!(
+                    engine = %self.engine_id,
+                    hash = %self.hash,
+                    "path claim: proof waiting for its turn, as many files are being read as \
+                     checks may run at once"
+                );
+                rt.block_on(typhon_engine::torrent::recheck_slot())
+            })
+        });
+        #[cfg(test)]
+        {
+            use std::sync::atomic::Ordering::SeqCst;
+            let now = PROOFS_NOW.fetch_add(1, SeqCst) + 1;
+            PROOFS_MAX.fetch_max(now, SeqCst);
+            // Long enough for every proof the test started to overlap.
+            std::thread::sleep(Duration::from_millis(200));
+            self.run();
+            PROOFS_NOW.fetch_sub(1, SeqCst);
+            PROOFS_DONE.fetch_add(1, SeqCst);
+        }
+        #[cfg(not(test))]
+        self.run();
+    }
+
     fn run(self) {
         let Some(engine) = self.state.engines.get(&self.engine_id) else {
             return;
@@ -1404,12 +1466,12 @@ pub fn guarded_recheck(
         resume: was_running,
         rt: tokio::runtime::Handle::try_current().ok(),
     };
-    if cfg!(test) {
+    if inline_under_test() {
         job.run();
     } else {
         std::thread::Builder::new()
             .name("pathclaim-recheck".into())
-            .spawn(move || job.run())
+            .spawn(move || job.run_capped())
             .map_err(|e| format!("cannot start the check: {e}"))?;
     }
     Ok(())
@@ -2291,6 +2353,57 @@ mod tests {
         assert!(recent()
             .iter()
             .any(|e| e.info_hash == b && e.action == "isolated"));
+    }
+
+    /// A bulk add of releases sharing one folder started one full read per
+    /// torrent at once. The real threaded path runs here (the test asks for it
+    /// on this thread; inline is the default under test), with two of the four
+    /// recheck slots held by the test so the limit is two: five adds, four
+    /// proofs, never more than two reading together.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_bulk_add_runs_no_more_proofs_than_the_recheck_limit() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let s = crate::api::testing::state("pathclaim-cap");
+        let dir = s.dir.join("movies");
+        std::fs::create_dir_all(dir.join("Film")).unwrap();
+        let video: Vec<u8> = (0..32_768u32).map(|i| (i % 251) as u8).collect();
+        std::fs::write(dir.join("Film").join("a.mkv"), &video).unwrap();
+        std::fs::write(dir.join("Film").join("a.nfo"), b"notes v0........").unwrap();
+        PROOFS_NOW.store(0, SeqCst);
+        PROOFS_MAX.store(0, SeqCst);
+        PROOFS_DONE.store(0, SeqCst);
+        let held_a = typhon_engine::torrent::recheck_slot().await;
+        let held_b = typhon_engine::torrent::recheck_slot().await;
+        THREADED.with(|t| t.set(true));
+        for i in 0..5 {
+            let nfo = format!("notes v{i}........");
+            add(
+                &s,
+                &torrent_over(
+                    "Film",
+                    &[("a.mkv", &video), ("a.nfo", nfo.as_bytes())],
+                    16384,
+                ),
+                &dir,
+                true,
+                false,
+            )
+            .unwrap();
+        }
+        THREADED.with(|t| t.set(false));
+        for _ in 0..400 {
+            if PROOFS_DONE.load(SeqCst) >= 4 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        drop((held_a, held_b));
+        assert_eq!(PROOFS_DONE.load(SeqCst), 4, "the proofs did not all run");
+        let max = PROOFS_MAX.load(SeqCst);
+        assert!(
+            (1..=2).contains(&max),
+            "{max} proofs were reading at once, the limit was 2"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
