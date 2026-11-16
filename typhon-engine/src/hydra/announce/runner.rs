@@ -483,6 +483,13 @@ pub(super) async fn announce_one(
     // Owed events still reach every tracker they are owed to.
     let mut tier_done = false;
     for tier in &tiers {
+        // A 429 from one URL of this tier: the rest of the tier waits too, for
+        // periodic announces. A 429 is an answer -- the tracker exists and asks
+        // us to slow down -- and its other names often lead to the same server,
+        // which a second request would hit at the very moment it said wait.
+        // Any other error still falls through to the next URL (BEP 12). Owed
+        // events are not held back: `step` sends them before it looks at this.
+        let mut tier_rate_limited = false;
         for tracker_url in tier {
             // Switched off for this engine: not contacted, not counted, not an
             // error. Skipped before the book so it owes and records nothing.
@@ -505,7 +512,7 @@ pub(super) async fn announce_one(
                     let st = book::step(
                         slot,
                         now,
-                        tier_done && mode == Mode::Hoard,
+                        (tier_done && mode == Mode::Hoard) || tier_rate_limited,
                         silent,
                         job.forced,
                     );
@@ -725,7 +732,11 @@ pub(super) async fn announce_one(
                         // no URL for `redact` to find, the key in clear all
                         // the same.
                         let e = scrub_url_secrets(&e, &req.url);
-                        let kind = classify(&redact(&e));
+                        // The v4 leg is cut out BEFORE redacting: `redact` runs
+                        // from the first `http` to the last `)` of the message,
+                        // so on "v4: http 429 .. | v6: .. (http://..)" it ate the
+                        // 429 and the error was filed under `connect`.
+                        let kind = classify(&redact(e.split(" | v6: ").next().unwrap_or(&e)));
                         // A 429 is an answer, not an outage: the tracker is up
                         // and asking us to slow down, which the scheduler does,
                         // per tracker. Counted as a failure here, five of them
@@ -747,6 +758,7 @@ pub(super) async fn announce_one(
                         );
                         if kind == "rate_limited" {
                             throttled = true;
+                            tier_rate_limited = true;
                         }
                         if kind == "timeout" {
                             timed_out = true;
@@ -2170,6 +2182,125 @@ mod announce_one_tests {
             t.queries().len(),
             1,
             "asked once, told never, never asked again"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A tracker that answers every announce with a bare HTTP status.
+    async fn status_tracker(status: u16, retry_after: Option<&'static str>) -> Recording {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let s2 = seen.clone();
+        let app = axum::Router::new().route(
+            "/announce",
+            axum::routing::get(move |axum::extract::RawQuery(q): axum::extract::RawQuery| {
+                let s3 = s2.clone();
+                async move {
+                    s3.lock().unwrap().push(q.unwrap_or_default());
+                    let mut r = axum::response::Response::new(axum::body::Body::empty());
+                    *r.status_mut() = axum::http::StatusCode::from_u16(status).unwrap();
+                    if let Some(v) = retry_after {
+                        r.headers_mut().insert(
+                            axum::http::header::RETRY_AFTER,
+                            axum::http::HeaderValue::from_static(v),
+                        );
+                    }
+                    r
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = rx.await;
+                })
+                .await;
+        });
+        Recording {
+            url: format!("http://{addr}/announce"),
+            seen,
+            _stop: tx,
+        }
+    }
+
+    /// One tier of two URLs, one pass: how many requests the second received.
+    async fn one_tier_two_urls(first: &str, second: &Recording, mode: Mode, tag: &str) -> usize {
+        let (mgr, root) = manager(tag);
+        let hash = add(&mgr, tag, first);
+        *state(&mgr, &hash).live_trackers.write() =
+            vec![vec![first.to_string(), second.url.clone()]];
+        let (policy, breaker, cache) = parts();
+        run(&mgr, &policy, &breaker, &cache, mode, &hash).await;
+        let _ = std::fs::remove_dir_all(root);
+        second.queries().len()
+    }
+
+    /// A 429 is an answer: the tracker is up and asks us to wait. Its other
+    /// names in the same tier often lead to the same server, so the pass does
+    /// not go on to them.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_429_ends_the_pass_for_its_tier() {
+        for (mode, tag) in [(Mode::Hoard, "t429h"), (Mode::Race, "t429r")] {
+            let first = status_tracker(429, Some("60")).await;
+            let second = recording_tracker(OPEN_BODY).await;
+            let reached = one_tier_two_urls(&first.url, &second, mode, tag).await;
+            assert_eq!(
+                first.queries().len(),
+                1,
+                "{tag}: the 429 tracker is asked once"
+            );
+            assert_eq!(reached, 0, "{tag}: the next URL of the tier is not tried");
+        }
+    }
+
+    /// Any other failure still falls through to the next URL of the tier
+    /// (BEP 12): a refused connection, a 503 without `Retry-After`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn other_failures_still_try_the_next_url_of_the_tier() {
+        let second = recording_tracker(OPEN_BODY).await;
+        let reached = one_tier_two_urls(
+            "http://127.0.0.1:1/announce",
+            &second,
+            Mode::Race,
+            "refused",
+        )
+        .await;
+        assert_eq!(reached, 1, "connection refused: next URL tried");
+
+        let first = status_tracker(503, None).await;
+        let second = recording_tracker(OPEN_BODY).await;
+        let reached = one_tier_two_urls(&first.url, &second, Mode::Race, "e503").await;
+        assert_eq!(first.queries().len(), 1);
+        assert_eq!(reached, 1, "503: next URL tried");
+    }
+
+    /// The pass stops at a 429 for periodic announces only: a departure owed
+    /// to every tracker still reaches the next URL of the tier.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_429_does_not_hold_back_an_owed_stopped() {
+        let first = status_tracker(429, Some("60")).await;
+        let second = recording_tracker(OPEN_BODY).await;
+        let (mgr, root) = manager("t429stop");
+        let hash = add(&mgr, "t429stop", &first.url);
+        *state(&mgr, &hash).live_trackers.write() =
+            vec![vec![first.url.clone(), second.url.clone()]];
+        let (policy, breaker, cache) = parts();
+        {
+            let st = state(&mgr, &hash);
+            let mut book = st.announce_book.lock().unwrap();
+            for url in [&first.url, &second.url] {
+                book::slot_mut(&mut book, url).started = true;
+            }
+        }
+        mgr.stop_torrent(&typhon_engine::torrent::hex_decode(&hash).unwrap())
+            .unwrap();
+        run(&mgr, &policy, &breaker, &cache, Mode::Hoard, &hash).await;
+        assert_eq!(
+            param(&second.last(), "event").as_deref(),
+            Some("stopped"),
+            "the departure owed to the second URL still goes out"
         );
         let _ = std::fs::remove_dir_all(root);
     }
