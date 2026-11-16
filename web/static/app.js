@@ -9067,9 +9067,9 @@ async function updateTrackers() {
             const sev = (agg[r.host] && agg[r.host].severity) || "none";
             const muted = !!(agg[r.host] && agg[r.host].muted);
             const SEV = {
-                red:   ["sev-red",   "needs action"],
-                amber: ["sev-amber", "unreachable"],
-                muted: ["sev-muted", "acknowledged"],
+                red:   ["sev-red",   t("needs action")],
+                amber: ["sev-amber", t("unreachable")],
+                muted: ["sev-muted", t("acknowledged")],
             };
             const mute = `<button class="btn-small" data-host="${esc(r.host)}" data-to="${muted ? "false" : "true"}" onclick="muteTracker(this.dataset.host,this.dataset.to === 'true')">${muted ? "Unmute" : "Mute"}</button>`;
             const hide = `<button class="btn-small" data-host="${esc(r.host)}" data-to="${r.hidden ? "false" : "true"}" onclick="hideTracker(this.dataset.host,this.dataset.to === 'true')" title="${esc(t("Still announced to. Out of this table and out of the tab badge until you show hidden trackers again"))}">${r.hidden ? t("Unhide") : t("Hide")}</button>`;

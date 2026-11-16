@@ -1206,5 +1206,8 @@
   "Not supported on this system": "Non pris en charge sur ce système",
   "this tracker lists your IPv4 address but not your IPv6 one: it dropped one of your addresses, and IPv6-only peers cannot find you": "ce tracker connaît votre adresse IPv4 mais pas votre adresse IPv6 : il a perdu une de vos adresses, et les pairs qui n'ont que l'IPv6 ne vous trouvent plus",
   "this tracker lists your IPv6 address but not your IPv4 one: it dropped one of your addresses, and IPv4-only peers cannot find you": "ce tracker connaît votre adresse IPv6 mais pas votre adresse IPv4 : il a perdu une de vos adresses, et les pairs qui n'ont que l'IPv4 ne vous trouvent plus",
-  "the tracker refuses the passkey": "le tracker refuse la passkey"
+  "the tracker refuses the passkey": "le tracker refuse la passkey",
+  "needs action": "à traiter",
+  "unreachable": "injoignable",
+  "acknowledged": "vu"
 }
