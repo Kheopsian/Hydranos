@@ -37,6 +37,8 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 
 ### Fixed
 
+- A tracker marked "needs action" now says why when you point at its row: which address family it dropped (IPv4 or IPv6), or a refused passkey.
+
 - A tracker that answers HTTP 429 and has several addresses in one tier of the announce list (two host names for the same backend, say) is no longer asked on the next address in the same pass. The 429 is an answer, not an outage: the tracker is up and asks us to wait, and its other names often lead to the same server, which used to receive a second request at the very moment it said to slow down. The pass now stops for that tier, the next attempt waits for the `Retry-After` it gave, and the other tiers are still announced to, as are the `completed` and `stopped` events owed to every tracker. Any other failure (timeout, DNS, refused connection, 5xx) still moves on to the next address of the tier.
 - A tracker with no error at all could show "needs action" on the Trackers tab, in its badge and in the anomalies, only because the announce self-check did not find our own address in the peer list it returned. A tracker usually leaves the announcing peer out of its answer, and a swarm of one has nobody else to list, so that is no fault. Only a self-check that finds us in one address family and not the other (the tracker dropped an address) still counts as one, with a refused passkey.
 

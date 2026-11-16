@@ -9079,8 +9079,20 @@ async function updateTrackers() {
             if (SEV[sev]) {
                 status = `<span class="sev ${SEV[sev][0]}"></span><span class="sev-label">${SEV[sev][1]}</span>`;
             }
+            // Why the row is red, in words: the same three causes the daemon
+            // ranks red (api.rs tracker_severity), so the pointer says what
+            // to look at instead of only that something is wrong.
+            const sevWhy = [];
+            if (sev === "red") {
+                const vd = vv && vv.verdict;
+                if (vd === "v6_missing") sevWhy.push(t("this tracker lists your IPv4 address but not your IPv6 one: it dropped one of your addresses, and IPv6-only peers cannot find you"));
+                if (vd === "v4_missing") sevWhy.push(t("this tracker lists your IPv6 address but not your IPv4 one: it dropped one of your addresses, and IPv4-only peers cannot find you"));
+                if (counts.some(([c]) => c === "invalid_passkey")) sevWhy.push(t("the tracker refuses the passkey"));
+            }
             const rowTip = SEV[sev]
-                ? esc(incoTracker(r.host) + ": " + SEV[sev][1] + (counts.length ? " (" + counts.map(([c, n]) => c + " x" + n).join(", ") + ")" : ""))
+                ? esc(incoTracker(r.host) + ": " + SEV[sev][1]
+                    + (sevWhy.length ? " -- " + sevWhy.join("; ") : "")
+                    + (counts.length ? " (" + counts.map(([c, n]) => c + " x" + n).join(", ") + ")" : ""))
                 : esc(r.last_error || "");
             const errTip = counts.some(([c]) => c === "udp_proxied") ? t(UDP_PROXIED_MSG) : (incoMsg(r.last_error) || "");
             return `<tr title="${rowTip}"><td><strong>${esc(incoTracker(r.host))}</strong></td><td>${r.torrents}</td><td>${status}</td><td>${passkey}</td><td>${minseed}</td><td>${ipmode}</td><td class="sr-desc" style="max-width:280px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(errTip)}">${counts.length ? `<a href="#" class="trk-err-link" data-host="${esc(r.host)}" onclick="showTrackerErrors(this.dataset.host);return false">${err}</a>` : err}</td><td>${mute} ${hide} <button class="btn-small" data-host="${esc(r.host)}" data-cur="${esc(cur)}" data-msh="${typeof r.min_seed_hours === "number" ? r.min_seed_hours : -1}" onclick="editTracker(this.dataset.host,this.dataset.cur,Number(this.dataset.msh))">Edit</button></td></tr>`;

@@ -1203,5 +1203,8 @@
   "Pre-allocate disk space": "Préallouer l'espace disque",
   "Sets [daemon] preallocate. Linux and Windows. Reserves the space of a torrent's files when it first writes to them, so a full disk is found at the start and not halfway through. Taken into account at the next restart. On ZFS and btrfs the space is not guaranteed (copy on write). With it on, a file not yet downloaded already has its final size, so prefer a recheck to skip_checking.": "Règle [daemon] preallocate. Linux et Windows. Réserve la place des fichiers d'un torrent à sa première écriture, pour découvrir un disque plein dès le début et non à mi-chemin. Pris en compte au prochain redémarrage. Sur ZFS et btrfs la place n'est pas garantie (copy on write). Avec l'option, un fichier pas encore téléchargé a déjà sa taille finale : préférez une revérification à skip_checking.",
   "Saved. A restart is required for this to take effect.": "Enregistré. Un redémarrage est nécessaire pour que ce soit pris en compte.",
-  "Not supported on this system": "Non pris en charge sur ce système"
+  "Not supported on this system": "Non pris en charge sur ce système",
+  "this tracker lists your IPv4 address but not your IPv6 one: it dropped one of your addresses, and IPv6-only peers cannot find you": "ce tracker connaît votre adresse IPv4 mais pas votre adresse IPv6 : il a perdu une de vos adresses, et les pairs qui n'ont que l'IPv6 ne vous trouvent plus",
+  "this tracker lists your IPv6 address but not your IPv4 one: it dropped one of your addresses, and IPv4-only peers cannot find you": "ce tracker connaît votre adresse IPv6 mais pas votre adresse IPv4 : il a perdu une de vos adresses, et les pairs qui n'ont que l'IPv4 ne vous trouvent plus",
+  "the tracker refuses the passkey": "le tracker refuse la passkey"
 }
