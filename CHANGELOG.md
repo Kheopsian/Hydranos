@@ -21,7 +21,7 @@ decided when the release is cut, by looking at what went in: whoever tags it
 renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 `HYDRANOS_VERSION` in the same commit.
 
-## Unreleased -- a reset configuration no longer sends existing torrents out by the home address
+## v4.9.1 -- a reset configuration that stays off the network, preallocation on Windows, a tracker that answers 429 left alone, and isolated torrents that reuse their files
 
 ### Changed
 
