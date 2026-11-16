@@ -40,12 +40,15 @@
 //! leaves no unproven link behind: at worst a paused torrent with an empty
 //! folder, which downloads what it needs when resumed.
 //!
-//! The isolated folder also takes, unproven, the files of the incoming torrent
-//! that are already on disk at their original path, regular, and named by no
-//! torrent at all: they are nobody else's, the recheck validates them piece by
-//! piece, and without them a film already on the disk would be downloaded again
-//! because of an `.nfo`. They are linked after the proof, so the restart case
-//! above is unchanged for every file another torrent names.
+//! The isolated folder also takes the files of the incoming torrent that are
+//! already on disk at their original path, regular, of the declared size, with
+//! no other name, and named by no torrent at all, without which a film already
+//! on the disk would be downloaded again because of an `.nfo`. They go through
+//! the very same proof as the files another torrent names, and are linked only
+//! once proven identical, piece by piece: a file that is not (a preallocated
+//! leftover of a deleted torrent, a truncated copy completed with zeros) is
+//! downloaded into the isolated folder, and the original is never written. They
+//! are linked after the proof, so the restart case above is unchanged.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -664,7 +667,8 @@ pub struct AddPlan {
     /// Isolated: files to prove from the original location and link in.
     pub isolate_from: Option<(PathBuf, HashSet<PathBuf>)>,
     /// Isolated: the files (below the root) no other torrent names. Those that
-    /// are already on disk at their original path are linked in unproven.
+    /// are already on disk at their original path are proven with the others,
+    /// and linked in only if they are.
     pub free: HashSet<PathBuf>,
     /// Where it asked, held until these files are proven in place.
     pub prove_in_place: Option<HashSet<PathBuf>>,
@@ -768,8 +772,8 @@ pub fn check_add(
                 .filter_map(|p| rel_of.get(p).cloned())
                 .collect();
             // Isolation is for the files another torrent holds; one nobody
-            // names stays this torrent's to reuse, or it would download a
-            // film that is already on the disk.
+            // names is this torrent's to reuse once proven, or it would
+            // download a film that is already on the disk.
             plan.free = all
                 .iter()
                 .filter(|(a, _, _)| !claimed.contains(&path_key(a)))
@@ -952,43 +956,17 @@ impl Job {
         let root = root_of(&t.meta, &t.save_path.read().clone());
 
         if let Some((src_root, candidates)) = &self.isolate_from {
-            let (proven, interior) =
-                prove_torrent_detail(&t, self.metainfo.as_deref(), src_root, candidates, false);
-            let interior = accepted_interior(interior, INTERIOR_ONLY_OK);
-            // A file only its interior proves is linked too: the pieces it
-            // shares with a file this torrent does not have (another .nfo
-            // there) are written through the byte comparison, which leaves the
-            // other torrent's file alone, so the disk cost stays that of the
-            // files that really differ.
-            let mut linked = 0usize;
-            let mut shared: HashSet<PathBuf> = HashSet::new();
-            for rel in proven.iter().chain(&interior) {
-                if link_into(&src_root.join(rel), &root.join(rel)) {
-                    linked += 1;
-                    shared.insert(rel.clone());
-                }
-            }
-            t.guard_files(shared);
-            // A file no torrent names needs no proof: it is nobody else's, and
-            // the recheck below validates it piece by piece. Linked after the
-            // proof, so a restart during it leaves nothing; not guarded, so a
-            // wrong piece can still be fetched into it. Only a regular file:
-            // a symlink or a folder is not something to link.
-            //
-            // Only a file this torrent could really own: of the size it
-            // declares (another release or a truncated copy is not its
-            // file), with no other name (a library copy, whose inode a
-            // download would rewrite or grow), and that no torrent named
-            // since the plan was made -- the proof may have waited a long
-            // time for its slot, and a torrent added meanwhile does not see
-            // this one.
-            let mut free_linked = 0usize;
-            let mut free: Vec<&PathBuf> = self.free.iter().collect();
-            free.sort();
+            // A file no torrent names is a candidate too, once it is a file
+            // this torrent could really own: regular (a symlink or a folder is
+            // not something to link), of the size it declares (another release
+            // or a truncated copy is not its file), and with no other name (a
+            // library copy, whose inode a download would rewrite or grow).
             let declared: HashMap<PathBuf, u64> = files_of(&t.meta, &root)
                 .into_iter()
                 .map(|(_, rel, len)| (rel, len))
                 .collect();
+            let mut free: Vec<&PathBuf> = self.free.iter().collect();
+            free.sort();
             let mut own: Vec<(PathBuf, &PathBuf)> = Vec::new();
             for rel in free {
                 let from = src_root.join(rel);
@@ -1002,6 +980,43 @@ impl Job {
                     own.push((from, rel));
                 }
             }
+            // One proof, one read, for both kinds: the files another torrent
+            // names at the same size and the free ones. A free file is linked
+            // only once proven, exactly like the others: an unproven one that
+            // is linked has a second name, and the write guard would then
+            // refuse every piece that differs, for ever -- a preallocated
+            // leftover of a deleted torrent, a truncated copy completed with
+            // zeros. Unproven, it is downloaded into B's own folder and the
+            // original is never written. The permit of the proof is the one
+            // `run_capped` took for the whole job.
+            let mut to_prove: HashSet<PathBuf> = candidates.clone();
+            to_prove.extend(own.iter().map(|(_, rel)| (*rel).clone()));
+            let (proven, interior) =
+                prove_torrent_detail(&t, self.metainfo.as_deref(), src_root, &to_prove, false);
+            let interior = accepted_interior(interior, INTERIOR_ONLY_OK);
+            // A file only its interior proves is linked too: the pieces it
+            // shares with a file this torrent does not have (another .nfo
+            // there) are written through the byte comparison, which leaves the
+            // other torrent's file alone, so the disk cost stays that of the
+            // files that really differ. The same rule for a free file as for
+            // a colliding one.
+            let is_proven = |rel: &PathBuf| proven.contains(rel) || interior.contains(rel);
+            let mut linked = 0usize;
+            let mut shared: HashSet<PathBuf> = HashSet::new();
+            for rel in proven.iter().chain(&interior) {
+                if candidates.contains(rel) && link_into(&src_root.join(rel), &root.join(rel)) {
+                    linked += 1;
+                    shared.insert(rel.clone());
+                }
+            }
+            // Free files proven: linked after the proof, so a restart during
+            // it leaves nothing; and not if a torrent named the path since the
+            // plan was made -- the proof may have waited a long time for its
+            // slot, and a torrent added meanwhile does not see this one.
+            let mut free_linked = 0usize;
+            let own_total = own.len();
+            let own: Vec<(PathBuf, &PathBuf)> =
+                own.into_iter().filter(|(_, rel)| is_proven(rel)).collect();
             if !own.is_empty() {
                 let mine: Vec<(PathBuf, u64)> = own.iter().map(|(f, _)| (f.clone(), 0)).collect();
                 let me = t.meta.info_hash;
@@ -1015,22 +1030,27 @@ impl Job {
                 for (from, rel) in own {
                     if !named.contains(&path_key(&from)) && link_into(&from, &root.join(rel)) {
                         free_linked += 1;
+                        shared.insert(rel.clone());
                     }
                 }
             }
-            if !candidates.is_empty() || free_linked > 0 {
+            t.guard_files(shared);
+            if !candidates.is_empty() || own_total > 0 {
                 record(
                     &self.engine_id,
                     &self.hash,
                     &name,
                     "proven",
                     format!(
-                        "{} of {} same-size file(s) proven identical and linked, {} to download, \
-                         {} file(s) of its own already on disk linked",
+                        "{} of {} same-size file(s) proven identical and linked, {} to download; \
+                         {} of {} file(s) of its own on disk proven identical and linked, {} not \
+                         proven, to download",
                         linked,
                         candidates.len(),
                         candidates.len() - linked,
-                        free_linked
+                        free_linked,
+                        own_total,
+                        own_total - free_linked
                     ),
                 );
             }
@@ -3536,8 +3556,9 @@ mod tests {
         assert!(!is_error(&t), "{}", why(&t));
         assert_eq!(missing(&t), vec![2], "only the .nfo is left");
         assert!(recent().iter().any(|e| e.action == "proven"
-            && e.detail
-                .contains("1 file(s) of its own already on disk linked")));
+            && e.detail.contains(
+                "1 of 1 file(s) of its own on disk proven identical and linked, 0 not proven"
+            )));
         assert_eq!(std::fs::read(dir.join("info.nfo")).unwrap(), nfo_a);
     }
 
@@ -3637,42 +3658,50 @@ mod tests {
         a_free_file_of_another_size_is_not_linked("pathclaim-free-long", long).await;
     }
 
-    /// A free file of the right size with one wrong piece: linked, that piece
-    /// is missing after the check, and the right piece that then arrives is
-    /// never written through the link into the original, byte for byte.
+    /// A free file of the right size that is not proven (`on_disk`) is not
+    /// linked: B downloads it into its own folder and finishes, and the
+    /// original stays as it was, inode and bytes.
     #[cfg(unix)]
-    #[tokio::test(flavor = "multi_thread")]
-    async fn a_right_piece_never_rewrites_a_linked_free_file() {
-        use std::os::unix::fs::MetadataExt;
-        let (s, dir, movie_b, nfo_a) = flat_library("pathclaim-free-badpiece").await;
+    async fn an_unproven_free_file_is_downloaded_not_linked(name: &str, on_disk: Vec<u8>) {
+        let (s, dir, movie_b, nfo_a) = flat_library(name).await;
         let original = dir.join("movieB.mkv");
-        let mut wrong = movie_b.clone();
-        wrong[20_000] ^= 0xff;
-        std::fs::write(&original, &wrong).unwrap();
+        std::fs::write(&original, &on_disk).unwrap();
         age(&original);
         let before = stamp(&original);
         let other_nfo: Vec<u8> = nfo_a.iter().map(|c| c ^ 0x20).collect();
         let (t, own) = add_movie_b(&s, &dir, &movie_b, &other_nfo).await;
-        assert_eq!(
-            std::fs::metadata(own.join("movieB.mkv")).unwrap().ino(),
-            before.0,
-            "not linked"
+        assert!(
+            std::fs::symlink_metadata(own.join("movieB.mkv")).is_err(),
+            "an unproven free file was linked"
         );
-        assert_eq!(missing(&t), vec![1, 2], "{}", why(&t));
+        assert_eq!(missing(&t), vec![0, 1, 2], "{}", why(&t));
 
         let stream: Vec<u8> = movie_b.iter().chain(other_nfo.iter()).copied().collect();
         let (sent, owned) = fetch_missing(&s, &t, &stream).await;
-        eprintln!(
-            "bad piece: sent {sent} owned {owned} error {} why {:?} missing {:?}",
-            is_error(&t),
-            why(&t),
-            missing(&t)
-        );
+        assert_eq!((sent, owned), (3, 3), "{}", why(&t));
+        assert!(!is_error(&t), "{}", why(&t));
+        assert!(missing(&t).is_empty());
+        assert_eq!(std::fs::read(own.join("movieB.mkv")).unwrap(), movie_b);
         assert_eq!(stamp(&original), before, "the original was rewritten");
-        assert_eq!(std::fs::read(&original).unwrap(), wrong);
-        assert!(owned < sent, "the piece was accepted over the link");
-        assert!(is_error(&t), "B is silent about a piece it can never take");
-        assert!(why(&t).contains("refused to overwrite"), "{}", why(&t));
+        assert_eq!(std::fs::read(&original).unwrap(), on_disk);
+    }
+
+    /// One wrong piece out of the file: not linked, downloaded, B finishes.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_free_file_with_a_wrong_piece_is_downloaded_not_linked() {
+        let movie_b: Vec<u8> = (0..32_768u32).map(|i| (i % 251) as u8).collect();
+        let mut wrong = movie_b.clone();
+        wrong[20_000] ^= 0xff;
+        an_unproven_free_file_is_downloaded_not_linked("pathclaim-free-badpiece", wrong).await;
+    }
+
+    /// A preallocated leftover of a deleted torrent: the right size, zeros.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_preallocated_leftover_is_downloaded_not_linked() {
+        an_unproven_free_file_is_downloaded_not_linked("pathclaim-free-zeros", vec![0u8; 32_768])
+            .await;
     }
 
     /// A file nobody names but that has another name (a library copy imported
