@@ -8170,8 +8170,8 @@ const _SETTINGS_DESC = {
     api_port: "TCP port for the HTTP API and WebUI.",
     api_key: "Secret required in the X-API-Key header to call the API.",
     data_dir: "Root directory for daemon state (categories, DBs, configs).",
-    recheck_torrents: "Rechecks (and proofs of data shared with another torrent) reading at once, across every disk. 1 to 64, default 4. Applied live: a lower count takes effect as running checks end.",
-    recheck_per_disk: "Rechecks reading ONE disk at once. 0 = by the kind of disk: 1 on a hard drive (two make it seek between them for every read: measured 64 MiB/s with one, 32.7 with four), 2 on an SSD. Only Linux tells them apart: on Windows and macOS every disk counts as a hard drive, so set it by hand for an SSD there. A USB adapter can also report an SSD as a hard drive. The log says once per disk what it was taken for. 0 to 64, default 0. Applied live.",
+    recheck_torrents: "Rechecks (and proofs of data shared with another torrent) reading at once, across every disk. 0 = no cap: each disk is already read by recheck_per_disk checks at a time, and every disk can be checked at once. 0 to 64, default 0. Applied live: a lower count takes effect as running checks end.",
+    recheck_per_disk: "Rechecks reading ONE disk at once. 0 = by the kind of disk: 1 on a hard drive (two make it seek between them for every read: measured 64 MiB/s with one, 32.7 with four), 4 on an SSD (measured on NVMe: 4 checks of 8 pieces read the most). Only Linux tells them apart: on Windows and macOS every disk counts as a hard drive, so set it by hand for an SSD there. A USB adapter can also report an SSD as a hard drive. The log says once per disk what it was taken for. 0 to 64, default 0. Applied live.",
     recheck_pieces: "Pieces one recheck reads at once. 0 = by the kind of disk: 4 on a hard drive, 8 on an SSD (Linux only, as above). 0 to 64, default 0. Applied live, from the next check on.",
     create_torrent_folder: "Create a per-torrent subfolder for single-file torrents (like qBittorrent's subfolder option). Off = single files saved directly in the category folder; multi-file torrents always keep their own folder. Applies to newly added torrents only.",
     // session (race/hoard)
@@ -8273,7 +8273,7 @@ const _SETTINGS_DEFAULT = {
     "daemon::api_host": "0.0.0.0", "daemon::api_port": 8199,
     "daemon::data_dir": "/config",
     "daemon::create_torrent_folder": false,
-    "daemon::recheck_torrents": 4, "daemon::recheck_per_disk": 0, "daemon::recheck_pieces": 0,
+    "daemon::recheck_torrents": 0, "daemon::recheck_per_disk": 0, "daemon::recheck_pieces": 0,
     "race::enable_dht": true, "race::enable_pex": true,
     "hoard::enable_dht": true, "hoard::enable_pex": true,
     "race::enable_lsd": true, "hoard::enable_lsd": false,
@@ -8320,7 +8320,7 @@ const _LIVE_ENGINE_KEY_DEFAULTS = {
 };
 // [daemon] keys applied live and created when absent (LIVE_DAEMON_KEYS in
 // api.rs): commented out in the template, so shown at their default.
-const _LIVE_DAEMON_KEY_DEFAULTS = { recheck_torrents: 4, recheck_per_disk: 0, recheck_pieces: 0 };
+const _LIVE_DAEMON_KEY_DEFAULTS = { recheck_torrents: 0, recheck_per_disk: 0, recheck_pieces: 0 };
 function _withLiveEngineKeys(cfg) {
     if (_isObj(cfg.daemon)) {
         for (const [k, d] of Object.entries(_LIVE_DAEMON_KEY_DEFAULTS)) {

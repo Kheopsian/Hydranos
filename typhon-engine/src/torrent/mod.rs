@@ -3322,11 +3322,6 @@ fn env_count_opt(name: &str) -> Option<usize> {
         .filter(|v| *v > 0)
 }
 
-/// A positive whole number from the environment, or `default`.
-fn env_count(name: &str, default: usize) -> usize {
-    env_count_opt(name).unwrap_or(default)
-}
-
 /// The highest value any of the three recheck limits takes. A typo of 400
 /// readers on one hard drive would make it seek for every read.
 pub const RECHECK_LIMIT_MAX: usize = 64;
@@ -3336,19 +3331,28 @@ pub const RECHECK_LIMIT_MAX: usize = 64;
 /// more seeks between them. Measured on USB drives holding ebooks and FLAC
 /// albums: 32.7 MiB/s with four checks of sixteen pieces, 64 MiB/s with one
 /// check of four; one check of eight read 54.6, of sixteen 51.5. An SSD has no
-/// head to move: two checks of eight keep it busier. Not measured, chosen
-/// low; the settings raise them.
+/// head to move and wants many reads at once. Measured on an NVMe drive
+/// (Crucial P3) over FLAC albums, 256 KiB pieces: four checks of eight read
+/// 1 510 to 1 760 MiB/s, four of sixteen 835 to 1 560, two of eight 1 130 to
+/// 1 280, one of four 450 to 940.
 const HDD_PER_DISK: usize = 1;
 const HDD_PIECES: usize = 4;
-const SSD_PER_DISK: usize = 2;
+const SSD_PER_DISK: usize = 4;
 const SSD_PIECES: usize = 8;
 
-/// The limit in force: the config's when it sets one, else the
-/// environment's, else `default`; within 1..=`RECHECK_LIMIT_MAX`.
-fn limit_from(config: Option<usize>, env: &str, default: usize) -> usize {
-    config
-        .unwrap_or_else(|| env_count(env, default))
-        .clamp(1, RECHECK_LIMIT_MAX)
+/// The global count when nothing caps it: more turns than there are disks
+/// to take them, so the per-disk locks alone decide.
+const UNCAPPED: usize = 4096;
+
+/// Checks reading at once across every disk: the config's when it sets one,
+/// else `TYPHON_RECHECK_TORRENTS`, else no cap (0). Each disk is read by one
+/// check at a time already (`recheck_per_disk`); a cap on top only made a
+/// fifth disk wait while it sat idle. 1..=`RECHECK_LIMIT_MAX` caps it.
+fn torrents_from(config: Option<usize>) -> usize {
+    match config.or_else(|| env_count_opt("TYPHON_RECHECK_TORRENTS")) {
+        None | Some(0) => UNCAPPED,
+        Some(v) => v.min(RECHECK_LIMIT_MAX),
+    }
 }
 
 /// A limit that can be left to the kind of disk: the config's, else the
@@ -3378,7 +3382,7 @@ struct RecheckLimits {
 fn limits() -> &'static RecheckLimits {
     static L: OnceLock<RecheckLimits> = OnceLock::new();
     L.get_or_init(|| RecheckLimits {
-        torrents: limit_from(None, "TYPHON_RECHECK_TORRENTS", 4).into(),
+        torrents: torrents_from(None).into(),
         per_disk: per_disk_from(None, "TYPHON_RECHECK_PER_DISK")
             .unwrap_or(0)
             .into(),
@@ -3393,8 +3397,8 @@ fn limits() -> &'static RecheckLimits {
 /// `[daemon] recheck_torrents`, `recheck_per_disk` and `recheck_pieces`;
 /// `None` (the key is absent) falls back to `TYPHON_RECHECK_TORRENTS`,
 /// `TYPHON_RECHECK_PER_DISK` and `TYPHON_RECHECK_CONCURRENCY`. Past that,
-/// and for 0, the last two are auto: by the kind of each disk
-/// (`DiskKind`). A check already reading keeps its pieces in flight; the next
+/// and for 0, the first is no cap and the last two are auto: by the kind of
+/// each disk (`DiskKind`). A check already reading keeps its pieces in flight; the next
 /// one reads at the new width. A lower count takes effect as running checks
 /// end: none is cut short, and no new one starts until the count is under it.
 pub fn set_recheck_limits(torrents: Option<usize>, per_disk: Option<usize>, pieces: Option<usize>) {
@@ -3403,7 +3407,7 @@ pub fn set_recheck_limits(torrents: Option<usize>, per_disk: Option<usize>, piec
         per_disk_from(pieces, "TYPHON_RECHECK_CONCURRENCY").unwrap_or(0),
         Ordering::SeqCst,
     );
-    let to = limit_from(torrents, "TYPHON_RECHECK_TORRENTS", 4);
+    let to = torrents_from(torrents);
     let from = l.torrents.swap(to, Ordering::SeqCst);
     resize_sem(recheck_sem(), from, to);
     // Under the map's lock: a disk asked for meanwhile is made at the new
@@ -4800,12 +4804,12 @@ mod lifecycle_tests {
     }
 
     /// Left to the disk, a hard drive gets one check of four pieces and an
-    /// SSD two of eight; a disk the OS does not describe is a hard drive.
+    /// SSD four of eight; a disk the OS does not describe is a hard drive.
     #[test]
     fn an_ssd_reads_more_at_once_than_a_hard_drive() {
         assert_eq!(limits().per_disk.load(Ordering::SeqCst), 0, "auto in tests");
         assert_eq!((DiskKind::Hdd.per_disk(), DiskKind::Hdd.pieces()), (1, 4));
-        assert_eq!((DiskKind::Ssd.per_disk(), DiskKind::Ssd.pieces()), (2, 8));
+        assert_eq!((DiskKind::Ssd.per_disk(), DiskKind::Ssd.pieces()), (4, 8));
         assert_eq!(disk_kind("root:c:").0, DiskKind::Hdd);
         assert_eq!(recheck_width_for("test:not-a-device"), HDD_PIECES);
     }
@@ -4821,19 +4825,19 @@ mod lifecycle_tests {
         assert_eq!(per_disk_from(None, unset), None);
     }
 
-    /// The config's limit wins, then the environment's, then the default,
-    /// and none goes outside 1..=64.
+    /// The global count: the config's when set, none at all by default or
+    /// at 0 (the per-disk locks decide), and never over 64 when capped.
     #[test]
-    fn a_recheck_limit_comes_from_the_config_first() {
-        let unset = "TYPHON_TEST_NO_SUCH_LIMIT";
-        assert_eq!(limit_from(Some(2), unset, 4), 2, "the config's");
-        assert_eq!(limit_from(None, unset, 4), 4, "nothing set: the default");
-        assert_eq!(limit_from(Some(0), unset, 4), 1, "never none at all");
+    fn the_global_recheck_count_is_uncapped_unless_set() {
+        assert_eq!(torrents_from(Some(2)), 2, "the config's");
+        assert_eq!(torrents_from(Some(0)), UNCAPPED, "0: no cap");
         assert_eq!(
-            limit_from(Some(400), unset, 4),
+            torrents_from(Some(400)),
             RECHECK_LIMIT_MAX,
             "a typo is capped"
         );
+        // The variable is not set under test: no cap either.
+        assert_eq!(torrents_from(None), UNCAPPED);
     }
 
     /// A lower limit takes back what is free at once and the rest as checks
@@ -4982,7 +4986,10 @@ mod lifecycle_tests {
         // Stopped.
         mgr.stop_torrent(&ih).unwrap();
         assert_eq!(state(&t), "paused");
-        let hold = recheck_sem().acquire_many(4).await.unwrap();
+        let hold = recheck_sem()
+            .acquire_many(limits().torrents.load(Ordering::SeqCst) as u32)
+            .await
+            .unwrap();
         mgr.recheck(&ih).expect("recheck starts");
         assert_eq!(
             state(&t),
@@ -5015,7 +5022,10 @@ mod lifecycle_tests {
 
         // Running.
         mgr.start_torrent(&ih).unwrap();
-        let hold = recheck_sem().acquire_many(4).await.unwrap();
+        let hold = recheck_sem()
+            .acquire_many(limits().torrents.load(Ordering::SeqCst) as u32)
+            .await
+            .unwrap();
         mgr.recheck(&ih).expect("recheck starts");
         assert_eq!(state(&t), "checking_files");
         drop(hold);
@@ -5040,7 +5050,10 @@ mod lifecycle_tests {
 
         // Queued: under way, nothing read yet. `progress` is what it was.
         let before = progress(&t);
-        let hold = recheck_sem().acquire_many(4).await.unwrap();
+        let hold = recheck_sem()
+            .acquire_many(limits().torrents.load(Ordering::SeqCst) as u32)
+            .await
+            .unwrap();
         mgr.recheck(&ih).expect("recheck starts");
         assert_eq!(field(&t), 0.0);
         assert_eq!(progress(&t), before, "progress is not the check's figure");

@@ -58,17 +58,19 @@ create_torrent_folder = false
 # between them for every read: measured on USB drives, one check with four
 # pieces read 64 MiB/s, four checks with sixteen pieces 32.7 MiB/s. A disk is
 # what the OS reports as one device.
+# recheck_torrents at 0 (the default) puts no cap on top of the per-disk one:
+# every disk can be checked at once, each by recheck_per_disk checks.
 # recheck_per_disk and recheck_pieces at 0 (the default) go by the kind of
-# disk: 1 check of 4 pieces on a hard drive, 2 of 8 on an SSD. Linux says which
+# disk: 1 check of 4 pieces on a hard drive, 4 of 8 on an SSD. Linux says which
 # is which (/sys/block/<disk>/queue/rotational); a disk it cannot tell (FUSE,
 # mergerfs, NFS, SMB, ZFS) counts as a hard drive, and so does every disk on
 # Windows and macOS: set them by hand for an SSD there. A USB adapter may also
 # report an SSD as a hard drive. The log says once per disk what it was taken
 # for. Absent = TYPHON_RECHECK_TORRENTS, TYPHON_RECHECK_PER_DISK and
-# TYPHON_RECHECK_CONCURRENCY when set, else 4, 0 and 0. recheck_torrents 1 to
-# 64, the two others 0 to 64. Applied live: a lower count takes effect as
-# running checks end, the pieces from the next check on.
-# recheck_torrents = 4
+# TYPHON_RECHECK_CONCURRENCY when set, else 0. Each 0 to 64. Applied live: a
+# lower count takes effect as running checks end, the pieces from the next
+# check on.
+# recheck_torrents = 0
 # recheck_per_disk = 0
 # recheck_pieces = 0
 # Interface the daemon's own requests are bound to when they go "direct" or

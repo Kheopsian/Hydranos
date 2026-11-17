@@ -964,7 +964,8 @@ impl Job {
     /// A proof reads every file it shares back from disk, as a recheck does;
     /// a bulk add (cross-seed injection, a client import) used to start one
     /// such read per torrent at once. The slot is the recheck semaphore's own,
-    /// so proofs and rechecks together stay within `TYPHON_RECHECK_TORRENTS`.
+    /// so proofs and rechecks together stay within `recheck_torrents` when it
+    /// caps them, and within one per disk always.
     /// No deadlock: `run` only *starts* the recheck (`manager.recheck` spawns
     /// a task and returns), it never waits for it, so the slot is back before
     /// that task needs one. The wait is on this thread, off the runtime, and

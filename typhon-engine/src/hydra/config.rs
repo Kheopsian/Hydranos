@@ -117,11 +117,13 @@ pub struct Daemon {
     #[serde(default)]
     pub preallocate: bool,
     /// Checks (and path-claim proofs) reading at once across every disk.
-    /// Absent = `TYPHON_RECHECK_TORRENTS`, else 4. 1 to 64. Applied live.
+    /// 0 = no cap: each disk is read by `recheck_per_disk` checks at a time,
+    /// and every disk can be at once. Absent = `TYPHON_RECHECK_TORRENTS`,
+    /// else 0. 0 to 64. Applied live.
     #[serde(default)]
     pub recheck_torrents: Option<i64>,
     /// Checks reading one disk at once. 0 = by the kind of disk: 1 on a hard
-    /// drive (two make it seek between them for every read), 2 on an SSD;
+    /// drive (two make it seek between them for every read), 4 on an SSD;
     /// Linux only tells them apart, elsewhere every disk is a hard drive.
     /// Absent = `TYPHON_RECHECK_PER_DISK`, else 0. 0 to 64. Applied live.
     #[serde(default)]
@@ -146,12 +148,12 @@ impl Daemon {
         ]
     }
 
-    /// Why a recheck limit is refused: `recheck_torrents` outside 1 to 64,
-    /// the two others outside 0 (by the kind of disk) to 64.
+    /// Why a recheck limit is refused: one outside 0 (no cap, or by the kind
+    /// of disk) to 64.
     pub fn recheck_limits_error(&self) -> Option<String> {
         let max = typhon_engine::torrent::RECHECK_LIMIT_MAX as i64;
         self.recheck_limits().into_iter().find_map(|(name, v)| {
-            let min = i64::from(name == "recheck_torrents");
+            let min = 0;
             v.filter(|v| !(min..=max).contains(v)).map(|v| {
                 format!(
                     "[daemon] {name} = {v} is out of range: {min} to {max}, or leave it out for the default"
@@ -1083,11 +1085,11 @@ mod tests {
         );
         let auto = Config::load(&write_tmp(
             "rl-auto",
-            "[daemon]\nrecheck_per_disk = 0\nrecheck_pieces = 0\n",
+            "[daemon]\nrecheck_torrents = 0\nrecheck_per_disk = 0\nrecheck_pieces = 0\n",
         ));
-        assert!(auto.is_ok(), "0 = by the kind of disk: {auto:?}");
+        assert!(auto.is_ok(), "0 = no cap, or by the kind of disk: {auto:?}");
         for (bad, range) in [
-            ("recheck_torrents = 0", "1 to 64"),
+            ("recheck_torrents = -1", "0 to 64"),
             ("recheck_pieces = 65", "0 to 64"),
             ("recheck_per_disk = -1", "0 to 64"),
         ] {
