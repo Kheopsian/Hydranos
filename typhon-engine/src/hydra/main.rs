@@ -1178,6 +1178,8 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
     workers::spawn_health_scan(state.engines.clone());
     // The volumes in fault behind /health, every 30 s.
     workers::spawn_volume_fault_scan(state.engines.clone());
+    // Parks for an unmounted disk, lifted once it is back.
+    workers::spawn_absent_volume_scan(state.engines.clone());
 
     // Taken before the router consumes the state: `flush_on_shutdown` needs the
     // engines, and by then `state` has been moved.

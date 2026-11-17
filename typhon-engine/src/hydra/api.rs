@@ -10130,7 +10130,8 @@ fn qbit_filter_matches(state: &str, filter: &str) -> bool {
         "stalled" => matches!(state, "stalledDL" | "stalledUP"),
         "stalled_uploading" => state == "stalledUP",
         "stalled_downloading" => state == "stalledDL",
-        "errored" => state == "error",
+        // qBittorrent counts missing files as errored too.
+        "errored" => matches!(state, "error" | "missingFiles"),
         // qBittorrent's own: a torrent whose files are being checked, waiting
         // for its turn included -- qBittorrent reports that wait as checking
         // too, and has no state of its own for it. Listed everything before.

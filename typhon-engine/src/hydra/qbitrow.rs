@@ -108,13 +108,19 @@ pub fn build(native: &Value, engine_name: &str, now: i64) -> Value {
     let progress = f(native, "progress");
     let download_rate = i(native, "download_rate");
     let upload_rate = i(native, "upload_rate");
-    let state = state_to_qbit(
+    let state = match state_to_qbit(
         &s(native, "state"),
         progress,
         upload_rate,
         download_rate,
         b(native, "user_paused"),
-    );
+    ) {
+        // Parked because its disk is not mounted: what qBittorrent reports
+        // for the same case, and what the *arrs show as missing files rather
+        // than a failure.
+        "error" if b(native, "files_absent") => "missingFiles",
+        other => other,
+    };
 
     let total_size = i(native, "total_size");
     // The real lifetime figures. 3.x read "total_downloaded" / "total_uploaded"
@@ -343,6 +349,20 @@ mod tests {
             state_to_qbit("checking_files", 0.5, 0, 0, false),
             "checkingDL"
         );
+    }
+
+    /// A torrent parked because its disk is not mounted reads as qBittorrent
+    /// reads the same case; any other error stays an error.
+    #[test]
+    fn files_absent_reads_as_missing_files() {
+        let row = build(&json!({"state": "error", "files_absent": true}), "hoard", 0);
+        assert_eq!(row["state"], "missingFiles");
+        let row = build(
+            &json!({"state": "error", "files_absent": false}),
+            "hoard",
+            0,
+        );
+        assert_eq!(row["state"], "error");
     }
 
     #[test]

@@ -545,6 +545,14 @@ impl EngineHost {
                             }),
                         );
                     }
+                    // Before the runner too: a torrent whose disk is not
+                    // mounted is parked now, one probe per disk, and never
+                    // announced as a seed it cannot serve.
+                    {
+                        let manager = engine.manager.clone();
+                        let _ =
+                            tokio::task::spawn_blocking(move || manager.check_volumes(true)).await;
+                    }
                     let bump = crate::announce::runner::start(
                         engine.manager.clone(),
                         policy,

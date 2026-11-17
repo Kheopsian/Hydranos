@@ -683,6 +683,11 @@ async fn commit(
                         .as_secs() as i64,
                     Ordering::Relaxed,
                 );
+                // The filesystem the finished data is on (see `data_vol`).
+                {
+                    let t = torrent.clone();
+                    tokio::task::spawn_blocking(move || t.note_data_vol_of_files());
+                }
                 // Write it down now. Waiting for the five-minute sweep meant a
                 // restart inside that window lost the completion and
                 // re-downloaded the whole torrent.

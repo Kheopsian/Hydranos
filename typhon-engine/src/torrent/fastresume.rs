@@ -73,6 +73,15 @@ pub struct ResumeData {
     /// torrent that was only ever to be served back to the downloader.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub seed_only: bool,
+    /// The filesystem the data was on at the last good verdict (see
+    /// `TorrentState::data_vol`), 0 when not known. What tells an unmounted
+    /// disk from deleted files at a start with files missing.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub data_vol: u64,
+}
+
+fn is_zero(v: &u64) -> bool {
+    *v == 0
 }
 
 /// Save resume data for a torrent.

@@ -234,6 +234,16 @@ pub fn build(engine: &Value, facts: &StoreFacts, agent: &str) -> Value {
             .unwrap_or(false)
             .into(),
     );
+    // Parked because its disk is not mounted: the pieces are kept, and the
+    // park lifts by itself when the disk is back.
+    row.insert(
+        "files_absent".into(),
+        engine
+            .get("files_absent")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+            .into(),
+    );
     // How far a running recheck has got, 0..1, null when none is: its own
     // field, because `progress` keeps meaning what the torrent holds.
     row.insert(
@@ -474,6 +484,7 @@ mod tests {
                 "content_folder",
                 "download_rate",
                 "engine_save_path",
+                "files_absent",
                 "info_hash",
                 "injected_peers",
                 "injection_hit",

@@ -104,7 +104,7 @@ fn each_filter_word_keeps_exactly_its_states() {
     assert_eq!(kept("stalled"), ["stalledDL", "stalledUP"]);
     assert_eq!(kept("stalled_uploading"), ["stalledUP"]);
     assert_eq!(kept("stalled_downloading"), ["stalledDL"]);
-    assert_eq!(kept("errored"), ["error"]);
+    assert_eq!(kept("errored"), ["error", "missingFiles"]);
     assert_eq!(
         kept("checking"),
         ["checkingDL", "checkingUP"],

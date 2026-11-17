@@ -345,6 +345,9 @@ pub fn torrent_to_json(t: &Arc<crate::torrent::meta::TorrentState>) -> Value {
         // Under a check that is still waiting for its turn on the disk, not
         // reading: shown "Waiting for check" rather than "Checking 0 %".
         "check_queued": state == "checking_files" && t.waiting_for_check(),
+        // Parked because its files are absent as a whole (a disk not
+        // mounted): qBittorrent's `missingFiles`, not a plain error.
+        "files_absent": t.files_absent.load(Ordering::Relaxed),
         "total_size": t.meta.total_size,
         "multi_file": t.meta.multi_file,
         "total_done": total_done,

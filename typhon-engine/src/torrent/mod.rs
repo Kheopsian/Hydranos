@@ -6,6 +6,7 @@ pub mod piece_picker;
 pub mod rate;
 pub mod ratelimit;
 pub mod statedb;
+pub mod volume;
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -1254,6 +1255,7 @@ impl TorrentManager {
             file_renames: state.meta.renamed_files(),
             data_lost: String::new(),
             seed_only: false,
+            data_vol: 0,
         };
         // The record first, then the torrent: a store that refuses it refuses
         // the add, with nothing inserted and the error going back to the
@@ -1486,6 +1488,16 @@ impl TorrentManager {
             t.fold_seed_time(crate::torrent::meta::now_secs());
             return Ok(());
         }
+        // Parked because its files were absent (an unmounted disk): a start
+        // looks again, and goes on as a plain start if they are all back. At
+        // most `volume::PROBE_TIMEOUT` on a disk that does not answer.
+        if t.files_absent.load(Ordering::Relaxed) {
+            let probe_t = t.clone();
+            let key = t.save_path.read().clone();
+            if volume::probe(key, move || probe_t.lift_absent_park()) == Some(true) {
+                self.after_lift(&t);
+            }
+        }
         // Pieces found missing (`mark_data_lost`) park the torrent until a
         // recheck, whatever status a stop left it in since: a start would make
         // it a download and fetch them again, which only a recheck may decide.
@@ -1531,6 +1543,141 @@ impl TorrentManager {
         // The status is settled: open the interval if this is now a seed.
         t.fold_seed_time(crate::torrent::meta::now_secs());
         Ok(())
+    }
+
+    /// A park for absent files was just lifted: a download goes back in the
+    /// queue, and the trackers hear from it again soon.
+    fn after_lift(&self, t: &TorrentState) {
+        let ih = t.meta.info_hash;
+        if t.status.load(Ordering::Relaxed) == TorrentStatus::Downloading as u8 {
+            self.incomplete.insert(ih);
+        }
+        if !t.is_paused.load(Ordering::Relaxed) {
+            self.announce_soon(&ih);
+        }
+    }
+
+    /// Judge every disk at once instead of every torrent alone, and lift the
+    /// parks of the disks that came back.
+    ///
+    /// Torrents are grouped by the filesystem recorded at their last good
+    /// verdict (`data_vol`). Each group costs one probe of one of its paths,
+    /// under `volume::PROBE_TIMEOUT`, whatever the number of torrents in it:
+    ///
+    /// - the path is now on another filesystem, or the disk does not answer:
+    ///   the disk is not mounted. At `startup`, every torrent of the group
+    ///   that holds pieces is parked as absent with no look at its files,
+    ///   before the first announce, and one line is logged for the disk;
+    /// - the path is on its filesystem: the parks of the group are lifted,
+    ///   each after one `stat` per file says every file is back in full.
+    ///
+    /// A park whose torrent has no filesystem recorded (saved by an older
+    /// build, or on Windows) is grouped by save path, probed by its first
+    /// torrent's files, and lifted the same way.
+    ///
+    /// Outside `startup` only parked torrents are looked at, and nothing at
+    /// all is done while none is parked (`meta::ABSENT_PARKED`): a library
+    /// whose disks are mounted pays one atomic load per pass. Touches the
+    /// disk: never on the async runtime.
+    pub fn check_volumes(&self, startup: bool) -> VolumeCheck {
+        use std::collections::HashMap;
+        let mut out = VolumeCheck::default();
+        if !startup && meta::ABSENT_PARKED.load(Ordering::Relaxed) == 0 {
+            return out;
+        }
+        #[derive(PartialEq, Eq, Hash)]
+        enum Key {
+            Vol(u64),
+            Folder(std::path::PathBuf),
+        }
+        let mut groups: HashMap<Key, Vec<Arc<TorrentState>>> = HashMap::new();
+        for r in self.torrents.iter() {
+            let t = r.value();
+            if t.status.load(Ordering::Relaxed) == TorrentStatus::Checking as u8 {
+                continue;
+            }
+            let absent = t.files_absent.load(Ordering::Relaxed);
+            let vol = t.data_vol.load(Ordering::Relaxed);
+            let key = if vol != 0 && (absent || startup) {
+                Key::Vol(vol)
+            } else if absent {
+                Key::Folder(t.save_path.read().clone())
+            } else {
+                continue;
+            };
+            groups.entry(key).or_default().push(t.clone());
+        }
+        for (key, members) in groups {
+            let first = &members[0];
+            let save = first.save_path.read().clone();
+            // Up to three torrents of the group stand for it. Its disk is
+            // there when the first file of one of them is (whatever the
+            // filesystem id says: an NFS remount gets a new one), or when the
+            // path of one of them is on the recorded filesystem (files
+            // deleted from a disk that is mounted: the lift judges them).
+            let samples: Vec<std::path::PathBuf> =
+                members.iter().take(3).map(|t| first_file_path(t)).collect();
+            let want = match key {
+                Key::Vol(v) => Some(v),
+                Key::Folder(_) => None,
+            };
+            let probe_key = samples[0].clone();
+            let here = volume::probe(probe_key, move || {
+                samples.iter().any(|p| p.exists())
+                    || want.is_some_and(|v| samples.iter().any(|p| volume::volume_id(p) == Some(v)))
+            })
+            .unwrap_or(false);
+            if here {
+                let mut lifted = 0;
+                for t in members
+                    .iter()
+                    .filter(|t| t.files_absent.load(Ordering::Relaxed))
+                {
+                    if t.lift_absent_park() {
+                        self.after_lift(t);
+                        lifted += 1;
+                    }
+                }
+                if lifted > 0 {
+                    info!(
+                        "[volume] the disk of {} is back: {} torrent(s) no longer parked",
+                        save.display(),
+                        lifted
+                    );
+                }
+                out.lifted += lifted;
+                continue;
+            }
+            if !startup {
+                continue;
+            }
+            let mut parked = 0;
+            for t in &members {
+                let holds = t
+                    .picker
+                    .get()
+                    .is_none_or(|p| p.lock().unwrap().num_have() > 0);
+                if !holds || t.files_absent.load(Ordering::Relaxed) {
+                    continue;
+                }
+                t.park_absent(&format!(
+                    "the disk holding {} is not mounted (or does not answer). The torrent comes \
+                     back by itself once it is, or recheck this torrent",
+                    save.display()
+                ));
+                parked += 1;
+            }
+            if parked > 0 {
+                warn!(
+                    "[volume] the disk of {} is not mounted (or does not answer): {} torrent(s) \
+                     parked, their pieces kept",
+                    save.display(),
+                    parked
+                );
+            }
+            out.parked += parked;
+        }
+        out
     }
 
     /// Put back a stop decided before this process started.
@@ -2054,6 +2201,7 @@ impl TorrentManager {
             }
             // Parked for lost data by the run before: it stays parked, and is
             // neither offered as a seed nor queued as a download below.
+            state.data_vol.store(rd.data_vol, Ordering::Relaxed);
             state.restore_data_lost(&rd.data_lost);
             self.skey_index
                 .insert(crate::crypto::mse::sha1_combine(b"req2", &ih), ih);
@@ -2579,6 +2727,7 @@ impl TorrentManager {
             file_renames: t.meta.renamed_files(),
             data_lost: t.data_lost_msg(),
             seed_only: t.is_seed_only(),
+            data_vol: t.data_vol.load(Ordering::Relaxed),
         }
     }
 
@@ -2851,6 +3000,11 @@ impl TorrentManager {
         // new one (and a move that is undone is a move too).
         t.forget_write_verdicts();
         if was != new {
+            // Nor does the filesystem they were on: the next good verdict
+            // records the new one.
+            t.data_vol.store(0, Ordering::Relaxed);
+        }
+        if was != new {
             self.note_placed(t.meta.info_hash);
             self.note_arrival(t.meta.info_hash);
         }
@@ -3121,6 +3275,7 @@ fn fingerprint_of(t: &TorrentState) -> statedb::Fingerprint {
         up_limit: t.rate_limits().0,
         down_limit: t.rate_limits().1,
         data_lost: t.data_lost.load(Ordering::Relaxed),
+        data_vol: t.data_vol.load(Ordering::Relaxed),
         edits: edits_hash(t),
     }
 }
@@ -3648,6 +3803,26 @@ pub fn disk_key(path: &std::path::Path) -> String {
     }
 }
 
+/// What `TorrentManager::check_volumes` did.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct VolumeCheck {
+    /// Torrents parked because their disk is not mounted.
+    pub parked: usize,
+    /// Parks lifted because their disk is back.
+    pub lifted: usize,
+}
+
+/// Where a torrent's first non-empty file is, or its save path.
+fn first_file_path(t: &TorrentState) -> std::path::PathBuf {
+    let save_path = t.save_path.read().clone();
+    t.meta
+        .files
+        .iter()
+        .position(|f| f.length > 0)
+        .map(|i| t.meta.disk_path(&save_path, i))
+        .unwrap_or(save_path)
+}
+
 /// The disk a torrent's data is read from: where its first non-empty file
 /// is, or its save path.
 fn torrent_disk_key(t: &TorrentState) -> String {
@@ -3986,6 +4161,13 @@ impl TorrentManager {
             for piece in &verified {
                 p.set_have(*piece);
             }
+        }
+
+        // Pieces found where they were looked for: the filesystem they are
+        // on is the one to tell an unmounted disk by (see `data_vol`).
+        if have > 0 {
+            let t = t.clone();
+            tokio::task::spawn_blocking(move || t.note_data_vol_of_files());
         }
 
         let complete = num_pieces > 0 && have >= num_pieces;
@@ -7339,6 +7521,126 @@ mod manager_tests {
             "and the engine does not look where the disk does not"
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A whole seed on disk under its own folder, for the volume pass.
+    fn seed_on_disk(tag: &str) -> (Arc<TorrentManager>, std::path::PathBuf, Arc<TorrentState>) {
+        let (mgr, root) = manager(tag);
+        let save = root.join("disk");
+        std::fs::create_dir_all(&save).unwrap();
+        std::fs::write(save.join("vol"), vec![0u8; 16384]).unwrap();
+        let (ih, _) = mgr
+            .add_torrent_bytes(
+                &torrent_bytes("vol", &["https://tracker.example/announce"]),
+                &save.to_string_lossy(),
+                false,
+                true,
+            )
+            .unwrap();
+        let t = mgr.get(&ih).unwrap();
+        t.status
+            .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+        (mgr, root, t)
+    }
+
+    /// A park with no filesystem recorded is lifted by the pass once the
+    /// torrent's files are back, and the torrent seeds again.
+    #[test]
+    fn the_volume_pass_lifts_a_park_whose_files_are_back() {
+        let (mgr, root, t) = seed_on_disk("vol-lift");
+        t.park_absent("test");
+        assert_eq!(t.status.load(Ordering::Relaxed), TorrentStatus::Error as u8);
+        let done = mgr.check_volumes(false);
+        assert_eq!(done.lifted, 1);
+        assert_eq!(
+            t.status.load(Ordering::Relaxed),
+            TorrentStatus::Seeding as u8
+        );
+        assert!(!t.files_absent.load(Ordering::Relaxed));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The pass leaves a park alone while the files are still not there.
+    #[test]
+    fn the_volume_pass_keeps_a_park_while_the_files_are_gone() {
+        let (mgr, root, t) = seed_on_disk("vol-keep");
+        t.park_absent("test");
+        std::fs::remove_file(t.save_path.read().join("vol")).unwrap();
+        assert_eq!(mgr.check_volumes(false).lifted, 0);
+        assert!(t.files_absent.load(Ordering::Relaxed));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The filesystem the disk recorded is not where its path is now.
+    fn another_volume(t: &TorrentState) -> u64 {
+        volume::volume_id(&t.save_path.read())
+            .unwrap_or(0)
+            .wrapping_add(1)
+    }
+
+    /// At startup, a disk whose path is on another filesystem than the one
+    /// recorded, with its files not there, parks its torrents in one go,
+    /// pieces kept; once the files are back, the next pass lifts them.
+    #[test]
+    fn the_startup_pass_parks_a_disk_that_is_not_mounted_and_lifts_it_back() {
+        let (mgr, root, t) = seed_on_disk("vol-startup");
+        t.data_vol.store(another_volume(&t), Ordering::Relaxed);
+        let file = t.save_path.read().join("vol");
+        std::fs::remove_file(&file).unwrap();
+        let done = mgr.check_volumes(true);
+        assert_eq!(done.parked, 1);
+        assert!(t.files_absent.load(Ordering::Relaxed));
+        assert_eq!(t.status.load(Ordering::Relaxed), TorrentStatus::Error as u8);
+
+        std::fs::write(&file, vec![0u8; 16384]).unwrap();
+        assert_eq!(mgr.check_volumes(false).lifted, 1);
+        assert_eq!(
+            t.status.load(Ordering::Relaxed),
+            TorrentStatus::Seeding as u8
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A filesystem whose id changed (an NFS remount) with its files there
+    /// is mounted: nothing is parked.
+    #[test]
+    fn the_startup_pass_keeps_a_disk_whose_id_changed_but_whose_files_are_there() {
+        let (mgr, root, t) = seed_on_disk("vol-new-id");
+        t.data_vol.store(another_volume(&t), Ordering::Relaxed);
+        assert_eq!(mgr.check_volumes(true).parked, 0);
+        assert!(!t.files_absent.load(Ordering::Relaxed));
+        assert_eq!(
+            t.status.load(Ordering::Relaxed),
+            TorrentStatus::Seeding as u8
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A pass with nothing parked does nothing.
+    #[test]
+    fn a_pass_with_nothing_parked_does_nothing() {
+        let (mgr, root, t) = seed_on_disk("vol-idle");
+        t.data_vol.store(another_volume(&t), Ordering::Relaxed);
+        std::fs::remove_file(t.save_path.read().join("vol")).unwrap();
+        // Not at startup: a torrent not parked is not looked at.
+        assert_eq!(mgr.check_volumes(false), VolumeCheck::default());
+        assert!(!t.files_absent.load(Ordering::Relaxed));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A start on a torrent parked for absent files looks again, and starts
+    /// it when the files are back.
+    #[test]
+    fn a_start_lifts_an_absent_park_whose_files_are_back() {
+        let (mgr, root, t) = seed_on_disk("vol-start");
+        t.park_absent("test");
+        mgr.start_torrent(&t.meta.info_hash).unwrap();
+        assert_eq!(
+            t.status.load(Ordering::Relaxed),
+            TorrentStatus::Seeding as u8
+        );
+        assert!(!t.data_lost.load(Ordering::Relaxed));
+        std::fs::remove_dir_all(&root).ok();
     }
 }
 

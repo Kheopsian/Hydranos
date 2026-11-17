@@ -934,6 +934,26 @@ pub fn spawn_health_scan(engines: Arc<crate::engines::EngineHost>) {
     });
 }
 
+/// Lift the parks of torrents whose disk was not mounted, once it is: one
+/// pass a minute, the first one at once (it lifts the parks a restart put
+/// back). A pass with no torrent parked costs one atomic load per engine;
+/// otherwise one probe per disk, and one `stat` per file of the torrents on
+/// a disk that is back (`TorrentManager::check_volumes`).
+pub fn spawn_absent_volume_scan(engines: Arc<crate::engines::EngineHost>) {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_secs(60));
+        loop {
+            if !crate::shutdown::tick(&mut tick).await {
+                return;
+            }
+            for engine in engines.engines() {
+                let manager = engine.manager.clone();
+                let _ = tokio::task::spawn_blocking(move || manager.check_volumes(false)).await;
+            }
+        }
+    });
+}
+
 /// Keep the volumes in fault current for `/health`: one blocking pass every
 /// 30 s, so the route itself walks nothing.
 pub fn spawn_volume_fault_scan(engines: Arc<crate::engines::EngineHost>) {
