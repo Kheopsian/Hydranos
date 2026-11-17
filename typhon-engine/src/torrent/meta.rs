@@ -32,7 +32,32 @@ pub enum TorrentStatus {
 /// early, panicked, or its thread never started): a torrent can not stay held
 /// for good. See `TorrentState::hold_for_proof`.
 #[must_use = "the hold ends when this is dropped"]
-pub struct ProofHold(Arc<TorrentState>);
+pub struct ProofHold(Arc<TorrentState>, u64);
+
+impl ProofHold {
+    /// A stop has called this proof off since the hold was taken: the job
+    /// must leave without proving, rechecking or starting anything.
+    pub fn cancelled(&self) -> bool {
+        self.0.check_gen.load(Ordering::SeqCst) != self.1
+    }
+
+    /// The proof waits for its turn on the disk until this is dropped.
+    pub fn waiting(&self) -> CheckWait {
+        self.0.wait_for_check()
+    }
+}
+
+/// A check (recheck or proof) of this torrent is waiting for its turn on the
+/// disk while this lives: the torrent is shown waiting for its check, not
+/// checking. Dropped the moment the check has its turn, or gives up.
+#[must_use = "the wait ends when this is dropped"]
+pub struct CheckWait(Arc<TorrentState>);
+
+impl Drop for CheckWait {
+    fn drop(&mut self) {
+        self.0.check_waiting.fetch_sub(1, Ordering::SeqCst);
+    }
+}
 
 impl Drop for ProofHold {
     fn drop(&mut self) {
@@ -1009,6 +1034,17 @@ pub struct TorrentState {
     /// what it shares with another torrent, and a verification asked in that
     /// time would read a folder that is not yet in place.
     proof_holds: AtomicU32,
+    /// Moved on by a stop the user asks for (`cancel_check`): a recheck or a
+    /// proof queued or under way when it moves is called off, publishes no
+    /// verdict and starts nothing. Each check notes it when it begins.
+    pub check_gen: AtomicU64,
+    /// Checks of this torrent waiting for their turn on the disk
+    /// (`wait_for_check`). A torrent queued behind 16 000 others read
+    /// "Checking 0 %" like the two actually reading.
+    check_waiting: AtomicU32,
+    /// `check_gen` when the last proof hold was taken. A hold from before a
+    /// stop no longer makes the torrent read as checking.
+    proof_gen: AtomicU64,
     /// Pieces the running recheck has read so far (verified or not). 0 outside
     /// a check; what `checking_progress` is made of. The verdict itself is
     /// still installed in one go at the end, so `progress` stays what it was.
@@ -1705,6 +1741,9 @@ impl TorrentState {
             is_removed: AtomicBool::new(false),
             rechecking: AtomicBool::new(false),
             proof_holds: AtomicU32::new(0),
+            check_gen: AtomicU64::new(0),
+            check_waiting: AtomicU32::new(0),
+            proof_gen: AtomicU64::new(0),
             recheck_done: AtomicU32::new(0),
             write_state: RwLock::new(WriteState::default()),
             recheck_note: AtomicBool::new(false),
@@ -1737,24 +1776,44 @@ impl TorrentState {
     /// check it when done. Until the returned guard is dropped the torrent
     /// reads as checking, and a verification asked from outside is a no-op.
     pub fn hold_for_proof(self: &Arc<Self>) -> ProofHold {
+        let gen = self.check_gen.load(Ordering::SeqCst);
+        self.proof_gen.store(gen, Ordering::SeqCst);
         self.proof_holds.fetch_add(1, Ordering::SeqCst);
-        ProofHold(self.clone())
+        ProofHold(self.clone(), gen)
     }
 
     /// Take over a hold that was placed when the torrent was created, so that
     /// no reader ever saw it without (`start_held`).
     pub fn adopt_proof_hold(self: &Arc<Self>) -> ProofHold {
-        ProofHold(self.clone())
+        ProofHold(self.clone(), self.proof_gen.load(Ordering::SeqCst))
     }
 
     /// Created already held, for a torrent whose add is followed by a proof.
     pub fn start_held(&self) {
+        self.proof_gen
+            .store(self.check_gen.load(Ordering::SeqCst), Ordering::SeqCst);
         self.proof_holds.fetch_add(1, Ordering::SeqCst);
     }
 
-    /// True while a proof holds this torrent.
+    /// A check of this torrent waits for its turn until the guard is dropped.
+    /// Counted, not a flag: a recheck and a proof can wait at once.
+    pub fn wait_for_check(self: &Arc<Self>) -> CheckWait {
+        self.check_waiting.fetch_add(1, Ordering::SeqCst);
+        CheckWait(self.clone())
+    }
+
+    /// True while a check of this torrent waits for its turn on the disk and
+    /// none of its checks is reading yet. Read with the state: it means
+    /// something only while the torrent shows as checking.
+    pub fn waiting_for_check(&self) -> bool {
+        self.check_waiting.load(Ordering::SeqCst) > 0
+            && self.recheck_done.load(Ordering::SeqCst) == 0
+    }
+
+    /// True while a proof holds this torrent, and no stop called it off.
     pub fn held_for_proof(&self) -> bool {
         self.proof_holds.load(Ordering::SeqCst) > 0
+            && self.proof_gen.load(Ordering::SeqCst) == self.check_gen.load(Ordering::SeqCst)
     }
 
     /// The data is missing: park the torrent instead of promising pieces we

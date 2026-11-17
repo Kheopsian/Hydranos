@@ -105,6 +105,12 @@ fn each_filter_word_keeps_exactly_its_states() {
     assert_eq!(kept("stalled_uploading"), ["stalledUP"]);
     assert_eq!(kept("stalled_downloading"), ["stalledDL"]);
     assert_eq!(kept("errored"), ["error"]);
+    assert_eq!(
+        kept("checking"),
+        ["checkingDL", "checkingUP"],
+        "qBittorrent's word: it listed the whole library"
+    );
+    assert!(kept("moving").is_empty(), "nothing here is ever moving");
     let running: Vec<&str> = STATES
         .iter()
         .copied()

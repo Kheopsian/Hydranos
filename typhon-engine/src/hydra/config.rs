@@ -116,12 +116,60 @@ pub struct Daemon {
     /// Default off; read at startup, a change needs a restart.
     #[serde(default)]
     pub preallocate: bool,
+    /// Checks (and path-claim proofs) reading at once across every disk.
+    /// Absent = `TYPHON_RECHECK_TORRENTS`, else 4. 1 to 64. Applied live.
+    #[serde(default)]
+    pub recheck_torrents: Option<i64>,
+    /// Checks reading one disk at once. 0 = by the kind of disk: 1 on a hard
+    /// drive (two make it seek between them for every read), 2 on an SSD;
+    /// Linux only tells them apart, elsewhere every disk is a hard drive.
+    /// Absent = `TYPHON_RECHECK_PER_DISK`, else 0. 0 to 64. Applied live.
+    #[serde(default)]
+    pub recheck_per_disk: Option<i64>,
+    /// Pieces one check reads at once. 0 = by the kind of disk: 4 on a hard
+    /// drive, 8 on an SSD. Absent = `TYPHON_RECHECK_CONCURRENCY`, else 0.
+    /// 0 to 64. Applied live, from the next check on.
+    #[serde(default)]
+    pub recheck_pieces: Option<i64>,
 }
 
 /// The echo service asked when `[daemon] exit_probe_url` is empty.
 pub const DEFAULT_EXIT_PROBE_URL: &str = "https://api.ipify.org/";
 
 impl Daemon {
+    /// The three recheck limits, named as in the file, as set there.
+    pub fn recheck_limits(&self) -> [(&'static str, Option<i64>); 3] {
+        [
+            ("recheck_torrents", self.recheck_torrents),
+            ("recheck_per_disk", self.recheck_per_disk),
+            ("recheck_pieces", self.recheck_pieces),
+        ]
+    }
+
+    /// Why a recheck limit is refused: `recheck_torrents` outside 1 to 64,
+    /// the two others outside 0 (by the kind of disk) to 64.
+    pub fn recheck_limits_error(&self) -> Option<String> {
+        let max = typhon_engine::torrent::RECHECK_LIMIT_MAX as i64;
+        self.recheck_limits().into_iter().find_map(|(name, v)| {
+            let min = i64::from(name == "recheck_torrents");
+            v.filter(|v| !(min..=max).contains(v)).map(|v| {
+                format!(
+                    "[daemon] {name} = {v} is out of range: {min} to {max}, or leave it out for the default"
+                )
+            })
+        })
+    }
+
+    /// Put the recheck limits in force in the engine, now.
+    pub fn apply_recheck_limits(&self) {
+        let n = |v: Option<i64>| v.and_then(|v| usize::try_from(v).ok());
+        typhon_engine::torrent::set_recheck_limits(
+            n(self.recheck_torrents),
+            n(self.recheck_per_disk),
+            n(self.recheck_pieces),
+        );
+    }
+
     pub fn exit_probe_enabled(&self) -> bool {
         self.exit_probe.unwrap_or(true)
     }
@@ -831,6 +879,9 @@ impl Config {
                 cfg.daemon.memory_alert_mb
             );
         }
+        if let Some(e) = cfg.daemon.recheck_limits_error() {
+            anyhow::bail!("{}: {e}", path.display());
+        }
         for (name, s) in [("race", &cfg.race), ("hoard", &cfg.hoard)] {
             if s.max_uploads >= 0 && !s.choking {
                 tracing::warn!(
@@ -1012,6 +1063,40 @@ mod tests {
             cfg.hoard.max_dials_per_sec, 50.0,
             "absent [hoard] must bound to 50"
         );
+    }
+
+    /// The recheck limits: absent is the default, a value in range is kept
+    /// (0 for the two per-disk ones: by the kind of disk), anything else is
+    /// refused at startup with the key and the range in the message.
+    #[test]
+    fn a_recheck_limit_out_of_range_is_refused() {
+        let absent = Config::load(&write_tmp("rl-absent", "[daemon]\n")).unwrap();
+        assert_eq!(absent.daemon.recheck_per_disk, None);
+        let set = Config::load(&write_tmp(
+            "rl-set",
+            "[daemon]\nrecheck_torrents = 8\nrecheck_per_disk = 2\nrecheck_pieces = 16\n",
+        ))
+        .unwrap();
+        assert_eq!(
+            set.daemon.recheck_limits().map(|(_, v)| v),
+            [Some(8), Some(2), Some(16)]
+        );
+        let auto = Config::load(&write_tmp(
+            "rl-auto",
+            "[daemon]\nrecheck_per_disk = 0\nrecheck_pieces = 0\n",
+        ));
+        assert!(auto.is_ok(), "0 = by the kind of disk: {auto:?}");
+        for (bad, range) in [
+            ("recheck_torrents = 0", "1 to 64"),
+            ("recheck_pieces = 65", "0 to 64"),
+            ("recheck_per_disk = -1", "0 to 64"),
+        ] {
+            let err = Config::load(&write_tmp("rl-bad", &format!("[daemon]\n{bad}\n")))
+                .unwrap_err()
+                .to_string();
+            let key = bad.split(' ').next().unwrap();
+            assert!(err.contains(key) && err.contains(range), "{bad}: {err}");
+        }
     }
 
     /// `memory_alert_mb`: absent and 0 are both "off", a positive value is the

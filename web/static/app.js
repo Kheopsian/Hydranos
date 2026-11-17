@@ -1667,6 +1667,9 @@ let _hoardAllTorrents = [];
 let _hoardLastFetch = 0;
 let _hoardStatsPainted = false;
 let _hoardStateFilter = "";
+// Under the Checking chip: "" (all of them), "__check_reading__" or
+// "__check_waiting__". Cleared whenever the state chip changes.
+let _hoardCheckSub = "";
 // Two lists per facet family instead of one value. Include is OR inside a
 // family, exclude wins over include, families are ANDed. Left click owns the
 // include list, right click owns the exclude list -- one polarity per button,
@@ -2058,7 +2061,7 @@ async function loadTorrentContent(infoHash, bodyId, summaryId, agent, mode) {
             <td class="tc-path">${esc(f.path || "")}</td>
             <td class="tc-num">${formatBytes(f.size || 0)}</td>
             <td class="tc-num">${f.done == null ? "–" : formatBytes(f.done)}</td>
-            <td class="tc-num">${pct == null ? "–" : (pct >= 100 ? "100%" : pct.toFixed(1) + "%")}</td>
+            <td class="tc-num">${pct == null ? "–" : _pctText(f.progress) + "%"}</td>
             <td class="tc-barcell"><div class="tc-bar"><div class="tc-bar-fill${cls}" style="width:${fill.toFixed(1)}%"></div></div></td>
             <td>${_filePrioSelect(infoHash, f, remote)}</td>
         </tr>`;
@@ -2562,7 +2565,7 @@ async function refreshDetail() {
         _detailAddedTime = d.added_time || 0;
         document.getElementById("detail-name").textContent = incoName(d);
         document.getElementById("detail-state").textContent = d.state === "checking_files" ? displayState(d).label : d.state;
-        document.getElementById("detail-progress").textContent = (d.progress * 100).toFixed(1) + "%";
+        document.getElementById("detail-progress").textContent = _pctText(d.progress) + "%";
         document.getElementById("detail-size").textContent = formatBytes(d.total_size);
         document.getElementById("detail-downloaded").textContent = formatBytes(d.total_download);
         document.getElementById("detail-uploaded").textContent = formatBytes(d.total_upload);
@@ -2876,10 +2879,29 @@ async function saveTrackerEditor() {
 
 function setHoardStateFilter(el, value) {
     _hoardStateFilter = value;
+    _hoardCheckSub = "";
     document.querySelectorAll(".chip-state").forEach(c => c.classList.toggle("active", c === el));
+    _paintCheckPills();
     // The filter is applied by the server now: refetch instead of
     // re-filtering a page that only holds the previous selection.
     fetchHoardPage(true);
+}
+
+// The halves of the Checking chip, shown beside the chips only while it is
+// selected: thousands of torrents queued behind two that read the disk all
+// said "Checking" alike.
+function setHoardCheckSub(el, value) {
+    _hoardCheckSub = value;
+    _paintCheckPills();
+    fetchHoardPage(true);
+}
+function _paintCheckPills() {
+    const box = document.getElementById("hoard-check-pills");
+    if (!box) return;
+    box.hidden = _hoardStateFilter !== "checking_files";
+    box.querySelectorAll(".chip-check").forEach(c => {
+        c.classList.toggle("active", c.dataset.check === _hoardCheckSub);
+    });
 }
 
 function setHoardCatFilter(el, value, negative) {
@@ -3153,7 +3175,9 @@ function _hoardFilterParams(q) {
     if (_hoardTrackerExc.length) q.set("tracker_not", _hoardTrackerExc.join(","));
     if (_hoardErrInc.length) q.set("error_class", _hoardErrInc.join(","));
     if (_hoardErrExc.length) q.set("error_class_not", _hoardErrExc.join(","));
-    if (_hoardStateFilter) q.set("state", _hoardStateFilter);
+    if (_hoardStateFilter) {
+        q.set("state", (_hoardStateFilter === "checking_files" && _hoardCheckSub) || _hoardStateFilter);
+    }
     return q;
 }
 
@@ -3315,6 +3339,15 @@ const _hoardSeenChips = { cat: new Set(), tracker: new Set(), tag: new Set(), er
 // keeps the width of its widest value (drawn invisibly by CSS from data-w), so
 // a chip only ever grows, and only the first time it meets a bigger number.
 const _chipCountMax = new Map();
+/// A fraction 0..1 as a percentage with one decimal, never rounded UP to
+/// 100.0: a torrent missing one piece in 2 000 (99.95 %) read "100.0%" and sat
+/// in Downloading with no way to tell why. Rounded down, as qBittorrent does.
+function _pctText(p) {
+    const v = Number(p) || 0;
+    if (v >= 1) return "100.0";
+    return (Math.floor(Math.max(0, v) * 1000) / 10).toFixed(1);
+}
+
 function _chipCount(key, n) {
     const v = Number(n) || 0;
     const prev = _chipCountMax.get(key);
@@ -3370,6 +3403,8 @@ function resetHoardFilters() {
     _hoardTrackerInc = []; _hoardTrackerExc = [];
     _hoardErrInc = []; _hoardErrExc = [];
     _hoardStateFilter = "";
+    _hoardCheckSub = "";
+    _paintCheckPills();
     const box = document.getElementById("hoard-search");
     if (box) box.value = "";
     document.querySelectorAll(".chip-state").forEach(c => {
@@ -3412,6 +3447,16 @@ function _renderHoardCounts() {
     document.querySelector(".chip-state[data-state='stopped']").innerHTML = `Stopped ${_chipCount("state:stopped", stateCounts["stopped"] || 0)}`;
     document.querySelector(".chip-state[data-state='queued']").innerHTML = `Queued ${_chipCount("state:queued", stateCounts["queued"] || 0)}`;
     document.querySelector(".chip-state[data-state='checking_files']").innerHTML = `Checking ${_chipCount("state:checking_files", stateCounts["checking_files"] || 0)}`;
+    {
+        // Counted by the server like the chip: the waiting ones of the whole
+        // library, not of this page.
+        const nChecking = stateCounts["checking_files"] || 0;
+        const nWaiting = Math.min(F.check_waiting || 0, nChecking);
+        const pill = v => document.querySelector(`.chip-check[data-check='${v}']`);
+        if (pill("")) pill("").innerHTML = `All ${_chipCount("check:", nChecking)}`;
+        if (pill("__check_reading__")) pill("__check_reading__").innerHTML = `Reading ${_chipCount("check:reading", nChecking - nWaiting)}`;
+        if (pill("__check_waiting__")) pill("__check_waiting__").innerHTML = `Waiting ${_chipCount("check:waiting", nWaiting)}`;
+    }
     document.querySelector(".chip-state[data-state='__tracker_err__']").innerHTML = `Tracker Error ${_chipCount("state:__tracker_err__", nTrackerErr)}`;
     document.querySelector(".chip-state[data-state='__error__']").innerHTML = `Error ${_chipCount("state:__error__", nTorrentErr)}`;
 
@@ -4007,6 +4052,8 @@ function _hoardMatches(t, search, skip) {
         else if (s === "__error__") { if (!t.torrent_error) return false; }
         else if (s === "__pinned__") { if (!_hoardPinned.has(t.info_hash)) return false; }
         else if (s && t.state !== s) return false;
+        else if (s === "checking_files" && _hoardCheckSub === "__check_reading__" && t.check_queued) return false;
+        else if (s === "checking_files" && _hoardCheckSub === "__check_waiting__" && !t.check_queued) return false;
     }
     return true;
 }
@@ -5433,11 +5480,20 @@ function displayState(t) {
     // A check outranks the stop: the disk is being read, stopped or not, and the
     // row goes back to what it was by itself when the check ends. The figure is
     // how far the check has got, not `progress` (what the torrent holds).
+    if (t.state === "checking_files" && t.check_queued) {
+        // Behind other checks of the same disk: nothing read yet, and the
+        // figure would only say 0 %.
+        return {
+            label: window.t("Waiting for check"),
+            cls: "state-queued",
+            title: window.t("Waiting for its turn on the disk: another check is reading it"),
+        };
+    }
     if (t.state === "checking_files") {
         const cp = typeof t.checking_progress === "number" ? t.checking_progress : null;
         const label = cp === null
             ? window.t("Checking")
-            : window.t("Checking {pct}%", { pct: (cp * 100).toFixed(1) });
+            : window.t("Checking {pct}%", { pct: _pctText(cp) });
         return { label, cls: "state-checking", title: label };
     }
     if (t.user_paused || t.state === "stopped") {
@@ -5630,7 +5686,7 @@ async function refreshHoardDetail() {
                 hErr.innerHTML = "";
             }
         }
-        document.getElementById("h-detail-progress").textContent = (d.progress * 100).toFixed(1) + "%";
+        document.getElementById("h-detail-progress").textContent = _pctText(d.progress) + "%";
         document.getElementById("h-detail-size").textContent = formatBytes(d.total_size);
         document.getElementById("h-detail-downloaded").textContent = formatBytes(d.total_download);
         document.getElementById("h-detail-uploaded").textContent = formatBytes(d.total_upload);
@@ -8114,6 +8170,9 @@ const _SETTINGS_DESC = {
     api_port: "TCP port for the HTTP API and WebUI.",
     api_key: "Secret required in the X-API-Key header to call the API.",
     data_dir: "Root directory for daemon state (categories, DBs, configs).",
+    recheck_torrents: "Rechecks (and proofs of data shared with another torrent) reading at once, across every disk. 1 to 64, default 4. Applied live: a lower count takes effect as running checks end.",
+    recheck_per_disk: "Rechecks reading ONE disk at once. 0 = by the kind of disk: 1 on a hard drive (two make it seek between them for every read: measured 64 MiB/s with one, 32.7 with four), 2 on an SSD. Only Linux tells them apart: on Windows and macOS every disk counts as a hard drive, so set it by hand for an SSD there. A USB adapter can also report an SSD as a hard drive. The log says once per disk what it was taken for. 0 to 64, default 0. Applied live.",
+    recheck_pieces: "Pieces one recheck reads at once. 0 = by the kind of disk: 4 on a hard drive, 8 on an SSD (Linux only, as above). 0 to 64, default 0. Applied live, from the next check on.",
     create_torrent_folder: "Create a per-torrent subfolder for single-file torrents (like qBittorrent's subfolder option). Off = single files saved directly in the category folder; multi-file torrents always keep their own folder. Applies to newly added torrents only.",
     // session (race/hoard)
     listen_port: "TCP/UDP port this session listens on for incoming peers.",
@@ -8172,6 +8231,7 @@ const _SETTINGS_DESC = {
 const _SETTINGS_COMMON = new Set([
     // WebUI / general (mirrors qBittorrent's everyday Options)
     "daemon::api_host", "daemon::api_port", "daemon::api_key", "daemon::create_torrent_folder",
+    "daemon::recheck_torrents", "daemon::recheck_per_disk", "daemon::recheck_pieces",
     "auth::username", "auth::password_hash",
     // Connection + Speed + Queueing, per engine (race & hoard)
     "race::listen_port", "race::bind_interface", "race::enable_ipv6", "race::max_connections", "race::max_uploads_per_torrent", "race::max_uploads",
@@ -8213,6 +8273,7 @@ const _SETTINGS_DEFAULT = {
     "daemon::api_host": "0.0.0.0", "daemon::api_port": 8199,
     "daemon::data_dir": "/config",
     "daemon::create_torrent_folder": false,
+    "daemon::recheck_torrents": 4, "daemon::recheck_per_disk": 0, "daemon::recheck_pieces": 0,
     "race::enable_dht": true, "race::enable_pex": true,
     "hoard::enable_dht": true, "hoard::enable_pex": true,
     "race::enable_lsd": true, "hoard::enable_lsd": false,
@@ -8257,7 +8318,15 @@ const _LIVE_ENGINE_KEY_DEFAULTS = {
     dont_count_slow_torrents: false, slow_torrent_dl_rate_threshold: 2, slow_torrent_ul_rate_threshold: 2, slow_torrent_inactive_timer: 60,
     max_ratio: -1, max_seeding_time: -1, max_inactive_seeding_time: -1, share_limit_action: "stop",
 };
+// [daemon] keys applied live and created when absent (LIVE_DAEMON_KEYS in
+// api.rs): commented out in the template, so shown at their default.
+const _LIVE_DAEMON_KEY_DEFAULTS = { recheck_torrents: 4, recheck_per_disk: 0, recheck_pieces: 0 };
 function _withLiveEngineKeys(cfg) {
+    if (_isObj(cfg.daemon)) {
+        for (const [k, d] of Object.entries(_LIVE_DAEMON_KEY_DEFAULTS)) {
+            if (!(k in cfg.daemon)) cfg.daemon[k] = d;
+        }
+    }
     for (const sec of ["race", "hoard"]) {
         if (!_isObj(cfg[sec])) continue;
         for (const [k, d] of Object.entries(_LIVE_ENGINE_KEY_DEFAULTS)) {
@@ -9243,6 +9312,8 @@ function showTrackerErrorTorrents(host, listClasses) {
     _hoardTrackerInc = [host]; _hoardTrackerExc = [];
     _hoardErrInc = listClasses.split(",").filter(Boolean); _hoardErrExc = [];
     _hoardStateFilter = "";
+    _hoardCheckSub = "";
+    _paintCheckPills();
     const box = document.getElementById("hoard-search");
     if (box) box.value = "";
     document.querySelectorAll(".chip-state").forEach(c => {
@@ -9987,7 +10058,7 @@ const TABLE_COLS = {
         })()}</td>` },
         { id: "total_size", label: "Size", sort: "total_size", render: t => `<td>${t.total_size ? formatBytes(t.total_size) : "-"}</td>` },
         { id: "state", label: "State", sort: "state", mobile: true, render: t => { const d = displayState(t); return `<td><span class="state-badge ${d.cls}" title="${esc(d.title)}">${d.label}</span></td>`; } },
-        { id: "progress", label: "Progress", sort: "progress", mobile: true, render: t => { const pct = (t.progress * 100).toFixed(1); return `<td><div class="progress-bar"><div class="progress-fill" style="width:${pct}%"></div></div><div class="progress-text">${pct}%</div></td>`; } },
+        { id: "progress", label: "Progress", sort: "progress", mobile: true, render: t => { const pct = _pctText(t.progress); return `<td><div class="progress-bar"><div class="progress-fill" style="width:${pct}%"></div></div><div class="progress-text">${pct}%</div></td>`; } },
         { id: "swarm_seeds", label: "Seeds", sort: "swarm_seeds", render: t => `<td>${t.swarm_seeds ?? "-"}</td>` },
         { id: "swarm_leechers", label: "Leechers", sort: "swarm_leechers", render: t => `<td>${t.swarm_leechers ?? "-"}</td>` },
         { id: "download_rate", label: "Down", sort: "download_rate", render: t => `<td>${formatSpeed(t.download_rate ?? 0)}</td>` },
@@ -10020,7 +10091,7 @@ const TABLE_COLS = {
     "race-table": [
         { id: "name", label: "Name", sort: "name", mobile: true, render: t => `<td title="${esc(t.info_hash)}">${esc(incoName(t))}${t.tracker_error ? ' <span class="tracker-warn" title="Tracker error">!</span>' : ''}${t.injected_peers ? ` <span class="uploader-badge ${t.injection_hit ? 'injection-hit' : ''}" title="Uploader: ${t.uploader} - ${t.injected_peers} peers injected${t.injection_hit ? ' HIT' : ''}">${t.injection_hit ? '&#9889;&#10003;' : '&#9889;'}${t.injected_peers}</span>` : ''}</td>` },
         { id: "total_size", label: "Size", sort: "total_size", render: t => `<td>${t.total_size ? formatBytes(t.total_size) : "-"}</td>` },
-        { id: "progress", label: "Progress", sort: "progress", mobile: true, render: t => { const pct = (t.progress * 100).toFixed(1); return `<td><div class="progress-bar"><div class="progress-fill" style="width:${pct}%"></div></div><div class="progress-text">${pct}%</div></td>`; } },
+        { id: "progress", label: "Progress", sort: "progress", mobile: true, render: t => { const pct = _pctText(t.progress); return `<td><div class="progress-bar"><div class="progress-fill" style="width:${pct}%"></div></div><div class="progress-text">${pct}%</div></td>`; } },
         { id: "swarm_seeds", label: "Seeds", sort: "swarm_seeds", render: t => `<td>${t.swarm_seeds ?? "-"}</td>` },
         { id: "swarm_leechers", label: "Leechers", sort: "swarm_leechers", render: t => `<td>${t.swarm_leechers ?? "-"}</td>` },
         { id: "download_rate", label: "Down", sort: "download_rate", mobile: true, render: t => `<td>${formatSpeed(t.download_rate)}</td>` },

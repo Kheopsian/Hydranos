@@ -333,6 +333,8 @@ impl EngineHost {
     /// file since boot is not running and is skipped: it needs a restart
     /// whatever this does.
     pub fn apply_config(&self, config: &Config) -> usize {
+        // One set for the whole daemon: two engines can read the same disk.
+        config.daemon.apply_recheck_limits();
         let mut n = 0;
         for local in config.local_engines() {
             if let Some(e) = self.get(&local.id) {

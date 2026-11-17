@@ -3707,7 +3707,7 @@ pub(crate) async fn engine_page_value(
         f_tracker: std::collections::BTreeMap<u16, i64>,
         f_tag: Vec<i64>,
         f_errclass: std::collections::BTreeMap<&'static str, i64>,
-        counts: [i64; 8],
+        counts: [i64; 9],
         keyed: Vec<ListKey>,
     }
     let scan = |range: std::ops::Range<usize>| -> Slice {
@@ -3731,6 +3731,8 @@ pub(crate) async fn engine_page_value(
         let (mut n_all, mut n_active, mut n_trk_err, mut n_err, mut n_pinned) = (0i64, 0, 0, 0, 0);
         let (mut n_uncat, mut n_untagged) = (0i64, 0i64);
         let mut n_no_tracker = 0i64;
+        // Of the torrents under a check, those still waiting for their turn.
+        let mut n_check_waiting = 0i64;
         // Decorated as they are kept, while the torrent is still in cache: the
         // sort key is built once per row, never inside the comparator -- which
         // cost a String allocation per COMPARISON.
@@ -3808,8 +3810,14 @@ pub(crate) async fn engine_page_value(
                 state_filter == "__pinned__" || (want_facets && !pinned.is_empty());
             let is_pinned = hash_hex_needed
                 && std::str::from_utf8(&hex40(&t.info_hash)).is_ok_and(|h| pinned.contains(h));
+            // Only asked of a torrent under a check: two atomics.
+            let check_waiting = row_state == "checking_files" && t.waiting_for_check();
             let m_state = match state_filter.as_str() {
                 "" => true,
+                // The two halves of Checking: reading the disk, or waiting
+                // for its turn on it.
+                "__check_reading__" => row_state == "checking_files" && !check_waiting,
+                "__check_waiting__" => check_waiting,
                 "__active__" => row_state == "seeding" && upload_rate > 0,
                 "__tracker_err__" => tracker_error,
                 "__error__" => torrent_error,
@@ -3848,6 +3856,9 @@ pub(crate) async fn engine_page_value(
                     }
                     if is_pinned {
                         n_pinned += 1;
+                    }
+                    if check_waiting {
+                        n_check_waiting += 1;
                     }
                 }
                 if m_search && m_state && m_tag && m_tracker && m_errclass {
@@ -3966,6 +3977,7 @@ pub(crate) async fn engine_page_value(
                 n_uncat,
                 n_untagged,
                 n_no_tracker,
+                n_check_waiting,
             ],
             keyed,
         }
@@ -4001,7 +4013,7 @@ pub(crate) async fn engine_page_value(
     let mut f_tracker: std::collections::BTreeMap<String, i64> = Default::default();
     let mut f_tag: Vec<i64> = vec![0; 64];
     let mut f_errclass: std::collections::BTreeMap<&'static str, i64> = Default::default();
-    let mut counts = [0i64; 8];
+    let mut counts = [0i64; 9];
     let mut keyed: Vec<ListKey> = Vec::with_capacity(slices.iter().map(|s| s.keyed.len()).sum());
     for slice in slices {
         for (k, n) in slice.f_state {
@@ -4026,7 +4038,8 @@ pub(crate) async fn engine_page_value(
         }
         keyed.extend(slice.keyed);
     }
-    let [n_all, n_active, n_trk_err, n_err, n_pinned, n_uncat, n_untagged, n_no_tracker] = counts;
+    let [n_all, n_active, n_trk_err, n_err, n_pinned, n_uncat, n_untagged, n_no_tracker, n_check_waiting] =
+        counts;
 
     let filtered = keyed.len();
     let scan_done = started.elapsed();
@@ -4129,6 +4142,8 @@ pub(crate) async fn engine_page_value(
             "tracker_error": n_trk_err,
             "torrent_error": n_err,
             "pinned": n_pinned,
+            // Of `state.checking_files`, those waiting for their turn.
+            "check_waiting": n_check_waiting,
             "uncategorized": n_uncat,
             "untagged": n_untagged,
             "no_tracker": n_no_tracker,
@@ -8137,6 +8152,9 @@ pub(crate) fn apply_pause_to_engine(state: &AppState, engine_id: &str, hash: &st
         return;
     };
     let _ = if paused {
+        // A stop is a stop: a check queued or under way is called off, not
+        // left to run and show the torrent as checking.
+        engine.manager.cancel_check(&info_hash);
         engine.manager.stop_torrent(&info_hash)
     } else {
         // Through the path claim: a torrent still downloading must not write
@@ -10113,6 +10131,13 @@ fn qbit_filter_matches(state: &str, filter: &str) -> bool {
         "stalled_uploading" => state == "stalledUP",
         "stalled_downloading" => state == "stalledDL",
         "errored" => state == "error",
+        // qBittorrent's own: a torrent whose files are being checked, waiting
+        // for its turn included -- qBittorrent reports that wait as checking
+        // too, and has no state of its own for it. Listed everything before.
+        "checking" => matches!(state, "checkingUP" | "checkingDL" | "checkingResumeData"),
+        // Files being moved: never the case here, so nothing. It listed the
+        // whole library, which a client reads as every torrent moving.
+        "moving" => state == "moving",
         "resumed" | "running" => {
             !matches!(state, "pausedDL" | "pausedUP" | "stoppedDL" | "stoppedUP")
         }
@@ -12121,9 +12146,12 @@ async fn post_settings(
         // `[daemon] preallocate` likewise: the key is commented out in the
         // template, so it is absent from nearly every file, and its switch is
         // offered next to the duplicate-data method (applied at restart).
+        // The recheck limits too: commented out, shown at their default.
         let creatable = ((change.section == "race" || change.section == "hoard")
             && (LIVE_SESSION_KEYS.contains(&change.key.as_str()) || change.key == "enable_lsd"))
-            || (change.section == "daemon" && change.key == "preallocate");
+            || (change.section == "daemon"
+                && (change.key == "preallocate"
+                    || LIVE_DAEMON_KEYS.contains(&change.key.as_str())));
         let edited =
             match crate::tomledit::set_toml_value(&doc, &change.section, &change.key, &literal) {
                 Err(_) if creatable => crate::tomledit::set_toml_table(
@@ -12149,12 +12177,24 @@ async fn post_settings(
     // and the UI that wrote it would have no idea. "Parses" is the Config type,
     // not just TOML: a string for a port is valid TOML and a daemon that will
     // not boot.
-    if toml::from_str::<Config>(&doc).is_err() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "edited config no longer parses"})),
-        )
-            .into_response();
+    match toml::from_str::<Config>(&doc) {
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "edited config no longer parses"})),
+            )
+                .into_response();
+        }
+        // Refused at startup, so refused here: the next start would fail.
+        Ok(c) => {
+            if let Some(e) = c.daemon.recheck_limits_error() {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": e})),
+                )
+                    .into_response();
+            }
+        }
     }
     if let Err(e) = crate::cfgfile::write_edit(&state.config_path, &doc) {
         if e.kind() == std::io::ErrorKind::PermissionDenied {
@@ -12186,7 +12226,14 @@ async fn post_settings(
         // Most config edits land in the file, not in the running engines: the
         // UI says so rather than letting an operator believe the change is
         // live. A batch made only of keys `apply_config` carries is live.
-        "restart_required": req.changes.iter().any(|c| !LIVE_SESSION_KEYS.contains(&c.key.as_str())),
+        "restart_required": req.changes.iter().any(|c| {
+            let live = if c.section == "daemon" {
+                LIVE_DAEMON_KEYS
+            } else {
+                LIVE_SESSION_KEYS
+            };
+            !live.contains(&c.key.as_str())
+        }),
     }))
     .into_response()
 }
@@ -12423,6 +12470,10 @@ const LIVE_SESSION_KEYS: &[&str] = &[
     "max_inactive_seeding_time",
     "share_limit_action",
 ];
+
+/// The `[daemon]` keys a save applies without a restart (`apply_config`
+/// carries them to the engine).
+const LIVE_DAEMON_KEYS: &[&str] = &["recheck_torrents", "recheck_per_disk", "recheck_pieces"];
 
 /// Put the stored client-wide caps back on the engines. Called once at boot.
 pub fn restore_client_rate_limits(state: &AppState) {
@@ -14177,6 +14228,8 @@ fn detail_payload(
         "progress": row.get("progress").cloned().unwrap_or(serde_json::json!(0)),
         // How far a running recheck has got; null when none is.
         "checking_progress": row.get("checking_progress").cloned().unwrap_or(serde_json::Value::Null),
+        // A check still waiting for its turn on the disk.
+        "check_queued": row.get("check_queued").cloned().unwrap_or(serde_json::Value::Bool(false)),
         "ratio": crate::row::num_json(ratio),
         "ratio_efficiency": 0,
         "save_path": row.get("save_path").cloned().unwrap_or_else(|| "".into()),
@@ -27271,6 +27324,54 @@ mod write_path_tests {
         assert!(s.state.cfg().daemon.preallocate);
     }
 
+    /// The recheck limits are commented out in the template: the settings tab
+    /// creates them, refuses one out of range (the daemon would not start
+    /// with it) and says no restart is needed. The value written is the
+    /// default, 0 (by the kind of disk): the limits are the whole process's,
+    /// and a test of the proofs next door counts one reader per disk.
+    #[tokio::test]
+    async fn settings_create_the_recheck_limits_and_refuse_one_out_of_range() {
+        let s = state_from("set-recheck", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+        let post = |value: serde_json::Value| {
+            super::post_settings(
+                State(s.state.clone()),
+                RawQuery(None),
+                keyed(KEY),
+                serde_json::json!({"changes":[{"section":"daemon","key":"recheck_per_disk","value":value}]})
+                    .to_string(),
+            )
+        };
+        for bad in [
+            serde_json::json!(-1),
+            serde_json::json!(65),
+            serde_json::json!("two"),
+        ] {
+            let resp = post(bad.clone()).await;
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{bad} accepted");
+        }
+        let file = std::fs::read_to_string(&s.state.config_path).unwrap();
+        assert!(
+            !file.contains("recheck_per_disk"),
+            "a refused value was written: {file}"
+        );
+
+        let resp = post(serde_json::json!(0)).await;
+        assert!(resp.status().is_success(), "got {:?}", resp.status());
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["restart_required"], false, "applied live: {v}");
+        let file = std::fs::read_to_string(&s.state.config_path).unwrap();
+        let cfg: toml::Value = toml::from_str(&file).unwrap();
+        assert_eq!(
+            cfg["daemon"]["recheck_per_disk"].as_integer(),
+            Some(0),
+            "{file}"
+        );
+        assert_eq!(s.state.cfg().daemon.recheck_per_disk, Some(0));
+    }
+
     /// A settings document that is not valid TOML is refused rather than
     /// written -- writing it would make the daemon unstartable.
     #[tokio::test]
@@ -32662,6 +32763,7 @@ mod detail_panel_tests {
             "pieces_total",
             "isolated_from",
             "checking_progress",
+            "check_queued",
         ] {
             before[k] = now[k].clone();
         }
