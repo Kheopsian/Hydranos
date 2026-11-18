@@ -108,13 +108,19 @@ pub fn build(native: &Value, engine_name: &str, now: i64) -> Value {
     let progress = f(native, "progress");
     let download_rate = i(native, "download_rate");
     let upload_rate = i(native, "upload_rate");
-    let state = state_to_qbit(
+    let state = match state_to_qbit(
         &s(native, "state"),
         progress,
         upload_rate,
         download_rate,
         b(native, "user_paused"),
-    );
+    ) {
+        // Parked because its disk is not mounted: what qBittorrent reports
+        // for the same case, and what the *arrs show as missing files rather
+        // than a failure.
+        "error" if b(native, "files_absent") => "missingFiles",
+        other => other,
+    };
 
     let total_size = i(native, "total_size");
     // The real lifetime figures. 3.x read "total_downloaded" / "total_uploaded"
@@ -127,17 +133,26 @@ pub fn build(native: &Value, engine_name: &str, now: i64) -> Value {
     let mut downloaded = i(native, "total_download");
     let uploaded = i(native, "total_upload");
 
+    // What the torrent holds, as qBittorrent means `completed`, and what it
+    // still lacks. Not the bytes downloaded: those count a piece fetched again
+    // after it failed its hash twice, and data held from before (an import, a
+    // recheck) not at all. A torrent missing one piece it had re-downloaded
+    // read one piece OVER its size, with a negative amount left.
+    let (completed, amount_left) = if progress >= 1.0 {
+        (total_size, 0)
+    } else {
+        // `max(0)`: `clamp` panics on a range upside down, and this is the
+        // row every *arr polls.
+        let held = ((progress.max(0.0) * total_size as f64) as i64).clamp(0, total_size.max(0));
+        // Never 0 left on a torrent that is not complete: a client reads that
+        // as done.
+        (held, (total_size - held).max(i64::from(total_size > 0)))
+    };
     // A finished torrent reports zero bytes downloaded, because the engine only
     // counts this session. Left alone, *arr sees a complete torrent that never
     // downloaded anything and refuses to import it.
-    let mut completed = downloaded;
-    let mut amount_left = total_size - downloaded;
-    if progress >= 1.0 {
-        completed = total_size;
-        amount_left = 0;
-        if downloaded == 0 {
-            downloaded = total_size;
-        }
+    if progress >= 1.0 && downloaded == 0 {
+        downloaded = total_size;
     }
 
     let ratio = if downloaded > 0 {
@@ -336,6 +351,20 @@ mod tests {
         );
     }
 
+    /// A torrent parked because its disk is not mounted reads as qBittorrent
+    /// reads the same case; any other error stays an error.
+    #[test]
+    fn files_absent_reads_as_missing_files() {
+        let row = build(&json!({"state": "error", "files_absent": true}), "hoard", 0);
+        assert_eq!(row["state"], "missingFiles");
+        let row = build(
+            &json!({"state": "error", "files_absent": false}),
+            "hoard",
+            0,
+        );
+        assert_eq!(row["state"], "error");
+    }
+
     #[test]
     fn activity_decides_between_stalled_and_moving() {
         assert_eq!(state_to_qbit("seeding", 1.0, 0, 0, false), "stalledUP");
@@ -361,6 +390,46 @@ mod tests {
         assert_eq!(row["amount_left"], 0);
     }
 
+    /// ⭐ A torrent missing one piece of 2 006, which it had downloaded a
+    /// second time after the piece failed its hash, read `completed` one piece
+    /// over its size and `amount_left` negative: the bytes downloaded, not the
+    /// bytes held. Seen on a FLAC album with one damaged piece and no seed.
+    #[test]
+    fn completed_is_what_the_torrent_holds_not_what_it_downloaded() {
+        let size = 131_405_858_i64;
+        let row = build(
+            &json!({
+                "progress": 2005.0 / 2006.0,
+                "total_size": size,
+                "total_download": size + 65_536,
+                "state": "downloading",
+            }),
+            "hoard",
+            0,
+        );
+        let completed = row["completed"].as_i64().unwrap();
+        let left = row["amount_left"].as_i64().unwrap();
+        assert!(completed < size, "{completed}: not all of it is held");
+        assert_eq!(completed + left, size);
+        assert!(
+            (60_000..70_000).contains(&left),
+            "about one piece left: {left}"
+        );
+        assert_eq!(
+            row["downloaded"],
+            size + 65_536,
+            "what was downloaded stays"
+        );
+
+        // Almost there is never "nothing left".
+        let row = build(
+            &json!({"progress": 0.999_999_99, "total_size": 1000, "state": "downloading"}),
+            "hoard",
+            0,
+        );
+        assert_eq!(row["amount_left"], 1);
+    }
+
     #[test]
     fn eta_is_infinite_when_nothing_is_moving() {
         let row = build(
@@ -371,7 +440,9 @@ mod tests {
         assert_eq!(row["eta"], ETA_INFINITE);
 
         let row = build(
-            &json!({"total_size": 1000, "total_download": 100, "download_rate": 90}),
+            // What is left is what the torrent lacks (10 % held), not the
+            // size less the bytes downloaded.
+            &json!({"total_size": 1000, "progress": 0.1, "total_download": 100, "download_rate": 90}),
             "race",
             0,
         );

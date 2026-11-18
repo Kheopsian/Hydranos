@@ -32,7 +32,32 @@ pub enum TorrentStatus {
 /// early, panicked, or its thread never started): a torrent can not stay held
 /// for good. See `TorrentState::hold_for_proof`.
 #[must_use = "the hold ends when this is dropped"]
-pub struct ProofHold(Arc<TorrentState>);
+pub struct ProofHold(Arc<TorrentState>, u64);
+
+impl ProofHold {
+    /// A stop has called this proof off since the hold was taken: the job
+    /// must leave without proving, rechecking or starting anything.
+    pub fn cancelled(&self) -> bool {
+        self.0.check_gen.load(Ordering::SeqCst) != self.1
+    }
+
+    /// The proof waits for its turn on the disk until this is dropped.
+    pub fn waiting(&self) -> CheckWait {
+        self.0.wait_for_check()
+    }
+}
+
+/// A check (recheck or proof) of this torrent is waiting for its turn on the
+/// disk while this lives: the torrent is shown waiting for its check, not
+/// checking. Dropped the moment the check has its turn, or gives up.
+#[must_use = "the wait ends when this is dropped"]
+pub struct CheckWait(Arc<TorrentState>);
+
+impl Drop for CheckWait {
+    fn drop(&mut self) {
+        self.0.check_waiting.fetch_sub(1, Ordering::SeqCst);
+    }
+}
 
 impl Drop for ProofHold {
     fn drop(&mut self) {
@@ -685,6 +710,28 @@ impl PeerRegistry {
     }
 }
 
+/// The start of the park recorded when a torrent's files are absent as a
+/// whole (`park_absent`). It is kept in the saved `data_lost` text, so a
+/// restart can tell it from a loss of pieces and re-read the files first.
+pub const ABSENT_PARK: &str = "files absent: ";
+
+/// How many torrents, across every engine, are parked for absent files.
+/// The background pass that lifts those parks does nothing while it is 0,
+/// which is every minute of a library whose disks are all mounted.
+pub static ABSENT_PARKED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// What the files on disk say about the pieces a torrent's state claims.
+enum FilesVerdict {
+    /// They back the state.
+    Fine,
+    /// Absent as a whole: their disk is not mounted. Nothing is retracted.
+    Offline(String),
+    /// The disk refused to say (permissions, an I/O error).
+    Unreadable(String),
+    /// Files shorter than claimed, or deleted: these pieces are not held.
+    Lost(Vec<u32>, String),
+}
+
 /// No announce event is owed.
 pub const ANNOUNCE_EVENT_NONE: u8 = 0;
 /// BEP 3 `event=completed`: this torrent finished downloading.
@@ -1009,6 +1056,20 @@ pub struct TorrentState {
     /// what it shares with another torrent, and a verification asked in that
     /// time would read a folder that is not yet in place.
     proof_holds: AtomicU32,
+    /// Moved on by a stop the user asks for (`cancel_check`): a recheck or a
+    /// proof queued or under way when it moves is called off, publishes no
+    /// verdict and starts nothing. Each check notes it when it begins.
+    pub check_gen: AtomicU64,
+    /// See `check_publish()`. One byte, in what was padding: the struct did
+    /// not grow.
+    check_publish: parking_lot::Mutex<()>,
+    /// Checks of this torrent waiting for their turn on the disk
+    /// (`wait_for_check`). A torrent queued behind 16 000 others read
+    /// "Checking 0 %" like the two actually reading.
+    check_waiting: AtomicU32,
+    /// `check_gen` when the last proof hold was taken. A hold from before a
+    /// stop no longer makes the torrent read as checking.
+    proof_gen: AtomicU64,
     /// Pieces the running recheck has read so far (verified or not). 0 outside
     /// a check; what `checking_progress` is made of. The verdict itself is
     /// still installed in one go at the end, so `progress` stays what it was.
@@ -1089,6 +1150,15 @@ pub struct TorrentState {
     /// (`PeerDownload::is_downloading`, `webseed::wants_webseed`) and where a
     /// piece would be written (`DiskManager::write_piece`).
     pub seed_only: std::sync::atomic::AtomicBool,
+    /// The `data_lost` park is for files absent as a whole (`park_absent`):
+    /// their disk is not there, nothing was retracted, and the park lifts by
+    /// itself once the files are back (`lift_absent_park`).
+    pub files_absent: AtomicBool,
+    /// The filesystem the files were on at the last good verdict
+    /// (`volume::volume_id`), 0 when not known yet. Saved with the record:
+    /// it is what tells, at a start with files missing, an unmounted disk
+    /// from deleted files.
+    pub data_vol: std::sync::atomic::AtomicU64,
     /// Consecutive failures to WRITE a verified piece to disk.
     ///
     /// Counted rather than acted on at the first one, because a full disk on a
@@ -1705,6 +1775,10 @@ impl TorrentState {
             is_removed: AtomicBool::new(false),
             rechecking: AtomicBool::new(false),
             proof_holds: AtomicU32::new(0),
+            check_gen: AtomicU64::new(0),
+            check_publish: parking_lot::Mutex::new(()),
+            check_waiting: AtomicU32::new(0),
+            proof_gen: AtomicU64::new(0),
             recheck_done: AtomicU32::new(0),
             write_state: RwLock::new(WriteState::default()),
             recheck_note: AtomicBool::new(false),
@@ -1725,6 +1799,8 @@ impl TorrentState {
             error_msg: Mutex::new(String::new()),
             data_lost: std::sync::atomic::AtomicBool::new(false),
             seed_only: std::sync::atomic::AtomicBool::new(false),
+            files_absent: AtomicBool::new(false),
+            data_vol: std::sync::atomic::AtomicU64::new(0),
             piece_mem: OnceLock::new(),
             files_checked: std::sync::atomic::AtomicU8::new(0),
             peers: PeerRegistry::default(),
@@ -1733,28 +1809,58 @@ impl TorrentState {
         }
     }
 
+    /// Taken by a recheck from its last look at `check_gen` to the end of its
+    /// verdict (pieces, status, the record written), and by a stop around
+    /// what it changes. A stop that moved `check_gen` after that last look,
+    /// with nothing held, let the verdict land on a stopped torrent; it now
+    /// lands before the verdict, which then does not publish, or after it,
+    /// and finds it finished. Nothing slow is done under it but the write.
+    pub(super) fn check_publish(&self) -> parking_lot::MutexGuard<'_, ()> {
+        self.check_publish.lock()
+    }
+
     /// A job is proving what this torrent shares with another one, and will
     /// check it when done. Until the returned guard is dropped the torrent
     /// reads as checking, and a verification asked from outside is a no-op.
     pub fn hold_for_proof(self: &Arc<Self>) -> ProofHold {
+        let gen = self.check_gen.load(Ordering::SeqCst);
+        self.proof_gen.store(gen, Ordering::SeqCst);
         self.proof_holds.fetch_add(1, Ordering::SeqCst);
-        ProofHold(self.clone())
+        ProofHold(self.clone(), gen)
     }
 
     /// Take over a hold that was placed when the torrent was created, so that
     /// no reader ever saw it without (`start_held`).
     pub fn adopt_proof_hold(self: &Arc<Self>) -> ProofHold {
-        ProofHold(self.clone())
+        ProofHold(self.clone(), self.proof_gen.load(Ordering::SeqCst))
     }
 
     /// Created already held, for a torrent whose add is followed by a proof.
     pub fn start_held(&self) {
+        self.proof_gen
+            .store(self.check_gen.load(Ordering::SeqCst), Ordering::SeqCst);
         self.proof_holds.fetch_add(1, Ordering::SeqCst);
     }
 
-    /// True while a proof holds this torrent.
+    /// A check of this torrent waits for its turn until the guard is dropped.
+    /// Counted, not a flag: a recheck and a proof can wait at once.
+    pub fn wait_for_check(self: &Arc<Self>) -> CheckWait {
+        self.check_waiting.fetch_add(1, Ordering::SeqCst);
+        CheckWait(self.clone())
+    }
+
+    /// True while a check of this torrent waits for its turn on the disk and
+    /// none of its checks is reading yet. Read with the state: it means
+    /// something only while the torrent shows as checking.
+    pub fn waiting_for_check(&self) -> bool {
+        self.check_waiting.load(Ordering::SeqCst) > 0
+            && self.recheck_done.load(Ordering::SeqCst) == 0
+    }
+
+    /// True while a proof holds this torrent, and no stop called it off.
     pub fn held_for_proof(&self) -> bool {
         self.proof_holds.load(Ordering::SeqCst) > 0
+            && self.proof_gen.load(Ordering::SeqCst) == self.check_gen.load(Ordering::SeqCst)
     }
 
     /// The data is missing: park the torrent instead of promising pieces we
@@ -1802,8 +1908,9 @@ impl TorrentState {
     /// damaged (a digit flipped in the database) or outlived its data (a file
     /// cut short, deleted, replaced) would offer and serve pieces that were
     /// never there. This does not hash anything: it only refuses the claim
-    /// of bytes past the end of a file, or in a file that is gone. A hole
-    /// inside a file is for a recheck.
+    /// of bytes past the end of a file, or in a file gone from a folder that
+    /// is there. Files absent as a whole (an unmounted disk) park the torrent
+    /// without retracting anything. A hole inside a file is for a recheck.
     pub async fn verify_files_once(self: &Arc<Self>) {
         // A download that holds nothing has nothing to doubt: no thread hop
         // for it, a session of a fresh download starts as fast as ever.
@@ -1852,17 +1959,53 @@ impl TorrentState {
                 return;
             }
         }
+        self.apply_files_verdict(self.assess_files());
+    }
+
+    /// Act on what `assess_files` found. Returns whether the torrent is left
+    /// with no park of its own making (the files back the state).
+    fn apply_files_verdict(&self, verdict: FilesVerdict) -> bool {
+        match verdict {
+            FilesVerdict::Fine => true,
+            FilesVerdict::Offline(msg) => {
+                self.park_absent(&msg);
+                tracing::warn!(torrent = %self.meta.name, "parked: {}", msg);
+                false
+            }
+            FilesVerdict::Unreadable(msg) => {
+                self.mark_error(&msg);
+                false
+            }
+            FilesVerdict::Lost(lost, msg) => {
+                let n = self.retract_pieces(&lost, &msg);
+                if n > 0 {
+                    tracing::warn!(torrent = %self.meta.name, "{} piece(s) claimed by the saved state are not on disk", n);
+                }
+                n == 0
+            }
+        }
+    }
+
+    /// What the files on disk say about the pieces the state claims, without
+    /// changing anything but the recorded filesystem (on a good verdict).
+    /// One `stat` per file.
+    fn assess_files(&self) -> FilesVerdict {
         let save = self.save_path.read().clone();
         // No folder at all is a volume that is not mounted, not a loss of
-        // pieces: park it, as a read of it would, and keep what it holds
-        // recorded for when the volume is back.
+        // pieces: park it, keep what it holds recorded, and lift the park
+        // when the volume is back.
         if !save.exists() {
-            self.mark_error(&format!("save path {} is not there", save.display()));
-            return;
+            return FilesVerdict::Offline(format!(
+                "save path {} is not there. The torrent comes back by itself once its disk is \
+                 mounted, or recheck this torrent",
+                save.display()
+            ));
         }
         let plen = self.meta.piece_length as u64;
-        let mut lost: Vec<u32> = Vec::new();
-        let mut short: Vec<String> = Vec::new();
+        // (file index, path, bytes on disk) for every file of the torrent with
+        // a length, and the files that are not there.
+        let mut found: Vec<(usize, PathBuf, u64)> = Vec::new();
+        let mut absent: Vec<(usize, PathBuf)> = Vec::new();
         for (i, f) in self.meta.files.iter().enumerate() {
             if f.length == 0 {
                 continue;
@@ -1872,18 +2015,78 @@ impl TorrentState {
             // the disk refused (permissions, an I/O error, a mount that went
             // away) says nothing about the pieces: park the torrent and leave
             // its bitfield for when the disk answers, as a read would.
-            let actual = match std::fs::metadata(&path) {
-                Ok(m) => m.len(),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0,
+            match std::fs::metadata(&path) {
+                Ok(m) => found.push((i, path, m.len())),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => absent.push((i, path)),
                 Err(e) => {
-                    self.mark_error(&format!("cannot stat {}: {}", path.display(), e));
-                    return;
+                    return FilesVerdict::Unreadable(format!(
+                        "cannot stat {}: {}",
+                        path.display(),
+                        e
+                    ))
                 }
-            };
-            if actual >= f.length {
-                continue;
             }
-            // The bytes this file lacks, and every piece that touches them.
+        }
+        // Every file there at its full length: this is a good verdict, and
+        // the filesystem it was found on is the one to compare against the
+        // next time files are missing. One `statvfs`.
+        let whole = absent.is_empty()
+            && found
+                .iter()
+                .all(|(i, _, len)| *len >= self.meta.files[*i].length);
+        if whole {
+            if let Some((_, p, _)) = found.first() {
+                self.note_data_vol(p);
+            }
+            return FilesVerdict::Fine;
+        }
+        // Only a missing file the state claims pieces of says anything about
+        // the disk. One the torrent holds no piece of is a download that has
+        // not got there yet (its folder not created): taken for an unmounted
+        // disk, it would park a download in progress, and on a pool any such
+        // file would. No picker is a torrent loaded whole: every file counts.
+        let absent: Vec<(usize, PathBuf)> = match self.picker.get() {
+            None => absent,
+            Some(p) => {
+                let p = p.lock().unwrap();
+                absent
+                    .into_iter()
+                    .filter(|(i, _)| {
+                        let f = &self.meta.files[*i];
+                        let (from, to) = (f.offset / plen, (f.offset + f.length - 1) / plen);
+                        (from..=to).any(|piece| p.has_piece(piece as u32))
+                    })
+                    .collect()
+            }
+        };
+        if let Some((_, first_absent)) = absent.first() {
+            if self.absent_means_offline(first_absent, found.is_empty(), &absent) {
+                let first = absent
+                    .iter()
+                    .take(3)
+                    .map(|(_, p)| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return FilesVerdict::Offline(format!(
+                    "not found under {}, e.g. {}. Its disk looks not mounted: the torrent \
+                     comes back by itself once it is, or recheck this torrent",
+                    save.display(),
+                    first
+                ));
+            }
+        }
+        // A file that is there but shorter, or a file deleted: the bytes it
+        // lacks, and every piece that touches them, are no longer held.
+        let mut lost: Vec<u32> = Vec::new();
+        let mut short: Vec<String> = Vec::new();
+        let mut gaps: Vec<(usize, PathBuf, u64)> = found
+            .into_iter()
+            .filter(|(i, _, actual)| *actual < self.meta.files[*i].length)
+            .collect();
+        gaps.extend(absent.into_iter().map(|(i, p)| (i, p, 0)));
+        gaps.sort_by_key(|(i, _, _)| *i);
+        for (i, path, actual) in &gaps {
+            let f = &self.meta.files[*i];
             let (from, to) = (f.offset + actual, f.offset + f.length);
             lost.extend((from / plen..=(to - 1) / plen).map(|p| p as u32));
             short.push(format!(
@@ -1893,19 +2096,13 @@ impl TorrentState {
                 f.length
             ));
         }
-        if lost.is_empty() {
-            return;
-        }
-        let n = self.retract_pieces(
-            &lost,
-            &format!(
-                "files on disk are shorter than the saved state claims: {}. The pieces they \
-                 cannot hold are no longer counted as held; recheck this torrent once the data \
-                 is back",
-                short.iter().take(3).cloned().collect::<Vec<_>>().join(", ")
-            ),
+        let msg = format!(
+            "files on disk are shorter than the saved state claims: {}. The pieces they \
+             cannot hold are no longer counted as held; recheck this torrent once the data \
+             is back",
+            short.iter().take(3).cloned().collect::<Vec<_>>().join(", ")
         );
-        tracing::warn!(torrent = %self.meta.name, "{} piece(s) claimed by the saved state are not on disk", n);
+        FilesVerdict::Lost(lost, msg)
     }
 
     /// Stop counting `pieces` as held, and say why in the torrent's error.
@@ -1959,6 +2156,9 @@ impl TorrentState {
             *g = msg.to_string();
         }
         self.data_lost.store(true, Ordering::Relaxed);
+        // Pieces are gone now, not just out of reach: no longer a park that
+        // lifts by itself.
+        self.set_files_absent(false);
         let cur = self.status.load(Ordering::Relaxed);
         if cur == TorrentStatus::Seeding as u8 || cur == TorrentStatus::Downloading as u8 {
             self.status
@@ -1981,11 +2181,178 @@ impl TorrentState {
         }
     }
 
+    /// Files this torrent holds pieces of are absent (`absent`, the first at
+    /// `first_absent`; `none_here` when no file at all is there). Is that
+    /// its disk not being mounted, rather than the files being deleted?
+    ///
+    /// Decided by the filesystem when one was recorded at a good verdict:
+    /// absent on another filesystem than that one is offline (the empty
+    /// mount point belongs to the disk below it), absent on that very one is
+    /// deleted. A FUSE pool (mergerfs) is always taken for offline, since a
+    /// branch can be out while the mount stays up. With nothing recorded
+    /// (a torrent not checked since this build, or Windows), the folders
+    /// decide: no file of the torrent here, or a folder of it gone.
+    fn absent_means_offline(
+        &self,
+        first_absent: &std::path::Path,
+        none_here: bool,
+        absent: &[(usize, PathBuf)],
+    ) -> bool {
+        if super::volume::is_pooled(first_absent) {
+            return true;
+        }
+        let recorded = self.data_vol.load(Ordering::Relaxed);
+        match (recorded, super::volume::volume_id(first_absent)) {
+            (0, _) | (_, None) => {
+                none_here
+                    || absent
+                        .iter()
+                        .any(|(_, p)| p.parent().is_some_and(|d| !d.exists()))
+            }
+            (rec, Some(now)) => rec != now,
+        }
+    }
+
+    /// Record the filesystem `path` is on as the one this torrent's data
+    /// lives on (see `data_vol`).
+    pub fn note_data_vol(&self, path: &std::path::Path) {
+        if let Some(v) = super::volume::volume_id(path) {
+            self.data_vol.store(v, Ordering::Relaxed);
+        }
+    }
+
+    /// `note_data_vol` for the torrent's first file with a length, if it is
+    /// there. Called at a good verdict (a recheck that found pieces, a
+    /// finished download); touches the disk, so never on the async runtime.
+    pub fn note_data_vol_of_files(&self) {
+        let save = self.save_path.read().clone();
+        if let Some(i) = self.meta.files.iter().position(|f| f.length > 0) {
+            let path = self.meta.disk_path(&save, i);
+            if path.exists() {
+                self.note_data_vol(&path);
+            }
+        }
+    }
+
+    /// The files are not there as a whole (a disk not mounted, or a folder
+    /// gone with it). Parked like a loss, and persisted like one, but no
+    /// piece is retracted: the bitfield is what was verified, and the park
+    /// says the disk is not there to check it against. `lift_absent_park`
+    /// lifts it once the files are back in full. Logs nothing: callers say
+    /// it once per torrent or once per disk.
+    pub fn park_absent(&self, detail: &str) {
+        let msg = format!("{ABSENT_PARK}{detail}");
+        if let Ok(mut g) = self.error_msg.lock() {
+            *g = msg;
+        }
+        self.data_lost.store(true, Ordering::Relaxed);
+        self.serving_suspended.store(true, Ordering::Relaxed);
+        self.set_files_absent(true);
+        let cur = self.status.load(Ordering::Relaxed);
+        if cur == TorrentStatus::Seeding as u8 || cur == TorrentStatus::Downloading as u8 {
+            self.status
+                .store(TorrentStatus::Error as u8, Ordering::Relaxed);
+        }
+    }
+
+    /// The torrent is removed: its park, if any, no longer counts in
+    /// `ABSENT_PARKED`, so the pass does not keep running for it.
+    pub fn forget_absent_park(&self) {
+        self.set_files_absent(false);
+    }
+
+    /// Set `files_absent`, keeping `ABSENT_PARKED` right.
+    fn set_files_absent(&self, on: bool) {
+        if self.files_absent.swap(on, Ordering::Relaxed) != on {
+            if on {
+                ABSENT_PARKED.fetch_add(1, Ordering::Relaxed);
+            } else {
+                ABSENT_PARKED.fetch_sub(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// Look again at a torrent parked for absent files, and lift the park
+    /// when the files back the state again. Returns whether it was lifted.
+    ///
+    /// The same judgement as the check before the first peer, so a lift
+    /// decides exactly what a start with the disk mounted would have: files
+    /// still offline keep the park; files deleted meanwhile become a loss of
+    /// the pieces they held (parked for a recheck); files that back the
+    /// state lift it, and the status goes back to what the bitfield says
+    /// (Seeding when whole, Downloading otherwise) or stays Stopped. The
+    /// caller puts a download back in its queue.
+    ///
+    /// Touches the disk (one `stat` per file): never on the async runtime.
+    pub fn lift_absent_park(&self) -> bool {
+        if !self.files_absent.load(Ordering::Relaxed) {
+            return false;
+        }
+        let verdict = self.assess_files();
+        match verdict {
+            FilesVerdict::Offline(_) | FilesVerdict::Unreadable(_) => return false,
+            FilesVerdict::Fine | FilesVerdict::Lost(..) => {}
+        }
+        // Back: the park goes, and what the disk says replaces it.
+        if let Ok(mut g) = self.error_msg.lock() {
+            g.clear();
+        }
+        self.data_lost.store(false, Ordering::Relaxed);
+        self.serving_suspended.store(false, Ordering::Relaxed);
+        self.set_files_absent(false);
+        self.files_checked.store(2, Ordering::SeqCst);
+        let whole = self.seed_mode
+            || self
+                .picker
+                .get()
+                .is_none_or(|p| p.lock().unwrap().is_complete());
+        let target = if whole {
+            TorrentStatus::Seeding
+        } else {
+            TorrentStatus::Downloading
+        };
+        let restored = self
+            .status
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |cur| {
+                (cur == TorrentStatus::Error as u8).then_some(target as u8)
+            })
+            .is_ok();
+        // Pieces deleted meanwhile: retracted now, which parks the torrent
+        // for a recheck, as a start with the disk mounted would have.
+        if !self.apply_files_verdict(verdict) {
+            return false;
+        }
+        if restored && whole {
+            self.release_have_tx();
+            self.fold_seed_time(now_secs());
+        }
+        true
+    }
+
+    /// Every file of the torrent is on disk at its full length.
+    pub fn files_in_place(&self) -> bool {
+        let save = self.save_path.read().clone();
+        self.meta.files.iter().enumerate().all(|(i, f)| {
+            f.length == 0
+                || std::fs::metadata(self.meta.disk_path(&save, i))
+                    .is_ok_and(|m| m.len() >= f.length)
+        })
+    }
+
     /// Put back, at start, the park a previous run saved: the torrent is in
     /// error again with its message, and fetches nothing until a recheck.
     /// A stopped torrent stays stopped and keeps the park for its resume.
+    ///
+    /// A park for absent files is put back as it was, without touching the
+    /// disk (a stale network mount would hang the start): the volume pass
+    /// that runs before the first announce lifts it if the disk is back
+    /// (`TorrentManager::check_volumes`).
     pub fn restore_data_lost(&self, msg: &str) {
         if msg.is_empty() {
+            return;
+        }
+        if let Some(detail) = msg.strip_prefix(ABSENT_PARK) {
+            self.park_absent(detail);
             return;
         }
         // A record that says every piece is held cannot be a parked loss: a
@@ -2124,8 +2491,10 @@ impl TorrentState {
 
     /// Forget a fault the operator has dealt with.
     ///
-    /// Called when a recheck starts, which is the one moment somebody has
-    /// declared the underlying problem fixed. Nothing cleared `error_msg`
+    /// Called when a recheck publishes its verdict: asking for one is
+    /// somebody declaring the underlying problem fixed, and the verdict is
+    /// the disk agreeing. Not when it starts: a check a stop called off
+    /// leaves the fault, as it leaves the pieces. Nothing cleared `error_msg`
     /// before, so a torrent that erred, was repaired and came back kept its
     /// panic message on display for the rest of the process's life -- and the
     /// operator had no way to tell a torrent that is broken from one that was.
@@ -2140,6 +2509,7 @@ impl TorrentState {
         self.disk_write_failures.store(0, Ordering::Relaxed);
         self.serving_suspended.store(false, Ordering::Relaxed);
         self.data_lost.store(false, Ordering::Relaxed);
+        self.set_files_absent(false);
         self.recheck_note.store(false, Ordering::Relaxed);
     }
 
@@ -2280,7 +2650,7 @@ mod tests {
     fn per_torrent_types_do_not_grow() {
         use std::mem::size_of;
         let state = size_of::<TorrentState>();
-        let bound = if cfg!(windows) { 936 } else { 928 };
+        let bound = if cfg!(windows) { 968 } else { 960 };
         assert!(state <= bound, "TorrentState grew to {state} bytes");
         let meta = size_of::<TorrentMeta>();
         assert!(meta <= 160, "TorrentMeta grew to {meta} bytes");
@@ -2592,17 +2962,384 @@ mod tests {
         d
     }
 
-    /// A file that is really gone still takes its pieces with it.
+    /// A file on disk that is shorter than the saved state claims still takes
+    /// the pieces it cannot hold with it, and the torrent is parked for them.
     #[test]
-    fn verify_files_retracts_the_pieces_of_a_file_that_is_absent() {
-        let dir = scratch("absent");
+    fn verify_files_retracts_the_pieces_of_a_file_that_is_too_short() {
+        let dir = scratch("short");
+        std::fs::write(dir.join("some.bin"), vec![0u8; 100]).unwrap();
         let st = seeded_under(dir.clone());
         st.check_files_back_the_state();
         let held = st.picker.get().unwrap().lock().unwrap().num_have();
-        assert_eq!(held, 0, "an absent file kept its pieces");
+        assert_eq!(held, 0, "a short file kept the pieces it cannot hold");
         assert_eq!(
             st.status.load(Ordering::Relaxed),
             TorrentStatus::Error as u8
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Every file absent under a folder that is there is what an unmounted
+    /// disk looks like (an empty mount point). It is not a loss of pieces: the
+    /// torrent is parked, nothing is retracted, so the saved bitfield is
+    /// intact for the next start with the disk back.
+    #[test]
+    fn verify_files_parks_without_retracting_when_no_file_is_there() {
+        let dir = scratch("unmounted");
+        let st = seeded_under(dir.clone());
+        st.check_files_back_the_state();
+        let p = st.picker.get().unwrap().lock().unwrap();
+        assert_eq!(p.num_have(), 4, "an unmounted disk retracted pieces");
+        drop(p);
+        assert_eq!(
+            st.status.load(Ordering::Relaxed),
+            TorrentStatus::Error as u8,
+            "not parked"
+        );
+        assert!(
+            st.data_lost_msg().starts_with(ABSENT_PARK),
+            "not recorded as absent, so a restart would not re-read the files: {}",
+            st.data_lost_msg()
+        );
+        assert!(st.serving_suspended.load(Ordering::Relaxed));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A restart puts the park for absent files back without touching the
+    /// disk; once the files are back in full, lifting it brings the torrent
+    /// back as it was, pieces and all.
+    #[test]
+    fn an_absent_park_lifts_once_the_files_are_back() {
+        let dir = scratch("back-after-restart");
+        let st = seeded_under(dir.clone());
+        st.check_files_back_the_state();
+        let saved = st.data_lost_msg();
+        assert!(saved.starts_with(ABSENT_PARK), "{saved}");
+
+        std::fs::write(dir.join("some.bin"), vec![0u8; 4 * 16384]).unwrap();
+        let again = seeded_under(dir.clone());
+        again
+            .status
+            .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+        again.restore_data_lost(&saved);
+        assert_eq!(
+            again.status.load(Ordering::Relaxed),
+            TorrentStatus::Error as u8,
+            "restored without the volume pass deciding"
+        );
+        assert!(again.files_absent.load(Ordering::Relaxed));
+        assert!(again.lift_absent_park(), "not lifted with the files back");
+        assert_eq!(
+            again.status.load(Ordering::Relaxed),
+            TorrentStatus::Seeding as u8,
+            "the park outlived the disk coming back"
+        );
+        assert!(again.data_lost_msg().is_empty());
+        assert!(!again.serving_suspended.load(Ordering::Relaxed));
+        assert_eq!(again.picker.get().unwrap().lock().unwrap().num_have(), 4);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// An unfinished download comes back too: its file only has to hold the
+    /// pieces it claims, not the whole torrent.
+    #[test]
+    fn a_lift_takes_back_an_unfinished_download_whose_file_holds_its_pieces() {
+        let dir = scratch("lift-partial");
+        let (bytes, _) = torrent_bytes(4);
+        let meta = crate::torrent::metainfo::parse_torrent_bytes(&bytes).unwrap();
+        // Not seed mode, and no picker allocated: the one below is it.
+        let st = TorrentState::new_with_times(meta, dir.clone(), false, None, None, false);
+        let mut p = PiecePicker::new(4);
+        p.import_bitfield(&crate::torrent::full_bitfield(4));
+        let _ = st.picker.set(Arc::new(Mutex::new(p)));
+        {
+            let mut p = st.picker.get().unwrap().lock().unwrap();
+            p.clear_have(2);
+            p.clear_have(3);
+        }
+        st.status
+            .store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+        st.park_absent("test");
+        std::fs::write(dir.join("some.bin"), vec![0u8; 2 * 16384]).unwrap();
+        assert!(st.lift_absent_park());
+        assert_eq!(
+            st.status.load(Ordering::Relaxed),
+            TorrentStatus::Downloading as u8
+        );
+        assert_eq!(st.picker.get().unwrap().lock().unwrap().num_have(), 2);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Files deleted while their disk was out are a loss once it is back:
+    /// the pieces go, and the torrent waits for a recheck.
+    #[cfg(unix)]
+    #[test]
+    fn a_lift_on_files_deleted_meanwhile_retracts_their_pieces() {
+        let dir = scratch("lift-deleted");
+        let st = seeded_under(dir.clone());
+        st.data_vol.store(
+            super::super::volume::volume_id(&dir).unwrap(),
+            Ordering::Relaxed,
+        );
+        st.park_absent("test");
+        assert!(!st.lift_absent_park());
+        assert_eq!(st.picker.get().unwrap().lock().unwrap().num_have(), 0);
+        assert!(!st.files_absent.load(Ordering::Relaxed));
+        assert!(st.data_lost.load(Ordering::Relaxed));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A stopped torrent whose park is lifted stays stopped.
+    #[test]
+    fn a_lifted_park_leaves_a_stopped_torrent_stopped() {
+        let dir = scratch("lift-stopped");
+        let st = seeded_under(dir.clone());
+        st.status
+            .store(TorrentStatus::Stopped as u8, Ordering::Relaxed);
+        st.park_absent("test");
+        std::fs::write(dir.join("some.bin"), vec![0u8; 4 * 16384]).unwrap();
+        assert!(st.lift_absent_park());
+        assert_eq!(
+            st.status.load(Ordering::Relaxed),
+            TorrentStatus::Stopped as u8
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A good verdict records the filesystem the files are on.
+    #[cfg(unix)]
+    #[test]
+    fn a_whole_torrent_records_its_filesystem() {
+        let dir = scratch("records-vol");
+        std::fs::write(dir.join("some.bin"), vec![0u8; 4 * 16384]).unwrap();
+        let st = seeded_under(dir.clone());
+        st.check_files_back_the_state();
+        assert_eq!(
+            st.data_vol.load(Ordering::Relaxed),
+            super::super::volume::volume_id(&dir).unwrap()
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Files absent on the very filesystem recorded at the last good verdict
+    /// were deleted, even when none is left: their pieces are retracted.
+    #[cfg(unix)]
+    #[test]
+    fn files_absent_on_their_recorded_filesystem_are_deleted() {
+        let dir = scratch("deleted-same-vol");
+        let st = seeded_under(dir.clone());
+        st.data_vol.store(
+            super::super::volume::volume_id(&dir).unwrap(),
+            Ordering::Relaxed,
+        );
+        st.check_files_back_the_state();
+        assert_eq!(st.picker.get().unwrap().lock().unwrap().num_have(), 0);
+        assert!(!st.files_absent.load(Ordering::Relaxed));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Files absent where the folder now belongs to another filesystem than
+    /// the recorded one: the disk is not mounted, even with a folder that is
+    /// there and another file of the torrent present.
+    #[cfg(unix)]
+    #[test]
+    fn files_absent_on_another_filesystem_are_offline() {
+        let dir = scratch("offline-other-vol");
+        std::fs::create_dir_all(dir.join("pack/sub")).unwrap();
+        std::fs::write(dir.join("pack/b.bin"), vec![0u8; 32768]).unwrap();
+        let st = seeded_pack_under(dir.clone());
+        let here = super::super::volume::volume_id(&dir).unwrap();
+        st.data_vol.store(here.wrapping_add(1), Ordering::Relaxed);
+        st.check_files_back_the_state();
+        assert_eq!(st.picker.get().unwrap().lock().unwrap().num_have(), 4);
+        assert!(st.files_absent.load(Ordering::Relaxed));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A save path that is not there parks as absent, so the park lifts by
+    /// itself once the disk is mounted.
+    #[test]
+    fn a_missing_save_path_parks_as_absent() {
+        let dir = scratch("no-save-path");
+        let st = seeded_under(dir.join("not-mounted"));
+        st.check_files_back_the_state();
+        assert!(st.files_absent.load(Ordering::Relaxed));
+        assert!(st.data_lost_msg().starts_with(ABSENT_PARK));
+        assert_eq!(st.picker.get().unwrap().lock().unwrap().num_have(), 4);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// An absent park whose files are still missing at the next start stays
+    /// a park, and keeps the pieces it was saved with.
+    #[test]
+    fn an_absent_park_holds_at_restart_while_the_files_are_still_gone() {
+        let dir = scratch("still-gone");
+        let st = seeded_under(dir.clone());
+        st.check_files_back_the_state();
+        let saved = st.data_lost_msg();
+
+        let again = seeded_under(dir.clone());
+        again
+            .status
+            .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+        again.restore_data_lost(&saved);
+        assert_eq!(
+            again.status.load(Ordering::Relaxed),
+            TorrentStatus::Error as u8,
+            "not parked while its files are gone"
+        );
+        assert_eq!(
+            again.picker.get().unwrap().lock().unwrap().num_have(),
+            4,
+            "the pieces were retracted"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A multi-file torrent named `pack`: `sub/a.bin` (pieces 0-1) then
+    /// `b.bin` (pieces 2-3), every piece held, saved under `save`.
+    fn seeded_pack_under(save: std::path::PathBuf) -> TorrentState {
+        let mut b = Vec::new();
+        b.extend_from_slice(b"d8:announce19:http://tracker/annc4:infod5:filesl");
+        b.extend_from_slice(
+            b"d6:lengthi32768e4:pathl3:sub5:a.bineed6:lengthi32768e4:pathl5:b.bineee",
+        );
+        b.extend_from_slice(b"4:name4:pack12:piece lengthi16384e6:pieces80:");
+        b.extend_from_slice(&[7u8; 80]);
+        b.extend_from_slice(b"ee");
+        let meta = crate::torrent::metainfo::parse_torrent_bytes(&b).unwrap();
+        let st = TorrentState::new(meta, save, true);
+        let n = st.meta.num_pieces();
+        let mut p = PiecePicker::new(n);
+        p.import_bitfield(&crate::torrent::full_bitfield(n));
+        let _ = st.picker.set(Arc::new(Mutex::new(p)));
+        st
+    }
+
+    /// A file gone from a folder that is still there was deleted, not
+    /// unmounted: its pieces are retracted, the other file's are kept.
+    #[test]
+    fn verify_files_retracts_a_file_gone_from_a_folder_that_is_there() {
+        let dir = scratch("gone-from-folder");
+        std::fs::create_dir_all(dir.join("pack/sub")).unwrap();
+        std::fs::write(dir.join("pack/b.bin"), vec![0u8; 32768]).unwrap();
+        let st = seeded_pack_under(dir.clone());
+        st.check_files_back_the_state();
+        let p = st.picker.get().unwrap().lock().unwrap();
+        assert_eq!(p.num_have(), 2, "only the deleted file's pieces go");
+        assert!(!p.has_piece(0) && !p.has_piece(1));
+        drop(p);
+        assert!(
+            !st.data_lost_msg().starts_with(ABSENT_PARK),
+            "a deleted file was taken for an unmounted disk"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A folder the torrent needs that is gone (a volume mounted below it)
+    /// parks the torrent as absent even when another of its files is there.
+    #[test]
+    fn verify_files_parks_when_a_folder_of_the_torrent_is_gone() {
+        let dir = scratch("folder-gone");
+        std::fs::create_dir_all(dir.join("pack")).unwrap();
+        std::fs::write(dir.join("pack/b.bin"), vec![0u8; 32768]).unwrap();
+        let st = seeded_pack_under(dir.clone());
+        st.check_files_back_the_state();
+        assert_eq!(
+            st.picker.get().unwrap().lock().unwrap().num_have(),
+            4,
+            "a missing folder retracted pieces"
+        );
+        assert!(st.data_lost_msg().starts_with(ABSENT_PARK));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `seeded_pack_under` as a download that holds only `b.bin` (pieces
+    /// 2-3), with `b.bin` written in full and `sub/` not created yet.
+    fn partial_pack_without_its_second_folder(tag: &str) -> (std::path::PathBuf, TorrentState) {
+        let dir = scratch(tag);
+        std::fs::create_dir_all(dir.join("pack")).unwrap();
+        std::fs::write(dir.join("pack/b.bin"), vec![0u8; 32768]).unwrap();
+        let st = seeded_pack_under(dir.clone());
+        {
+            let mut p = st.picker.get().unwrap().lock().unwrap();
+            p.clear_have(0);
+            p.clear_have(1);
+        }
+        st.status
+            .store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+        (dir, st)
+    }
+
+    /// A download whose next folder is not created yet is a download in
+    /// progress, not an unmounted disk: the missing file holds no piece.
+    #[test]
+    fn a_partial_download_whose_next_folder_is_not_there_yet_is_not_parked() {
+        let (dir, st) = partial_pack_without_its_second_folder("partial-no-folder");
+        st.check_files_back_the_state();
+        assert!(
+            !st.files_absent.load(Ordering::Relaxed),
+            "parked as not mounted: {}",
+            st.data_lost_msg()
+        );
+        assert_eq!(
+            st.status.load(Ordering::Relaxed),
+            TorrentStatus::Downloading as u8
+        );
+        assert_eq!(st.picker.get().unwrap().lock().unwrap().num_have(), 2);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// On a pool (mergerfs, Unraid user shares) a missing file the torrent
+    /// holds no piece of does not park it either.
+    #[test]
+    fn on_a_pool_a_missing_file_with_no_piece_held_does_not_park() {
+        let (dir, st) = partial_pack_without_its_second_folder("pooled-unheld");
+        super::super::volume::POOLED_FOR_TEST.with(|c| c.set(true));
+        st.check_files_back_the_state();
+        super::super::volume::POOLED_FOR_TEST.with(|c| c.set(false));
+        assert!(
+            !st.files_absent.load(Ordering::Relaxed),
+            "parked as not mounted: {}",
+            st.data_lost_msg()
+        );
+        assert_eq!(
+            st.status.load(Ordering::Relaxed),
+            TorrentStatus::Downloading as u8
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// On a pool a missing file the torrent holds pieces of still parks it
+    /// as not mounted, pieces kept.
+    #[test]
+    fn on_a_pool_a_missing_file_with_pieces_held_still_parks() {
+        let dir = scratch("pooled-held");
+        std::fs::create_dir_all(dir.join("pack/sub")).unwrap();
+        std::fs::write(dir.join("pack/b.bin"), vec![0u8; 32768]).unwrap();
+        let st = seeded_pack_under(dir.clone());
+        super::super::volume::POOLED_FOR_TEST.with(|c| c.set(true));
+        st.check_files_back_the_state();
+        super::super::volume::POOLED_FOR_TEST.with(|c| c.set(false));
+        assert!(st.files_absent.load(Ordering::Relaxed), "not parked");
+        assert!(st.data_lost_msg().starts_with(ABSENT_PARK));
+        assert_eq!(st.picker.get().unwrap().lock().unwrap().num_have(), 4);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The whole torrent present and complete is left alone.
+    #[test]
+    fn verify_files_leaves_a_complete_file_alone() {
+        let dir = scratch("complete");
+        std::fs::write(dir.join("some.bin"), vec![0u8; 4 * 16384]).unwrap();
+        let st = seeded_under(dir.clone());
+        st.check_files_back_the_state();
+        let p = st.picker.get().unwrap().lock().unwrap();
+        assert_eq!(p.num_have(), 4, "a complete file lost pieces");
+        drop(p);
+        assert!(
+            !st.serving_suspended.load(Ordering::Relaxed),
+            "a complete file was parked"
         );
         std::fs::remove_dir_all(&dir).ok();
     }

@@ -474,6 +474,18 @@
                 <button class="chip chip-state chip-torrent-err" data-state="__error__" onclick="setHoardStateFilter(this, '__error__')">Error</button>
                 </div>
             </div>
+            <!-- The halves of Checking, on a row of their own under the state
+                 chips (that line is full) and only while Checking is
+                 selected: the checks reading the disk, and those waiting
+                 their turn. -->
+            <div class="facet-group" id="hoard-check-pills" hidden>
+                <span class="facet-label">Checking</span>
+                <div class="hoard-chips-row">
+                    <button class="chip chip-check active" data-check="" onclick="setHoardCheckSub(this, '')">All</button>
+                    <button class="chip chip-check" data-check="__check_reading__" title="Checks reading the disk now" onclick="setHoardCheckSub(this, '__check_reading__')">Reading</button>
+                    <button class="chip chip-check" data-check="__check_waiting__" title="Checks waiting for their turn on the disk" onclick="setHoardCheckSub(this, '__check_waiting__')">Waiting</button>
+                </div>
+            </div>
             <!-- The three facet families used the same chip with nothing between
                  them, so a row of trackers ran straight into a row of
                  categories. The label is what separates them. -->

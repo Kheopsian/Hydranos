@@ -675,6 +675,12 @@ tr:hover td {
     margin-bottom: 12px;
 }
 
+/* The Checking row: a facet group, shown only while Checking is selected.
+   `.facet-group` sets display:flex, which would beat the hidden attribute. */
+#hoard-check-pills[hidden] {
+    display: none;
+}
+
 .chip {
     padding: 3px 10px;
     border-radius: 12px;

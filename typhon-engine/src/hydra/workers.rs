@@ -649,7 +649,10 @@ pub fn share_limits_pass(
                 if let Ok(store) = state.store.lock() {
                     crate::store::log_store("set_paused", store.set_paused(&hash, engine_id, true));
                 }
-                crate::api::apply_pause_to_engine(state, engine_id, &hash, true);
+                // Not `apply_pause_to_engine`: that is the user's stop, and
+                // calls off a check. A parked seed under the user's recheck
+                // reads Stopped and can get here; its check goes on.
+                let _ = manager.stop_torrent(&t.info_hash);
                 out.stopped += 1;
                 tracing::info!(engine = %engine_id, name = %t.meta.name, reason = %why, "share limit reached: stopped");
             }
@@ -930,6 +933,26 @@ pub fn spawn_health_scan(engines: Arc<crate::engines::EngineHost>) {
             }
             let engines = engines.clone();
             let _ = tokio::task::spawn_blocking(move || health_pass(&engines)).await;
+        }
+    });
+}
+
+/// Lift the parks of torrents whose disk was not mounted, once it is: one
+/// pass a minute, the first one at once (it lifts the parks a restart put
+/// back). A pass with no torrent parked costs one atomic load per engine;
+/// otherwise one probe per disk, and one `stat` per file of the torrents on
+/// a disk that is back (`TorrentManager::check_volumes`).
+pub fn spawn_absent_volume_scan(engines: Arc<crate::engines::EngineHost>) {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_secs(60));
+        loop {
+            if !crate::shutdown::tick(&mut tick).await {
+                return;
+            }
+            for engine in engines.engines() {
+                let manager = engine.manager.clone();
+                let _ = tokio::task::spawn_blocking(move || manager.check_volumes(false)).await;
+            }
         }
     });
 }

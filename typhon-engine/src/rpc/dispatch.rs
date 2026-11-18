@@ -99,6 +99,18 @@ pub fn pieces_held(t: &Arc<crate::torrent::meta::TorrentState>) -> (u32, u32) {
     (torrent_core(t).num_have, t.meta.num_pieces())
 }
 
+/// The bytes `num_have` pieces hold: full pieces, but the last one, when it
+/// is among them, only as long as what is left of the torrent after the
+/// others.
+fn bytes_held(num_have: u32, last_held: bool, piece_length: u64, total_size: u64) -> u64 {
+    let full = num_have as u64 * piece_length;
+    let short = match total_size % piece_length.max(1) {
+        r if last_held && r > 0 => piece_length - r,
+        _ => 0,
+    };
+    full.saturating_sub(short).min(total_size)
+}
+
 pub fn torrent_core(t: &Arc<crate::torrent::meta::TorrentState>) -> TorrentCore {
     let status_u8 = t.status.load(Ordering::Relaxed);
     let is_paused = t.is_paused.load(Ordering::Relaxed);
@@ -108,11 +120,17 @@ pub fn torrent_core(t: &Arc<crate::torrent::meta::TorrentState>) -> TorrentCore 
     let rechecking = t.rechecking.load(Ordering::Relaxed) || t.held_for_proof();
     let state = state_of(t, status_u8, is_paused, rechecking);
     // Real progress from picker's have count (was a 0.0/1.0 placeholder).
+    // Whether the last piece, shorter than the others, is among those held.
+    let mut last_held = false;
     let (num_have, progress) = if status_u8 == TorrentStatus::Seeding as u8 {
         (t.meta.num_pieces(), 1.0_f64)
     } else if let Some(picker) = t.picker.get() {
-        let n = picker.lock().unwrap().num_have();
         let total = t.meta.num_pieces();
+        let (n, last) = {
+            let p = picker.lock().unwrap();
+            (p.num_have(), total > 0 && p.has_piece(total - 1))
+        };
+        last_held = last;
         let p = if total > 0 {
             n as f64 / total as f64
         } else {
@@ -126,13 +144,18 @@ pub fn torrent_core(t: &Arc<crate::torrent::meta::TorrentState>) -> TorrentCore 
         // start_torrent draws the same conclusion from the same fact.
         (t.meta.num_pieces(), 1.0)
     };
-    // Approximate -- over-reports by <=1 piece_length when the last (short)
-    // piece is among the have set but we can't tell cheaply. Good enough
-    // for a progress display.
+    // Exact: every piece held is a full piece but the last, which is shorter.
+    // It was counted full, so a torrent missing one piece in the middle could
+    // read as holding all of its bytes.
     let total_done: u64 = if progress >= 1.0 {
         t.meta.total_size
     } else {
-        (num_have as u64 * t.meta.piece_length as u64).min(t.meta.total_size)
+        bytes_held(
+            num_have,
+            last_held,
+            t.meta.piece_length as u64,
+            t.meta.total_size,
+        )
     };
     TorrentCore {
         state,
@@ -319,6 +342,12 @@ pub fn torrent_to_json(t: &Arc<crate::torrent::meta::TorrentState>) -> Value {
         "state": state,
         "progress": progress,
         "checking_progress": checking_progress(t),
+        // Under a check that is still waiting for its turn on the disk, not
+        // reading: shown "Waiting for check" rather than "Checking 0 %".
+        "check_queued": state == "checking_files" && t.waiting_for_check(),
+        // Parked because its files are absent as a whole (a disk not
+        // mounted): qBittorrent's `missingFiles`, not a plain error.
+        "files_absent": t.files_absent.load(Ordering::Relaxed),
         "total_size": t.meta.total_size,
         "multi_file": t.meta.multi_file,
         "total_done": total_done,
@@ -354,6 +383,33 @@ pub fn torrent_to_json(t: &Arc<crate::torrent::meta::TorrentState>) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ⭐ The last piece is shorter than the others. Counted full, a FLAC
+    /// album missing one piece in the middle (2 005 of 2 006 held, 64 KiB
+    /// pieces, last piece 6 178 bytes) read as holding nearly every byte.
+    #[test]
+    fn the_bytes_held_count_the_short_last_piece_as_what_it_is() {
+        let (plen, size) = (65_536u64, 131_405_858u64);
+        let last = size - 2005 * plen;
+        assert_eq!(last, 6_178);
+        assert_eq!(
+            bytes_held(2005, true, plen, size),
+            size - plen,
+            "one full piece missing"
+        );
+        assert_eq!(
+            bytes_held(2005, false, plen, size),
+            2005 * plen,
+            "the short one missing"
+        );
+        assert_eq!(bytes_held(2006, true, plen, size), size, "all of it");
+        assert_eq!(bytes_held(0, false, plen, size), 0);
+        assert_eq!(
+            bytes_held(2, true, 16_384, 32_768),
+            32_768,
+            "no short piece at all"
+        );
+    }
 
     /// `tracker_host_of` is what keys every per-tracker counter and the
     /// breaker; getting it wrong splits one tracker into several.

@@ -52,6 +52,27 @@ create_torrent_folder = false
 # size check and would be announced as a seed of data that is not there: use a
 # recheck, not skip checking, on pre-allocated files.
 # preallocate = false
+# Rechecks (and the proofs of data a torrent shares with another): how many
+# read at once across every disk, how many read one disk at once, and how many
+# pieces each one has in flight. Two checks on one hard drive make it seek
+# between them for every read: measured on USB drives, one check with four
+# pieces read 64 MiB/s, four checks with sixteen pieces 32.7 MiB/s. A disk is
+# what the OS reports as one device.
+# recheck_torrents at 0 (the default) puts no cap on top of the per-disk one:
+# every disk can be checked at once, each by recheck_per_disk checks.
+# recheck_per_disk and recheck_pieces at 0 (the default) go by the kind of
+# disk: 1 check of 4 pieces on a hard drive, 4 of 8 on an SSD. Linux says which
+# is which (/sys/block/<disk>/queue/rotational); a disk it cannot tell (FUSE,
+# mergerfs, NFS, SMB, ZFS) counts as a hard drive, and so does every disk on
+# Windows and macOS: set them by hand for an SSD there. A USB adapter may also
+# report an SSD as a hard drive. The log says once per disk what it was taken
+# for. Absent = TYPHON_RECHECK_TORRENTS, TYPHON_RECHECK_PER_DISK and
+# TYPHON_RECHECK_CONCURRENCY when set, else 0. Each 0 to 64. Applied live: a
+# lower count takes effect as running checks end, the pieces from the next
+# check on.
+# recheck_torrents = 0
+# recheck_per_disk = 0
+# recheck_pieces = 0
 # Interface the daemon's own requests are bound to when they go "direct" or
 # through "proxy". The engines have their own, in [race]/[hoard].
 # bind_interface = "wg0"

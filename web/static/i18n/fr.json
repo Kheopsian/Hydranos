@@ -198,6 +198,8 @@
   "Check what actually happens": "Vérifier ce qui se passe vraiment",
   "Checking": "Vérification",
   "Checking {pct}%": "Vérification {pct} %",
+  "Waiting for check": "En attente de vérification",
+  "Waiting for its turn on the disk: another check is reading it": "En attente de son tour sur le disque : une autre vérification le lit",
   "Checking...": "Vérification...",
   "Checking…": "Vérification…",
   "Clear every spoof": "Retirer tous les masquages",

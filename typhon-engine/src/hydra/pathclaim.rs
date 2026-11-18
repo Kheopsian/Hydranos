@@ -459,7 +459,7 @@ pub fn prove(
     meta: &TorrentMeta,
     src_root: &Path,
     candidates: &HashSet<PathBuf>,
-    verify: &dyn Fn(u32, &[u8]) -> Option<bool>,
+    verify: &(dyn Fn(u32, &[u8]) -> Option<bool> + Sync),
 ) -> HashSet<PathBuf> {
     prove_from(meta, src_root, candidates, false, verify)
 }
@@ -477,7 +477,7 @@ pub fn prove_from(
     src_root: &Path,
     candidates: &HashSet<PathBuf>,
     beside: bool,
-    verify: &dyn Fn(u32, &[u8]) -> Option<bool>,
+    verify: &(dyn Fn(u32, &[u8]) -> Option<bool> + Sync),
 ) -> HashSet<PathBuf> {
     prove_detail(meta, src_root, candidates, beside, verify).0
 }
@@ -494,7 +494,7 @@ pub fn prove_detail(
     src_root: &Path,
     candidates: &HashSet<PathBuf>,
     beside: bool,
-    verify: &dyn Fn(u32, &[u8]) -> Option<bool>,
+    verify: &(dyn Fn(u32, &[u8]) -> Option<bool> + Sync),
 ) -> (HashSet<PathBuf>, HashSet<PathBuf>) {
     let plen = meta.piece_length as u64;
     let mut wanted: HashMap<PathBuf, (u32, u32)> = HashMap::new();
@@ -521,35 +521,58 @@ pub fn prove_detail(
     pieces.sort_unstable();
     pieces.dedup();
 
-    let mut open: HashMap<PathBuf, Option<std::fs::File>> = HashMap::new();
-    let mut good: HashSet<u32> = HashSet::new();
-    'piece: for p in pieces {
-        let size = meta.piece_size(p);
-        let mut data: Vec<u8> = Vec::with_capacity(size as usize);
-        for op in meta.map_block(p, 0, size) {
-            if op.pad {
-                data.resize(data.len() + op.length as usize, 0);
-                continue;
+    // Whether piece `p` reads whole from `src_root` and verifies. Each reader
+    // keeps its own open files, and its own buffer from piece to piece.
+    let piece_ok =
+        |p: u32, open: &mut HashMap<PathBuf, Option<std::fs::File>>, data: &mut Vec<u8>| -> bool {
+            let size = meta.piece_size(p);
+            data.clear();
+            data.reserve(size as usize);
+            for op in meta.map_block(p, 0, size) {
+                if op.pad {
+                    data.resize(data.len() + op.length as usize, 0);
+                    continue;
+                }
+                if !beside && !candidates.contains(&op.path) {
+                    return false;
+                }
+                let file = open
+                    .entry(op.path.clone())
+                    .or_insert_with(|| std::fs::File::open(src_root.join(&op.path)).ok());
+                let Some(file) = file.as_ref() else {
+                    return false;
+                };
+                let at = data.len();
+                data.resize(at + op.length as usize, 0);
+                if read_at(file, &mut data[at..], op.file_offset).is_err() {
+                    return false;
+                }
             }
-            if !beside && !candidates.contains(&op.path) {
-                continue 'piece;
-            }
-            let file = open
-                .entry(op.path.clone())
-                .or_insert_with(|| std::fs::File::open(src_root.join(&op.path)).ok());
-            let Some(file) = file.as_ref() else {
-                continue 'piece;
-            };
-            let at = data.len();
-            data.resize(at + op.length as usize, 0);
-            if read_at(file, &mut data[at..], op.file_offset).is_err() {
-                continue 'piece;
-            }
+            verify(p, data) == Some(true)
+        };
+    // As many pieces in flight as a recheck of that disk has, taken in
+    // order. One at a time left the disk idle between a read and the next:
+    // the proof of a shared file ran at a fraction of the recheck after it.
+    let disk = typhon_engine::torrent::disk_key(src_root);
+    let width = typhon_engine::torrent::recheck_width_for(&disk).clamp(1, pieces.len().max(1));
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let good: std::sync::Mutex<HashSet<u32>> = std::sync::Mutex::new(HashSet::new());
+    std::thread::scope(|s| {
+        for _ in 0..width {
+            s.spawn(|| {
+                let mut open: HashMap<PathBuf, Option<std::fs::File>> = HashMap::new();
+                let mut data: Vec<u8> = Vec::new();
+                loop {
+                    let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some(&p) = pieces.get(i) else { break };
+                    if piece_ok(p, &mut open, &mut data) {
+                        good.lock().unwrap_or_else(|e| e.into_inner()).insert(p);
+                    }
+                }
+            });
         }
-        if verify(p, &data) == Some(true) {
-            good.insert(p);
-        }
-    }
+    });
+    let good = good.into_inner().unwrap_or_else(|e| e.into_inner());
     let mut interior_ok: HashSet<PathBuf> = HashSet::new();
     for (path, (a, b)) in wanted {
         if (a..=b).all(|p| good.contains(&p)) {
@@ -862,10 +885,7 @@ pub fn finish(
     if inline_under_test() {
         job.run();
     } else {
-        std::thread::Builder::new()
-            .name("pathclaim-proof".into())
-            .spawn(move || job.run_capped())
-            .ok();
+        job.spawn_capped("pathclaim-proof");
     }
 }
 
@@ -913,6 +933,15 @@ fn link_into(from: &Path, to: &Path) -> bool {
     }
 }
 
+/// Where a proof of torrent `hash` reads when it is proven in place: its own
+/// root. `None` when the torrent is gone.
+fn read_root_of(state: &AppState, engine_id: &str, hash: &str) -> Option<PathBuf> {
+    let engine = state.engines.get(engine_id)?;
+    let t = engine.manager.get(&crate::store::hex20(hash)?)?;
+    let save_path = t.save_path.read().clone();
+    Some(root_of(&t.meta, &save_path))
+}
+
 struct Job {
     metainfo: Option<Vec<u8>>,
     state: AppState,
@@ -935,39 +964,132 @@ impl Job {
     /// A proof reads every file it shares back from disk, as a recheck does;
     /// a bulk add (cross-seed injection, a client import) used to start one
     /// such read per torrent at once. The slot is the recheck semaphore's own,
-    /// so proofs and rechecks together stay within `TYPHON_RECHECK_TORRENTS`.
+    /// so proofs and rechecks together stay within `recheck_torrents` when it
+    /// caps them, and within one per disk always.
     /// No deadlock: `run` only *starts* the recheck (`manager.recheck` spawns
     /// a task and returns), it never waits for it, so the slot is back before
     /// that task needs one. The wait is on this thread, off the runtime, and
     /// the torrent reads as checking meanwhile (`_hold`).
-    fn run_capped(self) {
-        let _slot = self.rt.clone().map(|rt| {
-            typhon_engine::torrent::try_recheck_slot().unwrap_or_else(|| {
+    ///
+    /// The wait is a task, not a thread. One thread parked per proof waiting
+    /// for its turn put a selection recheck of 19 000 torrents at hundreds of
+    /// threads and climbing; a waiting task costs next to nothing. Only the
+    /// proof itself, which reads files, runs on the blocking pool, so there
+    /// are as many such threads as proofs reading -- one per disk at most.
+    /// Without a runtime (a caller outside one), it runs at once on a thread
+    /// of its own, uncapped, as before.
+    fn spawn_capped(self, name: &str) {
+        match self.rt.clone() {
+            Some(rt) => {
+                rt.spawn(self.run_queued());
+            }
+            None => {
+                let _ = std::thread::Builder::new()
+                    .name(name.to_string())
+                    .spawn(move || self.run());
+            }
+        }
+    }
+
+    /// Wait for the disk, then for a slot of the limit, then prove.
+    async fn run_queued(self) {
+        // The torrent shows waiting for its check, not checking, until the
+        // proof has its turn.
+        let waiting = self._hold.as_ref().map(|h| h.waiting());
+        // Where it reads, off the runtime: a stat on a slow drive blocks.
+        let key = {
+            let job_state = (
+                self.state.clone(),
+                self.engine_id.clone(),
+                self.hash.clone(),
+            );
+            let isolate = self.isolate_from.as_ref().map(|(r, _)| r.clone());
+            tokio::task::spawn_blocking(move || {
+                let root = match isolate {
+                    Some(r) => Some(r),
+                    None => read_root_of(&job_state.0, &job_state.1, &job_state.2),
+                };
+                root.map(|r| typhon_engine::torrent::disk_key(&r))
+            })
+            .await
+            .ok()
+            .flatten()
+        };
+        let Some(key) = key else {
+            return; // the torrent is gone: `run` would do nothing either
+        };
+        // The disk first, as a recheck takes it: two proofs, or a proof and
+        // a recheck, reading one hard drive at once made it seek between
+        // them for every read. Taken before the slot of the limit, so a proof
+        // waiting for a busy disk does not hold a slot another disk could use.
+        let disk = match typhon_engine::torrent::try_disk_slot(&key) {
+            Some(p) => p,
+            None => {
+                tracing::debug!(
+                    engine = %self.engine_id,
+                    hash = %self.hash,
+                    "path claim: proof waiting for its disk, another check is reading it"
+                );
+                typhon_engine::torrent::disk_slot(&key).await
+            }
+        };
+        if self.cancelled() {
+            return;
+        }
+        let slot = match typhon_engine::torrent::try_recheck_slot() {
+            Some(p) => p,
+            None => {
                 tracing::info!(
                     engine = %self.engine_id,
                     hash = %self.hash,
                     "path claim: proof waiting for its turn, as many files are being read as \
                      checks may run at once"
                 );
-                rt.block_on(typhon_engine::torrent::recheck_slot())
-            })
-        });
-        #[cfg(test)]
-        {
-            use std::sync::atomic::Ordering::SeqCst;
-            let now = PROOFS_NOW.fetch_add(1, SeqCst) + 1;
-            PROOFS_MAX.fetch_max(now, SeqCst);
-            // Long enough for every proof the test started to overlap.
-            std::thread::sleep(Duration::from_millis(200));
-            self.run();
-            PROOFS_NOW.fetch_sub(1, SeqCst);
-            PROOFS_DONE.fetch_add(1, SeqCst);
+                typhon_engine::torrent::recheck_slot().await
+            }
+        };
+        if self.cancelled() {
+            return;
         }
-        #[cfg(not(test))]
-        self.run();
+        drop(waiting);
+        let _ = tokio::task::spawn_blocking(move || {
+            let _turn = (disk, slot);
+            #[cfg(test)]
+            {
+                use std::sync::atomic::Ordering::SeqCst;
+                let now = PROOFS_NOW.fetch_add(1, SeqCst) + 1;
+                PROOFS_MAX.fetch_max(now, SeqCst);
+                // Long enough for every proof the test started to overlap.
+                std::thread::sleep(Duration::from_millis(200));
+                self.run();
+                PROOFS_NOW.fetch_sub(1, SeqCst);
+                PROOFS_DONE.fetch_add(1, SeqCst);
+            }
+            #[cfg(not(test))]
+            self.run();
+        })
+        .await;
+    }
+
+    /// A stop the user asked for has called this proof off since it was
+    /// planned (`TorrentManager::cancel_check`). The torrent stays as the stop
+    /// left it: nothing proven, linked, rechecked or started.
+    fn cancelled(&self) -> bool {
+        let off = self._hold.as_ref().is_some_and(|h| h.cancelled());
+        if off {
+            tracing::info!(
+                engine = %self.engine_id,
+                hash = %self.hash,
+                "path claim: proof called off by a stop"
+            );
+        }
+        off
     }
 
     fn run(self) {
+        if self.cancelled() {
+            return;
+        }
         let Some(engine) = self.state.engines.get(&self.engine_id) else {
             return;
         };
@@ -1009,7 +1131,7 @@ impl Job {
             // terms. One whose interior fails (a leftover of zeros, a
             // truncated copy completed with zeros) is not linked: it is
             // downloaded into B's own folder and the original is never
-            // written. The permit of the proof is the one `run_capped` took
+            // written. The permit of the proof is the one `run_queued` took
             // for the whole job.
             let mut to_prove: HashSet<PathBuf> = candidates.clone();
             to_prove.extend(own.iter().map(|(_, rel)| (*rel).clone()));
@@ -1146,6 +1268,10 @@ impl Job {
         manager: &Arc<typhon_engine::torrent::TorrentManager>,
         ih: &[u8; 20],
     ) {
+        // Stopped while it proved: no recheck, and above all no start.
+        if self.cancelled() {
+            return;
+        }
         let _enter = self.rt.as_ref().map(|h| h.enter());
         if self.rt.is_some() {
             let _ = manager.recheck(ih);
@@ -1604,10 +1730,7 @@ pub fn guarded_recheck(
     if inline_under_test() {
         job.run();
     } else {
-        std::thread::Builder::new()
-            .name("pathclaim-recheck".into())
-            .spawn(move || job.run_capped())
-            .map_err(|e| format!("cannot start the check: {e}"))?;
+        job.spawn_capped("pathclaim-recheck");
     }
     Ok(())
 }
@@ -2506,9 +2629,11 @@ mod tests {
 
     /// A bulk add of releases sharing one folder started one full read per
     /// torrent at once. The real threaded path runs here (the test asks for it
-    /// on this thread; inline is the default under test), with two of the four
-    /// recheck slots held by the test so the limit is two: five adds, four
-    /// proofs, never more than two reading together.
+    /// on this thread; inline is the default under test): five adds, four
+    /// proofs, all on one disk. Never more proofs may read that disk at once
+    /// than the disk allows. That is 1 on a hard drive, where two proofs made
+    /// the disk seek between them for every read, and 4 on an SSD, which the
+    /// kernel reports on Linux, so the expected maximum is read from the disk.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_bulk_add_runs_no_more_proofs_than_the_recheck_limit() {
         use std::sync::atomic::Ordering::SeqCst;
@@ -2549,9 +2674,10 @@ mod tests {
         drop((held_a, held_b));
         assert_eq!(PROOFS_DONE.load(SeqCst), 4, "the proofs did not all run");
         let max = PROOFS_MAX.load(SeqCst);
+        let limit = typhon_engine::torrent::disk_count(&typhon_engine::torrent::disk_key(&dir));
         assert!(
-            (1..=2).contains(&max),
-            "{max} proofs were reading at once, the limit was 2"
+            (1..=limit).contains(&max),
+            "{max} proofs were reading one disk at once, the limit per disk is {limit}"
         );
     }
 

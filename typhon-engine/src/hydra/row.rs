@@ -225,6 +225,25 @@ pub fn build(engine: &Value, facts: &StoreFacts, agent: &str) -> Value {
     row.insert("added_time".into(), added_time.into());
     row.insert("agent".into(), agent.into());
     row.insert("category".into(), facts.category.clone().into());
+    // A check waiting for its turn on the disk, not yet reading.
+    row.insert(
+        "check_queued".into(),
+        engine
+            .get("check_queued")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+            .into(),
+    );
+    // Parked because its disk is not mounted: the pieces are kept, and the
+    // park lifts by itself when the disk is back.
+    row.insert(
+        "files_absent".into(),
+        engine
+            .get("files_absent")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+            .into(),
+    );
     // How far a running recheck has got, 0..1, null when none is: its own
     // field, because `progress` keeps meaning what the torrent holds.
     row.insert(
@@ -459,11 +478,13 @@ mod tests {
                 "added_time",
                 "agent",
                 "category",
+                "check_queued",
                 "checking_progress",
                 "completed_time",
                 "content_folder",
                 "download_rate",
                 "engine_save_path",
+                "files_absent",
                 "info_hash",
                 "injected_peers",
                 "injection_hit",

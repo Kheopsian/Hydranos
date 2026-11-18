@@ -2926,6 +2926,43 @@ mod disk_tests {
         );
     }
 
+    /// A torrent stopped before the restart, its bitfield set aside: the
+    /// check is asked at load, and the stop put back just after it
+    /// (`restore_stopped`, as at startup). That is no stop asked now: the
+    /// check still runs, its verdict lands, and the torrent stays stopped.
+    #[tokio::test]
+    async fn a_stopped_torrent_with_an_unusable_bitfield_is_checked_and_stays_stopped() {
+        use std::sync::atomic::Ordering;
+        let (f, chunks) = four_piece_fixture("nothexstopped");
+        download(&f, 0, &chunks[0]).await;
+        download(&f, 1, &chunks[1]).await;
+        let (mgr, t) = restart_after(&f, "UPDATE torrent_state SET bitfield='zz'");
+        assert!(
+            t.rechecking.load(Ordering::SeqCst),
+            "the check is asked at load"
+        );
+        mgr.restore_stopped(&f.torrent.info_hash).expect("restored");
+
+        assert_eq!(
+            held_after_settling(&t, &[0, 1]).await,
+            vec![0, 1],
+            "the check ran to its verdict"
+        );
+        for _ in 0..150 {
+            if !t.rechecking.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(!t.rechecking.load(Ordering::SeqCst));
+        assert!(t.is_paused.load(Ordering::Relaxed), "still stopped");
+        assert_eq!(
+            t.status.load(Ordering::Relaxed),
+            crate::torrent::meta::TorrentStatus::Stopped as u8,
+            "not started by the verdict"
+        );
+    }
+
     fn hex_of(f: &Fixture) -> String {
         crate::torrent::hex_encode(&f.torrent.info_hash)
     }

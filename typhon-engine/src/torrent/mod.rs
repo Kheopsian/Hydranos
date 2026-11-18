@@ -6,6 +6,7 @@ pub mod piece_picker;
 pub mod rate;
 pub mod ratelimit;
 pub mod statedb;
+pub mod volume;
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -1254,6 +1255,7 @@ impl TorrentManager {
             file_renames: state.meta.renamed_files(),
             data_lost: String::new(),
             seed_only: false,
+            data_vol: 0,
         };
         // The record first, then the torrent: a store that refuses it refuses
         // the add, with nothing inserted and the error going back to the
@@ -1395,6 +1397,7 @@ impl TorrentManager {
         if let Some((_, t)) = &removed {
             let was = t.save_path.read().clone();
             self.uncount_save_path(&was);
+            t.forget_absent_park();
         }
         tm.map_remove = stage.elapsed();
         let result = match removed {
@@ -1486,6 +1489,35 @@ impl TorrentManager {
             t.fold_seed_time(crate::torrent::meta::now_secs());
             return Ok(());
         }
+        // Parked because its files were absent (an unmounted disk): a start
+        // looks again, and goes on as a plain start if they are all back. At
+        // most `volume::PROBE_TIMEOUT` on a disk that does not answer.
+        //
+        // A lift that outlives the probe ends on the probe's thread, so what
+        // `after_lift` owes is not left to this one: the download goes in the
+        // queue's index first (a superset, pruned once whole, so a lift that
+        // does not happen costs nothing), and the announce goes from there.
+        if t.files_absent.load(Ordering::Relaxed) {
+            let unfinished = !t.seed_mode
+                && t.picker
+                    .get()
+                    .is_some_and(|p| !p.lock().unwrap().is_complete());
+            if unfinished {
+                self.incomplete.insert(*info_hash);
+            }
+            let hook = self.announce_hook.get().cloned();
+            let probe_t = t.clone();
+            let key = t.save_path.read().clone();
+            let _ = volume::probe(key, move || {
+                let lifted = probe_t.lift_absent_park();
+                if lifted && !probe_t.is_paused.load(Ordering::Relaxed) {
+                    if let Some(hook) = hook {
+                        hook(probe_t.meta.info_hash);
+                    }
+                }
+                lifted
+            });
+        }
         // Pieces found missing (`mark_data_lost`) park the torrent until a
         // recheck, whatever status a stop left it in since: a start would make
         // it a download and fetch them again, which only a recheck may decide.
@@ -1533,6 +1565,141 @@ impl TorrentManager {
         Ok(())
     }
 
+    /// A park for absent files was just lifted: a download goes back in the
+    /// queue, and the trackers hear from it again soon.
+    fn after_lift(&self, t: &TorrentState) {
+        let ih = t.meta.info_hash;
+        if t.status.load(Ordering::Relaxed) == TorrentStatus::Downloading as u8 {
+            self.incomplete.insert(ih);
+        }
+        if !t.is_paused.load(Ordering::Relaxed) {
+            self.announce_soon(&ih);
+        }
+    }
+
+    /// Judge every disk at once instead of every torrent alone, and lift the
+    /// parks of the disks that came back.
+    ///
+    /// Torrents are grouped by the filesystem recorded at their last good
+    /// verdict (`data_vol`). Each group costs one probe of one of its paths,
+    /// under `volume::PROBE_TIMEOUT`, whatever the number of torrents in it:
+    ///
+    /// - the path is now on another filesystem, or the disk does not answer:
+    ///   the disk is not mounted. At `startup`, every torrent of the group
+    ///   that holds pieces is parked as absent with no look at its files,
+    ///   before the first announce, and one line is logged for the disk;
+    /// - the path is on its filesystem: the parks of the group are lifted,
+    ///   each after one `stat` per file says every file is back in full.
+    ///
+    /// A park whose torrent has no filesystem recorded (saved by an older
+    /// build, or on Windows) is grouped by save path, probed by its first
+    /// torrent's files, and lifted the same way.
+    ///
+    /// Outside `startup` only parked torrents are looked at, and nothing at
+    /// all is done while none is parked (`meta::ABSENT_PARKED`): a library
+    /// whose disks are mounted pays one atomic load per pass. Touches the
+    /// disk: never on the async runtime.
+    pub fn check_volumes(&self, startup: bool) -> VolumeCheck {
+        use std::collections::HashMap;
+        let mut out = VolumeCheck::default();
+        if !startup && meta::ABSENT_PARKED.load(Ordering::Relaxed) == 0 {
+            return out;
+        }
+        #[derive(PartialEq, Eq, Hash)]
+        enum Key {
+            Vol(u64),
+            Folder(std::path::PathBuf),
+        }
+        let mut groups: HashMap<Key, Vec<Arc<TorrentState>>> = HashMap::new();
+        for r in self.torrents.iter() {
+            let t = r.value();
+            if t.status.load(Ordering::Relaxed) == TorrentStatus::Checking as u8 {
+                continue;
+            }
+            let absent = t.files_absent.load(Ordering::Relaxed);
+            let vol = t.data_vol.load(Ordering::Relaxed);
+            let key = if vol != 0 && (absent || startup) {
+                Key::Vol(vol)
+            } else if absent {
+                Key::Folder(t.save_path.read().clone())
+            } else {
+                continue;
+            };
+            groups.entry(key).or_default().push(t.clone());
+        }
+        for (key, members) in groups {
+            let first = &members[0];
+            let save = first.save_path.read().clone();
+            // Up to three torrents of the group stand for it. Its disk is
+            // there when the first file of one of them is (whatever the
+            // filesystem id says: an NFS remount gets a new one), or when the
+            // path of one of them is on the recorded filesystem (files
+            // deleted from a disk that is mounted: the lift judges them).
+            let samples: Vec<std::path::PathBuf> =
+                members.iter().take(3).map(|t| first_file_path(t)).collect();
+            let want = match key {
+                Key::Vol(v) => Some(v),
+                Key::Folder(_) => None,
+            };
+            let probe_key = samples[0].clone();
+            let here = volume::probe(probe_key, move || {
+                samples.iter().any(|p| p.exists())
+                    || want.is_some_and(|v| samples.iter().any(|p| volume::volume_id(p) == Some(v)))
+            })
+            .unwrap_or(false);
+            if here {
+                let mut lifted = 0;
+                for t in members
+                    .iter()
+                    .filter(|t| t.files_absent.load(Ordering::Relaxed))
+                {
+                    if t.lift_absent_park() {
+                        self.after_lift(t);
+                        lifted += 1;
+                    }
+                }
+                if lifted > 0 {
+                    info!(
+                        "[volume] the disk of {} is back: {} torrent(s) no longer parked",
+                        save.display(),
+                        lifted
+                    );
+                }
+                out.lifted += lifted;
+                continue;
+            }
+            if !startup {
+                continue;
+            }
+            let mut parked = 0;
+            for t in &members {
+                let holds = t
+                    .picker
+                    .get()
+                    .is_none_or(|p| p.lock().unwrap().num_have() > 0);
+                if !holds || t.files_absent.load(Ordering::Relaxed) {
+                    continue;
+                }
+                t.park_absent(&format!(
+                    "the disk holding {} is not mounted (or does not answer). The torrent comes \
+                     back by itself once it is, or recheck this torrent",
+                    save.display()
+                ));
+                parked += 1;
+            }
+            if parked > 0 {
+                warn!(
+                    "[volume] the disk of {} is not mounted (or does not answer): {} torrent(s) \
+                     parked, their pieces kept",
+                    save.display(),
+                    parked
+                );
+            }
+            out.parked += parked;
+        }
+        out
+    }
+
     /// Put back a stop decided before this process started.
     ///
     /// ⚠️ Not `stop_torrent`, whose BEP 3 departure is right for a stop someone
@@ -1559,13 +1726,18 @@ impl TorrentManager {
 
     pub fn stop_torrent(&self, info_hash: &InfoHash) -> Result<(), String> {
         let t = self.get(info_hash).ok_or("torrent not found")?;
-        // Closed BEFORE the pause flag goes up, so the interval that just
-        // ended is credited. After it, fold_seed_time would see a paused
-        // torrent and drop the open interval on the floor.
-        t.fold_seed_time(crate::torrent::meta::now_secs());
-        t.is_paused.store(true, Ordering::Relaxed);
-        t.status
-            .store(TorrentStatus::Stopped as u8, Ordering::Relaxed);
+        {
+            // Not in the middle of a recheck's verdict: it either reads the
+            // pause flag set below, or has finished writing its status.
+            let _publish = t.check_publish();
+            // Closed BEFORE the pause flag goes up, so the interval that just
+            // ended is credited. After it, fold_seed_time would see a paused
+            // torrent and drop the open interval on the floor.
+            t.fold_seed_time(crate::torrent::meta::now_secs());
+            t.is_paused.store(true, Ordering::Relaxed);
+            t.status
+                .store(TorrentStatus::Stopped as u8, Ordering::Relaxed);
+        }
         // BEP 3: tell the trackers we are leaving. Without it a stop is silent
         // and every tracker keeps us in the swarm until the entry goes stale,
         // handing our address to leechers we will not answer.
@@ -1580,6 +1752,39 @@ impl TorrentManager {
         self.untrack_in_dht(info_hash);
         self.announce_soon(info_hash);
         Ok(())
+    }
+
+    /// The stop an operator asks for (UI, API, qBittorrent shim): a check of
+    /// the torrent is called off (`cancel_check`), then it stops. Automatic
+    /// stops (queues, share limits, rules) call `stop_torrent` alone.
+    pub fn stop_torrent_by_user(&self, info_hash: &InfoHash) -> Result<(), String> {
+        self.cancel_check(info_hash);
+        self.stop_torrent(info_hash)
+    }
+
+    /// Call off a recheck or a proof of this torrent, queued or under way.
+    ///
+    /// For a stop the USER asks for. A torrent stopped while it waited for
+    /// its disk stayed under Checking, offered Start, and was checked later
+    /// anyway: the stop did nothing visible. Now the check leaves at once if
+    /// it is still waiting, or at its next piece if it is reading, publishes
+    /// no verdict (what the torrent held before stays), and a proof starts
+    /// nothing. The torrent reads as what the stop made it. Not called by the
+    /// queue managers' own stops, nor by the share-limit worker's or a rule's,
+    /// which must not undo a check the user asked.
+    ///
+    /// A check that has read everything and is writing its verdict finishes
+    /// it first (`check_publish`): the stop then finds a finished check, and
+    /// `stop_torrent` after it sets the state over that verdict.
+    pub fn cancel_check(&self, info_hash: &InfoHash) {
+        let Some(t) = self.get(info_hash) else {
+            return;
+        };
+        let _publish = t.check_publish();
+        t.check_gen.fetch_add(1, Ordering::SeqCst);
+        // The counter goes first, as at the end of a check.
+        t.recheck_done.store(0, Ordering::SeqCst);
+        t.rechecking.store(false, Ordering::SeqCst);
     }
 
     /// Suspend/resume disk serving for one torrent without pausing it: the
@@ -2035,6 +2240,7 @@ impl TorrentManager {
             }
             // Parked for lost data by the run before: it stays parked, and is
             // neither offered as a seed nor queued as a download below.
+            state.data_vol.store(rd.data_vol, Ordering::Relaxed);
             state.restore_data_lost(&rd.data_lost);
             self.skey_index
                 .insert(crate::crypto::mse::sha1_combine(b"req2", &ih), ih);
@@ -2560,6 +2766,7 @@ impl TorrentManager {
             file_renames: t.meta.renamed_files(),
             data_lost: t.data_lost_msg(),
             seed_only: t.is_seed_only(),
+            data_vol: t.data_vol.load(Ordering::Relaxed),
         }
     }
 
@@ -2832,6 +3039,11 @@ impl TorrentManager {
         // new one (and a move that is undone is a move too).
         t.forget_write_verdicts();
         if was != new {
+            // Nor does the filesystem they were on: the next good verdict
+            // records the new one.
+            t.data_vol.store(0, Ordering::Relaxed);
+        }
+        if was != new {
             self.note_placed(t.meta.info_hash);
             self.note_arrival(t.meta.info_hash);
         }
@@ -3102,6 +3314,7 @@ fn fingerprint_of(t: &TorrentState) -> statedb::Fingerprint {
         up_limit: t.rate_limits().0,
         down_limit: t.rate_limits().1,
         data_lost: t.data_lost.load(Ordering::Relaxed),
+        data_vol: t.data_vol.load(Ordering::Relaxed),
         edits: edits_hash(t),
     }
 }
@@ -3287,19 +3500,380 @@ fn remove_empty_dirs_recursive(dir: &std::path::Path) {
 /// Bounds how many rechecks hash the disk at once. Recheck is triggered per
 /// add / per explicit request (never a boot-wide O(N) scan), but a burst of
 /// re-adds could otherwise thrash the disk -- cap concurrent checks.
-fn recheck_sem() -> &'static Semaphore {
-    static S: OnceLock<Semaphore> = OnceLock::new();
+fn recheck_sem() -> &'static Arc<Semaphore> {
+    static S: OnceLock<Arc<Semaphore>> = OnceLock::new();
     // Deux rechecks simultanes lisant leurs pieces une par une plafonnaient a
     // ~2 Mo/s sur un pool qui en sert 500. Reparer 573 torrents aurait pris des
     // milliers d heures. Reglable sans rebuild pour une campagne de reparation.
-    S.get_or_init(|| {
-        let n = std::env::var("TYPHON_RECHECK_TORRENTS")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .filter(|v| *v > 0)
-            .unwrap_or(4);
-        Semaphore::new(n)
+    S.get_or_init(|| Arc::new(Semaphore::new(limits().torrents.load(Ordering::SeqCst))))
+}
+
+/// A positive whole number from the environment, if one is set.
+fn env_count_opt(name: &str) -> Option<usize> {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|v| *v > 0)
+}
+
+/// The highest value any of the three recheck limits takes. A typo of 400
+/// readers on one hard drive would make it seek for every read.
+pub const RECHECK_LIMIT_MAX: usize = 64;
+
+/// Checks reading one disk at once, and pieces each one has in flight, when
+/// nothing sets them: by the kind of disk. On a hard drive more readers are
+/// more seeks between them. Measured on USB drives holding ebooks and FLAC
+/// albums: 32.7 MiB/s with four checks of sixteen pieces, 64 MiB/s with one
+/// check of four; one check of eight read 54.6, of sixteen 51.5. An SSD has no
+/// head to move and wants many reads at once. Measured on an NVMe drive
+/// (Crucial P3) over FLAC albums, 256 KiB pieces: four checks of eight read
+/// 1 510 to 1 760 MiB/s, four of sixteen 835 to 1 560, two of eight 1 130 to
+/// 1 280, one of four 450 to 940.
+const HDD_PER_DISK: usize = 1;
+const HDD_PIECES: usize = 4;
+const SSD_PER_DISK: usize = 4;
+const SSD_PIECES: usize = 8;
+
+/// The global count when nothing caps it: more turns than there are disks
+/// to take them, so the per-disk locks alone decide.
+const UNCAPPED: usize = 4096;
+
+/// Checks reading at once across every disk: the config's when it sets one,
+/// else `TYPHON_RECHECK_TORRENTS`, else no cap (0). Each disk is read by one
+/// check at a time already (`recheck_per_disk`); a cap on top only made a
+/// fifth disk wait while it sat idle. 1..=`RECHECK_LIMIT_MAX` caps it.
+fn torrents_from(config: Option<usize>) -> usize {
+    match config.or_else(|| env_count_opt("TYPHON_RECHECK_TORRENTS")) {
+        None | Some(0) => UNCAPPED,
+        Some(v) => v.min(RECHECK_LIMIT_MAX),
+    }
+}
+
+/// A limit that can be left to the kind of disk: the config's, else the
+/// environment's, else `None` (auto). 0 in the config is auto too, even with
+/// the variable set, so the settings tab can always go back to it.
+fn per_disk_from(config: Option<usize>, env: &str) -> Option<usize> {
+    match config {
+        Some(0) => None,
+        Some(v) => Some(v),
+        None => env_count_opt(env),
+    }
+    .map(|v| v.clamp(1, RECHECK_LIMIT_MAX))
+}
+
+/// The three recheck limits as they are now. They start from the environment
+/// and change when the config is read or saved (`set_recheck_limits`).
+/// 0 for `per_disk` and `pieces` is auto: by the kind of each disk.
+struct RecheckLimits {
+    /// Checks and proofs reading at once across every disk.
+    torrents: std::sync::atomic::AtomicUsize,
+    /// Checks and proofs reading one disk at once, 0 = auto.
+    per_disk: std::sync::atomic::AtomicUsize,
+    /// Pieces one check or proof reads at once, 0 = auto.
+    pieces: std::sync::atomic::AtomicUsize,
+}
+
+fn limits() -> &'static RecheckLimits {
+    static L: OnceLock<RecheckLimits> = OnceLock::new();
+    L.get_or_init(|| RecheckLimits {
+        torrents: torrents_from(None).into(),
+        per_disk: per_disk_from(None, "TYPHON_RECHECK_PER_DISK")
+            .unwrap_or(0)
+            .into(),
+        pieces: per_disk_from(None, "TYPHON_RECHECK_CONCURRENCY")
+            .unwrap_or(0)
+            .into(),
     })
+}
+
+/// Put the recheck limits of the config in force, now.
+///
+/// `[daemon] recheck_torrents`, `recheck_per_disk` and `recheck_pieces`;
+/// `None` (the key is absent) falls back to `TYPHON_RECHECK_TORRENTS`,
+/// `TYPHON_RECHECK_PER_DISK` and `TYPHON_RECHECK_CONCURRENCY`. Past that,
+/// and for 0, the first is no cap and the last two are auto: by the kind of
+/// each disk (`DiskKind`). A check already reading keeps its pieces in flight; the next
+/// one reads at the new width. A lower count takes effect as running checks
+/// end: none is cut short, and no new one starts until the count is under it.
+pub fn set_recheck_limits(torrents: Option<usize>, per_disk: Option<usize>, pieces: Option<usize>) {
+    let l = limits();
+    l.pieces.store(
+        per_disk_from(pieces, "TYPHON_RECHECK_CONCURRENCY").unwrap_or(0),
+        Ordering::SeqCst,
+    );
+    let to = torrents_from(torrents);
+    let from = l.torrents.swap(to, Ordering::SeqCst);
+    resize_sem(recheck_sem(), from, to);
+    // Under the map's lock: a disk asked for meanwhile is made at the new
+    // count, not resized from a count it never had.
+    let mut map = disk_map().lock().unwrap_or_else(|e| e.into_inner());
+    l.per_disk.store(
+        per_disk_from(per_disk, "TYPHON_RECHECK_PER_DISK").unwrap_or(0),
+        Ordering::SeqCst,
+    );
+    for d in map.values_mut() {
+        let to = d.kind.per_disk();
+        resize_sem(&d.sem, d.count, to);
+        d.count = to;
+    }
+}
+
+/// Take a semaphore of `from` permits to `to`. Permits in use are not taken
+/// back: what is free goes at once, the rest as its holders let go.
+fn resize_sem(sem: &Arc<Semaphore>, from: usize, to: usize) {
+    if to >= from {
+        sem.add_permits(to - from);
+        return;
+    }
+    let want = from - to;
+    let left = want - sem.forget_permits(want);
+    if left == 0 {
+        return;
+    }
+    let Ok(rt) = tokio::runtime::Handle::try_current() else {
+        // Off a runtime nothing is checking yet: only a test lands here.
+        return;
+    };
+    let sem = sem.clone();
+    rt.spawn(async move {
+        if let Ok(p) = sem.acquire_many_owned(left as u32).await {
+            p.forget();
+        }
+    });
+}
+
+/// What a disk is, as far as reading it back goes.
+///
+/// Linux says it in `/sys/block/<disk>/queue/rotational`. Anything it cannot
+/// tell -- a device with no entry there, a filesystem with no block device of
+/// its own (mergerfs, unRAID's shfs, ZFS, NFS, SMB, FUSE, btrfs over several
+/// disks) -- is a hard drive: taken for an SSD, a hard drive loses half its
+/// speed to seeks; taken for a hard drive, an SSD only reads less at once.
+///
+/// Windows and macOS are not asked: every disk there is a hard drive, and the
+/// settings are the way to raise an SSD. Windows tells through
+/// `IOCTL_STORAGE_QUERY_PROPERTY` (`StorageDeviceSeekPenaltyProperty`), which
+/// needs a handle on the volume and FFI this crate does not carry. A USB
+/// bridge may also report an SSD behind it as rotational: it is then read as
+/// a hard drive, slower than it could be, never faster than it can take.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DiskKind {
+    Hdd,
+    Ssd,
+}
+
+impl DiskKind {
+    /// Checks on this disk at once: the setting, else by kind.
+    fn per_disk(self) -> usize {
+        match limits().per_disk.load(Ordering::SeqCst) {
+            0 if self == DiskKind::Ssd => SSD_PER_DISK,
+            0 => HDD_PER_DISK,
+            n => n,
+        }
+    }
+
+    /// Pieces in flight for one check on this disk: the setting, else by kind.
+    fn pieces(self) -> usize {
+        match limits().pieces.load(Ordering::SeqCst) {
+            0 if self == DiskKind::Ssd => SSD_PIECES,
+            0 => HDD_PIECES,
+            n => n,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            DiskKind::Hdd => "a hard drive (or not known)",
+            DiskKind::Ssd => "an SSD",
+        }
+    }
+}
+
+/// The kind of the disk under `key` (see `disk_key`), and its name when the
+/// OS gives one.
+fn disk_kind(key: &str) -> (DiskKind, Option<String>) {
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(dev) = key.strip_prefix("dev:").and_then(|d| d.parse::<u64>().ok()) {
+            // glibc's gnu_dev_major / gnu_dev_minor.
+            let major = ((dev >> 8) & 0xfff) | ((dev >> 32) & !0xfff);
+            let minor = (dev & 0xff) | ((dev >> 12) & !0xff);
+            return rotational_in(std::path::Path::new("/sys/dev/block"), major, minor);
+        }
+    }
+    let _ = key;
+    (DiskKind::Hdd, None)
+}
+
+/// What `<sys>/<major>:<minor>` says of the device: its own queue for a whole
+/// disk, its parent's for a partition (`sdc1` has none, `sdc` has).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn rotational_in(sys: &std::path::Path, major: u64, minor: u64) -> (DiskKind, Option<String>) {
+    if major == 0 {
+        // No block device behind it: FUSE, NFS, ZFS, overlay, btrfs pool.
+        return (DiskKind::Hdd, None);
+    }
+    let dev = sys.join(format!("{major}:{minor}"));
+    let name = std::fs::canonicalize(&dev)
+        .ok()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()));
+    for q in [
+        dev.join("queue/rotational"),
+        dev.join("../queue/rotational"),
+    ] {
+        if let Ok(v) = std::fs::read_to_string(&q) {
+            let kind = if v.trim() == "0" {
+                DiskKind::Ssd
+            } else {
+                DiskKind::Hdd
+            };
+            return (kind, name);
+        }
+    }
+    (DiskKind::Hdd, name)
+}
+
+/// Pieces one check or proof reading the disk under `key` has in flight.
+pub fn recheck_width_for(key: &str) -> usize {
+    let map = disk_map().lock().unwrap_or_else(|e| e.into_inner());
+    match map.get(key) {
+        Some(d) => d.kind.pieces(),
+        None => {
+            drop(map);
+            disk_entry(key).1.pieces()
+        }
+    }
+}
+
+/// A turn on the disk under `key` (see `disk_key`), taken without waiting.
+/// Whatever reads a whole torrent back from disk besides a recheck (the
+/// path-claim proof) takes one before its slot of the recheck limit, in that
+/// order, as a recheck does.
+pub fn try_disk_slot(key: &str) -> Option<tokio::sync::OwnedSemaphorePermit> {
+    disk_sem(key).try_acquire_owned().ok()
+}
+
+/// `try_disk_slot`, waited for.
+pub async fn disk_slot(key: &str) -> tokio::sync::OwnedSemaphorePermit {
+    disk_sem(key)
+        .acquire_owned()
+        .await
+        .expect("a disk semaphore is never closed")
+}
+
+/// One disk's lock, what the disk is, and how many turns the lock has now.
+struct DiskLock {
+    sem: Arc<Semaphore>,
+    kind: DiskKind,
+    count: usize,
+}
+
+type DiskMap = std::sync::Mutex<std::collections::HashMap<String, DiskLock>>;
+
+fn disk_map() -> &'static DiskMap {
+    static S: OnceLock<DiskMap> = OnceLock::new();
+    S.get_or_init(Default::default)
+}
+
+/// The lock for one disk, made the first time that disk is asked for.
+fn disk_sem(key: &str) -> Arc<Semaphore> {
+    disk_entry(key).0
+}
+
+/// The lock and kind of one disk, made the first time it is asked for. The
+/// kind is read once (a few bytes of /sys), outside the map's lock, and said
+/// once in the log so a wrong guess can be seen and overridden.
+fn disk_entry(key: &str) -> (Arc<Semaphore>, DiskKind) {
+    {
+        let map = disk_map().lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(d) = map.get(key) {
+            return (d.sem.clone(), d.kind);
+        }
+    }
+    let (kind, name) = disk_kind(key);
+    let mut map = disk_map().lock().unwrap_or_else(|e| e.into_inner());
+    let d = map.entry(key.to_string()).or_insert_with(|| {
+        let count = kind.per_disk();
+        info!(
+            "[recheck] disk {key}{} is {}: {count} check(s) at once, {} pieces each",
+            name.map(|n| format!(" ({n})")).unwrap_or_default(),
+            kind.label(),
+            kind.pieces()
+        );
+        DiskLock {
+            sem: Arc::new(Semaphore::new(count)),
+            kind,
+            count,
+        }
+    });
+    (d.sem.clone(), d.kind)
+}
+
+/// Checks the disk under `key` lets read at once now: 1 for a hard drive,
+/// 4 for an SSD on Linux (by `/sys`), and whatever the limit was set to.
+pub fn disk_count(key: &str) -> usize {
+    disk_entry(key);
+    disk_map().lock().unwrap().get(key).map_or(0, |d| d.count)
+}
+
+/// Which disk a path is on, as far as the OS says.
+///
+/// The nearest part of the path that exists is asked: a torrent whose files
+/// are not there yet is still checked on the disk that will hold them. On
+/// Unix this is the device number, so two folders of one filesystem share a
+/// key, and a container's bind mounts of different drives do not. Two
+/// partitions of one physical drive are two keys: the OS gives no cheap way
+/// to tell. Elsewhere the drive letter or share stands in.
+pub fn disk_key(path: &std::path::Path) -> String {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        for p in path.ancestors() {
+            if let Ok(m) = std::fs::metadata(p) {
+                return format!("dev:{}", m.dev());
+            }
+        }
+    }
+    match path.components().next() {
+        Some(std::path::Component::Prefix(p)) => {
+            format!("root:{}", p.as_os_str().to_string_lossy().to_lowercase())
+        }
+        _ => "root:/".to_string(),
+    }
+}
+
+/// What `TorrentManager::check_volumes` did.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct VolumeCheck {
+    /// Torrents parked because their disk is not mounted.
+    pub parked: usize,
+    /// Parks lifted because their disk is back.
+    pub lifted: usize,
+}
+
+/// Where a torrent's first non-empty file is, or its save path.
+fn first_file_path(t: &TorrentState) -> std::path::PathBuf {
+    let save_path = t.save_path.read().clone();
+    t.meta
+        .files
+        .iter()
+        .position(|f| f.length > 0)
+        .map(|i| t.meta.disk_path(&save_path, i))
+        .unwrap_or(save_path)
+}
+
+/// The disk a torrent's data is read from: where its first non-empty file
+/// is, or its save path.
+fn torrent_disk_key(t: &TorrentState) -> String {
+    let save_path = t.save_path.read().clone();
+    let first = t
+        .meta
+        .files
+        .iter()
+        .position(|f| f.length > 0)
+        .map(|i| t.meta.disk_path(&save_path, i))
+        .unwrap_or(save_path);
+    disk_key(&first)
 }
 
 /// A slot of the recheck limit, taken without waiting, or `None` when every
@@ -3310,7 +3884,7 @@ pub fn try_recheck_slot() -> Option<tokio::sync::SemaphorePermit<'static>> {
 
 /// A slot of the recheck limit, waited for. Whatever reads a whole torrent
 /// back from disk besides a recheck (the path-claim proof) takes one, so the
-/// two together never go over `TYPHON_RECHECK_TORRENTS`. The holder must not
+/// two together never go over `recheck_torrents`. The holder must not
 /// wait for a recheck while it holds it: a recheck needs a slot of its own.
 pub async fn recheck_slot() -> tokio::sync::SemaphorePermit<'static> {
     recheck_sem()
@@ -3395,30 +3969,12 @@ impl TorrentManager {
         if t.rechecking.swap(true, Ordering::SeqCst) {
             return Ok(());
         }
-        // A seed_mode torrent has no picker (data trusted; no bitfield -> cheap at
-        // scale). To recheck it, create an all-missing picker on demand so
-        // run_recheck can populate it from disk. Only rechecked torrents pay for a
-        // picker; download.rs gates piece requests on picker presence, so a recheck
-        // that finds missing/corrupt pieces will refetch them.
-        let mut created = false;
-        let _ = t.picker.get_or_init(|| {
-            created = true;
-            std::sync::Arc::new(std::sync::Mutex::new(
-                crate::torrent::piece_picker::PiecePicker::new(t.meta.num_pieces()),
-            ))
-        });
-        // A new picker starts with no order: give it the torrent's, in case
-        // the recheck finds pieces to fetch.
-        if created {
-            if let Some(p) = t.picker.get() {
-                p.lock().unwrap().attach_mem(self.piece_mem.clone());
-            }
-            t.apply_download_order();
-        }
-        // A recheck is somebody saying the underlying problem is dealt with.
-        // Without this the torrent came back working and went on displaying the
-        // fault it no longer had.
-        t.clear_error();
+        // Noted now: a stop asked while this check waits for its disk, or
+        // while it reads, calls it off (`cancel_check`).
+        let gen = t.check_gen.load(Ordering::SeqCst);
+        // The fault the torrent shows is cleared by the verdict
+        // (`run_recheck`), not here: a check a stop calls off must leave it,
+        // as it leaves the pieces.
         // A torrent in error told its trackers `stopped` (or owes it) and the
         // announcer will not look at it again for half an hour. If this
         // recheck brings it back, that wait is not its own.
@@ -3429,38 +3985,109 @@ impl TorrentManager {
         }
         let mgr = self.clone();
         let ih = *info_hash;
+        // Shown waiting for its turn from now, not "Checking 0 %", until both
+        // locks below are taken.
+        let waiting = t.wait_for_check();
         tokio::spawn(async move {
+            // The disk first, then the global cap: a check waiting for a busy
+            // disk must not hold a slot another disk could use. A stat on a
+            // slow drive blocks, so it goes to the blocking pool.
+            let key = {
+                let t = t.clone();
+                tokio::task::spawn_blocking(move || torrent_disk_key(&t))
+                    .await
+                    .unwrap_or_default()
+            };
+            let _disk = disk_sem(&key).acquire_owned().await;
             let _permit = recheck_sem().acquire().await;
-            mgr.run_recheck(ih, t.clone()).await;
-            if was_error {
-                let back = t.status.load(Ordering::Relaxed);
-                if back == TorrentStatus::Downloading as u8 || back == TorrentStatus::Seeding as u8
-                {
-                    // Same as a resume: a new announce session, `started` to
-                    // every tracker, no departure left over, and the announcer
-                    // asked to go now.
-                    t.pending_announce_event.fetch_and(
-                        !crate::torrent::meta::ANNOUNCE_EVENT_STOPPED,
-                        Ordering::Relaxed,
-                    );
-                    t.begin_announce_session();
-                    mgr.announce_soon(&ih);
-                }
+            drop(waiting);
+            let width = recheck_width_for(&key);
+            // Stopped while it waited: nothing read, nothing to undo, and
+            // the flags are the stop's (and maybe a newer check's) now.
+            if t.check_gen.load(Ordering::SeqCst) != gen {
+                return;
             }
-            // The counter goes first: a reader seeing `rechecking` false must
-            // not find a figure left over from this check.
-            t.recheck_done.store(0, Ordering::SeqCst);
-            t.rechecking.store(false, Ordering::SeqCst);
+            mgr.run_recheck(ih, t.clone(), gen, width).await;
+            let announce = {
+                // A stop landing here would have its departure taken back by
+                // the `started` below: it waits, or is seen.
+                let _publish = t.check_publish();
+                if t.check_gen.load(Ordering::SeqCst) != gen {
+                    return;
+                }
+                let mut announce = false;
+                if was_error {
+                    let back = t.status.load(Ordering::Relaxed);
+                    if back == TorrentStatus::Downloading as u8
+                        || back == TorrentStatus::Seeding as u8
+                    {
+                        // Same as a resume: a new announce session, `started`
+                        // to every tracker, no departure left over, and the
+                        // announcer asked to go now.
+                        t.pending_announce_event.fetch_and(
+                            !crate::torrent::meta::ANNOUNCE_EVENT_STOPPED,
+                            Ordering::Relaxed,
+                        );
+                        t.begin_announce_session();
+                        announce = true;
+                    }
+                }
+                // The counter goes first: a reader seeing `rechecking` false
+                // must not find a figure left over from this check.
+                t.recheck_done.store(0, Ordering::SeqCst);
+                t.rechecking.store(false, Ordering::SeqCst);
+                announce
+            };
+            if announce {
+                mgr.announce_soon(&ih);
+            }
         });
         Ok(())
     }
 
-    async fn run_recheck(&self, ih: InfoHash, t: Arc<TorrentState>) {
+    /// Called off by a stop since `gen` was noted.
+    fn check_called_off(t: &TorrentState, gen: u64) -> bool {
+        t.check_gen.load(Ordering::SeqCst) != gen
+    }
+
+    /// The torrent's picker, made if it has none.
+    ///
+    /// A seed_mode torrent has no picker (data trusted; no bitfield -> cheap at
+    /// scale). A recheck makes an all-missing one to install its verdict in.
+    /// Only rechecked torrents pay for a picker; download.rs gates piece
+    /// requests on picker presence, so a recheck that finds missing/corrupt
+    /// pieces will refetch them. Made only once the verdict is in hand: a
+    /// check called off by a stop must not leave a seed with an empty picker,
+    /// which would read as 0 % and download everything on the next start.
+    fn picker_for_verdict(
+        &self,
+        t: &TorrentState,
+    ) -> Arc<std::sync::Mutex<crate::torrent::piece_picker::PiecePicker>> {
+        let mut created = false;
+        let p = t
+            .picker
+            .get_or_init(|| {
+                created = true;
+                Arc::new(std::sync::Mutex::new(
+                    crate::torrent::piece_picker::PiecePicker::new(t.meta.num_pieces()),
+                ))
+            })
+            .clone();
+        // A new picker starts with no order: give it the torrent's, in case
+        // the recheck finds pieces to fetch.
+        if created {
+            p.lock().unwrap().attach_mem(self.piece_mem.clone());
+            t.apply_download_order();
+        }
+        p
+    }
+
+    /// `gen` is `check_gen` when the check was asked: a stop that lands
+    /// between the queue and the first read still calls it off.
+    /// `width` is how many pieces are read at once: the disk's
+    /// (`recheck_width_for`).
+    async fn run_recheck(&self, ih: InfoHash, t: Arc<TorrentState>, gen: u64, width: usize) {
         let num_pieces = t.meta.num_pieces();
-        let picker = match t.picker.get() {
-            Some(p) => p.clone(),
-            None => return,
-        };
         // Read the files as they are now: a handle cached before the recheck
         // may be on a file the user has since replaced under the same name.
         crate::disk::evict_fds(&data_files(&t));
@@ -3477,31 +4104,31 @@ impl TorrentManager {
         // mesure a 0,5 piece/s (~2 Mo/s) la ou le pool en sert plusieurs
         // centaines. Les lectures partent en parallele, le hachage suit, et
         // c est le disque qui redevient le facteur limitant.
-        let width = std::env::var("TYPHON_RECHECK_CONCURRENCY")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .filter(|v| *v > 0)
-            .unwrap_or(16);
         let unreadable: Arc<std::sync::Mutex<Option<String>>> =
             Arc::new(std::sync::Mutex::new(None));
         t.recheck_done.store(0, Ordering::SeqCst);
-        let mut verified: Vec<u32> = futures::stream::iter(0..num_pieces)
+        let scan = futures::stream::iter(0..num_pieces)
             .map(|piece| {
                 let t = t.clone();
                 let unreadable = unreadable.clone();
                 async move {
-                    if t.is_removed.load(Ordering::Relaxed) {
+                    if t.is_removed.load(Ordering::Relaxed) || Self::check_called_off(&t, gen) {
                         return None;
                     }
                     // Counted when the read ends, whatever its verdict: this
                     // is how far the check has got, not how much was good.
-                    struct Counted(Arc<TorrentState>);
+                    // Not once a stop has called the check off: the stop
+                    // zeroed the figure, and a read finishing after it would
+                    // leave one on a torrent no longer checking.
+                    struct Counted(Arc<TorrentState>, u64);
                     impl Drop for Counted {
                         fn drop(&mut self) {
-                            self.0.recheck_done.fetch_add(1, Ordering::Relaxed);
+                            if !TorrentManager::check_called_off(&self.0, self.1) {
+                                self.0.recheck_done.fetch_add(1, Ordering::Relaxed);
+                            }
                         }
                     }
-                    let _counted = Counted(t.clone());
+                    let _counted = Counted(t.clone(), gen);
                     // No hash table -> we cannot say this piece is good. Leave
                     // the have bit clear; the recheck reports the torrent
                     // incomplete rather than blessing unverified data.
@@ -3518,11 +4145,67 @@ impl TorrentManager {
             })
             .buffer_unordered(width)
             .filter_map(|r| async move { r })
-            .collect()
-            .await;
-        if t.is_removed.load(Ordering::Relaxed) {
+            .collect::<Vec<u32>>();
+        // A stop leaves at once, not when the reads in flight end: those
+        // could be stuck on a slow disk, and the check holds that disk's
+        // turn until it returns. Reads already handed to the blocking pool
+        // finish in the background; their results go nowhere.
+        let called_off = async {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                if t.is_removed.load(Ordering::Relaxed) || Self::check_called_off(&t, gen) {
+                    return;
+                }
+            }
+        };
+        let scanned = tokio::select! {
+            v = scan => Some(v),
+            _ = called_off => None,
+        };
+        let removed = || t.is_removed.load(Ordering::Relaxed);
+        // Stopped mid-check: the pieces not read are no verdict. What the
+        // torrent held before stays, as for a removal.
+        let off = |t: &TorrentState| {
+            if Self::check_called_off(t, gen) {
+                info!(
+                    "[recheck] {} called off by a stop, nothing changed",
+                    &hex_encode(&ih)[..8]
+                );
+                return true;
+            }
+            false
+        };
+        let Some(mut verified) = scanned else {
+            if !removed() {
+                off(&t);
+            }
+            return;
+        };
+        if removed() || off(&t) {
+            return;
+        }
+        // Looked at before the verdict is published, so that no stat of a
+        // slow disk is made while a stop waits for it.
+        let absent = if verified.is_empty() {
+            t.files_not_on_disk()
+        } else {
+            Vec::new()
+        };
+        // From the last look at `check_gen` to the record written: a stop
+        // lands before (nothing is published) or after (it finds the verdict
+        // finished, and its state is set over it).
+        let publish = t.check_publish();
+        if removed() {
             return; // torrent removed mid-check -> do not publish a verdict
         }
+        if off(&t) {
+            return;
+        }
+        // A recheck is somebody saying the underlying problem is dealt with.
+        // Without this the torrent came back working and went on displaying
+        // the fault it no longer had. Here, not when the check starts: a
+        // check called off keeps the fault as well as the pieces.
+        t.clear_error();
         // The disk refused a read: that is no verdict on the pieces. Clearing
         // them and writing the result down would turn a fault of the volume
         // into a torrent at 0%, and lose the record of what had been
@@ -3553,7 +4236,6 @@ impl TorrentManager {
         // second says nothing about WHY, and the files are often only a folder
         // up. Say how many were not there, in the log and on the torrent.
         if have == 0 {
-            let absent = t.files_not_on_disk();
             if let Some(first) = absent.first() {
                 let first = first.to_string_lossy().replace('\\', "/");
                 let save = t.save_path.read().to_string_lossy().into_owned();
@@ -3573,11 +4255,19 @@ impl TorrentManager {
             }
         }
         {
+            let picker = self.picker_for_verdict(&t);
             let mut p = picker.lock().unwrap();
             p.reset_have();
             for piece in &verified {
                 p.set_have(*piece);
             }
+        }
+
+        // Pieces found where they were looked for: the filesystem they are
+        // on is the one to tell an unmounted disk by (see `data_vol`).
+        if have > 0 {
+            let t = t.clone();
+            tokio::task::spawn_blocking(move || t.note_data_vol_of_files());
         }
 
         let complete = num_pieces > 0 && have >= num_pieces;
@@ -3607,6 +4297,7 @@ impl TorrentManager {
         // Persist the verified bitfield so a restart does not re-check from
         // scratch (mirrors the resume written at add / on piece completion).
         let _ = self.try_persist_live(&ih);
+        drop(publish);
         info!(
             "[recheck] {} verified {}/{} pieces -> {}",
             &hex_encode(&ih)[..8],
@@ -4326,6 +5017,472 @@ mod lifecycle_tests {
         panic!("the recheck does not end");
     }
 
+    /// Two folders of one filesystem are one disk, and a file not there yet
+    /// is on the disk of the folder that will hold it.
+    #[test]
+    fn a_path_is_keyed_by_the_disk_it_is_on() {
+        let root = std::env::temp_dir().join(format!("typhon_diskkey_{}", std::process::id()));
+        std::fs::create_dir_all(root.join("a")).unwrap();
+        std::fs::create_dir_all(root.join("b")).unwrap();
+        let a = disk_key(&root.join("a"));
+        assert_eq!(a, disk_key(&root.join("b")), "same filesystem, same disk");
+        assert_eq!(
+            a,
+            disk_key(&root.join("a").join("not").join("yet.mkv")),
+            "a file not there yet is on its folder's disk"
+        );
+        assert!(!a.is_empty());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// One lock per disk, shared by everything on it.
+    #[test]
+    fn each_disk_has_one_lock() {
+        let a = disk_sem("test:disk-a");
+        assert!(Arc::ptr_eq(&a, &disk_sem("test:disk-a")));
+        assert!(!Arc::ptr_eq(&a, &disk_sem("test:disk-b")));
+        assert_eq!(a.available_permits(), disk_count("test:disk-a"));
+        assert_eq!(
+            disk_count("test:disk-a"),
+            HDD_PER_DISK,
+            "not a device: a hard drive"
+        );
+    }
+
+    /// Linux's word on a disk: a whole disk's own queue, a partition's
+    /// parent's; 0 is an SSD, anything else or nothing a hard drive, and a
+    /// device of major 0 (FUSE, NFS, ZFS, overlay) is not asked at all.
+    #[cfg(unix)]
+    #[test]
+    fn a_disk_is_an_ssd_only_when_linux_says_so() {
+        let sys = std::env::temp_dir().join(format!("typhon_sysfs_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&sys);
+        let block = sys.join("block");
+        let dev = sys.join("dev");
+        for (disk, rota) in [("nvme0n1", "0\n"), ("sdc", "1\n")] {
+            std::fs::create_dir_all(block.join(disk).join("queue")).unwrap();
+            std::fs::write(block.join(disk).join("queue/rotational"), rota).unwrap();
+        }
+        std::fs::create_dir_all(block.join("sdc/sdc1")).unwrap();
+        std::fs::create_dir_all(&dev).unwrap();
+        std::os::unix::fs::symlink(block.join("nvme0n1"), dev.join("259:0")).unwrap();
+        std::os::unix::fs::symlink(block.join("sdc/sdc1"), dev.join("8:33")).unwrap();
+
+        assert_eq!(
+            rotational_in(&dev, 259, 0),
+            (DiskKind::Ssd, Some("nvme0n1".into()))
+        );
+        assert_eq!(
+            rotational_in(&dev, 8, 33),
+            (DiskKind::Hdd, Some("sdc1".into())),
+            "a partition: its disk's queue"
+        );
+        assert_eq!(
+            rotational_in(&dev, 0, 52),
+            (DiskKind::Hdd, None),
+            "no block device"
+        );
+        assert_eq!(rotational_in(&dev, 8, 99).0, DiskKind::Hdd, "not listed");
+        std::fs::remove_dir_all(&sys).ok();
+    }
+
+    /// Left to the disk, a hard drive gets one check of four pieces and an
+    /// SSD four of eight; a disk the OS does not describe is a hard drive.
+    #[test]
+    fn an_ssd_reads_more_at_once_than_a_hard_drive() {
+        assert_eq!(limits().per_disk.load(Ordering::SeqCst), 0, "auto in tests");
+        assert_eq!((DiskKind::Hdd.per_disk(), DiskKind::Hdd.pieces()), (1, 4));
+        assert_eq!((DiskKind::Ssd.per_disk(), DiskKind::Ssd.pieces()), (4, 8));
+        assert_eq!(disk_kind("root:c:").0, DiskKind::Hdd);
+        assert_eq!(recheck_width_for("test:not-a-device"), HDD_PIECES);
+    }
+
+    /// A per-disk limit set to 0 in the config is auto (the variable is
+    /// not read then); absent, the variable; then auto.
+    #[test]
+    fn a_per_disk_limit_of_zero_is_left_to_the_disk() {
+        let unset = "TYPHON_TEST_NO_SUCH_LIMIT";
+        assert_eq!(per_disk_from(Some(0), unset), None, "0 is auto");
+        assert_eq!(per_disk_from(Some(3), unset), Some(3));
+        assert_eq!(per_disk_from(Some(400), unset), Some(RECHECK_LIMIT_MAX));
+        assert_eq!(per_disk_from(None, unset), None);
+    }
+
+    /// The global count: the config's when set, none at all by default or
+    /// at 0 (the per-disk locks decide), and never over 64 when capped.
+    #[test]
+    fn the_global_recheck_count_is_uncapped_unless_set() {
+        assert_eq!(torrents_from(Some(2)), 2, "the config's");
+        assert_eq!(torrents_from(Some(0)), UNCAPPED, "0: no cap");
+        assert_eq!(
+            torrents_from(Some(400)),
+            RECHECK_LIMIT_MAX,
+            "a typo is capped"
+        );
+        // The variable is not set under test: no cap either.
+        assert_eq!(torrents_from(None), UNCAPPED);
+    }
+
+    /// A lower limit takes back what is free at once and the rest as checks
+    /// end, without cutting one short; a higher one is there at once.
+    #[tokio::test]
+    async fn a_recheck_limit_is_changed_while_checks_run() {
+        let sem = Arc::new(Semaphore::new(4));
+        let running = sem.clone().acquire_many_owned(3).await.unwrap();
+        resize_sem(&sem, 4, 1);
+        assert_eq!(
+            sem.available_permits(),
+            0,
+            "the free one went, the 3 checks go on"
+        );
+        drop(running);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(sem.available_permits(), 1, "once they end: 1");
+        resize_sem(&sem, 1, 3);
+        assert_eq!(sem.available_permits(), 3, "raised at once");
+    }
+
+    /// The review's case: all 4 slots busy, lowered to 2, raised back to 4
+    /// before the checks end. The limit must end at 4 once they do.
+    #[tokio::test]
+    async fn a_lower_then_higher_limit_while_checks_run_ends_at_the_higher() {
+        let sem = Arc::new(Semaphore::new(4));
+        let running = sem.clone().acquire_many_owned(4).await.unwrap();
+        resize_sem(&sem, 4, 2);
+        resize_sem(&sem, 2, 4);
+        drop(running);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(sem.available_permits(), 4, "the limit is back at 4");
+        let all = sem.clone().try_acquire_many_owned(4);
+        assert!(all.is_ok(), "four checks can run at once");
+    }
+
+    /// Variant: one check ends while the lowering still waits, then the limit
+    /// goes back up, then the rest end.
+    #[tokio::test]
+    async fn a_limit_raised_while_a_lowering_waits_ends_at_the_higher() {
+        let sem = Arc::new(Semaphore::new(4));
+        let mut running = sem.clone().acquire_many_owned(4).await.unwrap();
+        resize_sem(&sem, 4, 2);
+        let one = running.split(1).unwrap();
+        drop(one);
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        resize_sem(&sem, 2, 4);
+        drop(running);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(sem.available_permits(), 4, "the limit is back at 4");
+    }
+
+    /// ⭐ A torrent stopped while its recheck waited for the disk stayed under
+    /// Checking, offered Start, and was checked later anyway. The stop calls
+    /// the check off: the torrent reads as stopped at once, the check never
+    /// runs, and what the torrent held is left as it was. A recheck asked
+    /// afterwards runs normally.
+    #[tokio::test]
+    async fn a_stop_calls_off_a_queued_recheck() {
+        let (mgr, root, ih, t) = whole_two_piece_torrent("recheckstop");
+        let state =
+            |t: &Arc<TorrentState>| crate::rpc::dispatch::torrent_to_json(t)["state"].clone();
+        let had = t.picker.get().unwrap().lock().unwrap().num_have();
+        let key = torrent_disk_key(&t);
+        let disk = disk_sem(&key)
+            .acquire_many_owned(disk_count(&key) as u32)
+            .await
+            .unwrap();
+        mgr.recheck(&ih).expect("recheck starts");
+        assert_eq!(state(&t), "checking_files");
+
+        mgr.cancel_check(&ih);
+        mgr.stop_torrent(&ih).unwrap();
+        assert_eq!(state(&t), "paused", "stopped, not checking");
+        assert_eq!(
+            crate::rpc::dispatch::torrent_to_json(&t)["check_queued"],
+            false,
+            "nor waiting for a check"
+        );
+        assert!(!t.rechecking.load(Ordering::SeqCst));
+
+        drop(disk);
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert_eq!(
+            t.picker.get().unwrap().lock().unwrap().num_have(),
+            had,
+            "the check never ran: nothing changed"
+        );
+        assert_eq!(state(&t), "paused", "and it did not come back as checking");
+
+        mgr.recheck(&ih).expect("a new recheck starts");
+        wait_recheck_end(&t).await;
+        assert_eq!(
+            t.picker.get().unwrap().lock().unwrap().num_have(),
+            2,
+            "a recheck asked after the stop runs"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A stop releases a proof hold at once: the torrent no longer reads as
+    /// checking, and the job, when its turn comes, sees it was called off. A
+    /// hold taken after the stop holds again.
+    #[tokio::test]
+    async fn a_stop_releases_a_proof_hold() {
+        let (mgr, root, ih, t) = whole_two_piece_torrent("proofstop");
+        let hold = t.hold_for_proof();
+        assert!(t.held_for_proof());
+        assert!(!hold.cancelled());
+        mgr.cancel_check(&ih);
+        assert!(!t.held_for_proof(), "released by the stop");
+        assert!(hold.cancelled(), "and the job knows");
+        let again = t.hold_for_proof();
+        assert!(t.held_for_proof(), "a new proof holds again");
+        assert!(!again.cancelled());
+        drop((hold, again));
+        assert!(!t.held_for_proof());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The torrent's picker set to hold piece 0 alone, so that a verdict
+    /// (both pieces) can be told from no verdict.
+    fn hold_only_the_first_piece(t: &TorrentState) {
+        let picker = t.picker.get().unwrap();
+        let mut p = picker.lock().unwrap();
+        p.reset_have();
+        p.set_have(0);
+    }
+
+    fn num_have(t: &TorrentState) -> u32 {
+        t.picker.get().unwrap().lock().unwrap().num_have()
+    }
+
+    /// ⭐ A stop that landed once the check had read everything, between its
+    /// last look at `check_gen` and its verdict, found nothing held there:
+    /// the verdict went onto the stopped torrent and was written down. The
+    /// last look is now made under the lock a stop takes, so a stop made
+    /// while the check waits for it calls the verdict off.
+    // The guard is held across the sleeps on purpose: it stands for the stop
+    // that waits on the publish.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reads_that_finish_after_a_stop_cannot_publish() {
+        let (mgr, root, ih, t) = whole_two_piece_torrent("cancelverdict");
+        wait_recheck_end(&t).await;
+        hold_only_the_first_piece(&t);
+        let gen = t.check_gen.load(Ordering::SeqCst);
+        let held = t.check_publish();
+        let check = {
+            let (mgr, t) = (mgr.clone(), t.clone());
+            tokio::spawn(async move { mgr.run_recheck(ih, t, gen, 4).await })
+        };
+        for _ in 0..500 {
+            if t.recheck_done.load(Ordering::SeqCst) == 2 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(t.recheck_done.load(Ordering::SeqCst), 2, "every piece read");
+        // Time to reach the lock and wait there.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(!check.is_finished(), "the verdict waits for the lock");
+        // The stop, as `cancel_check` then `stop_torrent` make it.
+        t.check_gen.fetch_add(1, Ordering::SeqCst);
+        t.is_paused.store(true, Ordering::Relaxed);
+        t.status
+            .store(TorrentStatus::Stopped as u8, Ordering::Relaxed);
+        drop(held);
+        check.await.unwrap();
+        assert_eq!(num_have(&t), 1, "the reads' verdict was not installed");
+        assert_eq!(
+            t.status.load(Ordering::Relaxed),
+            TorrentStatus::Stopped as u8
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// ⭐ A check stopped while its reads are stuck on the disk gives the
+    /// disk's turn back at once, not when the reads end: the next check of
+    /// that disk would otherwise wait for a check nobody wants any more. The
+    /// reads end later in the background, and publish nothing.
+    #[test]
+    fn a_stop_frees_the_disk_of_a_check_whose_reads_are_stuck() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let (mgr, root, ih, t) = whole_two_piece_torrent("cancelactive");
+            wait_recheck_end(&t).await;
+            hold_only_the_first_piece(&t);
+            let key = torrent_disk_key(&t);
+            let count = disk_count(&key) as u32;
+            let disk = disk_sem(&key).acquire_many_owned(count).await.unwrap();
+            mgr.recheck(&ih).expect("recheck starts");
+            // Its disk found (a stat, on the blocking pool), it waits.
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            // The pool's one thread taken: the check's reads cannot end.
+            let (release, wait) = std::sync::mpsc::channel::<()>();
+            let (entered, ready) = tokio::sync::oneshot::channel();
+            let blocker = tokio::task::spawn_blocking(move || {
+                entered.send(()).unwrap();
+                let _ = wait.recv();
+            });
+            ready.await.unwrap();
+            drop(disk);
+            for _ in 0..500 {
+                if !t.waiting_for_check() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            assert!(!t.waiting_for_check(), "the check has its turn");
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            assert!(t.rechecking.load(Ordering::SeqCst));
+            assert_eq!(
+                t.recheck_done.load(Ordering::SeqCst),
+                0,
+                "its reads are stuck"
+            );
+
+            mgr.cancel_check(&ih);
+            mgr.stop_torrent(&ih).unwrap();
+            let turn = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                disk_sem(&key).acquire_many_owned(count),
+            )
+            .await;
+            assert!(
+                turn.is_ok(),
+                "the disk is given back while the reads are stuck"
+            );
+            drop(turn);
+
+            release.send(()).unwrap();
+            blocker.await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            assert_eq!(num_have(&t), 1, "the stuck reads published nothing");
+            assert_eq!(t.recheck_done.load(Ordering::SeqCst), 0, "nor a figure");
+            assert_eq!(crate::rpc::dispatch::torrent_to_json(&t)["state"], "paused");
+            std::fs::remove_dir_all(&root).ok();
+        });
+    }
+
+    /// A recheck cleared the fault the torrent showed when it started, so a
+    /// check a stop called off left a torrent parked for an unmounted disk
+    /// looking healthy, serving again, with nothing checked. The fault goes
+    /// with the verdict now: called off, it stays; run, it goes.
+    #[tokio::test]
+    async fn a_cancelled_queued_recheck_keeps_the_fault() {
+        let (mgr, root, ih, t) = whole_two_piece_torrent("cancelfault");
+        wait_recheck_end(&t).await;
+        hold_only_the_first_piece(&t);
+        t.park_absent("the disk is not mounted");
+        let fault = t.error_msg.lock().unwrap().clone();
+        let key = torrent_disk_key(&t);
+        let disk = disk_sem(&key)
+            .acquire_many_owned(disk_count(&key) as u32)
+            .await
+            .unwrap();
+        mgr.recheck(&ih).expect("recheck starts");
+        mgr.cancel_check(&ih);
+        mgr.stop_torrent(&ih).unwrap();
+        drop(disk);
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert_eq!(
+            *t.error_msg.lock().unwrap(),
+            fault,
+            "the fault is still shown"
+        );
+        assert!(
+            t.serving_suspended.load(Ordering::Relaxed),
+            "and still not served"
+        );
+        assert!(t.data_lost.load(Ordering::Relaxed));
+        assert!(t.files_absent.load(Ordering::Relaxed));
+        assert_eq!(num_have(&t), 1, "nothing checked, nothing changed");
+
+        mgr.recheck(&ih).expect("a new recheck starts");
+        wait_recheck_end(&t).await;
+        assert!(
+            t.error_msg.lock().unwrap().is_empty(),
+            "a verdict clears it"
+        );
+        assert!(!t.serving_suspended.load(Ordering::Relaxed));
+        assert!(!t.data_lost.load(Ordering::Relaxed));
+        assert!(!t.files_absent.load(Ordering::Relaxed));
+        assert_eq!(num_have(&t), 2);
+        assert!(t.is_paused.load(Ordering::Relaxed), "and it stays stopped");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A stopped torrent whose check finds pieces missing stays stopped: the
+    /// incomplete verdict does not make it a download.
+    #[tokio::test]
+    async fn a_stopped_incomplete_recheck_stays_stopped() {
+        let (mgr, root, ih, t) = whole_two_piece_torrent("checkstoppedpartial");
+        wait_recheck_end(&t).await;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(root.join("data").join("whole"))
+            .unwrap()
+            .set_len(16384)
+            .unwrap();
+        mgr.stop_torrent(&ih).unwrap();
+        mgr.recheck(&ih).expect("recheck starts");
+        wait_recheck_end(&t).await;
+        assert_eq!(num_have(&t), 1);
+        assert!(t.is_paused.load(Ordering::Relaxed));
+        assert_eq!(
+            t.status.load(Ordering::Relaxed),
+            TorrentStatus::Stopped as u8
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// ⭐ Rechecks on one disk go one at a time. Four at once on a hard
+    /// drive made it seek between them for every read, and each went at a
+    /// fraction of the speed of one alone. The check waits for the disk,
+    /// showing as checking, and runs once the disk is free.
+    #[tokio::test]
+    async fn a_recheck_waits_for_its_disk() {
+        let (mgr, root, ih, t) = whole_two_piece_torrent("recheckdisk");
+        let key = torrent_disk_key(&t);
+        let disk = disk_sem(&key)
+            .acquire_many_owned(disk_count(&key) as u32)
+            .await
+            .unwrap();
+        mgr.recheck(&ih).expect("recheck starts");
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert!(
+            t.rechecking.load(Ordering::SeqCst),
+            "still waiting for the disk"
+        );
+        assert_eq!(
+            t.status.load(Ordering::Relaxed),
+            TorrentStatus::Checking as u8,
+            "and showing as checking meanwhile"
+        );
+        assert_eq!(t.recheck_done.load(Ordering::SeqCst), 0, "nothing read yet");
+        let json = |t: &Arc<TorrentState>| crate::rpc::dispatch::torrent_to_json(t);
+        assert_eq!(json(&t)["state"], "checking_files");
+        assert_eq!(
+            json(&t)["check_queued"],
+            true,
+            "shown waiting, not checking 0 %"
+        );
+        drop(disk);
+        wait_recheck_end(&t).await;
+        assert_eq!(
+            json(&t)["check_queued"],
+            false,
+            "and no longer once it has run"
+        );
+        assert_eq!(
+            t.status.load(Ordering::Relaxed),
+            TorrentStatus::Seeding as u8
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     /// ⭐ A recheck on a STOPPED torrent left it displayed as stopped for the
     /// whole verification, the disk busy and nothing saying why. The check has
     /// to show, stopped or not, and the torrent has to come back exactly as it
@@ -4340,7 +5497,10 @@ mod lifecycle_tests {
         // Stopped.
         mgr.stop_torrent(&ih).unwrap();
         assert_eq!(state(&t), "paused");
-        let hold = recheck_sem().acquire_many(4).await.unwrap();
+        let hold = recheck_sem()
+            .acquire_many(limits().torrents.load(Ordering::SeqCst) as u32)
+            .await
+            .unwrap();
         mgr.recheck(&ih).expect("recheck starts");
         assert_eq!(
             state(&t),
@@ -4373,7 +5533,10 @@ mod lifecycle_tests {
 
         // Running.
         mgr.start_torrent(&ih).unwrap();
-        let hold = recheck_sem().acquire_many(4).await.unwrap();
+        let hold = recheck_sem()
+            .acquire_many(limits().torrents.load(Ordering::SeqCst) as u32)
+            .await
+            .unwrap();
         mgr.recheck(&ih).expect("recheck starts");
         assert_eq!(state(&t), "checking_files");
         drop(hold);
@@ -4398,7 +5561,10 @@ mod lifecycle_tests {
 
         // Queued: under way, nothing read yet. `progress` is what it was.
         let before = progress(&t);
-        let hold = recheck_sem().acquire_many(4).await.unwrap();
+        let hold = recheck_sem()
+            .acquire_many(limits().torrents.load(Ordering::SeqCst) as u32)
+            .await
+            .unwrap();
         mgr.recheck(&ih).expect("recheck starts");
         assert_eq!(field(&t), 0.0);
         assert_eq!(progress(&t), before, "progress is not the check's figure");
@@ -4409,7 +5575,8 @@ mod lifecycle_tests {
         // The pass itself counts the pieces it reads: run it on its own with
         // the flag up, and read the figure it leaves.
         t.rechecking.store(true, Ordering::SeqCst);
-        mgr.run_recheck(ih, t.clone()).await;
+        let gen = t.check_gen.load(Ordering::SeqCst);
+        mgr.run_recheck(ih, t.clone(), gen, 4).await;
         assert_eq!(field(&t), 1.0, "both pieces were read");
         t.rechecking.store(false, Ordering::SeqCst);
         assert!(field(&t).is_null());
@@ -6683,6 +7850,211 @@ mod manager_tests {
             "and the engine does not look where the disk does not"
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A whole seed on disk under its own folder, for the volume pass.
+    fn seed_on_disk(tag: &str) -> (Arc<TorrentManager>, std::path::PathBuf, Arc<TorrentState>) {
+        let (mgr, root) = manager(tag);
+        let save = root.join("disk");
+        std::fs::create_dir_all(&save).unwrap();
+        std::fs::write(save.join("vol"), vec![0u8; 16384]).unwrap();
+        let (ih, _) = mgr
+            .add_torrent_bytes(
+                &torrent_bytes("vol", &["https://tracker.example/announce"]),
+                &save.to_string_lossy(),
+                false,
+                true,
+            )
+            .unwrap();
+        let t = mgr.get(&ih).unwrap();
+        t.status
+            .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+        (mgr, root, t)
+    }
+
+    /// A park with no filesystem recorded is lifted by the pass once the
+    /// torrent's files are back, and the torrent seeds again.
+    #[test]
+    fn the_volume_pass_lifts_a_park_whose_files_are_back() {
+        let (mgr, root, t) = seed_on_disk("vol-lift");
+        t.park_absent("test");
+        assert_eq!(t.status.load(Ordering::Relaxed), TorrentStatus::Error as u8);
+        let done = mgr.check_volumes(false);
+        assert_eq!(done.lifted, 1);
+        assert_eq!(
+            t.status.load(Ordering::Relaxed),
+            TorrentStatus::Seeding as u8
+        );
+        assert!(!t.files_absent.load(Ordering::Relaxed));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The pass leaves a park alone while the files are still not there.
+    #[test]
+    fn the_volume_pass_keeps_a_park_while_the_files_are_gone() {
+        let (mgr, root, t) = seed_on_disk("vol-keep");
+        t.park_absent("test");
+        std::fs::remove_file(t.save_path.read().join("vol")).unwrap();
+        assert_eq!(mgr.check_volumes(false).lifted, 0);
+        assert!(t.files_absent.load(Ordering::Relaxed));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The filesystem the disk recorded is not where its path is now.
+    fn another_volume(t: &TorrentState) -> u64 {
+        volume::volume_id(&t.save_path.read())
+            .unwrap_or(0)
+            .wrapping_add(1)
+    }
+
+    /// At startup, a disk whose path is on another filesystem than the one
+    /// recorded, with its files not there, parks its torrents in one go,
+    /// pieces kept; once the files are back, the next pass lifts them.
+    #[test]
+    fn the_startup_pass_parks_a_disk_that_is_not_mounted_and_lifts_it_back() {
+        let (mgr, root, t) = seed_on_disk("vol-startup");
+        t.data_vol.store(another_volume(&t), Ordering::Relaxed);
+        let file = t.save_path.read().join("vol");
+        std::fs::remove_file(&file).unwrap();
+        let done = mgr.check_volumes(true);
+        assert_eq!(done.parked, 1);
+        assert!(t.files_absent.load(Ordering::Relaxed));
+        assert_eq!(t.status.load(Ordering::Relaxed), TorrentStatus::Error as u8);
+
+        std::fs::write(&file, vec![0u8; 16384]).unwrap();
+        assert_eq!(mgr.check_volumes(false).lifted, 1);
+        assert_eq!(
+            t.status.load(Ordering::Relaxed),
+            TorrentStatus::Seeding as u8
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A filesystem whose id changed (an NFS remount) with its files there
+    /// is mounted: nothing is parked.
+    #[test]
+    fn the_startup_pass_keeps_a_disk_whose_id_changed_but_whose_files_are_there() {
+        let (mgr, root, t) = seed_on_disk("vol-new-id");
+        t.data_vol.store(another_volume(&t), Ordering::Relaxed);
+        assert_eq!(mgr.check_volumes(true).parked, 0);
+        assert!(!t.files_absent.load(Ordering::Relaxed));
+        assert_eq!(
+            t.status.load(Ordering::Relaxed),
+            TorrentStatus::Seeding as u8
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A pass with nothing parked does nothing.
+    #[test]
+    fn a_pass_with_nothing_parked_does_nothing() {
+        let (mgr, root, t) = seed_on_disk("vol-idle");
+        t.data_vol.store(another_volume(&t), Ordering::Relaxed);
+        std::fs::remove_file(t.save_path.read().join("vol")).unwrap();
+        // Not at startup: a torrent not parked is not looked at.
+        assert_eq!(mgr.check_volumes(false), VolumeCheck::default());
+        assert!(!t.files_absent.load(Ordering::Relaxed));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A start on a torrent parked for absent files looks again, and starts
+    /// it when the files are back.
+    #[test]
+    fn a_start_lifts_an_absent_park_whose_files_are_back() {
+        let (mgr, root, t) = seed_on_disk("vol-start");
+        t.park_absent("test");
+        mgr.start_torrent(&t.meta.info_hash).unwrap();
+        assert_eq!(
+            t.status.load(Ordering::Relaxed),
+            TorrentStatus::Seeding as u8
+        );
+        assert!(!t.data_lost.load(Ordering::Relaxed));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A parked torrent that is removed no longer counts as parked, so the
+    /// minute pass stops running for it. The count is process-wide and other
+    /// tests park torrents meanwhile: the torrent's own mark is what is
+    /// checked, the count only moves with it (`set_files_absent`).
+    #[test]
+    fn removing_a_parked_torrent_releases_its_park() {
+        let (mgr, root, t) = seed_on_disk("vol-remove");
+        t.park_absent("test");
+        assert!(t.files_absent.load(Ordering::Relaxed));
+        assert!(meta::ABSENT_PARKED.load(Ordering::Relaxed) >= 1);
+        mgr.remove_torrent(&t.meta.info_hash, true).unwrap();
+        assert!(
+            !t.files_absent.load(Ordering::Relaxed),
+            "a removed torrent still counts as parked"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A start whose lift outlives the probe still leaves the download in
+    /// the queue's index and asks for its announce once the lift ends on the
+    /// probe's thread. Holds the lift for longer than `PROBE_TIMEOUT`.
+    #[test]
+    fn a_start_whose_lift_outlives_the_probe_still_queues_the_download() {
+        let (mgr, root) = manager("vol-start-slow");
+        let save = root.join("disk");
+        std::fs::create_dir_all(&save).unwrap();
+        std::fs::write(save.join("vol"), vec![0u8; 16384]).unwrap();
+        let (ih, _) = mgr
+            .add_torrent_bytes(
+                &torrent_bytes("vol", &["https://tracker.example/announce"]),
+                &save.to_string_lossy(),
+                false,
+                false,
+            )
+            .unwrap();
+        let t = mgr.get(&ih).unwrap();
+        assert!(t.picker.get().is_some(), "a download, with a picker");
+        t.status
+            .store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+        t.park_absent("test");
+        mgr.incomplete.remove(&ih);
+        let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let a = asked.clone();
+        mgr.set_announce_hook(Arc::new(move |_ih| {
+            a.fetch_add(1, Ordering::Relaxed);
+        }));
+
+        // The lift waits on this lock once the files are judged back.
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let holder_t = t.clone();
+        let holder = std::thread::spawn(move || {
+            let _g = holder_t.error_msg.lock().unwrap();
+            held_tx.send(()).unwrap();
+            std::thread::sleep(volume::PROBE_TIMEOUT + std::time::Duration::from_millis(700));
+        });
+        held_rx.recv().unwrap();
+        mgr.start_torrent(&ih).unwrap();
+        assert!(
+            t.files_absent.load(Ordering::Relaxed),
+            "the lift was meant to outlive the probe"
+        );
+        let before = asked.load(Ordering::Relaxed);
+        holder.join().unwrap();
+        for _ in 0..300 {
+            if !t.files_absent.load(Ordering::Relaxed) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(!t.files_absent.load(Ordering::Relaxed), "lifted in the end");
+        assert_eq!(
+            t.status.load(Ordering::Relaxed),
+            TorrentStatus::Downloading as u8
+        );
+        assert!(
+            mgr.incomplete.contains(&ih),
+            "the lifted download is not in the queue's index"
+        );
+        assert!(
+            asked.load(Ordering::Relaxed) > before,
+            "the lift asked for no announce"
+        );
+        std::fs::remove_dir_all(&root).ok();
     }
 }
 
