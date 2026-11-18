@@ -877,3 +877,114 @@ async fn both_routes_refuse_a_caller_with_no_key() {
         "and nothing was renamed"
     );
 }
+
+/// `renameFolder` points every file under a folder at the same path below
+/// the new one, as qBittorrent does; the root folder or one inside it. All
+/// or nothing: when one file of the folder would be refused, none moves.
+#[tokio::test]
+async fn the_shim_renames_a_folder_with_every_file_in_it() {
+    let s = st("rn-shim-folder");
+    let t = pack("Pack");
+    add(&s, &t, true).await;
+    let h = hash_of(&t);
+    let folder = |old: &str, new: &str| {
+        format!(
+            "hash={h}&oldPath={}&newPath={}",
+            old.replace('/', "%2F"),
+            new.replace('/', "%2F")
+        )
+    };
+
+    // The root folder: both files follow it.
+    let (code, body) = call(
+        &s,
+        "POST",
+        "/api/v2/torrents/renameFolder",
+        &folder("Pack", "Copy.B"),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK, "{body}");
+    assert_eq!(body, "");
+    assert_eq!(shim_names(&s, &h).await, ["Copy.B/a.bin", "Copy.B/b.bin"]);
+
+    // A folder inside it, with a trailing slash as some clients send it.
+    let (code, body) = call(
+        &s,
+        "POST",
+        "/api/v2/torrents/renameFile",
+        &format!("hash={h}&oldPath=Copy.B%2Fb.bin&newPath=Copy.B%2Fsub%2Fb.bin"),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK, "{body}");
+    let (code, body) = call(
+        &s,
+        "POST",
+        "/api/v2/torrents/renameFolder",
+        &folder("Copy.B/sub/", "Copy.B/extras"),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK, "{body}");
+    assert_eq!(
+        shim_names(&s, &h).await,
+        ["Copy.B/a.bin", "Copy.B/extras/b.bin"]
+    );
+
+    // Not a folder: a file's path, a prefix that stops inside a name, nothing.
+    for old in ["Copy.B/a.bin", "Copy", "Nope"] {
+        let (code, body) = call(
+            &s,
+            "POST",
+            "/api/v2/torrents/renameFolder",
+            &folder(old, "Other"),
+        )
+        .await;
+        assert_eq!(code, StatusCode::BAD_REQUEST, "{old}: {body}");
+    }
+    // Onto a file of the torrent: refused, nothing moves.
+    let (code, body) = call(
+        &s,
+        "POST",
+        "/api/v2/torrents/renameFolder",
+        &folder("Copy.B/extras", "Copy.B/a.bin"),
+    )
+    .await;
+    assert_eq!(code, StatusCode::CONFLICT, "{body}");
+    let (code, _) = call(
+        &s,
+        "POST",
+        "/api/v2/torrents/renameFolder",
+        &format!("hash={h}&oldPath=Copy.B"),
+    )
+    .await;
+    assert_eq!(code, StatusCode::BAD_REQUEST, "newPath is required");
+    let (code, _) = call(
+        &s,
+        "POST",
+        "/api/v2/torrents/renameFolder",
+        &format!("hash={}&oldPath=a&newPath=b", "0".repeat(40)),
+    )
+    .await;
+    assert_eq!(code, StatusCode::NOT_FOUND);
+    assert_eq!(
+        shim_names(&s, &h).await,
+        ["Copy.B/a.bin", "Copy.B/extras/b.bin"]
+    );
+
+    // One file of the folder refused (data on disk under its current name,
+    // which a rename would leave behind): the other one stays put as well.
+    let save = engine_dir(&s, &h);
+    std::fs::create_dir_all(save.join("Copy.B/extras")).unwrap();
+    std::fs::write(save.join("Copy.B/extras/b.bin"), b_bytes()).unwrap();
+    let (code, body) = call(
+        &s,
+        "POST",
+        "/api/v2/torrents/renameFolder",
+        &folder("Copy.B", "Copy.C"),
+    )
+    .await;
+    assert_eq!(code, StatusCode::CONFLICT, "{body}");
+    assert_eq!(
+        shim_names(&s, &h).await,
+        ["Copy.B/a.bin", "Copy.B/extras/b.bin"]
+    );
+}

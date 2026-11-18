@@ -10758,10 +10758,11 @@ fn torrent_files_json(
     })
 }
 
-/// Rename a file on the copies of a torrent that `engine` names (every copy
+/// Rename files on the copies of a torrent that `engine` names (every copy
 /// when `all`, else exactly one: an unnamed engine is refused when several
-/// hold it). `paths` turns the request into the `(from, to)` below the save
-/// path that one copy is asked (`Err` is a 400).
+/// hold it). `paths` turns the request into the `(from, to)` pairs below the
+/// save path that one copy is asked (`Err` is a 400): one for a file, one per
+/// file under it for a folder.
 ///
 /// The 409s are the engine's (`RenameError::Conflict`); `Err` carries the
 /// status and the sentence.
@@ -10772,7 +10773,9 @@ fn rename_file_on_copies(
     hash: &str,
     engine: &str,
     all: bool,
-    paths: &dyn Fn(&typhon_engine::torrent::meta::TorrentMeta) -> Result<(String, String), String>,
+    paths: &dyn Fn(
+        &typhon_engine::torrent::meta::TorrentMeta,
+    ) -> Result<Vec<(String, String)>, String>,
 ) -> Result<std::sync::Arc<typhon_engine::torrent::meta::TorrentState>, (StatusCode, String)> {
     use typhon_engine::torrent::RenameError;
     let copies = torrent_copies(state, hash, engine);
@@ -10794,19 +10797,20 @@ fn rename_file_on_copies(
         RenameError::Invalid(m) => (StatusCode::BAD_REQUEST, m),
         RenameError::Conflict(m) => (StatusCode::CONFLICT, m),
     };
-    // Every copy is checked before one is renamed: if any would refuse, none
-    // changes.
+    // Every file of every copy is checked before one is renamed: if any
+    // would refuse, none changes.
     let mut todo = Vec::new();
     for (id, copy) in &copies {
         let Some(engine) = state.engines.get(id) else {
             continue;
         };
-        let (from, to) = paths(&copy.meta).map_err(|m| (StatusCode::BAD_REQUEST, m))?;
-        engine
-            .manager
-            .can_rename_file(&copy.info_hash, &from, &to)
-            .map_err(refused)?;
-        todo.push((engine, copy.info_hash, from, to));
+        for (from, to) in paths(&copy.meta).map_err(|m| (StatusCode::BAD_REQUEST, m))? {
+            engine
+                .manager
+                .can_rename_file(&copy.info_hash, &from, &to)
+                .map_err(refused)?;
+            todo.push((engine, copy.info_hash, from, to));
+        }
     }
     for (engine, ih, from, to) in todo {
         engine
@@ -10921,7 +10925,7 @@ async fn post_torrent_file_rename(
     };
     let engine = engine_param(&query, "");
     match rename_file_on_copies(&state, &info_hash, &engine, false, &|meta| {
-        native_rename_paths(meta, &req)
+        native_rename_paths(meta, &req).map(|p| vec![p])
     }) {
         Ok(torrent) => {
             let mut v = torrent_files_json(&torrent);
@@ -10954,7 +10958,66 @@ async fn qbit_rename_file(
     };
     // The paths are the engine's own: below the save path, folder included
     // (which may change: a file can go to another folder).
-    match rename_file_on_copies(&state, hash, "", true, &|_| Ok((old.clone(), new.clone()))) {
+    match rename_file_on_copies(&state, hash, "", true, &|_| {
+        Ok(vec![(old.clone(), new.clone())])
+    }) {
+        Ok(_) => qbit_ok(),
+        Err((code, msg)) => qbit_refuse(code, &msg),
+    }
+}
+
+/// The `(from, to)` of every file below `old`, a folder as `torrents/files`
+/// names it (the torrent's own folder or one inside it, `/`-separated, a
+/// trailing `/` allowed), moved below `new` with the rest of its path.
+fn folder_rename_paths(
+    meta: &typhon_engine::torrent::meta::TorrentMeta,
+    old: &str,
+    new: &str,
+) -> Result<Vec<(String, String)>, String> {
+    let old = old.trim_end_matches('/');
+    let new = new.trim_end_matches('/');
+    let prefix = format!("{old}/");
+    let pairs: Vec<(String, String)> = (0..meta.files.len())
+        .filter_map(|i| {
+            let path = meta
+                .disk_rel(i)
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join("/");
+            let rest = path.strip_prefix(&prefix)?.to_string();
+            Some((path, format!("{new}/{rest}")))
+        })
+        .collect();
+    if old.is_empty() || pairs.is_empty() {
+        return Err(format!("{old:?} is not a folder of this torrent"));
+    }
+    Ok(pairs)
+}
+
+/// `POST /api/v2/torrents/renameFolder` (`hash`, `oldPath`, `newPath`): every
+/// file below the folder `oldPath` is renamed below `newPath`, as
+/// `renameFile` renames one, and all or none of them are.
+async fn qbit_rename_folder(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+    let form = shim_form(&query, &body);
+    let (Some(hash), Some(old), Some(new)) =
+        (form.get("hash"), form.get("oldPath"), form.get("newPath"))
+    else {
+        return qbit_refuse(
+            StatusCode::BAD_REQUEST,
+            "hash, oldPath and newPath are required",
+        );
+    };
+    match rename_file_on_copies(&state, hash, "", true, &|meta| {
+        folder_rename_paths(meta, old, new)
+    }) {
         Ok(_) => qbit_ok(),
         Err((code, msg)) => qbit_refuse(code, &msg),
     }
@@ -19739,6 +19802,10 @@ fn router_with(state: AppState, extra: Router<AppState>) -> Router {
         .route(
             "/api/v2/torrents/renameFile",
             axum::routing::post(qbit_rename_file),
+        )
+        .route(
+            "/api/v2/torrents/renameFolder",
+            axum::routing::post(qbit_rename_folder),
         )
         .route("/api/torrents/:info_hash/torrent", get(get_torrent_file))
         .route(
