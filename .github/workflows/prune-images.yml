@@ -29,8 +29,11 @@ on:
         default: true
         type: boolean
 
+# The built-in token, not a long-lived one: the package grants this repository
+# the Admin role in its Actions access, which is what deleting a version needs.
 permissions:
   contents: read
+  packages: write
 
 jobs:
   prune:
@@ -40,7 +43,7 @@ jobs:
 
       - name: Plan
         env:
-          GHCR_TOKEN: ${{ secrets.GHCR_PRUNE_TOKEN }}
+          GHCR_TOKEN: ${{ github.token }}
           OWNER: ${{ github.repository_owner }}
           PKG: hydranos
           KEEP: ${{ github.event.inputs.keep || 10 }}
@@ -55,7 +58,7 @@ jobs:
         # by accident is a condition nobody can read.
         if: ${{ github.event_name == 'push' || !inputs.dry_run }}
         env:
-          GHCR_TOKEN: ${{ secrets.GHCR_PRUNE_TOKEN }}
+          GHCR_TOKEN: ${{ github.token }}
           OWNER: ${{ github.repository_owner }}
           PKG: hydranos
           KEEP: ${{ github.event.inputs.keep || 10 }}
