@@ -1706,13 +1706,18 @@ impl TorrentManager {
 
     pub fn stop_torrent(&self, info_hash: &InfoHash) -> Result<(), String> {
         let t = self.get(info_hash).ok_or("torrent not found")?;
-        // Closed BEFORE the pause flag goes up, so the interval that just
-        // ended is credited. After it, fold_seed_time would see a paused
-        // torrent and drop the open interval on the floor.
-        t.fold_seed_time(crate::torrent::meta::now_secs());
-        t.is_paused.store(true, Ordering::Relaxed);
-        t.status
-            .store(TorrentStatus::Stopped as u8, Ordering::Relaxed);
+        {
+            // Not in the middle of a recheck's verdict: it either reads the
+            // pause flag set below, or has finished writing its status.
+            let _publish = t.check_publish();
+            // Closed BEFORE the pause flag goes up, so the interval that just
+            // ended is credited. After it, fold_seed_time would see a paused
+            // torrent and drop the open interval on the floor.
+            t.fold_seed_time(crate::torrent::meta::now_secs());
+            t.is_paused.store(true, Ordering::Relaxed);
+            t.status
+                .store(TorrentStatus::Stopped as u8, Ordering::Relaxed);
+        }
         // BEP 3: tell the trackers we are leaving. Without it a stop is silent
         // and every tracker keeps us in the swarm until the entry goes stale,
         // handing our address to leechers we will not answer.
@@ -1738,10 +1743,15 @@ impl TorrentManager {
     /// no verdict (what the torrent held before stays), and a proof starts
     /// nothing. The torrent reads as what the stop made it. Not called by the
     /// queue managers' own stops, which must not undo a check the user asked.
+    ///
+    /// A check that has read everything and is writing its verdict finishes
+    /// it first (`check_publish`): the stop then finds a finished check, and
+    /// `stop_torrent` after it sets the state over that verdict.
     pub fn cancel_check(&self, info_hash: &InfoHash) {
         let Some(t) = self.get(info_hash) else {
             return;
         };
+        let _publish = t.check_publish();
         t.check_gen.fetch_add(1, Ordering::SeqCst);
         // The counter goes first, as at the end of a check.
         t.recheck_done.store(0, Ordering::SeqCst);
@@ -3933,10 +3943,9 @@ impl TorrentManager {
         // Noted now: a stop asked while this check waits for its disk, or
         // while it reads, calls it off (`cancel_check`).
         let gen = t.check_gen.load(Ordering::SeqCst);
-        // A recheck is somebody saying the underlying problem is dealt with.
-        // Without this the torrent came back working and went on displaying the
-        // fault it no longer had.
-        t.clear_error();
+        // The fault the torrent shows is cleared by the verdict
+        // (`run_recheck`), not here: a check a stop calls off must leave it,
+        // as it leaves the pieces.
         // A torrent in error told its trackers `stopped` (or owes it) and the
         // announcer will not look at it again for half an hour. If this
         // recheck brings it back, that wait is not its own.
@@ -3970,28 +3979,39 @@ impl TorrentManager {
                 return;
             }
             mgr.run_recheck(ih, t.clone(), gen, width).await;
-            if t.check_gen.load(Ordering::SeqCst) != gen {
-                return;
-            }
-            if was_error {
-                let back = t.status.load(Ordering::Relaxed);
-                if back == TorrentStatus::Downloading as u8 || back == TorrentStatus::Seeding as u8
-                {
-                    // Same as a resume: a new announce session, `started` to
-                    // every tracker, no departure left over, and the announcer
-                    // asked to go now.
-                    t.pending_announce_event.fetch_and(
-                        !crate::torrent::meta::ANNOUNCE_EVENT_STOPPED,
-                        Ordering::Relaxed,
-                    );
-                    t.begin_announce_session();
-                    mgr.announce_soon(&ih);
+            let announce = {
+                // A stop landing here would have its departure taken back by
+                // the `started` below: it waits, or is seen.
+                let _publish = t.check_publish();
+                if t.check_gen.load(Ordering::SeqCst) != gen {
+                    return;
                 }
+                let mut announce = false;
+                if was_error {
+                    let back = t.status.load(Ordering::Relaxed);
+                    if back == TorrentStatus::Downloading as u8
+                        || back == TorrentStatus::Seeding as u8
+                    {
+                        // Same as a resume: a new announce session, `started`
+                        // to every tracker, no departure left over, and the
+                        // announcer asked to go now.
+                        t.pending_announce_event.fetch_and(
+                            !crate::torrent::meta::ANNOUNCE_EVENT_STOPPED,
+                            Ordering::Relaxed,
+                        );
+                        t.begin_announce_session();
+                        announce = true;
+                    }
+                }
+                // The counter goes first: a reader seeing `rechecking` false
+                // must not find a figure left over from this check.
+                t.recheck_done.store(0, Ordering::SeqCst);
+                t.rechecking.store(false, Ordering::SeqCst);
+                announce
+            };
+            if announce {
+                mgr.announce_soon(&ih);
             }
-            // The counter goes first: a reader seeing `rechecking` false must
-            // not find a figure left over from this check.
-            t.recheck_done.store(0, Ordering::SeqCst);
-            t.rechecking.store(false, Ordering::SeqCst);
         });
         Ok(())
     }
@@ -4058,7 +4078,7 @@ impl TorrentManager {
         let unreadable: Arc<std::sync::Mutex<Option<String>>> =
             Arc::new(std::sync::Mutex::new(None));
         t.recheck_done.store(0, Ordering::SeqCst);
-        let mut verified: Vec<u32> = futures::stream::iter(0..num_pieces)
+        let scan = futures::stream::iter(0..num_pieces)
             .map(|piece| {
                 let t = t.clone();
                 let unreadable = unreadable.clone();
@@ -4068,13 +4088,18 @@ impl TorrentManager {
                     }
                     // Counted when the read ends, whatever its verdict: this
                     // is how far the check has got, not how much was good.
-                    struct Counted(Arc<TorrentState>);
+                    // Not once a stop has called the check off: the stop
+                    // zeroed the figure, and a read finishing after it would
+                    // leave one on a torrent no longer checking.
+                    struct Counted(Arc<TorrentState>, u64);
                     impl Drop for Counted {
                         fn drop(&mut self) {
-                            self.0.recheck_done.fetch_add(1, Ordering::Relaxed);
+                            if !TorrentManager::check_called_off(&self.0, self.1) {
+                                self.0.recheck_done.fetch_add(1, Ordering::Relaxed);
+                            }
                         }
                     }
-                    let _counted = Counted(t.clone());
+                    let _counted = Counted(t.clone(), gen);
                     // No hash table -> we cannot say this piece is good. Leave
                     // the have bit clear; the recheck reports the torrent
                     // incomplete rather than blessing unverified data.
@@ -4091,20 +4116,67 @@ impl TorrentManager {
             })
             .buffer_unordered(width)
             .filter_map(|r| async move { r })
-            .collect()
-            .await;
-        if t.is_removed.load(Ordering::Relaxed) {
-            return; // torrent removed mid-check -> do not publish a verdict
-        }
+            .collect::<Vec<u32>>();
+        // A stop leaves at once, not when the reads in flight end: those
+        // could be stuck on a slow disk, and the check holds that disk's
+        // turn until it returns. Reads already handed to the blocking pool
+        // finish in the background; their results go nowhere.
+        let called_off = async {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                if t.is_removed.load(Ordering::Relaxed) || Self::check_called_off(&t, gen) {
+                    return;
+                }
+            }
+        };
+        let scanned = tokio::select! {
+            v = scan => Some(v),
+            _ = called_off => None,
+        };
+        let removed = || t.is_removed.load(Ordering::Relaxed);
         // Stopped mid-check: the pieces not read are no verdict. What the
         // torrent held before stays, as for a removal.
-        if Self::check_called_off(&t, gen) {
-            info!(
-                "[recheck] {} called off by a stop, nothing changed",
-                &hex_encode(&ih)[..8]
-            );
+        let off = |t: &TorrentState| {
+            if Self::check_called_off(t, gen) {
+                info!(
+                    "[recheck] {} called off by a stop, nothing changed",
+                    &hex_encode(&ih)[..8]
+                );
+                return true;
+            }
+            false
+        };
+        let Some(mut verified) = scanned else {
+            if !removed() {
+                off(&t);
+            }
+            return;
+        };
+        if removed() || off(&t) {
             return;
         }
+        // Looked at before the verdict is published, so that no stat of a
+        // slow disk is made while a stop waits for it.
+        let absent = if verified.is_empty() {
+            t.files_not_on_disk()
+        } else {
+            Vec::new()
+        };
+        // From the last look at `check_gen` to the record written: a stop
+        // lands before (nothing is published) or after (it finds the verdict
+        // finished, and its state is set over it).
+        let publish = t.check_publish();
+        if removed() {
+            return; // torrent removed mid-check -> do not publish a verdict
+        }
+        if off(&t) {
+            return;
+        }
+        // A recheck is somebody saying the underlying problem is dealt with.
+        // Without this the torrent came back working and went on displaying
+        // the fault it no longer had. Here, not when the check starts: a
+        // check called off keeps the fault as well as the pieces.
+        t.clear_error();
         // The disk refused a read: that is no verdict on the pieces. Clearing
         // them and writing the result down would turn a fault of the volume
         // into a torrent at 0%, and lose the record of what had been
@@ -4135,7 +4207,6 @@ impl TorrentManager {
         // second says nothing about WHY, and the files are often only a folder
         // up. Say how many were not there, in the log and on the torrent.
         if have == 0 {
-            let absent = t.files_not_on_disk();
             if let Some(first) = absent.first() {
                 let first = first.to_string_lossy().replace('\\', "/");
                 let save = t.save_path.read().to_string_lossy().into_owned();
@@ -4197,6 +4268,7 @@ impl TorrentManager {
         // Persist the verified bitfield so a restart does not re-check from
         // scratch (mirrors the resume written at add / on piece completion).
         let _ = self.try_persist_live(&ih);
+        drop(publish);
         info!(
             "[recheck] {} verified {}/{} pieces -> {}",
             &hex_encode(&ih)[..8],
@@ -5106,6 +5178,200 @@ mod lifecycle_tests {
         assert!(!again.cancelled());
         drop((hold, again));
         assert!(!t.held_for_proof());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The torrent's picker set to hold piece 0 alone, so that a verdict
+    /// (both pieces) can be told from no verdict.
+    fn hold_only_the_first_piece(t: &TorrentState) {
+        let picker = t.picker.get().unwrap();
+        let mut p = picker.lock().unwrap();
+        p.reset_have();
+        p.set_have(0);
+    }
+
+    fn num_have(t: &TorrentState) -> u32 {
+        t.picker.get().unwrap().lock().unwrap().num_have()
+    }
+
+    /// ⭐ A stop that landed once the check had read everything, between its
+    /// last look at `check_gen` and its verdict, found nothing held there:
+    /// the verdict went onto the stopped torrent and was written down. The
+    /// last look is now made under the lock a stop takes, so a stop made
+    /// while the check waits for it calls the verdict off.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reads_that_finish_after_a_stop_cannot_publish() {
+        let (mgr, root, ih, t) = whole_two_piece_torrent("cancelverdict");
+        wait_recheck_end(&t).await;
+        hold_only_the_first_piece(&t);
+        let gen = t.check_gen.load(Ordering::SeqCst);
+        let held = t.check_publish();
+        let check = {
+            let (mgr, t) = (mgr.clone(), t.clone());
+            tokio::spawn(async move { mgr.run_recheck(ih, t, gen, 4).await })
+        };
+        for _ in 0..500 {
+            if t.recheck_done.load(Ordering::SeqCst) == 2 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(t.recheck_done.load(Ordering::SeqCst), 2, "every piece read");
+        // Time to reach the lock and wait there.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(!check.is_finished(), "the verdict waits for the lock");
+        // The stop, as `cancel_check` then `stop_torrent` make it.
+        t.check_gen.fetch_add(1, Ordering::SeqCst);
+        t.is_paused.store(true, Ordering::Relaxed);
+        t.status
+            .store(TorrentStatus::Stopped as u8, Ordering::Relaxed);
+        drop(held);
+        check.await.unwrap();
+        assert_eq!(num_have(&t), 1, "the reads' verdict was not installed");
+        assert_eq!(
+            t.status.load(Ordering::Relaxed),
+            TorrentStatus::Stopped as u8
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// ⭐ A check stopped while its reads are stuck on the disk gives the
+    /// disk's turn back at once, not when the reads end: the next check of
+    /// that disk would otherwise wait for a check nobody wants any more. The
+    /// reads end later in the background, and publish nothing.
+    #[test]
+    fn a_stop_frees_the_disk_of_a_check_whose_reads_are_stuck() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let (mgr, root, ih, t) = whole_two_piece_torrent("cancelactive");
+            wait_recheck_end(&t).await;
+            hold_only_the_first_piece(&t);
+            let key = torrent_disk_key(&t);
+            let count = disk_count(&key) as u32;
+            let disk = disk_sem(&key).acquire_many_owned(count).await.unwrap();
+            mgr.recheck(&ih).expect("recheck starts");
+            // Its disk found (a stat, on the blocking pool), it waits.
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            // The pool's one thread taken: the check's reads cannot end.
+            let (release, wait) = std::sync::mpsc::channel::<()>();
+            let (entered, ready) = tokio::sync::oneshot::channel();
+            let blocker = tokio::task::spawn_blocking(move || {
+                entered.send(()).unwrap();
+                let _ = wait.recv();
+            });
+            ready.await.unwrap();
+            drop(disk);
+            for _ in 0..500 {
+                if !t.waiting_for_check() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            assert!(!t.waiting_for_check(), "the check has its turn");
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            assert!(t.rechecking.load(Ordering::SeqCst));
+            assert_eq!(
+                t.recheck_done.load(Ordering::SeqCst),
+                0,
+                "its reads are stuck"
+            );
+
+            mgr.cancel_check(&ih);
+            mgr.stop_torrent(&ih).unwrap();
+            let turn = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                disk_sem(&key).acquire_many_owned(count),
+            )
+            .await;
+            assert!(
+                turn.is_ok(),
+                "the disk is given back while the reads are stuck"
+            );
+            drop(turn);
+
+            release.send(()).unwrap();
+            blocker.await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            assert_eq!(num_have(&t), 1, "the stuck reads published nothing");
+            assert_eq!(t.recheck_done.load(Ordering::SeqCst), 0, "nor a figure");
+            assert_eq!(crate::rpc::dispatch::torrent_to_json(&t)["state"], "paused");
+            std::fs::remove_dir_all(&root).ok();
+        });
+    }
+
+    /// A recheck cleared the fault the torrent showed when it started, so a
+    /// check a stop called off left a torrent parked for an unmounted disk
+    /// looking healthy, serving again, with nothing checked. The fault goes
+    /// with the verdict now: called off, it stays; run, it goes.
+    #[tokio::test]
+    async fn a_cancelled_queued_recheck_keeps_the_fault() {
+        let (mgr, root, ih, t) = whole_two_piece_torrent("cancelfault");
+        wait_recheck_end(&t).await;
+        hold_only_the_first_piece(&t);
+        t.park_absent("the disk is not mounted");
+        let fault = t.error_msg.lock().unwrap().clone();
+        let key = torrent_disk_key(&t);
+        let disk = disk_sem(&key)
+            .acquire_many_owned(disk_count(&key) as u32)
+            .await
+            .unwrap();
+        mgr.recheck(&ih).expect("recheck starts");
+        mgr.cancel_check(&ih);
+        mgr.stop_torrent(&ih).unwrap();
+        drop(disk);
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert_eq!(
+            *t.error_msg.lock().unwrap(),
+            fault,
+            "the fault is still shown"
+        );
+        assert!(
+            t.serving_suspended.load(Ordering::Relaxed),
+            "and still not served"
+        );
+        assert!(t.data_lost.load(Ordering::Relaxed));
+        assert!(t.files_absent.load(Ordering::Relaxed));
+        assert_eq!(num_have(&t), 1, "nothing checked, nothing changed");
+
+        mgr.recheck(&ih).expect("a new recheck starts");
+        wait_recheck_end(&t).await;
+        assert!(
+            t.error_msg.lock().unwrap().is_empty(),
+            "a verdict clears it"
+        );
+        assert!(!t.serving_suspended.load(Ordering::Relaxed));
+        assert!(!t.data_lost.load(Ordering::Relaxed));
+        assert!(!t.files_absent.load(Ordering::Relaxed));
+        assert_eq!(num_have(&t), 2);
+        assert!(t.is_paused.load(Ordering::Relaxed), "and it stays stopped");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A stopped torrent whose check finds pieces missing stays stopped: the
+    /// incomplete verdict does not make it a download.
+    #[tokio::test]
+    async fn a_stopped_incomplete_recheck_stays_stopped() {
+        let (mgr, root, ih, t) = whole_two_piece_torrent("checkstoppedpartial");
+        wait_recheck_end(&t).await;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(root.join("data").join("whole"))
+            .unwrap()
+            .set_len(16384)
+            .unwrap();
+        mgr.stop_torrent(&ih).unwrap();
+        mgr.recheck(&ih).expect("recheck starts");
+        wait_recheck_end(&t).await;
+        assert_eq!(num_have(&t), 1);
+        assert!(t.is_paused.load(Ordering::Relaxed));
+        assert_eq!(
+            t.status.load(Ordering::Relaxed),
+            TorrentStatus::Stopped as u8
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 

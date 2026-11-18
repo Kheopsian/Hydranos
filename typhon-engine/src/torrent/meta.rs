@@ -1060,6 +1060,9 @@ pub struct TorrentState {
     /// proof queued or under way when it moves is called off, publishes no
     /// verdict and starts nothing. Each check notes it when it begins.
     pub check_gen: AtomicU64,
+    /// See `check_publish()`. One byte, in what was padding: the struct did
+    /// not grow.
+    check_publish: parking_lot::Mutex<()>,
     /// Checks of this torrent waiting for their turn on the disk
     /// (`wait_for_check`). A torrent queued behind 16 000 others read
     /// "Checking 0 %" like the two actually reading.
@@ -1773,6 +1776,7 @@ impl TorrentState {
             rechecking: AtomicBool::new(false),
             proof_holds: AtomicU32::new(0),
             check_gen: AtomicU64::new(0),
+            check_publish: parking_lot::Mutex::new(()),
             check_waiting: AtomicU32::new(0),
             proof_gen: AtomicU64::new(0),
             recheck_done: AtomicU32::new(0),
@@ -1803,6 +1807,16 @@ impl TorrentState {
             saved_fingerprint: AtomicU64::new(0),
             saved_num_have: AtomicU32::new(0),
         }
+    }
+
+    /// Taken by a recheck from its last look at `check_gen` to the end of its
+    /// verdict (pieces, status, the record written), and by a stop around
+    /// what it changes. A stop that moved `check_gen` after that last look,
+    /// with nothing held, let the verdict land on a stopped torrent; it now
+    /// lands before the verdict, which then does not publish, or after it,
+    /// and finds it finished. Nothing slow is done under it but the write.
+    pub(super) fn check_publish(&self) -> parking_lot::MutexGuard<'_, ()> {
+        self.check_publish.lock()
     }
 
     /// A job is proving what this torrent shares with another one, and will
@@ -2452,8 +2466,10 @@ impl TorrentState {
 
     /// Forget a fault the operator has dealt with.
     ///
-    /// Called when a recheck starts, which is the one moment somebody has
-    /// declared the underlying problem fixed. Nothing cleared `error_msg`
+    /// Called when a recheck publishes its verdict: asking for one is
+    /// somebody declaring the underlying problem fixed, and the verdict is
+    /// the disk agreeing. Not when it starts: a check a stop called off
+    /// leaves the fault, as it leaves the pieces. Nothing cleared `error_msg`
     /// before, so a torrent that erred, was repaired and came back kept its
     /// panic message on display for the rest of the process's life -- and the
     /// operator had no way to tell a torrent that is broken from one that was.
