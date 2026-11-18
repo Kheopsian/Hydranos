@@ -2255,6 +2255,12 @@ impl TorrentState {
         }
     }
 
+    /// The torrent is removed: its park, if any, no longer counts in
+    /// `ABSENT_PARKED`, so the pass does not keep running for it.
+    pub fn forget_absent_park(&self) {
+        self.set_files_absent(false);
+    }
+
     /// Set `files_absent`, keeping `ABSENT_PARKED` right.
     fn set_files_absent(&self, on: bool) {
         if self.files_absent.swap(on, Ordering::Relaxed) != on {

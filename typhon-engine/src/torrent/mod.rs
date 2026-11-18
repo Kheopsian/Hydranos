@@ -1397,6 +1397,7 @@ impl TorrentManager {
         if let Some((_, t)) = &removed {
             let was = t.save_path.read().clone();
             self.uncount_save_path(&was);
+            t.forget_absent_park();
         }
         tm.map_remove = stage.elapsed();
         let result = match removed {
@@ -7934,6 +7935,24 @@ mod manager_tests {
             TorrentStatus::Seeding as u8
         );
         assert!(!t.data_lost.load(Ordering::Relaxed));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A parked torrent that is removed no longer counts as parked, so the
+    /// minute pass stops running for it. The count is process-wide and other
+    /// tests park torrents meanwhile: the torrent's own mark is what is
+    /// checked, the count only moves with it (`set_files_absent`).
+    #[test]
+    fn removing_a_parked_torrent_releases_its_park() {
+        let (mgr, root, t) = seed_on_disk("vol-remove");
+        t.park_absent("test");
+        assert!(t.files_absent.load(Ordering::Relaxed));
+        assert!(meta::ABSENT_PARKED.load(Ordering::Relaxed) >= 1);
+        mgr.remove_torrent(&t.meta.info_hash, true).unwrap();
+        assert!(
+            !t.files_absent.load(Ordering::Relaxed),
+            "a removed torrent still counts as parked"
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 
