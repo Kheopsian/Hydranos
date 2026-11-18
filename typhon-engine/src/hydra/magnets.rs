@@ -206,7 +206,7 @@ pub fn torrent_from_dict(dict: &[u8], trackers: &[String]) -> Vec<u8> {
 }
 
 pub fn hex(b: &[u8]) -> String {
-    b.iter().map(|x| format!("{x:02x}")).collect()
+    typhon_engine::torrent::hex_encode_bytes(b)
 }
 
 /// Ask for a magnet to be added. Returns its info hash.

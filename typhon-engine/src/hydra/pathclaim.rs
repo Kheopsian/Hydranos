@@ -3933,7 +3933,7 @@ mod tests {
         // and still marked given up, so every write opened the file fresh
         // rather than through a cached handle a racing read could have left
         // on the original.
-        let f = t.free_links();
+        let f = t.free_links().expect("the free link was not recorded");
         let f = f.lock();
         let rel = std::path::Path::new("movieB.mkv");
         assert_eq!(f.settlements, 1, "settled at every piece");

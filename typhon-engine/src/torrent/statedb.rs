@@ -41,7 +41,10 @@ use super::fastresume::ResumeData;
 /// piece count stands in for the bitfield: the bitfield cannot change without
 /// the count changing with it, and comparing one u32 beats memcmp-ing a
 /// multi-kilobyte hex string per torrent per sweep.
-#[derive(Clone, Copy, PartialEq, Eq)]
+///
+/// Built for the comparison and then let go: what is kept of the one last
+/// written is its `digest`, on the torrent.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Fingerprint {
     pub total_uploaded: u64,
     pub total_downloaded: u64,
@@ -62,6 +65,19 @@ pub struct Fingerprint {
     /// order, file renames. A hash, so a row that ever differs from memory
     /// for one of them is rewritten by the next sweep, whatever made it so.
     pub edits: u64,
+}
+
+impl Fingerprint {
+    /// What is kept of a written fingerprint: 64 bits, never 0, which stands
+    /// for "nothing written". Two different fingerprints share a digest with
+    /// odds of 2^-64 per comparison, and then the row waits for the next
+    /// change to be rewritten.
+    pub fn digest(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.hash(&mut h);
+        h.finish().max(1)
+    }
 }
 
 pub struct StateDb {

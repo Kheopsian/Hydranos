@@ -148,7 +148,7 @@ pub fn latest() -> Option<std::sync::Arc<(i64, u64, Report)>> {
 pub fn scan_engine(
     engine: &str,
     torrents: &[std::sync::Arc<TorrentState>],
-    seeds_in_swarm: impl Fn(&str) -> i64,
+    seeds_in_swarm: impl Fn(&typhon_engine::torrent::meta::InfoHash) -> i64,
     host_in_outage: impl Fn(&str) -> bool,
     report: &mut Report,
 ) {
@@ -260,7 +260,7 @@ pub fn scan_engine(
             && peers == 0
             && !t.is_paused.load(Ordering::Relaxed)
         {
-            let seeds = seeds_in_swarm(&hash());
+            let seeds = seeds_in_swarm(&t.info_hash);
             if seeds > 0 {
                 report.add(anomaly(
                     STARVED,
@@ -274,7 +274,7 @@ pub fn scan_engine(
         if report.skip_outage {
             continue;
         }
-        'tiers: for tier in &t.meta.trackers {
+        'tiers: for tier in t.live_trackers.read().iter() {
             for url in tier {
                 let host = crate::announce::overrides::override_host(url);
                 if !host.is_empty() && host_in_outage(&host) {
@@ -332,7 +332,7 @@ pub fn scan_dual_seed(
             if t.status.load(Ordering::Relaxed) != TorrentStatus::Seeding as u8 {
                 continue;
             }
-            let hash: String = t.info_hash.iter().map(|b| format!("{b:02x}")).collect();
+            let hash: String = typhon_engine::torrent::hex_encode(&t.info_hash);
             seen.entry(hash).or_default().push(engine.clone());
         }
     }
@@ -568,7 +568,7 @@ mod scan_tests {
         assert!(r.truncated());
     }
 
-    fn no_seeds(_: &str) -> i64 {
+    fn no_seeds(_: &typhon_engine::torrent::meta::InfoHash) -> i64 {
         0
     }
     fn no_outage(_: &str) -> bool {

@@ -31,21 +31,15 @@ const OUR_ID: [u8; 20] = *b"-TY4R00-aaaaaaaaaaaa";
 const THEIR_ID: [u8; 20] = *b"-qB5220-bbbbbbbbbbbb";
 
 fn meta(num_pieces: u32) -> TorrentMeta {
-    TorrentMeta {
-        info_hash: [0x5A; 20],
-        name: "session-under-test".into(),
-        num_pieces,
-        piece_length: 16384,
-        total_size: num_pieces as u64 * 16384,
-        files: Vec::new(),
-        trackers: Vec::new(),
-        url_list: Vec::new(),
-        private: false,
-        multi_file: false,
-        info_dict_len: 0,
-        v2: false,
-        renames: Default::default(),
-    }
+    // Field by field: `trackers` is the crate's own, so a literal from out
+    // here cannot name it. Every field not set is its default.
+    let mut m = TorrentMeta::default();
+    m.info_hash = [0x5A; 20];
+    m.name = "session-under-test".into();
+    m.num_pieces = num_pieces;
+    m.piece_length = 16384;
+    m.total_size = num_pieces as u64 * 16384;
+    m
 }
 
 /// A torrent we hold in full: `seed_mode` skips the picker, which is what a
@@ -198,7 +192,7 @@ fn a_live_session_is_counted_on_the_torrent() {
 
         assert_eq!(torrent.peers_connected.load(Ordering::Relaxed), 1);
         assert!(
-            torrent.peer_stats.iter().next().is_some(),
+            !torrent.peers.is_empty(),
             "and it is in the peer table the choking engine reads"
         );
     });
@@ -226,10 +220,7 @@ fn a_peer_that_hangs_up_is_released() {
             );
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        assert!(
-            torrent.peer_stats.is_empty(),
-            "and the table is empty again"
-        );
+        assert!(torrent.peers.is_empty(), "and the table is empty again");
     });
 }
 
@@ -248,9 +239,10 @@ fn an_interested_peer_is_recorded_as_interested() {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         loop {
             let interested = torrent
-                .peer_stats
+                .peers
+                .snapshot()
                 .iter()
-                .any(|e| e.value().interested.load(Ordering::Relaxed));
+                .any(|p| p.interested.load(Ordering::Relaxed));
             if interested {
                 break;
             }

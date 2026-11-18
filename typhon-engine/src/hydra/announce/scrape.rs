@@ -143,7 +143,7 @@ async fn pass(
     done: &mut HashMap<InfoHash, Instant>,
 ) {
     let now = Instant::now();
-    let announced = |ih: &InfoHash| cache.has(&typhon_engine::torrent::hex_encode(ih));
+    let announced = |ih: &InfoHash| cache.has(ih);
     let groups = plan(
         manager
             .all()
@@ -177,9 +177,8 @@ async fn pass(
         .map(|entries| {
             let mut n = 0;
             for e in entries {
-                let hex = typhon_engine::torrent::hex_encode(&e.info_hash);
                 // An announce answered meanwhile is fresher: leave it.
-                if cache.has(&hex) {
+                if cache.has(&e.info_hash) {
                     continue;
                 }
                 if let Some(t) = manager.get(&e.info_hash) {

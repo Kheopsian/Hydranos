@@ -346,7 +346,7 @@ fn enforce_queue(
             && (checking || !holds_everything(&t))
         {
             if manage_downloads {
-                let seeds_n = cache.swarm_seeds(&hash);
+                let seeds_n = cache.swarm_seeds(&t.info_hash);
                 let active = running && status == TorrentStatus::Downloading as u8;
                 incomplete.push((t, seeds_n, active));
             }
@@ -1852,7 +1852,7 @@ fn reconcile_pass(engines: &crate::engines::EngineHost, store: &crate::store::St
             .manager
             .all()
             .iter()
-            .map(|t| t.info_hash.iter().map(|b| format!("{b:02x}")).collect())
+            .map(|t| typhon_engine::torrent::hex_encode(&t.info_hash))
             .collect();
         // An engine that failed to load its resume data reports
         // nothing, and taking that at face value would empty its half
@@ -3827,13 +3827,12 @@ mod decision_tests {
 
     fn seeders(c: &Cache, t: &TorrentState, n: i64) {
         c.record(
-            &typhon_engine::torrent::hex_encode(&t.info_hash),
+            &t.info_hash,
             crate::announce::cache::Entry {
                 complete: n,
                 incomplete: 0,
-                tracker: "tracker.example".into(),
+                host: "tracker.example".into(),
                 at: std::time::Instant::now(),
-                interval: Duration::from_secs(1800),
             },
         );
     }

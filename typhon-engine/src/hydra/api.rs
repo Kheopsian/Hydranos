@@ -739,10 +739,7 @@ async fn post_node_enrol(
     // check and is never run.
     let sha: String = {
         use sha2::{Digest, Sha256};
-        Sha256::digest(INSTALL_SCRIPT.as_bytes())
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect()
+        typhon_engine::torrent::hex_encode_bytes(&Sha256::digest(INSTALL_SCRIPT.as_bytes()))
     };
     Json(serde_json::json!({
         "token": token,
@@ -10397,9 +10394,12 @@ fn current_torrent_file(state: &AppState, info_hash: &str, blob: Vec<u8>) -> Vec
     let Some(tiers) = live_tiers(state, info_hash) else {
         return blob;
     };
-    match typhon_engine::torrent::metainfo::parse_torrent_bytes(&blob) {
-        Ok(meta) if meta.trackers == tiers => blob,
-        _ => crate::export::with_trackers(&blob, &tiers).unwrap_or(blob),
+    let unchanged = typhon_engine::torrent::metainfo::parse_torrent_bytes(&blob)
+        .is_ok_and(|meta| meta.into_trackers() == tiers);
+    if unchanged {
+        blob
+    } else {
+        crate::export::with_trackers(&blob, &tiers).unwrap_or(blob)
     }
 }
 
@@ -12194,10 +12194,10 @@ async fn qbit_add_trackers(
             .get("hash")
             .map(|h| h.trim().to_lowercase())
             .unwrap_or_default();
-        for (id, _) in copies_of(&state, &hash) {
+        for (id, copy) in copies_of(&state, &hash) {
             if let Some(bump) = state.engines.get(&id).and_then(|e| e.bump.get()) {
                 let _ = bump.try_send(crate::announce::scheduler::BumpReq {
-                    info_hash: hash.clone(),
+                    info_hash: copy.info_hash,
                     reply: None,
                     forced: false,
                 });
@@ -13570,7 +13570,7 @@ async fn reannounce_one(
     // announcing anything: there was no way to ask for an announce at all, so
     // the button in the Trackers tab had never done a thing. The scheduler owns
     // the queue, so asking is sending it a message.
-    let Some((engine_id, _torrent)) = find_selected(&state, &query, &info_hash) else {
+    let Some((engine_id, torrent)) = find_selected(&state, &query, &info_hash) else {
         return not_found();
     };
     let Some(engine) = state.engines.get(&engine_id) else {
@@ -13595,7 +13595,7 @@ async fn reannounce_one(
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     if bump
         .try_send(crate::announce::scheduler::BumpReq {
-            info_hash: info_hash.to_lowercase(),
+            info_hash: torrent.info_hash,
             reply: Some(reply_tx),
             // A person pressed it: past `min interval`, like qBittorrent.
             forced: true,
@@ -15306,7 +15306,7 @@ fn remove_one_inner(
             return Err(e);
         }
         let stage = Instant::now();
-        engine.announce_cache.forget(hash);
+        engine.announce_cache.forget(&torrent.info_hash);
         tm.announce_forget += stage.elapsed();
         // AFTER the engine let go, never before: absorbing a torrent the engine
         // then refuses to drop counts its bytes twice, once in the carry-over
@@ -15834,7 +15834,7 @@ async fn post_torrent_engine(
         )
             .into_response();
     }
-    src.announce_cache.forget(&hash);
+    src.announce_cache.forget(&ih);
     let stored = state
         .store
         .lock()
@@ -15900,7 +15900,7 @@ fn remove_torrent_everywhere(
                     tracing::warn!(hash = %hash, "engine refused removal: {e}");
                     return Err(e.to_string());
                 }
-                engine.announce_cache.forget(&hash);
+                engine.announce_cache.forget(&ih);
                 if let Err(e) = absorb_checked(state, &engine.id, &copy, &hash, Some(&engine.id)).2
                 {
                     refused = Some(e);
@@ -18416,7 +18416,7 @@ async fn qbit_reannounce(
     let mut not_announcing = 0usize;
     let mut queue_full = 0usize;
     for hash in resolved {
-        for (id, _copy) in copies_of(&state, &hash) {
+        for (id, copy) in copies_of(&state, &hash) {
             let Some(engine) = state.engines.get(&id) else {
                 continue;
             };
@@ -18426,7 +18426,7 @@ async fn qbit_reannounce(
                 continue;
             };
             match bump.try_send(crate::announce::scheduler::BumpReq {
-                info_hash: hash.to_lowercase(),
+                info_hash: copy.info_hash,
                 reply: None,
                 forced: true,
             }) {
@@ -25583,10 +25583,9 @@ mod node_route_tests {
             .as_str()
             .unwrap()
             .to_string();
-        let sha: String = Sha256::digest(include_str!("../../../install.sh").as_bytes())
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect();
+        let sha: String = typhon_engine::torrent::hex_encode_bytes(&Sha256::digest(
+            include_str!("../../../install.sh").as_bytes(),
+        ));
         assert!(
             !cmd.contains("install.sh |"),
             "the download is not piped into a shell: {cmd}"
@@ -29385,7 +29384,7 @@ mod export_route_tests {
     fn tiers_of(torrent: &[u8]) -> Vec<Vec<String>> {
         typhon_engine::torrent::metainfo::parse_torrent_bytes(torrent)
             .expect("a parseable .torrent")
-            .trackers
+            .into_trackers()
     }
 
     fn new_tiers() -> Vec<Vec<String>> {
@@ -32187,7 +32186,7 @@ mod detail_panel_tests {
                 .as_secs() as i64;
             t.last_announce_at.store(now - 30, Ordering::Relaxed);
             t.next_announce_at.store(now + 1800, Ordering::Relaxed);
-            *t.current_tracker.lock().unwrap() = "https://one.example/announce".into();
+            *t.current_tracker.lock().unwrap() = Some("https://one.example/announce".into());
 
             for (n, (port, client, enc, fast)) in [
                 (51413u16, "qBittorrent 4.6.0", true, true),
@@ -32223,8 +32222,7 @@ mod detail_panel_tests {
             tokio::time::sleep(std::time::Duration::from_millis(600)).await;
             t.upload_rate.update(600_000);
             t.download_rate.update(60_000);
-            for e in t.peer_stats.iter() {
-                let p = e.value();
+            for p in t.peers.snapshot() {
                 p.dl_rate.update(p.total_downloaded.load(Ordering::Relaxed));
                 p.ul_rate.update(p.total_uploaded.load(Ordering::Relaxed));
             }
@@ -32436,14 +32434,14 @@ mod detail_panel_tests {
                 );
             }
             let peers = p["peers"].as_array().expect("peers");
-            assert_eq!(peers.len(), t.peer_stats.len());
+            assert_eq!(peers.len(), t.peers.len());
             assert_eq!(peers.len(), 2);
             for peer in peers {
                 let addr: std::net::SocketAddr =
                     format!("{}:{}", peer["ip"].as_str().unwrap(), peer["port"])
                         .parse()
                         .unwrap();
-                let st = t.peer_stats.get(&addr).expect("a peer of the session");
+                let st = t.peers.get(&addr).expect("a peer of the session");
                 assert_eq!(peer["client"], st.client.as_str());
                 assert_eq!(
                     peer["total_upload"],

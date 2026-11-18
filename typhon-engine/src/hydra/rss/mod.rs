@@ -373,7 +373,7 @@ fn item_exists(feeds: &[RssFeedRow], folders: &[String], path: &str) -> bool {
 fn new_uid() -> String {
     use rand::Rng;
     let b: [u8; 16] = rand::thread_rng().gen();
-    let h: String = b.iter().map(|x| format!("{x:02x}")).collect();
+    let h: String = typhon_engine::torrent::hex_encode_bytes(&b);
     format!(
         "{{{}-{}-{}-{}-{}}}",
         &h[0..8],

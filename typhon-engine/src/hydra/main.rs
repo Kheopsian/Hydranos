@@ -967,7 +967,7 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
             let mut paused_total = 0usize;
             for engine in engine_host.engines() {
                 for torrent in engine.manager.all() {
-                    if !spoofmigration::is_affected(&torrent.meta.trackers, &spoofed_hosts) {
+                    if !spoofmigration::is_affected(&torrent.live_trackers.read(), &spoofed_hosts) {
                         continue;
                     }
                     if engine.manager.stop_torrent(&torrent.info_hash).is_err() {

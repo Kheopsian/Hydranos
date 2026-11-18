@@ -1,5 +1,4 @@
 use bytes::Bytes;
-use dashmap::DashMap;
 use parking_lot::RwLock;
 use std::path::PathBuf;
 use std::sync::atomic::{
@@ -94,7 +93,7 @@ pub struct FileEntry {
     pub length: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct TorrentMeta {
     pub info_hash: InfoHash,
     pub name: String,
@@ -105,7 +104,15 @@ pub struct TorrentMeta {
     pub piece_length: u32,
     pub total_size: u64,
     pub files: Vec<FileEntry>,
-    pub trackers: Vec<Vec<String>>,
+    /// The tiers the .torrent lists. Moved into `TorrentState::live_trackers`
+    /// when a state is built, and EMPTY on `TorrentState::meta` from then on:
+    /// a second copy of every announce URL on every torrent bought nothing.
+    ///
+    /// Not `pub`, so nothing outside this crate can read a live torrent's
+    /// (empty) copy by mistake: parsed metainfo hands its tiers over with
+    /// `into_trackers` / `take_trackers`, which need the value itself, and a
+    /// live torrent's `meta` sits behind an `Arc`.
+    pub(crate) trackers: Vec<Vec<String>>,
     /// BEP 19 `url-list`: HTTP mirrors that serve this torrent's payload.
     /// Empty for almost every torrent (an empty Vec is 24 bytes), which is
     /// what makes carrying it on a million-torrent catalogue affordable.
@@ -155,6 +162,23 @@ impl std::fmt::Debug for FileRenames {
 }
 
 impl TorrentMeta {
+    /// The tiers this metainfo lists, handed over. For metainfo just parsed:
+    /// a live torrent's are in `TorrentState::live_trackers`.
+    pub fn into_trackers(self) -> Vec<Vec<String>> {
+        self.trackers
+    }
+
+    /// `into_trackers`, keeping the rest.
+    pub fn take_trackers(&mut self) -> Vec<Vec<String>> {
+        std::mem::take(&mut self.trackers)
+    }
+
+    /// The same metainfo listing `tiers`, for one built by hand.
+    pub fn with_trackers(mut self, tiers: Vec<Vec<String>>) -> Self {
+        self.trackers = tiers;
+        self
+    }
+
     /// The path file `i` has when nothing was renamed: `name/<path>` for a
     /// multi-file torrent, the file's own name for a single-file one.
     fn original_rel(&self, i: usize) -> PathBuf {
@@ -540,19 +564,12 @@ pub struct PeerGuard {
 impl PeerGuard {
     pub fn new(torrent: Arc<TorrentState>, stats: Arc<PeerStats>) -> Self {
         let addr = stats.addr;
-        torrent.peer_stats.insert(addr, stats);
+        torrent.peers.insert(addr, stats);
         torrent.peers_connected.fetch_add(1, Ordering::Relaxed);
         // Process-wide live connection count backing `max_connections`.
         // Maintained here rather than at the dial site so inbound sessions are
         // counted too, and so the decrement is RAII-guaranteed below.
         torrent.limiter().connection_opened();
-        // Connected-addr dedup: tracker/DHT both check `connected_addrs`
-        // before dialing a peer to avoid spawning N parallel sockets to
-        // the same address. This insert is the missing half — without it
-        // the contains() check in tracker/mod.rs and dht.rs is always
-        // false and every announce cycle re-dials known peers, fragmenting
-        // throughput across redundant connections.
-        torrent.connected_addrs.insert(addr, ());
         Self {
             torrent,
             addr,
@@ -576,10 +593,9 @@ impl PeerGuard {
 
 impl Drop for PeerGuard {
     fn drop(&mut self) {
-        self.torrent.peer_stats.remove(&self.addr);
+        self.torrent.peers.remove(&self.addr);
         self.torrent.peers_connected.fetch_sub(1, Ordering::Relaxed);
         self.torrent.limiter().connection_closed();
-        self.torrent.connected_addrs.remove(&self.addr);
         if self.was_interested.load(Ordering::Relaxed) {
             self.torrent
                 .peers_interested
@@ -588,27 +604,86 @@ impl Drop for PeerGuard {
     }
 }
 
-/// Runtime state for an active torrent.
-/// Shard count for the two per-torrent concurrent maps below.
+/// The peers connected to one torrent, by address.
 ///
-/// `DashMap::new()` sizes its shard array from the machine: `(nproc * 4)`
-/// rounded up to a power of two. On a 12-core box that is 64 shards, and
-/// dashmap allocates the whole array up front, at construction, before a
-/// single entry exists. Each shard is a `CachePadded<RwLock<HashMap>>` = 128
-/// bytes, so one empty `DashMap` costs 8 KiB and a `TorrentState` carrying two
-/// of them costs ~16.7 KiB of untouched shards.
+/// One map, allocated when the first peer connects and freed when the last
+/// one leaves. Most torrents of a large catalogue have no peer at any given
+/// moment, and they pay 16 bytes here and nothing on the heap.
 ///
-/// Measured on prod 2026-08-28: 204,893 torrents, 167k of them with zero
-/// peers, 3.43 GB of RAM in shard arrays that never held anything.
+/// It used to be two `DashMap`s, `peer_stats` and `connected_addrs`, always
+/// holding the same keys. Even at 2 shards each, an empty one costs 256 bytes
+/// of padded shards on the heap plus 40 inline, so a torrent with no peer paid
+/// an estimated ~600 bytes, ~170 MB across 290,000 torrents (from the type
+/// sizes, not measured). (Built with `DashMap::new()`,
+/// which sizes its shards from the core count, they had cost 3.43 GB over
+/// 204,893 torrents, measured on prod 2026-08-28.) Sharding bought nothing:
+/// the map belongs to one torrent, and every write is one insert or remove on
+/// a small map.
 ///
-/// Sharding buys nothing here. These maps are per torrent, not global: they
-/// are written on peer connect/disconnect and read by the PEX tick, the dial
-/// dedup and `get_peers`. Contention is bounded by one torrent's peer count,
-/// and every critical section is a single insert/remove on a small map. The
-/// global maps in `TorrentManager` (`torrents`, `skey_index`) keep the default
-/// sharding -- those are genuinely hot across 200k entries.
-/// 2, not 1: dashmap asserts `shard_amount > 1` at construction.
-const PER_TORRENT_SHARDS: usize = 2;
+/// The closures given to `for_each` run under the read lock: they must not
+/// block, and must not touch this registry.
+#[derive(Default)]
+#[allow(clippy::box_collection)] // boxed: one word on the many torrents with no peer
+pub struct PeerRegistry(RwLock<Option<Box<PeerMap>>>);
+
+type PeerMap = std::collections::HashMap<std::net::SocketAddr, Arc<PeerStats>>;
+
+impl PeerRegistry {
+    /// Register `stats` under `addr`. Replaces (and returns) a peer already
+    /// registered there.
+    pub fn insert(
+        &self,
+        addr: std::net::SocketAddr,
+        stats: Arc<PeerStats>,
+    ) -> Option<Arc<PeerStats>> {
+        self.0
+            .write()
+            .get_or_insert_with(Box::default)
+            .insert(addr, stats)
+    }
+
+    /// Unregister `addr`. The map is freed with its last peer.
+    pub fn remove(&self, addr: &std::net::SocketAddr) -> Option<Arc<PeerStats>> {
+        let mut g = self.0.write();
+        let map = g.as_mut()?;
+        let gone = map.remove(addr);
+        if map.is_empty() {
+            *g = None;
+        }
+        gone
+    }
+
+    pub fn get(&self, addr: &std::net::SocketAddr) -> Option<Arc<PeerStats>> {
+        self.0.read().as_ref()?.get(addr).cloned()
+    }
+
+    pub fn contains_key(&self, addr: &std::net::SocketAddr) -> bool {
+        self.0.read().as_ref().is_some_and(|m| m.contains_key(addr))
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.read().is_none()
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.read().as_ref().map_or(0, |m| m.len())
+    }
+
+    /// Visit every peer, under the read lock. See the type's note.
+    pub fn for_each(&self, mut f: impl FnMut(&Arc<PeerStats>)) {
+        if let Some(m) = self.0.read().as_ref() {
+            m.values().for_each(&mut f);
+        }
+    }
+
+    /// The peers as they are now, to work on without holding the lock.
+    pub fn snapshot(&self) -> Vec<Arc<PeerStats>> {
+        self.0
+            .read()
+            .as_ref()
+            .map_or_else(Vec::new, |m| m.values().cloned().collect())
+    }
+}
 
 /// No announce event is owed.
 pub const ANNOUNCE_EVENT_NONE: u8 = 0;
@@ -749,6 +824,50 @@ pub fn tracker_error_class(
         .unwrap_or("")
 }
 
+/// One shared copy of `host`. The pool only grows, by one entry per distinct
+/// tracker host ever announced to: a few dozen on a large node.
+pub fn intern_host(host: &str) -> Arc<str> {
+    static POOL: std::sync::LazyLock<RwLock<std::collections::HashSet<Arc<str>>>> =
+        std::sync::LazyLock::new(Default::default);
+    // A read lock for the usual case, a host already pooled: every announce
+    // comes here.
+    if let Some(h) = POOL.read().get(host) {
+        return h.clone();
+    }
+    let mut pool = POOL.write();
+    // Again under the write lock: another thread may have pooled it between.
+    if let Some(h) = pool.get(host) {
+        return h.clone();
+    }
+    let h: Arc<str> = Arc::from(host);
+    pool.insert(h.clone());
+    h
+}
+
+/// The write path's three side tables, under one lock: 32 bytes on a torrent
+/// that has none, which is nearly every one.
+#[derive(Default)]
+struct WriteState {
+    /// Files (below the save path) that another torrent names or that have
+    /// another hardlink: `write_piece` writes into none of them, it only
+    /// reads the range back and accepts the piece when the bytes are already
+    /// there. `None` when there are none. See `guard_files`.
+    guard: Option<Arc<std::collections::HashSet<PathBuf>>>,
+    /// What `write_piece` found out about each file it writes into, once:
+    /// see `WriteVerdicts`. Built by the first write and dropped when the
+    /// torrent starts seeding (`release_piece_hashes`): a seed writes
+    /// nothing, and one table on each was an estimated ~23 MB of empty maps
+    /// across 290,000 seeds (from the type sizes, not measured).
+    verdicts: Option<Arc<parking_lot::Mutex<WriteVerdicts>>>,
+    /// See `FreeLinks`. Built by the first `set_free_links` that names a
+    /// file, `None` (no free links) otherwise: one on each torrent was a
+    /// 224-byte allocation, ~65 MB across 290,000 torrents (measured on
+    /// Linux, jemalloc). Kept through seeding and rechecks, unlike the
+    /// verdicts: a seed that downloads again must still open a given-up file
+    /// fresh.
+    free: Option<Arc<parking_lot::Mutex<FreeLinks>>>,
+}
+
 /// The key a tracker URL is filed under in the announce book.
 pub fn tracker_key(url: &str) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
@@ -762,10 +881,10 @@ pub fn tracker_key(url: &str) -> u64 {
 // A one-off shape; naming it would add an alias that nothing else uses.
 #[allow(clippy::type_complexity)]
 pub struct TorrentState {
-    /// Parsed straight from the .torrent. `meta.trackers` is the SEED for
-    /// `live_trackers` and nothing else reads it: the operator can edit the
-    /// tracker list at runtime, so what the file said and what we announce
-    /// to are two different facts.
+    /// Parsed straight from the .torrent, except `meta.trackers`, which is
+    /// moved into `live_trackers` and left empty here: the operator can edit
+    /// the tracker list at runtime, and what we announce to is the one fact
+    /// worth keeping. What the file said is in the stored metainfo.
     pub meta: TorrentMeta,
     /// The tracker list actually announced to, in tiers. Edited in place by
     /// the set_trackers command; the announce loop takes a snapshot each
@@ -894,16 +1013,9 @@ pub struct TorrentState {
     /// a check; what `checking_progress` is made of. The verdict itself is
     /// still installed in one go at the end, so `progress` stays what it was.
     pub recheck_done: AtomicU32,
-    /// Files (below the save path) that another torrent names or that have
-    /// another hardlink: `write_piece` writes into none of them, it only reads
-    /// the range back and accepts the piece when the bytes are already there.
-    /// Empty for nearly every torrent. See `guard_files`.
-    overwrite_guard: RwLock<Arc<std::collections::HashSet<PathBuf>>>,
-    /// What `write_piece` found out about each file it writes into, once: see
-    /// `WriteVerdicts`.
-    write_verdicts: Arc<parking_lot::Mutex<WriteVerdicts>>,
-    /// See `FreeLinks`. Empty for nearly every torrent.
-    free_links: Arc<parking_lot::Mutex<FreeLinks>>,
+    /// What `write_piece` works with besides the data, empty and unallocated
+    /// for nearly every torrent. See `WriteState`.
+    write_state: RwLock<WriteState>,
     /// `error_msg` holds a note a recheck left (nothing was found where it was
     /// expected), not a fault: the first piece that lands clears it.
     recheck_note: AtomicBool,
@@ -947,7 +1059,10 @@ pub struct TorrentState {
     // Tracker scrape data
     pub scrape_seeders: AtomicU32,
     pub scrape_leechers: AtomicU32,
-    pub current_tracker: Mutex<String>,
+    /// The host last announced to, interned (`intern_host`): a few distinct
+    /// hosts serve a whole catalogue, so 290,000 torrents share a handful of
+    /// strings instead of each holding its own.
+    pub current_tracker: Mutex<Option<Arc<str>>>,
     pub last_announce_ok: AtomicBool,
     pub last_announce_error: Mutex<String>,
     /// Unix seconds of the last SUCCESSFUL announce, 0 = never. Failures
@@ -978,17 +1093,20 @@ pub struct TorrentState {
     /// into a stop.
     pub disk_write_failures: AtomicU32,
 
-    // Peer registry: insert at connect, remove at disconnect (via PeerGuard).
-    // Each peer task holds its own Arc<PeerStats>, so hot-path updates do
-    // NOT need lookups — zero contention during piece transfers.
-    // This is only accessed during get_peers (user opens peer panel = rare).
-    pub peer_stats: DashMap<std::net::SocketAddr, Arc<PeerStats>>,
+    /// What the resume sweep last wrote for this torrent, so the next one
+    /// can skip its row when nothing moved: the `digest` of the
+    /// `statedb::Fingerprint` written (0: nothing written since it was
+    /// loaded or added), and that fingerprint's piece count, which the quick
+    /// download pass compares on its own. Kept by the `TorrentManager`.
+    pub(crate) saved_fingerprint: AtomicU64,
+    pub(crate) saved_num_have: AtomicU32,
 
-    /// Addresses of peers currently connected on this torrent. Maintained by
-    /// peer tasks (insert at handshake success, remove on disconnect). Used by
-    /// PEX (BEP 11) to compute added/dropped between ticks and by the dial
-    /// dedup path ("don't redial a peer we already serve").
-    pub connected_addrs: DashMap<std::net::SocketAddr, ()>,
+    /// The peers connected now: inserted at handshake, removed at disconnect,
+    /// both by `PeerGuard`. Each peer task holds its own `Arc<PeerStats>`, so
+    /// the transfer hot path never looks here. Read by the peer panel, the
+    /// choker, PEX, and the dial dedup of tracker, DHT and LSD ("don't redial
+    /// a peer we already serve").
+    pub peers: PeerRegistry,
 }
 
 /// Unix seconds. The seed counter needs a wall clock, not a monotonic one:
@@ -1430,11 +1548,7 @@ impl TorrentState {
 
     /// The info-hash as lowercase hex, which is how the store keys it.
     pub fn info_hash_hex(&self) -> String {
-        let mut out = String::with_capacity(40);
-        for b in self.info_hash.iter() {
-            out.push_str(&format!("{:02x}", b));
-        }
-        out
+        crate::torrent::hex_encode(&self.info_hash)
     }
 
     /// Drop the piece hash table.
@@ -1461,6 +1575,9 @@ impl TorrentState {
             Err(poisoned) => poisoned.into_inner(),
         };
         *v2 = None;
+        drop(v2);
+        // A seed writes nothing: what the writes found out goes too.
+        self.forget_write_verdicts();
     }
 
     /// Whether a whole piece -- alignment padding included, as `map_block`
@@ -1508,7 +1625,7 @@ impl TorrentState {
     /// Create a TorrentState, optionally restoring added_time / completed_time
     /// from fastresume. `None` falls back to `SystemTime::now()` (fresh add).
     pub fn new_with_times(
-        meta: TorrentMeta,
+        mut meta: TorrentMeta,
         save_path: PathBuf,
         seed_mode: bool,
         added_time_override: Option<i64>,
@@ -1541,7 +1658,7 @@ impl TorrentState {
         // so skip the 256-slot ring allocation for every seeder.
         // Built lazily by `have_sender`; a seeder never asks for one.
         Self {
-            live_trackers: RwLock::new(meta.trackers.clone()),
+            live_trackers: RwLock::new(std::mem::take(&mut meta.trackers)),
             announced_peer_id: RwLock::new(None),
             meta,
             save_path: RwLock::new(save_path),
@@ -1577,9 +1694,7 @@ impl TorrentState {
             rechecking: AtomicBool::new(false),
             proof_holds: AtomicU32::new(0),
             recheck_done: AtomicU32::new(0),
-            overwrite_guard: RwLock::new(Arc::new(std::collections::HashSet::new())),
-            write_verdicts: Arc::default(),
-            free_links: Arc::default(),
+            write_state: RwLock::new(WriteState::default()),
             recheck_note: AtomicBool::new(false),
             piece_hashes: Mutex::new(None),
             v2_checks: Mutex::new(None),
@@ -1589,7 +1704,7 @@ impl TorrentState {
             download_rate: RateTracker::new(),
             scrape_seeders: AtomicU32::new(0),
             scrape_leechers: AtomicU32::new(0),
-            current_tracker: Mutex::new(String::new()),
+            current_tracker: Mutex::new(None),
             last_announce_ok: AtomicBool::new(false),
             last_announce_error: Mutex::new(String::new()),
             disk_write_failures: AtomicU32::new(0),
@@ -1599,8 +1714,9 @@ impl TorrentState {
             data_lost: std::sync::atomic::AtomicBool::new(false),
             piece_mem: OnceLock::new(),
             files_checked: std::sync::atomic::AtomicU8::new(0),
-            peer_stats: DashMap::with_shard_amount(PER_TORRENT_SHARDS),
-            connected_addrs: DashMap::with_shard_amount(PER_TORRENT_SHARDS),
+            peers: PeerRegistry::default(),
+            saved_fingerprint: AtomicU64::new(0),
+            saved_num_have: AtomicU32::new(0),
         }
     }
 
@@ -1886,51 +2002,78 @@ impl TorrentState {
     /// there. A byte that differs refuses the piece and parks the torrent, the
     /// file untouched. Replaces the previous set.
     pub fn guard_files(&self, files: std::collections::HashSet<PathBuf>) {
-        *self.overwrite_guard.write() = Arc::new(files);
+        self.write_state.write().guard = (!files.is_empty()).then(|| Arc::new(files));
     }
 
     /// The per-file verdicts of `write_piece`, to share with its blocking task.
+    /// Built on first use.
     pub fn write_verdicts(&self) -> Arc<parking_lot::Mutex<WriteVerdicts>> {
-        self.write_verdicts.clone()
+        if let Some(v) = &self.write_state.read().verdicts {
+            return v.clone();
+        }
+        self.write_state
+            .write()
+            .verdicts
+            .get_or_insert_with(Arc::default)
+            .clone()
     }
 
     /// Forget what was found about the files: the next piece asks again. A
-    /// recheck calls it, so a file linked or claimed since is seen.
+    /// recheck calls it, so a file linked or claimed since is seen. A write in
+    /// flight keeps the table it holds; the next one starts a new one.
     pub fn forget_write_verdicts(&self) {
-        *self.write_verdicts.lock() = WriteVerdicts::default();
+        self.write_state.write().verdicts = None;
     }
 
-    /// The files `guard_files` set, cheap to clone.
+    /// The files `guard_files` set, cheap to clone. One shared empty set
+    /// stands for "none", so the torrents without a guard allocate nothing.
     pub fn guarded(&self) -> Arc<std::collections::HashSet<PathBuf>> {
-        self.overwrite_guard.read().clone()
+        static NONE: std::sync::LazyLock<Arc<std::collections::HashSet<PathBuf>>> =
+            std::sync::LazyLock::new(Arc::default);
+        self.write_state
+            .read()
+            .guard
+            .clone()
+            .unwrap_or_else(|| NONE.clone())
     }
 
     /// Stop guarding `rel`: the file under that name is the torrent's own
     /// now (see `FreeLinks`).
     pub fn unguard_file(&self, rel: &std::path::Path) {
-        let mut g = self.overwrite_guard.write();
-        if g.contains(rel) {
-            let mut files = (**g).clone();
+        let mut w = self.write_state.write();
+        if let Some(set) = w.guard.as_ref().filter(|set| set.contains(rel)) {
+            let mut files = (**set).clone();
             files.remove(rel);
-            *g = Arc::new(files);
+            w.guard = (!files.is_empty()).then(|| Arc::new(files));
         }
     }
 
     /// Record the free files the path-claim proof linked below `save_path`
-    /// (see `FreeLinks`). Replaces what was recorded.
+    /// (see `FreeLinks`). Replaces what was recorded, in place, so a write in
+    /// flight sees the new record; none recorded and no file allocates
+    /// nothing.
     pub fn set_free_links(&self, save_path: PathBuf, files: std::collections::HashSet<PathBuf>) {
-        *self.free_links.lock() = FreeLinks {
+        let record = FreeLinks {
             at: save_path,
             linked: files,
             undone: Default::default(),
             settled: Default::default(),
             settlements: 0,
         };
+        let mut w = self.write_state.write();
+        match &w.free {
+            Some(free) => *free.lock() = record,
+            None if !record.linked.is_empty() => {
+                w.free = Some(Arc::new(parking_lot::Mutex::new(record)))
+            }
+            None => {}
+        }
     }
 
     /// The free links, to share with the blocking task of `write_piece`.
-    pub fn free_links(&self) -> Arc<parking_lot::Mutex<FreeLinks>> {
-        self.free_links.clone()
+    /// `None`: there are none.
+    pub fn free_links(&self) -> Option<Arc<parking_lot::Mutex<FreeLinks>>> {
+        self.write_state.read().free.clone()
     }
 
     /// The files of this torrent (paths below the save path) that are not on
@@ -2024,38 +2167,127 @@ impl TorrentMeta {
 mod tests {
     use super::*;
 
-    /// The two per-torrent maps must NOT be sharded by core count.
-    ///
-    /// `DashMap::new()` allocates `(nproc * 4).next_power_of_two()` shards up
-    /// front -- 64 on a 12-core box, 128 bytes each, per map, per torrent,
-    /// before a single peer exists. At 200k torrents that was 3.43 GB of empty
-    /// shard arrays. Revert either constructor to `::new()` and this test goes
-    /// from 2 to nproc*4 on the CI runner.
+    /// A torrent with no peer must cost one lock and a null pointer, nothing
+    /// on the heap: most torrents of a large catalogue have none.
+    #[cfg(target_pointer_width = "64")]
     #[test]
-    fn per_torrent_maps_are_not_sharded_by_core_count() {
-        let stats: DashMap<std::net::SocketAddr, Arc<PeerStats>> =
-            DashMap::with_shard_amount(PER_TORRENT_SHARDS);
-        let addrs: DashMap<std::net::SocketAddr, ()> =
-            DashMap::with_shard_amount(PER_TORRENT_SHARDS);
-        assert_eq!(
-            stats.shards().len(),
-            PER_TORRENT_SHARDS,
-            "peer_stats regained shards"
+    fn an_empty_peer_registry_is_two_words() {
+        assert_eq!(std::mem::size_of::<PeerRegistry>(), 16);
+        assert!(PeerRegistry::default().0.read().is_none());
+    }
+
+    /// The write-path state costs nothing until something is written, and
+    /// is dropped again once the torrent seeds.
+    #[test]
+    fn write_state_is_built_on_first_write_and_dropped_on_seeding() {
+        let (st, _, _) = state_for("writestate", 2);
+        assert!(
+            st.write_state.read().guard.is_none(),
+            "a guard was allocated"
         );
+        assert!(
+            st.write_state.read().verdicts.is_none(),
+            "verdicts were allocated"
+        );
+        assert!(st.guarded().is_empty());
+
+        st.write_verdicts()
+            .lock()
+            .files
+            .insert(PathBuf::from("a"), true);
+        assert_eq!(st.write_verdicts().lock().files.len(), 1, "not kept");
+        st.release_piece_hashes();
+        assert!(st.write_state.read().verdicts.is_none(), "kept by a seed");
+
+        st.guard_files(std::iter::once(PathBuf::from("a")).collect());
+        assert!(st.guarded().contains(&PathBuf::from("a")));
+        st.guard_files(Default::default());
+        assert!(
+            st.write_state.read().guard.is_none(),
+            "an empty guard allocated"
+        );
+    }
+
+    /// The tracker list is kept once, as the live list, not twice.
+    #[test]
+    fn the_tracker_list_is_kept_once() {
+        let (st, _, _) = state_for("trackersonce", 1);
+        assert!(st.meta.trackers.is_empty(), "the .torrent's copy was kept");
         assert_eq!(
-            addrs.shards().len(),
-            PER_TORRENT_SHARDS,
-            "connected_addrs regained shards"
+            *st.live_trackers.read(),
+            vec![vec!["http://tracker/annc".to_string()]]
+        );
+    }
+
+    /// Parsed metainfo hands its tiers over; nothing else can read them
+    /// from outside the crate.
+    #[test]
+    fn parsed_metainfo_hands_its_tiers_over() {
+        let tiers = vec![vec!["http://a.example/announce".to_string()]];
+        let m = TorrentMeta::default().with_trackers(tiers.clone());
+        let mut n = m.clone();
+        assert_eq!(n.take_trackers(), tiers);
+        assert!(n.trackers.is_empty(), "taken, not copied");
+        assert_eq!(m.into_trackers(), tiers);
+    }
+
+    /// Free links are allocated only for a torrent the proof linked a file
+    /// for, and survive seeding and a recheck once they are.
+    #[test]
+    fn free_links_are_built_only_for_a_linked_file() {
+        let (st, _, _) = state_for("freelinks", 2);
+        st.set_free_links(PathBuf::from("/save"), Default::default());
+        assert!(st.free_links().is_none(), "no file linked, yet allocated");
+
+        let rel = PathBuf::from("a");
+        st.set_free_links(
+            PathBuf::from("/save"),
+            std::iter::once(rel.clone()).collect(),
+        );
+        let held = st.free_links().expect("a linked file not recorded");
+        held.lock().undone.insert(rel.clone());
+        st.release_piece_hashes();
+        st.forget_write_verdicts();
+        assert!(
+            st.free_links().unwrap().lock().undone.contains(&rel),
+            "forgotten by a seed or a recheck"
         );
 
-        // Proof the default is what we are avoiding: if dashmap ever stops
-        // sizing from the core count, this assert fires and the constant can
-        // go away.
-        let default_shards = DashMap::<u8, u8>::new().shards().len();
-        assert!(
-            default_shards > PER_TORRENT_SHARDS,
-            "dashmap no longer shards by core count; PER_TORRENT_SHARDS is moot"
+        // Replaced in place: a write holding the old handle sees it.
+        st.set_free_links(PathBuf::from("/save"), Default::default());
+        assert!(held.lock().linked.is_empty() && held.lock().undone.is_empty());
+    }
+
+    /// One of each per torrent, 300,000 times over: a field that makes them
+    /// bigger must be a decision, not an accident. The bounds are the sizes
+    /// measured on x86_64 when this was written (a `PathBuf` is 8 bytes
+    /// larger on Windows); raise one on purpose.
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn per_torrent_types_do_not_grow() {
+        use std::mem::size_of;
+        let state = size_of::<TorrentState>();
+        let bound = if cfg!(windows) { 936 } else { 928 };
+        assert!(state <= bound, "TorrentState grew to {state} bytes");
+        let meta = size_of::<TorrentMeta>();
+        assert!(meta <= 160, "TorrentMeta grew to {meta} bytes");
+        assert_eq!(
+            size_of::<RwLock<WriteState>>(),
+            32,
+            "the write path's state is one lock and three pointers"
         );
+    }
+
+    #[test]
+    fn interned_hosts_are_shared() {
+        let a = intern_host("tracker.example");
+        let b = intern_host(&String::from("tracker.example"));
+        assert!(Arc::ptr_eq(&a, &b), "two copies of one host");
+        assert_eq!(&*a, "tracker.example");
+    }
+
+    fn peer(addr: std::net::SocketAddr) -> Arc<PeerStats> {
+        Arc::new(PeerStats::new(addr, [0; 20], String::new(), false, false))
     }
 
     fn torrent_bytes(n: usize) -> (Vec<u8>, Vec<[u8; 20]>) {
@@ -2299,24 +2531,33 @@ mod tests {
         );
     }
 
-    /// One shard still has to behave like the set it replaced.
+    /// The registry behaves like the map it replaced, and frees itself with
+    /// its last peer.
     #[test]
-    fn single_shard_map_still_stores_and_removes() {
-        let addrs: DashMap<std::net::SocketAddr, ()> =
-            DashMap::with_shard_amount(PER_TORRENT_SHARDS);
+    fn peer_registry_stores_removes_and_frees() {
+        let peers = PeerRegistry::default();
         let a: std::net::SocketAddr = "10.0.0.1:6881".parse().unwrap();
         let b: std::net::SocketAddr = "10.0.0.2:6881".parse().unwrap();
-        assert!(addrs.insert(a, ()).is_none(), "first insert was not new");
-        assert!(addrs.insert(b, ()).is_none());
         assert!(
-            addrs.insert(a, ()).is_some(),
+            peers.insert(a, peer(a)).is_none(),
+            "first insert was not new"
+        );
+        assert!(peers.insert(b, peer(b)).is_none());
+        assert!(
+            peers.insert(a, peer(a)).is_some(),
             "duplicate insert must report the old entry"
         );
-        assert_eq!(addrs.len(), 2, "duplicate must not grow the map");
-        assert!(addrs.contains_key(&a));
-        assert!(addrs.remove(&a).is_some());
-        assert!(!addrs.contains_key(&a));
-        assert_eq!(addrs.len(), 1);
+        assert_eq!(peers.len(), 2, "duplicate must not grow the map");
+        assert!(peers.contains_key(&a));
+        assert_eq!(peers.get(&b).map(|p| p.addr), Some(b));
+        assert_eq!(peers.snapshot().len(), 2);
+        assert!(peers.remove(&a).is_some());
+        assert!(!peers.contains_key(&a));
+        assert_eq!(peers.len(), 1);
+        assert!(peers.remove(&a).is_none(), "removed twice");
+        assert!(peers.remove(&b).is_some());
+        assert!(peers.is_empty());
+        assert!(peers.0.read().is_none(), "the last peer must free the map");
     }
 
     /// A torrent whose pieces are all held, saved under `save`.

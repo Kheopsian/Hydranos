@@ -330,7 +330,7 @@ fn graduate(state: &AppState, job: &crate::store::Job) -> Result<(), String> {
         src.manager
             .remove_torrent(&ih, true)
             .map_err(|e| format!("the source engine refused to release it: {e}"))?;
-        src.announce_cache.forget(&hash);
+        src.announce_cache.forget(&ih);
     }
     #[cfg(test)]
     if STOP_AFTER_LEAVING_SOURCE.with(|c| c.replace(false)) {
@@ -1278,7 +1278,7 @@ fn move_data(state: &AppState, job: &crate::store::Job) -> Result<(), String> {
             "the engine refused to release it: {e}; nothing moved"
         ));
     }
-    engine.announce_cache.forget(&hash);
+    engine.announce_cache.forget(&ih);
     #[cfg(test)]
     if STOP_AFTER_LEAVING_SOURCE.with(|c| c.replace(false)) {
         return Err("stopped where a crash would".into());

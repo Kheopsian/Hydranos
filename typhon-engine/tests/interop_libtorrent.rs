@@ -381,8 +381,8 @@ async fn we_download_from_libtorrent(tag: &str, seed: u32) {
             });
         }
         if seen_client.is_empty() {
-            if let Some(p) = t.peer_stats.iter().next() {
-                seen_client = p.value().client.clone();
+            if let Some(p) = t.peers.snapshot().first() {
+                seen_client = p.client.clone();
             }
         }
         if let Ok(b) = std::fs::read(&target) {

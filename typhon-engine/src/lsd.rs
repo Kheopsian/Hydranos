@@ -244,7 +244,7 @@ pub fn candidates_with(mgr: &TorrentManager, announce_seeds: bool) -> Vec<Candid
         return out;
     }
     let with_peers = mgr.collect_torrents(usize::MAX, |t| {
-        !t.connected_addrs.is_empty() && may_use_lsd(t) && !seen.contains(&t.info_hash)
+        !t.peers.is_empty() && may_use_lsd(t) && !seen.contains(&t.info_hash)
     });
     out.extend(with_peers.into_iter().map(|info_hash| Candidate {
         info_hash,
@@ -378,7 +378,7 @@ impl LsdSession {
             self.peers_found.fetch_add(1, Ordering::Relaxed);
             *self.found.entry(*ih).or_insert(0) += 1;
             // Same filters as a tracker's peer list.
-            if t.connected_addrs.contains_key(&peer) || crate::tracker::is_self_ip(peer.ip()) {
+            if t.peers.contains_key(&peer) || crate::tracker::is_self_ip(peer.ip()) {
                 continue;
             }
             crate::tracker::enqueue_dial(peer, t);
@@ -696,7 +696,7 @@ mod tests {
         // Downloading and with a peer: everything that would make it a
         // candidate if it were public.
         let p = mgr.get(&private).unwrap();
-        p.connected_addrs.insert("192.0.2.1:1".parse().unwrap(), ());
+        p.peers.insert(test_peer().addr, test_peer());
 
         let got: Vec<InfoHash> = candidates(&mgr).iter().map(|c| c.info_hash).collect();
         assert_eq!(got, vec![public], "only the public, running torrent");
@@ -711,6 +711,17 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// A connected peer, for a torrent that must look like it has one.
+    fn test_peer() -> std::sync::Arc<crate::torrent::meta::PeerStats> {
+        std::sync::Arc::new(crate::torrent::meta::PeerStats::new(
+            "192.0.2.1:1".parse().unwrap(),
+            [0; 20],
+            String::new(),
+            false,
+            false,
+        ))
+    }
+
     /// Default unchanged (no new symbol, so it also compiles on the parent): a
     /// seed with a connected peer is a candidate, not downloading.
     #[test]
@@ -721,8 +732,8 @@ mod tests {
             .unwrap();
         mgr.get(&seed)
             .unwrap()
-            .connected_addrs
-            .insert("192.0.2.1:1".parse().unwrap(), ());
+            .peers
+            .insert(test_peer().addr, test_peer());
         let got = candidates(&mgr);
         assert_eq!(got.len(), 1);
         assert_eq!((got[0].info_hash, got[0].downloading), (seed, false));
@@ -744,8 +755,8 @@ mod tests {
             .unwrap();
         mgr.get(&seed)
             .unwrap()
-            .connected_addrs
-            .insert("192.0.2.1:1".parse().unwrap(), ());
+            .peers
+            .insert(test_peer().addr, test_peer());
         let sorted = |mut v: Vec<InfoHash>| {
             v.sort();
             v

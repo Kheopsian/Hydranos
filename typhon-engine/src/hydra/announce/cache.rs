@@ -13,30 +13,33 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
-/// The host part of a tracker announce URL.
-///
-/// The entry may hold either a full URL or a bare host depending on which code
-/// path recorded it, so both are accepted. Port and path are dropped: the tab
-/// groups by host, and `tracker.example:2810` and `tracker.example` are the
-/// same tracker to an operator.
-pub(crate) fn host_of(tracker: &str) -> String {
+use typhon_engine::torrent::meta::InfoHash;
+
+/// The host part of a tracker announce URL (a bare host is returned as it
+/// is). Port and path are dropped: the tab groups by host, and
+/// `tracker.example:2810` and `tracker.example` are the same tracker to an
+/// operator. Borrowed from `tracker`, so a caller that interns it allocates
+/// only for a host it has never seen.
+pub(crate) fn host_of(tracker: &str) -> &str {
     let s = tracker.split("://").nth(1).unwrap_or(tracker);
-    s.split(['/', ':']).next().unwrap_or("").to_string()
+    s.split(['/', ':']).next().unwrap_or("")
 }
 
 /// The last answer one tracker gave about one torrent.
+///
+/// One of these is kept per torrent that ever got an answer, so every field
+/// is paid 300k times over.
 #[derive(Debug, Clone)]
 pub struct Entry {
     /// Seeders, as the tracker counts them.
     pub complete: i64,
     /// Leechers.
     pub incomplete: i64,
-    /// The tracker that answered.
-    pub tracker: String,
+    /// The tracker that answered, by host as `host_of` gives it, and shared
+    /// (`intern_host`): a few hosts answer for a whole catalogue. Not the
+    /// announce URL, which is long and carries the passkey.
+    pub host: Arc<str>,
     pub at: Instant,
-    // Stored with the record; no code reads it today.
-    #[allow(dead_code)]
-    pub interval: Duration,
 }
 
 /// What one announce self-check observed about our own presence.
@@ -200,7 +203,7 @@ impl Window {
 
 #[derive(Default)]
 pub struct Cache {
-    entries: RwLock<HashMap<String, Entry>>,
+    entries: RwLock<HashMap<InfoHash, Entry>>,
     /// Lifetime announce outcomes for this engine. Monotonic: the bench
     /// sampler turns them into a per-second rate by differencing two samples,
     /// and a counter that reset would draw a negative spike.
@@ -434,14 +437,10 @@ impl Cache {
         )
     }
 
-    pub fn record(&self, info_hash: &str, entry: Entry) {
+    pub fn record(&self, info_hash: &InfoHash, entry: Entry) {
         use std::sync::atomic::Ordering;
         let (seeds, leechers) = (entry.complete, entry.incomplete);
-        let previous = self
-            .entries
-            .write()
-            .unwrap()
-            .insert(info_hash.to_string(), entry);
+        let previous = self.entries.write().unwrap().insert(*info_hash, entry);
         let (old_seeds, old_leechers) = previous
             .map(|e| (e.complete, e.incomplete))
             .unwrap_or((0, 0));
@@ -468,11 +467,11 @@ impl Cache {
 
     /// Has any tracker answered an announce for this torrent? Without the
     /// copy `get` makes.
-    pub fn has(&self, info_hash: &str) -> bool {
+    pub fn has(&self, info_hash: &InfoHash) -> bool {
         self.entries.read().unwrap().contains_key(info_hash)
     }
 
-    pub fn get(&self, info_hash: &str) -> Option<Entry> {
+    pub fn get(&self, info_hash: &InfoHash) -> Option<Entry> {
         self.entries.read().unwrap().get(info_hash).cloned()
     }
 
@@ -481,11 +480,15 @@ impl Cache {
     ///
     /// Zero and "unknown" are deliberately the same answer here: a torrent
     /// nobody has heard about should sort last, and that is what zero does.
-    pub fn swarm_seeds(&self, info_hash: &str) -> i64 {
-        self.get(info_hash).map(|e| e.complete).unwrap_or(0)
+    pub fn swarm_seeds(&self, info_hash: &InfoHash) -> i64 {
+        self.entries
+            .read()
+            .unwrap()
+            .get(info_hash)
+            .map_or(0, |e| e.complete)
     }
 
-    pub fn forget(&self, info_hash: &str) {
+    pub fn forget(&self, info_hash: &InfoHash) {
         use std::sync::atomic::Ordering;
         if let Some(e) = self.entries.write().unwrap().remove(info_hash) {
             self.swarm_seeds_total
@@ -503,20 +506,30 @@ impl Cache {
     /// client override for it. Listing only the declared ones showed a single
     /// row on a node announcing to several trackers.
     pub fn per_tracker(&self) -> HashMap<String, (i64, Duration)> {
-        let mut out: HashMap<String, (i64, Duration)> = HashMap::new();
+        // Grouped by the shared host string: a pass over every entry costs an
+        // allocation per host, not one per torrent.
+        let mut by_host: HashMap<Arc<str>, (i64, Duration)> = HashMap::new();
         for entry in self.entries.read().unwrap().values() {
-            let host = host_of(&entry.tracker);
-            if host.is_empty() {
+            if entry.host.is_empty() {
                 continue;
             }
             let age = entry.at.elapsed();
-            let slot = out.entry(host).or_insert((0, age));
-            slot.0 += 1;
-            if age < slot.1 {
-                slot.1 = age;
+            match by_host.get_mut(&*entry.host) {
+                Some(slot) => {
+                    slot.0 += 1;
+                    if age < slot.1 {
+                        slot.1 = age;
+                    }
+                }
+                None => {
+                    by_host.insert(entry.host.clone(), (1, age));
+                }
             }
         }
-        out
+        by_host
+            .into_iter()
+            .map(|(host, slot)| (host.to_string(), slot))
+            .collect()
     }
 
     pub fn len(&self) -> usize {
@@ -556,29 +569,72 @@ mod tests {
         Entry {
             complete,
             incomplete: 0,
-            tracker: "tr-a.test".into(),
+            host: "tr-a.test".into(),
             at: Instant::now(),
-            interval: Duration::from_secs(1800),
         }
     }
+
+    /// One per torrent that ever got an answer: it must not grow by accident.
+    /// The bound is the size measured on x86_64 when this was written.
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn an_entry_does_not_grow() {
+        let n = std::mem::size_of::<Entry>();
+        assert!(n <= 48, "cache::Entry grew to {n} bytes");
+    }
+
+    const AA: InfoHash = [0xaa; 20];
+    const BB: InfoHash = [0xbb; 20];
 
     #[test]
     fn a_torrent_no_tracker_answered_for_sorts_last() {
         let c = Cache::default();
-        c.record("aa", entry(42));
-        assert_eq!(c.swarm_seeds("aa"), 42);
-        assert_eq!(c.swarm_seeds("never-announced"), 0);
+        c.record(&AA, entry(42));
+        assert_eq!(c.swarm_seeds(&AA), 42);
+        assert_eq!(c.swarm_seeds(&BB), 0);
     }
 
     #[test]
     fn the_latest_answer_replaces_the_previous_one() {
         let c = Cache::default();
-        c.record("aa", entry(1));
-        c.record("aa", entry(9));
-        assert_eq!(c.swarm_seeds("aa"), 9);
+        c.record(&AA, entry(1));
+        c.record(&AA, entry(9));
+        assert_eq!(c.swarm_seeds(&AA), 9);
+        assert_eq!(c.swarm_totals().0, 9, "the totals follow the replacement");
         assert_eq!(c.len(), 1, "one entry per torrent, not one per announce");
-        c.forget("aa");
+        c.forget(&AA);
         assert!(c.is_empty());
+        assert_eq!(c.swarm_totals().0, 0);
+    }
+
+    /// The trackers tab counts each host once.
+    #[test]
+    fn per_tracker_counts_each_host_once() {
+        let c = Cache::default();
+        c.record(&AA, entry(1));
+        c.record(&BB, entry(2));
+        c.record(
+            &[0xcc; 20],
+            Entry {
+                host: "tr-b.test".into(),
+                ..entry(3)
+            },
+        );
+        let p = c.per_tracker();
+        assert_eq!(p.len(), 2, "{p:?}");
+        assert_eq!(p["tr-a.test"].0, 2);
+        assert_eq!(p["tr-b.test"].0, 1);
+    }
+
+    /// What an entry holds is what `host_of` leaves of the announce URL.
+    #[test]
+    fn host_of_keeps_the_host_only() {
+        assert_eq!(
+            host_of("https://tr-b.test:443/announce/secret"),
+            "tr-b.test"
+        );
+        assert_eq!(host_of("udp://tr-a.test:6969"), "tr-a.test");
+        assert_eq!(host_of("tr-a.test"), "tr-a.test");
     }
 
     /// ⭐ The point of the whole change: an hour after it stopped failing, a

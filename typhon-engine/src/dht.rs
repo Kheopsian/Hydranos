@@ -262,7 +262,7 @@ impl DhtSession {
                     break;
                 }
                 session.peers_discovered.fetch_add(1, Ordering::Relaxed);
-                if torrent.connected_addrs.contains_key(&peer_addr) {
+                if torrent.peers.contains_key(&peer_addr) {
                     continue;
                 }
                 session.peers_dialed.fetch_add(1, Ordering::Relaxed);

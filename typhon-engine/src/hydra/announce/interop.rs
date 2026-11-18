@@ -365,11 +365,10 @@ impl Torrust {
 }
 
 fn peer_id_hex(id: &str) -> String {
-    let mut s = String::from("0x");
-    for b in id.bytes() {
-        s.push_str(&format!("{b:02x}"));
-    }
-    s
+    format!(
+        "0x{}",
+        typhon_engine::torrent::hex_encode_bytes(id.as_bytes())
+    )
 }
 
 /// ⭐⭐⭐ What a private tracker stores about us is exactly what we meant:

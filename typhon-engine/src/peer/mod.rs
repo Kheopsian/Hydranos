@@ -1895,9 +1895,10 @@ mod paused_inbound_tests {
         let torrent = mgr.get(&ih).unwrap();
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
         while !torrent
-            .peer_stats
+            .peers
+            .snapshot()
             .iter()
-            .any(|e| e.value().interested.load(Ordering::Relaxed))
+            .any(|p| p.interested.load(Ordering::Relaxed))
         {
             assert!(
                 tokio::time::Instant::now() < deadline,
