@@ -1064,3 +1064,223 @@ async fn a_skip_checking_add_on_the_wrong_folder_shows_the_missing_path() {
         "{msg}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// `mode` / `engine` on the shim's add (a batch straight into hoard)
+// ---------------------------------------------------------------------------
+
+/// A shim add of several file parts in one request.
+async fn add_many(
+    s: &TestState,
+    torrents: &[&[u8]],
+    fields: &[(&str, &str)],
+) -> (StatusCode, String) {
+    let b = "shimboundary";
+    let mut body: Vec<u8> = Vec::new();
+    for (k, v) in fields {
+        body.extend_from_slice(
+            format!("--{b}\r\nContent-Disposition: form-data; name=\"{k}\"\r\n\r\n{v}\r\n")
+                .as_bytes(),
+        );
+    }
+    for t in torrents {
+        body.extend_from_slice(
+            format!("--{b}\r\nContent-Disposition: form-data; name=\"torrents\"; filename=\"t.torrent\"\r\nContent-Type: application/x-bittorrent\r\n\r\n").as_bytes(),
+        );
+        body.extend_from_slice(t);
+        body.extend_from_slice(b"\r\n");
+    }
+    body.extend_from_slice(format!("--{b}--\r\n").as_bytes());
+    let req = axum::http::Request::builder()
+        .method("POST")
+        .uri("/api/v2/torrents/add")
+        .header("X-API-Key", KEY)
+        .header("content-type", format!("multipart/form-data; boundary={b}"))
+        .body(axum::body::Body::from(body))
+        .unwrap();
+    let resp = super::router(s.state.clone()).oneshot(req).await.unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (status, String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// The engine that holds `hash`, or None.
+fn engine_of(s: &TestState, hash: &str) -> Option<String> {
+    find_torrent(&s.state, hash).map(|(engine, _)| engine)
+}
+
+/// ⭐ A batch sent with `mode=hoard` and no category lands in hoard, every
+/// file of it. Without the field the same batch went to race, and a client
+/// then had to move it -- a move made during the add's recheck dropped the
+/// check, and the hoard copy re-downloaded data already on disk.
+#[tokio::test]
+async fn a_batch_with_mode_hoard_lands_in_hoard_without_a_category() {
+    let s = st("shim-mode-hoard", "");
+    let (a, b) = (single("hoard-alpha"), single("hoard-bravo"));
+    let (code, body) = add_many(&s, &[&a, &b], &[("savepath", &data(&s)), ("mode", "hoard")]).await;
+    assert_eq!((code, body.as_str()), (StatusCode::OK, "Ok."));
+    assert_eq!(engine_of(&s, &hash_of(&a)).as_deref(), Some("hoard"));
+    assert_eq!(engine_of(&s, &hash_of(&b)).as_deref(), Some("hoard"));
+}
+
+/// `engine` names the engine by id, as on the native upload route.
+#[tokio::test]
+async fn the_engine_field_places_the_add_by_id() {
+    let s = st("shim-engine-id", "");
+    let t = single("by-id");
+    let (code, body) = add(&s, &t, &[("savepath", &data(&s)), ("engine", "hoard")]).await;
+    assert_eq!((code, body.as_str()), (StatusCode::OK, "Ok."));
+    assert_eq!(engine_of(&s, &hash_of(&t)).as_deref(), Some("hoard"));
+}
+
+/// Neither field: the category decides, exactly as before. An uncategorised
+/// add still goes to race; a hoard category still goes to hoard.
+#[tokio::test]
+async fn without_mode_or_engine_the_category_still_decides() {
+    let s = st("shim-mode-absent", "");
+    put_category(&s.state, "archive", "hoard", &data(&s));
+    let (plain, filed) = (single("plain-add"), single("filed-add"));
+    let (code, _) = add(&s, &plain, &[("savepath", &data(&s))]).await;
+    assert_eq!(code, StatusCode::OK);
+    let (code, _) = add(&s, &filed, &[("category", "archive")]).await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(engine_of(&s, &hash_of(&plain)).as_deref(), Some("race"));
+    assert_eq!(engine_of(&s, &hash_of(&filed)).as_deref(), Some("hoard"));
+}
+
+/// `mode` wins over a category of the other mode: the client said where.
+#[tokio::test]
+async fn mode_wins_over_the_category_mode() {
+    let s = st("shim-mode-over-cat", "");
+    put_category(&s.state, "films", "race", &data(&s));
+    let t = single("cat-race-mode-hoard");
+    let (code, _) = add(&s, &t, &[("category", "films"), ("mode", "hoard")]).await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(engine_of(&s, &hash_of(&t)).as_deref(), Some("hoard"));
+}
+
+/// A mode or engine that does not exist refuses the whole request, and adds
+/// nothing anywhere: falling back to the category would put a hoard batch in
+/// race without a word.
+#[tokio::test]
+async fn an_unknown_mode_or_engine_is_refused_and_adds_nothing() {
+    let s = st("shim-mode-unknown", "");
+    for (field, value) in [("mode", "vault"), ("engine", "nosuch")] {
+        let t = single(&format!("refused-{value}"));
+        let (code, body) = add(&s, &t, &[("savepath", &data(&s)), (field, value)]).await;
+        assert_eq!(
+            (code, body.as_str()),
+            (StatusCode::BAD_REQUEST, "Fails."),
+            "{field}={value}"
+        );
+        assert_eq!(
+            engine_of(&s, &hash_of(&t)),
+            None,
+            "{field}={value} added it"
+        );
+    }
+}
+
+/// A shim add cut short is `Fails.` and adds nothing. The read loop used to
+/// stop at the first error -- axum's 2 MB limit, in practice -- and add the
+/// torrents read so far while answering "Ok." for the whole batch.
+#[tokio::test]
+async fn a_shim_add_cut_short_fails_and_adds_nothing() {
+    let s = st("shim-cut-short", "");
+    let (a, b) = (single("cut-alpha"), single("cut-bravo"));
+    let boundary = "shimboundary";
+    let mut body: Vec<u8> = Vec::new();
+    body.extend_from_slice(
+        format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"savepath\"\r\n\r\n{}\r\n",
+            data(&s)
+        )
+        .as_bytes(),
+    );
+    for t in [&a, &b] {
+        body.extend_from_slice(
+            format!("--{boundary}\r\nContent-Disposition: form-data; name=\"torrents\"; filename=\"t.torrent\"\r\nContent-Type: application/x-bittorrent\r\n\r\n").as_bytes(),
+        );
+        body.extend_from_slice(t);
+        body.extend_from_slice(b"\r\n");
+    }
+    // The second file's bytes stop before its end and no closing boundary follows.
+    body.truncate(body.len() - 40);
+    let req = axum::http::Request::builder()
+        .method("POST")
+        .uri("/api/v2/torrents/add")
+        .header("X-API-Key", KEY)
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .body(axum::body::Body::from(body))
+        .unwrap();
+    let resp = super::router(s.state.clone()).oneshot(req).await.unwrap();
+    let status = resp.status();
+    let text = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        (status, &text[..]),
+        (StatusCode::BAD_REQUEST, &b"Fails."[..])
+    );
+    assert_eq!(
+        engine_of(&s, &hash_of(&a)),
+        None,
+        "the first file was not added either"
+    );
+}
+
+/// A shim add over the limit is 413 `Fails.` and adds nothing, the files that
+/// fit before the cut included.
+#[tokio::test]
+async fn a_shim_add_over_the_limit_is_413_and_adds_nothing() {
+    let s = st("shim-over-limit", "");
+    let a = single("over-alpha");
+    let boundary = "shimboundary";
+    let mut body: Vec<u8> = Vec::new();
+    body.extend_from_slice(
+        format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"savepath\"\r\n\r\n{}\r\n",
+            data(&s)
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(
+        format!("--{boundary}\r\nContent-Disposition: form-data; name=\"torrents\"; filename=\"t.torrent\"\r\nContent-Type: application/x-bittorrent\r\n\r\n").as_bytes(),
+    );
+    body.extend_from_slice(&a);
+    body.extend_from_slice(
+        format!("\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"pad\"\r\n\r\n")
+            .as_bytes(),
+    );
+    body.resize(body.len() + super::ADD_BODY_LIMIT + 1, b'x');
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    let req = axum::http::Request::builder()
+        .method("POST")
+        .uri("/api/v2/torrents/add")
+        .header("X-API-Key", KEY)
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .body(axum::body::Body::from(body))
+        .unwrap();
+    let resp = super::router(s.state.clone()).oneshot(req).await.unwrap();
+    let status = resp.status();
+    let text = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        (status, &text[..]),
+        (StatusCode::PAYLOAD_TOO_LARGE, &b"Fails."[..])
+    );
+    assert_eq!(
+        engine_of(&s, &hash_of(&a)),
+        None,
+        "the file before the cut was not added"
+    );
+}

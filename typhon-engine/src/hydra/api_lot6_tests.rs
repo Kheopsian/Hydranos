@@ -572,6 +572,277 @@ async fn an_upload_that_cannot_be_added_says_why_and_adds_nothing() {
     assert_eq!(held_count(), 1, "still only the one");
 }
 
+/// A multipart body of several file parts, all under `torrents`, after the
+/// text fields.
+fn multipart_many(fields: &[(&str, &str)], files: &[&[u8]]) -> (String, Vec<u8>) {
+    let b = "uploadboundary";
+    let mut body: Vec<u8> = Vec::new();
+    for (k, v) in fields {
+        body.extend_from_slice(
+            format!("--{b}\r\nContent-Disposition: form-data; name=\"{k}\"\r\n\r\n{v}\r\n")
+                .as_bytes(),
+        );
+    }
+    for bytes in files {
+        body.extend_from_slice(
+            format!("--{b}\r\nContent-Disposition: form-data; name=\"torrents\"; filename=\"t.torrent\"\r\nContent-Type: application/x-bittorrent\r\n\r\n").as_bytes(),
+        );
+        body.extend_from_slice(bytes);
+        body.extend_from_slice(b"\r\n");
+    }
+    body.extend_from_slice(format!("--{b}--\r\n").as_bytes());
+    (format!("multipart/form-data; boundary={b}"), body)
+}
+
+/// POST a ready multipart body to the upload route, with the key.
+async fn upload_raw(s: &TestState, ct: String, body: Vec<u8>) -> (StatusCode, serde_json::Value) {
+    let req = axum::http::Request::builder()
+        .method("POST")
+        .uri("/api/torrents/upload")
+        .header("content-type", ct)
+        .header("X-API-Key", KEY)
+        .body(axum::body::Body::from(body))
+        .unwrap();
+    let resp = router(s.state.clone()).oneshot(req).await.unwrap();
+    let code = resp.status();
+    (code, body_json(resp).await)
+}
+
+fn hash_of(bytes: &[u8]) -> String {
+    let m = typhon_engine::torrent::metainfo::parse_torrent_bytes(bytes).unwrap();
+    typhon_engine::torrent::hex_encode(&m.info_hash)
+}
+
+/// ⭐ A batch: one result per file, in the order sent, each saying what became
+/// of it -- added (with its engine), already present, or refused with the
+/// reason -- and a 200 for the request, since the request itself was good. A
+/// client reads this instead of listing the torrents again to find out.
+#[tokio::test]
+async fn a_batch_upload_answers_one_result_per_file_in_order() {
+    let s = st("upl-batch", "");
+    let dir = s.dir.join("incoming");
+    let d = dir.to_str().unwrap();
+    let (fresh, known) = (
+        torrent_bytes("batch-new.bin"),
+        torrent_bytes("batch-known.bin"),
+    );
+    let (code, _) = upload(
+        &s,
+        &[("savepath", d), ("mode", "hoard")],
+        Some(("torrents", &known)),
+        true,
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK);
+
+    let garbage: &[u8] = b"this is not a torrent";
+    let (ct, body) = multipart_many(
+        &[("savepath", d), ("mode", "hoard")],
+        &[&fresh, &known, garbage],
+    );
+    let (code, v) = upload_raw(&s, ct, body).await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    assert_eq!(
+        (
+            v["added"].as_u64(),
+            v["present"].as_u64(),
+            v["refused"].as_u64()
+        ),
+        (Some(1), Some(1), Some(1)),
+        "{v}"
+    );
+    let r = v["results"].as_array().expect("results");
+    assert_eq!(r.len(), 3, "{v}");
+
+    assert_eq!(r[0]["status"], "added");
+    assert_eq!(r[0]["info_hash"], hash_of(&fresh));
+    assert_eq!(r[0]["name"], "batch-new.bin");
+    assert_eq!(
+        (r[0]["engine"].as_str(), r[0]["mode"].as_str()),
+        (Some("hoard"), Some("hoard"))
+    );
+    assert!(
+        held(&s, "hoard", &hash_of(&fresh)).is_some(),
+        "in the engine it was sent to"
+    );
+
+    assert_eq!(r[1]["status"], "present");
+    assert_eq!(r[1]["info_hash"], hash_of(&known));
+
+    assert_eq!(r[2]["status"], "refused");
+    assert!(
+        r[2]["info_hash"].is_null(),
+        "no hash for bytes that are no torrent"
+    );
+    assert!(
+        r[2]["error"].as_str().unwrap().contains("did not parse"),
+        "{v}"
+    );
+
+    let held_count = manager(&s, "race").all().len() + manager(&s, "hoard").all().len();
+    assert_eq!(
+        held_count, 2,
+        "the known one was not added twice, the garbage not at all"
+    );
+    assert!(
+        manager(&s, "race").all().is_empty(),
+        "nothing fell back to race"
+    );
+}
+
+/// An empty file part is a result of its own, refused: dropping it would
+/// shift every result after it onto the wrong file.
+#[tokio::test]
+async fn an_empty_part_in_a_batch_keeps_the_results_in_step() {
+    let s = st("upl-batch-empty", "");
+    let dir = s.dir.join("incoming");
+    let (a, b) = (torrent_bytes("step-a.bin"), torrent_bytes("step-b.bin"));
+    let (ct, body) = multipart_many(&[("savepath", dir.to_str().unwrap())], &[&a, &[], &b]);
+    let (code, v) = upload_raw(&s, ct, body).await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    let r = v["results"].as_array().expect("results");
+    assert_eq!(r.len(), 3, "{v}");
+    assert_eq!(
+        (r[0]["status"].as_str(), r[0]["info_hash"].as_str()),
+        (Some("added"), Some(hash_of(&a).as_str()))
+    );
+    assert_eq!(r[1]["status"], "refused");
+    assert!(r[1]["info_hash"].is_null());
+    assert_eq!(
+        (r[2]["status"].as_str(), r[2]["info_hash"].as_str()),
+        (Some("added"), Some(hash_of(&b).as_str()))
+    );
+}
+
+/// `batch=true` gives one file the batch answer, so a client sends any count
+/// and reads one shape. Without it one file answers as it always has (the
+/// tests above), and a refusal keeps its status there.
+#[tokio::test]
+async fn batch_true_gives_a_single_file_the_batch_answer() {
+    let s = st("upl-batch-one", "");
+    let dir = s.dir.join("incoming");
+    let t = torrent_bytes("batch-one.bin");
+    let (ct, body) = multipart_many(
+        &[("savepath", dir.to_str().unwrap()), ("batch", "true")],
+        &[&t],
+    );
+    let (code, v) = upload_raw(&s, ct, body).await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    assert_eq!(v["added"], 1);
+    assert_eq!(v["results"][0]["status"], "added");
+    assert_eq!(v["results"][0]["info_hash"], hash_of(&t));
+    assert_eq!(
+        v["results"][0]["engine"], "race",
+        "no mode: the category decides, as before"
+    );
+}
+
+/// A batch past axum's 2 MB default is read whole: that default ended the
+/// read part way, and the torrents after the cut were dropped without a word.
+#[tokio::test]
+async fn a_batch_larger_than_two_megabytes_is_accepted() {
+    let s = st("upl-batch-big", "");
+    let dir = s.dir.join("incoming");
+    let (a, b) = (torrent_bytes("big-a.bin"), torrent_bytes("big-b.bin"));
+    // An ignored field carries the weight: the route reads every part.
+    let pad = "x".repeat(3 << 20);
+    let (ct, body) = multipart_many(
+        &[("savepath", dir.to_str().unwrap()), ("pad", &pad)],
+        &[&a, &b],
+    );
+    assert!(body.len() > 2 << 20);
+    let (code, v) = upload_raw(&s, ct, body).await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    assert_eq!(v["added"], 2, "{v}");
+}
+
+/// A request cut short -- here the closing boundary never comes -- is refused
+/// whole and adds nothing, not the files read before the break.
+#[tokio::test]
+async fn an_upload_cut_short_is_refused_and_adds_nothing() {
+    let s = st("upl-batch-cut", "");
+    let dir = s.dir.join("incoming");
+    let (a, b) = (torrent_bytes("cut-a.bin"), torrent_bytes("cut-b.bin"));
+    let (ct, mut body) = multipart_many(&[("savepath", dir.to_str().unwrap())], &[&a, &b]);
+    let tail = b"--uploadboundary--\r\n".len();
+    body.truncate(body.len() - tail - 40);
+    let (code, v) = upload_raw(&s, ct, body).await;
+    assert_eq!(code, StatusCode::BAD_REQUEST, "{v}");
+    assert!(
+        v["error"]
+            .as_str()
+            .unwrap()
+            .contains("could not be read whole"),
+        "{v}"
+    );
+    assert!(manager(&s, "race").all().is_empty() && manager(&s, "hoard").all().is_empty());
+}
+
+/// ⭐ A request over the limit is refused whole with 413, saying the limit and
+/// what to do, and adds nothing -- not even the files that fit before the
+/// cut. The limit is per request, so the same files sent in groups get in.
+#[tokio::test]
+async fn an_upload_over_the_limit_is_413_names_the_limit_and_adds_nothing() {
+    let s = st("upl-over-limit", "");
+    let dir = s.dir.join("incoming");
+    let d = dir.to_str().unwrap();
+    let (a, b) = (torrent_bytes("over-a.bin"), torrent_bytes("over-b.bin"));
+    // The torrents first, then the weight: what fits is read before the cut.
+    let (ct, mut body) = multipart_many(&[("savepath", d)], &[&a, &b]);
+    let close = b"--uploadboundary--
+"
+    .len();
+    body.truncate(body.len() - close);
+    body.extend_from_slice(
+        b"--uploadboundary
+Content-Disposition: form-data; name=\"pad\"
+
+",
+    );
+    body.resize(body.len() + super::ADD_BODY_LIMIT + 1, b'x');
+    body.extend_from_slice(
+        b"
+--uploadboundary--
+",
+    );
+    let (code, v) = upload_raw(&s, ct, body).await;
+    assert_eq!(code, StatusCode::PAYLOAD_TOO_LARGE, "{v}");
+    assert_eq!(
+        v["upload_limit_bytes"].as_u64(),
+        Some(super::ADD_BODY_LIMIT as u64)
+    );
+    assert!(
+        v["error"].as_str().unwrap().contains("smaller groups"),
+        "{v}"
+    );
+    assert!(manager(&s, "race").all().is_empty() && manager(&s, "hoard").all().is_empty());
+
+    // The same two files in groups under the limit: both get in.
+    for t in [&a, &b] {
+        let (code, v) = upload(&s, &[("savepath", d)], Some(("torrents", t)), true).await;
+        assert_eq!(code, StatusCode::OK, "{v}");
+    }
+}
+
+/// The limit is published, so a client sizes its groups before it sends.
+#[tokio::test]
+async fn the_status_publishes_the_upload_limit() {
+    let s = st("upl-limit-status", "");
+    let req = axum::http::Request::builder()
+        .uri("/api/status")
+        .header("X-API-Key", KEY)
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let resp = router(s.state.clone()).oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v = body_json(resp).await;
+    assert_eq!(
+        v["upload_limit_bytes"].as_u64(),
+        Some(super::ADD_BODY_LIMIT as u64),
+        "{v}"
+    );
+}
+
 /// ⭐ Which engine an upload's `engine` and `mode` name: an engine by its id
 /// first, a mode by the engine called after it, and only then by any engine
 /// that has the role. A node that renamed its roles gets the engine whose role
