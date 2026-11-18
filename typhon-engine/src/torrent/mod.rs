@@ -5228,6 +5228,9 @@ mod lifecycle_tests {
     /// the verdict went onto the stopped torrent and was written down. The
     /// last look is now made under the lock a stop takes, so a stop made
     /// while the check waits for it calls the verdict off.
+    // The guard is held across the sleeps on purpose: it stands for the stop
+    // that waits on the publish.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn reads_that_finish_after_a_stop_cannot_publish() {
         let (mgr, root, ih, t) = whole_two_piece_torrent("cancelverdict");
