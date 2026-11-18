@@ -414,6 +414,7 @@ pub enum Kind {
 pub const STATES: &[&str] = &[
     "seeding",
     "downloading",
+    "seed_only",
     "stopped",
     "queued",
     "checking_files",

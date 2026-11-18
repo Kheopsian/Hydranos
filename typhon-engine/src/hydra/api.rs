@@ -12761,6 +12761,92 @@ async fn post_torrent_download_order(
     Json(serde_json::json!({"info_hash": hash, "copies": list})).into_response()
 }
 
+// --- Seed only: serve what is held, never fetch the rest --------------------
+
+fn seed_only_json(
+    engine: &str,
+    t: &typhon_engine::torrent::meta::TorrentState,
+) -> serde_json::Value {
+    serde_json::json!({
+        "engine": engine,
+        "seed_only": t.is_seed_only(),
+        "complete": t.bytes_left() == 0,
+    })
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SeedOnlyBody {
+    seed_only: bool,
+}
+
+/// One torrent's seed-only flag, per local copy (`?engine=` for one).
+async fn get_torrent_seed_only(
+    State(state): State<AppState>,
+    Path(info_hash): Path<String>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+    let hash = {
+        let store = state.store.read().unwrap_or_else(|p| p.into_inner());
+        store
+            .resolve_hash(&info_hash)
+            .unwrap_or_else(|| info_hash.to_lowercase())
+    };
+    let copies = torrent_copies(&state, &hash, &engine_param(&query, ""));
+    if copies.is_empty() {
+        return not_found();
+    }
+    let list: Vec<_> = copies.iter().map(|(e, t)| seed_only_json(e, t)).collect();
+    Json(serde_json::json!({"info_hash": hash, "copies": list})).into_response()
+}
+
+/// Set or clear one torrent's seed-only flag, `{"seed_only": true|false}`:
+/// the torrent keeps serving what it holds and never asks for a piece nor
+/// writes its data. Allowed on a stopped torrent that never ran. Every local
+/// copy unless `?engine=` names one; live and persisted at once, and not
+/// acknowledged when the store refuses it (500).
+async fn post_torrent_seed_only(
+    State(state): State<AppState>,
+    Path(info_hash): Path<String>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+    let req: SeedOnlyBody = match serde_json::from_str(&body) {
+        Ok(r) => r,
+        Err(e) => return bad_request(&format!("invalid body: {e}")),
+    };
+    let hash = {
+        let store = state.store.read().unwrap_or_else(|p| p.into_inner());
+        store
+            .resolve_hash(&info_hash)
+            .unwrap_or_else(|| info_hash.to_lowercase())
+    };
+    let copies = torrent_copies(&state, &hash, &engine_param(&query, ""));
+    if copies.is_empty() {
+        return not_found();
+    }
+    let mut list = Vec::new();
+    for (engine, t) in &copies {
+        if let Some(e) = state.engines.get(engine) {
+            if let Err(msg) = e.manager.set_seed_only(&t.info_hash, req.seed_only) {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": msg})),
+                )
+                    .into_response();
+            }
+        }
+        list.push(seed_only_json(engine, t));
+    }
+    Json(serde_json::json!({"info_hash": hash, "copies": list})).into_response()
+}
+
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct EngineRateLimitsBody {
@@ -14120,6 +14206,8 @@ fn detail_payload(
         // Download order (file priorities are on the files route).
         "sequential": torrent.download_order_flags().0,
         "first_last_piece": torrent.download_order_flags().1,
+        // Barred from downloading: serves what it holds, asks for nothing.
+        "seed_only": torrent.is_seed_only(),
         // Share limits: its own, the ones in force, and the engine's action.
         "share_limits": crate::sharelimits::native_json(
             engine_id,
@@ -19806,6 +19894,10 @@ fn router_with(state: AppState, extra: Router<AppState>) -> Router {
             "/api/torrents/:info_hash/download-order",
             get(get_torrent_download_order).post(post_torrent_download_order),
         )
+        .route(
+            "/api/torrents/:info_hash/seed-only",
+            get(get_torrent_seed_only).post(post_torrent_seed_only),
+        )
         .route("/api/v2/torrents/rename", axum::routing::post(qbit_rename))
         .route(
             "/api/v2/torrents/topPrio",
@@ -21429,6 +21521,10 @@ mod api_access_tests;
 #[cfg(test)]
 #[path = "api_rename_tests.rs"]
 mod api_rename_tests;
+
+#[cfg(test)]
+#[path = "api_seed_only_tests.rs"]
+mod api_seed_only_tests;
 
 #[cfg(test)]
 #[path = "api_lot6_tests.rs"]
@@ -32297,6 +32393,7 @@ mod detail_panel_tests {
             "engine_download_limit": torrent.engine_rates().engine.down.rate(),
             "sequential": torrent.download_order_flags().0,
             "first_last_piece": torrent.download_order_flags().1,
+            "seed_only": torrent.is_seed_only(),
             "share_limits": crate::sharelimits::native_json(
                 engine_id,
                 &state.store.read().map(|s| s.share_limits_of(hash)).unwrap_or_default(),

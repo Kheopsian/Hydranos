@@ -304,7 +304,8 @@ fn facts_of(
         // make `state == stopped` match torrents the UI shows as
         // queued, which is a view contradicting another.
         state: crate::row::derive_state_static(
-            typhon_engine::rpc::dispatch::state_str(
+            typhon_engine::rpc::dispatch::state_of(
+                t,
                 t.status.load(Ordering::Relaxed),
                 t.is_paused.load(Ordering::Relaxed),
                 // Not the check's flag: a recheck of a stopped torrent is

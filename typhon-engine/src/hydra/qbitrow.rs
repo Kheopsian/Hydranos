@@ -81,6 +81,11 @@ pub fn state_to_qbit(
                 "queuedDL"
             }
         }
+        // Barred from downloading and incomplete. Never an *UP state: the
+        // *arr clients read those as "completed" and import the files, and
+        // these are not whole. A download-side state that is not a transfer,
+        // the one a stopped incomplete torrent already shows.
+        "seed_only" => "stoppedDL",
         "error" => "error",
         "moving" => "moving",
         "allocating" => "allocating",
@@ -296,6 +301,23 @@ mod tests {
         assert_eq!(state_to_qbit("queued", 1.0, 0, 0, false), "queuedUP");
         assert_eq!(state_to_qbit("queued", 0.5, 0, 0, false), "queuedDL");
         assert_eq!(state_to_qbit("stopped", 0.5, 0, 0, false), "stoppedDL");
+    }
+
+    /// ⭐ An incomplete seed-only torrent is never an *UP state (Sonarr and
+    /// Radarr import on those) nor a transfer under way: `stoppedDL`, whether
+    /// it is serving a peer or not, running or stopped.
+    #[test]
+    fn an_incomplete_seed_only_torrent_reads_as_stopped_download() {
+        for (upload, user_paused) in [(0, false), (9000, false), (0, true), (9000, true)] {
+            assert_eq!(
+                state_to_qbit("seed_only", 0.6, upload, 0, user_paused),
+                "stoppedDL",
+                "upload {upload} paused {user_paused}"
+            );
+        }
+        // Complete: the normal seeding states, untouched.
+        assert_eq!(state_to_qbit("seeding", 1.0, 5000, 0, false), "uploading");
+        assert_eq!(state_to_qbit("seeding", 1.0, 0, 0, false), "stalledUP");
     }
 
     #[test]

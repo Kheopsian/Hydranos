@@ -317,6 +317,10 @@ pub enum Action {
         sequential: Option<bool>,
         first_last_piece: Option<bool>,
     },
+    /// Set or clear the seed-only flag: serve what is held, never download.
+    SeedOnly {
+        seed_only: bool,
+    },
 }
 
 fn params<T: serde::de::DeserializeOwned>(v: &Value) -> Result<T, Refusal> {
@@ -401,6 +405,12 @@ struct ShareLimitParams {
     seeding_time_limit: Option<i64>,
     #[serde(default)]
     inactive_seeding_time_limit: Option<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SeedOnlyParams {
+    seed_only: bool,
 }
 
 #[derive(Deserialize)]
@@ -536,6 +546,12 @@ impl Action {
                 Action::DownloadOrder {
                     sequential: d.sequential,
                     first_last_piece: d.first_last_piece,
+                }
+            }
+            "seed_only" => {
+                let d: SeedOnlyParams = params(p)?;
+                Action::SeedOnly {
+                    seed_only: d.seed_only,
                 }
             }
             "node-move" => {
@@ -838,6 +854,11 @@ async fn remote_action(state: &AppState, t: &Target, action: &Action) -> Outcome
             format!("/api/torrents/{h}/download-order?engine={e}"),
             Some(download_order_body(*sequential, *first_last_piece)),
         ),
+        Action::SeedOnly { seed_only } => (
+            reqwest::Method::POST,
+            format!("/api/torrents/{h}/seed-only?engine={e}"),
+            Some(json!({"seed_only": seed_only})),
+        ),
         Action::Remove { delete_files } => (
             reqwest::Method::DELETE,
             format!("/api/torrents/{h}?delete_files={delete_files}&engine={e}"),
@@ -1129,6 +1150,19 @@ async fn one(state: &AppState, c: &Caller, action: &Action, t: &Target) -> Outco
                     enc(&t.engine())
                 ),
                 Some(download_order_body(*sequential, *first_last_piece)),
+                h,
+                "ok",
+            )
+            .await
+        }
+        Action::SeedOnly { seed_only } => {
+            if !t.is_local() {
+                return remote_action(state, t, action).await;
+            }
+            c.simple(
+                Method::POST,
+                &format!("/api/torrents/{h}/seed-only?engine={}", enc(&t.engine())),
+                Some(json!({"seed_only": seed_only})),
                 h,
                 "ok",
             )
@@ -1787,6 +1821,44 @@ mod tests {
         assert_eq!(flags(&h[0]), (true, true), "first/last kept");
         assert_eq!(flags(&h[1]), (true, false));
         assert_eq!(flags(&h[2]), (false, false), "series was not selected");
+    }
+
+    /// `seed_only` by filter sets the flag on exactly the filtered torrents,
+    /// clears it again, and a params without the flag is refused.
+    #[tokio::test]
+    async fn seed_only_by_filter_reaches_exactly_the_filtered_torrents() {
+        let (s, h) = library("sel-seedonly");
+        let (st, _) = start(
+            &s,
+            "seed_only",
+            json!({"selection": {"filter": "category=movies", "expect": 2}, "params": {}}),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        let hoard = s.state.engines.get("hoard").unwrap();
+        let on = |hash: &str| {
+            hoard
+                .manager
+                .get(&typhon_engine::torrent::hex_decode(hash).unwrap())
+                .unwrap()
+                .is_seed_only()
+        };
+        for flag in [true, false] {
+            let (st, v) = start(
+                &s,
+                "seed_only",
+                json!({"selection": {"filter": "category=movies", "expect": 2}, "params": {"seed_only": flag}}),
+            )
+            .await;
+            assert_eq!(st, StatusCode::ACCEPTED, "{v}");
+            let j = wait(&s, v["job"].as_str().unwrap()).await;
+            assert_eq!(
+                (j["done"].as_u64(), j["failed"].as_u64()),
+                (Some(2), Some(0)),
+                "{j}"
+            );
+            assert_eq!((on(&h[0]), on(&h[1]), on(&h[2])), (flag, flag, false));
+        }
     }
 
     /// `share_limits` by filter is a store write on exactly the filtered

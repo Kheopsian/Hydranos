@@ -72,6 +72,23 @@ pub fn state_str(status_u8: u8, is_paused: bool, rechecking: bool) -> &'static s
     }
 }
 
+/// `state_str` for a torrent: an incomplete one barred from downloading
+/// (`TorrentState::seed_only`) is not "downloading" to anybody who reads the
+/// state, whatever status it keeps inside. It reads `seed_only`: a client that
+/// takes "downloading" for a transfer under way, or "seeding" for a finished
+/// file, would be told something false either way.
+pub fn state_of(
+    t: &crate::torrent::meta::TorrentState,
+    status_u8: u8,
+    is_paused: bool,
+    rechecking: bool,
+) -> &'static str {
+    match state_str(status_u8, is_paused, rechecking) {
+        "downloading" if t.is_seed_only() => "seed_only",
+        other => other,
+    }
+}
+
 /// How many pieces the engine counts as held, and out of how many.
 ///
 /// The detail panel's `pieces_have` / `pieces_total`. It is `torrent_core`'s
@@ -89,7 +106,7 @@ pub fn torrent_core(t: &Arc<crate::torrent::meta::TorrentState>) -> TorrentCore 
     // only until its files are in place, and a client that sees "stopped"
     // would verify it over a folder not yet there.
     let rechecking = t.rechecking.load(Ordering::Relaxed) || t.held_for_proof();
-    let state = state_str(status_u8, is_paused, rechecking);
+    let state = state_of(t, status_u8, is_paused, rechecking);
     // Real progress from picker's have count (was a 0.0/1.0 placeholder).
     let (num_have, progress) = if status_u8 == TorrentStatus::Seeding as u8 {
         (t.meta.num_pieces(), 1.0_f64)
@@ -323,6 +340,7 @@ pub fn torrent_to_json(t: &Arc<crate::torrent::meta::TorrentState>) -> Value {
         "current_tracker": current_tracker,
         "tracker_host": tracker_host,
         "is_paused": is_paused,
+        "seed_only": t.is_seed_only(),
         "is_finished": progress >= 1.0,
         "is_seeding": status_u8 == TorrentStatus::Seeding as u8,
         "is_announced": announce_ok,

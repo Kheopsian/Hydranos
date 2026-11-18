@@ -256,6 +256,9 @@ pub fn build(engine: &Value, facts: &StoreFacts, agent: &str) -> Value {
     row.insert("progress".into(), num(progress));
     row.insert("ratio".into(), num(ratio));
     row.insert("save_path".into(), save_path.into());
+    // Barred from downloading by the user: serves what it holds, asks for
+    // nothing. Its `state` says so too.
+    row.insert("seed_only".into(), b(engine, "seed_only").into());
     // The engine's live counter wins over the store's copy. The store is
     // written once an hour -- enough for a rule that asks about 48 hours, far
     // too coarse for a panel a person is looking at, which would sit on a
@@ -471,6 +474,7 @@ mod tests {
                 "progress",
                 "ratio",
                 "save_path",
+                "seed_only",
                 "seeding_time",
                 "state",
                 "swarm_leechers",

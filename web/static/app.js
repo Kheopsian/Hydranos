@@ -5192,7 +5192,7 @@ function _hydraPromptLimits(title, body, up, down) {
 // carry it, and a selection over a filter (or a large one) is not read at
 // all -- it shows unticked, and a click turns the setting on.
 const _ORDER_MARK_MAX = 50;
-const _orderMarks = { sequential: false, first_last_piece: false };
+const _orderMarks = { sequential: false, first_last_piece: false, seed_only: false };
 let _orderMarksReq = 0;
 
 async function _refreshOrderMarks() {
@@ -5202,28 +5202,45 @@ async function _refreshOrderMarks() {
         const f = document.getElementById("ctx-first-last-mark");
         if (s) s.textContent = _orderMarks.sequential ? "✓" : "";
         if (f) f.textContent = _orderMarks.first_last_piece ? "✓" : "";
+        const so = document.getElementById("ctx-seed-only-mark");
+        if (so) so.textContent = _orderMarks.seed_only ? "✓" : "";
     };
     _orderMarks.sequential = false;
     _orderMarks.first_last_piece = false;
+    _orderMarks.seed_only = false;
     paint();
     const count = _selCount();
     if (_selAll || count === 0 || count > _ORDER_MARK_MAX) return;
     const hashes = [..._selected.values()].map(v => _selHash(v));
-    let seq = true, fl = true;
+    let seq = true, fl = true, so = true;
     for (const h of hashes) {
         try {
             const r = await api(`/api/torrents/${encodeURIComponent(h)}/download-order`);
             const c = (r.copies || [])[0];
-            if (!c) { seq = fl = false; break; }
+            if (!c) { seq = fl = so = false; break; }
             seq = seq && !!c.sequential;
             fl = fl && !!c.first_last_piece;
-        } catch (_) { seq = fl = false; break; } // a remote row: unticked
-        if (!seq && !fl) break;
+            const o = await api(`/api/torrents/${encodeURIComponent(h)}/seed-only`);
+            so = so && !!((o.copies || [])[0] || {}).seed_only;
+        } catch (_) { seq = fl = so = false; break; } // a remote row: unticked
+        if (!seq && !fl && !so) break;
     }
     if (req !== _orderMarksReq) return;
     _orderMarks.sequential = seq;
     _orderMarks.first_last_piece = fl;
+    _orderMarks.seed_only = so;
     paint();
+}
+
+// Seed only: ticked when every selected torrent has it; a click sets the
+// opposite on the whole selection. The torrent keeps serving what it holds and
+// never downloads the rest, so it stays incomplete by choice.
+async function _toggleSeedOnlySelected() {
+    _hideCtxMenu();
+    if (_selCount() === 0) return;
+    const on = !_orderMarks.seed_only;
+    const j = await _runSelection("seed_only", { seed_only: on }, t("Seed only (never download)"));
+    if (j) _bulkNote(j, "");
 }
 
 async function _toggleOrderSelected(key) {
@@ -5428,6 +5445,14 @@ function displayState(t) {
     }
     if (t.state === "queued") {
         return { label: window.t("queued"), cls: "state-queued", title: window.t("Waiting for a slot") };
+    }
+    // Incomplete by choice: it serves what it holds and asks for nothing.
+    if (t.state === "seed_only") {
+        return {
+            label: window.t("seed only"),
+            cls: "state-active",
+            title: window.t("Seed only: serves what it holds, never downloads the rest"),
+        };
     }
     return {
         label: window.t(t.state),
