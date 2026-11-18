@@ -3809,9 +3809,9 @@ fn disk_entry(key: &str) -> (Arc<Semaphore>, DiskKind) {
     (d.sem.clone(), d.kind)
 }
 
-/// Checks the disk under `key` lets read at once now.
-#[cfg(test)]
-fn disk_count(key: &str) -> usize {
+/// Checks the disk under `key` lets read at once now: 1 for a hard drive,
+/// 4 for an SSD on Linux (by `/sys`), and whatever the limit was set to.
+pub fn disk_count(key: &str) -> usize {
     disk_entry(key);
     disk_map().lock().unwrap().get(key).map_or(0, |d| d.count)
 }

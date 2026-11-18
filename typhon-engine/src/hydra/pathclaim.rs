@@ -2629,11 +2629,11 @@ mod tests {
 
     /// A bulk add of releases sharing one folder started one full read per
     /// torrent at once. The real threaded path runs here (the test asks for it
-    /// on this thread; inline is the default under test), with two of the four
-    /// recheck slots held by the test so the limit is two: five adds, four
-    /// proofs, never more than two reading together. And all on one disk, so
-    /// in fact one at a time: two proofs reading one hard drive at once made
-    /// it seek between them for every read.
+    /// on this thread; inline is the default under test): five adds, four
+    /// proofs, all on one disk. Never more proofs may read that disk at once
+    /// than the disk allows. That is 1 on a hard drive, where two proofs made
+    /// the disk seek between them for every read, and 4 on an SSD, which the
+    /// kernel reports on Linux, so the expected maximum is read from the disk.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_bulk_add_runs_no_more_proofs_than_the_recheck_limit() {
         use std::sync::atomic::Ordering::SeqCst;
@@ -2674,9 +2674,10 @@ mod tests {
         drop((held_a, held_b));
         assert_eq!(PROOFS_DONE.load(SeqCst), 4, "the proofs did not all run");
         let max = PROOFS_MAX.load(SeqCst);
-        assert_eq!(
-            max, 1,
-            "{max} proofs were reading one disk at once, the limit per disk is 1"
+        let limit = typhon_engine::torrent::disk_count(&typhon_engine::torrent::disk_key(&dir));
+        assert!(
+            (1..=limit).contains(&max),
+            "{max} proofs were reading one disk at once, the limit per disk is {limit}"
         );
     }
 
