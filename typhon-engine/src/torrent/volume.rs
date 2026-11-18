@@ -46,11 +46,22 @@ fn volume_of(_p: &Path) -> Option<u64> {
     None
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Tests on this thread see every path as on a FUSE pool, which no
+    /// test machine can be made to have.
+    pub static POOLED_FOR_TEST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// The filesystem holding `path` (or its nearest existing ancestor) is a
 /// FUSE pool -- mergerfs, rclone and the like -- where one branch can be
 /// missing while the mount stays up. Files absent there cannot be told
 /// deleted from offline, so they are taken for offline.
 pub fn is_pooled(path: &Path) -> bool {
+    #[cfg(test)]
+    if POOLED_FOR_TEST.with(|c| c.get()) {
+        return true;
+    }
     #[cfg(target_os = "linux")]
     {
         use nix::sys::statfs::{statfs, FUSE_SUPER_MAGIC};

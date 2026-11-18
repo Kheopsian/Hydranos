@@ -2040,6 +2040,25 @@ impl TorrentState {
             }
             return FilesVerdict::Fine;
         }
+        // Only a missing file the state claims pieces of says anything about
+        // the disk. One the torrent holds no piece of is a download that has
+        // not got there yet (its folder not created): taken for an unmounted
+        // disk, it would park a download in progress, and on a pool any such
+        // file would. No picker is a torrent loaded whole: every file counts.
+        let absent: Vec<(usize, PathBuf)> = match self.picker.get() {
+            None => absent,
+            Some(p) => {
+                let p = p.lock().unwrap();
+                absent
+                    .into_iter()
+                    .filter(|(i, _)| {
+                        let f = &self.meta.files[*i];
+                        let (from, to) = (f.offset / plen, (f.offset + f.length - 1) / plen);
+                        (from..=to).any(|piece| p.has_piece(piece as u32))
+                    })
+                    .collect()
+            }
+        };
         if let Some((_, first_absent)) = absent.first() {
             if self.absent_means_offline(first_absent, found.is_empty(), &absent) {
                 let first = absent
@@ -2162,7 +2181,7 @@ impl TorrentState {
         }
     }
 
-    /// Files of this torrent are absent (`absent`, the first at
+    /// Files this torrent holds pieces of are absent (`absent`, the first at
     /// `first_absent`; `none_here` when no file at all is there). Is that
     /// its disk not being mounted, rather than the files being deleted?
     ///
@@ -3226,6 +3245,79 @@ mod tests {
             "a missing folder retracted pieces"
         );
         assert!(st.data_lost_msg().starts_with(ABSENT_PARK));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `seeded_pack_under` as a download that holds only `b.bin` (pieces
+    /// 2-3), with `b.bin` written in full and `sub/` not created yet.
+    fn partial_pack_without_its_second_folder(tag: &str) -> (std::path::PathBuf, TorrentState) {
+        let dir = scratch(tag);
+        std::fs::create_dir_all(dir.join("pack")).unwrap();
+        std::fs::write(dir.join("pack/b.bin"), vec![0u8; 32768]).unwrap();
+        let st = seeded_pack_under(dir.clone());
+        {
+            let mut p = st.picker.get().unwrap().lock().unwrap();
+            p.clear_have(0);
+            p.clear_have(1);
+        }
+        st.status
+            .store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+        (dir, st)
+    }
+
+    /// A download whose next folder is not created yet is a download in
+    /// progress, not an unmounted disk: the missing file holds no piece.
+    #[test]
+    fn a_partial_download_whose_next_folder_is_not_there_yet_is_not_parked() {
+        let (dir, st) = partial_pack_without_its_second_folder("partial-no-folder");
+        st.check_files_back_the_state();
+        assert!(
+            !st.files_absent.load(Ordering::Relaxed),
+            "parked as not mounted: {}",
+            st.data_lost_msg()
+        );
+        assert_eq!(
+            st.status.load(Ordering::Relaxed),
+            TorrentStatus::Downloading as u8
+        );
+        assert_eq!(st.picker.get().unwrap().lock().unwrap().num_have(), 2);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// On a pool (mergerfs, Unraid user shares) a missing file the torrent
+    /// holds no piece of does not park it either.
+    #[test]
+    fn on_a_pool_a_missing_file_with_no_piece_held_does_not_park() {
+        let (dir, st) = partial_pack_without_its_second_folder("pooled-unheld");
+        super::super::volume::POOLED_FOR_TEST.with(|c| c.set(true));
+        st.check_files_back_the_state();
+        super::super::volume::POOLED_FOR_TEST.with(|c| c.set(false));
+        assert!(
+            !st.files_absent.load(Ordering::Relaxed),
+            "parked as not mounted: {}",
+            st.data_lost_msg()
+        );
+        assert_eq!(
+            st.status.load(Ordering::Relaxed),
+            TorrentStatus::Downloading as u8
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// On a pool a missing file the torrent holds pieces of still parks it
+    /// as not mounted, pieces kept.
+    #[test]
+    fn on_a_pool_a_missing_file_with_pieces_held_still_parks() {
+        let dir = scratch("pooled-held");
+        std::fs::create_dir_all(dir.join("pack/sub")).unwrap();
+        std::fs::write(dir.join("pack/b.bin"), vec![0u8; 32768]).unwrap();
+        let st = seeded_pack_under(dir.clone());
+        super::super::volume::POOLED_FOR_TEST.with(|c| c.set(true));
+        st.check_files_back_the_state();
+        super::super::volume::POOLED_FOR_TEST.with(|c| c.set(false));
+        assert!(st.files_absent.load(Ordering::Relaxed), "not parked");
+        assert!(st.data_lost_msg().starts_with(ABSENT_PARK));
+        assert_eq!(st.picker.get().unwrap().lock().unwrap().num_have(), 4);
         std::fs::remove_dir_all(&dir).ok();
     }
 
