@@ -489,6 +489,7 @@ pub fn prove_from(
 /// through the byte comparison of `TorrentState::guard_files`, which never
 /// touches a byte of a file it cannot prove. A file with no piece of its own
 /// (smaller than a piece) has no interior to vouch for it.
+#[cfg(test)]
 pub fn prove_detail(
     meta: &TorrentMeta,
     src_root: &Path,
@@ -496,6 +497,20 @@ pub fn prove_detail(
     beside: bool,
     verify: &(dyn Fn(u32, &[u8]) -> Option<bool> + Sync),
 ) -> (HashSet<PathBuf>, HashSet<PathBuf>) {
+    let (proven, interior, _) = prove_pieces(meta, src_root, candidates, beside, verify);
+    (proven, interior)
+}
+
+/// `prove_detail`, and with it every piece that was read from `src_root`
+/// and verified: what the recheck after the proof need not read again
+/// (`TorrentManager::recheck_knowing`).
+pub fn prove_pieces(
+    meta: &TorrentMeta,
+    src_root: &Path,
+    candidates: &HashSet<PathBuf>,
+    beside: bool,
+    verify: &(dyn Fn(u32, &[u8]) -> Option<bool> + Sync),
+) -> (HashSet<PathBuf>, HashSet<PathBuf>, HashSet<u32>) {
     let plen = meta.piece_length as u64;
     let mut wanted: HashMap<PathBuf, (u32, u32)> = HashMap::new();
     let mut proven: HashSet<PathBuf> = HashSet::new();
@@ -598,7 +613,7 @@ pub fn prove_detail(
             interior_ok.insert(path);
         }
     }
-    (proven, interior_ok)
+    (proven, interior_ok, good)
 }
 
 /// Whether a file proven by its interior only is accepted. The comparison that
@@ -617,7 +632,7 @@ fn accepted_interior(interior: HashSet<PathBuf>, allowed: bool) -> HashSet<PathB
     }
 }
 
-/// `prove_detail` against a torrent the engine holds.
+/// `prove_pieces` against a torrent the engine holds.
 ///
 /// Checked against the SHA-1 table of `metainfo` -- the bytes the caller
 /// already has in hand -- rather than through the engine, which loads its own
@@ -629,7 +644,7 @@ pub fn prove_torrent_detail(
     src_root: &Path,
     candidates: &HashSet<PathBuf>,
     beside: bool,
-) -> (HashSet<PathBuf>, HashSet<PathBuf>) {
+) -> (HashSet<PathBuf>, HashSet<PathBuf>, HashSet<u32>) {
     let table = metainfo.and_then(crate::dedup::pieces);
     let check = |p: u32, d: &[u8]| -> Option<bool> {
         match table {
@@ -641,7 +656,24 @@ pub fn prove_torrent_detail(
             None => t.verify_piece(p, d),
         }
     };
-    prove_detail(&t.meta, src_root, candidates, beside, &check)
+    prove_pieces(&t.meta, src_root, candidates, beside, &check)
+}
+
+/// The pieces of `good` that lie wholly in `files` (padding aside), sorted:
+/// of what a proof read elsewhere, what the torrent's own files now hold,
+/// since those are links to the very files it read.
+fn pieces_within(meta: &TorrentMeta, good: &HashSet<u32>, files: &HashSet<PathBuf>) -> Vec<u32> {
+    let mut v: Vec<u32> = good
+        .iter()
+        .copied()
+        .filter(|&p| {
+            meta.map_block(p, 0, meta.piece_size(p))
+                .iter()
+                .all(|op| op.pad || files.contains(&op.path))
+        })
+        .collect();
+    v.sort_unstable();
+    v
 }
 
 // ---------------------------------------------------------------------------
@@ -872,6 +904,7 @@ pub fn finish(
         .map(|t| t.adopt_proof_hold());
     let job = Job {
         _hold: hold,
+        follow: Follow::new(hash),
         metainfo: Some(bytes.to_vec()),
         state: state.clone(),
         engine_id: engine_id.to_string(),
@@ -942,6 +975,114 @@ fn read_root_of(state: &AppState, engine_id: &str, hash: &str) -> Option<PathBuf
     Some(root_of(&t.meta, &save_path))
 }
 
+// ---------------------------------------------------------------------------
+// A proof follows its torrent across an engine move
+// ---------------------------------------------------------------------------
+
+use typhon_engine::torrent::meta::ProofHold;
+
+/// Where a move hands a proof its hold on the copy that adopted the torrent.
+type Slot = Mutex<Option<ProofHold>>;
+
+/// The proofs alive, by torrent. An entry is dropped with its job
+/// (`Follow`'s `Drop`).
+type Following = Mutex<HashMap<[u8; 20], Vec<std::sync::Weak<Slot>>>>;
+
+fn following() -> &'static Following {
+    static F: OnceLock<Following> = OnceLock::new();
+    F.get_or_init(Default::default)
+}
+
+/// A job's entry in `following`.
+struct Follow {
+    ih: Option<[u8; 20]>,
+    slot: Arc<Slot>,
+}
+
+impl Follow {
+    fn new(hash: &str) -> Self {
+        let slot: Arc<Slot> = Arc::default();
+        let ih = crate::store::hex20(hash);
+        if let Some(ih) = ih {
+            let mut f = following().lock().unwrap_or_else(|e| e.into_inner());
+            let v = f.entry(ih).or_default();
+            v.retain(|w| w.strong_count() > 0);
+            v.push(Arc::downgrade(&slot));
+        }
+        Self { ih, slot }
+    }
+
+    /// The hold a move handed over since the last look, if any.
+    fn take(&self) -> Option<ProofHold> {
+        self.slot.lock().unwrap_or_else(|e| e.into_inner()).take()
+    }
+
+    /// The job has done its last step: it leaves `following`, unless a move
+    /// handed it a hold meanwhile, which is returned. Under the lock
+    /// `hand_over` takes, so a move finds either this job still there to
+    /// follow it, or no job at all, and then checks the copy itself.
+    fn close(&mut self) -> Option<ProofHold> {
+        let ih = self.ih?;
+        let mut f = following().lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(h) = self.take() {
+            return Some(h);
+        }
+        if let Some(v) = f.get_mut(&ih) {
+            let me = Arc::as_ptr(&self.slot);
+            v.retain(|w| w.strong_count() > 0 && w.as_ptr() != me);
+            if v.is_empty() {
+                f.remove(&ih);
+            }
+        }
+        self.ih = None;
+        None
+    }
+}
+
+impl Drop for Follow {
+    fn drop(&mut self) {
+        let Some(ih) = self.ih else { return };
+        let mut f = following().lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(v) = f.get_mut(&ih) {
+            let me = Arc::as_ptr(&self.slot);
+            v.retain(|w| w.strong_count() > 0 && w.as_ptr() != me);
+            if v.is_empty() {
+                f.remove(&ih);
+            }
+        }
+    }
+}
+
+/// Hand every proof of `ih` still alive a hold on `to`, the copy an engine
+/// move has just made, so that the proof runs and ends there: it proves, links,
+/// guards, rechecks and releases the torrent where it now lives.
+///
+/// A proof is tied to the copy it was planned on. Moved before its turn --
+/// a proof can wait hours behind a selection recheck -- the torrent was gone
+/// from that engine when the turn came, the proof did nothing, and the copy
+/// that landed stayed stopped at 0 %, never checked and never started. The
+/// copy holds the hold from now, so it reads as a check waiting for its
+/// turn, not as stopped, and a stop asked of it calls the proof off.
+///
+/// Called by a move between engines after the target adopted the torrent
+/// and before the source lets it go, and by its rollback with the copy put
+/// back. Returns how many proofs were handed over.
+pub fn hand_over(ih: &[u8; 20], to: &Arc<TorrentState>) -> usize {
+    let mut f = following().lock().unwrap_or_else(|e| e.into_inner());
+    let Some(v) = f.get_mut(ih) else { return 0 };
+    v.retain(|w| w.strong_count() > 0);
+    let mut n = 0;
+    for slot in v.iter().filter_map(|w| w.upgrade()) {
+        // A hold handed earlier and not taken yet is replaced, and ends.
+        *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(to.hold_for_proof());
+        n += 1;
+    }
+    if v.is_empty() {
+        f.remove(ih);
+    }
+    n
+}
+
 struct Job {
     metainfo: Option<Vec<u8>>,
     state: AppState,
@@ -954,8 +1095,11 @@ struct Job {
     rt: Option<tokio::runtime::Handle>,
     /// The torrent reads as checking for as long as the job lives, and no
     /// longer: dropped with it on every way out, a panic included. `None`
-    /// when the torrent is gone. Never read; owning it is the point.
-    _hold: Option<typhon_engine::torrent::meta::ProofHold>,
+    /// when the torrent is gone. Replaced when a move hands over the hold
+    /// on the copy it made (`follow`).
+    _hold: Option<ProofHold>,
+    /// Where such a hold arrives (`hand_over`).
+    follow: Follow,
 }
 
 impl Job {
@@ -992,10 +1136,11 @@ impl Job {
     }
 
     /// Wait for the disk, then for a slot of the limit, then prove.
-    async fn run_queued(self) {
+    async fn run_queued(mut self) {
+        self.follow();
         // The torrent shows waiting for its check, not checking, until the
         // proof has its turn.
-        let waiting = self._hold.as_ref().map(|h| h.waiting());
+        let mut waiting = self._hold.as_ref().map(|h| h.waiting());
         // Where it reads, off the runtime: a stat on a slow drive blocks.
         let key = {
             let job_state = (
@@ -1033,6 +1178,10 @@ impl Job {
                 typhon_engine::torrent::disk_slot(&key).await
             }
         };
+        // Moved meanwhile: the copy that adopted it is the one waiting now.
+        if self.follow() {
+            waiting = self._hold.as_ref().map(|h| h.waiting());
+        }
         if self.cancelled() {
             return;
         }
@@ -1074,7 +1223,9 @@ impl Job {
     /// A stop the user asked for has called this proof off since it was
     /// planned (`TorrentManager::cancel_check`). The torrent stays as the stop
     /// left it: nothing proven, linked, rechecked or started.
-    fn cancelled(&self) -> bool {
+    fn cancelled(&mut self) -> bool {
+        // A stop asked of the copy a move made is the one to obey.
+        self.follow();
         let off = self._hold.as_ref().is_some_and(|h| h.cancelled());
         if off {
             tracing::info!(
@@ -1086,22 +1237,98 @@ impl Job {
         off
     }
 
-    fn run(self) {
+    /// Take over the hold a move handed this proof, if one came, and follow
+    /// the torrent to the engine that holds that copy. True when it did.
+    fn follow(&mut self) -> bool {
+        match self.follow.take() {
+            Some(hold) => {
+                self.adopt(hold);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Hold the copy `hold` is on, and work on the engine that holds it.
+    fn adopt(&mut self, hold: ProofHold) {
+        let t = hold.torrent().clone();
+        if let Some(e) = self.state.engines.engines().iter().find(|e| {
+            e.manager
+                .get(&t.info_hash)
+                .is_some_and(|held| Arc::ptr_eq(&held, &t))
+        }) {
+            self.engine_id = e.id.clone();
+        }
+        tracing::info!(
+            engine = %self.engine_id,
+            hash = %self.hash,
+            "path claim: proof follows its torrent to the engine that adopted it"
+        );
+        self._hold = Some(hold);
+    }
+
+    /// The copy this proof's torrent now is, proven again there by a proof
+    /// of its own (`guarded_recheck`): for a move that came after this one
+    /// had guarded the files of the copy it left.
+    fn prove_again_where_it_landed(&mut self, ih: &[u8; 20]) {
+        let Some(t) = self
+            .state
+            .engines
+            .get(&self.engine_id)
+            .and_then(|e| e.manager.get(ih))
+        else {
+            return;
+        };
+        // Ours ends first, or the new proof takes this one for itself.
+        self._hold = None;
+        let _ = guarded_recheck(&self.state, &self.engine_id, &t);
+    }
+
+    /// After a move during the read: the copy to finish on,
+    /// when that copy reads its files where the proof read them. When it does
+    /// not, what was proven is about files that are no longer its own: the
+    /// proof gives way to a new one, planned on the copy (`guarded_recheck`).
+    fn moved_to(&mut self, root: &Path) -> Option<Arc<TorrentState>> {
+        let ih = crate::store::hex20(&self.hash)?;
+        let manager = self.state.engines.get(&self.engine_id)?.manager.clone();
+        let t = manager.get(&ih)?;
+        if root_of(&t.meta, &t.save_path.read().clone()) == root {
+            return Some(t);
+        }
+        tracing::warn!(
+            engine = %self.engine_id,
+            hash = %self.hash,
+            "path claim: torrent moved to other files while proven; proving it again there"
+        );
+        // Ours ends first, or the new proof takes this one for itself.
+        self._hold = None;
+        let _ = guarded_recheck(&self.state, &self.engine_id, &t);
+        None
+    }
+
+    fn run(mut self) {
         if self.cancelled() {
             return;
         }
-        let Some(engine) = self.state.engines.get(&self.engine_id) else {
+        let Some(manager) = self
+            .state
+            .engines
+            .get(&self.engine_id)
+            .map(|e| e.manager.clone())
+        else {
             return;
         };
-        let manager = engine.manager.clone();
         let Some(ih) = crate::store::hex20(&self.hash) else {
             return;
         };
-        let Some(t) = manager.get(&ih) else { return };
+        let Some(mut t) = manager.get(&ih) else {
+            return;
+        };
         let name = t.meta.name.clone();
         let root = root_of(&t.meta, &t.save_path.read().clone());
 
-        if let Some((src_root, candidates)) = &self.isolate_from {
+        if let Some((src_root, candidates)) = self.isolate_from.clone() {
+            let (src_root, candidates) = (&src_root, &candidates);
             // A file no torrent names is a candidate too, once it is a file
             // this torrent could really own: regular (a symlink or a folder is
             // not something to link), of the size it declares (another release
@@ -1111,7 +1338,8 @@ impl Job {
                 .into_iter()
                 .map(|(_, rel, len)| (rel, len))
                 .collect();
-            let mut free: Vec<&PathBuf> = self.free.iter().collect();
+            let free_set = self.free.clone();
+            let mut free: Vec<&PathBuf> = free_set.iter().collect();
             free.sort();
             let mut own: Vec<(PathBuf, &PathBuf)> = Vec::new();
             for rel in free {
@@ -1135,9 +1363,16 @@ impl Job {
             // for the whole job.
             let mut to_prove: HashSet<PathBuf> = candidates.clone();
             to_prove.extend(own.iter().map(|(_, rel)| (*rel).clone()));
-            let (proven, interior) =
+            let (proven, interior, good) =
                 prove_torrent_detail(&t, self.metainfo.as_deref(), src_root, &to_prove, false);
             let interior = accepted_interior(interior, INTERIOR_ONLY_OK);
+            // Moved while it read: what follows is the adopting copy's.
+            if self.follow() {
+                match self.moved_to(&root) {
+                    Some(moved) => t = moved,
+                    None => return,
+                }
+            }
             // A file only its interior proves is linked too, although its
             // edge pieces (shared with a file this torrent does not have,
             // another .nfo there) are not proven: they are written through the
@@ -1186,6 +1421,9 @@ impl Job {
             // torrent's, given up rather than refused when a piece it fetches
             // shows that one is not its file after all (`FreeLinks`).
             t.set_free_links(root.clone(), free_links);
+            // What the proof read and verified, through the links now in the
+            // torrent's own folder: not read a second time by the recheck.
+            let known = pieces_within(&t.meta, &good, &shared);
             t.guard_files(shared);
             if !candidates.is_empty() || own_total > 0 {
                 record(
@@ -1206,14 +1444,21 @@ impl Job {
                     ),
                 );
             }
-            self.recheck_and_release(&manager, &ih);
+            self.recheck_and_release(&ih, known);
             return;
         }
 
-        if let Some(files) = &self.prove_in_place {
-            let (proven, interior) =
+        if let Some(files) = self.prove_in_place.clone() {
+            let files = &files;
+            let (proven, interior, good) =
                 prove_torrent_detail(&t, self.metainfo.as_deref(), &root, files, true);
             let interior = accepted_interior(interior, INTERIOR_ONLY_OK);
+            if self.follow() {
+                match self.moved_to(&root) {
+                    Some(moved) => t = moved,
+                    None => return,
+                }
+            }
             // A file whose every piece of its own verifies and whose only
             // missing pieces are the ones it shares with a neighbour is not a
             // reason to hold: those pieces are written through a byte
@@ -1226,7 +1471,11 @@ impl Job {
             // the comparison.
             t.guard_files(files.clone());
             if bad.is_empty() {
-                self.recheck_and_release(&manager, &ih);
+                // Read in place, from the torrent's own files: every piece
+                // that verified is one the recheck need not read again.
+                let mut known: Vec<u32> = good.into_iter().collect();
+                known.sort_unstable();
+                self.recheck_and_release(&ih, known);
             } else {
                 let mut bad = bad;
                 bad.sort();
@@ -1263,18 +1512,30 @@ impl Job {
         }
     }
 
-    fn recheck_and_release(
-        &self,
-        manager: &Arc<typhon_engine::torrent::TorrentManager>,
-        ih: &[u8; 20],
-    ) {
+    fn recheck_and_release(&mut self, ih: &[u8; 20], known: Vec<u32>) {
+        let moved = self.follow();
         // Stopped while it proved: no recheck, and above all no start.
         if self.cancelled() {
             return;
         }
+        let Some(manager) = self
+            .state
+            .engines
+            .get(&self.engine_id)
+            .map(|e| e.manager.clone())
+        else {
+            return;
+        };
+        if moved {
+            // Moved after its files were guarded on the copy it left: the
+            // copy that landed has no guard yet, and is proven again rather
+            // than released unguarded.
+            self.prove_again_where_it_landed(ih);
+            return;
+        }
         let _enter = self.rt.as_ref().map(|h| h.enter());
         if self.rt.is_some() {
-            let _ = manager.recheck(ih);
+            let _ = manager.recheck_knowing(ih, known);
         }
         if self.resume {
             {
@@ -1285,6 +1546,13 @@ impl Job {
                 );
             }
             let _ = manager.start_torrent(ih);
+        }
+        // Moved while it was released here: the check and the start went to
+        // the copy that left. Its guard did too, so the copy that landed is
+        // proven again.
+        if let Some(hold) = self.follow.close() {
+            self.adopt(hold);
+            self.prove_again_where_it_landed(ih);
         }
     }
 }
@@ -1717,6 +1985,7 @@ pub fn guarded_recheck(
     };
     let job = Job {
         _hold: Some(hold),
+        follow: Follow::new(&hash),
         metainfo,
         state: state.clone(),
         engine_id: engine_id.to_string(),
@@ -1773,6 +2042,7 @@ pub fn guarded_start(
     };
     let job = Job {
         _hold: Some(hold),
+        follow: Follow::new(&hash),
         metainfo,
         state: state.clone(),
         engine_id: engine_id.to_string(),
@@ -2679,6 +2949,103 @@ mod tests {
             (1..=limit).contains(&max),
             "{max} proofs were reading one disk at once, the limit per disk is {limit}"
         );
+    }
+
+    /// ⭐ A torrent moved to another engine while its proof waited for its
+    /// turn (a client adding to one engine and moving it to the other right
+    /// away, behind a selection recheck) landed stopped at 0 %: its proof,
+    /// tied to the engine it left, found nothing there when the turn came, and
+    /// the copy that landed was never proven, checked or started. The proof
+    /// now follows it: the copy reads as waiting for its check from the move
+    /// on, and the proof links, checks and starts it where it landed.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_torrent_moved_while_its_proof_waits_is_proven_where_it_lands() {
+        use std::sync::atomic::Ordering::SeqCst;
+        const KEY: &str = "0123456789abcdef0123456789abcdef";
+        let s = crate::api::testing::state_from(
+            "pathclaim-follow",
+            &format!("[daemon]\napi_key = \"{KEY}\"\n"),
+        );
+        let dir = s.dir.join("movies");
+        std::fs::create_dir_all(dir.join("Film")).unwrap();
+        let video: Vec<u8> = (0..32_768u32).map(|i| (i % 251) as u8).collect();
+        std::fs::write(dir.join("Film").join("a.mkv"), &video).unwrap();
+        std::fs::write(dir.join("Film").join("a.nfo"), b"team notes v1...").unwrap();
+        add(
+            &s,
+            &torrent_over(
+                "Film",
+                &[("a.mkv", &video), ("a.nfo", b"team notes v1...")],
+                16384,
+            ),
+            &dir,
+            true,
+            true,
+        )
+        .unwrap();
+
+        // Its disk is busy: B's proof waits for its turn.
+        let key = typhon_engine::torrent::disk_key(&dir);
+        let mut busy = Vec::new();
+        for _ in 0..typhon_engine::torrent::disk_count(&key) {
+            busy.push(typhon_engine::torrent::disk_slot(&key).await);
+        }
+        THREADED.with(|t| t.set(true));
+        let b = add(
+            &s,
+            &torrent_over(
+                "Film",
+                &[("a.mkv", &video), ("a.nfo", b"uploader notes!!")],
+                16384,
+            ),
+            &dir,
+            false,
+            false,
+        )
+        .unwrap();
+        THREADED.with(|t| t.set(false));
+        let ih = crate::store::hex20(&b).unwrap();
+        let hoard = s.state.engines.get("hoard").unwrap().manager.clone();
+        assert!(hoard.get(&ih).unwrap().held_for_proof(), "its proof waits");
+
+        let resp = crate::api::post_torrent_engine(
+            axum::extract::State(s.state.clone()),
+            axum::extract::Path(b.clone()),
+            axum::extract::RawQuery(None),
+            crate::api::testing::keyed(KEY),
+            r#"{"engine":"race"}"#.to_string(),
+        )
+        .await;
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        assert!(hoard.get(&ih).is_none(), "hoard let it go");
+        let race = s.state.engines.get("race").unwrap().manager.clone();
+        let landed = race.get(&ih).expect("race holds it");
+        assert!(
+            landed.held_for_proof(),
+            "the copy that landed waits for the proof, it is not just stopped"
+        );
+
+        drop(busy);
+        for _ in 0..400 {
+            if !landed.held_for_proof() && !landed.rechecking.load(SeqCst) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(!landed.held_for_proof(), "the proof ran");
+        assert!(!landed.rechecking.load(SeqCst), "and the check after it");
+        assert_eq!(
+            landed.picker.get().unwrap().lock().unwrap().num_have(),
+            2,
+            "the video was linked and checked on race: only the .nfo is to fetch"
+        );
+        assert!(
+            !landed.is_paused.load(SeqCst),
+            "started, as the add asked, on race"
+        );
+        assert!(recent()
+            .iter()
+            .any(|e| e.info_hash == b && e.action == "proven" && e.engine == "race"));
     }
 
     #[tokio::test(flavor = "multi_thread")]

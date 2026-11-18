@@ -195,6 +195,9 @@ thread_local! {
 /// The existing `POST /api/torrents/:hash/engine` reassigns an engine WITHOUT
 /// touching the files -- deliberately, it says so. Graduation is the other
 /// case: the whole point is to get the bytes off the race disk.
+/// Why a move of files waits: a proof is reading them where they are.
+const PROVING: &str = "its files are being proven against another torrent's; nothing was moved,                        move it once the check has ended";
+
 fn graduate(state: &AppState, job: &crate::store::Job) -> Result<(), String> {
     let p: serde_json::Value = serde_json::from_str(&job.params).map_err(|e| e.to_string())?;
     let from = p
@@ -252,6 +255,13 @@ fn graduate(state: &AppState, job: &crate::store::Job) -> Result<(), String> {
         .and_then(|v| serde_json::from_value(v.clone()).ok());
     let (original, old_root, files, resumed) = match src.manager.get(&ih) {
         Some(t) => {
+            // Its files are being proven where they are (they are shared with
+            // another torrent): moved under the proof, they would be read,
+            // linked and guarded at a place they have left. It moves once the
+            // proof has ended.
+            if t.held_for_proof() {
+                return Err(PROVING.into());
+            }
             // A target that already holds this torrent can only refuse it at
             // the end, after every file was copied over and then copied back;
             // the drain queued it again each tick. Asked before anything stops.
@@ -1162,6 +1172,10 @@ fn move_data(state: &AppState, job: &crate::store::Job) -> Result<(), String> {
     let Some(t) = engine.manager.get(&ih) else {
         return finish_interrupted_move(state, job, engine, &p, &save_path, &category, allow);
     };
+    // As for a graduation: not under a proof of its files.
+    if t.held_for_proof() {
+        return Err(PROVING.into());
+    }
     let plan = plan_move_checked(state, &t, std::path::Path::new(&save_path));
     if let Some((_, why)) = plan.refusal() {
         return Err(format!("{why}; nothing was moved"));
@@ -2148,6 +2162,36 @@ mod graduate_tests {
                 .is_some(),
             "still in race"
         );
+    }
+
+    /// A torrent whose files a proof is reading stays where they are: moved
+    /// under the proof, they would be read, linked and guarded at a place
+    /// they have left. Refused with nothing touched, by a graduation as by a
+    /// move of its data; once the proof has ended, it moves.
+    #[test]
+    fn a_torrent_under_a_proof_does_not_move_until_it_ends() {
+        let (s, hash, src, dst) = setup("grad-proving");
+        let ih = typhon_engine::torrent::hex_decode(&hash).unwrap();
+        let race = s.state.engines.get("race").unwrap();
+        let t = race.manager.get(&ih).unwrap();
+        let proof = t.hold_for_proof();
+
+        let err = graduate(&s.state, &job(&hash, &dst)).expect_err("refused");
+        assert!(err.contains("being proven"), "{err}");
+        let mut j = job(&hash, &dst);
+        j.kind = "move_data".into();
+        j.params = serde_json::json!({
+            "engine": "race", "category": "", "save_path": dst.display().to_string(),
+        })
+        .to_string();
+        let err = move_data(&s.state, &j).expect_err("refused");
+        assert!(err.contains("being proven"), "{err}");
+        assert!(src.join("grad").exists(), "nothing moved");
+        assert!(race.manager.get(&ih).is_some(), "still in race");
+
+        drop(proof);
+        graduate(&s.state, &job(&hash, &dst)).expect("moved once the proof ended");
+        assert!(dst.join("grad").exists());
     }
 
     /// A graduation stopped right after its torrent left the source engine,

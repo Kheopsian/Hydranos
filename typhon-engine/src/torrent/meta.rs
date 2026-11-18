@@ -45,6 +45,12 @@ impl ProofHold {
     pub fn waiting(&self) -> CheckWait {
         self.0.wait_for_check()
     }
+
+    /// The torrent this hold is on: after an engine move, the copy the
+    /// target engine adopted (see `pathclaim::hand_over`).
+    pub fn torrent(&self) -> &Arc<TorrentState> {
+        &self.0
+    }
 }
 
 /// A check (recheck or proof) of this torrent is waiting for its turn on the

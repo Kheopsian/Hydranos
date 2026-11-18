@@ -4106,6 +4106,24 @@ impl TorrentManager {
     /// a seed_mode torrent has none and is rejected -- its data is trusted by
     /// explicit skip_checking, which stays the trust-fast path.
     pub fn recheck(self: &Arc<Self>, info_hash: &InfoHash) -> Result<(), String> {
+        self.recheck_knowing(info_hash, Vec::new())
+    }
+
+    /// `recheck`, counting `known` as verified without reading it again.
+    ///
+    /// For the proof of a torrent sharing files with another
+    /// (`pathclaim`): it has just read those pieces from the very files this
+    /// torrent reads, and hashed them against this torrent's own table, so
+    /// the recheck that follows it read them a second time for the same
+    /// verdict -- on a cross-seed add, most of the torrent. Every other piece
+    /// is read as usual. A piece past the end is ignored. Ignored as a whole
+    /// when a check of this torrent is already under way: that one reads
+    /// everything anyway.
+    pub fn recheck_knowing(
+        self: &Arc<Self>,
+        info_hash: &InfoHash,
+        known: Vec<u32>,
+    ) -> Result<(), String> {
         let t = self.get(info_hash).ok_or("torrent not found")?;
         // One at a time per torrent: the one under way reads the files as
         // they are now anyway.
@@ -4159,7 +4177,8 @@ impl TorrentManager {
             if t.check_gen.load(Ordering::SeqCst) != gen {
                 return;
             }
-            mgr.run_recheck(ih, t.clone(), gen, width).await;
+            mgr.run_recheck_knowing(ih, t.clone(), gen, width, known)
+                .await;
             let announce = {
                 // A stop landing here would have its departure taken back by
                 // the `started` below: it waits, or is seen.
@@ -4238,8 +4257,25 @@ impl TorrentManager {
     /// between the queue and the first read still calls it off.
     /// `width` is how many pieces are read at once: the disk's
     /// (`recheck_width_for`).
+    #[cfg(test)]
     async fn run_recheck(&self, ih: InfoHash, t: Arc<TorrentState>, gen: u64, width: usize) {
+        self.run_recheck_knowing(ih, t, gen, width, Vec::new())
+            .await
+    }
+
+    /// `run_recheck`, with the pieces `recheck_knowing` was told are good:
+    /// counted as read and verified, and not read.
+    async fn run_recheck_knowing(
+        &self,
+        ih: InfoHash,
+        t: Arc<TorrentState>,
+        gen: u64,
+        width: usize,
+        known: Vec<u32>,
+    ) {
         let num_pieces = t.meta.num_pieces();
+        let known: Arc<std::collections::HashSet<u32>> =
+            Arc::new(known.into_iter().filter(|p| *p < num_pieces).collect());
         // Read the files as they are now: a handle cached before the recheck
         // may be on a file the user has since replaced under the same name.
         crate::disk::evict_fds(&data_files(&t));
@@ -4263,6 +4299,7 @@ impl TorrentManager {
             .map(|piece| {
                 let t = t.clone();
                 let unreadable = unreadable.clone();
+                let known = known.clone();
                 async move {
                     if t.is_removed.load(Ordering::Relaxed) || Self::check_called_off(&t, gen) {
                         return None;
@@ -4282,6 +4319,9 @@ impl TorrentManager {
                         }
                     }
                     let _counted = Counted(t.clone(), gen, piece);
+                    if known.contains(&piece) {
+                        return Some(piece);
+                    }
                     // No hash table -> we cannot say this piece is good. Leave
                     // the have bit clear; the recheck reports the torrent
                     // incomplete rather than blessing unverified data.
@@ -5232,6 +5272,30 @@ mod lifecycle_tests {
         );
         drop(hold);
         assert!(!mgr.export_state(&ih).expect("exported").recheck_pending);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The recheck after a proof does not read again the pieces the proof
+    /// has just read and verified: told they are good, it counts them so and
+    /// reads only the others. Piece 0 is spoilt on disk here and still
+    /// counted, which only a piece left unread can be; a plain recheck after
+    /// it reads it and finds it bad. A piece past the end is ignored.
+    #[tokio::test]
+    async fn a_recheck_knowing_pieces_does_not_read_them_again() {
+        let (mgr, root, ih, t) = whole_two_piece_torrent("recheckknown");
+        let mut data: Vec<u8> = (0..32768u32).map(|i| (i % 241) as u8).collect();
+        data[100] ^= 0xFF;
+        std::fs::write(root.join("data").join("whole"), &data).unwrap();
+        let have = |t: &Arc<TorrentState>| t.picker.get().unwrap().lock().unwrap().num_have();
+
+        mgr.recheck_knowing(&ih, vec![0, 7])
+            .expect("recheck starts");
+        wait_recheck_end(&t).await;
+        assert_eq!(have(&t), 2, "piece 0 as told, piece 1 read and good");
+
+        mgr.recheck(&ih).expect("recheck starts");
+        wait_recheck_end(&t).await;
+        assert_eq!(have(&t), 1, "read this time: piece 0 is bad");
         std::fs::remove_dir_all(&root).ok();
     }
 
