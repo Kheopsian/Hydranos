@@ -1491,12 +1491,31 @@ impl TorrentManager {
         // Parked because its files were absent (an unmounted disk): a start
         // looks again, and goes on as a plain start if they are all back. At
         // most `volume::PROBE_TIMEOUT` on a disk that does not answer.
+        //
+        // A lift that outlives the probe ends on the probe's thread, so what
+        // `after_lift` owes is not left to this one: the download goes in the
+        // queue's index first (a superset, pruned once whole, so a lift that
+        // does not happen costs nothing), and the announce goes from there.
         if t.files_absent.load(Ordering::Relaxed) {
+            let unfinished = !t.seed_mode
+                && t.picker
+                    .get()
+                    .is_some_and(|p| !p.lock().unwrap().is_complete());
+            if unfinished {
+                self.incomplete.insert(*info_hash);
+            }
+            let hook = self.announce_hook.get().cloned();
             let probe_t = t.clone();
             let key = t.save_path.read().clone();
-            if volume::probe(key, move || probe_t.lift_absent_park()) == Some(true) {
-                self.after_lift(&t);
-            }
+            let _ = volume::probe(key, move || {
+                let lifted = probe_t.lift_absent_park();
+                if lifted && !probe_t.is_paused.load(Ordering::Relaxed) {
+                    if let Some(hook) = hook {
+                        hook(probe_t.meta.info_hash);
+                    }
+                }
+                lifted
+            });
         }
         // Pieces found missing (`mark_data_lost`) park the torrent until a
         // recheck, whatever status a stop left it in since: a start would make
@@ -7915,6 +7934,73 @@ mod manager_tests {
             TorrentStatus::Seeding as u8
         );
         assert!(!t.data_lost.load(Ordering::Relaxed));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A start whose lift outlives the probe still leaves the download in
+    /// the queue's index and asks for its announce once the lift ends on the
+    /// probe's thread. Holds the lift for longer than `PROBE_TIMEOUT`.
+    #[test]
+    fn a_start_whose_lift_outlives_the_probe_still_queues_the_download() {
+        let (mgr, root) = manager("vol-start-slow");
+        let save = root.join("disk");
+        std::fs::create_dir_all(&save).unwrap();
+        std::fs::write(save.join("vol"), vec![0u8; 16384]).unwrap();
+        let (ih, _) = mgr
+            .add_torrent_bytes(
+                &torrent_bytes("vol", &["https://tracker.example/announce"]),
+                &save.to_string_lossy(),
+                false,
+                false,
+            )
+            .unwrap();
+        let t = mgr.get(&ih).unwrap();
+        assert!(t.picker.get().is_some(), "a download, with a picker");
+        t.status
+            .store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+        t.park_absent("test");
+        mgr.incomplete.remove(&ih);
+        let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let a = asked.clone();
+        mgr.set_announce_hook(Arc::new(move |_ih| {
+            a.fetch_add(1, Ordering::Relaxed);
+        }));
+
+        // The lift waits on this lock once the files are judged back.
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let holder_t = t.clone();
+        let holder = std::thread::spawn(move || {
+            let _g = holder_t.error_msg.lock().unwrap();
+            held_tx.send(()).unwrap();
+            std::thread::sleep(volume::PROBE_TIMEOUT + std::time::Duration::from_millis(700));
+        });
+        held_rx.recv().unwrap();
+        mgr.start_torrent(&ih).unwrap();
+        assert!(
+            t.files_absent.load(Ordering::Relaxed),
+            "the lift was meant to outlive the probe"
+        );
+        let before = asked.load(Ordering::Relaxed);
+        holder.join().unwrap();
+        for _ in 0..300 {
+            if !t.files_absent.load(Ordering::Relaxed) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(!t.files_absent.load(Ordering::Relaxed), "lifted in the end");
+        assert_eq!(
+            t.status.load(Ordering::Relaxed),
+            TorrentStatus::Downloading as u8
+        );
+        assert!(
+            mgr.incomplete.contains(&ih),
+            "the lifted download is not in the queue's index"
+        );
+        assert!(
+            asked.load(Ordering::Relaxed) > before,
+            "the lift asked for no announce"
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 }
