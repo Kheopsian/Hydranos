@@ -1172,6 +1172,7 @@ mod announce_wire_tests {
     /// An engine in a managed tunnel asks the TUNNEL's DNS server for its
     /// tracker's name, from a socket pinned to the tunnel; the host's
     /// resolver never sees it. `lo` stands in for `wg-<engine>`.
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn a_tunnel_engine_resolves_its_tracker_through_the_tunnel_dns() {
         let _one = crate::tunneldns::tests::LO.lock().await;

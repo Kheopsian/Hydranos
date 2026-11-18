@@ -357,7 +357,9 @@ mod tests {
             native(&s, other.to_str().unwrap()).await.0,
             StatusCode::FORBIDDEN
         );
-        assert_eq!(native(&s, "/").await.0, StatusCode::FORBIDDEN);
+        // The filesystem root: `/`, or the drive's `C:\` on Windows.
+        let fs_root = other.ancestors().last().unwrap().to_str().unwrap();
+        assert_eq!(native(&s, fs_root).await.0, StatusCode::FORBIDDEN);
         // The refusal does not tell a missing folder from a present one.
         let missing = other.join("nope");
         assert_eq!(
@@ -484,7 +486,7 @@ mod tests {
         let s = state_from(
             "fsl-data",
             &format!(
-                "[daemon]\napi_key = \"{KEY}\"\ndata_dir = \"{}\"\n",
+                "[daemon]\napi_key = \"{KEY}\"\ndata_dir = '{}'\n",
                 data.display()
             ),
         );
@@ -593,7 +595,10 @@ mod tests {
         )
         .await;
         assert_eq!(code, StatusCode::FORBIDDEN);
-        let (code, _, _) = shim(&s, "GET", "/nonexistent-root-dir", None).await;
+        // Under the filesystem root: `/`, or the drive's `C:\` on Windows.
+        let fs_root = other.ancestors().last().unwrap();
+        let nonexistent = fs_root.join("nonexistent-root-dir");
+        let (code, _, _) = shim(&s, "GET", nonexistent.to_str().unwrap(), None).await;
         assert_eq!(code, StatusCode::FORBIDDEN);
 
         for (dir, mode) in [

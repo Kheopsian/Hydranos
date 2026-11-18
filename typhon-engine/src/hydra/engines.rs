@@ -1898,6 +1898,7 @@ mod network_wiring_tests {
     }
 
     /// Bring one engine up from a session, the way `connect` does.
+    #[cfg(target_os = "linux")]
     async fn started(tag: &str, toml_text: &str) -> Arc<TorrentManager> {
         let free = super::tests::free_port;
         let s = session(&format!(

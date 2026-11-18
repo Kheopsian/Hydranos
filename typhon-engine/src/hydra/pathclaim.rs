@@ -143,8 +143,13 @@ pub fn path_key(p: &Path) -> PathBuf {
 ///
 /// A path named by one claimant with another size is a conflict even if a
 /// second claimant agrees on the size: the file can only hold one of them.
+///
+/// Paths are compared by `path_key` (case-folded on Windows) and reported as
+/// this torrent writes them: `S02/E01.mkv`, never `s02/e01.mkv`. A caller
+/// looking one up in a table keyed by `path_key` folds it again.
 pub fn overlap(mine: &[(PathBuf, u64)], claimants: &[Claimant]) -> Overlap {
-    let want: HashMap<PathBuf, u64> = mine.iter().map(|(p, l)| (path_key(p), *l)).collect();
+    let want: HashMap<PathBuf, (u64, &PathBuf)> =
+        mine.iter().map(|(p, l)| (path_key(p), (*l, p))).collect();
     let mut conflicts: HashSet<PathBuf> = HashSet::new();
     let mut unproven: HashSet<PathBuf> = HashSet::new();
     let mut with: Vec<String> = Vec::new();
@@ -152,12 +157,14 @@ pub fn overlap(mine: &[(PathBuf, u64)], claimants: &[Claimant]) -> Overlap {
         let mut touched = false;
         for (p, theirs) in &c.files {
             let k = path_key(p);
-            let Some(&len) = want.get(&k) else { continue };
+            let Some(&(len, own)) = want.get(&k) else {
+                continue;
+            };
             touched = true;
             if len == *theirs {
-                unproven.insert(k);
+                unproven.insert(own.clone());
             } else {
-                conflicts.insert(k);
+                conflicts.insert(own.clone());
             }
         }
         if touched && !with.contains(&c.info_hash) {
@@ -786,7 +793,7 @@ pub fn check_add(
             let candidates: HashSet<PathBuf> = ov
                 .unproven
                 .iter()
-                .filter_map(|p| rel_of.get(p).cloned())
+                .filter_map(|p| rel_of.get(&path_key(p)).cloned())
                 .collect();
             // Isolation is for the files another torrent holds; one nobody
             // names is this torrent's to reuse once proven, or it would
@@ -1525,7 +1532,7 @@ fn guarded_from(
         .conflicts
         .iter()
         .chain(&ov.unproven)
-        .filter_map(|p| rel_of.get(p).cloned())
+        .filter_map(|p| rel_of.get(&path_key(p)).cloned())
         .collect();
     if links {
         let claimed: HashSet<PathBuf> = found
@@ -1721,6 +1728,19 @@ mod tests {
         assert_eq!(ov.conflicts, vec![PathBuf::from("/d/S02/E01.mkv")]);
         assert_eq!(ov.unproven, vec![PathBuf::from("/d/S02/E04.mkv")]);
         assert_eq!(ov.with, vec!["other".to_string()]);
+    }
+
+    /// On Windows `S02/E01.mkv` and `s02/e01.mkv` are one file: another
+    /// torrent spelling it in other case still conflicts, and the answer
+    /// names the file as this torrent writes it, capitals kept.
+    #[cfg(windows)]
+    #[test]
+    fn a_name_in_other_case_conflicts_and_keeps_this_torrents_spelling() {
+        let ov = overlap(
+            &mine(&[("/d/S02/E01.mkv", 1_000)]),
+            &[claimant("other", false, &[("/d/s02/e01.MKV", 2_000)])],
+        );
+        assert_eq!(ov.conflicts, vec![PathBuf::from("/d/S02/E01.mkv")]);
     }
 
     #[test]

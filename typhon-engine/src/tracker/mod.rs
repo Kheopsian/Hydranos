@@ -569,7 +569,9 @@ pub fn start_announce_loop(
 
 use crate::crypto::stream::CryptoStream;
 use crate::peer::transport::PeerTransport;
-use tokio::net::{TcpSocket, TcpStream};
+#[cfg(unix)]
+use tokio::net::TcpSocket;
+use tokio::net::TcpStream;
 
 /// One TCP connection to `dest`, leaving by the egress the engine was given.
 ///
@@ -1446,9 +1448,18 @@ mod socks_dial_tests {
     async fn a_refused_dial_is_never_retried_directly() {
         let (proxy, seen) = fake_socks5(2).await;
         // The peer: a TCP listener and a UDP socket on one port, both counting.
-        let tcp = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let peer = tcp.local_addr().unwrap();
-        let udp = tokio::net::UdpSocket::bind(peer).await.unwrap();
+        // Windows refuses UDP on some ports TCP may be handed (WSAEACCES for
+        // an excluded range): try another port rather than flake.
+        let mut tries = 0;
+        let (tcp, peer, udp) = loop {
+            let tcp = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let peer = tcp.local_addr().unwrap();
+            match tokio::net::UdpSocket::bind(peer).await {
+                Ok(udp) => break (tcp, peer, udp),
+                Err(_) if tries < 20 => tries += 1,
+                Err(e) => panic!("no port takes both TCP and UDP: {e}"),
+            }
+        };
         let utp = librqbit_utp::UtpSocketUdp::new_udp("127.0.0.1:0".parse().unwrap())
             .await
             .unwrap();

@@ -1018,6 +1018,17 @@ pub fn plan_move(
     }
 }
 
+/// `rename`, with the POSIX answer for two names of one file on every
+/// platform: nothing happens and both names stay. Windows would replace the
+/// target with the source and leave one name, which deletes a hardlink
+/// somebody else may be reading.
+fn rename_file(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+    if from != to && same_file(from, to) {
+        return Ok(());
+    }
+    std::fs::rename(from, to)
+}
+
 /// Two names of one file: renaming one onto the other loses nothing.
 fn same_file(a: &std::path::Path, b: &std::path::Path) -> bool {
     #[cfg(unix)]
@@ -1030,7 +1041,16 @@ fn same_file(a: &std::path::Path, b: &std::path::Path) -> bool {
     }
     #[cfg(not(unix))]
     {
-        matches!((std::fs::canonicalize(a), std::fs::canonicalize(b)), (Ok(x), Ok(y)) if x == y)
+        // Two hardlinks canonicalize to two paths: the volume and file index
+        // are what say they are one file, as `(dev, ino)` does above.
+        match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+            (Ok(x), Ok(y)) if x == y => true,
+            (Ok(x), Ok(y)) => matches!(
+                (crate::platform::file_id(&x), crate::platform::file_id(&y)),
+                (Some(i), Some(j)) if i.volume == j.volume && i.index == j.index
+            ),
+            _ => false,
+        }
     }
 }
 
@@ -1085,7 +1105,7 @@ fn roll_back(
     let old_root = std::path::Path::new(&original.save_path);
     let mut problems = Vec::new();
     for (from, to) in renamed.iter().rev() {
-        if let Err(e) = std::fs::rename(to, from) {
+        if let Err(e) = rename_file(to, from) {
             problems.push(format!("could not put {} back: {e}", from.display()));
         }
     }
@@ -1270,7 +1290,7 @@ fn move_data(state: &AppState, job: &crate::store::Job) -> Result<(), String> {
             f.to.parent()
                 .map(std::fs::create_dir_all)
                 .unwrap_or(Ok(()))
-                .and_then(|_| std::fs::rename(&f.from, &f.to));
+                .and_then(|_| rename_file(&f.from, &f.to));
         if let Err(e) = r {
             let undo = roll_back(engine, &metainfo, &original, &renamed, &copied);
             return Err(format!("renaming {}: {e}; {undo}", f.from.display()));
@@ -2634,8 +2654,11 @@ mod graduate_tests {
         let s = state_from("grad-rollback-short", "");
         let src = s.dir.join("race-data");
         let dst = s.dir.join("hoard-data");
-        let (sa, sb) = (src.join("pair/x/a"), src.join("pair/y/b"));
-        let (da, db) = (dst.join("pair/x/a"), dst.join("pair/y/b"));
+        // One component per join, so a path the error names displays the same
+        // on Windows, where `join("pair/x/a")` keeps its forward slashes.
+        let at = |root: &std::path::Path, d: &str, f: &str| root.join("pair").join(d).join(f);
+        let (sa, sb) = (at(&src, "x", "a"), at(&src, "y", "b"));
+        let (da, db) = (at(&dst, "x", "a"), at(&dst, "y", "b"));
         std::fs::create_dir_all(sa.parent().unwrap()).unwrap();
         std::fs::create_dir_all(sb.parent().unwrap()).unwrap();
         std::fs::write(&sa, vec![1u8; 16384]).unwrap();

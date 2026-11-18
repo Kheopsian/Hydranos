@@ -2356,7 +2356,9 @@ mod tests {
     /// A stat that fails for any other reason says nothing about the pieces:
     /// the torrent is parked with the error and its bitfield is left alone.
     /// A path component that is a plain file fails with ENOTDIR whoever runs
-    /// the test, root included, which a permission refusal would not.
+    /// the test, root included, which a permission refusal would not. Unix
+    /// only: Windows answers that path with "not found", which is a missing file.
+    #[cfg(unix)]
     #[test]
     fn verify_files_parks_on_a_stat_error_and_keeps_the_pieces() {
         let dir = scratch("enotdir");

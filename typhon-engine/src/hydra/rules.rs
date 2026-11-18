@@ -2469,7 +2469,7 @@ mod editor_delete_tests {
             "no entry deletes the files"
         );
         let collect = &js[js.find("function _wfCollect").expect("collector")..];
-        let collect = &collect[..collect.find("\n}\n").expect("collector ends")];
+        let collect = &collect[..end_of_fn(collect).expect("collector ends")];
         assert!(
             collect.contains(
                 "if (type === \"delete_with_files\") return { type: \"delete\", with_files: true };"
@@ -2529,7 +2529,7 @@ mod editor_delete_tests {
             let body = &js[js
                 .find(&format!("function {name}("))
                 .expect("switch exists")..];
-            let body = &body[..body.find("\n}\n").expect("switch ends")];
+            let body = &body[..end_of_fn(body).expect("switch ends")];
             assert!(
                 !body.contains("textContent"),
                 "{name} lights a tab by its text, which is translated"
@@ -2547,7 +2547,16 @@ mod editor_delete_tests {
             .find(&format!("function {name}("))
             .unwrap_or_else(|| panic!("app.js has no function {name}"));
         let body = &js[from..];
-        &body[..body.find("\n}\n").expect("function ends")]
+        &body[..end_of_fn(body).expect("function ends")]
+    }
+
+    /// Where a function that starts `src` closes: its `}` at column 0. A
+    /// Windows checkout with `core.autocrlf` ends that line with `\r\n`.
+    fn end_of_fn(src: &str) -> Option<usize> {
+        ["\n}\n", "\n}\r\n"]
+            .iter()
+            .filter_map(|end| src.find(end))
+            .min()
     }
 
     /// The Workflows tab of a torrent's detail, in both panels: a button that
@@ -2585,7 +2594,8 @@ mod editor_delete_tests {
                 "no {panel} div, hidden at first"
             );
             assert!(html.contains(&format!("id=\"{body}\"")), "no {body}");
-            let f = js_function(js, switch);
+            // The load below spans two lines; a CRLF checkout must match too.
+            let f = js_function(js, switch).replace("\r\n", "\n");
             assert!(
                 f.contains(&format!(
                     "getElementById(\"{panel}\").style.display = tab === \"workflows\""

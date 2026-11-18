@@ -1325,6 +1325,7 @@ async fn a_graduation_is_queued_to_the_folder_named_or_the_categorys() {
 /// ⭐ A graduation across filesystems copies the data, so the target needs
 /// room for exactly those bytes: one byte short is refused with the reason,
 /// exactly enough is queued.
+#[cfg(target_os = "linux")] // needs /dev/shm as a second filesystem
 #[tokio::test]
 async fn a_graduation_needs_room_for_exactly_the_bytes_it_copies() {
     struct Clean(std::path::PathBuf);

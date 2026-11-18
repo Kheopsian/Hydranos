@@ -639,9 +639,7 @@ fn stop_daemon(_dir: &Path) -> Result<(), String> {
             }
             std::thread::sleep(std::time::Duration::from_secs(1));
         }
-        return Err(
-            "hydranos is still running after 60s -- stop it yourself, nothing was replaced".into(),
-        );
+        Err("hydranos is still running after 60s -- stop it yourself, nothing was replaced".into())
     }
     #[cfg(not(windows))]
     {

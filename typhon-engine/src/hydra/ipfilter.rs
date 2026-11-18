@@ -358,7 +358,11 @@ async fn put_settings(
     };
     for src in &s.sources {
         let src = src.trim();
-        if !(src.starts_with("http://") || src.starts_with("https://") || src.starts_with('/')) {
+        // `is_absolute`, not a leading `/`: `C:\lists\level1.p2p` on Windows.
+        if !(src.starts_with("http://")
+            || src.starts_with("https://")
+            || std::path::Path::new(src).is_absolute())
+        {
             return bad(format!(
                 "{src:?}: a source is an absolute path on this node or an http(s) URL"
             ));

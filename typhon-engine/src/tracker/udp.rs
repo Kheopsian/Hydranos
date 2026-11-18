@@ -704,6 +704,7 @@ mod tests {
     }
 
     /// The UDP announcer resolves through the tunnel's DNS server too.
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn a_tunnel_engine_resolves_a_udp_tracker_through_the_tunnel_dns() {
         let _one = crate::tunneldns::tests::LO.lock().await;

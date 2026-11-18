@@ -259,35 +259,38 @@ async fn resolve_with(device: &str, host: &str, refuse_host: bool) -> Result<Vec
 }
 
 /// A UDP socket pinned to the device, connected to the server.
+#[cfg(target_os = "linux")]
 fn pinned_socket(device: &str, server: SocketAddr) -> Result<tokio::net::UdpSocket, String> {
-    let bind: SocketAddr = if server.is_ipv6() {
-        "[::]:0".parse().unwrap()
-    } else {
-        "0.0.0.0:0".parse().unwrap()
+    use std::os::unix::io::AsRawFd;
+
+    let bind = SocketAddr::new(
+        if server.is_ipv6() {
+            std::net::Ipv6Addr::UNSPECIFIED.into()
+        } else {
+            std::net::Ipv4Addr::UNSPECIFIED.into()
+        },
+        0,
+    );
+    let socket = std::net::UdpSocket::bind(bind).map_err(|e| format!("bind: {e}"))?;
+    // Pin before connecting: a query must never leave by the default route.
+    let egress = crate::netpin::Egress {
+        device: device.to_string(),
+        ..Default::default()
     };
-    let std = std::net::UdpSocket::bind(bind).map_err(|e| format!("bind: {e}"))?;
-    // Pinned or not opened at all: an unpinned query would leave by the
-    // default route, which is the leak this module exists to close.
-    #[cfg(target_os = "linux")]
-    {
-        use std::os::unix::io::AsRawFd;
-        let egress = crate::netpin::Egress {
-            device: device.to_string(),
-            ..Default::default()
-        };
-        crate::netpin::pin_fd(std.as_raw_fd(), &egress)
-            .map_err(|e| format!("pin to {device}: {e}"))?;
-    }
-    #[cfg(not(target_os = "linux"))]
-    return Err(format!(
+    crate::netpin::pin_fd(socket.as_raw_fd(), &egress)
+        .map_err(|e| format!("pin to {device}: {e}"))?;
+    socket
+        .connect(server)
+        .map_err(|e| format!("{server}: {e}"))?;
+    socket.set_nonblocking(true).map_err(|e| e.to_string())?;
+    tokio::net::UdpSocket::from_std(socket).map_err(|e| e.to_string())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn pinned_socket(device: &str, _server: SocketAddr) -> Result<tokio::net::UdpSocket, String> {
+    Err(format!(
         "a DNS query cannot be pinned to {device:?} on this platform"
-    ));
-    #[allow(unreachable_code)]
-    {
-        std.connect(server).map_err(|e| format!("{server}: {e}"))?;
-        std.set_nonblocking(true).map_err(|e| e.to_string())?;
-        tokio::net::UdpSocket::from_std(std).map_err(|e| e.to_string())
-    }
+    ))
 }
 
 /// Ask one server for A and AAAA at once; the addresses and the smallest TTL.
@@ -460,8 +463,18 @@ impl reqwest::dns::Resolve for Resolver {
 pub(crate) mod tests {
     use super::*;
 
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn unsupported_platform_refuses_pinned_dns_sockets() {
+        for server in ["127.0.0.1:53", "[::1]:53"] {
+            let error = pinned_socket("test-tunnel", server.parse().unwrap()).unwrap_err();
+            assert!(error.contains("cannot be pinned"), "{error}");
+        }
+    }
+
     /// A DNS server on loopback that answers every A query with `answer` and
     /// counts what it was asked.
+    #[cfg(target_os = "linux")]
     pub(crate) async fn fake_server(
         answer: [u8; 4],
     ) -> (SocketAddr, Arc<std::sync::Mutex<Vec<String>>>) {
@@ -502,6 +515,7 @@ pub(crate) mod tests {
 
     /// The server is registered with its real port: `set_servers` takes the
     /// `.conf`'s addresses and assumes 53, the test needs another one.
+    #[cfg(target_os = "linux")]
     pub(crate) fn register(device: &str, server: SocketAddr) {
         cache().lock().unwrap().retain(|(d, _), _| d != device);
         let entry = Arc::new(Entry {
@@ -517,8 +531,10 @@ pub(crate) mod tests {
 
     /// The tests that register `lo` take turns: the registry is keyed
     /// by device and they would otherwise overwrite each other's server.
+    #[cfg(target_os = "linux")]
     pub(crate) static LO: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn a_tunnel_name_is_asked_of_the_tunnel_server_and_never_of_the_host() {
         let _one = LO.lock().await;
@@ -552,6 +568,7 @@ pub(crate) mod tests {
         forget("lo");
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn a_silent_tunnel_server_fails_the_lookup_rather_than_asking_the_host() {
         let _one = LO.lock().await;

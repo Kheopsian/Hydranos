@@ -7,6 +7,15 @@ use tower::ServiceExt;
 
 const KEY: &str = "0123456789abcdef0123456789abcdef";
 
+/// Where a function that starts `src` closes: its `}` at column 0. A Windows
+/// checkout with `core.autocrlf` ends that line with `\r\n`.
+fn end_of_fn(src: &str) -> Option<usize> {
+    ["\n}\n", "\n}\r\n"]
+        .iter()
+        .filter_map(|end| src.find(end))
+        .min()
+}
+
 #[derive(Clone, Default)]
 struct Captured(Arc<std::sync::Mutex<Vec<u8>>>);
 impl std::io::Write for Captured {
@@ -191,7 +200,7 @@ fn routes_in(src: &str) -> Vec<String> {
 async fn every_route_but_the_open_ones_refuses_a_caller_with_no_key() {
     fn fn_body<'a>(src: &'a str, head: &str) -> &'a str {
         let from = src.find(head).unwrap_or_else(|| panic!("{head} not found"));
-        &src[from..from + src[from..].find("\n}\n").unwrap()]
+        &src[from..from + end_of_fn(&src[from..]).unwrap()]
     }
     let router_src = fn_body(include_str!("api.rs"), "fn router_with(");
     let merged: &[(&str, &str)] = &[
@@ -681,7 +690,7 @@ fn the_repair_screen_asks_for_the_key_not_a_login() {
     let from = js
         .find("async function showStoreRepairModal")
         .expect("repair screen");
-    let screen = &js[from..from + js[from..].find("\n}\n").unwrap()];
+    let screen = &js[from..from + end_of_fn(&js[from..]).unwrap()];
     assert!(
         screen.contains("promptApiKey("),
         "a 401 on the repair screen opens the key box"
@@ -774,7 +783,7 @@ async fn the_repair_answer_carries_what_the_screen_reads() {
     let from = js
         .find("async function showStoreRepairModal")
         .expect("repair screen");
-    let screen = &js[from..from + js[from..].find("\n}\n").unwrap()];
+    let screen = &js[from..from + end_of_fn(&js[from..]).unwrap()];
     let mut read: Vec<&str> = Vec::new();
     for var in ["body.", "st."] {
         let mut rest = screen;

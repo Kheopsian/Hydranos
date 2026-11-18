@@ -1059,8 +1059,10 @@ async fn a_skip_checking_add_on_the_wrong_folder_shows_the_missing_path() {
     assert_eq!(v["state"], "error", "{body}");
     assert_eq!(v["torrent_error"], true);
     let msg = v["torrent_error_msg"].as_str().unwrap_or("");
+    // The file is joined onto the folder with this platform's separator.
+    let tail = std::path::Path::new("book-dir").join("book");
     assert!(
-        msg.contains("missing file") && msg.contains("book-dir/book"),
+        msg.contains("missing file") && msg.contains(tail.to_str().unwrap()),
         "{msg}"
     );
 }
