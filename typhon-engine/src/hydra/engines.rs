@@ -68,6 +68,9 @@ pub struct Engine {
     /// torrent. Zeroed until `connect` starts the scheduler, which reads as
     /// "nothing admitted" and is exactly right for an engine that is offline.
     pub admission: Arc<crate::announce::scheduler::Admission>,
+    /// The order the scheduler admits new torrents in, shared with it so a
+    /// settings save reorders what has not announced yet (`apply_config`).
+    pub announce_sort: Arc<crate::config::LiveAnnounceSort>,
     /// Whether a peer listener is actually bound.
     ///
     /// Not "was asked to listen": an engine pinned to an interface that is not
@@ -286,6 +289,9 @@ impl EngineHost {
                 bump: std::sync::OnceLock::new(),
                 announce_policy: std::sync::OnceLock::new(),
                 admission: Default::default(),
+                announce_sort: Arc::new(crate::config::LiveAnnounceSort::new(
+                    session.announce_sort,
+                )),
                 engine_config: std::sync::OnceLock::new(),
                 blocked: std::sync::OnceLock::new(),
             });
@@ -337,6 +343,7 @@ impl EngineHost {
         for local in config.local_engines() {
             if let Some(e) = self.get(&local.id) {
                 apply_live_settings(&e.manager, &local.session);
+                e.announce_sort.set(local.session.announce_sort);
                 n += 1;
             }
         }
@@ -556,6 +563,7 @@ impl EngineHost {
                         },
                         engine.announce_cache.clone(),
                         engine.admission.clone(),
+                        engine.announce_sort.clone(),
                     );
                     // Set once, when this engine joins the network.
                     let _ = engine.bump.set(bump);

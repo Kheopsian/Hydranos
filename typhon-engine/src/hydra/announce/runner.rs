@@ -104,6 +104,7 @@ pub enum Mode {
 /// The engine's live torrent list, seen by the scheduler.
 struct EngineCatalogue {
     manager: Arc<TorrentManager>,
+    sort: Arc<crate::config::LiveAnnounceSort>,
 }
 
 impl Catalogue for EngineCatalogue {
@@ -139,6 +140,37 @@ impl Catalogue for EngineCatalogue {
             .next()
             .map(|u| super::cache::host_of(u).to_string())
             .unwrap_or_default()
+    }
+
+    fn admission_sort(&self) -> crate::config::AnnounceSort {
+        self.sort.get()
+    }
+
+    fn rank_key(
+        &self,
+        info_hash: &typhon_engine::torrent::meta::InfoHash,
+        sort: crate::config::AnnounceSort,
+    ) -> u64 {
+        use crate::config::AnnounceSort;
+        let Some(t) = self.manager.get(info_hash) else {
+            return 0;
+        };
+        match sort {
+            AnnounceSort::Default => 0,
+            AnnounceSort::Size => t.meta.total_size,
+            AnnounceSort::Ratio => ratio_key(crate::row::torrent_ratio(&t)),
+        }
+    }
+}
+
+/// A share ratio as a key that sorts the same way: the bits of a float that is
+/// not negative grow with it. A ratio is never negative; one that somehow is,
+/// or is not a number, ranks with the zeros.
+fn ratio_key(ratio: f64) -> u64 {
+    if ratio > 0.0 {
+        ratio.to_bits()
+    } else {
+        0
     }
 }
 
@@ -248,9 +280,11 @@ pub fn start(
     mode: Mode,
     cache: Arc<Cache>,
     admission: Arc<scheduler::Admission>,
+    sort: Arc<crate::config::LiveAnnounceSort>,
 ) -> tokio::sync::mpsc::Sender<scheduler::BumpReq> {
     let catalogue = Arc::new(EngineCatalogue {
         manager: manager.clone(),
+        sort,
     });
     let hook_manager = manager.clone();
     // One breaker for the engine, not one per torrent: an outage belongs to the
@@ -1307,12 +1341,25 @@ mod announce_one_tests {
 
     /// Bencode lengths are COMPUTED, never counted.
     fn torrent_bytes(name: &str, announce: &str) -> Vec<u8> {
+        torrent_bytes_of(name, announce, 1)
+    }
+
+    /// The fixture torrent with `pieces` pieces of 16 KiB, so its one file is
+    /// `pieces * 16384` bytes. One piece is exactly [`torrent_bytes`].
+    fn torrent_bytes_of(name: &str, announce: &str, pieces: u64) -> Vec<u8> {
+        let length = pieces * 16384;
         let mut info = Vec::new();
-        info.extend_from_slice(format!("d6:lengthi16384e4:name{}:{name}", name.len()).as_bytes());
-        info.extend_from_slice(b"12:piece lengthi16384e6:pieces20:");
+        info.extend_from_slice(
+            format!("d6:lengthi{length}e4:name{}:{name}", name.len()).as_bytes(),
+        );
+        info.extend_from_slice(
+            format!("12:piece lengthi16384e6:pieces{}:", pieces * 20).as_bytes(),
+        );
         let mut piece = [0xABu8; 20];
         piece[0] = name.as_bytes()[0];
-        info.extend_from_slice(&piece);
+        for _ in 0..pieces {
+            info.extend_from_slice(&piece);
+        }
         info.push(b'e');
         let mut out = Vec::new();
         out.extend_from_slice(format!("d8:announce{}:{announce}4:info", announce.len()).as_bytes());
@@ -1326,6 +1373,11 @@ mod announce_one_tests {
     /// One folder per call, so two tests using the same name never see each
     /// other's file half-written.
     fn seed_dir(name: &str) -> String {
+        seed_dir_of(name, 1)
+    }
+
+    /// [`seed_dir`] for a torrent of `pieces` pieces.
+    fn seed_dir_of(name: &str, pieces: u64) -> String {
         static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let dir = std::env::temp_dir().join(format!(
             "hydra-runner-{}-{}",
@@ -1333,7 +1385,7 @@ mod announce_one_tests {
             N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join(name), vec![0u8; 16384]).unwrap();
+        std::fs::write(dir.join(name), vec![0u8; pieces as usize * 16384]).unwrap();
         dir.to_string_lossy().into_owned()
     }
 
@@ -1376,8 +1428,18 @@ mod announce_one_tests {
     /// reported as `gone` -- which is correct behaviour, not a bug, and it
     /// silently made six of these tests assert the wrong thing.
     fn add(mgr: &Arc<TorrentManager>, name: &str, announce: &str) -> String {
+        add_of(mgr, name, announce, 1)
+    }
+
+    /// [`add`] for a torrent of `pieces` pieces of 16 KiB.
+    fn add_of(mgr: &Arc<TorrentManager>, name: &str, announce: &str, pieces: u64) -> String {
         let (ih, _) = mgr
-            .add_torrent_bytes(&torrent_bytes(name, announce), &seed_dir(name), false, true)
+            .add_torrent_bytes(
+                &torrent_bytes_of(name, announce, pieces),
+                &seed_dir_of(name, pieces),
+                false,
+                true,
+            )
             .expect("the fixture torrent parses");
         let t = mgr.get(&ih).expect("just added");
         {
@@ -1390,6 +1452,68 @@ mod announce_one_tests {
 
     fn parts() -> (Policy, Breaker, Cache) {
         (Policy::default(), Breaker::default(), Cache::default())
+    }
+
+    #[tokio::test]
+    async fn ratio_ranks_the_highest_lifetime_ratio_first_and_follows_the_setting() {
+        use crate::config::AnnounceSort;
+        use std::sync::atomic::Ordering::Relaxed;
+        let (manager, root) = manager("ratio-order");
+        let low = add(&manager, "low", "http://tracker.test/announce");
+        let high = add(&manager, "high", "http://tracker.test/announce");
+        let zero = add(&manager, "zero", "http://tracker.test/announce");
+        for (hash, uploaded) in [(&low, 16384), (&high, 49152), (&zero, 0)] {
+            let t = manager.get(&parse_hex(hash).unwrap()).unwrap();
+            t.total_uploaded.store(uploaded, Relaxed);
+            t.total_downloaded.store(16384, Relaxed);
+        }
+        let sort = Arc::new(crate::config::LiveAnnounceSort::default());
+        let catalogue = EngineCatalogue {
+            manager,
+            sort: sort.clone(),
+        };
+        assert_eq!(catalogue.admission_sort(), AnnounceSort::Default);
+        sort.set(AnnounceSort::Ratio);
+        assert_eq!(catalogue.admission_sort(), AnnounceSort::Ratio);
+        let key = |h: &String| catalogue.rank_key(&parse_hex(h).unwrap(), AnnounceSort::Ratio);
+        assert!(key(&high) > key(&low));
+        assert!(key(&low) > key(&zero));
+        assert_eq!(key(&zero), 0);
+        assert_eq!(ratio_key(f64::NAN), 0);
+        assert!(ratio_key(f64::INFINITY) > ratio_key(1e300));
+        drop(catalogue);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn size_ranks_the_largest_torrent_first_and_follows_the_setting() {
+        use crate::config::AnnounceSort;
+        let (manager, root) = manager("size-order");
+        let small = add_of(&manager, "small", "http://tracker.test/announce", 1);
+        let large = add_of(&manager, "large", "http://tracker.test/announce", 3);
+        let mid = add_of(&manager, "mid", "http://tracker.test/announce", 2);
+        let sort = Arc::new(crate::config::LiveAnnounceSort::default());
+        let catalogue = EngineCatalogue {
+            manager,
+            sort: sort.clone(),
+        };
+        assert_eq!(catalogue.admission_sort(), AnnounceSort::Default);
+        sort.set(AnnounceSort::Size);
+        assert_eq!(catalogue.admission_sort(), AnnounceSort::Size);
+        let key = |h: &String, s| catalogue.rank_key(&parse_hex(h).unwrap(), s);
+        assert_eq!(key(&large, AnnounceSort::Size), 3 * 16384);
+        assert_eq!(key(&mid, AnnounceSort::Size), 2 * 16384);
+        assert_eq!(key(&small, AnnounceSort::Size), 16384);
+        let mut ranked = vec![small.clone(), large.clone(), mid.clone()];
+        ranked.sort_by_key(|h| std::cmp::Reverse(key(h, catalogue.admission_sort())));
+        assert_eq!(ranked, [large.clone(), mid.clone(), small.clone()]);
+        sort.set(AnnounceSort::Default);
+        assert_eq!(catalogue.admission_sort(), AnnounceSort::Default);
+        for h in [&small, &large, &mid] {
+            assert_eq!(key(h, catalogue.admission_sort()), 0);
+        }
+        drop(catalogue);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// ⭐⭐ A hash the engine no longer holds reports `gone`, so the scheduler
