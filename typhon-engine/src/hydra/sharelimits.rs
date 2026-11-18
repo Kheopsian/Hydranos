@@ -870,6 +870,36 @@ mod worker_tests {
         assert!(t.is_paused.load(Ordering::Relaxed), "and it stays stopped");
     }
 
+    /// A rule's pause stops the torrent and leaves the user's recheck
+    /// running; the operator's stop calls it off.
+    #[tokio::test]
+    async fn a_rules_pause_leaves_a_recheck_running_and_the_operators_calls_it_off() {
+        let s = state("rule-pause-recheck", "", None);
+        let (hash, t, _) = seed(&s, "checked", 0, 0);
+        let mgr = s.engines.get("race").unwrap().manager.clone();
+        mgr.stop_torrent(&t.info_hash).unwrap();
+        mgr.recheck(&t.info_hash).expect("recheck starts");
+        let gen = t.check_gen.load(Ordering::SeqCst);
+        assert!(t.rechecking.load(Ordering::SeqCst));
+
+        crate::api::apply_automatic_pause_to_engine(&s.state, "race", &hash, true);
+        assert_eq!(
+            t.check_gen.load(Ordering::SeqCst),
+            gen,
+            "a rule's pause called the check off"
+        );
+        assert!(t.rechecking.load(Ordering::SeqCst));
+        assert!(t.is_paused.load(Ordering::Relaxed));
+
+        crate::api::apply_pause_to_engine(&s.state, "race", &hash, true);
+        assert_ne!(
+            t.check_gen.load(Ordering::SeqCst),
+            gen,
+            "the operator's stop left the check running"
+        );
+        assert!(!t.rechecking.load(Ordering::SeqCst));
+    }
+
     /// Inactivity counts from the first pass that saw the torrent, and an
     /// upload resets it.
     #[test]

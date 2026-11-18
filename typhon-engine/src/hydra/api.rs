@@ -8144,7 +8144,27 @@ async fn qbit_remove_tags(
 /// Quiet when the torrent is not in that engine. A row can name a session this
 /// process does not run -- a catalogue outlives a config change -- and that is
 /// not an error worth a log line on every bulk pause.
+///
+/// The operator's stop (UI, API, qBittorrent shim): it calls a check off
+/// (`stop_torrent_by_user`). A stop nobody clicked uses
+/// `apply_automatic_pause_to_engine`.
 pub(crate) fn apply_pause_to_engine(state: &AppState, engine_id: &str, hash: &str, paused: bool) {
+    apply_pause(state, engine_id, hash, paused, true);
+}
+
+/// `apply_pause_to_engine` for a stop the user did not make at that moment
+/// (a rule's pause): the torrent stops, and a check the user asked for goes
+/// on, as with the queue managers' and the share-limit worker's stops.
+pub(crate) fn apply_automatic_pause_to_engine(
+    state: &AppState,
+    engine_id: &str,
+    hash: &str,
+    paused: bool,
+) {
+    apply_pause(state, engine_id, hash, paused, false);
+}
+
+fn apply_pause(state: &AppState, engine_id: &str, hash: &str, paused: bool, by_user: bool) {
     let Some(info_hash) = crate::store::hex20(hash) else {
         return;
     };
@@ -8152,10 +8172,13 @@ pub(crate) fn apply_pause_to_engine(state: &AppState, engine_id: &str, hash: &st
         return;
     };
     let _ = if paused {
-        // A stop is a stop: a check queued or under way is called off, not
-        // left to run and show the torrent as checking.
-        engine.manager.cancel_check(&info_hash);
-        engine.manager.stop_torrent(&info_hash)
+        if by_user {
+            // A stop is a stop: a check queued or under way is called off,
+            // not left to run and show the torrent as checking.
+            engine.manager.stop_torrent_by_user(&info_hash)
+        } else {
+            engine.manager.stop_torrent(&info_hash)
+        }
     } else {
         // Through the path claim: a torrent still downloading must not write
         // into a file another torrent reads.

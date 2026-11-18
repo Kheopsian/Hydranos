@@ -838,9 +838,11 @@ fn apply_matches(
     report: &mut rulesrun::PassReport,
 ) {
     // The pause hook takes the same route a human click does, so a workflow
-    // cannot pause more or less thoroughly than a person can.
+    // cannot pause more or less thoroughly than a person can -- except that
+    // it leaves a check running: the user asked for that one, the rule did
+    // not ask to call it off.
     let hook = |engine: &str, hash: &str, paused: bool| {
-        crate::api::apply_pause_to_engine(state, engine, hash, paused);
+        crate::api::apply_automatic_pause_to_engine(state, engine, hash, paused);
     };
     // Same reasoning for delete, and it matters more: this is the path that
     // folds a removed torrent's lifetime bytes into the durable counters.

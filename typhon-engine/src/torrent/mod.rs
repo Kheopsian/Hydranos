@@ -1734,6 +1734,14 @@ impl TorrentManager {
         Ok(())
     }
 
+    /// The stop an operator asks for (UI, API, qBittorrent shim): a check of
+    /// the torrent is called off (`cancel_check`), then it stops. Automatic
+    /// stops (queues, share limits, rules) call `stop_torrent` alone.
+    pub fn stop_torrent_by_user(&self, info_hash: &InfoHash) -> Result<(), String> {
+        self.cancel_check(info_hash);
+        self.stop_torrent(info_hash)
+    }
+
     /// Call off a recheck or a proof of this torrent, queued or under way.
     ///
     /// For a stop the USER asks for. A torrent stopped while it waited for
@@ -1742,8 +1750,8 @@ impl TorrentManager {
     /// it is still waiting, or at its next piece if it is reading, publishes
     /// no verdict (what the torrent held before stays), and a proof starts
     /// nothing. The torrent reads as what the stop made it. Not called by the
-    /// queue managers' own stops, nor by the share-limit worker's, which must
-    /// not undo a check the user asked.
+    /// queue managers' own stops, nor by the share-limit worker's or a rule's,
+    /// which must not undo a check the user asked.
     ///
     /// A check that has read everything and is writing its verdict finishes
     /// it first (`check_publish`): the stop then finds a finished check, and
