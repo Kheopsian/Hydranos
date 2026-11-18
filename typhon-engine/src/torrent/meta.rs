@@ -844,8 +844,8 @@ pub fn intern_host(host: &str) -> Arc<str> {
     h
 }
 
-/// The write path's two side tables, under one lock: 24 bytes on a torrent
-/// that has neither, which is nearly every one.
+/// The write path's three side tables, under one lock: 32 bytes on a torrent
+/// that has none, which is nearly every one.
 #[derive(Default)]
 struct WriteState {
     /// Files (below the save path) that another torrent names or that have
@@ -859,6 +859,13 @@ struct WriteState {
     /// nothing, and one table on each was an estimated ~23 MB of empty maps
     /// across 290,000 seeds (from the type sizes, not measured).
     verdicts: Option<Arc<parking_lot::Mutex<WriteVerdicts>>>,
+    /// See `FreeLinks`. Built by the first `set_free_links` that names a
+    /// file, `None` (no free links) otherwise: one on each torrent was a
+    /// 224-byte allocation, ~65 MB across 290,000 torrents (measured on
+    /// Linux, jemalloc). Kept through seeding and rechecks, unlike the
+    /// verdicts: a seed that downloads again must still open a given-up file
+    /// fresh.
+    free: Option<Arc<parking_lot::Mutex<FreeLinks>>>,
 }
 
 /// The key a tracker URL is filed under in the announce book.
@@ -1009,8 +1016,6 @@ pub struct TorrentState {
     /// What `write_piece` works with besides the data, empty and unallocated
     /// for nearly every torrent. See `WriteState`.
     write_state: RwLock<WriteState>,
-    /// See `FreeLinks`. Empty for nearly every torrent.
-    free_links: Arc<parking_lot::Mutex<FreeLinks>>,
     /// `error_msg` holds a note a recheck left (nothing was found where it was
     /// expected), not a fault: the first piece that lands clears it.
     recheck_note: AtomicBool,
@@ -1690,7 +1695,6 @@ impl TorrentState {
             proof_holds: AtomicU32::new(0),
             recheck_done: AtomicU32::new(0),
             write_state: RwLock::new(WriteState::default()),
-            free_links: Arc::default(),
             recheck_note: AtomicBool::new(false),
             piece_hashes: Mutex::new(None),
             v2_checks: Mutex::new(None),
@@ -2045,20 +2049,31 @@ impl TorrentState {
     }
 
     /// Record the free files the path-claim proof linked below `save_path`
-    /// (see `FreeLinks`). Replaces what was recorded.
+    /// (see `FreeLinks`). Replaces what was recorded, in place, so a write in
+    /// flight sees the new record; none recorded and no file allocates
+    /// nothing.
     pub fn set_free_links(&self, save_path: PathBuf, files: std::collections::HashSet<PathBuf>) {
-        *self.free_links.lock() = FreeLinks {
+        let record = FreeLinks {
             at: save_path,
             linked: files,
             undone: Default::default(),
             settled: Default::default(),
             settlements: 0,
         };
+        let mut w = self.write_state.write();
+        match &w.free {
+            Some(free) => *free.lock() = record,
+            None if !record.linked.is_empty() => {
+                w.free = Some(Arc::new(parking_lot::Mutex::new(record)))
+            }
+            None => {}
+        }
     }
 
     /// The free links, to share with the blocking task of `write_piece`.
-    pub fn free_links(&self) -> Arc<parking_lot::Mutex<FreeLinks>> {
-        self.free_links.clone()
+    /// `None`: there are none.
+    pub fn free_links(&self) -> Option<Arc<parking_lot::Mutex<FreeLinks>>> {
+        self.write_state.read().free.clone()
     }
 
     /// The files of this torrent (paths below the save path) that are not on
@@ -2216,21 +2231,50 @@ mod tests {
         assert_eq!(m.into_trackers(), tiers);
     }
 
+    /// Free links are allocated only for a torrent the proof linked a file
+    /// for, and survive seeding and a recheck once they are.
+    #[test]
+    fn free_links_are_built_only_for_a_linked_file() {
+        let (st, _, _) = state_for("freelinks", 2);
+        st.set_free_links(PathBuf::from("/save"), Default::default());
+        assert!(st.free_links().is_none(), "no file linked, yet allocated");
+
+        let rel = PathBuf::from("a");
+        st.set_free_links(
+            PathBuf::from("/save"),
+            std::iter::once(rel.clone()).collect(),
+        );
+        let held = st.free_links().expect("a linked file not recorded");
+        held.lock().undone.insert(rel.clone());
+        st.release_piece_hashes();
+        st.forget_write_verdicts();
+        assert!(
+            st.free_links().unwrap().lock().undone.contains(&rel),
+            "forgotten by a seed or a recheck"
+        );
+
+        // Replaced in place: a write holding the old handle sees it.
+        st.set_free_links(PathBuf::from("/save"), Default::default());
+        assert!(held.lock().linked.is_empty() && held.lock().undone.is_empty());
+    }
+
     /// One of each per torrent, 300,000 times over: a field that makes them
     /// bigger must be a decision, not an accident. The bounds are the sizes
-    /// measured on x86_64 when this was written; raise one on purpose.
+    /// measured on x86_64 when this was written (a `PathBuf` is 8 bytes
+    /// larger on Windows); raise one on purpose.
     #[cfg(target_pointer_width = "64")]
     #[test]
     fn per_torrent_types_do_not_grow() {
         use std::mem::size_of;
         let state = size_of::<TorrentState>();
-        assert!(state <= 920, "TorrentState grew to {state} bytes");
+        let bound = if cfg!(windows) { 936 } else { 928 };
+        assert!(state <= bound, "TorrentState grew to {state} bytes");
         let meta = size_of::<TorrentMeta>();
         assert!(meta <= 160, "TorrentMeta grew to {meta} bytes");
         assert_eq!(
             size_of::<RwLock<WriteState>>(),
-            24,
-            "the write path's state is one lock and two pointers"
+            32,
+            "the write path's state is one lock and three pointers"
         );
     }
 
