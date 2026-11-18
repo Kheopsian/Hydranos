@@ -16122,13 +16122,16 @@ pub(crate) async fn post_torrent_engine(
     // (`pathclaim::hand_over`). Before the source lets go, so a proof
     // finding the source gone always finds the copy handed over.
     let proving = torrent.held_for_proof();
+    let adopted = dst.manager.get(&ih);
     if proving {
-        if let Some(adopted) = dst.manager.get(&ih) {
+        if let Some(adopted) = &adopted {
             // None left to follow it: the proof ended between the record
             // being taken and now, and checked and started the copy that is
             // leaving. The copy that landed is proven here instead.
-            if crate::pathclaim::hand_over(&ih, &adopted) == 0 {
-                let _ = crate::pathclaim::guarded_recheck(&state, &target, &adopted);
+            if crate::pathclaim::hand_over(&torrent, adopted) == 0 {
+                // Started there if the proof started it: what its add asked.
+                let start = !torrent.is_paused.load(std::sync::atomic::Ordering::Relaxed);
+                let _ = crate::pathclaim::guarded_recheck_then(&state, &target, adopted, start);
             }
         }
     }
@@ -16136,8 +16139,8 @@ pub(crate) async fn post_torrent_engine(
         // Undo the adoption rather than leave the torrent in both engines
         // with one store row.
         let _ = dst.manager.remove_torrent(&ih, true);
-        if proving {
-            crate::pathclaim::hand_over(&ih, &torrent);
+        if let (true, Some(adopted)) = (proving, &adopted) {
+            crate::pathclaim::hand_over(adopted, &torrent);
         }
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -16158,10 +16161,8 @@ pub(crate) async fn post_torrent_engine(
             .manager
             .import_state_bytes(&original, &blob)
             .map_err(|u| u.to_string());
-        if proving {
-            if let Some(put_back) = src.manager.get(&ih) {
-                crate::pathclaim::hand_over(&ih, &put_back);
-            }
+        if let (true, Some(adopted), Some(put_back)) = (proving, &adopted, src.manager.get(&ih)) {
+            crate::pathclaim::hand_over(adopted, &put_back);
         }
         let back = back.and_then(|_| {
             dst.manager
