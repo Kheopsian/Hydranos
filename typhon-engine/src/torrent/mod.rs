@@ -3500,12 +3500,32 @@ fn remove_empty_dirs_recursive(dir: &std::path::Path) {
 /// Bounds how many rechecks hash the disk at once. Recheck is triggered per
 /// add / per explicit request (never a boot-wide O(N) scan), but a burst of
 /// re-adds could otherwise thrash the disk -- cap concurrent checks.
+static RECHECK_SEM: OnceLock<Arc<Semaphore>> = OnceLock::new();
+
 fn recheck_sem() -> &'static Arc<Semaphore> {
-    static S: OnceLock<Arc<Semaphore>> = OnceLock::new();
     // Deux rechecks simultanes lisant leurs pieces une par une plafonnaient a
     // ~2 Mo/s sur un pool qui en sert 500. Reparer 573 torrents aurait pris des
     // milliers d heures. Reglable sans rebuild pour une campagne de reparation.
-    S.get_or_init(|| Arc::new(Semaphore::new(limits().torrents.load(Ordering::SeqCst))))
+    sem_at(&RECHECK_SEM, &limits().torrents)
+}
+
+/// The semaphore in `cell`, made at the count `count` holds when it is first
+/// asked for.
+fn sem_at<'a>(
+    cell: &'a OnceLock<Arc<Semaphore>>,
+    count: &std::sync::atomic::AtomicUsize,
+) -> &'a Arc<Semaphore> {
+    cell.get_or_init(|| Arc::new(Semaphore::new(count.load(Ordering::SeqCst))))
+}
+
+/// Set the global count `count` holds to `to`, and the semaphore in `cell`
+/// with it. The semaphore is made first, at the count it is then resized
+/// from: made after the swap, it would start at `to` and be "resized" from a
+/// count it never had (from no cap down to 8, that left it at 0).
+fn set_count(cell: &OnceLock<Arc<Semaphore>>, count: &std::sync::atomic::AtomicUsize, to: usize) {
+    let sem = sem_at(cell, count);
+    let from = count.swap(to, Ordering::SeqCst);
+    resize_sem(sem, from, to);
 }
 
 /// A positive whole number from the environment, if one is set.
@@ -3601,9 +3621,7 @@ pub fn set_recheck_limits(torrents: Option<usize>, per_disk: Option<usize>, piec
         per_disk_from(pieces, "TYPHON_RECHECK_CONCURRENCY").unwrap_or(0),
         Ordering::SeqCst,
     );
-    let to = torrents_from(torrents);
-    let from = l.torrents.swap(to, Ordering::SeqCst);
-    resize_sem(recheck_sem(), from, to);
+    set_count(&RECHECK_SEM, &l.torrents, torrents_from(torrents));
     // Under the map's lock: a disk asked for meanwhile is made at the new
     // count, not resized from a count it never had.
     let mut map = disk_map().lock().unwrap_or_else(|e| e.into_inner());
@@ -5121,6 +5139,28 @@ mod lifecycle_tests {
         );
         // The variable is not set under test: no cap either.
         assert_eq!(torrents_from(None), UNCAPPED);
+    }
+
+    /// A limit set before any check has run (the config's, read at start)
+    /// makes the semaphore at that count. It used to be made after the new
+    /// count was stored and then "resized" from the old one, which it never
+    /// had: from no cap down to 8 left it at 0, every check and proof waiting
+    /// for permits that would never come.
+    #[tokio::test]
+    async fn a_limit_set_before_the_first_check_is_the_count() {
+        for (start, to) in [(UNCAPPED, 8), (4, 8), (8, 4)] {
+            let cell = OnceLock::new();
+            let count = std::sync::atomic::AtomicUsize::new(start);
+            set_count(&cell, &count, to);
+            let sem = cell.get().expect("made");
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            assert_eq!(
+                sem.available_permits(),
+                to,
+                "from {start} to {to} on a semaphore not made yet"
+            );
+            assert_eq!(count.load(Ordering::SeqCst), to);
+        }
     }
 
     /// A lower limit takes back what is free at once and the rest as checks
