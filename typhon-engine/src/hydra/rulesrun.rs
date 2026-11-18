@@ -103,7 +103,7 @@ pub fn gather(
         .all()
         .into_iter()
         .map(|t| {
-            let hash: String = t.info_hash.iter().map(|b| format!("{b:02x}")).collect();
+            let hash: String = typhon_engine::torrent::hex_encode(&t.info_hash);
             let s = stored.get(&hash).cloned().unwrap_or_default();
             let free_space = if s.save_path.is_empty() || !want_free_space {
                 rules::NEVER
@@ -514,7 +514,7 @@ pub fn catalogue_where(
             if save_path.is_empty() {
                 continue;
             }
-            let info_hash: String = t.info_hash.iter().map(|b| format!("{b:02x}")).collect();
+            let info_hash: String = typhon_engine::torrent::hex_encode(&t.info_hash);
             let files = if t.meta.multi_file {
                 t.meta.files.len()
             } else {
@@ -548,7 +548,7 @@ pub fn entry_for(
         return None;
     }
     Some(CatalogueEntry {
-        info_hash: t.info_hash.iter().map(|b| format!("{b:02x}")).collect(),
+        info_hash: typhon_engine::torrent::hex_encode(&t.info_hash),
         session: session.clone(),
         save_path: save_path.as_str().into(),
         files: if t.meta.multi_file {
@@ -1645,13 +1645,12 @@ pub fn link_guard(host: &EngineHost, m: &Match, cached: &LinkFacts) -> Result<()
     let Some(engine) = host.engines().iter().find(|e| e.id == m.engine) else {
         return Err(format!("engine {} is not running here", m.engine));
     };
-    let Some(t) = engine.manager.all().into_iter().find(|t| {
-        t.info_hash
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect::<String>()
-            == m.info_hash
-    }) else {
+    let Some(t) = engine
+        .manager
+        .all()
+        .into_iter()
+        .find(|t| typhon_engine::torrent::hex_encode(&t.info_hash) == m.info_hash)
+    else {
         return Err("torrent is no longer in the engine".into());
     };
     let save_path = engine_save_path(&t);

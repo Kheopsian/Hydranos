@@ -29,8 +29,11 @@ on:
         default: true
         type: boolean
 
+# The built-in token, not a long-lived one: the package grants this repository
+# the Admin role in its Actions access, which is what deleting a version needs.
 permissions:
   contents: read
+  packages: write
 
 jobs:
   prune:
@@ -40,7 +43,7 @@ jobs:
 
       - name: Plan
         env:
-          GHCR_TOKEN: ${{ secrets.GHCR_PRUNE_TOKEN }}
+          GHCR_TOKEN: ${{ github.token }}
           OWNER: ${{ github.repository_owner }}
           PKG: hydranos
           KEEP: ${{ github.event.inputs.keep || 10 }}
@@ -53,9 +56,11 @@ jobs:
         # event_name this workflow can no longer receive, so the guard hung on
         # its second term alone and happened to pass. A condition that is true
         # by accident is a condition nobody can read.
-        if: ${{ github.event_name == 'push' || !inputs.dry_run }}
+        # A manual deletion only by the repository owner: anyone with write access
+        # can start a workflow, and a deletion has no undo.
+        if: ${{ github.event_name == 'push' || (!inputs.dry_run && github.actor == github.repository_owner) }}
         env:
-          GHCR_TOKEN: ${{ secrets.GHCR_PRUNE_TOKEN }}
+          GHCR_TOKEN: ${{ github.token }}
           OWNER: ${{ github.repository_owner }}
           PKG: hydranos
           KEEP: ${{ github.event.inputs.keep || 10 }}

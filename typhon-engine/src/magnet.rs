@@ -411,7 +411,7 @@ fn log_host(url: &str) -> String {
 
 /// Hex for arbitrary byte slices (the torrent one is fixed at 20 bytes).
 pub fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+    crate::torrent::hex_encode_bytes(bytes)
 }
 
 #[cfg(test)]

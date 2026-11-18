@@ -356,7 +356,7 @@ pub async fn run(
         is_encrypted,
         fast_ext,
     ));
-    // RAII: inserts into torrent.peer_stats and bumps peers_connected;
+    // RAII: inserts into torrent.peers and bumps peers_connected;
     // removes + decrements on drop (panic-safe).
     let guard = PeerGuard::new(torrent.clone(), stats.clone());
 
@@ -957,13 +957,13 @@ pub async fn run(
                                             }
                                         }
                                         // Somebody asks to be introduced. The
-                                        // register is `torrent.peer_stats`, which
+                                        // register is `torrent.peers`, which
                                         // already holds every peer this torrent
                                         // has and is emptied by the RAII guard
                                         // when a session ends.
                                         Some(Punch::Rendezvous(target)) => {
                                             let (connected, supports) =
-                                                match torrent.peer_stats.get(&target) {
+                                                match torrent.peers.get(&target) {
                                                     Some(e) => (
                                                         true,
                                                         e.supports_holepunch
@@ -980,7 +980,7 @@ pub async fn run(
                                             // Queued here and sent by that peer's
                                             // own task, which owns its socket.
                                             if matches!(reply, Punch::Connect(_)) {
-                                                if let Some(e) = torrent.peer_stats.get(&target) {
+                                                if let Some(e) = torrent.peers.get(&target) {
                                                     e.queue_punch(addr);
                                                 }
                                             }
@@ -1088,7 +1088,7 @@ pub async fn run(
         ul_total
     );
     dl.on_disconnect();
-    // guard drops here -> peer_stats.remove + peers_connected/interested decrement
+    // guard drops here -> peers.remove + peers_connected/interested decrement
     drop(guard);
 }
 

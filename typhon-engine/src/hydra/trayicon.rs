@@ -69,7 +69,7 @@ pub fn from_logo() -> Option<HANDLE> {
             biHeight: -h,
             biPlanes: 1,
             biBitCount: 32,
-            biCompression: BI_RGB as u32,
+            biCompression: BI_RGB,
             ..std::mem::zeroed()
         };
         let mut bits: *mut core::ffi::c_void = std::ptr::null_mut();

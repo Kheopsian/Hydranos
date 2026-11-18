@@ -315,7 +315,7 @@ mod tests {
     #[test]
     fn the_data_folder_is_known_but_not_a_download_folder() {
         let data = scratch("data");
-        let s = st("pr-data", &format!("data_dir = \"{}\"\n", data.display()));
+        let s = st("pr-data", &format!("data_dir = '{}'\n", data.display()));
         let f = file_in(&data, "default.toml");
         assert!(within_known_dirs(&s.state, &f.to_string_lossy()).is_ok());
         assert!(within_download_dirs(&s.state, &f.to_string_lossy()).is_err());

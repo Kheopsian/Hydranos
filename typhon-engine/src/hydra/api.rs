@@ -788,10 +788,7 @@ async fn post_node_enrol(
     // check and is never run.
     let sha: String = {
         use sha2::{Digest, Sha256};
-        Sha256::digest(INSTALL_SCRIPT.as_bytes())
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect()
+        typhon_engine::torrent::hex_encode_bytes(&Sha256::digest(INSTALL_SCRIPT.as_bytes()))
     };
     Json(serde_json::json!({
         "token": token,
@@ -6587,6 +6584,10 @@ fn status_payload(state: &AppState) -> serde_json::Value {
         },
         "server_ts": now,
         "tunnels": [],
+        // The most one `.torrent` add request may carry, whole body included,
+        // on `/api/torrents/upload` and `/api/v2/torrents/add`. A client groups
+        // its files under it; past it the request is refused with 413.
+        "upload_limit_bytes": ADD_BODY_LIMIT,
         // Seconds with a fraction, as 3.x publishes it.
         "uptime": (now - state.started_at) as f64,
         "version": HYDRANOS_VERSION,
@@ -10442,9 +10443,12 @@ fn current_torrent_file(state: &AppState, info_hash: &str, blob: Vec<u8>) -> Vec
     let Some(tiers) = live_tiers(state, info_hash) else {
         return blob;
     };
-    match typhon_engine::torrent::metainfo::parse_torrent_bytes(&blob) {
-        Ok(meta) if meta.trackers == tiers => blob,
-        _ => crate::export::with_trackers(&blob, &tiers).unwrap_or(blob),
+    let unchanged = typhon_engine::torrent::metainfo::parse_torrent_bytes(&blob)
+        .is_ok_and(|meta| meta.into_trackers() == tiers);
+    if unchanged {
+        blob
+    } else {
+        crate::export::with_trackers(&blob, &tiers).unwrap_or(blob)
     }
 }
 
@@ -12239,10 +12243,10 @@ async fn qbit_add_trackers(
             .get("hash")
             .map(|h| h.trim().to_lowercase())
             .unwrap_or_default();
-        for (id, _) in copies_of(&state, &hash) {
+        for (id, copy) in copies_of(&state, &hash) {
             if let Some(bump) = state.engines.get(&id).and_then(|e| e.bump.get()) {
                 let _ = bump.try_send(crate::announce::scheduler::BumpReq {
-                    info_hash: hash.clone(),
+                    info_hash: copy.info_hash,
                     reply: None,
                     forced: false,
                 });
@@ -13615,7 +13619,7 @@ async fn reannounce_one(
     // announcing anything: there was no way to ask for an announce at all, so
     // the button in the Trackers tab had never done a thing. The scheduler owns
     // the queue, so asking is sending it a message.
-    let Some((engine_id, _torrent)) = find_selected(&state, &query, &info_hash) else {
+    let Some((engine_id, torrent)) = find_selected(&state, &query, &info_hash) else {
         return not_found();
     };
     let Some(engine) = state.engines.get(&engine_id) else {
@@ -13640,7 +13644,7 @@ async fn reannounce_one(
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     if bump
         .try_send(crate::announce::scheduler::BumpReq {
-            info_hash: info_hash.to_lowercase(),
+            info_hash: torrent.info_hash,
             reply: Some(reply_tx),
             // A person pressed it: past `min interval`, like qBittorrent.
             forced: true,
@@ -14394,7 +14398,9 @@ async fn qbit_torrent_add(
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
 
-    let mut files: Vec<Vec<u8>> = Vec::new();
+    // `Bytes` as the reader hands them: a batch of up to `ADD_BODY_LIMIT` is
+    // not copied a second time.
+    let mut files: Vec<axum::body::Bytes> = Vec::new();
     let mut category = String::new();
     let mut save_path = String::new();
     let mut tags = String::new();
@@ -14417,18 +14423,39 @@ async fn qbit_torrent_add(
     let mut auto_tmm = false;
     let mut sequential = false;
     let mut first_last = false;
+    // Hydranos' own fields, the native upload's: where the batch goes, by
+    // engine id or by role. Absent, the category decides, as it always has.
+    // qBittorrent has neither and ignores what it does not know, so a client
+    // may send them to both.
+    let mut engine = String::new();
+    let mut mode = String::new();
     let mut ignored: Vec<String> = Vec::new();
 
-    while let Ok(Some(field)) = multipart.next_field().await {
+    // Read whole before anything is added. A batch past the body limit used to
+    // end the loop quietly: the torrents read so far were added, the rest
+    // dropped, and the client told "Ok." for all of them.
+    let cut_short = |e: axum::extract::multipart::MultipartError| {
+        let (status, why) = unreadable_upload(&e);
+        tracing::warn!(error = %why, "qbit add refused");
+        (status, "Fails.").into_response()
+    };
+    loop {
+        let field = match multipart.next_field().await {
+            Ok(Some(f)) => f,
+            Ok(None) => break,
+            Err(e) => return cut_short(e),
+        };
         let name = field.name().unwrap_or_default().to_string();
         match name.as_str() {
-            "torrents" | "file" | "fileselect" => {
-                if let Ok(data) = field.bytes().await {
-                    files.push(data.to_vec());
-                }
-            }
+            "torrents" | "file" | "fileselect" => match field.bytes().await {
+                Ok(data) => files.push(data),
+                Err(e) => return cut_short(e),
+            },
             _ => {
-                let value = field.text().await.unwrap_or_default();
+                let value = match field.text().await {
+                    Ok(v) => v,
+                    Err(e) => return cut_short(e),
+                };
                 match name.as_str() {
                     "category" => category = value,
                     "savepath" => save_path = value,
@@ -14477,6 +14504,8 @@ async fn qbit_torrent_add(
                     // which come at all.
                     "sequentialDownload" => sequential = value == "true" || value == "1",
                     "firstLastPiecePrio" => first_last = value == "true" || value == "1",
+                    "engine" => engine = value,
+                    "mode" => mode = value,
                     // Accepted and without effect, said in the log once per
                     // add: `rename` (the name is the .torrent's), `cookie`.
                     other => {
@@ -14495,6 +14524,16 @@ async fn qbit_torrent_add(
     if !ignored.is_empty() {
         tracing::info!(fields = ?ignored, "qbit add: these fields have no effect in Hydranos");
     }
+    // Named and unknown is refused, never a quiet fallback to the category:
+    // a batch meant for hoard that lands in race is then moved by somebody,
+    // and a move in the middle of the add's recheck loses the recheck.
+    let engine = match add_target_engine(&state, &engine, &mode) {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::warn!(error = %e, "qbit add refused");
+            return (StatusCode::BAD_REQUEST, "Fails.").into_response();
+        }
+    };
     // autoTMM: the category's folder, never the one sent alongside -- that is
     // what qBittorrent does with a managed torrent's savepath.
     if auto_tmm && !category.is_empty() && !placement(&state, &category, "").1.is_empty() {
@@ -14537,12 +14576,12 @@ async fn qbit_torrent_add(
             }
         }
     });
-    let mut failed = 0;
     let mut url_failed = 0;
     for u in &urls {
         let outcome = if crate::rss::is_magnet(u) {
             let (st, u2) = (state.clone(), u.clone());
             let (c, sp, tg) = (category.clone(), save_path.clone(), tags.clone());
+            let eng = engine.clone();
             let shared = share_at_add.clone();
             // Kept with the request: applied once the metadata is in.
             let opts = crate::magnets::AddOptions {
@@ -14555,7 +14594,7 @@ async fn qbit_torrent_add(
             };
             tokio::task::spawn_blocking(move || {
                 crate::magnets::request_with_options(
-                    &st, &u2, &c, &sp, &tg, paused, seed_mode, "", &opts,
+                    &st, &u2, &c, &sp, &tg, paused, seed_mode, &eng, &opts,
                 )
                 .map(|hash| {
                     // Keyed by hash, so a magnet's limits wait for it in the
@@ -14568,7 +14607,7 @@ async fn qbit_torrent_add(
         } else {
             match crate::mcp::fetch_torrent(u).await {
                 Ok(b) => {
-                    files.push(b);
+                    files.push(b.into());
                     Ok(())
                 }
                 Err(e) => Err(e),
@@ -14591,55 +14630,238 @@ async fn qbit_torrent_add(
             (StatusCode::OK, "Ok.").into_response()
         };
     }
-    for bytes in &files {
-        if no_subfolder
-            && typhon_engine::torrent::metainfo::parse_torrent_bytes(bytes)
-                .is_ok_and(|m| m.multi_file)
-        {
-            tracing::warn!("qbit add refused: contentLayout NoSubfolder on a multi-file torrent is not supported");
-            failed += 1;
-            continue;
-        }
-        let save_path = match add_save_path(&state, bytes, &category, "", &save_path, subfolder) {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::warn!(error = %e, "qbit add refused");
+    // Off the async runtime: each add takes the store's lock, writes SQLite,
+    // stats the save path and may wait on a path reservation. A batch of a
+    // hundred run inline held a runtime worker for all of it.
+    let total = files.len();
+    let st = state.clone();
+    let failed = tokio::task::spawn_blocking(move || {
+        let state = st;
+        let mut failed = 0usize;
+        for bytes in &files {
+            if no_subfolder
+                && typhon_engine::torrent::metainfo::parse_torrent_bytes(bytes)
+                    .is_ok_and(|m| m.multi_file)
+            {
+                tracing::warn!("qbit add refused: contentLayout NoSubfolder on a multi-file torrent is not supported");
                 failed += 1;
                 continue;
             }
-        };
-        match add_torrent_bytes(
-            &state, bytes, &category, &save_path, &tags, paused, seed_mode, "",
-        ) {
-            // upLimit / dlLimit and the download order land on the torrent
-            // the moment it exists, and persist with it. A magnet keeps them
-            // with its request until then (`magnets::AddOptions`).
-            Ok((hash, _)) => {
-                share_at_add(&state, hash.clone());
-                apply_add_options(&state, &hash, up_limit, dl_limit, sequential, first_last);
-            }
-            // "already added" is not a failure to a client that retries a
-            // release it has seen before; qBit answers Ok. for it too.
-            Err(e) if e.contains("already added") => continue,
-            Err(e) => {
-                tracing::warn!(error = %e, "qbit add refused");
-                failed += 1;
+            let save_path =
+                match add_save_path(&state, bytes, &category, &engine, &save_path, subfolder) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "qbit add refused");
+                        failed += 1;
+                        continue;
+                    }
+                };
+            match add_torrent_bytes(
+                &state, bytes, &category, &save_path, &tags, paused, seed_mode, &engine,
+            ) {
+                // upLimit / dlLimit and the download order land on the torrent
+                // the moment it exists, and persist with it. A magnet keeps them
+                // with its request until then (`magnets::AddOptions`).
+                Ok((hash, _)) => {
+                    apply_add_options(&state, &hash, up_limit, dl_limit, sequential, first_last);
+                    share_at_add(&state, hash);
+                }
+                // "already added" is not a failure to a client that retries a
+                // release it has seen before; qBit answers Ok. for it too.
+                Err(e) if e.contains("already added") => {}
+                Err(e) => {
+                    tracing::warn!(error = %e, "qbit add refused");
+                    failed += 1;
+                }
             }
         }
-    }
+        failed
+    })
+    .await
+    .unwrap_or_else(|e| {
+        tracing::error!(error = %e, "qbit add: the add task ended abnormally");
+        total
+    });
 
-    if failed == files.len() && url_failed == urls.len() {
+    if failed == total && url_failed == urls.len() {
         return (StatusCode::BAD_REQUEST, "Fails.").into_response();
     }
     (StatusCode::OK, "Ok.").into_response()
 }
 
-/// Add a torrent from an uploaded .torrent file.
+/// How large one `.torrent` add request may be, whole body included, on both
+/// add routes. Published as `upload_limit_bytes` in `/api/status`.
+///
+/// Per request, not per torrent, on purpose: the request is held in memory
+/// until it has been read whole (nothing is added from a request cut short),
+/// so this bounds what one add can hold, while a torrent of any size still
+/// gets in -- a client sends files in groups that fit under it, a large one
+/// alone if need be. axum's 2 MB default ended a batch part way, and a read
+/// loop that stopped quietly added the first torrents and answered as though
+/// it had them all.
+///
+/// If groups ever cost too much, the ways out are spooling the parts to disk
+/// while reading (any size, little memory, same all-or-nothing reading) or
+/// adding each file as it arrives (one file in memory, but the fields would
+/// have to come first and a cut request would leave the files before the cut
+/// added). Neither is done: a limit a client can read is the smallest change.
+pub(crate) const ADD_BODY_LIMIT: usize = 64 << 20;
+
+/// Why an add request could not be read, and the status to answer: 413 with
+/// the limit and what to do when it is past `ADD_BODY_LIMIT`, the reader's own
+/// status (400 for a malformed or cut-off body) otherwise.
+fn unreadable_upload(e: &axum::extract::multipart::MultipartError) -> (StatusCode, String) {
+    let status = e.status();
+    let why = if status == StatusCode::PAYLOAD_TOO_LARGE {
+        format!(
+            "this request is over the upload limit of {ADD_BODY_LIMIT} bytes \
+             (upload_limit_bytes in /api/status); nothing was added: send the files \
+             in smaller groups"
+        )
+    } else {
+        format!("the upload could not be read whole; nothing was added: {e}")
+    };
+    (status, why)
+}
+
+/// What became of one file of a native upload, as the batch answer writes it:
+/// `{"status":"added"|"present"|"refused", ...}`.
+#[derive(Debug, serde::Serialize)]
+#[serde(tag = "status", rename_all = "lowercase")]
+enum UploadOutcome {
+    Added {
+        info_hash: String,
+        name: String,
+        engine: String,
+        mode: String,
+    },
+    /// Held already by the engine the add was routed to.
+    Present { info_hash: String, error: String },
+    /// `info_hash` is `None` for bytes that are no torrent.
+    Refused {
+        info_hash: Option<String>,
+        error: String,
+    },
+}
+
+/// The fields of a native upload, applied to every file of it.
+struct UploadFields {
+    category: String,
+    save_path: String,
+    tags: String,
+    paused: bool,
+    seed_mode: bool,
+    /// Resolved by `add_target_engine`; empty lets the category decide.
+    engine: String,
+    subfolder: bool,
+}
+
+/// One file of a native upload: its folder, then the add.
+///
+/// Blocking: the add takes the store's lock and touches the disk, so it runs
+/// on a blocking thread, never on the async runtime.
+fn upload_one(state: &AppState, f: &UploadFields, bytes: &[u8]) -> UploadOutcome {
+    // The hash of a file the add did not take, for the answer to name it. Only
+    // then: a successful add hands the hash back, and a `.torrent` can be
+    // megabytes long.
+    let hash_of = || {
+        typhon_engine::torrent::metainfo::parse_torrent_bytes(bytes)
+            .ok()
+            .map(|m| typhon_engine::torrent::hex_encode(&m.info_hash))
+    };
+    let save_path = match add_save_path(
+        state,
+        bytes,
+        &f.category,
+        &f.engine,
+        &f.save_path,
+        f.subfolder,
+    ) {
+        Ok(p) => p,
+        Err(error) => {
+            return UploadOutcome::Refused {
+                info_hash: hash_of(),
+                error,
+            }
+        }
+    };
+    match add_torrent_bytes(
+        state,
+        bytes,
+        &f.category,
+        &save_path,
+        &f.tags,
+        f.paused,
+        f.seed_mode,
+        &f.engine,
+    ) {
+        Ok((info_hash, name)) => {
+            let engine = placement(state, &f.category, &f.engine).0;
+            let mode = engine_role(state, &engine);
+            UploadOutcome::Added {
+                info_hash,
+                name,
+                engine,
+                mode,
+            }
+        }
+        // The engines' refusal is a string; this is how every add route tells
+        // a duplicate from a failure.
+        Err(error) if error.contains("already added") => match hash_of() {
+            Some(info_hash) => UploadOutcome::Present { info_hash, error },
+            None => UploadOutcome::Refused {
+                info_hash: None,
+                error,
+            },
+        },
+        Err(error) => UploadOutcome::Refused {
+            info_hash: hash_of(),
+            error,
+        },
+    }
+}
+
+/// The answer to a batch upload: the counts, then one result per file in the
+/// order sent.
+#[derive(Debug, Default, serde::Serialize)]
+struct BatchAnswer {
+    added: usize,
+    present: usize,
+    refused: usize,
+    results: Vec<UploadOutcome>,
+}
+
+impl FromIterator<UploadOutcome> for BatchAnswer {
+    fn from_iter<I: IntoIterator<Item = UploadOutcome>>(outcomes: I) -> Self {
+        let mut answer = Self::default();
+        for outcome in outcomes {
+            match &outcome {
+                UploadOutcome::Added { .. } => answer.added += 1,
+                UploadOutcome::Present { .. } => answer.present += 1,
+                UploadOutcome::Refused { info_hash, error } => {
+                    answer.refused += 1;
+                    tracing::warn!(info_hash = ?info_hash, error = %error, "upload: one file of a batch refused");
+                }
+            }
+            answer.results.push(outcome);
+        }
+        answer
+    }
+}
+
+/// Add one or several torrents from uploaded .torrent files.
 ///
 /// Was a `refuse!` stub, which is what broke the farm's `sw_fill` and left a
 /// handoff no way to name the engine it wants: the qBit shim routes by
 /// category, and a category names a MODE, not one of the engines a node hosts.
 /// This route takes an explicit `engine`, so a torrent can be placed in `vpn1`.
+///
+/// One file part answers as it always has: the torrent, or an error with its
+/// status (409 already added). Several (or `batch=true`) answer `200` with one
+/// result per file part, in the order sent -- `added`, `present` or `refused`
+/// -- so a client knows what became of each without listing the torrents
+/// again. The fields apply to every file; only a bad `engine`/`mode`, an
+/// unreadable request or no file at all refuse the request as a whole.
 async fn post_torrent_upload(
     State(state): State<AppState>,
     RawQuery(query): RawQuery,
@@ -14649,20 +14871,54 @@ async fn post_torrent_upload(
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
 
-    let mut bytes: Vec<u8> = Vec::new();
+    let bad = |e: String| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": e})),
+        )
+            .into_response()
+    };
+    let unreadable = |e: axum::extract::multipart::MultipartError| {
+        let (status, why) = unreadable_upload(&e);
+        tracing::warn!(error = %why, "upload refused");
+        (
+            status,
+            Json(serde_json::json!({"error": why, "upload_limit_bytes": ADD_BODY_LIMIT})),
+        )
+            .into_response()
+    };
+
+    // `Bytes` as the reader hands them: a request of up to `ADD_BODY_LIMIT` is
+    // not copied a second time.
+    let mut files: Vec<axum::body::Bytes> = Vec::new();
     let (mut category, mut save_path, mut tags, mut engine) =
         (String::new(), String::new(), String::new(), String::new());
-    let (mut paused, mut seed_mode) = (false, false);
+    let (mut paused, mut seed_mode, mut batch) = (false, false, false);
     let mut mode = String::new();
     let mut subfolder = state.cfg().daemon.create_torrent_folder;
 
-    while let Ok(Some(field)) = multipart.next_field().await {
+    // Read whole before anything is added: a request cut short (past the body
+    // limit, a dropped connection) is refused, not half applied.
+    loop {
+        let field = match multipart.next_field().await {
+            Ok(Some(f)) => f,
+            Ok(None) => break,
+            Err(e) => return unreadable(e),
+        };
         let name = field.name().unwrap_or_default().to_string();
         if name == "torrents" || name == "torrent" || name == "file" {
-            bytes = field.bytes().await.map(|b| b.to_vec()).unwrap_or_default();
+            // An empty part is kept: it gets its own "refused" result, so the
+            // results still line up with the parts sent.
+            match field.bytes().await {
+                Ok(b) => files.push(b),
+                Err(e) => return unreadable(e),
+            }
             continue;
         }
-        let value = field.text().await.unwrap_or_default();
+        let value = match field.text().await {
+            Ok(v) => v,
+            Err(e) => return unreadable(e),
+        };
         match name.as_str() {
             "category" => category = value,
             "savepath" | "save_path" => save_path = value,
@@ -14674,58 +14930,74 @@ async fn post_torrent_upload(
             }
             "mode" => mode = value,
             "create_subfolder" => subfolder = value == "true" || value == "1",
+            "batch" => batch = value == "true" || value == "1",
             _ => {}
         }
     }
-    if bytes.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "no torrent file in request"})),
-        )
-            .into_response();
+    if files.iter().all(axum::body::Bytes::is_empty) {
+        return bad("no torrent file in request".into());
     }
     // A named engine that does not exist is refused rather than quietly
     // falling back: silently landing in race is how a hoard torrent changes
     // tier without anyone noticing.
     let engine = match add_target_engine(&state, &engine, &mode) {
         Ok(e) => e,
+        Err(e) => return bad(e),
+    };
+    let fields = UploadFields {
+        category,
+        save_path,
+        tags,
+        paused,
+        seed_mode,
+        engine,
+        subfolder,
+    };
+    let single = files.len() == 1 && !batch;
+
+    // Off the async runtime: each add takes the store's lock, writes SQLite,
+    // stats the save path and may wait on a path reservation.
+    let st = state.clone();
+    let outcomes = tokio::task::spawn_blocking(move || {
+        files
+            .iter()
+            .map(|bytes| upload_one(&st, &fields, bytes))
+            .collect::<Vec<_>>()
+    })
+    .await;
+    let mut outcomes = match outcomes {
+        Ok(o) => o,
         Err(e) => {
+            tracing::error!(error = %e, "upload: the add task ended abnormally");
             return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": e})),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "the add did not complete; list the torrents to see what went in"})),
             )
-                .into_response()
+                .into_response();
         }
     };
-    let save_path = match add_save_path(&state, &bytes, &category, &engine, &save_path, subfolder) {
-        Ok(p) => p,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": e})),
-            )
-                .into_response()
-        }
-    };
-    match add_torrent_bytes(
-        &state, &bytes, &category, &save_path, &tags, paused, seed_mode, &engine,
-    ) {
-        Ok((hash, name)) => {
-            let (engine_id, _) = placement(&state, &category, &engine);
-            Json(serde_json::json!({
-                "info_hash": hash, "name": name, "engine": engine_id, "mode": engine_role(&state, &engine_id)
+
+    if single {
+        return match outcomes.pop() {
+            Some(UploadOutcome::Added {
+                info_hash,
+                name,
+                engine,
+                mode,
+            }) => Json(serde_json::json!({
+                "info_hash": info_hash, "name": name, "engine": engine, "mode": mode
             }))
-            .into_response()
-        }
-        Err(e) => {
-            let code = if e.contains("already added") {
-                StatusCode::CONFLICT
-            } else {
-                StatusCode::BAD_REQUEST
-            };
-            (code, Json(serde_json::json!({"error": e}))).into_response()
-        }
+            .into_response(),
+            Some(UploadOutcome::Present { error, .. }) => (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({"error": error})),
+            )
+                .into_response(),
+            Some(UploadOutcome::Refused { error, .. }) => bad(error),
+            None => bad("no torrent file in request".into()),
+        };
     }
+    Json(outcomes.into_iter().collect::<BatchAnswer>()).into_response()
 }
 
 /// Remove a torrent from Hydra.
@@ -15083,7 +15355,7 @@ fn remove_one_inner(
             return Err(e);
         }
         let stage = Instant::now();
-        engine.announce_cache.forget(hash);
+        engine.announce_cache.forget(&torrent.info_hash);
         tm.announce_forget += stage.elapsed();
         // AFTER the engine let go, never before: absorbing a torrent the engine
         // then refuses to drop counts its bytes twice, once in the carry-over
@@ -15611,7 +15883,7 @@ async fn post_torrent_engine(
         )
             .into_response();
     }
-    src.announce_cache.forget(&hash);
+    src.announce_cache.forget(&ih);
     let stored = state
         .store
         .lock()
@@ -15677,7 +15949,7 @@ fn remove_torrent_everywhere(
                     tracing::warn!(hash = %hash, "engine refused removal: {e}");
                     return Err(e.to_string());
                 }
-                engine.announce_cache.forget(&hash);
+                engine.announce_cache.forget(&ih);
                 if let Err(e) = absorb_checked(state, &engine.id, &copy, &hash, Some(&engine.id)).2
                 {
                     refused = Some(e);
@@ -18193,7 +18465,7 @@ async fn qbit_reannounce(
     let mut not_announcing = 0usize;
     let mut queue_full = 0usize;
     for hash in resolved {
-        for (id, _copy) in copies_of(&state, &hash) {
+        for (id, copy) in copies_of(&state, &hash) {
             let Some(engine) = state.engines.get(&id) else {
                 continue;
             };
@@ -18203,7 +18475,7 @@ async fn qbit_reannounce(
                 continue;
             };
             match bump.try_send(crate::announce::scheduler::BumpReq {
-                info_hash: hash.to_lowercase(),
+                info_hash: copy.info_hash,
                 reply: None,
                 forced: true,
             }) {
@@ -19210,7 +19482,8 @@ fn router_with(state: AppState, extra: Router<AppState>) -> Router {
         .route("/api/torrents", axum::routing::post(post_torrent_add))
         .route(
             "/api/torrents/upload",
-            axum::routing::post(post_torrent_upload),
+            axum::routing::post(post_torrent_upload)
+                .layer(axum::extract::DefaultBodyLimit::max(ADD_BODY_LIMIT)),
         )
         .route(
             "/api/torrents/export",
@@ -19231,7 +19504,8 @@ fn router_with(state: AppState, extra: Router<AppState>) -> Router {
         .route("/api/v2/torrents/delete", axum::routing::post(qbit_delete))
         .route(
             "/api/v2/torrents/add",
-            axum::routing::post(qbit_torrent_add),
+            axum::routing::post(qbit_torrent_add)
+                .layer(axum::extract::DefaultBodyLimit::max(ADD_BODY_LIMIT)),
         )
         .route("/api/nodes", get(get_nodes).post(post_node))
         .route("/api/nodes/test", axum::routing::post(post_node_test))
@@ -20121,14 +20395,20 @@ mod bulk_body_tests {
     /// location"-ed to it, re-added at the trimmed name, and stayed in error.
     #[test]
     fn a_location_keeps_the_trailing_space_of_its_folder() {
-        let p = location_path("/data/sw_1/Purity  2016 ").unwrap();
-        assert_eq!(p, std::path::PathBuf::from("/data/sw_1/Purity  2016 "));
+        // `/data` is only absolute on Unix; Windows needs a drive.
+        let root = if cfg!(windows) { "C:" } else { "" };
+        let p = location_path(&format!("{root}/data/sw_1/Purity  2016 ")).unwrap();
         assert_eq!(
-            location_path("/data/tv/").unwrap(),
-            std::path::PathBuf::from("/data/tv")
+            p,
+            std::path::PathBuf::from(format!("{root}/data/sw_1/Purity  2016 "))
+        );
+        assert!(p.to_string_lossy().ends_with("Purity  2016 "));
+        assert_eq!(
+            location_path(&format!("{root}/data/tv/")).unwrap(),
+            std::path::PathBuf::from(format!("{root}/data/tv"))
         );
         assert!(location_path("   ").is_err());
-        assert!(location_path(" /data").is_err());
+        assert!(location_path(&format!(" {root}/data")).is_err());
     }
 
     /// ⭐ THE REGRESSION TEST FOR 2026-09-16.
@@ -23568,6 +23848,7 @@ mod body_route_tests {
 
     /// An HTTP echo on loopback: the first request (the default route,
     /// measured first) gets `first`, every later one `then`.
+    #[cfg(target_os = "linux")]
     async fn echo_server(first: &'static str, then: &'static str) -> String {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -25391,10 +25672,9 @@ mod node_route_tests {
             .as_str()
             .unwrap()
             .to_string();
-        let sha: String = Sha256::digest(include_str!("../../../install.sh").as_bytes())
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect();
+        let sha: String = typhon_engine::torrent::hex_encode_bytes(&Sha256::digest(
+            include_str!("../../../install.sh").as_bytes(),
+        ));
         assert!(
             !cmd.contains("install.sh |"),
             "the download is not piped into a shell: {cmd}"
@@ -29193,7 +29473,7 @@ mod export_route_tests {
     fn tiers_of(torrent: &[u8]) -> Vec<Vec<String>> {
         typhon_engine::torrent::metainfo::parse_torrent_bytes(torrent)
             .expect("a parseable .torrent")
-            .trackers
+            .into_trackers()
     }
 
     fn new_tiers() -> Vec<Vec<String>> {
@@ -31238,7 +31518,7 @@ mod wireguard_route_tests {
         state_from(
             tag,
             &format!(
-                "[daemon]\napi_key = \"{KEY}\"\ndata_dir = \"{}\"\n\n\
+                "[daemon]\napi_key = \"{KEY}\"\ndata_dir = '{}'\n\n\
                  [race]\nlisten_port = 16171\nsocks5_outbound_host = \"10.0.0.1\"\n\n\
                  [hoard]\nlisten_port = 16172\n",
                 data.display()
@@ -32074,7 +32354,7 @@ mod detail_panel_tests {
                 .as_secs() as i64;
             t.last_announce_at.store(now - 30, Ordering::Relaxed);
             t.next_announce_at.store(now + 1800, Ordering::Relaxed);
-            *t.current_tracker.lock().unwrap() = "https://one.example/announce".into();
+            *t.current_tracker.lock().unwrap() = Some("https://one.example/announce".into());
 
             for (n, (port, client, enc, fast)) in [
                 (51413u16, "qBittorrent 4.6.0", true, true),
@@ -32110,8 +32390,7 @@ mod detail_panel_tests {
             tokio::time::sleep(std::time::Duration::from_millis(600)).await;
             t.upload_rate.update(600_000);
             t.download_rate.update(60_000);
-            for e in t.peer_stats.iter() {
-                let p = e.value();
+            for p in t.peers.snapshot() {
                 p.dl_rate.update(p.total_downloaded.load(Ordering::Relaxed));
                 p.ul_rate.update(p.total_uploaded.load(Ordering::Relaxed));
             }
@@ -32323,14 +32602,14 @@ mod detail_panel_tests {
                 );
             }
             let peers = p["peers"].as_array().expect("peers");
-            assert_eq!(peers.len(), t.peer_stats.len());
+            assert_eq!(peers.len(), t.peers.len());
             assert_eq!(peers.len(), 2);
             for peer in peers {
                 let addr: std::net::SocketAddr =
                     format!("{}:{}", peer["ip"].as_str().unwrap(), peer["port"])
                         .parse()
                         .unwrap();
-                let st = t.peer_stats.get(&addr).expect("a peer of the session");
+                let st = t.peers.get(&addr).expect("a peer of the session");
                 assert_eq!(peer["client"], st.client.as_str());
                 assert_eq!(
                     peer["total_upload"],
@@ -32553,7 +32832,11 @@ mod detail_panel_tests {
             format!(".added_time: {} vs {added}", STORE_ADDED),
             format!(".category: \"{category}\" vs \"\""),
             format!(".completed_time: {STORE_COMPLETED} vs {ENGINE_COMPLETED}"),
-            format!(".save_path: \"{STORE_SAVE}\" vs \"{engine_save}\""),
+            // As JSON prints it: a Windows path's backslashes come escaped.
+            format!(
+                ".save_path: \"{STORE_SAVE}\" vs {}",
+                serde_json::Value::from(engine_save.as_str())
+            ),
             format!(".share_limits.engine: \"{engine}\" vs \"{role}\""),
         ];
         assert_eq!(diff, expected, "exactly the fields 61555df0 fixed differ");

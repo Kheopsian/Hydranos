@@ -408,16 +408,17 @@ fn skip_depth(data: &[u8], pos: usize, depth: usize) -> Result<usize, String> {
 /// around.
 fn csv_line(row: &ExportRow, live: Option<&[Vec<String>]>) -> String {
     let meta = typhon_engine::torrent::metainfo::parse_torrent_bytes(&row.torrent).ok();
-    let (name, size, hosts) = match &meta {
-        Some(m) => {
+    let (name, size, hosts) = match meta {
+        Some(mut m) => {
+            let parsed = m.take_trackers();
             let mut hosts: Vec<String> = Vec::new();
-            for url in live.unwrap_or(&m.trackers).iter().flatten() {
+            for url in live.unwrap_or(&parsed).iter().flatten() {
                 let h = tracker_host(url);
                 if !h.is_empty() && !hosts.contains(&h) {
                     hosts.push(h);
                 }
             }
-            (m.name.clone(), m.total_size.to_string(), hosts.join(" "))
+            (m.name, m.total_size.to_string(), hosts.join(" "))
         }
         None => (String::new(), String::new(), String::new()),
     };
@@ -843,7 +844,7 @@ mod tests {
         assert!(!stripped.windows(13).any(|w| w == b"SECRETPASSKEY"));
         assert_eq!(hash_of(&stripped), hash_of(&t));
         let meta = typhon_engine::torrent::metainfo::parse_torrent_bytes(&stripped).unwrap();
-        assert!(meta.trackers.is_empty());
+        assert!(meta.into_trackers().is_empty());
         // Everything else is left alone.
         assert!(stripped.windows(10).any(|w| w == b"7:comment2"));
     }
@@ -862,7 +863,7 @@ mod tests {
         assert_eq!(hash_of(&out), hash_of(&t));
         assert!(!out.windows(3).any(|w| w == b"OLD"));
         let meta = typhon_engine::torrent::metainfo::parse_torrent_bytes(&out).unwrap();
-        assert_eq!(meta.trackers, tiers);
+        assert_eq!(meta.into_trackers(), tiers);
         assert!(
             out.windows(10).any(|w| w == b"7:comment2"),
             "other keys stay"
@@ -881,7 +882,7 @@ mod tests {
         assert!(!one.windows(13).any(|w| w == b"announce-list"));
         let meta = typhon_engine::torrent::metainfo::parse_torrent_bytes(&one).unwrap();
         assert_eq!(
-            meta.trackers,
+            meta.into_trackers(),
             vec![vec!["https://new.example/a".to_string()]]
         );
         assert_eq!(

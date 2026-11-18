@@ -33,7 +33,9 @@ impl Drop for Shm {
 }
 
 /// Puts the copy hooks back to a normal disk, whatever the test did.
+#[cfg(target_os = "linux")] // only the /dev/shm tests use it
 struct Disk;
+#[cfg(target_os = "linux")]
 impl Drop for Disk {
     fn drop(&mut self) {
         crate::jobs::COPY_FULL_AFTER.with(|c| c.set(None));
@@ -155,6 +157,7 @@ fn bytes_of(p: PathBuf, n: u8, len: usize) -> bool {
 /// ⭐ The answer given when a move was asked is stale by the time the job
 /// runs: a file that gained a second name in between would have its link
 /// broken by the copy. The job asks again and stops before the first byte.
+#[cfg(target_os = "linux")] // needs /dev/shm as a second filesystem
 #[test]
 fn a_name_gained_after_the_request_stops_the_job_before_a_byte_is_copied() {
     let Some(m) = moving("mvf-late-link", &[("a", 16384)], true, false, "move_data") else {
@@ -178,6 +181,7 @@ fn a_name_gained_after_the_request_stops_the_job_before_a_byte_is_copied() {
 
 /// With the operator's consent the copy breaks the link: the torrent's name
 /// moves, the other name keeps the bytes, and the job counts them.
+#[cfg(target_os = "linux")] // needs /dev/shm as a second filesystem
 #[test]
 fn with_consent_the_copy_breaks_the_link_and_the_other_name_keeps_its_bytes() {
     let Some(m) = moving("mvf-consent", &[("a", 16384)], true, true, "move_data") else {
@@ -213,6 +217,7 @@ fn with_consent_the_copy_breaks_the_link_and_the_other_name_keeps_its_bytes() {
 /// ⭐ The copy of the second file fails: the first copy is removed too, no
 /// partial file is left, every original is where it was, and the torrent
 /// never left its engine.
+#[cfg(target_os = "linux")] // needs /dev/shm as a second filesystem
 #[test]
 fn a_copy_that_fails_on_the_second_file_removes_the_first_copy_and_moves_nothing() {
     let Some(m) = moving(
@@ -247,6 +252,7 @@ fn a_copy_that_fails_on_the_second_file_removes_the_first_copy_and_moves_nothing
 
 /// Room for the bytes to copy is asked before the first one is: one byte
 /// short is refused with both numbers, exactly enough goes through.
+#[cfg(target_os = "linux")] // needs /dev/shm as a second filesystem
 #[test]
 fn the_target_needs_room_for_exactly_the_bytes_to_copy() {
     let Some(m) = moving(
@@ -279,6 +285,7 @@ fn the_target_needs_room_for_exactly_the_bytes_to_copy() {
 /// ⭐ The record of where the torrent was is written down BEFORE it leaves
 /// its engine. A store that refuses it stops the move there: the copies are
 /// removed and the torrent is still served from where it was.
+#[cfg(target_os = "linux")] // needs /dev/shm as a second filesystem
 #[test]
 fn a_store_that_refuses_the_record_stops_the_move_with_the_copies_removed() {
     let Some(m) = moving("mvf-no-record", &[("a", 16384)], true, false, "move_data") else {

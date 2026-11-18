@@ -11,6 +11,10 @@ import json, os, sys, time, urllib.request, urllib.error
 OWNER = os.environ.get("OWNER", "Kheopsian")
 PKG   = os.environ.get("PKG", "hydranos")
 KEEP_N = int(os.environ.get("KEEP") or 10)
+# A floor, whoever asks: keeping fewer than the five newest releases is not a
+# cleanup any more, it is a deletion of what users pull.
+if KEEP_N < 5:
+    sys.exit("REFUS: KEEP=%d, au moins 5 releases gardent leurs images" % KEEP_N)
 # ⚠ One-off mode. ONLY_TAGS names the versions to remove outright, for images
 # that must not exist rather than images that have simply aged out. Retention
 # answers "how many do we keep"; this answers "this one is broken". Lowering

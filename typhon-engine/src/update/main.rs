@@ -521,7 +521,7 @@ fn sha256_hex(data: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
     h.update(data);
-    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
+    typhon_engine::torrent::hex_encode_bytes(&h.finalize())
 }
 
 // ---------------------------------------------------------------------------
@@ -639,9 +639,7 @@ fn stop_daemon(_dir: &Path) -> Result<(), String> {
             }
             std::thread::sleep(std::time::Duration::from_secs(1));
         }
-        return Err(
-            "hydranos is still running after 60s -- stop it yourself, nothing was replaced".into(),
-        );
+        Err("hydranos is still running after 60s -- stop it yourself, nothing was replaced".into())
     }
     #[cfg(not(windows))]
     {

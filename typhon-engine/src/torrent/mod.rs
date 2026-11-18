@@ -34,7 +34,7 @@ use tokio::sync::Semaphore;
 pub struct RemoveTimings {
     pub statedb_wait: std::time::Duration,
     pub statedb_hold: std::time::Duration,
-    /// `last_saved` and the legacy resume JSON unlink.
+    /// Clearing the saved mark and the legacy resume JSON unlink.
     pub resume_json: std::time::Duration,
     /// Getting the map entry: a shard READ lock, contended by the writers.
     pub map_wait: std::time::Duration,
@@ -312,11 +312,6 @@ pub struct TorrentManager {
     /// What startup could not restore (see `StartupIssue`): (how many, the
     /// first few). Read by the anomaly route.
     startup_issues: std::sync::Mutex<(usize, Vec<StartupIssue>)>,
-    /// Last state written per torrent, so a sweep can skip the rows that did
-    /// not move. Without this the periodic save rewrites every torrent every
-    /// five minutes regardless of activity, which is what made the old scheme
-    /// expensive.
-    last_saved: DashMap<InfoHash, statedb::Fingerprint>,
     /// Test seam: runs inside `remove_torrent_sparing`, between the row's
     /// deletion and the torrent's leaving the map, where a sweep can land.
     #[cfg(test)]
@@ -362,12 +357,12 @@ impl TorrentManager {
     pub fn wake_filtered_peers(&self) -> usize {
         let mut n = 0;
         for t in self.all() {
-            for p in t.peer_stats.iter() {
-                if crate::ipfilter::blocked(p.key().ip()) {
-                    p.value().punch_wake.notify_one();
+            t.peers.for_each(|p| {
+                if crate::ipfilter::blocked(p.addr.ip()) {
+                    p.punch_wake.notify_one();
                     n += 1;
                 }
-            }
+            });
         }
         n
     }
@@ -685,7 +680,6 @@ impl TorrentManager {
             announce_hook: std::sync::OnceLock::new(),
             completion_hook: std::sync::OnceLock::new(),
             state_db,
-            last_saved: DashMap::new(),
             #[cfg(test)]
             remove_window_hook: std::sync::Mutex::new(None),
             mirror_json,
@@ -716,7 +710,7 @@ impl TorrentManager {
                 // add_torrent, where the state is not in the map yet -- the
                 // first sweep then writes it once and starts tracking.
                 if let Some(t) = self.get(ih) {
-                    self.last_saved.insert(*ih, fingerprint_of(&t));
+                    Self::mark_saved(&t, &fingerprint_of(&t));
                 }
                 if self.mirror_json {
                     fastresume::save(&self.resume_dir, ih, rd);
@@ -758,7 +752,7 @@ impl TorrentManager {
                         Some((Self::build_resume_data(&t), fp))
                     },
                     |rd, fp| {
-                        self.last_saved.insert(*ih, *fp);
+                        Self::mark_saved(&t, fp);
                         if mirror {
                             fastresume::save(&self.resume_dir, ih, rd);
                         }
@@ -2049,7 +2043,7 @@ impl TorrentManager {
             // Seed the sweep's baseline from what was just read back, so the
             // first sweep after a start writes only what has moved since --
             // otherwise every start would rewrite the whole table once.
-            self.last_saved.insert(ih, fingerprint_of(&state));
+            Self::mark_saved(&state, &fingerprint_of(&state));
             self.insert_counted(ih, state);
             loaded += 1;
         }
@@ -2200,12 +2194,11 @@ impl TorrentManager {
     pub fn update_unseeded_count(&self) {
         let mut total = 0usize;
         for entry in self.torrents.iter() {
-            total += entry
-                .value()
-                .peer_stats
-                .iter()
-                .filter(|e| !e.value().is_seed.load(Ordering::Relaxed))
-                .count();
+            entry.value().peers.for_each(|p| {
+                if !p.is_seed.load(Ordering::Relaxed) {
+                    total += 1;
+                }
+            });
         }
         self.cached_unseeded_peers.store(total, Ordering::Relaxed);
     }
@@ -2232,7 +2225,9 @@ impl TorrentManager {
     /// then finds nothing to compare against and writes the lot. Costly, and
     /// correct exactly once, at shutdown.
     pub fn flush_all_resume(&self) {
-        self.last_saved.clear();
+        for entry in self.torrents.iter() {
+            Self::forget_saved(entry.value());
+        }
         self.save_all_resume();
     }
 
@@ -2281,7 +2276,7 @@ impl TorrentManager {
             let t = entry.value();
             // Before the fingerprint: the fingerprint reads the counter.
             t.fold_seed_time(now);
-            if self.is_saved(&t.info_hash, &fingerprint_of(t)) {
+            if Self::is_saved(t, &fingerprint_of(t)) {
                 continue;
             }
             dirty.push(t.info_hash);
@@ -2289,11 +2284,26 @@ impl TorrentManager {
         dirty
     }
 
-    fn is_saved(&self, ih: &InfoHash, fp: &statedb::Fingerprint) -> bool {
-        self.last_saved
-            .get(ih)
-            .map(|p| *p.value() == *fp)
-            .unwrap_or(false)
+    /// Whether `fp` is what the store last got for `t`.
+    fn is_saved(t: &TorrentState, fp: &statedb::Fingerprint) -> bool {
+        t.saved_fingerprint.load(Ordering::Relaxed) == fp.digest()
+    }
+
+    /// Note that the store now holds `fp` for `t`. The sweep builds its
+    /// records and calls this under the database lock, so the two atomics
+    /// are written in commit order. A reader that catches them between the
+    /// two stores sees a piece count one save behind: the quick pass then
+    /// writes a download once more or once less, and the full sweep, which
+    /// reads the digest, settles it.
+    fn mark_saved(t: &TorrentState, fp: &statedb::Fingerprint) {
+        t.saved_num_have.store(fp.num_have, Ordering::Relaxed);
+        t.saved_fingerprint.store(fp.digest(), Ordering::Relaxed);
+    }
+
+    /// Forget what was written for `t`: the next sweep writes it whatever
+    /// its fingerprint says.
+    fn forget_saved(t: &TorrentState) {
+        t.saved_fingerprint.store(0, Ordering::Relaxed);
     }
 
     /// Second half of a sweep: write the collected torrents, each record
@@ -2314,8 +2324,8 @@ impl TorrentManager {
         let res = db.put_batch_with(
             &dirty,
             |ih| self.build_if_unsaved(ih),
-            |ih, rd, fp| {
-                self.last_saved.insert(*ih, *fp);
+            |ih, rd, (t, fp)| {
+                Self::mark_saved(t, fp);
                 if mirror {
                     fastresume::save(&self.resume_dir, ih, rd);
                 }
@@ -2344,13 +2354,16 @@ impl TorrentManager {
         }
     }
 
-    /// The record of `ih` as memory holds it now, with its fingerprint,
-    /// unless the torrent is gone or its last save already says the same.
-    /// For the sweeps, called under the database lock.
+    /// The record of `ih` as memory holds it now, with the torrent and its
+    /// fingerprint, unless the torrent is gone or its last save already says
+    /// the same. For the sweeps, called under the database lock.
     fn build_if_unsaved(
         &self,
         ih: &InfoHash,
-    ) -> Option<(fastresume::ResumeData, statedb::Fingerprint)> {
+    ) -> Option<(
+        fastresume::ResumeData,
+        (Arc<TorrentState>, statedb::Fingerprint),
+    )> {
         let t = self.get(ih)?;
         if t.is_removed.load(Ordering::Relaxed) {
             return None;
@@ -2360,10 +2373,11 @@ impl TorrentManager {
         // leaves the fingerprint behind the record, so the next sweep
         // writes once more -- never the reverse.
         let fp = fingerprint_of(&t);
-        if self.is_saved(ih, &fp) {
+        if Self::is_saved(&t, &fp) {
             return None;
         }
-        Some((Self::build_resume_data(&t), fp))
+        let rd = Self::build_resume_data(&t);
+        Some((rd, (t, fp)))
     }
 
     fn save_json_fallback(&self, hashes: &[InfoHash]) {
@@ -2408,10 +2422,8 @@ impl TorrentManager {
                 }
                 let p = p.lock().unwrap();
                 !p.is_complete()
-                    && self
-                        .last_saved
-                        .get(ih)
-                        .is_none_or(|s| s.value().num_have != p.num_have())
+                    && (t.saved_fingerprint.load(Ordering::Relaxed) == 0
+                        || t.saved_num_have.load(Ordering::Relaxed) != p.num_have())
             })
             .collect();
         if moved.is_empty() {
@@ -2430,8 +2442,8 @@ impl TorrentManager {
         let res = db.put_batch_with(
             &moved,
             |ih| self.build_if_unsaved(ih),
-            |ih, rd, fp| {
-                self.last_saved.insert(*ih, *fp);
+            |ih, rd, (t, fp)| {
+                Self::mark_saved(t, fp);
                 if mirror {
                     fastresume::save(&self.resume_dir, ih, rd);
                 }
@@ -2501,7 +2513,7 @@ impl TorrentManager {
         let Some(t) = self.get(ih) else { return };
         t.retract_pieces(pieces, msg);
         self.incomplete.insert(*ih);
-        self.last_saved.remove(ih);
+        Self::forget_saved(&t);
     }
 
     pub fn persist_completed(&self, ih: &InfoHash) {
@@ -2521,9 +2533,9 @@ impl TorrentManager {
             // Writing an empty bitfield here ERASED that fact:
             // bitfield_is_complete("") is false, so the next boot rebuilt the
             // torrent at 0%, allocated an all-missing picker and re-downloaded
-            // data already sitting on disk. Since last_saved is empty at boot,
-            // the first sweep marked every torrent dirty and did this to the
-            // whole catalogue. Emit the full bitfield the picker would have.
+            // data already sitting on disk. When nothing was marked saved at
+            // boot, the first sweep marked every torrent dirty and did this
+            // to the whole catalogue. Emit the full bitfield the picker would have.
             None => hex_encode_bytes(&full_bitfield(t.meta.num_pieces())),
         };
         fastresume::ResumeData {
@@ -2838,7 +2850,11 @@ impl TorrentManager {
             }
         }
         let rest = std::time::Instant::now();
-        self.last_saved.remove(info_hash);
+        // Still in the map here: the removal flags it, then forgets its
+        // state, and only then lets it go.
+        if let Some(t) = self.torrents.get(info_hash) {
+            Self::forget_saved(&t);
+        }
         fastresume::remove(&self.resume_dir, info_hash);
         (wait, hold, rest.elapsed())
     }
@@ -3079,8 +3095,9 @@ fn edits_hash(t: &TorrentState) -> u64 {
     h.finish()
 }
 
+/// Lower-case hex of an info hash, in one allocation.
 pub fn hex_encode(hash: &[u8; 20]) -> String {
-    hash.iter().map(|b| format!("{:02x}", b)).collect()
+    hex_encode_bytes(hash)
 }
 
 pub fn hex_decode(hex: &str) -> Result<InfoHash, String> {
@@ -3100,8 +3117,17 @@ pub fn hex_decode(hex: &str) -> Result<InfoHash, String> {
     Ok(hash)
 }
 
-fn hex_encode_bytes(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+/// Lower-case hex of `bytes`, in one allocation: no `format!` per byte,
+/// which was a String each, and this runs per torrent per pass in several
+/// places.
+pub fn hex_encode_bytes(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        s.push(char::from(DIGITS[usize::from(b >> 4)]));
+        s.push(char::from(DIGITS[usize::from(b & 0x0f)]));
+    }
+    s
 }
 
 /// Is every piece already present in this resume bitfield?
@@ -3668,7 +3694,21 @@ mod full_bitfield_tests {
 
 #[cfg(test)]
 mod hex_decode_tests {
-    use super::hex_decode;
+    use super::{hex_decode, hex_encode, hex_encode_bytes};
+
+    /// What `format!("{:02x}")` wrote, without its allocations, and what
+    /// `hex_decode` reads back, in either case.
+    #[test]
+    fn a_hash_encodes_lower_case_and_reads_back() {
+        let h: [u8; 20] = std::array::from_fn(|i| (i as u8).wrapping_mul(37) ^ 0xf0);
+        let s = hex_encode(&h);
+        let want: String = h.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(s, want);
+        assert_eq!(hex_decode(&s), Ok(h));
+        assert_eq!(hex_decode(&s.to_uppercase()), Ok(h));
+        assert_eq!(hex_encode_bytes(&[]), "");
+        assert_eq!(hex_encode_bytes(&[0x00, 0xff, 0x0a]), "00ff0a");
+    }
 
     #[test]
     fn a_hex_hash_decodes() {
@@ -5273,6 +5313,41 @@ mod manager_tests {
         assert_eq!(stored(&mgr, &ih).save_path, "/tmp/moved");
         mgr.save_all_resume();
         assert_eq!(stored(&mgr, &ih).save_path, "/tmp/moved");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// What a sweep wrote is a mark on the torrent itself: set by the sweep,
+    /// cleared when pieces it vouched for are retracted (so the next sweep
+    /// rewrites the row), and never the 0 that means "nothing written".
+    #[test]
+    fn the_saved_mark_lives_on_the_torrent() {
+        let (mgr, root) = manager("saved-mark");
+        let ih = add(&mgr, "alpha");
+        let t = mgr.get(&ih).unwrap();
+        mgr.save_all_resume();
+        assert_ne!(t.saved_fingerprint.load(Ordering::Relaxed), 0, "not marked");
+        assert!(mgr.collect_dirty().is_empty(), "dirty right after a sweep");
+
+        mgr.retract_pieces(&ih, &[], "test");
+        assert_eq!(t.saved_fingerprint.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            mgr.collect_dirty(),
+            vec![ih],
+            "a retract must rewrite the row"
+        );
+        mgr.save_all_resume();
+        assert!(mgr.collect_dirty().is_empty());
+
+        let fp = fingerprint_of(&t);
+        assert_eq!(fp.digest(), fp.digest());
+        assert_ne!(
+            fp.digest(),
+            statedb::Fingerprint {
+                num_have: fp.num_have + 1,
+                ..fp
+            }
+            .digest()
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 

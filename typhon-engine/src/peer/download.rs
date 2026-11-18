@@ -1003,7 +1003,7 @@ mod tests {
     fn registered(t: &TorrentState) -> Arc<PeerStats> {
         let addr: std::net::SocketAddr = "192.0.2.7:6881".parse().unwrap();
         let s = Arc::new(PeerStats::new(addr, [7; 20], "test".into(), false, false));
-        t.peer_stats.insert(addr, s.clone());
+        t.peers.insert(addr, s.clone());
         s
     }
 

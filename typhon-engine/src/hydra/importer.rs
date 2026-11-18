@@ -584,7 +584,7 @@ const MAX_PREFIXES: usize = 40;
 pub fn path_prefixes<'a>(paths: impl Iterator<Item = &'a str>) -> Vec<String> {
     let mut set: BTreeSet<String> = paths
         .filter(|p| !p.is_empty())
-        .map(|p| p.trim_end_matches('/').to_string())
+        .map(|p| p.trim_end_matches(separators(p)).to_string())
         .collect();
     while set.len() > MAX_PREFIXES {
         let folded: BTreeSet<String> = set
@@ -608,24 +608,53 @@ pub fn path_prefixes<'a>(paths: impl Iterator<Item = &'a str>) -> Vec<String> {
     set.into_iter().collect()
 }
 
+/// A path written the Windows way: `C:\...`, `C:/...` or `\\server\share`.
+/// The client being imported may run on Windows whatever this node runs on,
+/// so this is read from the path, not from the platform.
+fn windows_style(p: &str) -> bool {
+    let b = p.as_bytes();
+    (b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':') || p.starts_with(r"\\")
+}
+
+/// The folder separators of `p`: `\` counts only in a Windows-style path, so
+/// a Linux file name holding a backslash is not split in two.
+fn separators(p: &str) -> &'static [char] {
+    if windows_style(p) {
+        &['/', '\\']
+    } else {
+        &['/']
+    }
+}
+
 /// `p` is `dir` or inside it, on a path-component boundary: `/data/films2` is
-/// not under `/data/films`.
+/// not under `/data/films`, and `C:\data\films\x` is under `C:\data\films`.
 fn under(p: &str, dir: &str) -> bool {
-    let dir = dir.trim_end_matches('/');
-    p == dir || (p.starts_with(dir) && p[dir.len()..].starts_with('/')) || dir.is_empty()
+    let dir = dir.trim_end_matches(separators(dir));
+    p == dir
+        || (p.starts_with(dir) && p[dir.len()..].starts_with(separators(dir)))
+        || dir.is_empty()
 }
 
 /// Rewrite a source-side path to what Hydranos sees, by the longest mapped
-/// folder it is under. Unmapped paths come back unchanged.
+/// folder it is under. Unmapped paths come back unchanged. The part below the
+/// folder takes the separator of the folder it is mapped to: `C:\dl\films\x`
+/// mapped from `C:\dl` to `/data` is `/data/films/x`.
 pub fn map_path(p: &str, map: &BTreeMap<String, String>) -> String {
     let best = map
         .iter()
         .filter(|(from, to)| !from.is_empty() && !to.is_empty() && under(p, from))
-        .max_by_key(|(from, _)| from.trim_end_matches('/').len());
+        .max_by_key(|(from, _)| from.trim_end_matches(separators(from)).len());
     match best {
         Some((from, to)) => {
-            let from = from.trim_end_matches('/');
-            format!("{}{}", to.trim_end_matches('/'), &p[from.len()..])
+            let from = from.trim_end_matches(separators(from));
+            let to_trimmed = to.trim_end_matches(separators(to));
+            let rest = &p[from.len()..];
+            let rest = match (windows_style(from), windows_style(to)) {
+                (true, false) => rest.replace('\\', "/"),
+                (false, true) => rest.replace('/', "\\"),
+                _ => rest.to_string(),
+            };
+            format!("{to_trimmed}{rest}")
         }
         None => p.to_string(),
     }
@@ -1181,10 +1210,14 @@ mod tests {
         let got = Candidate::from_qbit(&t);
         assert!(!got.complete);
         assert!(got.stopped);
+        // Joined with this platform's separator: `\` on Windows.
         assert_eq!(
-            got.content, "/downloads/films/Film",
+            got.content,
+            join("/downloads/films", "Film"),
             "no content_path: save_path/name"
         );
+        #[cfg(unix)]
+        assert_eq!(got.content, "/downloads/films/Film");
         assert_eq!(got.tags, vec!["a", "b"]);
         assert_eq!(got.source, Source::Qbit("ab".into()));
         let done = Candidate::from_qbit(&QbitTorrent {
@@ -1211,6 +1244,37 @@ mod tests {
             "not a component boundary"
         );
         assert_eq!(map_path("/elsewhere", &map), "/elsewhere");
+    }
+
+    /// A client on Windows: its paths use `\`, whatever this node runs on.
+    #[test]
+    fn a_windows_client_path_is_mapped_on_its_own_separators() {
+        let map: BTreeMap<String, String> = [
+            (r"C:\downloads".to_string(), "/data".to_string()),
+            (r"D:\films\".to_string(), r"E:\films".to_string()),
+        ]
+        .into();
+        assert_eq!(map_path(r"C:\downloads\series\B", &map), "/data/series/B");
+        assert_eq!(map_path(r"C:\downloads", &map), "/data");
+        assert_eq!(map_path(r"D:\films\A", &map), r"E:\films\A");
+        assert_eq!(
+            map_path(r"C:\downloads2\x", &map),
+            r"C:\downloads2\x",
+            "not a component boundary"
+        );
+        // A Linux file name may hold a backslash: it is not a separator there.
+        let linux: BTreeMap<String, String> = [("/d/films".to_string(), "/x".to_string())].into();
+        assert_eq!(map_path(r"/d/films\A", &linux), r"/d/films\A");
+        // And a Linux source mapped onto a Windows folder takes `\`.
+        let to_win: BTreeMap<String, String> =
+            [("/downloads".to_string(), r"C:\data".to_string())].into();
+        assert_eq!(map_path("/downloads/films/A", &to_win), r"C:\data\films\A");
+    }
+
+    #[test]
+    fn windows_prefixes_drop_nested_ones() {
+        let got = path_prefixes([r"C:\d\films", r"C:\d\films\hd", r"C:\e\"].into_iter());
+        assert_eq!(got, vec![r"C:\d\films", r"C:\e"]);
     }
 
     #[test]
@@ -1632,6 +1696,9 @@ mod transmission_tests {
             (a.name.as_str(), a.category.as_str(), a.save_path.as_str()),
             ("Alpha", "films", "/data/films")
         );
+        // Joined with this platform's separator: `\` on Windows.
+        assert_eq!(a.content, join("/data/films", "Alpha"));
+        #[cfg(unix)]
         assert_eq!(a.content, "/data/films/Alpha");
         assert!(a.complete);
         assert_eq!((a.uploaded, a.tags.clone()), (9, vec!["x".to_string()]));
@@ -1887,7 +1954,7 @@ mod qbit_session_tests {
         assert!(err.network);
         assert!(err.message.contains("error sending request"), "{err}");
         assert!(
-            err.message.to_lowercase().contains("refused"),
+            names_a_refusal(&err.message),
             "the cause must follow: {err}"
         );
     }
@@ -2066,11 +2133,12 @@ mod qbit_session_tests {
             .unwrap()
             .starts_with("qBittorrent stopped answering at torrent 2;"));
         let fails = progress.failures.lock().unwrap().clone();
-        assert!(
-            fails[0].error.to_lowercase().contains("refused"),
-            "{}",
-            fails[0].error
-        );
+        assert!(names_a_refusal(&fails[0].error), "{}", fails[0].error);
+    }
+
+    /// The OS wording is translated on Windows; its code (WSAECONNREFUSED) is not.
+    fn names_a_refusal(msg: &str) -> bool {
+        msg.to_lowercase().contains("refused") || msg.contains("os error 10061")
     }
 
     fn file_cand(name: &str, path: PathBuf) -> Candidate {

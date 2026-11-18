@@ -681,19 +681,22 @@ impl DiskManager {
         // pieces of each: nearly always none, and then nothing below changes.
         let free = torrent.free_links();
         let plen = torrent.meta.piece_length as u64;
-        let free_spans: Vec<(PathBuf, u64, u64)> = {
-            let f = free.lock();
-            if f.linked.is_empty() && f.undone.is_empty() {
-                Vec::new()
-            } else {
-                ops.iter()
-                    .filter(|op| {
-                        !op.pad && (f.linked.contains(&op.path) || f.undone.contains(&op.path))
-                    })
-                    .filter_map(|op| {
-                        file_span(&torrent.meta, &op.path).map(|(o, l)| (op.path.clone(), o, l))
-                    })
-                    .collect()
+        let free_spans: Vec<(PathBuf, u64, u64)> = match &free {
+            None => Vec::new(),
+            Some(free) => {
+                let f = free.lock();
+                if f.linked.is_empty() && f.undone.is_empty() {
+                    Vec::new()
+                } else {
+                    ops.iter()
+                        .filter(|op| {
+                            !op.pad && (f.linked.contains(&op.path) || f.undone.contains(&op.path))
+                        })
+                        .filter_map(|op| {
+                            file_span(&torrent.meta, &op.path).map(|(o, l)| (op.path.clone(), o, l))
+                        })
+                        .collect()
+                }
             }
         };
         let picker = torrent.picker.get().cloned();
@@ -706,7 +709,10 @@ impl DiskManager {
             // the comparison to the last byte: two edge pieces of the same
             // file must not both decide on the linked file, nor one compare
             // with it while the other replaces it.
-            let mut free_now = (!spans_task.is_empty()).then(|| free_task.lock());
+            let mut free_now = free_task
+                .as_ref()
+                .filter(|_| !spans_task.is_empty())
+                .map(|f| f.lock());
             let mut give_up: Vec<PathBuf> = Vec::new();
             // Before a byte goes down: the ranges that fall in a file this
             // torrent must not write into (another torrent names it, or it has
@@ -869,7 +875,7 @@ impl DiskManager {
         // A free link given up (or found given up by another piece): its
         // name is no longer under the guard the proof set, and nothing cached
         // of the linked file's bytes may be served for the new one.
-        if !free_spans.is_empty() {
+        if let Some(free) = free.as_ref().filter(|_| !free_spans.is_empty()) {
             // Once per file, not at every piece: lifting the guard and
             // dropping the whole file from the read cache costs in proportion
             // to the file, and doing it at every piece grew with the square of

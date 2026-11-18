@@ -272,7 +272,7 @@ mod win {
                 0
             }
             WM_COMMAND => {
-                match (wparam & 0xFFFF) as usize {
+                match wparam & 0xFFFF {
                     ID_OPEN => STATE.with(|s| {
                         if let Some(st) = s.borrow().as_ref() {
                             open_ui(st.port);

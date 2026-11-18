@@ -1140,7 +1140,7 @@ pub fn record_completions(state: &AppState, batch: &[(String, [u8; 20])]) {
             return;
         };
         for (session, ih) in batch {
-            let hash: String = ih.iter().map(|b| format!("{b:02x}")).collect();
+            let hash: String = typhon_engine::torrent::hex_encode_bytes(&ih[..]);
             if let Err(e) = store.push_workflow_event("completed", session, &hash) {
                 tracing::warn!(error = %e, info_hash = %hash, "completion could not be recorded for workflows");
             }

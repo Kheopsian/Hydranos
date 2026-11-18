@@ -28,18 +28,32 @@ jobs:
     # missing let a real public IP sit in three files for seven weeks, entered
     # by a commit that was itself fixing a leak.
     #
-    # The specific values -- a name, an address, a topic -- are NOT in this
-    # repository: they arrive in LEAK_DENYLIST, a repository secret. Writing
-    # them into a public workflow would publish exactly what the workflow
-    # defends. Without the secret (a fork, an outside pull request) the
-    # generic rules still run.
+    # The generic rules, on every push and pull request. The specific values
+    # -- a name, an address, a topic -- are NOT in this repository: they are
+    # checked by leaks-private below, on main only.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - name: Leak guard
+      - name: Leak guard (generic rules)
+        run: python3 .github/scripts/leak_guard.py
+
+  leaks-private:
+    # The specific values arrive in LEAK_DENYLIST, a secret of the `leaks`
+    # environment, which deploys from main only: a branch or a pull request
+    # never receives it, so a workflow changed there cannot print it. Writing
+    # the values into a public workflow would publish exactly what this job
+    # defends.
+    if: github.ref == 'refs/heads/main'
+    environment: leaks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Leak guard (private values)
         env:
           LEAK_DENYLIST: ${{ secrets.LEAK_DENYLIST }}
-        run: python3 .github/scripts/leak_guard.py
+        run: |
+          test -n "$LEAK_DENYLIST" || { echo "::error::LEAK_DENYLIST is empty: the leaks environment did not provide it"; exit 1; }
+          python3 .github/scripts/leak_guard.py
 
   # Every action, image and cargo build named by content: see the script.
   pins:
@@ -150,7 +164,7 @@ jobs:
           # release and changed both clippy and the coverage measure under
           # unchanged code. Raised on purpose, with the floor re-checked.
           toolchain: 1.99.1
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: typhon-engine
       - name: Tools
