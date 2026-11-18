@@ -1019,12 +1019,27 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
         api::refresh_records(bench_path.clone(), records.clone());
     }
 
-    // "Today" is the session minus what it was at the last local midnight;
-    // the day this process starts on begins at zero. The session itself needs
-    // no mark: the engines count what they move from zero (see
-    // `TorrentManager::moved`), so the lifetime history their torrents load
-    // with is never mistaken for this boot's traffic.
-    let odometer: api::Odo = Arc::new(std::sync::Mutex::new(api::Odometer::at_boot()));
+    // "Today" is the session minus what it was at the last local midnight.
+    // The session itself needs no mark: the engines count what they move from
+    // zero (see `TorrentManager::moved`), so the lifetime history their
+    // torrents load with is never mistaken for this boot's traffic.
+    // The restore carries earlier processes' bytes into the day baseline only:
+    // the session starts from zero, so it has no baseline to restore.
+    let mut odo = api::Odometer::at_boot();
+    match shared_store
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .setting(api::DAILY_TRAFFIC_KEY)
+    {
+        Ok(Some(saved)) => {
+            if let Err(e) = odo.restore(&saved) {
+                tracing::warn!(error = %format!("{e:#}"), "daily traffic restore failed");
+            }
+        }
+        Ok(None) => {}
+        Err(e) => tracing::warn!(error = %format!("{e:#}"), "daily traffic read failed"),
+    }
+    let odometer: api::Odo = Arc::new(std::sync::Mutex::new(odo));
 
     let state = api::AppState {
         imports: Default::default(),
@@ -1072,7 +1087,9 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
                 if !shutdown::tick(&mut tick).await {
                     return;
                 }
-                let _ = api::session_and_day(&state);
+                if let Err(e) = api::save_daily_traffic(state.clone()).await {
+                    tracing::warn!(error = %format!("{e:#}"), "daily traffic checkpoint failed");
+                }
             }
         });
     }
@@ -1164,6 +1181,7 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
     // Taken before the router consumes the state: `flush_on_shutdown` needs the
     // engines, and by then `state` has been moved.
     let engines_for_shutdown = state.engines.clone();
+    let state_for_shutdown = state.clone();
 
     // The notification-area icon, as the 3.x Windows package had. A no-op on
     // Unix. The closure is what it shows on hover, rebuilt every couple of
@@ -1214,6 +1232,18 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
     engines_for_shutdown
         .depart_all(std::time::Duration::from_secs(5))
         .await;
+    // Save before the potentially long resume flush; a stuck store must not
+    // remove the shutdown deadline.
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        api::save_daily_traffic(state_for_shutdown),
+    )
+    .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => tracing::warn!(error = %format!("{e:#}"), "daily traffic checkpoint failed"),
+        Err(_) => tracing::warn!("daily traffic checkpoint timed out during shutdown"),
+    }
     flush_on_shutdown(&engines_for_shutdown, stop_budget).await;
     // After the flush, not before: the departures above leave through the
     // tunnels. Under --network host the devices would outlive the process.
