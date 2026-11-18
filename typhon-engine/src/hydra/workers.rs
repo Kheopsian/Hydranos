@@ -341,7 +341,10 @@ fn enforce_queue(
         let running = !t.is_paused.load(Ordering::Relaxed);
         let checking = status == TorrentStatus::Checking as u8;
         // A check holds a download slot, as it always has here.
+        // A seed-only torrent asks for nothing: it holds no download slot and
+        // is not a candidate to be started for one.
         if status != TorrentStatus::Seeding as u8
+            && !t.is_seed_only()
             && t.total_downloaded.load(Ordering::Relaxed) < t.meta.total_size
             && (checking || !holds_everything(&t))
         {

@@ -648,6 +648,15 @@ impl DiskManager {
         piece: u32,
         data: Vec<u8>,
     ) -> Result<bool, String> {
+        // A seed-only torrent never writes its data: no file, no directory, no
+        // preallocation, before anything below can touch the disk.
+        if torrent.is_seed_only() {
+            return Err(format!(
+                "{} is seed-only; refusing to write piece {}",
+                torrent.info_hash_hex(),
+                piece
+            ));
+        }
         // Invalidate cached read blocks overlapping this piece
         let piece_size = torrent.meta.piece_length as u64;
         let piece_start = piece as u64 * piece_size;
@@ -1893,6 +1902,33 @@ mod disk_tests {
                 "{path:?}: {reserved} bytes allocated once closed, {want} declared"
             );
         }
+    }
+
+    /// ⭐ A seed-only torrent writes nothing: the piece is refused with an
+    /// error before anything touches the disk -- no file, no directory, no
+    /// preallocation.
+    #[tokio::test]
+    async fn a_seed_only_torrent_refuses_every_write() {
+        let _l = prealloc_lock().await;
+        let _on = PreallocOn::new();
+        let content = vec![7u8; 4096];
+        let f = fixture("seedonly-write", &content);
+        f.torrent
+            .seed_only
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let r = f.disk.write_piece(&f.torrent, 0, content.clone()).await;
+        assert!(r.is_err(), "refused with an error, not a verdict: {r:?}");
+        assert!(
+            !f.root.join("data/payload.bin").exists(),
+            "no file was created"
+        );
+        assert_eq!(f.root.join("data").read_dir().unwrap().count(), 0);
+
+        f.torrent
+            .seed_only
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        assert!(f.disk.write_piece(&f.torrent, 0, content).await.unwrap());
+        assert!(f.root.join("data/payload.bin").exists());
     }
 
     /// ⭐ A piece is checked against its hash BEFORE it lands. Accepting one

@@ -257,6 +257,7 @@ pub fn scan_engine(
         // starved: leeching, the swarm has seeds, and we hold no peer.
         let peers = t.peers_connected.load(Ordering::Relaxed);
         if status == TorrentStatus::Downloading as u8
+            && !t.is_seed_only()
             && peers == 0
             && !t.is_paused.load(Ordering::Relaxed)
         {

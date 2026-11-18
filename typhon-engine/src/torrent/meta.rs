@@ -1082,6 +1082,13 @@ pub struct TorrentState {
     /// record of such a torrent says "nothing held", and only this tells
     /// the next start that it is a parked loss and not a download.
     pub data_lost: std::sync::atomic::AtomicBool,
+    /// The user's "seed only" choice: this torrent serves what it holds and
+    /// never asks for a piece nor writes a byte of its data. Its status stays
+    /// whatever the pieces say (an incomplete one is `Downloading`, with a
+    /// real `left` for the trackers); the flag is read where a request is made
+    /// (`PeerDownload::is_downloading`, `webseed::wants_webseed`) and where a
+    /// piece would be written (`DiskManager::write_piece`).
+    pub seed_only: std::sync::atomic::AtomicBool,
     /// Consecutive failures to WRITE a verified piece to disk.
     ///
     /// Counted rather than acted on at the first one, because a full disk on a
@@ -1289,6 +1296,11 @@ impl TorrentState {
             have = have.saturating_sub(plen - self.meta.piece_size(n - 1) as u64);
         }
         self.meta.total_size.saturating_sub(have)
+    }
+
+    /// Is this torrent barred from downloading? See `seed_only`.
+    pub fn is_seed_only(&self) -> bool {
+        self.seed_only.load(Ordering::Relaxed)
     }
 
     /// The PEX / IPv6 policy this torrent runs under.
@@ -1712,6 +1724,7 @@ impl TorrentState {
             next_announce_at: AtomicI64::new(0),
             error_msg: Mutex::new(String::new()),
             data_lost: std::sync::atomic::AtomicBool::new(false),
+            seed_only: std::sync::atomic::AtomicBool::new(false),
             piece_mem: OnceLock::new(),
             files_checked: std::sync::atomic::AtomicU8::new(0),
             peers: PeerRegistry::default(),

@@ -507,7 +507,7 @@ async fn fetch_span(
 
 /// True when this torrent still wants webseed help right now.
 fn wants_webseed(t: &TorrentState) -> bool {
-    if t.meta.url_list.is_empty() || t.seed_mode {
+    if t.meta.url_list.is_empty() || t.seed_mode || t.is_seed_only() {
         return false;
     }
     if t.is_removed.load(Ordering::Relaxed) || t.is_paused.load(Ordering::Relaxed) {
@@ -1489,6 +1489,20 @@ mod gate_tests {
         let (mgr, root) = manager("seedmode");
         let t = torrent(&mgr, "seeded", Some("https://archive.example/files/"), true);
         assert!(!wants_webseed(&t), "seed mode has nothing to fetch");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A seed-only torrent takes nothing from a webseed either.
+    #[test]
+    fn a_seed_only_torrent_never_pulls_from_a_webseed() {
+        let (mgr, root) = manager("seedonly");
+        let t = torrent(&mgr, "held", Some("https://archive.example/files/"), false);
+        t.status
+            .store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+        t.is_paused.store(false, Ordering::Relaxed);
+        assert!(wants_webseed(&t), "an ordinary download does want it");
+        t.seed_only.store(true, Ordering::Relaxed);
+        assert!(!wants_webseed(&t), "seed only has nothing to fetch");
         let _ = std::fs::remove_dir_all(root);
     }
 

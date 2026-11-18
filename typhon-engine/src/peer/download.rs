@@ -126,6 +126,7 @@ impl DownloadState {
 
     pub fn is_downloading(&self) -> bool {
         self.torrent.picker.get().is_some()
+            && !self.torrent.is_seed_only()
             && self.torrent.status.load(Ordering::Relaxed) == TorrentStatus::Downloading as u8
     }
 
@@ -634,6 +635,11 @@ async fn commit(
         Some(p) => p,
         None => return Commit::Failed,
     };
+    // A seed-only torrent keeps nothing it is sent (the flag may have been set
+    // while this piece was in flight): not written, and not a disk failure.
+    if torrent.is_seed_only() {
+        return Commit::Failed;
+    }
     let len = piece_data.len() as u64;
     // Counted in the engine's download budget until the write returns.
     let _writing = picker.lock().unwrap().mem().map(|m| m.hold_write(len));
@@ -700,6 +706,10 @@ async fn commit(
             // read-only mount, and each attempt pulls a whole piece off the
             // swarm again -- so this downloaded the same piece forever, at full
             // speed, making no progress and showing none.
+            if torrent.is_seed_only() {
+                // Refused by the flag, not by the disk: nothing to count.
+                return Commit::Failed;
+            }
             tracing::warn!("[download] piece {} write failed: {}", index, e);
             // The piece left the picker when it was taken for this write: the
             // buffer goes with this call, and the piece is missing again.
@@ -1163,6 +1173,58 @@ mod tests {
         let reqs = dl.get_requests();
         assert_eq!(reqs.len(), 1, "one short block");
         assert_eq!(reqs[0], (0, 0, 1000));
+    }
+
+    // -----------------------------------------------------------------------
+    // Seed only
+    // -----------------------------------------------------------------------
+
+    /// ⭐ A seed-only torrent that is incomplete (it holds piece 0 and serves
+    /// it) never declares interest and never asks for a block, whatever the
+    /// peer offers. Clearing the flag lets it download again.
+    #[test]
+    fn a_seed_only_torrent_never_asks_for_a_piece() {
+        let t = downloading(4, 16384);
+        t.picker.get().unwrap().lock().unwrap().set_have(0);
+        t.seed_only.store(true, Ordering::Relaxed);
+        let mut dl = state(t.clone());
+        ready(&mut dl);
+
+        assert!(!dl.is_downloading(), "the choke point says no");
+        assert!(!dl.should_be_interested(), "no interest declared");
+        assert!(dl.get_requests().is_empty(), "no block asked for");
+        assert!(
+            t.picker.get().unwrap().lock().unwrap().has_piece(0),
+            "what it holds is still held, to serve"
+        );
+        assert!(t.bytes_left() > 0, "and `left` stays honest");
+
+        t.seed_only.store(false, Ordering::Relaxed);
+        assert!(dl.should_be_interested());
+        assert!(!dl.get_requests().is_empty(), "lifted: it downloads again");
+    }
+
+    /// A piece that was in flight when the flag was set is not kept, and the
+    /// refusal is not counted as a failing disk.
+    #[test]
+    fn a_seed_only_torrent_keeps_no_piece_that_arrives() {
+        let t = downloading(4, 16384);
+        t.seed_only.store(true, Ordering::Relaxed);
+        let disk = Arc::new(DiskManager::new(100));
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        for _ in 0..(DISK_FAILURES_BEFORE_ERROR + 2) {
+            assert!(!rt.block_on(commit_piece(&t, &disk, 0, vec![0u8; 16384])));
+        }
+        assert_eq!(t.disk_write_failures.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            t.status.load(Ordering::Relaxed),
+            TorrentStatus::Downloading as u8,
+            "not parked in error for a refusal that is the user's"
+        );
+        assert!(!t.picker.get().unwrap().lock().unwrap().has_piece(0));
     }
 }
 

@@ -68,6 +68,11 @@ pub struct ResumeData {
     /// a recheck the operator asks for may start.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub data_lost: String,
+    /// The user barred this torrent from downloading (`TorrentState::seed_only`).
+    /// Kept in the record so a restart or an engine move cannot hand a
+    /// torrent that was only ever to be served back to the downloader.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub seed_only: bool,
 }
 
 /// Save resume data for a torrent.

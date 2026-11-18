@@ -1253,6 +1253,7 @@ impl TorrentManager {
             download_order: None,
             file_renames: state.meta.renamed_files(),
             data_lost: String::new(),
+            seed_only: false,
         };
         // The record first, then the torrent: a store that refuses it refuses
         // the add, with nothing inserted and the error going back to the
@@ -1991,6 +1992,9 @@ impl TorrentManager {
             if let Some(o) = &rd.download_order {
                 state.set_download_order(o.clone());
             }
+            // Before any status is derived or a peer is met: a seed-only
+            // torrent must never get as far as asking for a piece.
+            state.seed_only.store(rd.seed_only, Ordering::Relaxed);
             // History, not this session's traffic: the counted mark moves too.
             state.restore_lifetime(rd.total_uploaded, rd.total_downloaded);
             // The lifetime totals are ours; what a tracker is told starts
@@ -2555,6 +2559,7 @@ impl TorrentManager {
             download_order: t.stored_download_order(),
             file_renames: t.meta.renamed_files(),
             data_lost: t.data_lost_msg(),
+            seed_only: t.is_seed_only(),
         }
     }
 
@@ -2607,6 +2612,26 @@ impl TorrentManager {
             }
         }
         Ok(t.download_order())
+    }
+
+    /// Bar a torrent from downloading (or lift the bar) and persist it at
+    /// once, as `update_download_order` does. Returns the flag now in force.
+    ///
+    /// Allowed on a stopped torrent that never ran, which is the point: an
+    /// imported torrent can be marked before its first start. Clearing it on
+    /// a running torrent lets it fetch again at the next peer turn.
+    pub fn set_seed_only(&self, info_hash: &InfoHash, on: bool) -> Result<bool, String> {
+        let t = self.get(info_hash).ok_or("torrent not found")?;
+        let before = t.seed_only.swap(on, Ordering::SeqCst);
+        if before != on {
+            if let Err(e) = self.try_persist_live(info_hash) {
+                // Not kept: the flag in force must be the one the next start
+                // reads, and the caller must not be told it took.
+                t.seed_only.store(before, Ordering::SeqCst);
+                return Err(e);
+            }
+        }
+        Ok(t.is_seed_only())
     }
 
     /// `try_persist` for a torrent the engine does not hold yet: the record
@@ -2954,6 +2979,9 @@ impl TorrentManager {
         if let Some(o) = &rd.download_order {
             state.set_download_order(o.clone());
         }
+        // The flag travels too: an engine move must not turn a torrent that
+        // was only to be served into a download.
+        state.seed_only.store(rd.seed_only, Ordering::Relaxed);
         // The source engine counted these bytes when it moved them, and
         // settles the rest when it lets go: this side counts from here on.
         state.restore_lifetime(rd.total_uploaded, rd.total_downloaded);
@@ -3092,6 +3120,7 @@ fn edits_hash(t: &TorrentState) -> u64 {
         (o.sequential, o.first_last, &o.file_prio).hash(&mut h);
     }
     t.meta.renamed_files().hash(&mut h);
+    t.is_seed_only().hash(&mut h);
     h.finish()
 }
 
@@ -4256,6 +4285,34 @@ mod lifecycle_tests {
         mgr.recheck(&ih).expect("recheck starts");
         wait_recheck_end(&t).await;
         assert!(t.error_msg.lock().unwrap().is_empty());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// ⭐ A recheck that finds a seed-only torrent incomplete leaves it
+    /// unable to download and announcing what it lacks: not a seed (that would
+    /// zero `left`), not a downloader.
+    #[tokio::test]
+    async fn a_recheck_leaves_an_incomplete_seed_only_torrent_not_downloading() {
+        let (mgr, root, ih, t) = whole_two_piece_torrent("recheck-seedonly");
+        wait_recheck_end(&t).await;
+        mgr.set_seed_only(&ih, true).unwrap();
+        // One piece goes bad on disk: the recheck finds the torrent half there.
+        let mut data: Vec<u8> = (0..32768u32).map(|i| (i % 241) as u8).collect();
+        data[20000] ^= 0xFF;
+        std::fs::write(root.join("data").join("whole"), &data).unwrap();
+        mgr.recheck(&ih).expect("recheck starts");
+        wait_recheck_end(&t).await;
+
+        assert_eq!(
+            t.status.load(Ordering::Relaxed),
+            TorrentStatus::Downloading as u8
+        );
+        let dl = crate::peer::download::DownloadState::new(t.clone(), mgr.disk().clone());
+        assert!(!dl.is_downloading());
+        assert_eq!(t.bytes_left(), 16384, "one piece still lacking");
+        assert!(t.picker.get().unwrap().lock().unwrap().has_piece(0));
+        let after = std::fs::read(root.join("data").join("whole")).unwrap();
+        assert_eq!(after, data, "nothing was written");
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -6038,6 +6095,107 @@ mod manager_tests {
             "and the picker follows it"
         );
         assert_eq!(again.get(&other).unwrap().stored_download_order(), None);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A started download of the stopped, seed-only kind: what the peer path
+    /// and the tracker see of it.
+    fn assert_barred_and_honest(mgr: &Arc<TorrentManager>, t: &Arc<TorrentState>) {
+        let dl = crate::peer::download::DownloadState::new(t.clone(), mgr.disk().clone());
+        assert!(!dl.is_downloading(), "it must not request");
+        assert!(!dl.should_be_interested());
+        assert_eq!(
+            t.bytes_left(),
+            t.meta.total_size,
+            "and it announces what it really lacks"
+        );
+        assert_ne!(
+            t.status.load(Ordering::Relaxed),
+            TorrentStatus::Seeding as u8
+        );
+    }
+
+    /// ⭐ Seed only survives a restart, also for a torrent that was stopped
+    /// before it ever ran: its first start after the restart is no download.
+    /// The default stays the default.
+    #[test]
+    fn seed_only_survives_a_restart() {
+        let (mgr, root) = manager("resume-seedonly");
+        let blob = torrent_bytes("alpha", &["https://tracker.example/announce"]);
+        let ih = mgr.add_torrent_bytes(&blob, "/tmp", true, false).unwrap().0;
+        let other = add(&mgr, "beta");
+        assert_eq!(mgr.set_seed_only(&ih, true), Ok(true));
+        assert!(mgr.set_seed_only(&[9u8; 20], true).is_err(), "unknown hash");
+
+        let again = Arc::new(TorrentManager::new(
+            root.join("data").to_string_lossy().into_owned(),
+            root.join("resume").to_string_lossy().into_owned(),
+            Arc::new(DiskManager::new(16)),
+        ));
+        let blob_b = torrent_bytes("beta", &["https://tracker.example/announce"]);
+        let (ha, hb) = (hex_encode(&ih), hex_encode(&other));
+        again.set_blob_source(Arc::new(move |hash: &str| {
+            if hash == ha {
+                Some(blob.clone())
+            } else if hash == hb {
+                Some(blob_b.clone())
+            } else {
+                None
+            }
+        }));
+        assert_eq!(again.load_resume_data(), 2);
+        let t = again.get(&ih).unwrap();
+        assert!(t.is_seed_only(), "the flag came back");
+        assert!(!again.get(&other).unwrap().is_seed_only());
+
+        again.start_torrent(&ih).unwrap();
+        assert_eq!(
+            t.status.load(Ordering::Relaxed),
+            TorrentStatus::Downloading as u8,
+            "incomplete: not a seed"
+        );
+        assert_barred_and_honest(&again, &t);
+
+        assert_eq!(again.set_seed_only(&ih, false), Ok(false));
+        let dl = crate::peer::download::DownloadState::new(t.clone(), again.disk().clone());
+        assert!(dl.is_downloading(), "cleared: it may download again");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// ⭐ The record that crosses between engines carries the flag.
+    #[test]
+    fn seed_only_travels_with_an_engine_move() {
+        let (src, root) = manager("move-seedonly-src");
+        let (dst, root2) = manager("move-seedonly-dst");
+        let blob = torrent_bytes("alpha", &["https://tracker.example/announce"]);
+        let b = blob.clone();
+        dst.set_blob_source(Arc::new(move |_hash: &str| Some(b.clone())));
+        let ih = src.add_torrent_bytes(&blob, "/tmp", true, false).unwrap().0;
+        src.set_seed_only(&ih, true).unwrap();
+        let rd = src.export_state(&ih).expect("exported");
+        assert!(rd.seed_only, "the record says it");
+
+        dst.import_state(&rd).expect("imported");
+        let t = dst.get(&ih).unwrap();
+        assert!(t.is_seed_only(), "and the adopting engine honours it");
+        dst.start_torrent(&ih).unwrap();
+        assert_barred_and_honest(&dst, &t);
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(root2);
+    }
+
+    /// A flag the state store could not keep is not acknowledged and is not
+    /// left in force.
+    #[test]
+    fn a_seed_only_flag_the_store_did_not_keep_is_refused() {
+        let (mgr, root) = manager("seedonly-store-down");
+        let ih = add(&mgr, "alpha");
+        let conn = rusqlite::Connection::open(root.join("state.db")).unwrap();
+        conn.execute("DROP TABLE torrent_state", []).unwrap();
+        drop(conn);
+
+        assert!(mgr.set_seed_only(&ih, true).is_err());
+        assert!(!mgr.get(&ih).unwrap().is_seed_only());
         let _ = std::fs::remove_dir_all(root);
     }
 

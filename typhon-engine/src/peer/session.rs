@@ -601,6 +601,13 @@ pub async fn run(
                 }
             }
         }
+        // Barred from downloading while interest was already declared: say so,
+        // so the peer stops holding an unchoke slot for us. Lifting the bar
+        // re-declares it through the line below.
+        if dl.am_interested && torrent.is_seed_only() {
+            dl.am_interested = false;
+            framed.send(Message::NotInterested).await.ok();
+        }
         if dl.is_downloading() && !dl.am_interested && dl.should_be_interested() {
             dl.am_interested = true;
             framed.send(Message::Interested).await.ok();
@@ -1312,6 +1319,24 @@ mod request_bounds_tests {
             !ask(&t, &s, 0, u32::MAX, 1),
             "a begin at the top of the range"
         );
+    }
+
+    /// ⭐ Seed only bars requests, not serving: an incomplete torrent hands out
+    /// the piece it holds and still refuses the one it does not.
+    #[test]
+    fn a_seed_only_torrent_serves_the_pieces_it_holds() {
+        let (seed, s) = seeding();
+        let t = Arc::new(TorrentState::new(
+            seed.meta.clone(),
+            std::path::PathBuf::from("/tmp"),
+            false,
+        ));
+        t.status
+            .store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+        t.picker.get().unwrap().lock().unwrap().set_have(0);
+        t.seed_only.store(true, Ordering::Relaxed);
+        assert!(ask(&t, &s, 0, 0, PIECE), "the piece it holds is served");
+        assert!(!ask(&t, &s, 1, 0, PIECE), "the one it lacks is not");
     }
 
     #[test]
