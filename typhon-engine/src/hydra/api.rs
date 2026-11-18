@@ -175,6 +175,12 @@ pub(crate) const DAILY_TRAFFIC_KEY: &str = "daily_traffic";
 ///
 /// Once started, the blocking write may finish even if the caller stops waiting.
 pub(crate) async fn save_daily_traffic(state: AppState) -> anyhow::Result<()> {
+    save_daily_traffic_on(state, local_date).await
+}
+
+/// [`save_daily_traffic`] with the date read from `today`, so a test can pin
+/// the day instead of depending on the clock.
+async fn save_daily_traffic_on(state: AppState, today: fn() -> String) -> anyhow::Result<()> {
     use anyhow::Context as _;
 
     tokio::task::spawn_blocking(move || {
@@ -182,7 +188,7 @@ pub(crate) async fn save_daily_traffic(state: AppState) -> anyhow::Result<()> {
         let store = state.store.lock().unwrap_or_else(|e| e.into_inner());
         let saved = {
             let mut odo = state.odometer.lock().unwrap_or_else(|e| e.into_inner());
-            odo.checkpoint(state.engines.moved_totals(), &local_date())
+            odo.checkpoint(state.engines.moved_totals(), &today())
         };
         store.put_setting(DAILY_TRAFFIC_KEY, &saved)
     })
@@ -29449,6 +29455,23 @@ mod odometer_tests {
 
     #[tokio::test]
     async fn daily_traffic_checkpoint_survives_reopening_the_database() {
+        // A fixed date, not the clock: a run across midnight must not roll the
+        // day between the save and the restore.
+        const DAY: &str = "2026-11-15";
+        fn day() -> String {
+            DAY.to_string()
+        }
+        let boot = |s: &TestState| {
+            *s.odometer.lock().unwrap() = Odometer {
+                day_baseline: (0, 0),
+                day_date: DAY.into(),
+            };
+        };
+        let today_of = |s: &TestState| {
+            let session = s.engines.moved_totals();
+            (session, s.odometer.lock().unwrap().day(session, DAY))
+        };
+
         let mut first = state_from("odo-persist-first", "");
         let path = first.dir.join("daily.db");
         let store = crate::store::Store::open(&path, false).unwrap();
@@ -29467,7 +29490,9 @@ mod odometer_tests {
             .total_downloaded
             .fetch_add(10, Ordering::Relaxed);
         tick(&first);
-        save_daily_traffic(first.state.clone()).await.unwrap();
+        save_daily_traffic_on(first.state.clone(), day)
+            .await
+            .unwrap();
 
         let mut second = state_from("odo-persist-second", "");
         second.state.store = Arc::new(crate::store::StoreLock::new(
@@ -29482,14 +29507,16 @@ mod odometer_tests {
             .unwrap()
             .unwrap();
         second.odometer.lock().unwrap().restore(&saved).unwrap();
-        let (_, session, day) = session_and_day(&second);
+        let (session, today) = today_of(&second);
         assert_eq!(session, (0, 0));
-        assert_eq!(day, (700, 10));
+        assert_eq!(today, (700, 10));
         let ih = add(&second, "hoard", "second-session");
         upload(&second, "hoard", &ih, 20);
         tick(&second);
-        assert_eq!(session_and_day(&second).2, (720, 10));
-        save_daily_traffic(second.state.clone()).await.unwrap();
+        assert_eq!(today_of(&second).1, (720, 10));
+        save_daily_traffic_on(second.state.clone(), day)
+            .await
+            .unwrap();
         let saved = first
             .store
             .lock()
@@ -29497,10 +29524,12 @@ mod odometer_tests {
             .setting(DAILY_TRAFFIC_KEY)
             .unwrap()
             .unwrap();
-        let mut third = Odometer::at_boot();
+        let mut third = Odometer {
+            day_baseline: (0, 0),
+            day_date: DAY.into(),
+        };
         third.restore(&saved).unwrap();
-        let today = third.day_date.clone();
-        assert_eq!(third.day((0, 0), &today), (720, 10));
+        assert_eq!(third.day((0, 0), DAY), (720, 10));
     }
 
     /// The 01/10/2026 incident, as an interleaving: deleting 1,813 torrents

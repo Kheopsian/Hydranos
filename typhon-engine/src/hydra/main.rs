@@ -1019,6 +1019,12 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
         api::refresh_records(bench_path.clone(), records.clone());
     }
 
+    // "Today" is the session minus what it was at the last local midnight.
+    // The session itself needs no mark: the engines count what they move from
+    // zero (see `TorrentManager::moved`), so the lifetime history their
+    // torrents load with is never mistaken for this boot's traffic.
+    // The restore carries earlier processes' bytes into the day baseline only:
+    // the session starts from zero, so it has no baseline to restore.
     let mut odo = api::Odometer::at_boot();
     match shared_store
         .lock()
