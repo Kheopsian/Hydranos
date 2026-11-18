@@ -829,6 +829,47 @@ mod worker_tests {
         assert!(!short.is_paused.load(Ordering::Relaxed));
     }
 
+    /// ⭐ A seed parked by the queue reads Stopped while the user's recheck
+    /// runs; at its limit the worker stops it, and the check goes on and
+    /// publishes. A user's stop calls a check off, the worker's does not.
+    #[tokio::test]
+    async fn the_worker_stop_leaves_a_users_recheck_running() {
+        let s = state("sl-recheck", "max_ratio = 2.0", Some("0"));
+        let (hash, t, _) = seed(&s, "checked", 3, 0);
+        let mgr = s.engines.get("race").unwrap().manager.clone();
+        let ih = t.info_hash;
+        // Parked by the queue: stopped, not by the operator.
+        mgr.stop_torrent(&ih).unwrap();
+        assert!(!user_paused(&s, &hash));
+        mgr.recheck(&ih).expect("recheck starts");
+        let gen = t.check_gen.load(Ordering::SeqCst);
+        assert!(t.rechecking.load(Ordering::SeqCst));
+        assert!(t.picker.get().is_none(), "a seed-mode add, no verdict yet");
+
+        let out = pass(&s, &mut ShareLimitBook::default(), NOW);
+        assert_eq!(out.stopped, 1);
+        assert!(user_paused(&s, &hash));
+        assert_eq!(
+            t.check_gen.load(Ordering::SeqCst),
+            gen,
+            "the check is not called off"
+        );
+        assert!(t.rechecking.load(Ordering::SeqCst));
+
+        for _ in 0..500 {
+            if !t.rechecking.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(!t.rechecking.load(Ordering::SeqCst), "the check ended");
+        // Zeros on disk do not match the piece hash: the verdict, published,
+        // holds nothing.
+        let picker = t.picker.get().expect("the check published its verdict");
+        assert_eq!(picker.lock().unwrap().num_have(), 0);
+        assert!(t.is_paused.load(Ordering::Relaxed), "and it stays stopped");
+    }
+
     /// Inactivity counts from the first pass that saw the torrent, and an
     /// upload resets it.
     #[test]

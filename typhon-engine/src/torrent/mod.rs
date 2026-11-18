@@ -1742,7 +1742,8 @@ impl TorrentManager {
     /// it is still waiting, or at its next piece if it is reading, publishes
     /// no verdict (what the torrent held before stays), and a proof starts
     /// nothing. The torrent reads as what the stop made it. Not called by the
-    /// queue managers' own stops, which must not undo a check the user asked.
+    /// queue managers' own stops, nor by the share-limit worker's, which must
+    /// not undo a check the user asked.
     ///
     /// A check that has read everything and is writing its verdict finishes
     /// it first (`check_publish`): the stop then finds a finished check, and

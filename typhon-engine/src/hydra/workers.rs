@@ -649,7 +649,10 @@ pub fn share_limits_pass(
                 if let Ok(store) = state.store.lock() {
                     crate::store::log_store("set_paused", store.set_paused(&hash, engine_id, true));
                 }
-                crate::api::apply_pause_to_engine(state, engine_id, &hash, true);
+                // Not `apply_pause_to_engine`: that is the user's stop, and
+                // calls off a check. A parked seed under the user's recheck
+                // reads Stopped and can get here; its check goes on.
+                let _ = manager.stop_torrent(&t.info_hash);
                 out.stopped += 1;
                 tracing::info!(engine = %engine_id, name = %t.meta.name, reason = %why, "share limit reached: stopped");
             }
