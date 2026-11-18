@@ -1610,6 +1610,20 @@ mod runtime_exit_tests {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
+    /// Held by every test that reaches the warning in `finish_runtime`.
+    ///
+    /// ⚠ tracing caches a callsite's interest the first time it is hit. A
+    /// test with no subscriber that hit the warning while the logging test's
+    /// scoped subscriber was the only one alive cached "never" for it, and
+    /// the logging test then recorded nothing. One at a time, the logging
+    /// test's subscriber is registered before or after the callsite, never
+    /// beside a thread that has none.
+    static WARNING_CALLSITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn one_at_a_time() -> std::sync::MutexGuard<'static, ()> {
+        WARNING_CALLSITE.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
     fn runtime() -> tokio::runtime::Runtime {
         tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
@@ -1623,6 +1637,7 @@ mod runtime_exit_tests {
     /// it for as long as it ran, past the supervisor's own patience.
     #[test]
     fn a_blocking_task_does_not_hold_the_exit_past_the_grace() {
+        let _one = one_at_a_time();
         let rt = runtime();
         let (release, rx) = std::sync::mpsc::channel::<()>();
         let (started_tx, started_rx) = std::sync::mpsc::channel::<()>();
@@ -1677,6 +1692,7 @@ mod runtime_exit_tests {
     /// The log lines `finish_runtime` writes with `blocking_secs` of blocking
     /// work still running when the grace is 200 ms.
     fn logged_closing(blocking: Duration) -> String {
+        let _one = one_at_a_time();
         let rt = runtime();
         let (started_tx, started_rx) = std::sync::mpsc::channel::<()>();
         rt.spawn_blocking(move || {
