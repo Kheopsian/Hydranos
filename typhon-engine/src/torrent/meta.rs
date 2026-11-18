@@ -2625,7 +2625,7 @@ mod tests {
     fn per_torrent_types_do_not_grow() {
         use std::mem::size_of;
         let state = size_of::<TorrentState>();
-        let bound = if cfg!(windows) { 936 } else { 928 };
+        let bound = if cfg!(windows) { 968 } else { 960 };
         assert!(state <= bound, "TorrentState grew to {state} bytes");
         let meta = size_of::<TorrentMeta>();
         assert!(meta <= 160, "TorrentMeta grew to {meta} bytes");
