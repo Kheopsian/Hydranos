@@ -5142,6 +5142,37 @@ mod lifecycle_tests {
         assert_eq!(sem.available_permits(), 3, "raised at once");
     }
 
+    /// The review's case: all 4 slots busy, lowered to 2, raised back to 4
+    /// before the checks end. The limit must end at 4 once they do.
+    #[tokio::test]
+    async fn a_lower_then_higher_limit_while_checks_run_ends_at_the_higher() {
+        let sem = Arc::new(Semaphore::new(4));
+        let running = sem.clone().acquire_many_owned(4).await.unwrap();
+        resize_sem(&sem, 4, 2);
+        resize_sem(&sem, 2, 4);
+        drop(running);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(sem.available_permits(), 4, "the limit is back at 4");
+        let all = sem.clone().try_acquire_many_owned(4);
+        assert!(all.is_ok(), "four checks can run at once");
+    }
+
+    /// Variant: one check ends while the lowering still waits, then the limit
+    /// goes back up, then the rest end.
+    #[tokio::test]
+    async fn a_limit_raised_while_a_lowering_waits_ends_at_the_higher() {
+        let sem = Arc::new(Semaphore::new(4));
+        let mut running = sem.clone().acquire_many_owned(4).await.unwrap();
+        resize_sem(&sem, 4, 2);
+        let one = running.split(1).unwrap();
+        drop(one);
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        resize_sem(&sem, 2, 4);
+        drop(running);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(sem.available_permits(), 4, "the limit is back at 4");
+    }
+
     /// ⭐ A torrent stopped while its recheck waited for the disk stayed under
     /// Checking, offered Start, and was checked later anyway. The stop calls
     /// the check off: the torrent reads as stopped at once, the check never
