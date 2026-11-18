@@ -12422,6 +12422,8 @@ const LIVE_SESSION_KEYS: &[&str] = &[
     "max_seeding_time",
     "max_inactive_seeding_time",
     "share_limit_action",
+    // Read by the scheduler on every cycle (`Engine::announce_sort`).
+    "announce_sort",
 ];
 
 /// Put the stored client-wide caps back on the engines. Called once at boot.
@@ -30746,6 +30748,31 @@ mod qbit_shim_post_tests {
         assert_eq!(json(&b)["upload_kib"], 128);
         let file = std::fs::read_to_string(&s.state.config_path).unwrap();
         assert!(file.contains("upload_rate_limit = 131072"), "{file}");
+    }
+
+    /// `announce_sort` is live too, on every engine: a file without the key
+    /// accepts it, no restart is asked for, and the running scheduler's order
+    /// changes for the torrents that have not announced yet.
+    #[tokio::test]
+    async fn saving_announce_sort_reorders_the_running_engine() {
+        let s = state_from(
+            "live-announce-sort",
+            &format!("[daemon]\napi_key = \"{KEY}\"\n\n[race]\nlisten_port = 1\n"),
+        );
+        let race = s.state.engines.get("race").unwrap();
+        assert_eq!(
+            race.announce_sort.get(),
+            crate::config::AnnounceSort::Default
+        );
+        let body = serde_json::json!({"changes": [
+            {"section": "race", "key": "announce_sort", "value": "ratio"},
+        ]});
+        let (st, b) = call(&s, "POST", "/api/settings", &body.to_string()).await;
+        assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
+        assert_eq!(json(&b)["restart_required"], false);
+        assert_eq!(race.announce_sort.get(), crate::config::AnnounceSort::Ratio);
+        let file = std::fs::read_to_string(&s.state.config_path).unwrap();
+        assert!(file.contains("announce_sort = \"ratio\""), "{file}");
     }
 
     /// `peer_encryption` is a live engine key: `allow` until saved, then the

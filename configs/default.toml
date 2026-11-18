@@ -128,6 +128,8 @@ create_torrent_folder = false
 # RACE SESSION - maximum aggressiveness (hot downloads)
 # ─────────────────────────────────────────────
 [race]
+# Order of torrents not announced yet: default, size (largest first), ratio (highest first). Applied live.
+announce_sort = "default"
 listen_port = 16171
 # While a tracker answers "unregistered torrent" (the upload is not in yet),
 # re-announce every 5 seconds for this many minutes; then the tracker's own
@@ -276,6 +278,8 @@ share_limit_action = "stop"
 # HOARD SESSION - upload-optimized (long-term seeding)
 # ─────────────────────────────────────────────
 [hoard]
+# Order of torrents not announced yet: default, size (largest first), ratio (highest first). Applied live.
+announce_sort = "default"
 listen_port = 16172
 # Pin this engine's peer sockets to one host interface (optional), by NAME,
 # e.g. "wg0": resolved to its IP at start, so it survives VPN IP changes.

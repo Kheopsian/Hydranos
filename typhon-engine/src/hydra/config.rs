@@ -170,12 +170,50 @@ impl Session {
     }
 }
 
+/// Order in which an engine's torrents join the announce schedule.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[repr(u8)]
+pub enum AnnounceSort {
+    #[default]
+    Default = 0,
+    Size = 1,
+    Ratio = 2,
+}
+
+/// An engine's announce order while it runs: a settings save changes it, and
+/// the scheduler reads it on its next cycle.
+#[derive(Debug, Default)]
+pub struct LiveAnnounceSort(std::sync::atomic::AtomicU8);
+
+impl LiveAnnounceSort {
+    pub fn new(sort: AnnounceSort) -> Self {
+        Self(std::sync::atomic::AtomicU8::new(sort as u8))
+    }
+
+    pub fn get(&self) -> AnnounceSort {
+        match self.0.load(std::sync::atomic::Ordering::Relaxed) {
+            1 => AnnounceSort::Size,
+            2 => AnnounceSort::Ratio,
+            _ => AnnounceSort::Default,
+        }
+    }
+
+    pub fn set(&self, sort: AnnounceSort) {
+        self.0
+            .store(sort as u8, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 /// One engine's section of the config ([race] or [hoard]).
 ///
 /// Only the keys the ported surface reads are typed. The rest stays in the file
 /// and is served verbatim by /api/settings, which re-reads it.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct Session {
+    /// Order in which torrents not announced yet join the schedule. Applied live.
+    #[serde(default)]
+    pub announce_sort: AnnounceSort,
     #[serde(default)]
     pub registration_retry_minutes: Option<u64>,
     #[serde(default)]
@@ -1390,5 +1428,27 @@ mod default_tests {
             ports.len(),
             "no two engines share a port: {ports:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod announce_sort_tests {
+    use super::*;
+
+    #[test]
+    fn announce_sort_defaults_and_rejects_unknown_values() {
+        assert_eq!(
+            toml::from_str::<Session>("").unwrap().announce_sort,
+            AnnounceSort::Default
+        );
+        for (value, expected) in [
+            ("default", AnnounceSort::Default),
+            ("size", AnnounceSort::Size),
+            ("ratio", AnnounceSort::Ratio),
+        ] {
+            let session: Session = toml::from_str(&format!("announce_sort = \"{value}\"")).unwrap();
+            assert_eq!(session.announce_sort, expected);
+        }
+        assert!(toml::from_str::<Session>("announce_sort = \"unknown\"").is_err());
     }
 }

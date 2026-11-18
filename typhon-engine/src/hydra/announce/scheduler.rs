@@ -16,7 +16,7 @@
 //! workers only ever speak through channels.
 
 use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -24,6 +24,8 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
 use typhon_engine::torrent::meta::InfoHash;
+
+use crate::config::AnnounceSort;
 
 use typhon_engine::torrent::{hex_decode, hex_encode};
 
@@ -318,6 +320,120 @@ pub trait Catalogue: Send + Sync + 'static {
     fn host_of(&self, _info_hash: &InfoHash) -> String {
         String::new()
     }
+    /// The order torrents not admitted yet join in, read every cycle so a
+    /// settings save applies to what is still waiting. `Default` spreads them
+    /// by hash, as before the setting existed.
+    fn admission_sort(&self) -> AnnounceSort {
+        AnnounceSort::Default
+    }
+    /// Where this torrent ranks under `sort`, highest first. Asked once, when
+    /// it starts waiting, and again only if the order changes while it waits.
+    fn rank_key(&self, _info_hash: &InfoHash, _sort: AnnounceSort) -> u64 {
+        0
+    }
+}
+
+/// Torrents waiting to be admitted in a ranked order, one queue per tracker.
+///
+/// Kept from one cycle to the next: a torrent is ranked when it starts
+/// waiting, not on every cycle it waits. Right after a restart that is the
+/// whole catalogue once, rather than the whole catalogue every ten seconds
+/// inside the loop that sends the announces that are due.
+///
+/// One queue per host, served in turn: a ranking that puts one tracker's
+/// torrents on top must not hand that tracker every slot of the startup
+/// backlog, which is the rate-limited case the ranking is for.
+#[derive(Default)]
+struct Waiting {
+    /// What the queues are ranked by. `Default` while there are none.
+    sort: AnnounceSort,
+    /// Per host, best ranked on top: highest key, then lowest info hash.
+    queues: BTreeMap<Arc<str>, BinaryHeap<(u64, Reverse<InfoHash>)>>,
+    /// Everything in a queue, with the last cycle the catalogue still held
+    /// it: a cycle tells a torrent it has already ranked from one that has
+    /// just appeared, and one that left while it waited, with this one lookup.
+    /// Not SipHash: an info hash is already uniform.
+    queued: HashMap<InfoHash, u32, std::hash::BuildHasherDefault<crate::store::InfoHashHasher>>,
+    /// Counts the cycles, for `queued`.
+    cycle: u32,
+    /// The host served last, so the next cycle starts with the one after it.
+    last_host: Option<Arc<str>>,
+}
+
+impl Waiting {
+    fn clear(&mut self) {
+        // Assigned, not cleared: the startup backlog can be the whole
+        // catalogue, and its memory is not wanted once it has drained.
+        *self = Self::default();
+    }
+
+    fn push<C: Catalogue>(
+        &mut self,
+        catalogue: &C,
+        hosts: &mut HashMap<String, Arc<str>>,
+        hash: InfoHash,
+    ) {
+        let key = catalogue.rank_key(&hash, self.sort);
+        let host = intern(hosts, catalogue.host_of(&hash));
+        self.queues
+            .entry(host)
+            .or_default()
+            .push((key, Reverse(hash)));
+        self.queued.insert(hash, self.cycle);
+    }
+
+    /// Up to `quota` torrents, one host at a time in turn, each host's in rank
+    /// order. One that left the catalogue this cycle, or was admitted some
+    /// other way (a manual announce) while it waited, is dropped as it comes
+    /// up.
+    fn take(
+        &mut self,
+        quota: usize,
+        mut admissible: impl FnMut(&InfoHash) -> bool,
+    ) -> Vec<(InfoHash, Arc<str>)> {
+        let mut out = Vec::with_capacity(quota.min(self.queued.len()));
+        let mut order: Vec<Arc<str>> = self.queues.keys().cloned().collect();
+        if let Some(last) = &self.last_host {
+            let after = order.partition_point(|h| h <= last);
+            order.rotate_left(after);
+        }
+        while out.len() < quota && !order.is_empty() {
+            order.retain(|host| {
+                if out.len() >= quota {
+                    return true;
+                }
+                let Some(queue) = self.queues.get_mut(host) else {
+                    return false;
+                };
+                while let Some((_, Reverse(hash))) = queue.pop() {
+                    let still_held = self.queued.remove(&hash) == Some(self.cycle);
+                    if still_held && admissible(&hash) {
+                        out.push((hash, host.clone()));
+                        self.last_host = Some(host.clone());
+                        return !queue.is_empty();
+                    }
+                }
+                false
+            });
+        }
+        self.queues.retain(|_, q| !q.is_empty());
+        if self.queued.is_empty() {
+            let sort = self.sort;
+            self.clear();
+            self.sort = sort;
+        }
+        out
+    }
+}
+
+/// Interned: a million torrents share a handful of trackers.
+fn intern(hosts: &mut HashMap<String, Arc<str>>, host: String) -> Arc<str> {
+    if let Some(h) = hosts.get(&host) {
+        return h.clone();
+    }
+    let h: Arc<str> = Arc::from(host.as_str());
+    hosts.insert(host, h.clone());
+    h
 }
 
 /// One tracker as the scheduler last saw it, for the API and the panel.
@@ -445,8 +561,18 @@ pub async fn run<C, F, Fut>(
     let mut reconcile = tokio::time::interval(RECONCILE);
     let mut pool = Pool::default();
     let mut hosts: HashMap<String, Arc<str>> = HashMap::new();
+    let mut waiting = Waiting::default();
 
-    off_the_runtime(|| reconcile_now(&catalogue, &mut states, &mut heap, &admission, &mut hosts));
+    off_the_runtime(|| {
+        reconcile_now(
+            &catalogue,
+            &mut states,
+            &mut heap,
+            &admission,
+            &mut hosts,
+            &mut waiting,
+        )
+    });
 
     loop {
         // Hand out what is due, tracker by tracker, as far as each one's limit
@@ -520,7 +646,7 @@ pub async fn run<C, F, Fut>(
                 let health = off_the_runtime(|| measure(&states, &heap, &pool, Instant::now()));
                 pool.adjust();
                 health.publish(&admission, &pool);
-                off_the_runtime(|| reconcile_now(&catalogue, &mut states, &mut heap, &admission, &mut hosts));
+                off_the_runtime(|| reconcile_now(&catalogue, &mut states, &mut heap, &admission, &mut hosts, &mut waiting));
             }
         }
     }
@@ -903,25 +1029,24 @@ fn reconcile_now<C: Catalogue>(
     heap: &mut BinaryHeap<Reverse<Deadline>>,
     admission: &Admission,
     hosts: &mut HashMap<String, Arc<str>>,
+    waiting: &mut Waiting,
 ) -> usize {
     let live = catalogue.hashes();
     let total = live.len() as u64;
     // Derived from the catalogue in hand: the bigger it is, the faster it has
     // to be taken on, because the steady state it is heading for is faster too.
     let quota = admit_quota(live.len());
-    let mut seen = std::collections::HashSet::with_capacity(live.len());
+    let sort = catalogue.admission_sort();
+    let mut seen = HashSet::with_capacity(if sort == AnnounceSort::Default {
+        live.len()
+    } else {
+        states.len() + quota
+    });
     let mut added = 0usize;
-    for hash in live {
-        seen.insert(hash);
-        if states.contains_key(&hash) {
-            continue;
-        }
-        // The rest join on the next cycle. `seen` already holds them, so they
-        // are not mistaken for departures in the meantime.
-        if added >= quota {
-            continue;
-        }
-        added += 1;
+    // A torrent that has just appeared announces now: it is either newly added
+    // or the engine has just started, and both want the tracker told rather
+    // than a thirty-minute wait.
+    let mut admit = |states: &mut HashMap<InfoHash, State>, hash: InfoHash, host, at| {
         states.insert(
             hash,
             State {
@@ -931,30 +1056,79 @@ fn reconcile_now<C: Catalogue>(
                 epoch: 0,
                 last_bump: None,
                 interval_s: DEFAULT_INTERVAL.as_secs() as u32,
-                // Interned: a million torrents share a handful of trackers.
-                host: {
-                    let h = catalogue.host_of(&hash);
-                    hosts
-                        .entry(h.clone())
-                        .or_insert_with(|| Arc::from(h.as_str()))
-                        .clone()
-                },
+                host,
             },
         );
-        // A torrent that has just appeared announces now: it is either newly
-        // added or the engine has just started, and both want the tracker told
-        // rather than a thirty-minute wait.
-        //
-        // "Now" is spread across the cycle rather than taken literally: a whole
-        // quota leaving in the same millisecond is the burst this admission
-        // limit exists to prevent, and it would only get bigger now that the
-        // quota scales with the catalogue.
-        let at = Instant::now() + spread(&hash, RECONCILE);
         heap.push(Reverse(Deadline {
             at,
             info_hash: hash,
             epoch: 0,
         }));
+    };
+
+    if sort != waiting.sort {
+        // Ranked by something else, or not at all: what is still waiting is
+        // ranked again, once, by the new order. Back to `Default`, there is
+        // no queue at all.
+        let requeue: Vec<InfoHash> = waiting.queued.keys().copied().collect();
+        waiting.clear();
+        waiting.sort = sort;
+        if sort != AnnounceSort::Default {
+            for hash in requeue {
+                waiting.push(catalogue.as_ref(), hosts, hash);
+            }
+        }
+    }
+
+    if sort == AnnounceSort::Default {
+        for hash in live {
+            seen.insert(hash);
+            if states.contains_key(&hash) {
+                continue;
+            }
+            // The rest join on the next cycle. `seen` already holds them, so
+            // they are not mistaken for departures in the meantime.
+            if added >= quota {
+                continue;
+            }
+            added += 1;
+            let host = intern(hosts, catalogue.host_of(&hash));
+            // "Now" is spread across the cycle rather than taken literally: a
+            // whole quota leaving in the same millisecond is the burst this
+            // admission limit exists to prevent, and it would only get bigger
+            // now that the quota scales with the catalogue.
+            admit(
+                states,
+                hash,
+                host,
+                Instant::now() + spread(&hash, RECONCILE),
+            );
+        }
+    } else {
+        // Two lookups per torrent, as in `default`. `seen` holds only the admitted
+        // ones here, which is all the departures below need; a waiting one
+        // is marked in `queued` instead.
+        waiting.cycle = waiting.cycle.wrapping_add(1);
+        for hash in live {
+            if states.contains_key(&hash) {
+                seen.insert(hash);
+            } else if let Some(cycle) = waiting.queued.get_mut(&hash) {
+                *cycle = waiting.cycle;
+            } else {
+                waiting.push(catalogue.as_ref(), hosts, hash);
+            }
+        }
+        // Spread across the cycle in the order handed out, so the ranking
+        // holds and hosts take turns in time as well.
+        let cycle_start = Instant::now();
+        let taken = waiting.take(quota, |h| !states.contains_key(h));
+        let n = taken.len();
+        for (i, (hash, host)) in taken.into_iter().enumerate() {
+            seen.insert(hash);
+            let at = cycle_start + RECONCILE.mul_f64(i as f64 / n as f64);
+            admit(states, hash, host, at);
+        }
+        added = n;
     }
     // A torrent in flight is left alone: its worker still holds it, and its
     // result will remove it.
@@ -1163,6 +1337,7 @@ mod tests {
         let admission = Admission::default();
         let mut states = HashMap::new();
         let mut heap = BinaryHeap::new();
+        let mut waiting = Waiting::default();
 
         reconcile_now(
             &catalogue,
@@ -1170,6 +1345,7 @@ mod tests {
             &mut heap,
             &admission,
             &mut HashMap::new(),
+            &mut waiting,
         );
         assert_eq!(
             admission.admitted.load(Ordering::Relaxed),
@@ -1186,6 +1362,7 @@ mod tests {
             &mut heap,
             &admission,
             &mut HashMap::new(),
+            &mut waiting,
         );
         assert_eq!(
             admission.admitted.load(Ordering::Relaxed),
@@ -1202,6 +1379,7 @@ mod tests {
             &mut heap,
             &admission,
             &mut HashMap::new(),
+            &mut waiting,
         );
         assert_eq!(
             admission.waiting.load(Ordering::Relaxed),
@@ -1209,6 +1387,227 @@ mod tests {
             "the whole catalogue is in"
         );
         assert_eq!(admission.drain_seconds(), 0);
+    }
+
+    /// A catalogue for ranked admission: torrent `i` sits on `host(i)` and
+    /// ranks `key(i)`, and every `rank_key` call is counted per torrent.
+    struct Ranked {
+        n: usize,
+        sort: std::sync::Mutex<AnnounceSort>,
+        host: fn(usize) -> String,
+        key: fn(usize) -> u64,
+        ranked: std::sync::Mutex<HashMap<InfoHash, usize>>,
+    }
+
+    impl Ranked {
+        fn new(n: usize, host: fn(usize) -> String, key: fn(usize) -> u64) -> Arc<Self> {
+            Arc::new(Self {
+                n,
+                sort: std::sync::Mutex::new(AnnounceSort::Size),
+                host,
+                key,
+                ranked: Default::default(),
+            })
+        }
+        fn index(h: &InfoHash) -> usize {
+            u64::from_be_bytes(h[12..].try_into().unwrap()) as usize
+        }
+    }
+
+    impl Catalogue for Ranked {
+        fn hashes(&self) -> Vec<InfoHash> {
+            (0..self.n).map(nth).collect()
+        }
+        fn host_of(&self, h: &InfoHash) -> String {
+            (self.host)(Self::index(h))
+        }
+        fn admission_sort(&self) -> AnnounceSort {
+            *self.sort.lock().unwrap()
+        }
+        fn rank_key(&self, h: &InfoHash, _sort: AnnounceSort) -> u64 {
+            *self.ranked.lock().unwrap().entry(*h).or_default() += 1;
+            (self.key)(Self::index(h))
+        }
+    }
+
+    /// One reconcile cycle; what it admitted, in the order it is due.
+    fn admit_cycle(
+        catalogue: &Arc<Ranked>,
+        states: &mut HashMap<InfoHash, State>,
+        waiting: &mut Waiting,
+    ) -> Vec<usize> {
+        let mut heap = BinaryHeap::new();
+        reconcile_now(
+            catalogue,
+            states,
+            &mut heap,
+            &Admission::default(),
+            &mut HashMap::new(),
+            waiting,
+        );
+        let mut due = Vec::new();
+        let mut last = None;
+        while let Some(Reverse(d)) = heap.pop() {
+            if let Some(last) = last {
+                assert!(d.at >= last, "due in the order handed out");
+            }
+            last = Some(d.at);
+            due.push(Ranked::index(&d.info_hash));
+        }
+        due
+    }
+
+    /// ⭐ A waiting torrent is ranked once, not on every cycle it waits.
+    ///
+    /// Ranking everything not admitted yet on every cycle cost close to a
+    /// second per cycle on a million torrents, inside the loop that sends the
+    /// announces that are due.
+    #[test]
+    fn a_waiting_torrent_is_ranked_once_across_cycles() {
+        let n = MIN_NEW_PER_CYCLE * 3 + 7;
+        let catalogue = Ranked::new(n, |_| "t.test".into(), |i| i as u64);
+        let (mut states, mut waiting) = (HashMap::new(), Waiting::default());
+        for _ in 0..5 {
+            admit_cycle(&catalogue, &mut states, &mut waiting);
+        }
+        assert_eq!(states.len(), n, "the whole catalogue is in");
+        let ranked = catalogue.ranked.lock().unwrap();
+        assert_eq!(ranked.len(), n);
+        assert!(ranked.values().all(|&c| c == 1), "each one ranked once");
+        assert!(waiting.queued.is_empty() && waiting.queues.is_empty());
+    }
+
+    /// `size`: largest first, and equal sizes in info hash order.
+    #[test]
+    fn size_admits_the_largest_first_ties_by_info_hash() {
+        // Sizes 0, 0, 1, 1, 2, 2, ...: every size twice.
+        let n = MIN_NEW_PER_CYCLE * 2;
+        let catalogue = Ranked::new(n, |_| "t.test".into(), |i| (i / 2) as u64);
+        let (mut states, mut waiting) = (HashMap::new(), Waiting::default());
+        // The `j`-th admitted overall: of each pair of equal sizes, the
+        // lower info hash goes first.
+        let nth_admitted = |j: usize| 2 * (n / 2 - 1 - j / 2) + j % 2;
+        for c in 0..2 {
+            let due = admit_cycle(&catalogue, &mut states, &mut waiting);
+            let expected: Vec<usize> = (0..MIN_NEW_PER_CYCLE)
+                .map(|j| nth_admitted(c * MIN_NEW_PER_CYCLE + j))
+                .collect();
+            assert_eq!(due, expected);
+        }
+    }
+
+    /// ⭐ The quota is shared between trackers in turn.
+    ///
+    /// Every torrent of tracker A outranks every torrent of B: a single
+    /// global ranking would give A the whole quota of every cycle right after
+    /// a restart, which is the rate-limited case the ranking is for.
+    #[test]
+    fn the_quota_goes_round_the_trackers() {
+        let n = MIN_NEW_PER_CYCLE * 4;
+        let half = n / 2;
+        let catalogue = Ranked::new(
+            n,
+            |i| {
+                if i < MIN_NEW_PER_CYCLE * 2 {
+                    "a.test"
+                } else {
+                    "b.test"
+                }
+                .into()
+            },
+            |i| {
+                if i < MIN_NEW_PER_CYCLE * 2 {
+                    1_000 + i as u64
+                } else {
+                    i as u64
+                }
+            },
+        );
+        let (mut states, mut waiting) = (HashMap::new(), Waiting::default());
+        let mut a_next = half - 1;
+        let mut b_next = n - 1;
+        for _ in 0..2 {
+            let due = admit_cycle(&catalogue, &mut states, &mut waiting);
+            assert_eq!(due.len(), MIN_NEW_PER_CYCLE);
+            let (a, b): (Vec<usize>, Vec<usize>) = due.iter().copied().partition(|&i| i < half);
+            assert_eq!(a.len(), MIN_NEW_PER_CYCLE / 2, "an even share each");
+            assert_eq!(b.len(), MIN_NEW_PER_CYCLE / 2);
+            // Each tracker's own torrents in rank order, best first.
+            assert_eq!(a, (0..a.len()).map(|j| a_next - j).collect::<Vec<_>>());
+            assert_eq!(b, (0..b.len()).map(|j| b_next - j).collect::<Vec<_>>());
+            a_next -= a.len();
+            b_next -= b.len();
+            // And in turn within the cycle, not one tracker then the other.
+            assert!(due.windows(2).all(|w| (w[0] < half) != (w[1] < half)));
+        }
+    }
+
+    /// A host with less waiting than its turns gives way: the quota is still
+    /// filled from the others.
+    #[test]
+    fn a_short_queue_does_not_shrink_the_quota() {
+        let n = MIN_NEW_PER_CYCLE * 2;
+        let catalogue = Ranked::new(
+            n,
+            |i| if i < 3 { "small.test" } else { "big.test" }.into(),
+            |i| i as u64,
+        );
+        let (mut states, mut waiting) = (HashMap::new(), Waiting::default());
+        let due = admit_cycle(&catalogue, &mut states, &mut waiting);
+        assert_eq!(due.len(), MIN_NEW_PER_CYCLE);
+        assert_eq!(due.iter().filter(|&&i| i < 3).count(), 3);
+    }
+
+    /// Changing the order while torrents wait ranks those, once, by the new
+    /// one; back to `default`, they are spread by hash again and the queue
+    /// is gone.
+    #[test]
+    fn a_new_order_ranks_what_is_waiting_again() {
+        let n = MIN_NEW_PER_CYCLE * 3;
+        let catalogue = Ranked::new(n, |_| "t.test".into(), |i| i as u64);
+        let (mut states, mut waiting) = (HashMap::new(), Waiting::default());
+        admit_cycle(&catalogue, &mut states, &mut waiting);
+        *catalogue.sort.lock().unwrap() = AnnounceSort::Ratio;
+        admit_cycle(&catalogue, &mut states, &mut waiting);
+        {
+            let ranked = catalogue.ranked.lock().unwrap();
+            // The first cycle's admissions once; the rest twice, once per order.
+            assert_eq!(
+                ranked.values().filter(|&&c| c == 1).count(),
+                MIN_NEW_PER_CYCLE
+            );
+            assert_eq!(
+                ranked.values().filter(|&&c| c == 2).count(),
+                n - MIN_NEW_PER_CYCLE
+            );
+        }
+        *catalogue.sort.lock().unwrap() = AnnounceSort::Default;
+        admit_cycle(&catalogue, &mut states, &mut waiting);
+        assert_eq!(states.len(), n);
+        assert!(waiting.queued.is_empty() && waiting.queues.is_empty());
+    }
+
+    /// A torrent that leaves while it waits is not admitted when its turn
+    /// comes.
+    #[test]
+    fn a_torrent_gone_while_waiting_is_not_admitted() {
+        let n = MIN_NEW_PER_CYCLE + 10;
+        // The lowest indexes rank highest, so the ten left waiting are last.
+        let catalogue = Ranked::new(n, |_| "t.test".into(), |i| (10_000 - i) as u64);
+        let (mut states, mut waiting) = (HashMap::new(), Waiting::default());
+        admit_cycle(&catalogue, &mut states, &mut waiting);
+        // The ten lowest ranked are still waiting; the catalogue loses them.
+        let shrunk = Arc::new(Ranked {
+            n: MIN_NEW_PER_CYCLE,
+            sort: std::sync::Mutex::new(AnnounceSort::Size),
+            host: catalogue.host,
+            key: catalogue.key,
+            ranked: Default::default(),
+        });
+        let due = admit_cycle(&shrunk, &mut states, &mut waiting);
+        assert!(due.is_empty(), "{due:?}");
+        assert!(waiting.queued.is_empty());
+        assert_eq!(states.len(), MIN_NEW_PER_CYCLE);
     }
 
     /// ⭐ Admission never runs faster than the steady state it leads to.

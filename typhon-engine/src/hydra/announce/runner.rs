@@ -104,6 +104,7 @@ pub enum Mode {
 /// The engine's live torrent list, seen by the scheduler.
 struct EngineCatalogue {
     manager: Arc<TorrentManager>,
+    sort: Arc<crate::config::LiveAnnounceSort>,
 }
 
 impl Catalogue for EngineCatalogue {
@@ -139,6 +140,37 @@ impl Catalogue for EngineCatalogue {
             .next()
             .map(|u| super::cache::host_of(u).to_string())
             .unwrap_or_default()
+    }
+
+    fn admission_sort(&self) -> crate::config::AnnounceSort {
+        self.sort.get()
+    }
+
+    fn rank_key(
+        &self,
+        info_hash: &typhon_engine::torrent::meta::InfoHash,
+        sort: crate::config::AnnounceSort,
+    ) -> u64 {
+        use crate::config::AnnounceSort;
+        let Some(t) = self.manager.get(info_hash) else {
+            return 0;
+        };
+        match sort {
+            AnnounceSort::Default => 0,
+            AnnounceSort::Size => t.meta.total_size,
+            AnnounceSort::Ratio => ratio_key(crate::row::torrent_ratio(&t)),
+        }
+    }
+}
+
+/// A share ratio as a key that sorts the same way: the bits of a float that is
+/// not negative grow with it. A ratio is never negative; one that somehow is,
+/// or is not a number, ranks with the zeros.
+fn ratio_key(ratio: f64) -> u64 {
+    if ratio > 0.0 {
+        ratio.to_bits()
+    } else {
+        0
     }
 }
 
@@ -248,9 +280,11 @@ pub fn start(
     mode: Mode,
     cache: Arc<Cache>,
     admission: Arc<scheduler::Admission>,
+    sort: Arc<crate::config::LiveAnnounceSort>,
 ) -> tokio::sync::mpsc::Sender<scheduler::BumpReq> {
     let catalogue = Arc::new(EngineCatalogue {
         manager: manager.clone(),
+        sort,
     });
     let hook_manager = manager.clone();
     // One breaker for the engine, not one per torrent: an outage belongs to the
@@ -1390,6 +1424,37 @@ mod announce_one_tests {
 
     fn parts() -> (Policy, Breaker, Cache) {
         (Policy::default(), Breaker::default(), Cache::default())
+    }
+
+    #[tokio::test]
+    async fn ratio_ranks_the_highest_lifetime_ratio_first_and_follows_the_setting() {
+        use crate::config::AnnounceSort;
+        use std::sync::atomic::Ordering::Relaxed;
+        let (manager, root) = manager("ratio-order");
+        let low = add(&manager, "low", "http://tracker.test/announce");
+        let high = add(&manager, "high", "http://tracker.test/announce");
+        let zero = add(&manager, "zero", "http://tracker.test/announce");
+        for (hash, uploaded) in [(&low, 16384), (&high, 49152), (&zero, 0)] {
+            let t = manager.get(&parse_hex(hash).unwrap()).unwrap();
+            t.total_uploaded.store(uploaded, Relaxed);
+            t.total_downloaded.store(16384, Relaxed);
+        }
+        let sort = Arc::new(crate::config::LiveAnnounceSort::default());
+        let catalogue = EngineCatalogue {
+            manager,
+            sort: sort.clone(),
+        };
+        assert_eq!(catalogue.admission_sort(), AnnounceSort::Default);
+        sort.set(AnnounceSort::Ratio);
+        assert_eq!(catalogue.admission_sort(), AnnounceSort::Ratio);
+        let key = |h: &String| catalogue.rank_key(&parse_hex(h).unwrap(), AnnounceSort::Ratio);
+        assert!(key(&high) > key(&low));
+        assert!(key(&low) > key(&zero));
+        assert_eq!(key(&zero), 0);
+        assert_eq!(ratio_key(f64::NAN), 0);
+        assert!(ratio_key(f64::INFINITY) > ratio_key(1e300));
+        drop(catalogue);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// ⭐⭐ A hash the engine no longer holds reports `gone`, so the scheduler
