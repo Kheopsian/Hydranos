@@ -3903,6 +3903,9 @@ pub(crate) async fn engine_page_value(
                 let key = if textual {
                     match sort.as_str() {
                         "name" => t.meta.name.to_lowercase(),
+                        // A check waiting for the disk sorts after the ones
+                        // reading it, as the two read apart in the row.
+                        "state" if check_waiting => format!("{row_state}~"),
                         "state" => row_state.to_string(),
                         "tracker_host" => tracker_names[tracker_id as usize].to_lowercase(),
                         _ => facts.category(f.category_id).to_lowercase(),
@@ -3918,6 +3921,16 @@ pub(crate) async fn engine_page_value(
                 let completed = t.completed_time.load(std::sync::atomic::Ordering::Relaxed);
                 let n = match sort.as_str() {
                     "total_size" => t.meta.total_size as f64,
+                    // Under a check the bar shows how far the check has read,
+                    // so that is what sorts: a waiting check is at 0.
+                    "progress" if row_state == "checking_files" => {
+                        if check_waiting {
+                            0.0
+                        } else {
+                            typhon_engine::rpc::dispatch::checking_progress(t)
+                                .unwrap_or(core.progress)
+                        }
+                    }
                     "progress" => {
                         if core.state == "seeding" {
                             1.0
@@ -4234,14 +4247,30 @@ fn row_sort_key_dir(row: &serde_json::Value, sort: &str, asc: bool) -> (String, 
     let n = |k: &str| row.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0);
     match sort {
         "name" => (s("name").to_lowercase(), 0.0),
-        "state" => (s("state").to_lowercase(), 0.0),
+        "state" => {
+            let queued = row.get("check_queued").and_then(|v| v.as_bool()) == Some(true);
+            let mut k = s("state").to_lowercase();
+            if queued && k == "checking_files" {
+                k.push('~');
+            }
+            (k, 0.0)
+        }
         "tracker_host" => (s("tracker_host").to_lowercase(), 0.0),
         "category" => (s("category").to_lowercase(), 0.0),
         // A seeding torrent sorts as complete whatever its stored progress,
         // which is what the local path does when it builds its key.
         "progress" => (
             String::new(),
-            if s("state") == "seeding" {
+            if s("state") == "checking_files" {
+                // The bar follows the check, a waiting one sits at 0.
+                if row.get("check_queued").and_then(|v| v.as_bool()) == Some(true) {
+                    0.0
+                } else {
+                    row.get("checking_progress")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or_else(|| n("progress"))
+                }
+            } else if s("state") == "seeding" {
                 1.0
             } else {
                 n("progress")

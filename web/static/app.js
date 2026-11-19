@@ -1741,6 +1741,12 @@ function renderRaceTable() {
     const asc = _raceSortAsc;
     const sorted = [...torrents].sort((a, b) => {
         let va = a[col] ?? 0, vb = b[col] ?? 0;
+        if (col === "progress") { va = _barProgress(a); vb = _barProgress(b); }
+        else if (col === "state") {
+            // A check waiting for the disk reads after the ones reading it.
+            va = a.state === "checking_files" && a.check_queued ? "checking_files~" : String(va);
+            vb = b.state === "checking_files" && b.check_queued ? "checking_files~" : String(vb);
+        }
         if (typeof va === "string") {
             const cmp = va.localeCompare(vb);
             if (cmp !== 0) return asc ? cmp : -cmp;
