@@ -2122,8 +2122,8 @@ function _fileRecheckButton(infoHash, f, remote, agent, bodyId, summaryId, mode)
     if (f.checking) return `<span class="tc-checking">${esc(t("Checking…"))}</span>`;
     return `<button class="btn-small tc-recheck" data-hash="${esc(infoHash)}" data-index="${Number(f.index)}"
         data-agent="${esc(agent || "")}" data-body="${esc(bodyId)}" data-summary="${esc(summaryId)}" data-mode="${esc(mode || "")}"
-        title="${esc(t("Hash-check this file only. A piece it shares with the file beside it is read whole."))}"
-        onclick="_recheckFile(this)">${esc(t("Recheck"))}</button>`;
+        title="${esc(t("Hash-check this file only."))}"
+        onclick="_recheckFile(this)">${esc(t("Verify"))}</button>`;
 }
 
 async function _recheckFile(btn) {
