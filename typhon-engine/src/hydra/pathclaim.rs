@@ -1752,7 +1752,9 @@ pub fn guarded_start(
     let Some(engine) = state.engines.get(engine_id) else {
         return Err(format!("no engine {engine_id}"));
     };
-    if t.seed_mode || crate::workers::holds_everything(t) {
+    // A seed-only torrent never downloads and refuses every write (`disk`), so
+    // there is nothing to protect: whatever pieces it lacks, it only serves.
+    if t.seed_mode || t.is_seed_only() || crate::workers::holds_everything(t) {
         return engine.manager.start_torrent(&t.info_hash);
     }
     let guarded = guarded_files(state, t, true);
@@ -2398,6 +2400,52 @@ mod tests {
         guarded_start(&s.state, "hoard", &t2).unwrap();
         assert!(!t2.is_paused.load(SeqCst), "identical bytes start at once");
         assert!(!recent().iter().any(|e| e.info_hash == second));
+    }
+
+    /// A seed-only torrent writes nothing, so a Start has nothing to prove:
+    /// it starts at once even over a file another torrent names with other
+    /// bytes, and no proof is run for it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_start_of_a_seed_only_torrent_runs_no_proof() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let s = crate::api::testing::state_from(
+            "pathclaim-start-seed-only",
+            "[dedup]\npath_collision = \"legacy\"\n",
+        );
+        let dir = s.dir.join("d");
+        std::fs::create_dir_all(dir.join("S")).unwrap();
+        std::fs::write(dir.join("S").join("s.nfo"), b"held first notes").unwrap();
+        add(
+            &s,
+            &torrent_over("S", &[("s.nfo", b"held first notes")], 16384),
+            &dir,
+            true,
+            true,
+        )
+        .unwrap();
+        let b = add(
+            &s,
+            &torrent_over("S", &[("s.nfo", b"held other notes")], 16384),
+            &dir,
+            true,
+            false,
+        )
+        .unwrap();
+        let mgr = s.state.engines.get("hoard").unwrap().manager.clone();
+        let t = mgr.get(&crate::store::hex20(&b).unwrap()).unwrap();
+        t.seed_only.store(true, SeqCst);
+        // The add noted what it shares; only what Start adds counts.
+        let before = recent().iter().filter(|e| e.info_hash == b).count();
+
+        guarded_start(&s.state, "hoard", &t).unwrap();
+
+        assert!(!t.is_paused.load(SeqCst), "started");
+        assert_eq!(
+            recent().iter().filter(|e| e.info_hash == b).count(),
+            before,
+            "no proof was run for it: {:?}",
+            recent()
+        );
     }
 
     /// ⭐ Start on a torrent whose file another torrent names with other
