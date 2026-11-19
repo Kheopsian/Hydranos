@@ -32322,7 +32322,7 @@ mod wireguard_route_tests {
         let s = state_from(
             "wg-mark",
             &format!(
-                "[daemon]\napi_key = \"{KEY}\"\ndata_dir = \"{}\"\n\n\
+                "[daemon]\napi_key = \"{KEY}\"\ndata_dir = '{}'\n\n\
                  [network]\nmode_unconfirmed = true\n\n\
                  [race]\nlisten_port = 16171\n\n[hoard]\nlisten_port = 16172\n",
                 data.display()
