@@ -1056,10 +1056,12 @@ impl Follow {
             .take()
     }
 
-    /// The job has done its last step: it leaves `following`, unless a move
-    /// handed it a hold meanwhile, which is returned. Under the lock
-    /// `hand_over` takes, so a move finds either this job still there to
-    /// follow it, or no job at all, and then checks the copy itself.
+    /// The job has done its last step, whichever way it ends: it leaves
+    /// `following`, unless a move handed it a hold meanwhile, which is
+    /// returned. Under the lock `hand_over` takes, so a move finds either this
+    /// job still there to follow it, or no job at all, and then checks the
+    /// copy itself. Called by the normal end (`recheck_and_release`) and, for
+    /// every other way out, by `Job`'s `Drop`.
     fn close(&mut self) -> Option<ProofHold> {
         let ih = self.ih?;
         let mut f = following().lock().unwrap_or_else(|e| e.into_inner());
@@ -1128,6 +1130,30 @@ pub fn hand_over(from: &Arc<TorrentState>, to: &Arc<TorrentState>) -> usize {
         f.remove(&ih);
     }
     n
+}
+
+/// Every way out of a job closes it (`Follow::close`). A move that handed a
+/// hold over to a proof leaving early -- the torrent not found where the
+/// proof looked, a stop on the copy it left -- left the copy that landed
+/// stopped at 0 % with nobody to check it: it is proven again where it
+/// landed, unless a stop asked of that copy has called this off.
+impl Drop for Job {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            return;
+        }
+        let Some(hold) = self.follow.close() else {
+            return;
+        };
+        if hold.cancelled() {
+            return;
+        }
+        let Some(ih) = crate::store::hex20(&self.hash) else {
+            return;
+        };
+        self.adopt(hold);
+        self.prove_again_where_it_landed(&ih);
+    }
 }
 
 struct Job {
@@ -3267,6 +3293,72 @@ mod tests {
         assert!(
             !landed.is_paused.load(SeqCst),
             "the add asked it to run: it runs, not stopped waiting for a Start"
+        );
+    }
+
+    /// A move can hand its hold to a proof that then leaves without its last
+    /// step: here it never runs at all, the torrent gone from the engine it
+    /// looked in. The hold was dropped with it and the copy that landed sat
+    /// stopped at 0 %. Every way out of a job now closes it: the copy is
+    /// proven and checked where it landed, and started, as its add asked.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_hold_handed_to_a_proof_that_ends_early_is_not_lost() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let s = crate::api::testing::state("pathclaim-early");
+        let dir = s.dir.join("movies");
+        std::fs::create_dir_all(dir.join("Early")).unwrap();
+        let video: Vec<u8> = (0..32_768u32).map(|i| (i % 239) as u8).collect();
+        std::fs::write(dir.join("Early").join("e.mkv"), &video).unwrap();
+        let bytes = torrent_over("Early", &[("e.mkv", &video)], 16384);
+        let b = add(&s, &bytes, &dir, true, true).unwrap();
+        let ih = crate::store::hex20(&b).unwrap();
+        let hoard = s.state.engines.get("hoard").unwrap().manager.clone();
+        let race = s.state.engines.get("race").unwrap().manager.clone();
+        let t = hoard.get(&ih).unwrap();
+        let job = Job {
+            follow: Follow::new(&b, Some(&t)),
+            _hold: Some(t.hold_for_proof()),
+            metainfo: Some(bytes.clone()),
+            state: s.state.clone(),
+            engine_id: "hoard".into(),
+            hash: b.clone(),
+            isolate_from: None,
+            free: HashSet::new(),
+            prove_in_place: Some(HashSet::new()),
+            resume: true,
+            rt: tokio::runtime::Handle::try_current().ok(),
+        };
+
+        // Moved the way the move route does it.
+        let rd = hoard.export_state(&ih).unwrap();
+        race.import_state_bytes(&rd, &bytes).unwrap();
+        let landed = race.get(&ih).unwrap();
+        assert_eq!(hand_over(&t, &landed), 1);
+        hoard.remove_torrent(&ih, true).unwrap();
+        s.state
+            .store
+            .lock()
+            .unwrap()
+            .set_session(&b, "hoard", "race")
+            .unwrap();
+        drop(t);
+        // Leaves without running: nothing of its torrent in hoard.
+        drop(job);
+        assert!(
+            landed.rechecking.load(SeqCst),
+            "the copy that landed is checked, not left stopped at 0 %"
+        );
+
+        for _ in 0..400 {
+            if !landed.held_for_proof() && !landed.rechecking.load(SeqCst) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(!landed.rechecking.load(SeqCst), "the check ended");
+        assert!(
+            !landed.is_paused.load(SeqCst),
+            "and started, as its add asked"
         );
     }
 

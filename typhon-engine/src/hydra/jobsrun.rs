@@ -190,14 +190,15 @@ thread_local! {
     static REFUSE_ADOPTION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+/// Why a move of files waits: a proof is reading them where they are.
+const PROVING: &str = "its files are being proven against another torrent's; nothing was moved, \
+                       move it once the check has ended";
+
 /// Move a torrent and its data to another engine's storage, keeping it seeding.
 ///
 /// The existing `POST /api/torrents/:hash/engine` reassigns an engine WITHOUT
 /// touching the files -- deliberately, it says so. Graduation is the other
 /// case: the whole point is to get the bytes off the race disk.
-/// Why a move of files waits: a proof is reading them where they are.
-const PROVING: &str = "its files are being proven against another torrent's; nothing was moved,                        move it once the check has ended";
-
 fn graduate(state: &AppState, job: &crate::store::Job) -> Result<(), String> {
     let p: serde_json::Value = serde_json::from_str(&job.params).map_err(|e| e.to_string())?;
     let from = p

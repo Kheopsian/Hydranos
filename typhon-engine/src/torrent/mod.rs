@@ -1465,7 +1465,7 @@ impl TorrentManager {
         (result, tm)
     }
 
-    pub fn start_torrent(&self, info_hash: &InfoHash) -> Result<(), String> {
+    pub fn start_torrent(self: &Arc<Self>, info_hash: &InfoHash) -> Result<(), String> {
         let t = self.get(info_hash).ok_or("torrent not found")?;
         let was_paused = t.is_paused.swap(false, Ordering::Relaxed);
         if was_paused {
@@ -1514,11 +1514,21 @@ impl TorrentManager {
             let hook = self.announce_hook.get().cloned();
             let probe_t = t.clone();
             let key = t.save_path.read().clone();
+            // A check the park held back runs once it is lifted, from the
+            // runtime (the lift may end on the probe's own thread).
+            let mgr = Arc::downgrade(self);
+            let rt = tokio::runtime::Handle::try_current().ok();
             let _ = volume::probe(key, move || {
                 let lifted = probe_t.lift_absent_park();
                 if lifted && !probe_t.is_paused.load(Ordering::Relaxed) {
                     if let Some(hook) = hook {
                         hook(probe_t.meta.info_hash);
+                    }
+                }
+                if lifted && probe_t.recheck_owed.load(Ordering::SeqCst) {
+                    if let (Some(mgr), Some(rt)) = (mgr.upgrade(), rt) {
+                        let _in = rt.enter();
+                        mgr.run_owed_checks(&[probe_t.meta.info_hash]);
                     }
                 }
                 lifted
@@ -1569,6 +1579,24 @@ impl TorrentManager {
         // The status is settled: open the interval if this is now a seed.
         t.fold_seed_time(crate::torrent::meta::now_secs());
         Ok(())
+    }
+
+    /// Run the checks a park for absent files held back (`park_if_offline`),
+    /// now that their disk is back: those still owed and not under way.
+    pub fn run_owed_checks(self: &Arc<Self>, owed: &[InfoHash]) {
+        for ih in owed {
+            let Some(t) = self.get(ih) else { continue };
+            if !t.recheck_owed.load(Ordering::SeqCst) || t.files_absent.load(Ordering::Relaxed) {
+                continue;
+            }
+            if let Err(e) = self.recheck(ih) {
+                warn!(
+                    "[volume] check of {} left owed: {}",
+                    &hex_encode(ih)[..8],
+                    e
+                );
+            }
+        }
     }
 
     /// A park for absent files was just lifted: a download goes back in the
@@ -1662,6 +1690,9 @@ impl TorrentManager {
                     if t.lift_absent_park() {
                         self.after_lift(t);
                         lifted += 1;
+                        if t.recheck_owed.load(Ordering::SeqCst) {
+                            out.owed.push(t.meta.info_hash);
+                        }
                     }
                 }
                 if lifted > 0 {
@@ -3986,12 +4017,15 @@ pub fn disk_key(path: &std::path::Path) -> String {
 }
 
 /// What `TorrentManager::check_volumes` did.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct VolumeCheck {
     /// Torrents parked because their disk is not mounted.
     pub parked: usize,
     /// Parks lifted because their disk is back.
     pub lifted: usize,
+    /// Of those, the torrents that owe a check (`park_if_offline`): the
+    /// caller runs them (`run_owed_checks`), from the async runtime.
+    pub owed: Vec<InfoHash>,
 }
 
 /// Where a torrent's first non-empty file is, or its save path.
@@ -4130,21 +4164,26 @@ impl TorrentManager {
         if t.rechecking.swap(true, Ordering::SeqCst) {
             return Ok(());
         }
+        // Owed until its verdict, and written down now: the check may wait
+        // hours behind the others, and a restart in that wait must not find
+        // a record that says only "nothing held" (`recheck_pending`). Only
+        // when it was not owed already: a start or an adoption that runs a
+        // check left pending finds the mark in the record it just read, and
+        // that check is `carried`. Written off this task and in batches
+        // (`queue_mark_write`). Set BEFORE the generation is noted: a stop
+        // landing in between then clears the mark it finds, where set after
+        // it the mark outlived the check the user stopped and the next start
+        // ran it again.
+        let carried = t.recheck_owed.swap(true, Ordering::SeqCst);
+        if !carried {
+            self.queue_mark_write(*info_hash);
+        }
         // Noted now: a stop asked while this check waits for its disk, or
         // while it reads, calls it off (`cancel_check`).
         let gen = t.check_gen.load(Ordering::SeqCst);
         // The fault the torrent shows is cleared by the verdict
         // (`run_recheck`), not here: a check a stop calls off must leave it,
         // as it leaves the pieces.
-        // Owed until its verdict, and written down now: the check may wait
-        // hours behind the others, and a restart in that wait must not find
-        // a record that says only "nothing held" (`recheck_pending`). Only
-        // when it was not owed already: a start or an adoption that runs a
-        // check left pending finds the mark in the record it just read.
-        // Written off this task and in batches (`queue_mark_write`).
-        if !t.recheck_owed.swap(true, Ordering::Relaxed) {
-            self.queue_mark_write(*info_hash);
-        }
         // A torrent in error told its trackers `stopped` (or owes it) and the
         // announcer will not look at it again for half an hour. If this
         // recheck brings it back, that wait is not its own.
@@ -4176,6 +4215,33 @@ impl TorrentManager {
             // the flags are the stop's (and maybe a newer check's) now.
             if t.check_gen.load(Ordering::SeqCst) != gen {
                 return;
+            }
+            // Carried over, on a disk that is not there: parked, pieces and
+            // mark kept, no verdict (`park_if_offline`).
+            if carried {
+                let offline = {
+                    let t = t.clone();
+                    tokio::task::spawn_blocking(move || t.park_if_offline())
+                        .await
+                        .unwrap_or(false)
+                };
+                if offline {
+                    let _publish = t.check_publish();
+                    if t.check_gen.load(Ordering::SeqCst) != gen {
+                        return;
+                    }
+                    t.status.store(
+                        if t.is_paused.load(Ordering::Relaxed) {
+                            TorrentStatus::Stopped as u8
+                        } else {
+                            TorrentStatus::Error as u8
+                        },
+                        Ordering::Relaxed,
+                    );
+                    t.end_recheck_progress();
+                    t.rechecking.store(false, Ordering::SeqCst);
+                    return;
+                }
             }
             mgr.run_recheck_knowing(ih, t.clone(), gen, width, known)
                 .await;
@@ -6037,6 +6103,76 @@ mod lifecycle_tests {
         );
         drop(hold);
         wait_recheck_end(&t2).await;
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// ⭐ A complete seed whose check was still waiting its turn (a bulk
+    /// verify) at a restart, its disk not mounted at the reload: the owed
+    /// check used to run at start, read nothing (the files are absent, not
+    /// unreadable), publish 0 pieces, save it and clear its mark, and the
+    /// seed came back at 0 % to download everything again. It is parked as a
+    /// start parks a torrent on a missing disk, pieces and mark kept, and the
+    /// check runs once the disk is back.
+    #[tokio::test]
+    async fn an_owed_check_over_a_disk_not_mounted_keeps_the_pieces() {
+        let (mgr, root, ih, t) = whole_two_piece_torrent("owedunmounted");
+        mgr.recheck(&ih).expect("first check");
+        wait_recheck_end(&t).await;
+        // A seed loaded whole has no picker: all its pieces.
+        let have = |t: &Arc<TorrentState>| {
+            t.picker
+                .get()
+                .map_or(t.meta.num_pieces(), |p| p.lock().unwrap().num_have())
+        };
+        assert_eq!(have(&t), 2, "a complete seed");
+
+        // Its next check waits behind the others, and the daemon stops.
+        let hold = recheck_sem()
+            .acquire_many(limits().torrents.load(Ordering::SeqCst) as u32)
+            .await
+            .unwrap();
+        mgr.recheck(&ih).expect("recheck queued");
+        mgr.flush_all_resume();
+        // That process is gone: its queued check never runs.
+        t.check_gen.fetch_add(1, Ordering::SeqCst);
+
+        // The disk is not mounted at the next start.
+        let data = root.join("data");
+        let away = root.join("data-unmounted");
+        // The engine keeps its files open; Windows refuses to move them.
+        crate::disk::evict_fds(&data_files(&t));
+        std::fs::rename(&data, &away).unwrap();
+        let again = reloaded(&mgr, &root);
+        let t2 = again.get(&ih).unwrap();
+        drop(hold);
+        wait_recheck_end(&t2).await;
+        assert_eq!(have(&t2), 2, "the pieces stay");
+        assert!(t2.files_absent.load(Ordering::Relaxed), "parked as absent");
+        assert!(
+            t2.recheck_owed.load(Ordering::SeqCst),
+            "the check still owed"
+        );
+        again.flush_all_resume();
+        assert!(stored_mark(&again, &ih), "and so says the record");
+        let stored = again
+            .state_db
+            .as_ref()
+            .unwrap()
+            .load_all()
+            .into_iter()
+            .find(|rd| rd.info_hash == hex_encode(&ih))
+            .unwrap();
+        assert!(!stored.bitfield.is_empty(), "the record keeps its pieces");
+
+        // The disk is back: the park lifts and the check runs.
+        std::fs::rename(&away, &data).unwrap();
+        let done = again.check_volumes(false);
+        assert_eq!(done.owed, vec![ih], "the lift hands the owed check back");
+        again.run_owed_checks(&done.owed);
+        assert!(t2.rechecking.load(Ordering::SeqCst), "the check runs");
+        wait_recheck_end(&t2).await;
+        assert_eq!(have(&t2), 2);
+        assert!(!t2.recheck_owed.load(Ordering::SeqCst), "its verdict is in");
         std::fs::remove_dir_all(&root).ok();
     }
 

@@ -2036,6 +2036,31 @@ impl TorrentState {
         self.apply_files_verdict(self.assess_files());
     }
 
+    /// Before a check carried over from a restart or an engine move reads
+    /// anything: when the files are absent as a whole (a disk not mounted,
+    /// judged as a start judges it), the torrent is parked with its pieces
+    /// kept, and true is returned. Such a check must not run: reading nothing
+    /// it would publish "nothing held" over pieces only the missing disk
+    /// hides, save it, and clear its mark, and a complete seed waiting its
+    /// turn came back at 0 % and downloaded everything. It runs once the park
+    /// is lifted (`TorrentManager::run_owed_checks`).
+    ///
+    /// Touches the disk (one `stat` per file): never on the async runtime.
+    pub fn park_if_offline(&self) -> bool {
+        match self.assess_files() {
+            FilesVerdict::Offline(msg) => {
+                self.park_absent(&msg);
+                tracing::warn!(
+                    torrent = %self.meta.name,
+                    "parked, its check left for when the disk is back: {}",
+                    msg
+                );
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Act on what `assess_files` found. Returns whether the torrent is left
     /// with no park of its own making (the files back the state).
     fn apply_files_verdict(&self, verdict: FilesVerdict) -> bool {

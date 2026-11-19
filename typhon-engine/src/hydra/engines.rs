@@ -557,8 +557,11 @@ impl EngineHost {
                     // announced as a seed it cannot serve.
                     {
                         let manager = engine.manager.clone();
-                        let _ =
+                        let done =
                             tokio::task::spawn_blocking(move || manager.check_volumes(true)).await;
+                        if let Ok(done) = done {
+                            engine.manager.run_owed_checks(&done.owed);
+                        }
                     }
                     let bump = crate::announce::runner::start(
                         engine.manager.clone(),

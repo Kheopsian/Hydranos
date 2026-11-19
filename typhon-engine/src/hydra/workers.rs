@@ -951,7 +951,10 @@ pub fn spawn_absent_volume_scan(engines: Arc<crate::engines::EngineHost>) {
             }
             for engine in engines.engines() {
                 let manager = engine.manager.clone();
-                let _ = tokio::task::spawn_blocking(move || manager.check_volumes(false)).await;
+                let done = tokio::task::spawn_blocking(move || manager.check_volumes(false)).await;
+                if let Ok(done) = done {
+                    engine.manager.run_owed_checks(&done.owed);
+                }
             }
         }
     });
