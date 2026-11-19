@@ -3362,7 +3362,7 @@ mod tests {
             &s,
             &torrent_over(
                 "Film",
-                &[("a.mkv", &video), ("a.nfo", b"follower notes!!")],
+                &[("a.mkv", &video), ("a.nfo", b"stopped notes!!!")],
                 16384,
             ),
             &dir,
