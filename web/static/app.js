@@ -1139,6 +1139,7 @@ function _activateTabNow(name) {
     document.querySelectorAll(".tab-content").forEach(c => c.classList.remove("active"));
     tab.classList.add("active");
     content.classList.add("active");
+    _syncHoardDetailChrome();
     window.location.hash = name;
     if (name !== "logs") stopLogsTail();
     // The hoard table skips its render while off screen, so pay the deferred
@@ -1634,6 +1635,9 @@ async function updateOverview() {
 
 // ─── Race torrents ──────────────────────────────────────
 
+// Whether the side panel is folded to the edge (Race and Hoard share it).
+let _hoardDetailCollapsed = false;
+try { _hoardDetailCollapsed = localStorage.getItem("hoardDetailCollapsed") === "1"; } catch (e) {}
 let selectedTorrent = null;
 let selectedTorrentAgent = "local";
 let detailRefreshTimer = null;
@@ -1785,6 +1789,11 @@ function renderRaceTable() {
 
 async function showDetail(infoHash, agent) {
     selectedTorrent = infoHash;
+    selectedTorrentAgent = agent || "local";
+    if (detailRefreshTimer) clearInterval(detailRefreshTimer);
+    _syncHoardDetailChrome();
+    // Folded to the side: selecting a row does not bring the panel back.
+    if (_hoardDetailCollapsed) return;
     // Not on the 3 s refresh: this only moves when the torrent announces, and
     // re-fetching every tick would be a request per panel per 3 seconds for a
     // value that changes every half hour.
@@ -1806,6 +1815,7 @@ function closeDetail() {
     selectedTorrent = null;
     selectedTorrentAgent = "local";
     if (detailRefreshTimer) clearInterval(detailRefreshTimer);
+    _syncHoardDetailChrome();
     if (_tlProgressChart) { _tlProgressChart.destroy(); _tlProgressChart = null; }
     if (_tlPeerChart) { _tlPeerChart.destroy(); _tlPeerChart = null; }
     const panel = document.getElementById("torrent-detail");
@@ -3669,8 +3679,6 @@ async function updateHoardStats() {
 // The side panel can be folded to the right edge with its arrow. While folded,
 // clicking a row selects it but does not open the panel: only the arrow does.
 // Kept across reloads, since it is a layout preference.
-let _hoardDetailCollapsed = false;
-try { _hoardDetailCollapsed = localStorage.getItem("hoardDetailCollapsed") === "1"; } catch (e) {}
 
 function _hoardDetailSetWidth(px) {
     const w = Math.max(360, Math.min(px, window.innerWidth - 80));
@@ -3694,13 +3702,22 @@ function _hoardDetailSetWidth(px) {
             handle.classList.remove("dragging");
             handle.removeEventListener("pointermove", move);
             handle.removeEventListener("pointerup", up);
+            handle.removeEventListener("pointercancel", up);
+            handle.removeEventListener("lostpointercapture", up);
         };
         handle.addEventListener("pointermove", move);
         handle.addEventListener("pointerup", up);
+        handle.addEventListener("pointercancel", up);
+        handle.addEventListener("lostpointercapture", up);
     });
 })();
 
-function _syncHoardDetailChrome(hasSelection) {
+// The arrow and handle are shared by the Race and Hoard panels but sit outside
+// both tabs, so they show only on a tab that has a torrent selected.
+function _syncHoardDetailChrome() {
+    const onTab = id => document.getElementById(id)?.classList.contains("active");
+    const hasSelection = (onTab("tab-race") && !!selectedTorrent) ||
+        (onTab("tab-hoard") && !!selectedHoardTorrent);
     const toggle = document.getElementById("hoard-detail-toggle");
     const resizer = document.getElementById("hoard-detail-resizer");
     toggle.style.display = hasSelection ? "" : "none";
@@ -3717,10 +3734,13 @@ function toggleHoardDetailCollapsed() {
         if (detailRefreshTimer) clearInterval(detailRefreshTimer);
         document.getElementById("hoard-detail-panel").style.display = "none";
         document.getElementById("torrent-detail").style.display = "none";
-        _syncHoardDetailChrome(!!(selectedHoardTorrent || selectedTorrent));
+        _syncHoardDetailChrome();
     } else {
-        if (selectedTorrent) showDetail(selectedTorrent, selectedTorrentAgent);
-        if (selectedHoardTorrent) showHoardDetail(selectedHoardTorrent, selectedHoardTorrentAgent);
+        if (document.getElementById("tab-race").classList.contains("active") && selectedTorrent) {
+            showDetail(selectedTorrent, selectedTorrentAgent);
+        } else if (document.getElementById("tab-hoard").classList.contains("active") && selectedHoardTorrent) {
+            showHoardDetail(selectedHoardTorrent, selectedHoardTorrentAgent);
+        }
     }
 }
 
@@ -3728,7 +3748,7 @@ async function showHoardDetail(infoHash, agent) {
     selectedHoardTorrent = infoHash;
     selectedHoardTorrentAgent = agent || "local";
     if (hoardDetailTimer) clearInterval(hoardDetailTimer);
-    _syncHoardDetailChrome(true);
+    _syncHoardDetailChrome();
     if (_hoardDetailCollapsed) return;
     loadPeerIdState(infoHash, "h-detail-peerid-state");
     switchHoardDetailTab("info");
@@ -3741,7 +3761,7 @@ function closeHoardDetail() {
     selectedHoardTorrent = null;
     selectedHoardTorrentAgent = "local";
     if (hoardDetailTimer) clearInterval(hoardDetailTimer);
-    _syncHoardDetailChrome(false);
+    _syncHoardDetailChrome();
     const panel = document.getElementById("hoard-detail-panel");
     if (panel.style.display === "none") return;
     panel.classList.add("closing");
