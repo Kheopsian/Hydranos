@@ -2523,13 +2523,12 @@ mod tests {
         clear_seed_only(&s.state, "hoard", &t).unwrap();
 
         assert!(!t.is_seed_only(), "the flag is lifted");
-        assert!(t.is_paused.load(SeqCst), "the proof failed: it stays stopped");
         assert!(
-            recent()
-                .iter()
-                .filter(|e| e.info_hash == b)
-                .count()
-                > before
+            t.is_paused.load(SeqCst),
+            "the proof failed: it stays stopped"
+        );
+        assert!(
+            recent().iter().filter(|e| e.info_hash == b).count() > before
                 && recent()
                     .iter()
                     .any(|e| e.info_hash == b && e.action == "held"),
