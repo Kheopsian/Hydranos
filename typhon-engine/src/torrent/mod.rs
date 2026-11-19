@@ -4180,7 +4180,7 @@ impl TorrentManager {
         info_hash: &InfoHash,
         known: Vec<u32>,
     ) -> Result<(), String> {
-        self.start_check(info_hash, known, None)
+        self.start_check(info_hash, known, None).map(|_| ())
     }
 
     /// Hash-check one file of a torrent: its pieces only, the verdict on every
@@ -4227,18 +4227,6 @@ impl TorrentManager {
             self.recheck(info_hash)?;
             return Ok(FileCheck::Torrent);
         }
-        if t.rechecking.load(Ordering::SeqCst) {
-            return match t.recheck_scope() {
-                Some(s) if s.start == 0 && s.end == t.meta.num_pieces() && s != pieces => {
-                    Ok(FileCheck::Torrent)
-                }
-                Some(s) if s.start > pieces.start || s.end < pieces.end => Err(
-                    "a check of another file of this torrent is under way: recheck this one once it ends"
-                        .into(),
-                ),
-                _ => Ok(FileCheck::File),
-            };
-        }
         self.start_check(
             info_hash,
             Vec::new(),
@@ -4247,40 +4235,56 @@ impl TorrentManager {
                 pieces,
                 held_outside,
             }),
-        )?;
-        Ok(FileCheck::File)
+        )
     }
 
     /// `recheck_knowing`, of every piece (`scope` `None`) or of one file's.
+    /// What it checks: the torrent for `scope` `None`, else see
+    /// `recheck_file`.
     fn start_check(
         self: &Arc<Self>,
         info_hash: &InfoHash,
         known: Vec<u32>,
         scope: Option<FileScope>,
-    ) -> Result<(), String> {
+    ) -> Result<FileCheck, String> {
         let t = self.get(info_hash).ok_or("torrent not found")?;
-        // One at a time per torrent: the one under way reads the files as
-        // they are now anyway -- unless it reads one file only and this one
-        // is of the torrent. That one is called off as a stop would, and this
-        // one takes its place: its verdict covers the file as well.
-        if t.rechecking.swap(true, Ordering::SeqCst) {
-            let partial = t
-                .recheck_scope()
-                .is_some_and(|s| s.start > 0 || s.end < t.meta.num_pieces());
-            if scope.is_some() || !partial {
-                return Ok(());
-            }
+        let whole = 0..t.meta.num_pieces();
+        let asked = scope.as_ref().map_or(whole.clone(), |s| s.pieces.clone());
+        let checks = if scope.is_some() {
+            FileCheck::File
+        } else {
+            FileCheck::Torrent
+        };
+        {
+            // Under the lock a check ends under (it lets go of `rechecking`
+            // and its scope there): the one under way, if any, is read and
+            // taken over in one step. Read before the lock, a check ending
+            // in between left this one dropped, or running beside a second.
             let _publish = t.check_publish();
-            t.check_gen.fetch_add(1, Ordering::SeqCst);
-            t.end_recheck_progress();
+            // One at a time per torrent: the one under way reads the files as
+            // they are now anyway -- unless it reads one file only and this
+            // one is of the torrent. That one is called off as a stop would,
+            // and this one takes its place: its verdict covers the file too.
+            if t.rechecking.swap(true, Ordering::SeqCst) {
+                let running = t.recheck_scope().unwrap_or_else(|| whole.clone());
+                if running != whole && scope.is_none() {
+                    t.check_gen.fetch_add(1, Ordering::SeqCst);
+                    t.end_recheck_progress();
+                } else if running == whole {
+                    return Ok(FileCheck::Torrent);
+                } else if running.start > asked.start || running.end < asked.end {
+                    return Err(
+                        "a check of another file of this torrent is under way: recheck this one once it ends"
+                            .into(),
+                    );
+                } else {
+                    return Ok(FileCheck::File);
+                }
+            }
+            // Known from now: the Content tab tells the file a waiting check
+            // is for from the others.
+            t.begin_recheck_progress_of(asked);
         }
-        // Known from now: the Content tab tells the file a waiting check is
-        // for from the others.
-        t.begin_recheck_progress_of(
-            scope
-                .as_ref()
-                .map_or(0..t.meta.num_pieces(), |s| s.pieces.clone()),
-        );
         // Owed until its verdict, and written down now: the check may wait
         // hours behind the others, and a restart in that wait must not find
         // a record that says only "nothing held" (`recheck_pending`). Only
@@ -4397,7 +4401,7 @@ impl TorrentManager {
                 mgr.announce_soon(&ih);
             }
         });
-        Ok(())
+        Ok(checks)
     }
 
     /// Called off by a stop since `gen` was noted.
@@ -5706,6 +5710,42 @@ mod lifecycle_tests {
         drop(hold);
         wait_recheck_end(&t).await;
         assert_eq!(held(&t), vec![1, 2], "piece 0, not c's, was judged");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// ⭐ A recheck of the torrent asked as a check of one file ends is not
+    /// lost and does not run beside another: the running check is read under
+    /// the lock it ends under. Read before it, the file check ending in
+    /// between left `rechecking` cleared under a check still running.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_torrent_recheck_asked_as_a_file_check_ends_is_kept() {
+        let (mgr, root, ih, t) = three_file_torrent("filecheck-ending").await;
+        spoil(&root, "a", 0, 100);
+        let hold = recheck_sem()
+            .acquire_many(limits().torrents.load(Ordering::SeqCst) as u32)
+            .await
+            .unwrap();
+        mgr.recheck_file(&ih, 2).expect("check of c queued");
+
+        // The file check is ending: it holds the lock while the torrent
+        // recheck is asked, and lets go of the torrent under it.
+        let ending = t.check_publish();
+        let asked = {
+            let (mgr, ih) = (mgr.clone(), ih);
+            tokio::task::spawn_blocking(move || mgr.recheck(&ih))
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        t.check_gen.fetch_add(1, Ordering::SeqCst);
+        t.end_recheck_progress();
+        t.rechecking.store(false, Ordering::SeqCst);
+        drop(ending);
+        asked.await.unwrap().expect("recheck asked");
+
+        assert!(t.rechecking.load(Ordering::SeqCst), "a check is on");
+        assert_eq!(t.recheck_scope(), Some(0..3), "of the torrent");
+        drop(hold);
+        wait_recheck_end(&t).await;
+        assert_eq!(held(&t), vec![1, 2], "its verdict covers piece 0");
         std::fs::remove_dir_all(&root).ok();
     }
 
