@@ -384,15 +384,6 @@ pub struct PiecePicker {
     convicted: std::collections::HashSet<Owner>,
 }
 
-/// A piece somebody is fetching.
-///
-/// It costs the blocks that have ARRIVED and nothing else. It used to be a
-/// `vec![0u8; piece_size]` made the moment a peer was asked for the piece:
-/// 4 to 16 MiB reserved on a promise, kept for as long as that peer stayed
-/// connected whether it sent anything or not, and made resident by the zero
-/// fill on recycled allocator extents. On a production hoard (1.1 M torrents,
-/// ~400 incomplete) that came to 17.3 GB under `start_piece`, growing by
-/// ~0.5 GB/h.
 /// A piece handed over complete: its bytes and who sent which block.
 pub struct TakenPiece {
     pub data: Vec<u8>,
@@ -414,6 +405,15 @@ struct FailedBlock {
 const MAX_FAILED_PIECES: usize = 64;
 const MAX_FAILED_ATTEMPTS: usize = 4;
 
+/// A piece somebody is fetching.
+///
+/// It costs the blocks that have ARRIVED and nothing else. It used to be a
+/// `vec![0u8; piece_size]` made the moment a peer was asked for the piece:
+/// 4 to 16 MiB reserved on a promise, kept for as long as that peer stayed
+/// connected whether it sent anything or not, and made resident by the zero
+/// fill on recycled allocator extents. On a production hoard (1.1 M torrents,
+/// ~400 incomplete) that came to 17.3 GB under `start_piece`, growing by
+/// ~0.5 GB/h.
 struct PendingPiece {
     /// One slot per block, filled as the block arrives, at its exact length.
     blocks: Vec<Option<Box<[u8]>>>,
