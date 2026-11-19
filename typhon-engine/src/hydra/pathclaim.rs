@@ -1796,6 +1796,41 @@ pub fn guarded_start(
     Ok(())
 }
 
+/// Lift a torrent's seed-only bar. `guarded_start` lets a seed-only torrent
+/// start without a proof, because it writes nothing; lifting the bar on one
+/// that is running would hand it to the download path with that proof never
+/// made. So a running torrent that could still download is stopped BEFORE the
+/// flag goes, and goes back through `guarded_start`: it runs again at once if
+/// there is nothing to protect, and stays stopped, saying why, if the proof
+/// fails. A stopped torrent, a seed and a seed-mode torrent only lose the flag.
+pub fn clear_seed_only(
+    state: &AppState,
+    engine_id: &str,
+    t: &Arc<TorrentState>,
+) -> Result<(), String> {
+    let Some(engine) = state.engines.get(engine_id) else {
+        return Err(format!("no engine {engine_id}"));
+    };
+    let guard_needed = t.is_seed_only()
+        && !t.is_paused.load(std::sync::atomic::Ordering::Relaxed)
+        && !t.seed_mode
+        && !crate::workers::holds_everything(t);
+    if guard_needed {
+        let _ = engine.manager.stop_torrent(&t.info_hash);
+    }
+    if let Err(e) = engine.manager.set_seed_only(&t.info_hash, false) {
+        // Not lifted: back as it was, running and seed-only.
+        if guard_needed {
+            let _ = engine.manager.start_torrent(&t.info_hash);
+        }
+        return Err(e);
+    }
+    if guard_needed {
+        guarded_start(state, engine_id, t)?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2445,6 +2480,66 @@ mod tests {
             before,
             "no proof was run for it: {:?}",
             recent()
+        );
+    }
+
+    /// The seed-only exemption must not outlive the flag: lifting it on a
+    /// running torrent over a file another torrent names with other bytes goes
+    /// back through the proof, which fails, so the torrent is left stopped and
+    /// the file is not written.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn lifting_seed_only_on_a_running_torrent_goes_back_through_the_proof() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let s = crate::api::testing::state_from(
+            "pathclaim-seed-only-lifted",
+            "[dedup]\npath_collision = \"legacy\"\n",
+        );
+        let dir = s.dir.join("d");
+        std::fs::create_dir_all(dir.join("L")).unwrap();
+        std::fs::write(dir.join("L").join("l.nfo"), b"held first notes").unwrap();
+        add(
+            &s,
+            &torrent_over("L", &[("l.nfo", b"held first notes")], 16384),
+            &dir,
+            true,
+            true,
+        )
+        .unwrap();
+        let b = add(
+            &s,
+            &torrent_over("L", &[("l.nfo", b"held other notes")], 16384),
+            &dir,
+            true,
+            false,
+        )
+        .unwrap();
+        let mgr = s.state.engines.get("hoard").unwrap().manager.clone();
+        let t = mgr.get(&crate::store::hex20(&b).unwrap()).unwrap();
+        mgr.set_seed_only(&t.info_hash, true).unwrap();
+        guarded_start(&s.state, "hoard", &t).unwrap();
+        assert!(!t.is_paused.load(SeqCst), "seed-only runs with no proof");
+        let before = recent().iter().filter(|e| e.info_hash == b).count();
+
+        clear_seed_only(&s.state, "hoard", &t).unwrap();
+
+        assert!(!t.is_seed_only(), "the flag is lifted");
+        assert!(t.is_paused.load(SeqCst), "the proof failed: it stays stopped");
+        assert!(
+            recent()
+                .iter()
+                .filter(|e| e.info_hash == b)
+                .count()
+                > before
+                && recent()
+                    .iter()
+                    .any(|e| e.info_hash == b && e.action == "held"),
+            "{:?}",
+            recent()
+        );
+        assert_eq!(
+            std::fs::read(dir.join("L").join("l.nfo")).unwrap(),
+            b"held first notes",
+            "the other torrent's file is untouched"
         );
     }
 

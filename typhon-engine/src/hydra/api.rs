@@ -12925,7 +12925,14 @@ async fn post_torrent_seed_only(
     let mut list = Vec::new();
     for (engine, t) in &copies {
         if let Some(e) = state.engines.get(engine) {
-            if let Err(msg) = e.manager.set_seed_only(&t.info_hash, req.seed_only) {
+            // Lifting the bar goes back through the path claim: a running
+            // torrent must not start downloading over a shared file.
+            let set = if req.seed_only {
+                e.manager.set_seed_only(&t.info_hash, true).map(|_| ())
+            } else {
+                crate::pathclaim::clear_seed_only(&state, engine, t)
+            };
+            if let Err(msg) = set {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(serde_json::json!({"error": msg})),
