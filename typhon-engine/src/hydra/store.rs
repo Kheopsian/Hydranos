@@ -3107,6 +3107,7 @@ impl Store {
         let mut store = Self::bare(conn);
         // Empty, so complete: every row it will hold goes through `insert_torrent`.
         store.claim_ready = std::sync::atomic::AtomicBool::new(true);
+        store.ensure_claim_top().expect("claim_top");
         store.track_changes();
         Ok(store)
     }
@@ -6095,6 +6096,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(SCHEMA).unwrap();
         let mut store = Store::bare(conn);
+        store.ensure_claim_top().unwrap();
         store.track_changes();
         store
     }
