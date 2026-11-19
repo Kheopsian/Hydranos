@@ -78,6 +78,15 @@ pub struct ResumeData {
     /// disk from deleted files at a start with files missing.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub data_vol: u64,
+    /// A check of the data on disk was asked and has not given its verdict
+    /// yet (queued behind the others, or under way). The bitfield of such a
+    /// record says nothing held -- the add of a torrent over data already
+    /// there writes none -- so a start that trusted it loaded a download at
+    /// 0 % and fetched again what was on disk. The start that finds it set
+    /// runs the check; the verdict clears it, so it costs one check, not one
+    /// per start.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub recheck_pending: bool,
 }
 
 fn is_zero(v: &u64) -> bool {

@@ -277,6 +277,9 @@ pub struct TorrentManager {
     /// Pieces in flight across this engine's torrents and the block bytes
     /// they hold, kept by the pickers as they go.
     piece_mem: Arc<piece_picker::PieceMem>,
+    /// Torrents whose `recheck_pending` mark moved and is not written yet,
+    /// and whether a writer is draining them (`queue_mark_write`).
+    mark_writes: std::sync::Mutex<(Vec<InfoHash>, bool)>,
     /// Asks the announcer to announce one torrent now, because it owes its
     /// trackers an event. Set by the announcer, which lives in the binary and
     /// cannot be named from here; unset, events wait for the next scheduled
@@ -678,6 +681,7 @@ impl TorrentManager {
             limiter: Default::default(),
             rates: Default::default(),
             piece_mem: Default::default(),
+            mark_writes: Default::default(),
             announce_hook: std::sync::OnceLock::new(),
             completion_hook: std::sync::OnceLock::new(),
             state_db,
@@ -1256,6 +1260,8 @@ impl TorrentManager {
             data_lost: String::new(),
             seed_only: false,
             data_vol: 0,
+            // Set by the recheck the caller queues next, if it does.
+            recheck_pending: false,
         };
         // The record first, then the torrent: a store that refuses it refuses
         // the add, with nothing inserted and the error going back to the
@@ -1459,7 +1465,7 @@ impl TorrentManager {
         (result, tm)
     }
 
-    pub fn start_torrent(&self, info_hash: &InfoHash) -> Result<(), String> {
+    pub fn start_torrent(self: &Arc<Self>, info_hash: &InfoHash) -> Result<(), String> {
         let t = self.get(info_hash).ok_or("torrent not found")?;
         let was_paused = t.is_paused.swap(false, Ordering::Relaxed);
         if was_paused {
@@ -1508,11 +1514,21 @@ impl TorrentManager {
             let hook = self.announce_hook.get().cloned();
             let probe_t = t.clone();
             let key = t.save_path.read().clone();
+            // A check the park held back runs once it is lifted, from the
+            // runtime (the lift may end on the probe's own thread).
+            let mgr = Arc::downgrade(self);
+            let rt = tokio::runtime::Handle::try_current().ok();
             let _ = volume::probe(key, move || {
                 let lifted = probe_t.lift_absent_park();
                 if lifted && !probe_t.is_paused.load(Ordering::Relaxed) {
                     if let Some(hook) = hook {
                         hook(probe_t.meta.info_hash);
+                    }
+                }
+                if lifted && probe_t.recheck_owed.load(Ordering::SeqCst) {
+                    if let (Some(mgr), Some(rt)) = (mgr.upgrade(), rt) {
+                        let _in = rt.enter();
+                        mgr.run_owed_checks(&[probe_t.meta.info_hash]);
                     }
                 }
                 lifted
@@ -1563,6 +1579,24 @@ impl TorrentManager {
         // The status is settled: open the interval if this is now a seed.
         t.fold_seed_time(crate::torrent::meta::now_secs());
         Ok(())
+    }
+
+    /// Run the checks a park for absent files held back (`park_if_offline`),
+    /// now that their disk is back: those still owed and not under way.
+    pub fn run_owed_checks(self: &Arc<Self>, owed: &[InfoHash]) {
+        for ih in owed {
+            let Some(t) = self.get(ih) else { continue };
+            if !t.recheck_owed.load(Ordering::SeqCst) || t.files_absent.load(Ordering::Relaxed) {
+                continue;
+            }
+            if let Err(e) = self.recheck(ih) {
+                warn!(
+                    "[volume] check of {} left owed: {}",
+                    &hex_encode(ih)[..8],
+                    e
+                );
+            }
+        }
     }
 
     /// A park for absent files was just lifted: a download goes back in the
@@ -1656,6 +1690,9 @@ impl TorrentManager {
                     if t.lift_absent_park() {
                         self.after_lift(t);
                         lifted += 1;
+                        if t.recheck_owed.load(Ordering::SeqCst) {
+                            out.owed.push(t.meta.info_hash);
+                        }
                     }
                 }
                 if lifted > 0 {
@@ -1757,7 +1794,7 @@ impl TorrentManager {
     /// The stop an operator asks for (UI, API, qBittorrent shim): a check of
     /// the torrent is called off (`cancel_check`), then it stops. Automatic
     /// stops (queues, share limits, rules) call `stop_torrent` alone.
-    pub fn stop_torrent_by_user(&self, info_hash: &InfoHash) -> Result<(), String> {
+    pub fn stop_torrent_by_user(self: &Arc<Self>, info_hash: &InfoHash) -> Result<(), String> {
         self.cancel_check(info_hash);
         self.stop_torrent(info_hash)
     }
@@ -1776,15 +1813,99 @@ impl TorrentManager {
     /// A check that has read everything and is writing its verdict finishes
     /// it first (`check_publish`): the stop then finds a finished check, and
     /// `stop_torrent` after it sets the state over that verdict.
-    pub fn cancel_check(&self, info_hash: &InfoHash) {
+    ///
+    /// The check called off is no longer owed: its `recheck_pending` mark is
+    /// cleared and written, so the next start does not run again by itself a
+    /// check the user stopped. Written after the lock is let go and off the
+    /// runtime (`queue_mark_write`): a stop never waits on the database.
+    pub fn cancel_check(self: &Arc<Self>, info_hash: &InfoHash) {
         let Some(t) = self.get(info_hash) else {
             return;
         };
-        let _publish = t.check_publish();
-        t.check_gen.fetch_add(1, Ordering::SeqCst);
-        // The counter goes first, as at the end of a check.
-        t.end_recheck_progress();
-        t.rechecking.store(false, Ordering::SeqCst);
+        let owed = {
+            let _publish = t.check_publish();
+            t.check_gen.fetch_add(1, Ordering::SeqCst);
+            // The counter goes first, as at the end of a check.
+            t.end_recheck_progress();
+            t.rechecking.store(false, Ordering::SeqCst);
+            t.recheck_owed.swap(false, Ordering::Relaxed)
+        };
+        if owed {
+            self.queue_mark_write(*info_hash);
+        }
+    }
+
+    /// Write the record of `ih` because its `recheck_pending` mark moved.
+    ///
+    /// Not on the calling task: a bulk verify of a large catalogue asks one
+    /// check per torrent, back to back, and a synchronous upsert for each
+    /// held the runtime that long. The hashes are queued, and one blocking
+    /// writer drains the queue a batch at a time, each record built from
+    /// memory under the database lock as a sweep does, so a write queued
+    /// before a later edit cannot overwrite it. With no runtime (a start
+    /// before one exists, some tests) the write is made here.
+    fn queue_mark_write(self: &Arc<Self>, ih: InfoHash) {
+        if tokio::runtime::Handle::try_current().is_err() {
+            let _ = self.try_persist_live(&ih);
+            return;
+        }
+        {
+            let mut q = self.mark_writes.lock().unwrap();
+            q.0.push(ih);
+            if q.1 {
+                return;
+            }
+            q.1 = true;
+        }
+        let mgr = self.clone();
+        tokio::task::spawn_blocking(move || mgr.drain_mark_writes());
+    }
+
+    /// The writer of `queue_mark_write`: batches until the queue is empty.
+    fn drain_mark_writes(&self) {
+        loop {
+            let batch = {
+                let mut q = self.mark_writes.lock().unwrap();
+                if q.0.is_empty() {
+                    q.1 = false;
+                    return;
+                }
+                std::mem::take(&mut q.0)
+            };
+            self.write_now(batch);
+        }
+    }
+
+    /// Write these torrents' records now, from memory as it is, skipping the
+    /// ones gone or already saved as they are.
+    fn write_now(&self, mut hashes: Vec<InfoHash>) {
+        hashes.sort_unstable();
+        hashes.dedup();
+        let Some(db) = &self.state_db else {
+            for ih in &hashes {
+                let _ = self.try_persist_live(ih);
+            }
+            return;
+        };
+        let mirror = self.mirror_json;
+        let res = db.put_batch_with(
+            &hashes,
+            |ih| self.build_if_unsaved(ih),
+            |ih, rd, (t, fp)| {
+                Self::mark_saved(t, fp);
+                if mirror {
+                    fastresume::save(&self.resume_dir, ih, rd);
+                }
+            },
+        );
+        if let Err((at, e)) = res {
+            warn!(
+                "[statedb] recheck mark commit failed: {} -- writing {} JSON records instead",
+                e,
+                hashes.len() - at
+            );
+            self.save_json_fallback(&hashes[at..]);
+        }
     }
 
     /// Suspend/resume disk serving for one torrent without pausing it: the
@@ -2170,6 +2291,13 @@ impl TorrentManager {
                         .into(),
                 );
                 to_recheck.push(ih);
+            } else if rd.recheck_pending {
+                // A check asked before the restart that never gave its
+                // verdict: the bitfield is what was known BEFORE it (for an
+                // add over data already on disk, nothing), so it is run now.
+                // Only these records: the mark is cleared by the verdict, so
+                // a start does not check the catalogue.
+                to_recheck.push(ih);
             }
             let already_complete = bitfield_is_complete(&resume_bits, meta.num_pieces());
             let state = TorrentState::new_with_times(
@@ -2190,6 +2318,12 @@ impl TorrentManager {
             // Restored BEFORE the status is derived below: the fold that the
             // first sweep performs must find the carried-over total, not zero.
             state.seed_secs.store(rd.seed_secs, Ordering::Relaxed);
+            // Memory says what the record says until the check runs (queued
+            // below): a start with no runtime to run it must not let the
+            // first sweep write the mark away.
+            state
+                .recheck_owed
+                .store(rd.recheck_pending, Ordering::Relaxed);
             // Its own rate caps, if it had any. Nothing is allocated for the
             // (nearly all) torrents that have none.
             state.set_rate_limits(Some(rd.up_limit), Some(rd.down_limit));
@@ -2292,12 +2426,12 @@ impl TorrentManager {
                     }
                 }
                 info!(
-                    "[resume] {} torrents with an unusable bitfield are being rechecked",
+                    "[resume] {} torrents with an unusable bitfield or a check left pending are being rechecked",
                     to_recheck.len()
                 );
             } else {
                 warn!(
-                    "[resume] {} torrents have an unusable bitfield and no runtime to recheck them",
+                    "[resume] {} torrents have an unusable bitfield or a check left pending, and no runtime to recheck them",
                     to_recheck.len()
                 );
             }
@@ -2767,6 +2901,7 @@ impl TorrentManager {
             data_lost: t.data_lost_msg(),
             seed_only: t.is_seed_only(),
             data_vol: t.data_vol.load(Ordering::Relaxed),
+            recheck_pending: t.recheck_owed.load(Ordering::Relaxed),
         }
     }
 
@@ -3098,8 +3233,21 @@ impl TorrentManager {
 
     /// Export one torrent's durable state, for handing it to another engine.
     /// Returns None if the torrent is not held here.
+    ///
+    /// A check still owed travels as `recheck_pending`, and the adopting
+    /// engine runs it: the picker of such a torrent holds no verdict yet.
+    ///
+    /// Not for a torrent a proof holds: the target would check a folder whose
+    /// shared files are not in place yet, publish a verdict missing them, and
+    /// clear the mark. The proof follows the torrent to the target instead
+    /// (`pathclaim::hand_over`, called by the move) and starts the check
+    /// there once the files are proven.
     pub fn export_state(&self, info_hash: &InfoHash) -> Option<fastresume::ResumeData> {
-        self.get(info_hash).map(|t| Self::build_resume_data(&t))
+        self.get(info_hash).map(|t| {
+            let mut rd = Self::build_resume_data(&t);
+            rd.recheck_pending |= t.rechecking.load(Ordering::SeqCst);
+            rd
+        })
     }
 
     /// Adopt a torrent from another engine, progression and all.
@@ -3185,6 +3333,10 @@ impl TorrentManager {
         // Carried across an engine move: this is what makes "48 hours of
         // seeding" mean the same thing on both sides of a graduation.
         state.seed_secs.store(rd.seed_secs, Ordering::Relaxed);
+        // And a check it still owed (run at the end, once it is adopted).
+        state
+            .recheck_owed
+            .store(rd.recheck_pending, Ordering::Relaxed);
         // A cap set on the torrent travels with it, like its tracker edits.
         state.set_rate_limits(Some(rd.up_limit), Some(rd.down_limit));
         // And so does its download order.
@@ -3254,6 +3406,10 @@ impl TorrentManager {
                  rechecked against the disk"
                     .into(),
             );
+        }
+        // A check the source still owed travels with the record, as it does
+        // across a restart: this side runs it.
+        if bitfield_unusable || rd.recheck_pending {
             if tokio::runtime::Handle::try_current().is_ok() {
                 if let Err(e) = self.recheck(&ih) {
                     warn!(
@@ -3264,7 +3420,7 @@ impl TorrentManager {
                 }
             } else {
                 warn!(
-                    "[import] {} has an unusable bitfield and no runtime to recheck it",
+                    "[import] {} needs a recheck and has no runtime to run it",
                     &hex_encode(&ih)[..8]
                 );
             }
@@ -3315,6 +3471,7 @@ fn fingerprint_of(t: &TorrentState) -> statedb::Fingerprint {
         down_limit: t.rate_limits().1,
         data_lost: t.data_lost.load(Ordering::Relaxed),
         data_vol: t.data_vol.load(Ordering::Relaxed),
+        recheck_pending: t.recheck_owed.load(Ordering::Relaxed),
         edits: edits_hash(t),
     }
 }
@@ -3861,12 +4018,15 @@ pub fn disk_key(path: &std::path::Path) -> String {
 }
 
 /// What `TorrentManager::check_volumes` did.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct VolumeCheck {
     /// Torrents parked because their disk is not mounted.
     pub parked: usize,
     /// Parks lifted because their disk is back.
     pub lifted: usize,
+    /// Of those, the torrents that owe a check (`park_if_offline`): the
+    /// caller runs them (`run_owed_checks`), from the async runtime.
+    pub owed: Vec<InfoHash>,
 }
 
 /// Where a torrent's first non-empty file is, or its save path.
@@ -3981,11 +4141,43 @@ impl TorrentManager {
     /// a seed_mode torrent has none and is rejected -- its data is trusted by
     /// explicit skip_checking, which stays the trust-fast path.
     pub fn recheck(self: &Arc<Self>, info_hash: &InfoHash) -> Result<(), String> {
+        self.recheck_knowing(info_hash, Vec::new())
+    }
+
+    /// `recheck`, counting `known` as verified without reading it again.
+    ///
+    /// For the proof of a torrent sharing files with another
+    /// (`pathclaim`): it has just read those pieces from the very files this
+    /// torrent reads, and hashed them against this torrent's own table, so
+    /// the recheck that follows it read them a second time for the same
+    /// verdict -- on a cross-seed add, most of the torrent. Every other piece
+    /// is read as usual. A piece past the end is ignored. Ignored as a whole
+    /// when a check of this torrent is already under way: that one reads
+    /// everything anyway.
+    pub fn recheck_knowing(
+        self: &Arc<Self>,
+        info_hash: &InfoHash,
+        known: Vec<u32>,
+    ) -> Result<(), String> {
         let t = self.get(info_hash).ok_or("torrent not found")?;
         // One at a time per torrent: the one under way reads the files as
         // they are now anyway.
         if t.rechecking.swap(true, Ordering::SeqCst) {
             return Ok(());
+        }
+        // Owed until its verdict, and written down now: the check may wait
+        // hours behind the others, and a restart in that wait must not find
+        // a record that says only "nothing held" (`recheck_pending`). Only
+        // when it was not owed already: a start or an adoption that runs a
+        // check left pending finds the mark in the record it just read, and
+        // that check is `carried`. Written off this task and in batches
+        // (`queue_mark_write`). Set BEFORE the generation is noted: a stop
+        // landing in between then clears the mark it finds, where set after
+        // it the mark outlived the check the user stopped and the next start
+        // ran it again.
+        let carried = t.recheck_owed.swap(true, Ordering::SeqCst);
+        if !carried {
+            self.queue_mark_write(*info_hash);
         }
         // Noted now: a stop asked while this check waits for its disk, or
         // while it reads, calls it off (`cancel_check`).
@@ -4025,7 +4217,35 @@ impl TorrentManager {
             if t.check_gen.load(Ordering::SeqCst) != gen {
                 return;
             }
-            mgr.run_recheck(ih, t.clone(), gen, width).await;
+            // Carried over, on a disk that is not there: parked, pieces and
+            // mark kept, no verdict (`park_if_offline`).
+            if carried {
+                let offline = {
+                    let t = t.clone();
+                    tokio::task::spawn_blocking(move || t.park_if_offline())
+                        .await
+                        .unwrap_or(false)
+                };
+                if offline {
+                    let _publish = t.check_publish();
+                    if t.check_gen.load(Ordering::SeqCst) != gen {
+                        return;
+                    }
+                    t.status.store(
+                        if t.is_paused.load(Ordering::Relaxed) {
+                            TorrentStatus::Stopped as u8
+                        } else {
+                            TorrentStatus::Error as u8
+                        },
+                        Ordering::Relaxed,
+                    );
+                    t.end_recheck_progress();
+                    t.rechecking.store(false, Ordering::SeqCst);
+                    return;
+                }
+            }
+            mgr.run_recheck_knowing(ih, t.clone(), gen, width, known)
+                .await;
             let announce = {
                 // A stop landing here would have its departure taken back by
                 // the `started` below: it waits, or is seen.
@@ -4104,8 +4324,25 @@ impl TorrentManager {
     /// between the queue and the first read still calls it off.
     /// `width` is how many pieces are read at once: the disk's
     /// (`recheck_width_for`).
+    #[cfg(test)]
     async fn run_recheck(&self, ih: InfoHash, t: Arc<TorrentState>, gen: u64, width: usize) {
+        self.run_recheck_knowing(ih, t, gen, width, Vec::new())
+            .await
+    }
+
+    /// `run_recheck`, with the pieces `recheck_knowing` was told are good:
+    /// counted as read and verified, and not read.
+    async fn run_recheck_knowing(
+        &self,
+        ih: InfoHash,
+        t: Arc<TorrentState>,
+        gen: u64,
+        width: usize,
+        known: Vec<u32>,
+    ) {
         let num_pieces = t.meta.num_pieces();
+        let known: Arc<std::collections::HashSet<u32>> =
+            Arc::new(known.into_iter().filter(|p| *p < num_pieces).collect());
         // Read the files as they are now: a handle cached before the recheck
         // may be on a file the user has since replaced under the same name.
         crate::disk::evict_fds(&data_files(&t));
@@ -4129,6 +4366,7 @@ impl TorrentManager {
             .map(|piece| {
                 let t = t.clone();
                 let unreadable = unreadable.clone();
+                let known = known.clone();
                 async move {
                     if t.is_removed.load(Ordering::Relaxed) || Self::check_called_off(&t, gen) {
                         return None;
@@ -4148,6 +4386,9 @@ impl TorrentManager {
                         }
                     }
                     let _counted = Counted(t.clone(), gen, piece);
+                    if known.contains(&piece) {
+                        return Some(piece);
+                    }
                     // No hash table -> we cannot say this piece is good. Leave
                     // the have bit clear; the recheck reports the torrent
                     // incomplete rather than blessing unverified data.
@@ -4315,6 +4556,8 @@ impl TorrentManager {
 
         // Persist the verified bitfield so a restart does not re-check from
         // scratch (mirrors the resume written at add / on piece completion).
+        // The verdict is in: nothing is owed any more, in the same write.
+        t.recheck_owed.store(false, Ordering::Relaxed);
         let _ = self.try_persist_live(&ih);
         drop(publish);
         info!(
@@ -5026,6 +5269,104 @@ mod lifecycle_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    /// ⭐ A torrent added over its data and moved to another engine before its
+    /// check had run left as a download at 0 %: the record carried the picker
+    /// the check had not filled yet, the target took it for nothing
+    /// downloaded, and the source's check, its torrent gone, ended without a
+    /// verdict. The target downloaded again what was on disk. The check is
+    /// held at the semaphore for the whole move, as the queue of a big import
+    /// holds it.
+    #[tokio::test]
+    async fn a_torrent_moved_while_its_check_is_queued_is_checked_where_it_lands() {
+        let hold = recheck_sem()
+            .acquire_many(limits().torrents.load(Ordering::SeqCst) as u32)
+            .await
+            .unwrap();
+        let (src, root, ih, t) = whole_two_piece_torrent("movedmidcheck");
+        // What the add endpoint does for a torrent whose data is on disk.
+        src.recheck(&ih).expect("recheck starts");
+        assert!(t.rechecking.load(Ordering::SeqCst), "its check is queued");
+        let record = src.export_state(&ih).expect("exported");
+        assert!(record.recheck_pending, "the record says a check is owed");
+        // The graduation carries the record through the job's parameters.
+        let carried: fastresume::ResumeData =
+            serde_json::from_value(serde_json::to_value(&record).unwrap()).unwrap();
+        assert!(carried.recheck_pending, "and the mark survives the trip");
+        let source = src.blob_source.read().unwrap().clone().expect("a source");
+        let blob = source(&record.info_hash).expect("the metainfo");
+
+        let (dst, dst_root) = manager("movedmidcheck-dst");
+        // Both engines of a node read the metainfo from one store.
+        dst.set_blob_source(source.clone());
+        dst.import_state_bytes(&record, &blob).expect("adopted");
+        src.remove_torrent(&ih, true).expect("released");
+        let moved = dst.get(&ih).expect("held by the target");
+        assert!(
+            moved.rechecking.load(Ordering::SeqCst),
+            "the target checks the disk instead of downloading"
+        );
+        drop(hold);
+        wait_recheck_end(&moved).await;
+        assert_eq!(
+            moved.status.load(Ordering::Relaxed),
+            TorrentStatus::Seeding as u8,
+            "the data on disk is whole: a seed, not a download at 0 %"
+        );
+        assert_eq!(moved.picker.get().unwrap().lock().unwrap().num_have(), 2);
+        assert!(
+            !dst.export_state(&ih).expect("exported").recheck_pending,
+            "the verdict is in: nothing is owed any more"
+        );
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&dst_root).ok();
+    }
+
+    /// A torrent a proof holds is checked when the proof ends, by the proof,
+    /// which follows it to the engine it is moved to: exported before that,
+    /// it carries no mark, or the target would check a folder whose shared
+    /// files are not in place yet and clear the mark with a verdict missing
+    /// them.
+    #[tokio::test]
+    async fn a_torrent_held_for_proof_is_exported_without_a_check_owed() {
+        let (mgr, root, ih, t) = whole_two_piece_torrent("movedheld");
+        assert!(
+            !mgr.export_state(&ih).expect("exported").recheck_pending,
+            "nothing pending, nothing to check"
+        );
+        let hold = t.hold_for_proof();
+        assert!(
+            !mgr.export_state(&ih).expect("exported").recheck_pending,
+            "the proof starts the check, on this engine"
+        );
+        drop(hold);
+        assert!(!mgr.export_state(&ih).expect("exported").recheck_pending);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The recheck after a proof does not read again the pieces the proof
+    /// has just read and verified: told they are good, it counts them so and
+    /// reads only the others. Piece 0 is spoilt on disk here and still
+    /// counted, which only a piece left unread can be; a plain recheck after
+    /// it reads it and finds it bad. A piece past the end is ignored.
+    #[tokio::test]
+    async fn a_recheck_knowing_pieces_does_not_read_them_again() {
+        let (mgr, root, ih, t) = whole_two_piece_torrent("recheckknown");
+        let mut data: Vec<u8> = (0..32768u32).map(|i| (i % 241) as u8).collect();
+        data[100] ^= 0xFF;
+        std::fs::write(root.join("data").join("whole"), &data).unwrap();
+        let have = |t: &Arc<TorrentState>| t.picker.get().unwrap().lock().unwrap().num_have();
+
+        mgr.recheck_knowing(&ih, vec![0, 7])
+            .expect("recheck starts");
+        wait_recheck_end(&t).await;
+        assert_eq!(have(&t), 2, "piece 0 as told, piece 1 read and good");
+
+        mgr.recheck(&ih).expect("recheck starts");
+        wait_recheck_end(&t).await;
+        assert_eq!(have(&t), 1, "read this time: piece 0 is bad");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     async fn wait_recheck_end(t: &Arc<TorrentState>) {
         for _ in 0..500 {
             if !t.rechecking.load(Ordering::SeqCst) {
@@ -5603,6 +5944,237 @@ mod lifecycle_tests {
         wait_recheck_end(&t).await;
         assert_eq!(state(&t), "seeding");
         assert!(!t.is_paused.load(Ordering::Relaxed));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// ⭐ A torrent added over data already on disk is saved with no piece
+    /// held: what it has is the check's to say, and the check waits its turn.
+    /// A restart in that wait used to load it as a download at 0 %, nothing
+    /// queued to look at the disk, and fetch again bytes that were already
+    /// there. The check owed is in the record, so the next start runs it --
+    /// and once it has run, the start after that does not run it again.
+    #[tokio::test]
+    async fn a_check_still_queued_at_a_restart_runs_after_it() {
+        let (mgr, root, ih, t) = whole_two_piece_torrent("recheckrestart");
+        let hold = recheck_sem()
+            .acquire_many(limits().torrents.load(Ordering::SeqCst) as u32)
+            .await
+            .unwrap();
+        mgr.recheck(&ih).expect("recheck starts");
+        // What a restart writes on its way out: the sweep, every torrent.
+        mgr.flush_all_resume();
+        assert_eq!(t.picker.get().unwrap().lock().unwrap().num_have(), 0);
+
+        let reload = || {
+            let again = Arc::new(TorrentManager::new(
+                root.join("data").to_string_lossy().into_owned(),
+                root.join("cfg")
+                    .join("resume")
+                    .to_string_lossy()
+                    .into_owned(),
+                Arc::new(crate::disk::DiskManager::new(16)),
+            ));
+            again.set_blob_source(mgr.blob_source.read().unwrap().clone().unwrap());
+            assert_eq!(again.load_resume_data(), 1);
+            let t = again.get(&ih).unwrap();
+            (again, t)
+        };
+
+        let (again, t2) = reload();
+        assert!(
+            t2.rechecking.load(Ordering::SeqCst),
+            "the check owed before the restart is under way after it"
+        );
+        drop(hold);
+        wait_recheck_end(&t2).await;
+        assert_eq!(t2.picker.get().unwrap().lock().unwrap().num_have(), 2);
+        assert_eq!(
+            t2.status.load(Ordering::Relaxed),
+            TorrentStatus::Seeding as u8
+        );
+        // The first manager's check ends too, and writes its own verdict.
+        wait_recheck_end(&t).await;
+        drop(again);
+
+        // Checked: the next start trusts the record and reads nothing.
+        let (_third, t3) = reload();
+        assert!(
+            !t3.rechecking.load(Ordering::SeqCst),
+            "a check that has run is not run at every start"
+        );
+        assert_eq!(
+            t3.status.load(Ordering::Relaxed),
+            TorrentStatus::Seeding as u8
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Until the writer of `queue_mark_write` has drained what it was given.
+    async fn wait_mark_writes(mgr: &TorrentManager) {
+        for _ in 0..500 {
+            {
+                let q = mgr.mark_writes.lock().unwrap();
+                if q.0.is_empty() && !q.1 {
+                    return;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("the recheck mark was not written");
+    }
+
+    /// What the store says of `ih`'s `recheck_pending`.
+    fn stored_mark(mgr: &TorrentManager, ih: &InfoHash) -> bool {
+        let db = mgr.state_db.as_ref().expect("a state database");
+        db.load_all()
+            .into_iter()
+            .find(|rd| rd.info_hash == hex_encode(ih))
+            .expect("a record")
+            .recheck_pending
+    }
+
+    /// A start reading the records `mgr` wrote, as a restart would.
+    fn reloaded(mgr: &TorrentManager, root: &std::path::Path) -> Arc<TorrentManager> {
+        let again = Arc::new(TorrentManager::new(
+            root.join("data").to_string_lossy().into_owned(),
+            root.join("cfg")
+                .join("resume")
+                .to_string_lossy()
+                .into_owned(),
+            Arc::new(crate::disk::DiskManager::new(16)),
+        ));
+        again.set_blob_source(mgr.blob_source.read().unwrap().clone().unwrap());
+        assert_eq!(again.load_resume_data(), 1);
+        again
+    }
+
+    /// ⭐ A check the user calls off is not owed any more: the stop clears the
+    /// mark and writes it, so the next start does not run by itself the check
+    /// that was stopped. Nothing but the mark's own writes reach the record
+    /// here (no sweep, no shutdown flush): the stop's write is what the start
+    /// reads.
+    #[tokio::test]
+    async fn a_check_the_user_calls_off_is_not_run_after_a_restart() {
+        let (mgr, root, ih, t) = whole_two_piece_torrent("recheckcalledoff");
+        let hold = recheck_sem()
+            .acquire_many(limits().torrents.load(Ordering::SeqCst) as u32)
+            .await
+            .unwrap();
+        mgr.recheck(&ih).expect("recheck starts");
+        wait_mark_writes(&mgr).await;
+        assert!(
+            stored_mark(&mgr, &ih),
+            "the mark is on disk before the check gets its turn"
+        );
+
+        mgr.stop_torrent_by_user(&ih).expect("stopped");
+        assert!(!t.recheck_owed.load(Ordering::Relaxed));
+        wait_mark_writes(&mgr).await;
+        assert!(!stored_mark(&mgr, &ih), "and the stop's clearing is too");
+        drop(hold);
+
+        let again = reloaded(&mgr, &root);
+        let t2 = again.get(&ih).unwrap();
+        assert!(
+            !t2.rechecking.load(Ordering::SeqCst),
+            "the check the user stopped does not start again by itself"
+        );
+        assert!(!t2.recheck_owed.load(Ordering::Relaxed));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A stop the user did not ask for (queues, share limits, rules) leaves
+    /// the check owed: it is not the user calling it off.
+    #[tokio::test]
+    async fn an_automatic_stop_leaves_the_check_owed() {
+        let (mgr, root, ih, _t) = whole_two_piece_torrent("recheckautostop");
+        let hold = recheck_sem()
+            .acquire_many(limits().torrents.load(Ordering::SeqCst) as u32)
+            .await
+            .unwrap();
+        mgr.recheck(&ih).expect("recheck starts");
+        mgr.stop_torrent(&ih).expect("stopped");
+        wait_mark_writes(&mgr).await;
+        assert!(stored_mark(&mgr, &ih), "still owed on disk");
+
+        let again = reloaded(&mgr, &root);
+        let t2 = again.get(&ih).unwrap();
+        assert!(
+            t2.rechecking.load(Ordering::SeqCst),
+            "the check still owed runs after the restart"
+        );
+        drop(hold);
+        wait_recheck_end(&t2).await;
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// ⭐ A complete seed whose check was still waiting its turn (a bulk
+    /// verify) at a restart, its disk not mounted at the reload: the owed
+    /// check used to run at start, read nothing (the files are absent, not
+    /// unreadable), publish 0 pieces, save it and clear its mark, and the
+    /// seed came back at 0 % to download everything again. It is parked as a
+    /// start parks a torrent on a missing disk, pieces and mark kept, and the
+    /// check runs once the disk is back.
+    #[tokio::test]
+    async fn an_owed_check_over_a_disk_not_mounted_keeps_the_pieces() {
+        let (mgr, root, ih, t) = whole_two_piece_torrent("owedunmounted");
+        mgr.recheck(&ih).expect("first check");
+        wait_recheck_end(&t).await;
+        // A seed loaded whole has no picker: all its pieces.
+        let have = |t: &Arc<TorrentState>| {
+            t.picker
+                .get()
+                .map_or(t.meta.num_pieces(), |p| p.lock().unwrap().num_have())
+        };
+        assert_eq!(have(&t), 2, "a complete seed");
+
+        // Its next check waits behind the others, and the daemon stops.
+        let hold = recheck_sem()
+            .acquire_many(limits().torrents.load(Ordering::SeqCst) as u32)
+            .await
+            .unwrap();
+        mgr.recheck(&ih).expect("recheck queued");
+        mgr.flush_all_resume();
+        // That process is gone: its queued check never runs.
+        t.check_gen.fetch_add(1, Ordering::SeqCst);
+
+        // The disk is not mounted at the next start.
+        let data = root.join("data");
+        let away = root.join("data-unmounted");
+        // The engine keeps its files open; Windows refuses to move them.
+        crate::disk::evict_fds(&data_files(&t));
+        std::fs::rename(&data, &away).unwrap();
+        let again = reloaded(&mgr, &root);
+        let t2 = again.get(&ih).unwrap();
+        drop(hold);
+        wait_recheck_end(&t2).await;
+        assert_eq!(have(&t2), 2, "the pieces stay");
+        assert!(t2.files_absent.load(Ordering::Relaxed), "parked as absent");
+        assert!(
+            t2.recheck_owed.load(Ordering::SeqCst),
+            "the check still owed"
+        );
+        again.flush_all_resume();
+        assert!(stored_mark(&again, &ih), "and so says the record");
+        let stored = again
+            .state_db
+            .as_ref()
+            .unwrap()
+            .load_all()
+            .into_iter()
+            .find(|rd| rd.info_hash == hex_encode(&ih))
+            .unwrap();
+        assert!(!stored.bitfield.is_empty(), "the record keeps its pieces");
+
+        // The disk is back: the park lifts and the check runs.
+        std::fs::rename(&away, &data).unwrap();
+        let done = again.check_volumes(false);
+        assert_eq!(done.owed, vec![ih], "the lift hands the owed check back");
+        again.run_owed_checks(&done.owed);
+        assert!(t2.rechecking.load(Ordering::SeqCst), "the check runs");
+        wait_recheck_end(&t2).await;
+        assert_eq!(have(&t2), 2);
+        assert!(!t2.recheck_owed.load(Ordering::SeqCst), "its verdict is in");
         std::fs::remove_dir_all(&root).ok();
     }
 

@@ -45,6 +45,12 @@ impl ProofHold {
     pub fn waiting(&self) -> CheckWait {
         self.0.wait_for_check()
     }
+
+    /// The torrent this hold is on: after an engine move, the copy the
+    /// target engine adopted (see `pathclaim::hand_over`).
+    pub fn torrent(&self) -> &Arc<TorrentState> {
+        &self.0
+    }
 }
 
 /// A check (recheck or proof) of this torrent is waiting for its turn on the
@@ -1059,6 +1065,12 @@ pub struct TorrentState {
     /// meanwhile would read and hash the whole torrent again, and the two
     /// verdicts would land in whichever order they finish.
     pub rechecking: AtomicBool,
+    /// A recheck was asked and has given no verdict yet: what the record
+    /// says as `recheck_pending`, so a restart in between runs it again. Set
+    /// with `rechecking`, cleared by the verdict or a stop the user asks for
+    /// (`cancel_check`) -- not by the end of the
+    /// task, which also comes after a pass that could not read the disk.
+    pub(crate) recheck_owed: AtomicBool,
     /// How many proofs hold this torrent (see `ProofHold`). Above 0 it is read
     /// as checking: it is stopped at 0 % only because a job is still hashing
     /// what it shares with another torrent, and a verification asked in that
@@ -1782,6 +1794,7 @@ impl TorrentState {
             serving_suspended: AtomicBool::new(false),
             is_removed: AtomicBool::new(false),
             rechecking: AtomicBool::new(false),
+            recheck_owed: AtomicBool::new(false),
             proof_holds: AtomicU32::new(0),
             check_gen: AtomicU64::new(0),
             check_publish: parking_lot::Mutex::new(()),
@@ -2021,6 +2034,31 @@ impl TorrentState {
             }
         }
         self.apply_files_verdict(self.assess_files());
+    }
+
+    /// Before a check carried over from a restart or an engine move reads
+    /// anything: when the files are absent as a whole (a disk not mounted,
+    /// judged as a start judges it), the torrent is parked with its pieces
+    /// kept, and true is returned. Such a check must not run: reading nothing
+    /// it would publish "nothing held" over pieces only the missing disk
+    /// hides, save it, and clear its mark, and a complete seed waiting its
+    /// turn came back at 0 % and downloaded everything. It runs once the park
+    /// is lifted (`TorrentManager::run_owed_checks`).
+    ///
+    /// Touches the disk (one `stat` per file): never on the async runtime.
+    pub fn park_if_offline(&self) -> bool {
+        match self.assess_files() {
+            FilesVerdict::Offline(msg) => {
+                self.park_absent(&msg);
+                tracing::warn!(
+                    torrent = %self.meta.name,
+                    "parked, its check left for when the disk is back: {}",
+                    msg
+                );
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Act on what `assess_files` found. Returns whether the torrent is left

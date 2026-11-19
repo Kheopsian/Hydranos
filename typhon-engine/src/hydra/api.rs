@@ -16039,7 +16039,7 @@ fn category_entry(state: &AppState, name: &str) -> Option<Category> {
     Some(c)
 }
 
-async fn post_torrent_engine(
+pub(crate) async fn post_torrent_engine(
     State(state): State<AppState>,
     Path(info_hash): Path<String>,
     RawQuery(query): RawQuery,
@@ -16146,10 +16146,31 @@ async fn post_torrent_engine(
         )
             .into_response();
     }
+    // A proof of its shared files still to run goes with it: it ends on the
+    // copy that landed, which reads as waiting for its check from now
+    // (`pathclaim::hand_over`). Before the source lets go, so a proof
+    // finding the source gone always finds the copy handed over.
+    let proving = torrent.held_for_proof();
+    let adopted = dst.manager.get(&ih);
+    if proving {
+        if let Some(adopted) = &adopted {
+            // None left to follow it: the proof ended between the record
+            // being taken and now, and checked and started the copy that is
+            // leaving. The copy that landed is proven here instead.
+            if crate::pathclaim::hand_over(&torrent, adopted) == 0 {
+                // Started there if the proof started it: what its add asked.
+                let start = !torrent.is_paused.load(std::sync::atomic::Ordering::Relaxed);
+                let _ = crate::pathclaim::guarded_recheck_then(&state, &target, adopted, start);
+            }
+        }
+    }
     if let Err(e) = src.manager.remove_torrent(&ih, true) {
         // Undo the adoption rather than leave the torrent in both engines
         // with one store row.
         let _ = dst.manager.remove_torrent(&ih, true);
+        if let (true, Some(adopted)) = (proving, &adopted) {
+            crate::pathclaim::hand_over(adopted, &torrent);
+        }
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": format!("the source engine refused to let go; nothing was changed: {e}")})),
@@ -16169,6 +16190,9 @@ async fn post_torrent_engine(
             .manager
             .import_state_bytes(&original, &blob)
             .map_err(|u| u.to_string());
+        if let (true, Some(adopted), Some(put_back)) = (proving, &adopted, src.manager.get(&ih)) {
+            crate::pathclaim::hand_over(adopted, &put_back);
+        }
         let back = back.and_then(|_| {
             dst.manager
                 .remove_torrent(&ih, true)
