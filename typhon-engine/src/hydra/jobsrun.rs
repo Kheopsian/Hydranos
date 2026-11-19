@@ -762,20 +762,59 @@ pub fn scan_claims(
         Some(t) => root.join(t),
         None => root.to_path_buf(),
     };
-    let exact: Vec<String> = my_root
-        .ancestors()
-        .map(|a| a.to_string_lossy().into_owned())
-        .collect();
     let rows = {
         let store = match state.store.lock() {
             Ok(s) => s,
             Err(e) => e.into_inner(),
         };
-        store.rows_by_save_path(
-            &exact,
-            &my_root.to_string_lossy(),
-            std::path::MAIN_SEPARATOR,
-        )
+        match (my_top, store.claim_index_ready()) {
+            // A torrent saved at one of our ancestors can only name our files
+            // if its own top-level entry is the next component of our path
+            // below it -- or the one its store row spells in its path (the
+            // Internet Archive layout puts the entry in the row's save path,
+            // so a row at `.../lib` may belong to a torrent named `lib`) --
+            // or if it was renamed, or has no single entry. Asked of the
+            // index, a flat folder of a hundred thousand files costs the one
+            // file of our name instead of all of them.
+            (Some(_), true) => {
+                let exact: Vec<(String, Option<Vec<String>>)> = my_root
+                    .ancestors()
+                    .map(|a| {
+                        let tops = (a != my_root).then(|| {
+                            let mut tops: Vec<String> = Vec::new();
+                            if let Some(next) = my_root
+                                .strip_prefix(a)
+                                .ok()
+                                .and_then(|r| r.components().next())
+                            {
+                                tops.push(next.as_os_str().to_string_lossy().into_owned());
+                            }
+                            if let Some(own) = a.file_name() {
+                                tops.push(own.to_string_lossy().into_owned());
+                            }
+                            tops
+                        });
+                        (a.to_string_lossy().into_owned(), tops)
+                    })
+                    .collect();
+                store.rows_by_claim(
+                    &exact,
+                    &my_root.to_string_lossy(),
+                    std::path::MAIN_SEPARATOR,
+                )
+            }
+            _ => {
+                let exact: Vec<String> = my_root
+                    .ancestors()
+                    .map(|a| a.to_string_lossy().into_owned())
+                    .collect();
+                store.rows_by_save_path(
+                    &exact,
+                    &my_root.to_string_lossy(),
+                    std::path::MAIN_SEPARATOR,
+                )
+            }
+        }
     };
     let rows = match rows {
         Ok(r) => r,
@@ -788,11 +827,24 @@ pub fn scan_claims(
     };
     let mut out = Vec::new();
     let mut seen: std::collections::HashSet<(String, [u8; 20])> = std::collections::HashSet::new();
-    for (hash, session) in rows {
+    let mut candidates: Vec<(String, [u8; 20])> = rows
+        .into_iter()
+        .filter_map(|(hash, session)| Some((session, crate::store::hex20(&hash)?)))
+        .collect();
+    if my_top.is_some() {
+        // The index lists a torrent under the entry its .torrent gives; one
+        // whose files were renamed may sit under another, so those are always
+        // looked at (`claim_of` still tests their save path first).
+        for ih in typhon_engine::torrent::meta::ever_renamed() {
+            for e in state.engines.engines() {
+                if e.manager.get(&ih).is_some() {
+                    candidates.push((e.id.clone(), ih));
+                }
+            }
+        }
+    }
+    for (session, ih) in candidates {
         let Some(engine) = state.engines.get(&session) else {
-            continue;
-        };
-        let Some(ih) = crate::store::hex20(&hash) else {
             continue;
         };
         let Some(other) = engine.manager.get(&ih) else {

@@ -326,7 +326,23 @@ thread_local! {
 // not scan a folder to.
 #[cfg(test)]
 thread_local! {
+    /// How many rows those lookups returned in all.
+    pub static ROWS_BY_SAVE_PATH_ROWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     pub static ROWS_BY_SAVE_PATH_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Names this process, for `Store::claim_index_ready`.
+fn claim_boot_token() -> String {
+    static TOKEN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    TOKEN
+        .get_or_init(|| {
+            let ns = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            format!("{}-{ns}", std::process::id())
+        })
+        .clone()
 }
 
 /// Split a `tags` column into tag names.
@@ -1369,6 +1385,9 @@ pub struct Store {
     /// before calling it one. In memory on purpose: `added_time` is no witness,
     /// an import carries the date of the client it comes from.
     fresh: std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
+    /// `claim_top` is known to hold a row for every torrent this process may
+    /// ask about: see `claim_index_ready`.
+    claim_ready: std::sync::atomic::AtomicBool,
 }
 
 impl Store {
@@ -1549,6 +1568,7 @@ impl Store {
             #[cfg(test)]
             ping_stall_ms: Default::default(),
             fresh: Default::default(),
+            claim_ready: Default::default(),
         }
     }
 
@@ -1573,6 +1593,7 @@ impl Store {
         self.ensure_rule_since_table()?;
         self.ensure_content_index()?;
         self.ensure_link_index()?;
+        self.ensure_claim_top()?;
         self.ensure_share_limits_table()?;
         self.ensure_rss_tables()?;
         // After the tables exist, and before anything reads them.
@@ -1694,7 +1715,193 @@ impl Store {
         }
         out.sort();
         out.dedup();
+        #[cfg(test)]
+        ROWS_BY_SAVE_PATH_ROWS.with(|c| c.set(c.get() + out.len()));
         Ok(out)
+    }
+
+    /// The top-level entry of each torrent copy, as its .torrent names it: what
+    /// lets the path-claim lookup skip the torrents that share a save folder
+    /// with the new one but not a file name.
+    ///
+    /// `torrents` itself keeps the frozen schema, so this is a table of its
+    /// own, keyed like the rest by (info_hash, session) and carrying no path:
+    /// the path is joined from `torrents`, so a move needs no maintenance
+    /// here, and a row left by a deleted torrent matches nothing. An empty
+    /// `top` stands for "not one entry" (and for a blob that does not parse):
+    /// those are always candidates. Additive and invisible to an older build.
+    fn ensure_claim_top(&self) -> anyhow::Result<()> {
+        self.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS claim_top (
+                 info_hash TEXT NOT NULL,
+                 session TEXT NOT NULL,
+                 top TEXT NOT NULL COLLATE NOCASE,
+                 PRIMARY KEY (info_hash, session));
+             CREATE INDEX IF NOT EXISTS idx_claim_top_top
+                 ON claim_top(top, session, info_hash);",
+        )?;
+        Ok(())
+    }
+
+    /// The `claim_top` value of a metainfo: what the .torrent says, renames
+    /// aside (`ever_renamed` covers those). Empty when it is not one entry.
+    fn claim_top_of(blob: &[u8]) -> String {
+        typhon_engine::torrent::metainfo::parse_torrent_bytes(blob)
+            .ok()
+            .and_then(|m| m.original_common_root())
+            .map(|t| t.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    }
+
+    /// Whether `claim_top` has a row for every torrent that exists. False
+    /// until the boot pass (`backfill_claim_top`) has finished in THIS
+    /// process: a row written by an older build, or one this one wrote before
+    /// the table existed, has none, and a lookup that narrowed by it would
+    /// miss that torrent. The answer is kept in the store itself, tied to the
+    /// process, so a reopened connection does not lose it and a restart does.
+    pub fn claim_index_ready(&self) -> bool {
+        use std::sync::atomic::Ordering;
+        if self.claim_ready.load(Ordering::Relaxed) {
+            return true;
+        }
+        let ok = self
+            .conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'claim_top_ready'",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .map(|v| v == claim_boot_token())
+            .unwrap_or(false);
+        if ok {
+            self.claim_ready.store(true, Ordering::Relaxed);
+        }
+        ok
+    }
+
+    /// Give a row to every torrent that has none, `limit` at a time; Ok(0)
+    /// once none is left, which also marks the index ready. Like
+    /// `backfill_content_index`, in batches so the store lock is let go.
+    pub fn backfill_claim_top(&self, limit: usize) -> anyhow::Result<usize> {
+        let mut q = self.conn.prepare(
+            "SELECT t.info_hash, t.session, t.torrent
+               FROM torrents t
+               LEFT JOIN claim_top c
+                 ON c.info_hash = t.info_hash AND c.session = t.session
+              WHERE c.info_hash IS NULL
+              LIMIT ?1",
+        )?;
+        let pending = q
+            .query_map([limit as i64], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Vec<u8>>(2)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(q);
+        if pending.is_empty() {
+            if !self.read_only {
+                self.conn.execute(
+                    "INSERT OR REPLACE INTO meta (key, value) VALUES ('claim_top_ready', ?1)",
+                    [claim_boot_token()],
+                )?;
+            }
+            self.claim_ready
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            return Ok(0);
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        for (ih, sess, blob) in &pending {
+            tx.execute(
+                "INSERT OR REPLACE INTO claim_top (info_hash, session, top) VALUES (?1,?2,?3)",
+                rusqlite::params![ih, sess, Self::claim_top_of(blob)],
+            )?;
+        }
+        tx.commit()?;
+        Ok(pending.len())
+    }
+
+    /// `rows_by_save_path`, narrowed by top-level entry. Each `exact` item is
+    /// a save path and, when the caller can say which entries of it matter,
+    /// the entries a torrent saved there must have to name any of our files.
+    /// Only the rows with one of those entries, or with none (`''`), are
+    /// returned for it; `None` returns every row at that path. The range under
+    /// `root` is not narrowed: a torrent saved below our folder can name our
+    /// files whatever it is called.
+    ///
+    /// The cost is the torrents that share a NAME with ours, not the ones that
+    /// share a folder: a flat category folder holding a hundred thousand
+    /// single files answers with the one file of that name.
+    pub fn rows_by_claim(
+        &self,
+        exact: &[(String, Option<Vec<String>>)],
+        root: &str,
+        sep: char,
+    ) -> anyhow::Result<Vec<(String, String)>> {
+        #[cfg(test)]
+        ROWS_BY_SAVE_PATH_CALLS.with(|c| c.set(c.get() + 1));
+        let mut out: Vec<(String, String)> = Vec::new();
+        let mut all = self.conn.prepare_cached(
+            "SELECT info_hash, session FROM torrents WHERE save_path = ?1 COLLATE NOCASE",
+        )?;
+        // CROSS JOIN pins the order: the entry first (few rows), then the
+        // torrent by its key. Left to itself the planner may start from the
+        // path and walk the folder, which is the cost this exists to avoid.
+        let mut narrow = self.conn.prepare_cached(
+            "SELECT t.info_hash, t.session
+               FROM claim_top c CROSS JOIN torrents t
+                 ON t.info_hash = c.info_hash AND t.session = c.session
+              WHERE c.top = ?1 AND t.save_path = ?2 COLLATE NOCASE",
+        )?;
+        for (path, tops) in exact {
+            match tops {
+                None => {
+                    for r in all.query_map([path], |r| {
+                        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                    })? {
+                        out.push(r?);
+                    }
+                }
+                Some(tops) => {
+                    for top in tops.iter().map(String::as_str).chain(std::iter::once("")) {
+                        for r in narrow.query_map([top, path.as_str()], |r| {
+                            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                        })? {
+                            out.push(r?);
+                        }
+                    }
+                }
+            }
+        }
+        let lo = format!("{root}{sep}");
+        let hi = format!("{root}{}", char::from_u32(sep as u32 + 1).unwrap_or(sep));
+        let mut q = self.conn.prepare_cached(
+            "SELECT info_hash, session FROM torrents
+             WHERE save_path >= ?1 COLLATE NOCASE AND save_path < ?2 COLLATE NOCASE",
+        )?;
+        for r in q.query_map([lo, hi], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })? {
+            out.push(r?);
+        }
+        out.sort();
+        out.dedup();
+        #[cfg(test)]
+        ROWS_BY_SAVE_PATH_ROWS.with(|c| c.set(c.get() + out.len()));
+        Ok(out)
+    }
+
+    #[cfg(test)]
+    pub fn conn_for_test(&self, sql: &str) {
+        self.conn.execute_batch(sql).unwrap();
+    }
+
+    #[cfg(test)]
+    pub fn forget_claim_ready_for_test(&self) {
+        self.claim_ready
+            .store(false, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// The fleet registry.
@@ -2898,6 +3105,8 @@ impl Store {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch(SCHEMA)?;
         let mut store = Self::bare(conn);
+        // Empty, so complete: every row it will hold goes through `insert_torrent`.
+        store.claim_ready = std::sync::atomic::AtomicBool::new(true);
         store.track_changes();
         Ok(store)
     }
@@ -4141,6 +4350,9 @@ impl Store {
         let _ = self
             .conn
             .execute("DELETE FROM share_limits WHERE info_hash = ?1", [info_hash]);
+        let _ = self
+            .conn
+            .execute("DELETE FROM claim_top WHERE info_hash = ?1", [info_hash]);
         self.conn
             .execute("DELETE FROM tag_since WHERE info_hash = ?1", [info_hash])?;
         self.forget_rule_since(info_hash);
@@ -4274,6 +4486,12 @@ impl Store {
                 tags
             ],
         )?;
+        if n > 0 {
+            tx.execute(
+                "INSERT OR REPLACE INTO claim_top (info_hash, session, top) VALUES (?1,?2,?3)",
+                rusqlite::params![info_hash, session, Self::claim_top_of(torrent)],
+            )?;
+        }
         if n > 0 && !tags.is_empty() {
             // Tags a torrent arrives with are set now, whatever date the
             // client it comes from gave the torrent. A second copy of a
