@@ -91,4 +91,9 @@ pub struct TorrentStatsMini {
     pub peers_connected: u32,
     pub peers_interested: u32,
     pub progress: f32,
+    /// How far a running recheck has got, 0..1; null when none is. Streamed so
+    /// the list's "Checking n %" and its bar climb without a refetch.
+    pub checking_progress: Option<f32>,
+    /// A check waiting for its turn on the disk, nothing read yet.
+    pub check_queued: bool,
 }

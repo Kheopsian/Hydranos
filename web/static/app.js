@@ -2012,13 +2012,16 @@ function renderWorkflowsTab(d, infoHash, bodyId) {
 // torrent: only the newest request is allowed to paint.
 let _contentReq = 0;
 
-async function loadTorrentContent(infoHash, bodyId, summaryId, agent, mode) {
+// `quiet`: a refresh of what is on screen, which must not blink "Loading…".
+async function loadTorrentContent(infoHash, bodyId, summaryId, agent, mode, quiet) {
     const body = document.getElementById(bodyId);
     const summary = document.getElementById(summaryId);
     if (!body) return;
     const req = ++_contentReq;
-    body.innerHTML = `<div class="tc-empty">Loading…</div>`;
-    if (summary) summary.textContent = "";
+    if (!quiet) {
+        body.innerHTML = `<div class="tc-empty">Loading…</div>`;
+        if (summary) summary.textContent = "";
+    }
     let files, avail, order;
     // A file's priority is set on this node's copies; a row from another
     // node shows its priorities, read-only.
@@ -2565,7 +2568,8 @@ async function refreshDetail() {
         _detailAddedTime = d.added_time || 0;
         document.getElementById("detail-name").textContent = incoName(d);
         document.getElementById("detail-state").textContent = d.state === "checking_files" ? displayState(d).label : d.state;
-        document.getElementById("detail-progress").textContent = _pctText(d.progress) + "%";
+        document.getElementById("detail-progress").textContent = _pctText(_barProgress(d)) + "%";
+        _refreshContentWhileChecking(d, _activeDetailTab, selectedTorrent, "detail-content-body", "detail-content-summary", selectedTorrentAgent, "race");
         document.getElementById("detail-size").textContent = formatBytes(d.total_size);
         document.getElementById("detail-downloaded").textContent = formatBytes(d.total_download);
         document.getElementById("detail-uploaded").textContent = formatBytes(d.total_upload);
@@ -3346,6 +3350,30 @@ function _pctText(p) {
     const v = Number(p) || 0;
     if (v >= 1) return "100.0";
     return (Math.floor(Math.max(0, v) * 1000) / 10).toFixed(1);
+}
+
+// What the Progress bar shows. Under a check the bar follows the check, so it
+// climbs with the pieces verified instead of sitting at the 100% the torrent
+// holds; a check still waiting for the disk has verified nothing yet.
+function _barProgress(t) {
+    if (t.state === "checking_files") {
+        if (t.check_queued) return 0;
+        if (typeof t.checking_progress === "number") return t.checking_progress;
+    }
+    return t.progress;
+}
+
+// The Content tab shows how far a check has read each file, so while the
+// torrent is under a check it is fetched again with every detail refresh, and
+// once more after the check ends to go back to what the files hold.
+let _contentWasChecking = false;
+function _refreshContentWhileChecking(d, tab, hash, bodyId, summaryId, agent, mode) {
+    const checking = d.state === "checking_files";
+    const again = checking || _contentWasChecking;
+    _contentWasChecking = checking;
+    if (again && tab === "content" && hash) {
+        loadTorrentContent(hash, bodyId, summaryId, agent, mode, true);
+    }
 }
 
 function _chipCount(key, n) {
@@ -5686,7 +5714,8 @@ async function refreshHoardDetail() {
                 hErr.innerHTML = "";
             }
         }
-        document.getElementById("h-detail-progress").textContent = _pctText(d.progress) + "%";
+        document.getElementById("h-detail-progress").textContent = _pctText(_barProgress(d)) + "%";
+        _refreshContentWhileChecking(d, _activeHoardDetailTab, selectedHoardTorrent, "h-detail-content-body", "h-detail-content-summary", selectedHoardTorrentAgent, "hoard");
         document.getElementById("h-detail-size").textContent = formatBytes(d.total_size);
         document.getElementById("h-detail-downloaded").textContent = formatBytes(d.total_download);
         document.getElementById("h-detail-uploaded").textContent = formatBytes(d.total_upload);
@@ -7940,7 +7969,15 @@ function _openHoardSSE() {
                 if (!t) continue;
                 // A row under a check keeps saying so: the engine's status of a
                 // stopped torrent being checked is still "stopped".
-                if (t.checking_progress == null) t.state = _STATUS_TO_STATE[m.status] || t.state;
+                // The stream says how far a check has got (null when none
+                // runs), so the row follows it without a refetch.
+                if (m.checking_progress == null) {
+                    t.state = _STATUS_TO_STATE[m.status] || t.state;
+                } else {
+                    t.state = "checking_files";
+                }
+                t.checking_progress = m.checking_progress ?? null;
+                t.check_queued = !!m.check_queued;
                 t.upload_rate = m.upload_rate;
                 t.download_rate = m.download_rate;
                 t.total_upload = m.total_uploaded;
@@ -10061,7 +10098,7 @@ const TABLE_COLS = {
         })()}</td>` },
         { id: "total_size", label: "Size", sort: "total_size", render: t => `<td>${t.total_size ? formatBytes(t.total_size) : "-"}</td>` },
         { id: "state", label: "State", sort: "state", mobile: true, render: t => { const d = displayState(t); return `<td><span class="state-badge ${d.cls}" title="${esc(d.title)}">${d.label}</span></td>`; } },
-        { id: "progress", label: "Progress", sort: "progress", mobile: true, render: t => { const pct = _pctText(t.progress); return `<td><div class="progress-bar"><div class="progress-fill" style="width:${pct}%"></div></div><div class="progress-text">${pct}%</div></td>`; } },
+        { id: "progress", label: "Progress", sort: "progress", mobile: true, render: t => { const pct = _pctText(_barProgress(t)); return `<td><div class="progress-bar"><div class="progress-fill" style="width:${pct}%"></div></div><div class="progress-text">${pct}%</div></td>`; } },
         { id: "swarm_seeds", label: "Seeds", sort: "swarm_seeds", render: t => `<td>${t.swarm_seeds ?? "-"}</td>` },
         { id: "swarm_leechers", label: "Leechers", sort: "swarm_leechers", render: t => `<td>${t.swarm_leechers ?? "-"}</td>` },
         { id: "download_rate", label: "Down", sort: "download_rate", render: t => `<td>${formatSpeed(t.download_rate ?? 0)}</td>` },
@@ -10094,7 +10131,7 @@ const TABLE_COLS = {
     "race-table": [
         { id: "name", label: "Name", sort: "name", mobile: true, render: t => `<td title="${esc(t.info_hash)}">${esc(incoName(t))}${t.tracker_error ? ' <span class="tracker-warn" title="Tracker error">!</span>' : ''}${t.injected_peers ? ` <span class="uploader-badge ${t.injection_hit ? 'injection-hit' : ''}" title="Uploader: ${t.uploader} - ${t.injected_peers} peers injected${t.injection_hit ? ' HIT' : ''}">${t.injection_hit ? '&#9889;&#10003;' : '&#9889;'}${t.injected_peers}</span>` : ''}</td>` },
         { id: "total_size", label: "Size", sort: "total_size", render: t => `<td>${t.total_size ? formatBytes(t.total_size) : "-"}</td>` },
-        { id: "progress", label: "Progress", sort: "progress", mobile: true, render: t => { const pct = _pctText(t.progress); return `<td><div class="progress-bar"><div class="progress-fill" style="width:${pct}%"></div></div><div class="progress-text">${pct}%</div></td>`; } },
+        { id: "progress", label: "Progress", sort: "progress", mobile: true, render: t => { const pct = _pctText(_barProgress(t)); return `<td><div class="progress-bar"><div class="progress-fill" style="width:${pct}%"></div></div><div class="progress-text">${pct}%</div></td>`; } },
         { id: "swarm_seeds", label: "Seeds", sort: "swarm_seeds", render: t => `<td>${t.swarm_seeds ?? "-"}</td>` },
         { id: "swarm_leechers", label: "Leechers", sort: "swarm_leechers", render: t => `<td>${t.swarm_leechers ?? "-"}</td>` },
         { id: "download_rate", label: "Down", sort: "download_rate", mobile: true, render: t => `<td>${formatSpeed(t.download_rate)}</td>` },
