@@ -5521,6 +5521,11 @@ function _isUserPaused(hash) {
     const t = _hoardAllTorrents.find(x => x.info_hash === hash);
     // The state is the fresher signal: the list snapshot carries it on every
     // refresh, while user_paused only rides along with a full list fetch.
+    //
+    // A row under a check, queued or reading, is neither: paused underneath
+    // it still has a check to call off, and only Stop does that. Answering
+    // "paused" left such a row with Start alone and no way to cancel it.
+    if (t && t.state === "checking_files") return null;
     return t ? (!!t.user_paused || t.state === "stopped") : null;
 }
 
