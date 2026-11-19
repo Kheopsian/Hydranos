@@ -10855,12 +10855,27 @@ fn torrent_files_json(
     // what the torrent holds (which stays whole until the verdict lands): the
     // pieces seen over the pieces of the file, so the list climbs with the
     // check. A check still waiting for the disk has read nothing.
+    // A check of one file says so for that file only: the others keep what
+    // they hold, the check passes no verdict on them. A neighbour sharing a
+    // piece with it is read in part, and keeps its figure too.
     let checking = torrent
         .rechecking
         .load(std::sync::atomic::Ordering::Relaxed);
+    let scope = torrent.recheck_scope();
+    let piece_len = u64::from(torrent.meta.piece_length.max(1));
+    let in_check = |f: &typhon_engine::torrent::meta::FileEntry| match &scope {
+        None => true,
+        Some(s) => {
+            f.length > 0
+                && f.offset / piece_len >= u64::from(s.start)
+                && (f.offset + f.length - 1) / piece_len < u64::from(s.end)
+        }
+    };
     if checking {
         for (d, f) in done.iter_mut().zip(torrent.meta.files.iter()) {
-            *d = Some(torrent.rechecked_bytes(f.offset, f.length).unwrap_or(0));
+            if in_check(f) {
+                *d = Some(torrent.rechecked_bytes(f.offset, f.length).unwrap_or(0));
+            }
         }
     }
     let order = torrent.download_order();
@@ -10886,6 +10901,8 @@ fn torrent_files_json(
                 "done": d,
                 "progress": d.map(|d| if f.length == 0 { 1.0 } else { d as f64 / f.length as f64 }),
                 "priority": order.file_priority(i),
+                // Under the running check: its figures, not what it holds.
+                "checking": checking && in_check(f),
             })
         })
         .collect();
@@ -11040,6 +11057,63 @@ fn native_rename_paths(
     let (cur_folder, cur_path) = file_folder_and_path(meta, i);
     let from_full = format!("{}/{cur_path}", cur_folder.unwrap_or_default());
     Ok((from_full, format!("{folder}/{}", req.to)))
+}
+
+#[derive(serde::Deserialize)]
+struct FileRecheckBody {
+    /// The file's `index` in `GET .../files`.
+    index: usize,
+}
+
+/// `POST /api/torrents/:info_hash/files/recheck` `{"index": n}`: hash-check
+/// one file, the pieces it shares with its neighbours included, and leave
+/// the verdict on every other piece as it was. `?engine=` names the copy, the
+/// first found otherwise. Answers the file list with `"scope"`: `"file"`, or
+/// `"torrent"` when the whole torrent is checked instead because what its
+/// other pieces hold is not known (`TorrentManager::recheck_file`) or it
+/// shares files with another torrent (`pathclaim::guarded_recheck_file`).
+async fn post_torrent_file_recheck(
+    State(state): State<AppState>,
+    Path(info_hash): Path<String>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+    let refuse = |code: StatusCode, msg: &str| {
+        (code, Json(serde_json::json!({"error": msg}))).into_response()
+    };
+    let Ok(req) = serde_json::from_str::<FileRecheckBody>(&body) else {
+        return refuse(
+            StatusCode::BAD_REQUEST,
+            r#"the body is {"index": <file index>}"#,
+        );
+    };
+    let Some((engine_id, torrent)) = find_selected(&state, &query, &info_hash) else {
+        return not_found();
+    };
+    if req.index >= torrent.meta.files.len() {
+        return refuse(
+            StatusCode::BAD_REQUEST,
+            &format!("this torrent has no file {}", req.index),
+        );
+    }
+    match crate::pathclaim::guarded_recheck_file(&state, &engine_id, &torrent, req.index) {
+        Ok(scope) => {
+            tracing::info!(engine = %engine_id, hash = %info_hash, file = req.index,
+                scope = ?scope, "file recheck asked");
+            let mut v = torrent_files_json(&torrent);
+            v["ok"] = true.into();
+            v["scope"] = match scope {
+                typhon_engine::torrent::FileCheck::File => "file",
+                typhon_engine::torrent::FileCheck::Torrent => "torrent",
+            }
+            .into();
+            Json(v).into_response()
+        }
+        Err(msg) => refuse(StatusCode::CONFLICT, &msg),
+    }
 }
 
 /// `POST /api/torrents/:info_hash/files/rename`
@@ -20101,6 +20175,10 @@ fn router_with(state: AppState, extra: Router<AppState>) -> Router {
         .route(
             "/api/torrents/:info_hash/files/rename",
             axum::routing::post(post_torrent_file_rename),
+        )
+        .route(
+            "/api/torrents/:info_hash/files/recheck",
+            axum::routing::post(post_torrent_file_recheck),
         )
         .route(
             "/api/v2/torrents/renameFile",
@@ -31235,6 +31313,35 @@ mod qbit_shim_post_tests {
             assert_eq!(f["done"], f["size"], "{f}");
             assert_eq!(f["progress"], 1.0);
         }
+    }
+
+    /// The Content tab's Recheck on one file: a check of that file only, and
+    /// the list back with that file under it. A file the torrent does not
+    /// have, or a body that names none, is refused.
+    #[tokio::test]
+    async fn a_file_recheck_checks_that_file_only() {
+        let (s, hash) = populated("native-file-recheck", &multi_file_bytes());
+        let uri = format!("/api/torrents/{hash}/files/recheck");
+        let (status, body) = call(&s, "POST", &uri, r#"{"index": 0}"#).await;
+        assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        let v = json(&body);
+        assert_eq!(v["scope"], "file", "{v}");
+        let files = v["files"].as_array().unwrap();
+        let first = files.iter().find(|f| f["index"] == 0).unwrap();
+        assert_eq!(first["checking"], true, "{first}");
+
+        let (status, _) = call(&s, "POST", &uri, r#"{"index": 99}"#).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (status, _) = call(&s, "POST", &uri, "{}").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (status, _) = call(
+            &s,
+            "POST",
+            &format!("/api/torrents/{}/files/recheck", "ab".repeat(20)),
+            r#"{"index": 0}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
     #[test]

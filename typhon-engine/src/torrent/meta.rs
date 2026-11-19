@@ -936,8 +936,16 @@ pub fn tracker_key(url: &str) -> u64 {
 /// `TorrentState`: only the few torrents under a check hold one, where a
 /// field would cost every torrent. Dropped when the check ends or is called off.
 static RECHECK_SEEN: std::sync::LazyLock<
-    parking_lot::Mutex<std::collections::HashMap<usize, Box<[u64]>>>,
+    parking_lot::Mutex<std::collections::HashMap<usize, CheckSeen>>,
 > = std::sync::LazyLock::new(Default::default);
+
+/// One running check: the pieces it reads and those it has read.
+struct CheckSeen {
+    /// The pieces the check reads: every piece, or one file's
+    /// (`TorrentManager::recheck_file`).
+    scope: std::ops::Range<u32>,
+    bits: Box<[u64]>,
+}
 
 // A one-off shape; naming it would add an alias that nothing else uses.
 #[allow(clippy::type_complexity)]
@@ -1876,13 +1884,34 @@ impl TorrentState {
         self as *const Self as usize
     }
 
-    /// A check starts reading: the figure at 0 and an empty piece map.
+    /// A check of every piece starts reading: the figure at 0 and an empty
+    /// piece map.
     pub fn begin_recheck_progress(&self) {
+        self.begin_recheck_progress_of(0..self.meta.num_pieces());
+    }
+
+    /// A check of the pieces `scope` starts, or is asked: the figure at 0 and
+    /// an empty piece map. Set when the check is asked as well, so the
+    /// Content tab knows which files a waiting check is for.
+    pub fn begin_recheck_progress_of(&self, scope: std::ops::Range<u32>) {
         let words = (self.meta.num_pieces() as usize).div_ceil(64);
+        RECHECK_SEEN.lock().insert(
+            self.seen_key(),
+            CheckSeen {
+                scope,
+                bits: vec![0u64; words].into_boxed_slice(),
+            },
+        );
+        self.recheck_done.store(0, Ordering::SeqCst);
+    }
+
+    /// The pieces the check of this torrent reads, asked or running; `None`
+    /// when there is none.
+    pub fn recheck_scope(&self) -> Option<std::ops::Range<u32>> {
         RECHECK_SEEN
             .lock()
-            .insert(self.seen_key(), vec![0u64; words].into_boxed_slice());
-        self.recheck_done.store(0, Ordering::SeqCst);
+            .get(&self.seen_key())
+            .map(|c| c.scope.clone())
     }
 
     /// No check is reading: no figure and no map. The figure goes first, a
@@ -1894,8 +1923,8 @@ impl TorrentState {
 
     /// The running check has read `piece`, whatever its verdict.
     pub fn mark_rechecked(&self, piece: u32) {
-        if let Some(map) = RECHECK_SEEN.lock().get_mut(&self.seen_key()) {
-            if let Some(w) = map.get_mut(piece as usize / 64) {
+        if let Some(c) = RECHECK_SEEN.lock().get_mut(&self.seen_key()) {
+            if let Some(w) = c.bits.get_mut(piece as usize / 64) {
                 *w |= 1 << (piece % 64);
             }
         }
@@ -1905,7 +1934,7 @@ impl TorrentState {
     /// running check has read; `None` when no check is reading.
     pub fn rechecked_bytes(&self, offset: u64, len: u64) -> Option<u64> {
         let guard = RECHECK_SEEN.lock();
-        let map = guard.get(&self.seen_key())?;
+        let map = &guard.get(&self.seen_key())?.bits;
         if len == 0 {
             return Some(0);
         }

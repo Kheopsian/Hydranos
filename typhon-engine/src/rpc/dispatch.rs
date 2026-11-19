@@ -281,7 +281,11 @@ pub fn checking_progress(t: &Arc<crate::torrent::meta::TorrentState>) -> Option<
     if !t.rechecking.load(Ordering::SeqCst) {
         return None;
     }
-    let total = t.meta.num_pieces();
+    // Over the pieces the check reads: a check of one file is done when that
+    // file's pieces are.
+    let total = t
+        .recheck_scope()
+        .map_or(t.meta.num_pieces(), |s| s.end - s.start);
     let done = t.recheck_done.load(Ordering::SeqCst);
     Some(if total == 0 {
         0.0

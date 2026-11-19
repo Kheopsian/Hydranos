@@ -4071,6 +4071,27 @@ pub async fn recheck_slot() -> tokio::sync::SemaphorePermit<'static> {
         .expect("the recheck semaphore is never closed")
 }
 
+/// What `TorrentManager::recheck_file` checks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileCheck {
+    /// The file's pieces only.
+    File,
+    /// Every piece: what the others hold was not known.
+    Torrent,
+}
+
+/// The pieces a check of one file reads (`TorrentManager::recheck_file`).
+#[derive(Debug, Clone)]
+struct FileScope {
+    /// The file's index in the torrent.
+    file: usize,
+    /// Its pieces, those it shares with a neighbour included.
+    pieces: std::ops::Range<u32>,
+    /// The torrent had no piece map and is a seed: the pieces outside the
+    /// file are held when the verdict makes one.
+    held_outside: bool,
+}
+
 /// Why a seed_mode torrent cannot be what it claims, or None when every file
 /// is on disk at its declared size.
 ///
@@ -4159,11 +4180,110 @@ impl TorrentManager {
         info_hash: &InfoHash,
         known: Vec<u32>,
     ) -> Result<(), String> {
+        self.start_check(info_hash, known, None).map(|_| ())
+    }
+
+    /// Hash-check one file of a torrent: its pieces only, the verdict on every
+    /// other piece left as it was. For one file that shows 0 % (an episode of
+    /// a season), where a recheck of the torrent read every other file again.
+    ///
+    /// A piece that `file` shares with its neighbour is read whole, the
+    /// neighbour's bytes with it: it is the piece that is hashed, and it is
+    /// good only if both ends are. One that fails is fetched again, which
+    /// writes the neighbour's end too.
+    ///
+    /// The whole torrent is checked instead (`FileCheck::Torrent`) when what
+    /// the pieces outside the file hold is not known: no piece map on a
+    /// torrent that is not a seed, or a check of the torrent still owed
+    /// (`recheck_pending`). A check of this file or of the torrent already
+    /// under way is this one. A check of another file is refused: it would
+    /// leave this one unread.
+    pub fn recheck_file(
+        self: &Arc<Self>,
+        info_hash: &InfoHash,
+        file: usize,
+    ) -> Result<FileCheck, String> {
         let t = self.get(info_hash).ok_or("torrent not found")?;
-        // One at a time per torrent: the one under way reads the files as
-        // they are now anyway.
-        if t.rechecking.swap(true, Ordering::SeqCst) {
-            return Ok(());
+        let f = t
+            .meta
+            .files
+            .get(file)
+            .ok_or_else(|| format!("this torrent has no file {file}"))?;
+        if f.length == 0 {
+            return Err("an empty file holds no piece to check".into());
+        }
+        let pl = u64::from(t.meta.piece_length.max(1));
+        let first = u32::try_from(f.offset / pl).map_err(|_| "file past the last piece")?;
+        let last = u32::try_from((f.offset + f.length - 1) / pl)
+            .map_err(|_| "file past the last piece")?;
+        let pieces = first..last.saturating_add(1).min(t.meta.num_pieces());
+        if pieces.is_empty() {
+            return Err("file past the last piece".into());
+        }
+        let held_outside = t.picker.get().is_none();
+        if t.recheck_owed.load(Ordering::SeqCst)
+            || (held_outside && crate::rpc::dispatch::torrent_core(&t).progress < 1.0)
+        {
+            self.recheck(info_hash)?;
+            return Ok(FileCheck::Torrent);
+        }
+        self.start_check(
+            info_hash,
+            Vec::new(),
+            Some(FileScope {
+                file,
+                pieces,
+                held_outside,
+            }),
+        )
+    }
+
+    /// `recheck_knowing`, of every piece (`scope` `None`) or of one file's.
+    /// What it checks: the torrent for `scope` `None`, else see
+    /// `recheck_file`.
+    fn start_check(
+        self: &Arc<Self>,
+        info_hash: &InfoHash,
+        known: Vec<u32>,
+        scope: Option<FileScope>,
+    ) -> Result<FileCheck, String> {
+        let t = self.get(info_hash).ok_or("torrent not found")?;
+        let whole = 0..t.meta.num_pieces();
+        let asked = scope.as_ref().map_or(whole.clone(), |s| s.pieces.clone());
+        let checks = if scope.is_some() {
+            FileCheck::File
+        } else {
+            FileCheck::Torrent
+        };
+        {
+            // Under the lock a check ends under (it lets go of `rechecking`
+            // and its scope there): the one under way, if any, is read and
+            // taken over in one step. Read before the lock, a check ending
+            // in between left this one dropped, or running beside a second.
+            let _publish = t.check_publish();
+            // One at a time per torrent: the one under way reads the files as
+            // they are now anyway -- unless it reads one file only and this
+            // one is of the torrent. That one is called off as a stop would,
+            // and this one takes its place: its verdict covers the file too.
+            if t.rechecking.swap(true, Ordering::SeqCst) {
+                let running = t.recheck_scope().unwrap_or_else(|| whole.clone());
+                if running != whole && scope.is_none() {
+                    t.check_gen.fetch_add(1, Ordering::SeqCst);
+                    t.end_recheck_progress();
+                } else if running == whole {
+                    return Ok(FileCheck::Torrent);
+                } else if running.start > asked.start || running.end < asked.end {
+                    return Err(
+                        "a check of another file of this torrent is under way: recheck this one once it ends"
+                            .into(),
+                    );
+                } else {
+                    return Ok(FileCheck::File);
+                }
+            }
+            // Known from now: the Content tab tells the file a waiting check
+            // is for from the others.
+            t.begin_recheck_progress_of(asked);
         }
         // Owed until its verdict, and written down now: the check may wait
         // hours behind the others, and a restart in that wait must not find
@@ -4175,8 +4295,10 @@ impl TorrentManager {
         // landing in between then clears the mark it finds, where set after
         // it the mark outlived the check the user stopped and the next start
         // ran it again.
-        let carried = t.recheck_owed.swap(true, Ordering::SeqCst);
-        if !carried {
+        // A check of one file is not written down: a restart in its wait
+        // loses it with nothing changed, the pieces it had not judged yet.
+        let carried = scope.is_none() && t.recheck_owed.swap(true, Ordering::SeqCst);
+        if scope.is_none() && !carried {
             self.queue_mark_write(*info_hash);
         }
         // Noted now: a stop asked while this check waits for its disk, or
@@ -4244,8 +4366,7 @@ impl TorrentManager {
                     return;
                 }
             }
-            mgr.run_recheck_knowing(ih, t.clone(), gen, width, known)
-                .await;
+            mgr.run_check(ih, t.clone(), gen, width, known, scope).await;
             let announce = {
                 // A stop landing here would have its departure taken back by
                 // the `started` below: it waits, or is seen.
@@ -4280,7 +4401,7 @@ impl TorrentManager {
                 mgr.announce_soon(&ih);
             }
         });
-        Ok(())
+        Ok(checks)
     }
 
     /// Called off by a stop since `gen` was noted.
@@ -4326,21 +4447,23 @@ impl TorrentManager {
     /// (`recheck_width_for`).
     #[cfg(test)]
     async fn run_recheck(&self, ih: InfoHash, t: Arc<TorrentState>, gen: u64, width: usize) {
-        self.run_recheck_knowing(ih, t, gen, width, Vec::new())
-            .await
+        self.run_check(ih, t, gen, width, Vec::new(), None).await
     }
 
     /// `run_recheck`, with the pieces `recheck_knowing` was told are good:
-    /// counted as read and verified, and not read.
-    async fn run_recheck_knowing(
+    /// counted as read and verified, and not read. With a `scope`, only the
+    /// pieces of that file are read and judged.
+    async fn run_check(
         &self,
         ih: InfoHash,
         t: Arc<TorrentState>,
         gen: u64,
         width: usize,
         known: Vec<u32>,
+        scope: Option<FileScope>,
     ) {
         let num_pieces = t.meta.num_pieces();
+        let pieces = scope.as_ref().map_or(0..num_pieces, |s| s.pieces.clone());
         let known: Arc<std::collections::HashSet<u32>> =
             Arc::new(known.into_iter().filter(|p| *p < num_pieces).collect());
         // Read the files as they are now: a handle cached before the recheck
@@ -4361,8 +4484,8 @@ impl TorrentManager {
         // c est le disque qui redevient le facteur limitant.
         let unreadable: Arc<std::sync::Mutex<Option<String>>> =
             Arc::new(std::sync::Mutex::new(None));
-        t.begin_recheck_progress();
-        let scan = futures::stream::iter(0..num_pieces)
+        t.begin_recheck_progress_of(pieces.clone());
+        let scan = futures::stream::iter(pieces.clone())
             .map(|piece| {
                 let t = t.clone();
                 let unreadable = unreadable.clone();
@@ -4446,10 +4569,17 @@ impl TorrentManager {
         }
         // Looked at before the verdict is published, so that no stat of a
         // slow disk is made while a stop waits for it.
-        let absent = if verified.is_empty() {
-            t.files_not_on_disk()
-        } else {
-            Vec::new()
+        let absent = match &scope {
+            _ if !verified.is_empty() => Vec::new(),
+            None => t.files_not_on_disk(),
+            Some(s) => {
+                let root = t.save_path.read().clone();
+                if t.meta.disk_path(&root, s.file).exists() {
+                    Vec::new()
+                } else {
+                    vec![t.meta.disk_rel(s.file)]
+                }
+            }
         };
         // From the last look at `check_gen` to the record written: a stop
         // lands before (nothing is published) or after (it finds the verdict
@@ -4490,12 +4620,26 @@ impl TorrentManager {
             return;
         }
         verified.sort_unstable();
-        let have = verified.len() as u32;
+        let read = verified.len() as u32;
         // Nothing verified because nothing was where it was looked for: the
         // verdict is the same -- no piece held -- but a check that ends in a
         // second says nothing about WHY, and the files are often only a folder
         // up. Say how many were not there, in the log and on the torrent.
-        if have == 0 {
+        if read == 0 && scope.is_some() {
+            if let Some(file) = absent.first() {
+                let file = file.to_string_lossy().replace('\\', "/");
+                let save = t.save_path.read().to_string_lossy().into_owned();
+                warn!(
+                    "[recheck] {} file {file} verified 0/{} pieces: not on disk at the expected place under {save}",
+                    &hex_encode(&ih)[..8],
+                    pieces.len(),
+                );
+                t.set_recheck_note(&format!(
+                    "cannot find the data: {file} is not on disk at the expected place under {save}. \
+                     Put it there or move the torrent to where it is, then recheck it",
+                ));
+            }
+        } else if read == 0 {
             if let Some(first) = absent.first() {
                 let first = first.to_string_lossy().replace('\\', "/");
                 let save = t.save_path.read().to_string_lossy().into_owned();
@@ -4514,18 +4658,34 @@ impl TorrentManager {
                 ));
             }
         }
-        {
+        let have = {
+            let fresh = t.picker.get().is_none();
             let picker = self.picker_for_verdict(&t);
             let mut p = picker.lock().unwrap();
-            p.reset_have();
+            match &scope {
+                None => p.reset_have(),
+                Some(s) => {
+                    // A seed with no piece map holds every piece: those the
+                    // check did not read stay held.
+                    if fresh && s.held_outside {
+                        for piece in (0..num_pieces).filter(|i| !s.pieces.contains(i)) {
+                            p.set_have(piece);
+                        }
+                    }
+                    for piece in s.pieces.clone() {
+                        p.clear_have(piece);
+                    }
+                }
+            }
             for piece in &verified {
                 p.set_have(*piece);
             }
-        }
+            p.num_have()
+        };
 
         // Pieces found where they were looked for: the filesystem they are
         // on is the one to tell an unmounted disk by (see `data_vol`).
-        if have > 0 {
+        if read > 0 {
             let t = t.clone();
             tokio::task::spawn_blocking(move || t.note_data_vol_of_files());
         }
@@ -4557,16 +4717,30 @@ impl TorrentManager {
         // Persist the verified bitfield so a restart does not re-check from
         // scratch (mirrors the resume written at add / on piece completion).
         // The verdict is in: nothing is owed any more, in the same write.
-        t.recheck_owed.store(false, Ordering::Relaxed);
+        // A check of one file owes nothing and settles nothing owed.
+        if scope.is_none() {
+            t.recheck_owed.store(false, Ordering::Relaxed);
+        }
         let _ = self.try_persist_live(&ih);
         drop(publish);
-        info!(
-            "[recheck] {} verified {}/{} pieces -> {}",
-            &hex_encode(&ih)[..8],
-            have,
-            num_pieces,
-            if complete { "seeding" } else { "downloading" }
-        );
+        let outcome = if complete { "seeding" } else { "downloading" };
+        match &scope {
+            None => info!(
+                "[recheck] {} verified {}/{} pieces -> {outcome}",
+                &hex_encode(&ih)[..8],
+                have,
+                num_pieces,
+            ),
+            Some(s) => info!(
+                "[recheck] {} file {} verified {}/{} of its pieces, {}/{} held -> {outcome}",
+                &hex_encode(&ih)[..8],
+                s.file,
+                read,
+                s.pieces.len(),
+                have,
+                num_pieces,
+            ),
+        }
     }
 }
 
@@ -5364,6 +5538,233 @@ mod lifecycle_tests {
         mgr.recheck(&ih).expect("recheck starts");
         wait_recheck_end(&t).await;
         assert_eq!(have(&t), 1, "read this time: piece 0 is bad");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Three files over three 16 KiB pieces, each piece across a boundary:
+    /// `a` is 0..20000 (pieces 0, 1), `b` 20000..40000 (pieces 1, 2) and `c`
+    /// 40000..49000 (piece 2). On disk and whole, added and checked once.
+    async fn three_file_torrent(
+        tag: &str,
+    ) -> (
+        Arc<TorrentManager>,
+        std::path::PathBuf,
+        InfoHash,
+        Arc<TorrentState>,
+    ) {
+        let (mgr, root, ih, t) = three_file_torrent_as(tag, false);
+        mgr.recheck(&ih).expect("first check");
+        wait_recheck_end(&t).await;
+        assert_eq!(held(&t), vec![0, 1, 2], "whole at first");
+        (mgr, root, ih, t)
+    }
+
+    /// `three_file_torrent`, added as `seed_mode` says and not checked.
+    fn three_file_torrent_as(
+        tag: &str,
+        seed_mode: bool,
+    ) -> (
+        Arc<TorrentManager>,
+        std::path::PathBuf,
+        InfoHash,
+        Arc<TorrentState>,
+    ) {
+        let (mgr, root) = manager(tag);
+        let data: Vec<u8> = (0..49000u32).map(|i| (i % 251) as u8).collect();
+        let dir = root.join("data").join("S");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a"), &data[..20000]).unwrap();
+        std::fs::write(dir.join("b"), &data[20000..40000]).unwrap();
+        std::fs::write(dir.join("c"), &data[40000..]).unwrap();
+        let mut info = b"d5:filesl".to_vec();
+        for (name, len) in [("a", 20000), ("b", 20000), ("c", 9000)] {
+            info.extend_from_slice(format!("d6:lengthi{len}e4:pathl1:{name}ee").as_bytes());
+        }
+        info.extend_from_slice(b"e4:name1:S12:piece lengthi16384e6:pieces60:");
+        for chunk in data.chunks(16384) {
+            let mut hasher = Sha1::new();
+            hasher.update(chunk);
+            info.extend_from_slice(&hasher.finalize());
+        }
+        info.push(b'e');
+        let mut bytes = b"d4:info".to_vec();
+        bytes.extend_from_slice(&info);
+        bytes.push(b'e');
+        let blob = bytes.clone();
+        mgr.set_blob_source(Arc::new(move |_: &str| Some(blob.clone())));
+        let save = root.join("data").to_string_lossy().into_owned();
+        let ih = mgr
+            .add_torrent_bytes(&bytes, &save, false, seed_mode)
+            .expect("added")
+            .0;
+        let t = mgr.get(&ih).unwrap();
+        (mgr, root, ih, t)
+    }
+
+    /// The pieces the picker holds.
+    fn held(t: &TorrentState) -> Vec<u32> {
+        let p = t.picker.get().expect("a picker").lock().unwrap();
+        (0..t.meta.num_pieces())
+            .filter(|i| p.has_piece(*i))
+            .collect()
+    }
+
+    /// Overwrite `len` bytes of a file of `three_file_torrent` at `at`.
+    fn spoil(root: &std::path::Path, name: &str, at: u64, len: usize) {
+        use std::io::{Seek, Write};
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .open(root.join("data").join("S").join(name))
+            .unwrap();
+        f.seek(std::io::SeekFrom::Start(at)).unwrap();
+        f.write_all(&vec![0xEE; len]).unwrap();
+    }
+
+    /// ⭐ A check of one file reads its pieces and judges no other: a piece
+    /// of another file spoiled on disk stays held, the file's own spoiled
+    /// piece is let go.
+    #[tokio::test]
+    async fn a_file_check_judges_only_the_pieces_of_that_file() {
+        let (mgr, root, ih, t) = three_file_torrent("filecheck-scope").await;
+        // Piece 0 is `a` alone; piece 2 is the end of `b` and all of `c`.
+        spoil(&root, "a", 0, 100);
+
+        let scope = mgr.recheck_file(&ih, 2).expect("check of c starts");
+        assert_eq!(scope, FileCheck::File);
+        wait_recheck_end(&t).await;
+        assert_eq!(held(&t), vec![0, 1, 2], "piece 0 is not c's: not judged");
+        assert_eq!(
+            t.status.load(Ordering::Relaxed),
+            TorrentStatus::Seeding as u8,
+            "still whole as far as is known"
+        );
+
+        mgr.recheck_file(&ih, 0).expect("check of a starts");
+        wait_recheck_end(&t).await;
+        assert_eq!(
+            held(&t),
+            vec![1, 2],
+            "a's spoiled piece let go, the rest kept"
+        );
+        assert_eq!(
+            t.status.load(Ordering::Relaxed),
+            TorrentStatus::Downloading as u8
+        );
+        assert!(!t.recheck_owed.load(Ordering::SeqCst), "nothing owed");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// ⭐ A piece a file shares with its neighbour is read whole, the
+    /// neighbour's bytes with it: spoiled at the neighbour's end, it fails
+    /// the check of the file, and is fetched again.
+    #[tokio::test]
+    async fn a_file_check_reads_the_boundary_piece_whole() {
+        let (mgr, root, ih, t) = three_file_torrent("filecheck-boundary").await;
+        // The last bytes of `b` lie in piece 2, which `c` shares.
+        spoil(&root, "b", 19000, 100);
+
+        mgr.recheck_file(&ih, 2).expect("check of c starts");
+        wait_recheck_end(&t).await;
+        assert_eq!(
+            held(&t),
+            vec![0, 1],
+            "the shared piece fails with b's bytes"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The figure of a check of one file is over that file's pieces, so it
+    /// reaches 100 % when they are read.
+    #[tokio::test]
+    async fn a_file_check_figure_is_over_its_own_pieces() {
+        let (_mgr, root, _ih, t) = three_file_torrent("filecheck-figure").await;
+        t.rechecking.store(true, Ordering::SeqCst);
+        t.begin_recheck_progress_of(2..3);
+        assert_eq!(crate::rpc::dispatch::checking_progress(&t), Some(0.0));
+        t.recheck_done.store(1, Ordering::SeqCst);
+        assert_eq!(crate::rpc::dispatch::checking_progress(&t), Some(1.0));
+        t.end_recheck_progress();
+        t.rechecking.store(false, Ordering::SeqCst);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// ⭐ A recheck of the torrent asked while a check of one file waits
+    /// takes its place, where it used to be dropped as "one under way": its
+    /// verdict covers every file.
+    #[tokio::test]
+    async fn a_torrent_recheck_takes_over_a_waiting_file_check() {
+        let (mgr, root, ih, t) = three_file_torrent("filecheck-takeover").await;
+        spoil(&root, "a", 0, 100);
+        let hold = recheck_sem()
+            .acquire_many(limits().torrents.load(Ordering::SeqCst) as u32)
+            .await
+            .unwrap();
+        mgr.recheck_file(&ih, 2).expect("check of c queued");
+        assert_eq!(t.recheck_scope(), Some(2..3));
+        assert!(
+            mgr.recheck_file(&ih, 0).is_err(),
+            "a check of another file is refused while one is under way"
+        );
+        mgr.recheck(&ih).expect("check of the torrent queued");
+        assert_eq!(t.recheck_scope(), Some(0..3), "the torrent's now");
+        drop(hold);
+        wait_recheck_end(&t).await;
+        assert_eq!(held(&t), vec![1, 2], "piece 0, not c's, was judged");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// ⭐ A recheck of the torrent asked as a check of one file ends is not
+    /// lost and does not run beside another: the running check is read under
+    /// the lock it ends under. Read before it, the file check ending in
+    /// between left `rechecking` cleared under a check still running.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_torrent_recheck_asked_as_a_file_check_ends_is_kept() {
+        let (mgr, root, ih, t) = three_file_torrent("filecheck-ending").await;
+        spoil(&root, "a", 0, 100);
+        let hold = recheck_sem()
+            .acquire_many(limits().torrents.load(Ordering::SeqCst) as u32)
+            .await
+            .unwrap();
+        mgr.recheck_file(&ih, 2).expect("check of c queued");
+
+        // The file check is ending: it holds the lock while the torrent
+        // recheck is asked, and lets go of the torrent under it.
+        let ending = t.check_publish();
+        let asked = {
+            let (mgr, ih) = (mgr.clone(), ih);
+            tokio::task::spawn_blocking(move || mgr.recheck(&ih))
+        };
+        // Not an await: the lock is held, and the ask waits on it from
+        // another thread.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        t.check_gen.fetch_add(1, Ordering::SeqCst);
+        t.end_recheck_progress();
+        t.rechecking.store(false, Ordering::SeqCst);
+        drop(ending);
+        asked.await.unwrap().expect("recheck asked");
+
+        assert!(t.rechecking.load(Ordering::SeqCst), "a check is on");
+        assert_eq!(t.recheck_scope(), Some(0..3), "of the torrent");
+        drop(hold);
+        wait_recheck_end(&t).await;
+        assert_eq!(held(&t), vec![1, 2], "its verdict covers piece 0");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// ⭐ A seed added trusted has no piece map: a check of one file makes
+    /// one, and the pieces it did not read are held, not lost -- the seed
+    /// does not drop to the one file and download the rest again.
+    #[tokio::test]
+    async fn a_file_check_of_a_seed_with_no_piece_map_keeps_the_rest() {
+        let (mgr, root, ih, t) = three_file_torrent_as("filecheck-seed", true);
+        assert!(t.picker.get().is_none(), "a trusted seed carries none");
+        spoil(&root, "a", 0, 100);
+        spoil(&root, "c", 0, 100);
+
+        assert_eq!(mgr.recheck_file(&ih, 2), Ok(FileCheck::File));
+        wait_recheck_end(&t).await;
+        assert_eq!(held(&t), vec![0, 1], "c's piece let go, a's not judged");
+        assert!(mgr.recheck_file(&ih, 9).is_err(), "no such file");
         std::fs::remove_dir_all(&root).ok();
     }
 
