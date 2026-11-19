@@ -438,6 +438,7 @@ impl DiskManager {
         }
     }
 
+    /// The cache `read_block` answers from.
     pub fn read_cache(&self) -> &Arc<ReadCache> {
         &self.cache
     }
@@ -604,6 +605,9 @@ impl DiskManager {
                 msg: format!("slice start {} past end {}", key.start, slice_end),
             });
         };
+        // Lossless: `start` is inside the torrent, so its piece is one of the
+        // torrent's (a u32 on the wire), its offset is below a piece length
+        // (a u32 in the metainfo) and `len` is at most SLICE.
         let piece = (key.start / piece_size) as u32;
         let in_piece = (key.start % piece_size) as u32;
         let slice = read_range(torrent, piece, in_piece, len as u32).await?;
@@ -1137,9 +1141,15 @@ pub fn path_is_zfs(_path: &std::path::Path) -> bool {
 /// page on every request.
 #[cfg(unix)]
 pub fn is_block_resident(file: &File, offset: u64, len: u64) -> bool {
-    let last = offset + len.max(1) - 1;
-    page_resident(file, offset) && (last / 4096 == offset / 4096 || page_resident(file, last))
+    let last = offset.saturating_add(len.max(1) - 1);
+    page_resident(file, offset) && (last / PAGE == offset / PAGE || page_resident(file, last))
 }
+
+/// The smallest page size Linux runs with. On a kernel with larger pages two
+/// offsets this calls apart may share a page: the probe is then asked twice,
+/// never skipped.
+#[cfg(unix)]
+const PAGE: u64 = 4096;
 
 #[cfg(unix)]
 fn page_resident(file: &File, offset: u64) -> bool {
@@ -1149,8 +1159,13 @@ fn page_resident(file: &File, offset: u64) -> bool {
         iov_base: b.as_mut_ptr() as *mut libc::c_void,
         iov_len: 1,
     };
+    let Ok(at) = libc::off_t::try_from(offset) else {
+        return false;
+    };
     // RWF_NOWAIT (0x8): returns EAGAIN instead of blocking if not in page cache.
-    let n = unsafe { libc::preadv2(file.as_raw_fd(), &iov, 1, offset as libc::off_t, 0x8) };
+    // SAFETY: a valid open descriptor, and one iovec over `b`, a live 1-byte
+    // buffer the call may write into.
+    let n = unsafe { libc::preadv2(file.as_raw_fd(), &iov, 1, at, 0x8) };
     n == 1
 }
 
@@ -2254,10 +2269,12 @@ mod disk_tests {
         // Drop the whole file from the page cache (a range of pages written
         // a moment ago can refuse to go; the whole file does not), then read
         // the first half back: head cached, tail cold.
+        // SAFETY: a valid open descriptor, and plain integers.
         let rc = unsafe { libc::posix_fadvise(f.as_raw_fd(), 0, 0, libc::POSIX_FADV_DONTNEED) };
         assert_eq!(rc, 0);
         // No readahead on this descriptor, or reading the head brings the
         // tail in behind it.
+        // SAFETY: as above.
         let rc = unsafe { libc::posix_fadvise(f.as_raw_fd(), 0, 0, libc::POSIX_FADV_RANDOM) };
         assert_eq!(rc, 0);
         let mut b = vec![0u8; 32 << 10];

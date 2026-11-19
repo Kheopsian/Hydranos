@@ -106,6 +106,8 @@ impl Shard {
 /// (its peer went away), the next one waiting runs it instead.
 pub(super) type Flight = tokio::sync::OnceCell<Result<Bytes, ReadFailure>>;
 
+/// Slices of torrent data kept to answer peers' requests, within a byte
+/// budget, spread over one or more locks ("shards").
 pub struct ReadCache {
     shards: Box<[Mutex<Shard>]>,
     /// The whole budget in bytes; each shard gets its share.
@@ -118,6 +120,7 @@ pub struct ReadCache {
 }
 
 impl ReadCache {
+    /// An empty cache of `budget_bytes`, over `shards` locks (at least one).
     pub fn new(budget_bytes: u64, shards: usize) -> Self {
         let shards = shards.max(1);
         ReadCache {
@@ -152,6 +155,7 @@ impl ReadCache {
         }
     }
 
+    /// The budget in bytes, as last set.
     pub fn budget(&self) -> u64 {
         self.budget.load(Ordering::Relaxed)
     }
@@ -180,6 +184,11 @@ impl ReadCache {
         &self.shards[key.mix() % self.shards.len()]
     }
 
+    /// SeqCst, here and in `bump`, rather than reasoned down to the weakest
+    /// ordering that holds: the protocol (look, read the disk, check again
+    /// under the shard lock) is the part that keeps a pre-write slice out of
+    /// the cache, it runs once per disk read or piece write, not per request,
+    /// and a weaker ordering would save nothing measurable.
     pub(super) fn generation(&self, key: &Key) -> u64 {
         self.gen[key.mix() % STRIPES].load(Ordering::SeqCst)
     }
