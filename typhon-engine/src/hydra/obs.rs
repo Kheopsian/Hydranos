@@ -584,6 +584,48 @@ impl Exposition {
     }
 }
 
+/// The serve-side read cache, one for the whole daemon: what it answers from
+/// memory, what it reads, and what it holds. No engine label: every engine
+/// serves through the same one.
+fn read_cache_families(x: &mut Exposition) {
+    use std::sync::atomic::Ordering::Relaxed;
+    use typhon_engine::disk::readcache as rc;
+    let cache = typhon_engine::disk::ReadCache::process();
+    let mut requests = Vec::new();
+    for (result, n) in [
+        ("hit", &rc::HIT),
+        ("read", &rc::MISS),
+        ("joined", &rc::JOINED),
+        ("bypass", &rc::BYPASS),
+    ] {
+        requests.push((vec![("result", result.to_string())], n.load(Relaxed) as f64));
+    }
+    x.family(
+        "hydra_read_cache_requests_total",
+        "counter",
+        "Peer requests by how the read cache answered: hit (from memory), read (its slice read from disk), joined (waited on a read already under way), bypass (across two slices, read alone).",
+        &requests,
+    );
+    x.family(
+        "hydra_read_cache_stale_total",
+        "counter",
+        "Requests that found their slice older than a minute and read it again.",
+        &[(vec![], rc::STALE.load(Relaxed) as f64)],
+    );
+    x.family(
+        "hydra_read_cache_bytes",
+        "gauge",
+        "Bytes held by the read cache now.",
+        &[(vec![], cache.bytes() as f64)],
+    );
+    x.family(
+        "hydra_read_cache_budget_bytes",
+        "gauge",
+        "The read cache's budget ([daemon] read_cache_mb).",
+        &[(vec![], cache.budget() as f64)],
+    );
+}
+
 /// The whole `/metrics` page.
 pub fn metrics(state: &AppState) -> String {
     let stats = engine_stats(&state.engines);
@@ -609,6 +651,7 @@ pub fn metrics(state: &AppState) -> String {
         "Seconds since the process started, the catalogue load included.",
         &[(vec![], crate::startup::uptime_secs() as f64)],
     );
+    read_cache_families(&mut x);
 
     // One family per figure, one sample per engine.
     let per = |f: &dyn Fn(&EngineStats) -> f64| -> Vec<(Vec<(&str, String)>, f64)> {
@@ -1090,6 +1133,12 @@ mod tests {
             "hydra_announce_slots{engine=\"race\"}",
             "hydra_session_uploaded_bytes_total{engine=\"race\"} 0",
             "hydra_build_info{version=",
+            // The read cache is the daemon's, not an engine's: no label.
+            "# TYPE hydra_read_cache_requests_total counter",
+            "hydra_read_cache_requests_total{result=\"hit\"} ",
+            "hydra_read_cache_requests_total{result=\"joined\"} ",
+            "hydra_read_cache_bytes ",
+            "hydra_read_cache_budget_bytes ",
         ] {
             assert!(text.contains(line), "missing {line:?} in:\n{text}");
         }

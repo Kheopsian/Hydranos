@@ -250,7 +250,7 @@ async fn serve_block(
     // path pays. Any decline falls back to read_block below.
     if serve_zerocopy {
         if let Some((file, foff)) = disk.block_file(torrent, index, begin, length) {
-            if crate::disk::is_block_resident(&file, foff) {
+            if crate::disk::is_block_resident(&file, foff, length as u64) {
                 if framed.flush().await.is_err() {
                     tracing::debug!("[peer-debug] {} BREAK flush-before-sendfile failed", addr);
                     return false;

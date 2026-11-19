@@ -617,6 +617,7 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
     workers::start_memory_watch(config.daemon.memory_alert_bytes());
     typhon_engine::disk::set_preallocate(config.daemon.preallocate);
     config.daemon.apply_recheck_limits();
+    config.daemon.apply_read_cache();
     bootstrap::announce_setup_code(&config);
     // Keys the file holds and nothing reads: said once, never fatal -- an old
     // config must still start, but its owner must not believe it acts.

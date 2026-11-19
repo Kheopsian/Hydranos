@@ -5,7 +5,8 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::OnceLock;
-use std::time::{Duration, Instant};
+#[cfg(test)]
+use std::time::Duration;
 
 pub static FD_CACHE_HIT: AtomicU64 = AtomicU64::new(0);
 pub static FD_CACHE_MISS: AtomicU64 = AtomicU64::new(0);
@@ -318,25 +319,9 @@ use std::num::NonZeroUsize;
 
 use crate::torrent::meta::TorrentState;
 
-const CACHE_BLOCK_SIZE: u64 = 131072; // 128 KB
-const CACHE_MAX_ENTRIES: usize = 2048; // ~256 MB
-const CACHE_TTL: Duration = Duration::from_secs(60);
-
-pub static DISK_CACHE_HIT: AtomicU64 = AtomicU64::new(0);
-pub static DISK_CACHE_MISS: AtomicU64 = AtomicU64::new(0);
-pub static DISK_CACHE_STALE: AtomicU64 = AtomicU64::new(0);
-pub static DISK_CACHE_BYPASS: AtomicU64 = AtomicU64::new(0);
-
-#[derive(Clone, Copy, Hash, Eq, PartialEq)]
-struct CacheKey {
-    info_hash: [u8; 20],
-    block_start: u64,
-}
-
-struct CacheEntry {
-    data: Arc<Vec<u8>>,
-    inserted_at: Instant,
-}
+pub mod readcache;
+pub use readcache::ReadCache;
+use readcache::SLICE;
 
 /// Evict cached File handles for these paths so the underlying `Arc<File>` is
 /// dropped and the kernel reclaims the blocks of a just-unlinked file.
@@ -393,15 +378,13 @@ pub(crate) fn fail_sync_of(path: PathBuf) {
 // A one-off shape; naming it would add an alias that nothing else uses.
 #[allow(clippy::type_complexity)]
 pub struct DiskManager {
-    read_cache: Mutex<LruCache<CacheKey, CacheEntry>>,
+    /// What `read_block` answers from: the process's own in production,
+    /// shared by every engine (`with_cache`), a private one otherwise.
+    cache: Arc<ReadCache>,
     /// Files written and not yet synced, per torrent, with the pieces that
     /// went to each: a file that then fails to sync says which pieces it
     /// takes down with it.
     written: Arc<Mutex<HashMap<[u8; 20], HashMap<PathBuf, Vec<u32>>>>>,
-    /// Bumped after every piece write, per stripe of cache blocks. A read
-    /// that saw another value before going to disk may hold bytes the write
-    /// has since replaced, so it serves them once but does not cache them.
-    write_gen: Box<[AtomicU64]>,
     /// Asked, once per torrent, which of its files other torrents name (paths
     /// below its save path). Set by the host that knows the other torrents;
     /// without it only a hardlink protects a file.
@@ -431,26 +414,33 @@ pub struct SyncFailure {
     pub pieces: Vec<u32>,
 }
 
-const WRITE_GEN_STRIPES: usize = 256;
-
-fn gen_stripe(key: &CacheKey) -> usize {
-    let mut h = [0u8; 8];
-    h.copy_from_slice(&key.info_hash[..8]);
-    (u64::from_le_bytes(h) ^ (key.block_start / CACHE_BLOCK_SIZE)) as usize % WRITE_GEN_STRIPES
-}
-
 impl DiskManager {
     /// `max_open_files` is not used: descriptors live in the process-wide
     /// cache (`fd_cache`), fixed at 10 000. The per-manager pool this sized
     /// was never read, and a setting that looks like it acts is worse than
     /// none.
-    pub fn new(_max_open_files: usize) -> Self {
+    pub fn new(max_open_files: usize) -> Self {
+        Self::with_cache(
+            max_open_files,
+            Arc::new(ReadCache::new(
+                readcache::DEFAULT_MB << 20,
+                readcache::DEFAULT_SHARDS,
+            )),
+        )
+    }
+
+    /// Serving through `cache`, which other managers may share.
+    pub fn with_cache(_max_open_files: usize, cache: Arc<ReadCache>) -> Self {
         Self {
-            read_cache: Mutex::new(LruCache::new(NonZeroUsize::new(CACHE_MAX_ENTRIES).unwrap())),
+            cache,
             written: Arc::new(Mutex::new(HashMap::new())),
-            write_gen: (0..WRITE_GEN_STRIPES).map(|_| AtomicU64::new(0)).collect(),
             claim_probe: OnceLock::new(),
         }
+    }
+
+    /// The cache `read_block` answers from.
+    pub fn read_cache(&self) -> &Arc<ReadCache> {
+        &self.cache
     }
 
     /// Say how to find the files another torrent names. Once; later calls are
@@ -526,8 +516,11 @@ impl DiskManager {
         report
     }
 
-    /// Read a block from disk for a torrent piece request.
-    /// 128KB LRU block cache, TTL 60s — 1 miss covers 7 subsequent 16KB block requests.
+    /// Read a block for a peer's request, through the read cache: the 128 KiB
+    /// slice around it is read once and kept a minute (`readcache`), so the
+    /// next seven 16 KiB requests of that slice come out of memory. Requests
+    /// for a slice that is being read wait on that read rather than start
+    /// their own. The answer shares the slice's memory: no copy.
     pub async fn read_block(
         &self,
         torrent: &TorrentState,
@@ -537,108 +530,89 @@ impl DiskManager {
     ) -> Result<Bytes, String> {
         let piece_size = torrent.meta.piece_length as u64;
         let abs_start = piece as u64 * piece_size + offset as u64;
-        let block_start = (abs_start / CACHE_BLOCK_SIZE) * CACHE_BLOCK_SIZE;
-        let offset_in_block = (abs_start - block_start) as usize;
+        let slice_start = (abs_start / SLICE) * SLICE;
+        let at = (abs_start - slice_start) as usize;
+        let end = at + length as usize;
 
-        // Bypass: request spans two cache blocks or exceeds block size.
-        if (length as u64) > CACHE_BLOCK_SIZE
-            || (offset_in_block + length as usize) > CACHE_BLOCK_SIZE as usize
-        {
-            DISK_CACHE_BYPASS.fetch_add(1, Ordering::Relaxed);
+        // A request across two slices, or larger than one: read alone.
+        if (length as u64) > SLICE || end > SLICE as usize {
+            readcache::BYPASS.fetch_add(1, Ordering::Relaxed);
             return read_block_direct(torrent, piece, offset, length).await;
         }
 
-        let key = CacheKey {
+        let key = readcache::Key {
             info_hash: torrent.info_hash,
-            block_start,
+            start: slice_start,
         };
-
-        {
-            let mut cache = self.read_cache.lock();
-            if let Some(entry) = cache.get(&key) {
-                if entry.inserted_at.elapsed() < CACHE_TTL {
-                    DISK_CACHE_HIT.fetch_add(1, Ordering::Relaxed);
-                    let data = entry.data.clone();
-                    drop(cache);
-                    let end = offset_in_block + length as usize;
-                    if end > data.len() {
-                        return Err(format!(
-                            "cached block too short: {}..{} vs {}",
-                            offset_in_block,
-                            end,
-                            data.len()
-                        ));
-                    }
-                    return Ok(Bytes::copy_from_slice(&data[offset_in_block..end]));
-                } else {
-                    DISK_CACHE_STALE.fetch_add(1, Ordering::Relaxed);
-                    cache.pop(&key);
-                }
-            }
-        }
-
-        DISK_CACHE_MISS.fetch_add(1, Ordering::Relaxed);
-        let stripe = gen_stripe(&key);
-        let seen = self.write_gen[stripe].load(Ordering::SeqCst);
-
-        let block_end = (block_start + CACHE_BLOCK_SIZE).min(torrent.meta.total_size);
-        // A block past the end must not wrap the subtraction into a huge read.
-        let block_len = match block_end.checked_sub(block_start) {
-            Some(n) => n as u32,
-            None => {
+        let cut = |slice: &Bytes| {
+            if end > slice.len() {
                 return Err(format!(
-                    "block start {} past end {}",
-                    block_start, block_end
-                ))
+                    "short slice: need {}..{} got {}",
+                    at,
+                    end,
+                    slice.len()
+                ));
             }
+            Ok(slice.slice(at..end))
         };
-        let block_piece = (block_start / piece_size) as u32;
-        let block_offset_in_piece = (block_start % piece_size) as u32;
-
-        let block_bytes =
-            match read_range(torrent, block_piece, block_offset_in_piece, block_len).await {
-                Ok(b) => b,
-                // The 128 KB window around the request may reach into sectors the
-                // request does not need: ask for the request alone before blaming
-                // anything, and blame only what it spans.
-                Err(first) if first.unreadable => {
-                    return match read_range(torrent, piece, offset, length).await {
-                        Ok(b) => Ok(b),
-                        Err(e) => Err(give_up_on(torrent, piece, offset, length, e)),
-                    };
-                }
-                Err(e) => return Err(give_up_on(torrent, piece, offset, length, e)),
-            };
-
-        let end = offset_in_block + length as usize;
-        if end > block_bytes.len() {
-            return Err(format!(
-                "short block read: need {}..{} got {}",
-                offset_in_block,
-                end,
-                block_bytes.len()
-            ));
-        }
-        let result = Bytes::copy_from_slice(&block_bytes[offset_in_block..end]);
-
-        let block_vec: Vec<u8> = block_bytes.to_vec();
-        {
-            let mut cache = self.read_cache.lock();
-            // Checked under the cache lock, which the write takes after its
-            // bump: either this put lands first and the write pops it, or the
-            // write came first and this read may predate it.
-            if self.write_gen[stripe].load(Ordering::SeqCst) == seen {
-                cache.put(
-                    key,
-                    CacheEntry {
-                        data: Arc::new(block_vec),
-                        inserted_at: Instant::now(),
-                    },
-                );
-            }
+        if let Some(slice) = self.cache.get(&key) {
+            return cut(&slice);
         }
 
-        Ok(result)
+        let guard = self.cache.flight(key);
+        let mut ran = false;
+        let read = guard
+            .flight
+            .get_or_init(|| {
+                ran = true;
+                self.read_slice(torrent, key)
+            })
+            .await
+            .clone();
+        drop(guard);
+        if !ran {
+            readcache::JOINED.fetch_add(1, Ordering::Relaxed);
+        }
+        match read {
+            Ok(slice) => cut(&slice),
+            // The slice reaches into sectors this request may not need: ask
+            // for the request alone before blaming anything, and blame only
+            // what it spans. Every request waiting on the slice does this for
+            // its own part -- there is no slice to share them out of.
+            Err(f) if f.unreadable => match read_range(torrent, piece, offset, length).await {
+                Ok(b) => Ok(b),
+                Err(e) => Err(give_up_on(torrent, piece, offset, length, e)),
+            },
+            Err(f) => Err(give_up_on(torrent, piece, offset, length, f)),
+        }
+    }
+
+    /// One slice from disk, kept unless a write went by while it was read.
+    async fn read_slice(
+        &self,
+        torrent: &TorrentState,
+        key: readcache::Key,
+    ) -> Result<Bytes, ReadFailure> {
+        readcache::MISS.fetch_add(1, Ordering::Relaxed);
+        let seen = self.cache.generation(&key);
+        let piece_size = torrent.meta.piece_length as u64;
+        let slice_end = (key.start + SLICE).min(torrent.meta.total_size);
+        // A slice past the end must not wrap the subtraction into a huge read.
+        let Some(len) = slice_end.checked_sub(key.start) else {
+            return Err(ReadFailure {
+                missing: false,
+                unreadable: false,
+                msg: format!("slice start {} past end {}", key.start, slice_end),
+            });
+        };
+        // Lossless: `start` is inside the torrent, so its piece is one of the
+        // torrent's (a u32 on the wire), its offset is below a piece length
+        // (a u32 in the metainfo) and `len` is at most SLICE.
+        let piece = (key.start / piece_size) as u32;
+        let in_piece = (key.start % piece_size) as u32;
+        let slice = read_range(torrent, piece, in_piece, len as u32).await?;
+        self.cache.put(key, slice.clone(), seen);
+        Ok(slice)
     }
 
     /// Write a complete piece to disk and verify SHA1.
@@ -661,8 +635,9 @@ impl DiskManager {
         let piece_size = torrent.meta.piece_length as u64;
         let piece_start = piece as u64 * piece_size;
         let piece_end = piece_start + data.len() as u64;
-        let first_block = (piece_start / CACHE_BLOCK_SIZE) * CACHE_BLOCK_SIZE;
-        self.invalidate(torrent.info_hash, first_block, piece_end);
+        let first_block = (piece_start / SLICE) * SLICE;
+        self.cache
+            .invalidate(torrent.info_hash, first_block, piece_end);
 
         let ops = torrent.meta.map_block(piece, 0, data.len() as u32);
         let save_path = torrent.save_path.read().clone();
@@ -900,8 +875,8 @@ impl DiskManager {
             };
             for (rel, offset, len) in &undone {
                 torrent.unguard_file(rel);
-                let from = (offset / CACHE_BLOCK_SIZE) * CACHE_BLOCK_SIZE;
-                self.invalidate(torrent.info_hash, from, offset + len);
+                let from = (offset / SLICE) * SLICE;
+                self.cache.invalidate(torrent.info_hash, from, offset + len);
             }
             // Settled only once a piece went down into the new file; a write
             // that failed leaves it to the next piece.
@@ -924,18 +899,10 @@ impl DiskManager {
         // Again once the bytes are down: a read that went to disk while the
         // write was under way may have read the old bytes, and must not leave
         // them cached over the piece just written.
-        for key in blocks(torrent.info_hash, first_block, piece_end) {
-            self.write_gen[gen_stripe(&key)].fetch_add(1, Ordering::SeqCst);
-        }
-        self.invalidate(torrent.info_hash, first_block, piece_end);
+        self.cache.bump(torrent.info_hash, first_block, piece_end);
+        self.cache
+            .invalidate(torrent.info_hash, first_block, piece_end);
         outcome
-    }
-
-    fn invalidate(&self, info_hash: [u8; 20], first_block: u64, end: u64) {
-        let mut cache = self.read_cache.lock();
-        for key in blocks(info_hash, first_block, end) {
-            cache.pop(&key);
-        }
     }
 
     /// Resolve a piece block to a single backing file handle + byte offset for
@@ -1130,16 +1097,6 @@ fn holds_bytes(path: &std::path::Path, offset: u64, want: &[u8]) -> std::io::Res
     Ok(Some(true))
 }
 
-/// The cache blocks from `first_block` up to `end`.
-fn blocks(info_hash: [u8; 20], first_block: u64, end: u64) -> impl Iterator<Item = CacheKey> {
-    (first_block..end)
-        .step_by(CACHE_BLOCK_SIZE as usize)
-        .map(move |block_start| CacheKey {
-            info_hash,
-            block_start,
-        })
-}
-
 /// Stream a piece block straight from the page cache to a plaintext TCP peer
 /// via `sendfile(2)`, skipping the userspace copies (read cache -> Bytes ->
 /// codec buffer -> kernel) the buffered path pays. Writes the 13-byte piece
@@ -1171,23 +1128,49 @@ pub fn path_is_zfs(_path: &std::path::Path) -> bool {
     false
 }
 
-/// Non-blocking page-cache residency probe (preadv2 RWF_NOWAIT, 1 byte). True
-/// if the block's first page is already cached -> safe to sendfile without
-/// blocking the reactor. Cold -> caller uses the spawn_blocking buffered path.
+/// Whether a block is in the page cache, asked without blocking: preadv2 with
+/// RWF_NOWAIT of one byte, on the block's first page and on its last. True ->
+/// safe to sendfile from the reactor. Cold -> the caller takes the buffered
+/// path, whose read runs on the blocking pool.
+///
+/// The first page alone was asked before. A block whose tail was not cached
+/// passed, and sendfile then waited on the disk inside an async worker,
+/// stalling every peer on that worker. The middle pages are not asked: a
+/// 16 KiB block is four pages, readahead brings them in order, and a block
+/// with both ends cached and a hole between them is not worth a syscall per
+/// page on every request.
 #[cfg(unix)]
-pub fn is_block_resident(file: &File, offset: u64) -> bool {
+pub fn is_block_resident(file: &File, offset: u64, len: u64) -> bool {
+    let last = offset.saturating_add(len.max(1) - 1);
+    page_resident(file, offset) && (last / PAGE == offset / PAGE || page_resident(file, last))
+}
+
+/// The smallest page size Linux runs with. On a kernel with larger pages two
+/// offsets this calls apart may share a page: the probe is then asked twice,
+/// never skipped.
+#[cfg(unix)]
+const PAGE: u64 = 4096;
+
+#[cfg(unix)]
+fn page_resident(file: &File, offset: u64) -> bool {
     use std::os::unix::io::AsRawFd;
     let mut b = [0u8; 1];
     let iov = libc::iovec {
         iov_base: b.as_mut_ptr() as *mut libc::c_void,
         iov_len: 1,
     };
+    let Ok(at) = libc::off_t::try_from(offset) else {
+        return false;
+    };
     // RWF_NOWAIT (0x8): returns EAGAIN instead of blocking if not in page cache.
-    let n = unsafe { libc::preadv2(file.as_raw_fd(), &iov, 1, offset as libc::off_t, 0x8) };
+    // SAFETY: a valid open descriptor, and one iovec over `b`, a live 1-byte
+    // buffer the call may write into.
+    let n = unsafe { libc::preadv2(file.as_raw_fd(), &iov, 1, at, 0x8) };
     n == 1
 }
+
 #[cfg(not(unix))]
-pub fn is_block_resident(_file: &File, _offset: u64) -> bool {
+pub fn is_block_resident(_file: &File, _offset: u64, _len: u64) -> bool {
     false
 }
 
@@ -1290,6 +1273,7 @@ async fn read_block_direct(
 }
 
 /// Why a read for a peer failed.
+#[derive(Clone, Debug)]
 struct ReadFailure {
     /// A backing file is gone (ENOENT): the data is gone for good.
     missing: bool,
@@ -1409,10 +1393,18 @@ fn serve_read(
     buf: &mut [u8],
     offset: u64,
 ) -> std::io::Result<()> {
+    *served_reads().lock().entry(path.to_path_buf()).or_default() += 1;
     if read_failures().lock().contains(path) {
         return Err(std::io::Error::from_raw_os_error(5));
     }
     pread_exact(file, buf, offset)
+}
+
+/// How many served reads went to each path's disk.
+#[cfg(test)]
+fn served_reads() -> &'static Mutex<HashMap<PathBuf, usize>> {
+    static R: OnceLock<Mutex<HashMap<PathBuf, usize>>> = OnceLock::new();
+    R.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 #[cfg(test)]
@@ -2083,6 +2075,234 @@ mod disk_tests {
         let second = f.disk.read_block(&f.torrent, 0, 0, 512).await.unwrap();
         assert_eq!(first, second);
         assert_eq!(&first[..], &content[..512]);
+    }
+
+    /// ⭐ The trade-off of answering without a copy: the 16 KiB answer is a
+    /// view into the 128 KiB slice, so while the answer is alive the whole
+    /// slice is, even if the cache has let it go. How long is "alive"? Until
+    /// the codec writes the message into the socket buffer, which copies it:
+    /// `framed.send` encodes at once. This pins both ends.
+    #[tokio::test]
+    async fn an_answer_shares_its_slice_until_the_codec_copies_it_out() {
+        use tokio_util::codec::Encoder;
+        let content: Vec<u8> = (0..256 * 1024).map(|i| (i % 251) as u8).collect();
+        let f = fixture("share", &content);
+        assert!(f
+            .disk
+            .write_piece(&f.torrent, 0, content.clone())
+            .await
+            .unwrap());
+        let key = readcache::Key {
+            info_hash: f.torrent.info_hash,
+            start: 0,
+        };
+
+        let answer = f
+            .disk
+            .read_block(&f.torrent, 0, 16384, 16384)
+            .await
+            .unwrap();
+        assert_eq!(&answer[..], &content[16384..32768]);
+        let slice = f.disk.read_cache().holds(&key).expect("the slice is kept");
+        assert_eq!(
+            answer.as_ptr(),
+            slice[16384..].as_ptr(),
+            "no copy: the answer points into the slice"
+        );
+        drop(slice);
+        assert!(
+            !f.disk.read_cache().holds_alone(&key),
+            "the answer holds it too"
+        );
+
+        // The cache lets it go; the answer still reads right, and is now the
+        // only thing keeping 128 KiB alive for its 16. This is the cost.
+        let kept = answer.clone();
+        f.disk.read_cache().set_budget(0);
+        assert_eq!(f.disk.read_cache().bytes(), 0);
+        assert_eq!(&kept[..], &content[16384..32768]);
+        drop(kept);
+        f.disk.read_cache().set_budget(readcache::DEFAULT_MB << 20);
+
+        // And the codec ends it: the message is copied into the write
+        // buffer and the answer dropped with it.
+        let again = f.disk.read_block(&f.torrent, 0, 0, 16384).await.unwrap();
+        drop(answer);
+        let mut out = bytes::BytesMut::new();
+        crate::wire::codec::BtCodec::new()
+            .encode(
+                crate::peer::message::Message::Piece {
+                    index: 0,
+                    begin: 0,
+                    data: again,
+                },
+                &mut out,
+            )
+            .unwrap();
+        assert_eq!(&out[13..], &content[..16384]);
+        assert!(
+            f.disk.read_cache().holds_alone(&key),
+            "once encoded, nothing but the cache refers to the slice"
+        );
+    }
+
+    /// ⭐ Eight requests for the eight 16 KiB parts of one cold slice, all at once:
+    /// one disk read, and each gets its own part. Holding the descriptor
+    /// cache parks the first read until the others are waiting on it.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn requests_for_one_cold_slice_share_one_disk_read() {
+        let content: Vec<u8> = (0..256 * 1024).map(|i| (i % 251) as u8).collect();
+        let f = fixture("oneread", &content);
+        assert!(f
+            .disk
+            .write_piece(&f.torrent, 0, content.clone())
+            .await
+            .unwrap());
+        let path = f.root.join("data").join("payload.bin");
+        served_reads().lock().remove(&path);
+
+        let held = fd_cache().lock();
+        let tasks: Vec<_> = (0..8u32)
+            .map(|i| {
+                let (disk, t) = (f.disk.clone(), f.torrent.clone());
+                tokio::spawn(async move { (i, disk.read_block(&t, 0, i * 16384, 16384).await) })
+            })
+            .collect();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(held);
+        for t in tasks {
+            let (i, got) = t.await.unwrap();
+            let at = (i * 16384) as usize;
+            assert_eq!(&got.unwrap()[..], &content[at..at + 16384], "part {i}");
+        }
+        assert_eq!(
+            served_reads().lock().get(&path),
+            Some(&1),
+            "one read for the slice"
+        );
+
+        // The next slice is another read; the first is answered from memory.
+        f.disk
+            .read_block(&f.torrent, 0, 131072, 16384)
+            .await
+            .unwrap();
+        f.disk.read_block(&f.torrent, 0, 0, 16384).await.unwrap();
+        assert_eq!(served_reads().lock().get(&path), Some(&2));
+    }
+
+    /// The request running a slice's read can be dropped (its peer went
+    /// away): one waiting on it then reads the slice itself, never hangs.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_waiter_takes_over_the_read_of_a_dropped_request() {
+        let content: Vec<u8> = (0..128 * 1024).map(|i| (i % 251) as u8).collect();
+        let f = fixture("takeover", &content);
+        assert!(f
+            .disk
+            .write_piece(&f.torrent, 0, content.clone())
+            .await
+            .unwrap());
+        // Cold: what the write left cached is dropped.
+        f.disk.read_cache().set_budget(0);
+        f.disk.read_cache().set_budget(readcache::DEFAULT_MB << 20);
+
+        let held = fd_cache().lock();
+        let (disk, t) = (f.disk.clone(), f.torrent.clone());
+        let first = tokio::spawn(async move { disk.read_block(&t, 0, 0, 16384).await });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let (disk, t) = (f.disk.clone(), f.torrent.clone());
+        let second = tokio::spawn(async move { disk.read_block(&t, 0, 16384, 16384).await });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        first.abort();
+        drop(held);
+        let got = tokio::time::timeout(Duration::from_secs(5), second)
+            .await
+            .expect("the waiter must not hang")
+            .unwrap()
+            .unwrap();
+        assert_eq!(&got[..], &content[16384..32768]);
+    }
+
+    /// `read_cache_mb = 0`: no cache, every request read alone, all correct.
+    #[tokio::test]
+    async fn with_no_budget_every_request_still_reads_right() {
+        let content: Vec<u8> = (0..128 * 1024).map(|i| (i % 251) as u8).collect();
+        let f = fixture("nobudget", &content);
+        assert!(f
+            .disk
+            .write_piece(&f.torrent, 0, content.clone())
+            .await
+            .unwrap());
+        f.disk.read_cache().set_budget(0);
+        for i in 0..8u32 {
+            let at = (i * 16384) as usize;
+            let got = f
+                .disk
+                .read_block(&f.torrent, 0, i * 16384, 16384)
+                .await
+                .unwrap();
+            assert_eq!(&got[..], &content[at..at + 16384]);
+        }
+        assert_eq!(f.disk.read_cache().slices(), 0);
+    }
+
+    /// ⭐ A block whose first page is cached and whose last is not is cold:
+    /// sendfile on it would wait on the disk inside an async worker. The old
+    /// probe asked the first page only and let it through. Linux only (the
+    /// probe is preadv2); the tail is dropped from the page cache with
+    /// posix_fadvise, which a filesystem may ignore (tmpfs): then this says
+    /// so and checks nothing.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_block_with_a_cold_tail_is_not_resident() {
+        use std::io::Write;
+        use std::os::unix::io::AsRawFd;
+        let dir = std::env::temp_dir().join(format!("typhon-resident-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("f.bin");
+        let mut f = File::create(&path).unwrap();
+        f.write_all(&vec![7u8; 1 << 20]).unwrap();
+        f.sync_all().unwrap();
+        drop(f);
+        let f = File::open(&path).unwrap();
+        // Drop the whole file from the page cache (a range of pages written
+        // a moment ago can refuse to go; the whole file does not), then read
+        // the first half back: head cached, tail cold.
+        // SAFETY: a valid open descriptor, and plain integers.
+        let rc = unsafe { libc::posix_fadvise(f.as_raw_fd(), 0, 0, libc::POSIX_FADV_DONTNEED) };
+        assert_eq!(rc, 0);
+        // No readahead on this descriptor, or reading the head brings the
+        // tail in behind it.
+        // SAFETY: as above.
+        let rc = unsafe { libc::posix_fadvise(f.as_raw_fd(), 0, 0, libc::POSIX_FADV_RANDOM) };
+        assert_eq!(rc, 0);
+        let mut b = vec![0u8; 32 << 10];
+        pread_exact(&f, &mut b, 0).unwrap();
+        let skip = |why: &str| {
+            eprintln!("{why}: nothing checked");
+            let _ = std::fs::remove_dir_all(&dir);
+        };
+        if !page_resident(&f, 0) {
+            // overlayfs, for one, answers RWF_NOWAIT with EOPNOTSUPP: every
+            // block is then cold and served by the buffered path.
+            return skip("this filesystem does not answer RWF_NOWAIT");
+        }
+        // Readahead may have brought the tail in with the head.
+        if page_resident(&f, 36 << 10) || page_resident(&f, 900 << 10) {
+            return skip("the file stayed cached past what was read");
+        }
+        assert!(
+            is_block_resident(&f, 0, 16 << 10),
+            "a block all in the head"
+        );
+        // 24..40 KiB: head page cached, last page cold. The old probe, first
+        // page only, said yes.
+        let first_page_only = page_resident(&f, 24 << 10);
+        let both_ends = is_block_resident(&f, 24 << 10, 16 << 10);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(first_page_only, "the head page is cached");
+        assert!(!both_ends, "the tail is cold: not resident");
     }
 
     /// ⭐ Writing a piece must INVALIDATE the blocks cached over it, or a

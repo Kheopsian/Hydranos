@@ -12254,7 +12254,11 @@ async fn post_settings(
         }
         // Refused at startup, so refused here: the next start would fail.
         Ok(c) => {
-            if let Some(e) = c.daemon.recheck_limits_error() {
+            if let Some(e) = c
+                .daemon
+                .recheck_limits_error()
+                .or_else(|| c.daemon.read_cache_error())
+            {
                 return (
                     StatusCode::BAD_REQUEST,
                     Json(serde_json::json!({"error": e})),
@@ -12542,7 +12546,12 @@ const LIVE_SESSION_KEYS: &[&str] = &[
 
 /// The `[daemon]` keys a save applies without a restart (`apply_config`
 /// carries them to the engine).
-const LIVE_DAEMON_KEYS: &[&str] = &["recheck_torrents", "recheck_per_disk", "recheck_pieces"];
+const LIVE_DAEMON_KEYS: &[&str] = &[
+    "recheck_torrents",
+    "recheck_per_disk",
+    "recheck_pieces",
+    "read_cache_mb",
+];
 
 /// Put the stored client-wide caps back on the engines. Called once at boot.
 pub fn restore_client_rate_limits(state: &AppState) {
@@ -27474,6 +27483,40 @@ mod write_path_tests {
             "{file}"
         );
         assert_eq!(s.state.cfg().daemon.recheck_per_disk, Some(0));
+    }
+
+    /// `read_cache_mb` from the settings tab: absent from the file, created;
+    /// out of range, refused and not written; in range, live.
+    #[tokio::test]
+    async fn settings_create_read_cache_mb_and_refuse_one_out_of_range() {
+        let s = state_from("set-readcache", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+        let post = |value: serde_json::Value| {
+            super::post_settings(
+                State(s.state.clone()),
+                RawQuery(None),
+                keyed(KEY),
+                serde_json::json!({"changes":[{"section":"daemon","key":"read_cache_mb","value":value}]})
+                    .to_string(),
+            )
+        };
+        for bad in [serde_json::json!(-1), serde_json::json!(65537)] {
+            let resp = post(bad.clone()).await;
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{bad} accepted");
+        }
+        let file = std::fs::read_to_string(&s.state.config_path).unwrap();
+        assert!(
+            !file.contains("read_cache_mb"),
+            "a refused value was written: {file}"
+        );
+
+        let resp = post(serde_json::json!(512)).await;
+        assert!(resp.status().is_success(), "got {:?}", resp.status());
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["restart_required"], false, "applied live: {v}");
+        assert_eq!(s.state.cfg().daemon.read_cache_bytes(), 512 << 20);
     }
 
     /// A settings document that is not valid TOML is refused rather than
