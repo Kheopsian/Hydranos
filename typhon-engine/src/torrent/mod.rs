@@ -4255,7 +4255,7 @@ impl TorrentManager {
         } else {
             FileCheck::Torrent
         };
-        {
+        let (carried, gen) = {
             // Under the lock a check ends under (it lets go of `rechecking`
             // and its scope there): the one under way, if any, is read and
             // taken over in one step. Read before the lock, a check ending
@@ -4284,26 +4284,28 @@ impl TorrentManager {
             // Known from now: the Content tab tells the file a waiting check
             // is for from the others.
             t.begin_recheck_progress_of(asked);
-        }
-        // Owed until its verdict, and written down now: the check may wait
-        // hours behind the others, and a restart in that wait must not find
-        // a record that says only "nothing held" (`recheck_pending`). Only
-        // when it was not owed already: a start or an adoption that runs a
-        // check left pending finds the mark in the record it just read, and
-        // that check is `carried`. Written off this task and in batches
-        // (`queue_mark_write`). Set BEFORE the generation is noted: a stop
-        // landing in between then clears the mark it finds, where set after
-        // it the mark outlived the check the user stopped and the next start
-        // ran it again.
-        // A check of one file is not written down: a restart in its wait
-        // loses it with nothing changed, the pieces it had not judged yet.
-        let carried = scope.is_none() && t.recheck_owed.swap(true, Ordering::SeqCst);
+            // Owed until its verdict, and noted with the generation in the
+            // same step: a stop (`cancel_check`) takes this lock, so it lands
+            // wholly before (this check then starts from the generation it
+            // left, `rechecking` set anew) or wholly after (it calls this
+            // check off and clears the mark). Read outside the lock, a stop
+            // in between was ignored and its `rechecking` clear let a second
+            // check start beside this one. A check of one file is not owed:
+            // a restart in its wait loses it with nothing changed.
+            let carried = scope.is_none() && t.recheck_owed.swap(true, Ordering::SeqCst);
+            // Noted now: a stop asked while this check waits for its disk, or
+            // while it reads, calls it off (`cancel_check`).
+            (carried, t.check_gen.load(Ordering::SeqCst))
+        };
+        // Written down now: the check may wait hours behind the others, and a
+        // restart in that wait must not find a record that says only "nothing
+        // held" (`recheck_pending`). Only when it was not owed already: a
+        // start or an adoption that runs a check left pending finds the mark
+        // in the record it just read, and that check is `carried`. Written off
+        // this task and in batches (`queue_mark_write`), outside the lock.
         if scope.is_none() && !carried {
             self.queue_mark_write(*info_hash);
         }
-        // Noted now: a stop asked while this check waits for its disk, or
-        // while it reads, calls it off (`cancel_check`).
-        let gen = t.check_gen.load(Ordering::SeqCst);
         // The fault the torrent shows is cleared by the verdict
         // (`run_recheck`), not here: a check a stop calls off must leave it,
         // as it leaves the pieces.
