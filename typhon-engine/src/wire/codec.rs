@@ -99,6 +99,18 @@ impl Encoder<Message> for BtCodec {
         if dst.is_empty() && dst.capacity() > WRITE_BUF_HIGH_WATER {
             *dst = BytesMut::with_capacity(WRITE_BUF_TARGET);
         }
+        // A Piece goes straight into the write buffer: through
+        // `encode_payload` its 16 KiB were copied once into a growing Vec,
+        // then again from there. Each served block is now copied once.
+        if let Message::Piece { index, begin, data } = &msg {
+            dst.reserve(4 + 9 + data.len());
+            dst.put_u32(9 + data.len() as u32);
+            dst.put_u8(crate::peer::message::MSG_PIECE);
+            dst.put_u32(*index);
+            dst.put_u32(*begin);
+            dst.extend_from_slice(data);
+            return Ok(());
+        }
         let payload = msg.encode_payload();
         dst.reserve(4 + payload.len());
         dst.put_u32(payload.len() as u32);
@@ -110,6 +122,32 @@ impl Encoder<Message> for BtCodec {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A Piece written straight into the buffer is byte for byte what the
+    /// general path wrote, and reads back as the same message.
+    #[test]
+    fn a_piece_encodes_as_it_always_did() {
+        let msg = Message::Piece {
+            index: 7,
+            begin: 16384,
+            data: bytes::Bytes::from((0..16384).map(|i| (i % 251) as u8).collect::<Vec<_>>()),
+        };
+        let payload = msg.encode_payload();
+        let mut want = BytesMut::new();
+        want.put_u32(payload.len() as u32);
+        want.extend_from_slice(&payload);
+
+        let mut codec = BtCodec::new();
+        let mut got = BytesMut::new();
+        codec.encode(msg, &mut got).unwrap();
+        assert_eq!(got, want);
+        match codec.decode(&mut got).unwrap() {
+            Some(Message::Piece { index, begin, data }) => {
+                assert_eq!((index, begin, data.len()), (7, 16384, 16384));
+            }
+            other => panic!("decoded {other:?}"),
+        }
+    }
 
     /// The regression itself: a buffer that ratcheted to 128 KiB and then
     /// drained must not keep that capacity. Remove the swap in `decode` and

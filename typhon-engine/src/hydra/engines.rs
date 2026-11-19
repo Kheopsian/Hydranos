@@ -174,7 +174,12 @@ impl EngineHost {
             let data_dir = config_dir.join(id);
             let resume_dir = data_dir.join("resume");
 
-            let disk = Arc::new(DiskManager::new(session.file_pool_size()));
+            // One read cache for every engine: one memory budget for the
+            // node (`[daemon] read_cache_mb`), not one per tunnel.
+            let disk = Arc::new(DiskManager::with_cache(
+                session.file_pool_size(),
+                typhon_engine::disk::ReadCache::process(),
+            ));
             let manager = Arc::new(TorrentManager::new(
                 data_dir.to_string_lossy().into_owned(),
                 resume_dir.to_string_lossy().into_owned(),
@@ -341,6 +346,7 @@ impl EngineHost {
     pub fn apply_config(&self, config: &Config) -> usize {
         // One set for the whole daemon: two engines can read the same disk.
         config.daemon.apply_recheck_limits();
+        config.daemon.apply_read_cache();
         let mut n = 0;
         for local in config.local_engines() {
             if let Some(e) = self.get(&local.id) {

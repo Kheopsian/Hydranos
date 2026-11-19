@@ -133,6 +133,12 @@ pub struct Daemon {
     /// 0 to 64. Applied live, from the next check on.
     #[serde(default)]
     pub recheck_pieces: Option<i64>,
+    /// Memory for the slices read to serve peers, in MiB, one budget for
+    /// every engine of the daemon. 0 = no cache: every request is read from
+    /// disk. Absent = 256. 0 to 65536. Applied live: a smaller value drops
+    /// the coldest slices at once.
+    #[serde(default)]
+    pub read_cache_mb: Option<i64>,
 }
 
 /// The echo service asked when `[daemon] exit_probe_url` is empty.
@@ -170,6 +176,33 @@ impl Daemon {
             n(self.recheck_per_disk),
             n(self.recheck_pieces),
         );
+    }
+
+    /// Why `read_cache_mb` is refused: one outside 0 to 65536.
+    pub fn read_cache_error(&self) -> Option<String> {
+        let max = typhon_engine::disk::readcache::MAX_MB as i64;
+        self.read_cache_mb
+            .filter(|v| !(0..=max).contains(v))
+            .map(|v| {
+                format!(
+                    "[daemon] read_cache_mb = {v} is out of range: 0 to {max}, or leave it out for the default"
+                )
+            })
+    }
+
+    /// The read cache budget in bytes.
+    pub fn read_cache_bytes(&self) -> u64 {
+        let mb = self
+            .read_cache_mb
+            .and_then(|v| u64::try_from(v).ok())
+            .unwrap_or(typhon_engine::disk::readcache::DEFAULT_MB)
+            .min(typhon_engine::disk::readcache::MAX_MB);
+        mb << 20
+    }
+
+    /// Put the read cache budget in force, now.
+    pub fn apply_read_cache(&self) {
+        typhon_engine::disk::ReadCache::process().set_budget(self.read_cache_bytes());
     }
 
     pub fn exit_probe_enabled(&self) -> bool {
@@ -922,6 +955,9 @@ impl Config {
         if let Some(e) = cfg.daemon.recheck_limits_error() {
             anyhow::bail!("{}: {e}", path.display());
         }
+        if let Some(e) = cfg.daemon.read_cache_error() {
+            anyhow::bail!("{}: {e}", path.display());
+        }
         for (name, s) in [("race", &cfg.race), ("hoard", &cfg.hoard)] {
             if s.max_uploads >= 0 && !s.choking {
                 tracing::warn!(
@@ -1103,6 +1139,27 @@ mod tests {
             cfg.hoard.max_dials_per_sec, 50.0,
             "absent [hoard] must bound to 50"
         );
+    }
+
+    /// `read_cache_mb`: absent is 256 MiB, 0 is no cache, anything out of
+    /// 0 to 65536 is refused at startup with the key and the range.
+    #[test]
+    fn read_cache_mb_is_bounded_and_defaults_to_256() {
+        let absent = Config::load(&write_tmp("rc-absent", "[daemon]\n")).unwrap();
+        assert_eq!(absent.daemon.read_cache_bytes(), 256 << 20);
+        let off = Config::load(&write_tmp("rc-off", "[daemon]\nread_cache_mb = 0\n")).unwrap();
+        assert_eq!(off.daemon.read_cache_bytes(), 0);
+        let set = Config::load(&write_tmp("rc-set", "[daemon]\nread_cache_mb = 1024\n")).unwrap();
+        assert_eq!(set.daemon.read_cache_bytes(), 1 << 30);
+        for bad in ["read_cache_mb = -1", "read_cache_mb = 65537"] {
+            let err = Config::load(&write_tmp("rc-bad", &format!("[daemon]\n{bad}\n")))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("read_cache_mb") && err.contains("0 to 65536"),
+                "{bad}: {err}"
+            );
+        }
     }
 
     /// The recheck limits: absent is the default, a value in range is kept

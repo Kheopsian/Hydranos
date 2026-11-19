@@ -73,6 +73,13 @@ create_torrent_folder = false
 # recheck_torrents = 0
 # recheck_per_disk = 0
 # recheck_pieces = 0
+# Memory for the data read to serve peers, in MiB, one budget for every
+# engine. A peer asks for 16 KiB at a time: the 128 KiB around it is read once
+# and kept a minute, so the next requests of that slice come out of memory,
+# and requests for a slice being read wait on that read instead of reading it
+# again. 0 = no cache. Absent = 256. 0 to 65536. Applied live: a smaller value
+# frees memory at once.
+# read_cache_mb = 256
 # Interface the daemon's own requests are bound to when they go "direct" or
 # through "proxy". The engines have their own, in [race]/[hoard].
 # bind_interface = "wg0"
