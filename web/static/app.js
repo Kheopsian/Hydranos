@@ -1768,8 +1768,7 @@ function renderRaceTable() {
         tbody.innerHTML = `<tr><td colspan="${_visibleCols("race-table").length}" class="empty">No match</td></tr>`;
     } else {
         tbody.innerHTML = visible.map(t => {
-            const detailSel = selectedTorrent === t.info_hash ? ' selected' : '';
-            return `<tr class="t-row clickable${detailSel}" data-hash="${esc(t.info_hash)}" data-mode="race" data-agent="${esc(t.agent || 'local')}" onclick="handleRowClick(event,this.dataset.hash,'race')" oncontextmenu="handleRowContextMenu(event,this.dataset.hash,'race')">${renderRowCells("race-table", t)}</tr>`;
+            return `<tr class="t-row clickable" data-hash="${esc(t.info_hash)}" data-mode="race" data-agent="${esc(t.agent || 'local')}" onclick="handleRowClick(event,this.dataset.hash,'race')" oncontextmenu="handleRowContextMenu(event,this.dataset.hash,'race')">${renderRowCells("race-table", t)}</tr>`;
         }).join("");
     }
     _updateRowHighlights();
@@ -3339,8 +3338,7 @@ function renderHoardTable() {
         return;
     }
     tbody.innerHTML = visible.map(t => {
-        const detailSel = selectedHoardTorrent === t.info_hash ? " selected" : "";
-        return `<tr class="t-row clickable${detailSel}" data-hash="${esc(t.info_hash)}" data-mode="hoard" data-agent="${esc(t.agent || 'local')}" onclick="handleRowClick(event,this.dataset.hash,'hoard')" oncontextmenu="handleRowContextMenu(event,this.dataset.hash,'hoard')">${renderRowCells("hoard-table", t)}</tr>`;
+        return `<tr class="t-row clickable" data-hash="${esc(t.info_hash)}" data-mode="hoard" data-agent="${esc(t.agent || 'local')}" onclick="handleRowClick(event,this.dataset.hash,'hoard')" oncontextmenu="handleRowContextMenu(event,this.dataset.hash,'hoard')">${renderRowCells("hoard-table", t)}</tr>`;
     }).join("");
     _updateRowHighlights();
 }
@@ -3668,13 +3666,73 @@ async function updateHoardStats() {
     }
 }
 
+// The side panel can be folded to the right edge with its arrow. While folded,
+// clicking a row selects it but does not open the panel: only the arrow does.
+// Kept across reloads, since it is a layout preference.
+let _hoardDetailCollapsed = false;
+try { _hoardDetailCollapsed = localStorage.getItem("hoardDetailCollapsed") === "1"; } catch (e) {}
+
+function _hoardDetailSetWidth(px) {
+    const w = Math.max(360, Math.min(px, window.innerWidth - 80));
+    document.documentElement.style.setProperty("--hoard-detail-w", w + "px");
+    try { localStorage.setItem("hoardDetailWidth", String(Math.round(w))); } catch (e) {}
+}
+
+(function _initHoardDetailResize() {
+    try {
+        const saved = parseInt(localStorage.getItem("hoardDetailWidth") || "", 10);
+        if (saved > 0) _hoardDetailSetWidth(saved);
+    } catch (e) {}
+    const handle = document.getElementById("hoard-detail-resizer");
+    if (!handle) return;
+    handle.addEventListener("pointerdown", ev => {
+        ev.preventDefault();
+        handle.setPointerCapture(ev.pointerId);
+        handle.classList.add("dragging");
+        const move = e => _hoardDetailSetWidth(window.innerWidth - e.clientX);
+        const up = () => {
+            handle.classList.remove("dragging");
+            handle.removeEventListener("pointermove", move);
+            handle.removeEventListener("pointerup", up);
+        };
+        handle.addEventListener("pointermove", move);
+        handle.addEventListener("pointerup", up);
+    });
+})();
+
+function _syncHoardDetailChrome(hasSelection) {
+    const toggle = document.getElementById("hoard-detail-toggle");
+    const resizer = document.getElementById("hoard-detail-resizer");
+    toggle.style.display = hasSelection ? "" : "none";
+    toggle.classList.toggle("collapsed", _hoardDetailCollapsed);
+    toggle.innerHTML = _hoardDetailCollapsed ? "&lsaquo;" : "&rsaquo;";
+    resizer.style.display = hasSelection && !_hoardDetailCollapsed ? "" : "none";
+}
+
+function toggleHoardDetailCollapsed() {
+    _hoardDetailCollapsed = !_hoardDetailCollapsed;
+    try { localStorage.setItem("hoardDetailCollapsed", _hoardDetailCollapsed ? "1" : "0"); } catch (e) {}
+    if (_hoardDetailCollapsed) {
+        if (hoardDetailTimer) clearInterval(hoardDetailTimer);
+        if (detailRefreshTimer) clearInterval(detailRefreshTimer);
+        document.getElementById("hoard-detail-panel").style.display = "none";
+        document.getElementById("torrent-detail").style.display = "none";
+        _syncHoardDetailChrome(!!(selectedHoardTorrent || selectedTorrent));
+    } else {
+        if (selectedTorrent) showDetail(selectedTorrent, selectedTorrentAgent);
+        if (selectedHoardTorrent) showHoardDetail(selectedHoardTorrent, selectedHoardTorrentAgent);
+    }
+}
+
 async function showHoardDetail(infoHash, agent) {
-    loadPeerIdState(infoHash, "h-detail-peerid-state");
     selectedHoardTorrent = infoHash;
     selectedHoardTorrentAgent = agent || "local";
+    if (hoardDetailTimer) clearInterval(hoardDetailTimer);
+    _syncHoardDetailChrome(true);
+    if (_hoardDetailCollapsed) return;
+    loadPeerIdState(infoHash, "h-detail-peerid-state");
     switchHoardDetailTab("info");
     document.getElementById("hoard-detail-panel").style.display = "block";
-    if (hoardDetailTimer) clearInterval(hoardDetailTimer);
     await refreshHoardDetail();
     hoardDetailTimer = setInterval(refreshHoardDetail, 3000);
 }
@@ -3683,6 +3741,7 @@ function closeHoardDetail() {
     selectedHoardTorrent = null;
     selectedHoardTorrentAgent = "local";
     if (hoardDetailTimer) clearInterval(hoardDetailTimer);
+    _syncHoardDetailChrome(false);
     const panel = document.getElementById("hoard-detail-panel");
     if (panel.style.display === "none") return;
     panel.classList.add("closing");
@@ -5495,6 +5554,8 @@ document.addEventListener("click", e => {
         e.target.closest(".t-row") ||
         e.target.closest("#torrent-detail") ||
         e.target.closest("#hoard-detail-panel") ||
+        e.target.closest("#hoard-detail-toggle") ||
+        e.target.closest("#hoard-detail-resizer") ||
         e.target.closest(".col-menu") ||
         e.target.closest("#ctx-menu") ||
         e.target.closest("#ctx-submenu") ||

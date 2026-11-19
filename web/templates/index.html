@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Hydranos - Torrent Daemon</title>
     <link rel="icon" type="image/png" href="/static/hydra-logo.png">
-    <link rel="stylesheet" href="/static/style.css?v=1.5.25">
+    <link rel="stylesheet" href="/static/style.css?v=1.5.27">
     <!-- Before the stylesheet paints anything. app.js loads at the end of the
          body, so choosing the theme there means a dark flash on a light theme
          and a navy one on every other. Inline and tiny on purpose. -->
@@ -138,6 +138,9 @@
     </nav>
 
     <main>
+        <!-- Shared by the Race and Hoard detail panels: a drag handle and a collapse arrow on its left edge -->
+        <div id="hoard-detail-resizer" class="detail-resizer" style="display:none" title="Drag to resize"></div>
+        <button id="hoard-detail-toggle" class="detail-toggle" style="display:none" onclick="toggleHoardDetailCollapsed()" title="Hide / show the torrent panel">&rsaquo;</button>
         <!-- Overview -->
         <section id="tab-overview" class="tab-content active">
             <div class="cards">
@@ -540,7 +543,6 @@
                 </tbody>
             </table>
 
-            <!-- Hoard detail panel -->
             <div id="hoard-detail-panel" class="detail-panel" style="display:none">
                 <div class="detail-header">
                     <h3 id="h-detail-name"></h3>
@@ -1753,6 +1755,6 @@
     </div>
 
     <script src="/static/i18n.js?v=1.0.0"></script>
-    <script src="/static/app.js?v=1.6.119"></script>
+    <script src="/static/app.js?v=1.6.122"></script>
 </body>
 </html>
