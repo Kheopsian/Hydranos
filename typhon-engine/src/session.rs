@@ -341,7 +341,7 @@ pub async fn start(
         // The last stamp is the tick the torrent was last seen on: a removed
         // torrent stops being seen, and its entry goes at the next purge
         // instead of staying for the life of the process.
-        let mut last: HashMap<[u8; 20], (u64, u64, u8, usize, usize, u64)> = HashMap::new();
+        let mut last: HashMap<[u8; 20], (u64, u64, u8, usize, usize, u64, u64)> = HashMap::new();
         let mut tick: u64 = 0;
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
@@ -359,11 +359,27 @@ pub async fn start(
                 let st = t.status.load(Ordering::Relaxed);
                 let peers = t.peers_connected.load(Ordering::Relaxed);
                 let interested = t.peers_interested.load(Ordering::Relaxed);
+                // A check moves the figure the list shows: sent when it does,
+                // and once more when the check ends (the figure goes to null).
+                let checking = crate::rpc::dispatch::checking_progress(t);
+                let check_queued = checking.is_some() && t.waiting_for_check();
+                let ck = match checking {
+                    Some(_) => {
+                        1 + (u64::from(check_queued) << 1)
+                            + (u64::from(t.recheck_done.load(Ordering::Relaxed)) << 2)
+                    }
+                    None => 0,
+                };
                 let moved = match last.get_mut(&ih) {
                     Some(prev) => {
                         prev.5 = tick;
-                        let (pul, pdl, pst, pp, pi, _) = *prev;
-                        ul != pul || dl != pdl || st != pst || peers != pp || interested != pi
+                        let (pul, pdl, pst, pp, pi, _, pck) = *prev;
+                        ul != pul
+                            || dl != pdl
+                            || st != pst
+                            || peers != pp
+                            || interested != pi
+                            || ck != pck
                     }
                     None => true, // first-time entry always sent
                 };
@@ -393,8 +409,10 @@ pub async fn start(
                         peers_connected: peers as u32,
                         peers_interested: interested as u32,
                         progress,
+                        checking_progress: checking.map(|c| c as f32),
+                        check_queued,
                     });
-                    last.insert(ih, (ul, dl, st, peers, interested, tick));
+                    last.insert(ih, (ul, dl, st, peers, interested, tick, ck));
                 }
             }
             if tick.is_multiple_of(300) {

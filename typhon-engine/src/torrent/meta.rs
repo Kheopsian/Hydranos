@@ -925,6 +925,14 @@ pub fn tracker_key(url: &str) -> u64 {
     h
 }
 
+/// Which pieces each running check has read (by torrent object), one bit per piece, so the
+/// Content tab can say how far each file has got. Kept here and not in
+/// `TorrentState`: only the few torrents under a check hold one, where a
+/// field would cost every torrent. Dropped when the check ends or is called off.
+static RECHECK_SEEN: std::sync::LazyLock<
+    parking_lot::Mutex<std::collections::HashMap<usize, Box<[u64]>>>,
+> = std::sync::LazyLock::new(Default::default);
+
 // A one-off shape; naming it would add an alias that nothing else uses.
 #[allow(clippy::type_complexity)]
 pub struct TorrentState {
@@ -1847,6 +1855,59 @@ impl TorrentState {
     pub fn wait_for_check(self: &Arc<Self>) -> CheckWait {
         self.check_waiting.fetch_add(1, Ordering::SeqCst);
         CheckWait(self.clone())
+    }
+
+    /// What the piece map is filed under: this torrent object, not its hash,
+    /// which two engines can share.
+    fn seen_key(&self) -> usize {
+        self as *const Self as usize
+    }
+
+    /// A check starts reading: the figure at 0 and an empty piece map.
+    pub fn begin_recheck_progress(&self) {
+        let words = (self.meta.num_pieces() as usize).div_ceil(64);
+        RECHECK_SEEN
+            .lock()
+            .insert(self.seen_key(), vec![0u64; words].into_boxed_slice());
+        self.recheck_done.store(0, Ordering::SeqCst);
+    }
+
+    /// No check is reading: no figure and no map. The figure goes first, a
+    /// reader seeing `rechecking` false must not find one left over.
+    pub fn end_recheck_progress(&self) {
+        self.recheck_done.store(0, Ordering::SeqCst);
+        RECHECK_SEEN.lock().remove(&self.seen_key());
+    }
+
+    /// The running check has read `piece`, whatever its verdict.
+    pub fn mark_rechecked(&self, piece: u32) {
+        if let Some(map) = RECHECK_SEEN.lock().get_mut(&self.seen_key()) {
+            if let Some(w) = map.get_mut(piece as usize / 64) {
+                *w |= 1 << (piece % 64);
+            }
+        }
+    }
+
+    /// Bytes of the stream range `[offset, offset + len)` lying in pieces the
+    /// running check has read; `None` when no check is reading.
+    pub fn rechecked_bytes(&self, offset: u64, len: u64) -> Option<u64> {
+        let guard = RECHECK_SEEN.lock();
+        let map = guard.get(&self.seen_key())?;
+        if len == 0 {
+            return Some(0);
+        }
+        let pl = self.meta.piece_length.max(1) as u64;
+        let end = offset + len;
+        let mut n = 0;
+        for i in (offset / pl)..=((end - 1) / pl) {
+            let seen = map
+                .get(i as usize / 64)
+                .is_some_and(|w| w & (1 << (i % 64)) != 0);
+            if seen {
+                n += end.min((i + 1) * pl) - offset.max(i * pl);
+            }
+        }
+        Some(n)
     }
 
     /// True while a check of this torrent waits for its turn on the disk and

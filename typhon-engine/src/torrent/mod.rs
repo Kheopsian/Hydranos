@@ -1783,7 +1783,7 @@ impl TorrentManager {
         let _publish = t.check_publish();
         t.check_gen.fetch_add(1, Ordering::SeqCst);
         // The counter goes first, as at the end of a check.
-        t.recheck_done.store(0, Ordering::SeqCst);
+        t.end_recheck_progress();
         t.rechecking.store(false, Ordering::SeqCst);
     }
 
@@ -4052,7 +4052,7 @@ impl TorrentManager {
                 }
                 // The counter goes first: a reader seeing `rechecking` false
                 // must not find a figure left over from this check.
-                t.recheck_done.store(0, Ordering::SeqCst);
+                t.end_recheck_progress();
                 t.rechecking.store(false, Ordering::SeqCst);
                 announce
             };
@@ -4124,7 +4124,7 @@ impl TorrentManager {
         // c est le disque qui redevient le facteur limitant.
         let unreadable: Arc<std::sync::Mutex<Option<String>>> =
             Arc::new(std::sync::Mutex::new(None));
-        t.recheck_done.store(0, Ordering::SeqCst);
+        t.begin_recheck_progress();
         let scan = futures::stream::iter(0..num_pieces)
             .map(|piece| {
                 let t = t.clone();
@@ -4138,15 +4138,16 @@ impl TorrentManager {
                     // Not once a stop has called the check off: the stop
                     // zeroed the figure, and a read finishing after it would
                     // leave one on a torrent no longer checking.
-                    struct Counted(Arc<TorrentState>, u64);
+                    struct Counted(Arc<TorrentState>, u64, u32);
                     impl Drop for Counted {
                         fn drop(&mut self) {
                             if !TorrentManager::check_called_off(&self.0, self.1) {
                                 self.0.recheck_done.fetch_add(1, Ordering::Relaxed);
+                                self.0.mark_rechecked(self.2);
                             }
                         }
                     }
-                    let _counted = Counted(t.clone(), gen);
+                    let _counted = Counted(t.clone(), gen, piece);
                     // No hash table -> we cannot say this piece is good. Leave
                     // the have bit clear; the recheck reports the torrent
                     // incomplete rather than blessing unverified data.
@@ -5292,6 +5293,25 @@ mod lifecycle_tests {
 
     fn num_have(t: &TorrentState) -> u32 {
         t.picker.get().unwrap().lock().unwrap().num_have()
+    }
+
+    /// What the Content tab shows under a check: the bytes of a file lying in
+    /// pieces the check has read, nothing outside a check.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rechecked_bytes_follow_the_pieces_read() {
+        let (_mgr, _root, _ih, t) = whole_two_piece_torrent("seenmap");
+        wait_recheck_end(&t).await;
+        assert_eq!(t.rechecked_bytes(0, 10), None, "no check, no figure");
+        t.begin_recheck_progress();
+        let pl = t.meta.piece_length as u64;
+        assert_eq!(t.rechecked_bytes(0, pl * 2), Some(0), "nothing read yet");
+        t.mark_rechecked(0);
+        assert_eq!(t.rechecked_bytes(0, pl * 2), Some(pl), "piece 0 of 2");
+        assert_eq!(t.rechecked_bytes(pl, pl), Some(0), "a file in piece 1");
+        t.mark_rechecked(1);
+        assert_eq!(t.rechecked_bytes(0, pl * 2), Some(pl * 2));
+        t.end_recheck_progress();
+        assert_eq!(t.rechecked_bytes(0, 10), None, "the map is dropped");
     }
 
     /// ⭐ A stop that landed once the check had read everything, between its

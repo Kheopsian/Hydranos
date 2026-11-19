@@ -10821,7 +10821,19 @@ fn torrent_files_json(
 ) -> serde_json::Value {
     // What each file already has on disk, so the Content tab shows what was
     // downloaded and what is still missing. It listed paths and sizes only.
-    let done = file_done_bytes(torrent);
+    let mut done = file_done_bytes(torrent);
+    // Under a check the figures say how far the check has read each file, not
+    // what the torrent holds (which stays whole until the verdict lands): the
+    // pieces seen over the pieces of the file, so the list climbs with the
+    // check. A check still waiting for the disk has read nothing.
+    let checking = torrent
+        .rechecking
+        .load(std::sync::atomic::Ordering::Relaxed);
+    if checking {
+        for (d, f) in done.iter_mut().zip(torrent.meta.files.iter()) {
+            *d = Some(torrent.rechecked_bytes(f.offset, f.length).unwrap_or(0));
+        }
+    }
     let order = torrent.download_order();
     let files: Vec<serde_json::Value> = torrent
         .meta
@@ -10853,6 +10865,8 @@ fn torrent_files_json(
         "sequential": order.sequential,
         "first_last_piece": order.first_last,
         "complete": torrent.bytes_left() == 0,
+        // The figures above are the check's, not the torrent's.
+        "checking": checking,
     })
 }
 
@@ -21667,6 +21681,8 @@ mod event_stream_tests {
             peers_connected: 0,
             peers_interested: 0,
             progress: 0.0,
+            checking_progress: None,
+            check_queued: false,
         };
         for _ in 0..500 {
             manager
@@ -21721,6 +21737,8 @@ mod event_stream_tests {
             peers_connected: 0,
             peers_interested: 0,
             progress: 1.0,
+            checking_progress: None,
+            check_queued: false,
         };
         let (kept, gone) = ("aa".repeat(20), "bb".repeat(20));
         for i in 0..300u64 {
