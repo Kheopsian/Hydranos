@@ -5258,6 +5258,26 @@ mod manager_tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// The JSON written when a database `put` fails is NOT read at the next
+    /// start while the table has rows. This pins that, because it is why
+    /// `try_persist` answers Err for such a write: the change is not kept.
+    #[test]
+    fn the_json_fallback_is_not_read_at_restart_while_the_table_has_rows() {
+        let (mgr, root) = manager("fallback-restart");
+        let ih = add(&mgr, "alpha");
+        mgr.save_all_resume();
+        let mut rd = stored(&mgr, &ih);
+        rd.total_uploaded = 777_777;
+        fastresume::try_save(&mgr.resume_dir, &ih, &rd).expect("json write");
+        let loaded = mgr.load_state_records();
+        let got = loaded
+            .iter()
+            .find(|r| r.info_hash == hex_encode(&ih))
+            .expect("row");
+        assert_ne!(got.total_uploaded, 777_777, "the JSON fallback was read");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// The worst case: a restart would look for the files at the old path.
     #[test]
     fn a_save_path_edit_during_a_sweep_is_not_overwritten() {
