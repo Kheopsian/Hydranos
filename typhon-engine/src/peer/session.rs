@@ -410,6 +410,7 @@ pub async fn run(
     };
 
     let mut dl = DownloadState::new(torrent.clone(), disk.clone());
+    dl.set_addr(addr.ip());
 
     // Have broadcasts only matter while we're downloading. Subscribing on
     // seeding torrents pointlessly wakes every task on every piece we

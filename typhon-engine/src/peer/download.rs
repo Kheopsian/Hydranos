@@ -23,6 +23,11 @@ const DISK_FAILURES_BEFORE_ERROR: u32 = 3;
 /// Pieces sent entirely by one peer that failed their hash before that peer is
 /// cut off. One can be bad luck -- a flipped bit on its disk -- a second is not.
 const BAD_PIECES_BEFORE_CUT: u32 = 2;
+/// The same for a piece that had already failed with several senders. It goes
+/// on parole: one peer fetches it alone, and the shared failure was the first
+/// chance, so a failure by that peer alone is proof and the bad luck of a
+/// flipped bit is already allowed for. One strike.
+const PAROLE_BAD_PIECES_BEFORE_CUT: u32 = 1;
 const MAX_PIPELINE: usize = 32; // max in-flight requests (was 16; bumped — MAX_PIPELINE=32 doubles the in-flight window without overwhelming the picker mutex on multi-peer scenarios)
 /// How long a peer may hold a piece without sending a block of it before the
 /// piece is given back, blocks and all.
@@ -89,6 +94,9 @@ pub struct DownloadState {
     /// Too many of them: asked for nothing more, and nothing it sends is
     /// kept. The session ends the connection (see `cut_off`).
     cut_off: bool,
+    /// Where this peer connects from; told to the picker with its first block.
+    addr: Option<std::net::IpAddr>,
+    addr_told: bool,
 }
 
 impl DownloadState {
@@ -107,6 +115,32 @@ impl DownloadState {
             held_back: false,
             bad_pieces: 0,
             cut_off: false,
+            addr: None,
+            addr_told: false,
+        }
+    }
+
+    /// The address this peer connects from, so a verdict on it can ban it.
+    pub fn set_addr(&mut self, ip: std::net::IpAddr) {
+        self.addr = Some(ip);
+        self.addr_told = false;
+    }
+
+    /// Hang up if a good copy of a piece showed this peer sent a bad block.
+    fn cut_if_convicted(&mut self) {
+        if self.cut_off {
+            return;
+        }
+        let Some(picker) = self.torrent.picker.get() else {
+            return;
+        };
+        if picker.lock().unwrap().is_convicted(self.owner) {
+            tracing::warn!(
+                "[download] {}: cutting off a peer that sent a block a good copy proved bad",
+                &crate::torrent::hex_encode(&self.torrent.info_hash)[..8]
+            );
+            self.cut_off = true;
+            self.on_disconnect();
         }
     }
 
@@ -367,6 +401,10 @@ impl DownloadState {
         if self.cut_off {
             return Vec::new();
         }
+        self.cut_if_convicted();
+        if self.cut_off {
+            return Vec::new();
+        }
         self.get_requests_gated(|_| true)
     }
 
@@ -473,6 +511,9 @@ impl DownloadState {
 
     /// Process received Piece data. Returns Some(piece_index) if a piece completed.
     pub async fn on_piece(&mut self, index: u32, begin: u32, data: &[u8]) -> Option<u32> {
+        // A verdict lands while ANOTHER peer completes the piece, so it is
+        // read here, when this peer next sends something.
+        self.cut_if_convicted();
         if self.cut_off {
             return None;
         }
@@ -499,6 +540,10 @@ impl DownloadState {
         // peers finishing the same endgame piece cannot both hand it over.
         let (outcome, piece_data) = {
             let mut p = picker.lock().unwrap();
+            if !self.addr_told {
+                p.register_owner(self.owner, self.addr);
+                self.addr_told = true;
+            }
             let outcome = p.receive_block_from(index, begin, data, self.owner);
             let piece_data = if outcome == Block::Complete {
                 p.take_piece(index)
@@ -514,17 +559,62 @@ impl DownloadState {
             }
         }
 
-        if let Some((piece_data, sole)) = piece_data {
+        if let Some(mut taken) = piece_data {
+            let piece_data = std::mem::take(&mut taken.data);
+            let senders = std::mem::take(&mut taken.senders);
+            // The commit consumes the bytes. A copy is kept only for a piece
+            // that could need it afterwards: shared by several senders (it may
+            // fail, and is then remembered block by block), or one that failed
+            // before (a good copy now convicts whoever sent a different block).
+            let keep = if senders.len() > 1 || picker.lock().unwrap().has_failed_record(index) {
+                Some(piece_data.clone())
+            } else {
+                None
+            };
             // Off this peer's books either way: the picker no longer holds it,
             // and blocks of it still queued are skipped by `wants_block`.
             self.started.remove(&index);
             match commit(&self.torrent, &self.disk, index, piece_data).await {
-                Commit::Owned => return Some(index),
+                Commit::Owned => {
+                    let culprits = {
+                        let mut p = picker.lock().unwrap();
+                        p.end_parole(index);
+                        match &keep {
+                            Some(good) => p.convict(index, good, taken.block_size),
+                            None => Vec::new(),
+                        }
+                    };
+                    if !culprits.is_empty() {
+                        tracing::warn!(
+                            "[download] {}: a good copy of piece {index} proved {} peer(s) sent bad blocks",
+                            &crate::torrent::hex_encode(&self.torrent.info_hash)[..8],
+                            culprits.len()
+                        );
+                        self.cut_if_convicted();
+                    }
+                    return Some(index);
+                }
+                // Several senders: the bad bytes could be any of theirs. Parole:
+                // the next try has one fetcher, and its failure is its own.
+                Commit::BadHash if senders.len() > 1 => {
+                    let mut p = picker.lock().unwrap();
+                    p.put_on_parole(index);
+                    if let Some(bad) = keep {
+                        taken.data = bad;
+                        p.record_failed(index, &taken);
+                    }
+                }
                 // Every block of it came from this peer: the bad bytes are its.
                 // The last block is ours, so a sole sender can only be us.
-                Commit::BadHash if sole == Some(self.owner) => {
+                Commit::BadHash if senders == [self.owner] => {
+                    let on_parole = picker.lock().unwrap().is_on_parole(index);
+                    let limit = if on_parole {
+                        PAROLE_BAD_PIECES_BEFORE_CUT
+                    } else {
+                        BAD_PIECES_BEFORE_CUT
+                    };
                     self.bad_pieces += 1;
-                    if self.bad_pieces >= BAD_PIECES_BEFORE_CUT {
+                    if self.bad_pieces >= limit {
                         tracing::warn!(
                             "[download] {}: cutting off a peer after {} pieces that failed their hash",
                             &crate::torrent::hex_encode(&self.torrent.info_hash)[..8],
@@ -554,6 +644,8 @@ impl DownloadState {
         self.inflight.clear();
         if let Some(picker) = self.torrent.picker.get() {
             let mut p = picker.lock().unwrap();
+            // The session is over: its address and any verdict go with it.
+            p.forget_owner(self.owner);
             if !self.peer_bitfield.is_empty() {
                 p.remove_bitfield(&self.peer_bitfield);
                 // Idempotence, and it is not optional: this runs once from
@@ -1800,20 +1892,161 @@ mod poison_tests {
         );
     }
 
-    /// An endgame piece filled by two peers that fails proves nothing about
-    /// either: neither is charged.
+    /// An endgame piece filled by two peers that fails charges neither; it
+    /// goes on parole, so the next try has one fetcher and a second failure
+    /// can only be that peer's.
     #[test]
-    fn a_bad_piece_from_two_peers_charges_neither() {
+    fn a_bad_piece_from_two_peers_charges_neither_and_goes_on_parole() {
         let t = torrent(1);
         let rt = rt();
         let mut a = peer(&t);
         let mut b = peer(&t);
-        for _ in 0..3 {
-            assert_eq!(a.get_requests().len(), 2);
-            assert_eq!(b.get_requests().len(), 2, "B joins the endgame piece");
-            rt.block_on(a.on_piece(0, 0, &vec![0u8; BLOCK_SIZE as usize]));
-            rt.block_on(b.on_piece(0, BLOCK_SIZE, &good()[BLOCK_SIZE as usize..]));
-            assert_eq!(in_flight(&t), (0, 0), "handed over and failed");
+        assert_eq!(a.get_requests().len(), 2);
+        assert_eq!(b.get_requests().len(), 2, "B joins the endgame piece");
+        rt.block_on(a.on_piece(0, 0, &vec![0u8; BLOCK_SIZE as usize]));
+        rt.block_on(b.on_piece(0, BLOCK_SIZE, &good()[BLOCK_SIZE as usize..]));
+        assert_eq!(in_flight(&t), (0, 0), "handed over and failed");
+        assert_eq!(a.bad_pieces + b.bad_pieces, 0, "neither is charged");
+
+        assert_eq!(a.get_requests().len(), 2, "A has the piece to itself");
+        assert!(b.get_requests().is_empty(), "B may not join it on parole");
+
+        // Alone, A sends the whole piece right: it passes, and parole ends.
+        rt.block_on(a.on_piece(0, 0, &good()[..BLOCK_SIZE as usize]));
+        rt.block_on(a.on_piece(0, BLOCK_SIZE, &good()[BLOCK_SIZE as usize..]));
+        assert!(t.picker.get().unwrap().lock().unwrap().is_complete());
+    }
+
+    /// A good copy of a piece that failed names exactly who sent the bad
+    /// block: A's block differs from the good one, B's matches. A is cut off
+    /// and its address banned; B is untouched. The good copy comes from C,
+    /// who was not in the dispute.
+    #[test]
+    fn a_good_copy_of_a_failed_piece_bans_exactly_the_peer_that_sent_the_bad_block() {
+        let t = torrent(1);
+        let rt = rt();
+        let mut a = peer(&t);
+        let mut b = peer(&t);
+        let mut c = peer(&t);
+        let ip_a: std::net::IpAddr = "10.0.0.1".parse().unwrap();
+        let ip_b: std::net::IpAddr = "10.0.0.2".parse().unwrap();
+        a.set_addr(ip_a);
+        b.set_addr(ip_b);
+
+        a.get_requests();
+        b.get_requests();
+        rt.block_on(a.on_piece(0, 0, &vec![0u8; BLOCK_SIZE as usize]));
+        rt.block_on(b.on_piece(0, BLOCK_SIZE, &good()[BLOCK_SIZE as usize..]));
+        assert_eq!(
+            in_flight(&t),
+            (0, 0),
+            "failed, and remembered block by block"
+        );
+
+        assert_eq!(c.get_requests().len(), 2, "C takes the piece on parole");
+        rt.block_on(c.on_piece(0, 0, &good()[..BLOCK_SIZE as usize]));
+        let done = rt.block_on(c.on_piece(0, BLOCK_SIZE, &good()[BLOCK_SIZE as usize..]));
+        assert_eq!(done, Some(0), "the good copy passes");
+
+        {
+            let picker = t.picker.get().unwrap().lock().unwrap();
+            assert!(picker.is_banned(ip_a), "A's address is banned");
+            assert!(!picker.is_banned(ip_b), "B sent a good block");
         }
+        assert!(a.get_requests().is_empty());
+        assert!(a.cut_off(), "A hangs up at its next move");
+        assert!(!b.cut_off(), "B is left alone");
+    }
+
+    /// A peer that sent a bad block and then, alone on parole, sends the whole
+    /// piece right is still the one that sent the bad block: it completes the
+    /// piece and is banned all the same.
+    #[test]
+    fn a_peer_that_redeems_itself_on_parole_is_still_banned() {
+        let t = torrent(1);
+        let rt = rt();
+        let mut a = peer(&t);
+        let mut b = peer(&t);
+        let ip_a: std::net::IpAddr = "10.0.0.1".parse().unwrap();
+        a.set_addr(ip_a);
+        a.get_requests();
+        b.get_requests();
+        rt.block_on(a.on_piece(0, 0, &vec![0u8; BLOCK_SIZE as usize]));
+        rt.block_on(b.on_piece(0, BLOCK_SIZE, &good()[BLOCK_SIZE as usize..]));
+
+        assert_eq!(a.get_requests().len(), 2, "A is first to ask again");
+        rt.block_on(a.on_piece(0, 0, &good()[..BLOCK_SIZE as usize]));
+        let done = rt.block_on(a.on_piece(0, BLOCK_SIZE, &good()[BLOCK_SIZE as usize..]));
+        assert_eq!(done, Some(0), "the piece is complete");
+        assert!(a.cut_off(), "but its first block was bad");
+        assert!(t.picker.get().unwrap().lock().unwrap().is_banned(ip_a));
+        assert!(!b.cut_off());
+    }
+
+    /// The culprit may be gone by the time a good copy arrives: its address
+    /// is banned all the same, and nothing is left behind for it.
+    #[test]
+    fn a_poisoner_that_disconnected_is_banned_when_the_good_copy_arrives() {
+        let t = torrent(1);
+        let rt = rt();
+        let mut a = peer(&t);
+        let mut b = peer(&t);
+        let mut c = peer(&t);
+        let ip_a: std::net::IpAddr = "10.0.0.1".parse().unwrap();
+        a.set_addr(ip_a);
+        a.get_requests();
+        b.get_requests();
+        rt.block_on(a.on_piece(0, 0, &vec![0u8; BLOCK_SIZE as usize]));
+        rt.block_on(b.on_piece(0, BLOCK_SIZE, &good()[BLOCK_SIZE as usize..]));
+        a.on_disconnect();
+
+        c.get_requests();
+        rt.block_on(c.on_piece(0, 0, &good()[..BLOCK_SIZE as usize]));
+        rt.block_on(c.on_piece(0, BLOCK_SIZE, &good()[BLOCK_SIZE as usize..]));
+
+        {
+            let picker = t.picker.get().unwrap().lock().unwrap();
+            assert!(picker.is_banned(ip_a));
+            assert!(
+                !picker.is_convicted(a.owner),
+                "nothing kept for a gone session"
+            );
+        }
+    }
+
+    /// Confirms the peer-blame gap: a peer that sends a bad block into a piece
+    /// that another honest peer also fills is never charged, so it keeps being
+    /// asked for that piece. Each round here has the attacker send a bad first
+    /// block and the honest peer the good second block. Ten bad pieces later
+    /// the attacker should be cut off; if it is still being asked, the gap is
+    /// real.
+    #[test]
+    fn a_poisoner_sharing_every_piece_with_an_honest_peer_is_cut_off() {
+        let t = torrent(1);
+        let rt = rt();
+        let mut attacker = peer(&t);
+        let mut honest = peer(&t);
+        let mut asked_each_round = Vec::new();
+        for _ in 0..10 {
+            let ra = attacker.get_requests();
+            asked_each_round.push(ra.len());
+            if ra.is_empty() {
+                break;
+            }
+            let rh = honest.get_requests();
+            rt.block_on(attacker.on_piece(0, 0, &vec![0u8; BLOCK_SIZE as usize]));
+            if rh.is_empty() {
+                // On parole the attacker has the piece to itself and must send
+                // all of it: its bad bytes can only be its own.
+                rt.block_on(attacker.on_piece(0, BLOCK_SIZE, &vec![0u8; BLOCK_SIZE as usize]));
+            } else {
+                rt.block_on(honest.on_piece(0, BLOCK_SIZE, &good()[BLOCK_SIZE as usize..]));
+            }
+        }
+        assert!(
+            attacker.cut_off,
+            "after 10 bad pieces the attacker was still being asked (requests per round: {asked_each_round:?}); bad_pieces charged = {}",
+            attacker.bad_pieces
+        );
     }
 }
