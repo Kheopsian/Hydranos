@@ -5734,7 +5734,9 @@ mod lifecycle_tests {
             let (mgr, ih) = (mgr.clone(), ih);
             tokio::task::spawn_blocking(move || mgr.recheck(&ih))
         };
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        // Not an await: the lock is held, and the ask waits on it from
+        // another thread.
+        std::thread::sleep(std::time::Duration::from_millis(100));
         t.check_gen.fetch_add(1, Ordering::SeqCst);
         t.end_recheck_progress();
         t.rechecking.store(false, Ordering::SeqCst);
