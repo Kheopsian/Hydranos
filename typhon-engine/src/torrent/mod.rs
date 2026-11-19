@@ -3237,10 +3237,11 @@ impl TorrentManager {
     /// A check still owed travels as `recheck_pending`, and the adopting
     /// engine runs it: the picker of such a torrent holds no verdict yet.
     ///
-    /// Not for a torrent a proof holds: the proof job stays with this engine,
-    /// and the target would check a folder whose shared files are not in
-    /// place yet, publish a verdict missing them, and clear the mark. Its
-    /// check is the proof's to start.
+    /// Not for a torrent a proof holds: the target would check a folder whose
+    /// shared files are not in place yet, publish a verdict missing them, and
+    /// clear the mark. The proof follows the torrent to the target instead
+    /// (`pathclaim::hand_over`, called by the move) and starts the check
+    /// there once the files are proven.
     pub fn export_state(&self, info_hash: &InfoHash) -> Option<fastresume::ResumeData> {
         self.get(info_hash).map(|t| {
             let mut rd = Self::build_resume_data(&t);
@@ -5320,10 +5321,11 @@ mod lifecycle_tests {
         std::fs::remove_dir_all(&dst_root).ok();
     }
 
-    /// A torrent a proof holds is checked when the proof ends, by the engine
-    /// it was added to and that keeps the proof job: moved before that, it
-    /// carries no mark, or the target would check a folder whose shared files
-    /// are not in place yet and clear the mark with a verdict missing them.
+    /// A torrent a proof holds is checked when the proof ends, by the proof,
+    /// which follows it to the engine it is moved to: exported before that,
+    /// it carries no mark, or the target would check a folder whose shared
+    /// files are not in place yet and clear the mark with a verdict missing
+    /// them.
     #[tokio::test]
     async fn a_torrent_held_for_proof_is_exported_without_a_check_owed() {
         let (mgr, root, ih, t) = whole_two_piece_torrent("movedheld");
