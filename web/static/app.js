@@ -2073,6 +2073,7 @@ async function loadTorrentContent(infoHash, bodyId, summaryId, agent, mode, quie
             <td class="tc-num">${pct == null ? "–" : _pctText(f.progress) + "%"}</td>
             <td class="tc-barcell"><div class="tc-bar"><div class="tc-bar-fill${cls}" style="width:${fill.toFixed(1)}%"></div></div></td>
             <td>${_filePrioSelect(infoHash, f, remote)}</td>
+            <td>${_fileRecheckButton(infoHash, f, remote, agent, bodyId, summaryId, mode)}</td>
         </tr>`;
     }).join("");
     if (summary) {
@@ -2095,7 +2096,7 @@ async function loadTorrentContent(infoHash, bodyId, summaryId, agent, mode, quie
         summary.textContent = line;
     }
     body.innerHTML = `<div class="tc-scroll"><table class="tc-table">
-        <thead><tr><th>${t("Path")}</th><th class="tc-num">${t("Size")}</th><th class="tc-num">${t("Downloaded")}</th><th class="tc-num">${t("Progress")}</th><th></th><th title="${esc(t("The order files are downloaded in. Every file is always downloaded."))}">${t("Priority")}</th></tr></thead>
+        <thead><tr><th>${t("Path")}</th><th class="tc-num">${t("Size")}</th><th class="tc-num">${t("Downloaded")}</th><th class="tc-num">${t("Progress")}</th><th></th><th title="${esc(t("The order files are downloaded in. Every file is always downloaded."))}">${t("Priority")}</th><th></th></tr></thead>
         <tbody>${rows}</tbody>
     </table></div>`;
 }
@@ -2112,6 +2113,39 @@ function _filePrioSelect(infoHash, f, remote) {
     }
     const opts = _FILE_PRIOS.map(([v, l]) => `<option value="${v}"${v === cur ? " selected" : ""}>${esc(t(l))}</option>`).join("");
     return `<select class="tc-prio" data-hash="${esc(infoHash)}" data-index="${Number(f.index)}" onchange="_setFilePriority(this.dataset.hash, Number(this.dataset.index), this)">${opts}</select>`;
+}
+
+// Recheck one file: its pieces only, those it shares with the files beside it
+// read whole. Not on another node's copy, nor on an empty file (no piece).
+function _fileRecheckButton(infoHash, f, remote, agent, bodyId, summaryId, mode) {
+    if (remote || f.index == null || !(f.size > 0)) return "";
+    if (f.checking) return `<span class="tc-checking">${esc(t("Checking…"))}</span>`;
+    return `<button class="btn-small tc-recheck" data-hash="${esc(infoHash)}" data-index="${Number(f.index)}"
+        data-agent="${esc(agent || "")}" data-body="${esc(bodyId)}" data-summary="${esc(summaryId)}" data-mode="${esc(mode || "")}"
+        title="${esc(t("Hash-check this file only. A piece it shares with the file beside it is read whole."))}"
+        onclick="_recheckFile(this)">${esc(t("Recheck"))}</button>`;
+}
+
+async function _recheckFile(btn) {
+    const d = btn.dataset;
+    btn.disabled = true;
+    try {
+        const params = new URLSearchParams();
+        if (d.agent && _isLocalAgent(d.agent)) params.set("agent", d.agent);
+        const q = params.toString() ? `?${params.toString()}` : "";
+        const r = await api(`/api/torrents/${encodeURIComponent(d.hash)}/files/recheck${q}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ index: Number(d.index) }),
+        });
+        if (r && r.scope === "torrent") {
+            hydraNotify(t("The whole torrent is being checked instead."));
+        }
+    } catch (err) {
+        hydraNotify(t("File not rechecked: {err}", { err: err.message || String(err) }));
+    }
+    // Shows the file under the check, then its figures as the check reads.
+    loadTorrentContent(d.hash, d.body, d.summary, d.agent || null, d.mode || null, true);
 }
 
 async function _setFilePriority(infoHash, index, sel) {

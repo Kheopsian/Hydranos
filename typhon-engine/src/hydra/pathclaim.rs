@@ -2034,6 +2034,34 @@ pub fn guarded_recheck(
     guarded_recheck_then(state, engine_id, t, running)
 }
 
+/// A check of one file of `t` (`TorrentManager::recheck_file`), guarded as
+/// `guarded_recheck` is.
+///
+/// Held for proof: the proof checks the whole torrent when it ends, which is
+/// this check too. Sharing files with another torrent that names them with
+/// other bytes: the whole torrent goes through `guarded_recheck`, proof
+/// first, since a piece the check clears is written again and that write
+/// must not land on the other torrent's bytes.
+pub fn guarded_recheck_file(
+    state: &AppState,
+    engine_id: &str,
+    t: &Arc<TorrentState>,
+    file: usize,
+) -> Result<typhon_engine::torrent::FileCheck, String> {
+    use typhon_engine::torrent::FileCheck;
+    let Some(engine) = state.engines.get(engine_id) else {
+        return Err(format!("no engine {engine_id}"));
+    };
+    if t.held_for_proof() {
+        return Ok(FileCheck::Torrent);
+    }
+    if !protected_files(state, t).is_empty() {
+        guarded_recheck(state, engine_id, t)?;
+        return Ok(FileCheck::Torrent);
+    }
+    engine.manager.recheck_file(&t.info_hash, file)
+}
+
 /// `guarded_recheck`, starting the torrent once it is checked and released
 /// when `start` says so, whether it runs now or not.
 ///
