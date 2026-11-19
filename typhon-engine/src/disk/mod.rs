@@ -2146,7 +2146,7 @@ mod disk_tests {
         );
     }
 
-    /// ⭐ Sixteen requests for sixteen parts of one cold slice, all at once:
+    /// ⭐ Eight requests for the eight 16 KiB parts of one cold slice, all at once:
     /// one disk read, and each gets its own part. Holding the descriptor
     /// cache parks the first read until the others are waiting on it.
     #[allow(clippy::await_holding_lock)]
