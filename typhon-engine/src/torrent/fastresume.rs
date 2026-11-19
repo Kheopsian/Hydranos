@@ -110,16 +110,45 @@ pub fn save(resume_dir: &str, info_hash: &InfoHash, data: &ResumeData) {
 }
 
 /// `save`, saying whether the record is on disk now.
+///
+/// The temp file is flushed to disk (`sync_all`) before the rename: without
+/// it a crash can persist the rename but not the data, leaving the zero-byte
+/// record this function exists to prevent. The temp name is unique per call,
+/// so two saves of one torrent never interleave their writes in one file; the
+/// last rename wins, and each rename moves a complete record.
 pub fn try_save(resume_dir: &str, info_hash: &InfoHash, data: &ResumeData) -> Result<(), String> {
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+
     let hex = super::hex_encode(info_hash);
     let path = format!("{}/{}.json", resume_dir, hex);
-    let tmp = format!("{}/{}.json.tmp", resume_dir, hex);
+    // Ends in `.tmp` so `load_all` sweeps one a crash left behind.
+    let tmp = format!(
+        "{}/{}.json.{}.{}.tmp",
+        resume_dir,
+        hex,
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    );
     let json = serde_json::to_string(data).map_err(|e| format!("failed to serialize: {}", e))?;
-    std::fs::write(&tmp, json).map_err(|e| format!("failed to write {}: {}", tmp, e))?;
+    let written = std::fs::File::create(&tmp).and_then(|mut f| {
+        f.write_all(json.as_bytes())?;
+        f.sync_all()
+    });
+    if let Err(e) = written {
+        std::fs::remove_file(&tmp).ok();
+        return Err(format!("failed to write {}: {}", tmp, e));
+    }
     std::fs::rename(&tmp, &path).map_err(|e| {
         std::fs::remove_file(&tmp).ok();
         format!("failed to rename {} -> {}: {}", tmp, path, e)
-    })
+    })?;
+    #[cfg(unix)]
+    if let Ok(d) = std::fs::File::open(resume_dir) {
+        let _ = d.sync_all();
+    }
+    Ok(())
 }
 
 /// Load all resume data from a directory.
@@ -180,4 +209,114 @@ pub fn load_all_reporting(resume_dir: &str) -> (Vec<ResumeData>, Vec<String>) {
 pub fn remove(resume_dir: &str, info_hash: &InfoHash) {
     let path = format!("{}/{}.json", resume_dir, super::hex_encode(info_hash));
     std::fs::remove_file(&path).ok();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rec(ih: &InfoHash, up: u64) -> ResumeData {
+        serde_json::from_value(serde_json::json!({
+            "info_hash": super::super::hex_encode(ih),
+            "save_path": "/data/x",
+            "seed_mode": false,
+            "paused": false,
+            "total_uploaded": up,
+            "total_downloaded": 0,
+            "added_time": 1,
+            "completed_time": 0,
+            "seed_secs": 0,
+            "up_limit": 0,
+            "down_limit": 0,
+        }))
+        .expect("record")
+    }
+
+    fn dir(tag: &str) -> String {
+        let d = std::env::temp_dir().join(format!("hydra-fastresume-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d.to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn a_saved_record_round_trips_and_leaves_no_temp() {
+        let d = dir("roundtrip");
+        let ih = [7u8; 20];
+        try_save(&d, &ih, &rec(&ih, 42)).unwrap();
+        let (records, bad) = load_all_reporting(&d);
+        assert!(bad.is_empty());
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].total_uploaded, 42);
+        let tmps = std::fs::read_dir(&d)
+            .unwrap()
+            .filter(|e| {
+                e.as_ref()
+                    .unwrap()
+                    .path()
+                    .extension()
+                    .and_then(|x| x.to_str())
+                    == Some("tmp")
+            })
+            .count();
+        assert_eq!(tmps, 0);
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn a_truncated_record_is_reported_not_loaded_and_the_next_save_repairs_it() {
+        let d = dir("truncated");
+        let ih = [9u8; 20];
+        let hex = super::super::hex_encode(&ih);
+        let path = format!("{d}/{hex}.json");
+        std::fs::write(&path, b"").unwrap();
+        let (records, bad) = load_all_reporting(&d);
+        assert!(records.is_empty());
+        assert_eq!(bad, vec![hex.clone()]);
+        std::fs::write(&path, b"{\"info_hash\":\"ab").unwrap();
+        assert_eq!(load_all_reporting(&d).1, vec![hex.clone()]);
+        try_save(&d, &ih, &rec(&ih, 5)).unwrap();
+        let (records, bad) = load_all_reporting(&d);
+        assert!(bad.is_empty());
+        assert_eq!(records.len(), 1);
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn a_leftover_temp_is_swept_and_never_read() {
+        let d = dir("sweep");
+        let ih = [3u8; 20];
+        let hex = super::super::hex_encode(&ih);
+        let tmp = format!("{d}/{hex}.json.1.2.tmp");
+        std::fs::write(&tmp, b"{").unwrap();
+        let (records, bad) = load_all_reporting(&d);
+        assert!(records.is_empty() && bad.is_empty());
+        assert!(!std::path::Path::new(&tmp).exists());
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn concurrent_saves_of_one_torrent_leave_one_whole_record() {
+        let d = dir("concurrent");
+        let ih = [5u8; 20];
+        let threads: Vec<_> = (0..8u64)
+            .map(|t| {
+                let d = d.clone();
+                std::thread::spawn(move || {
+                    for i in 0..25u64 {
+                        try_save(&d, &ih, &rec(&ih, t * 1000 + i)).expect("save");
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        let (records, bad) = load_all_reporting(&d);
+        assert!(bad.is_empty(), "a save was torn: {bad:?}");
+        assert_eq!(records.len(), 1);
+        let leftovers = std::fs::read_dir(&d).unwrap().count();
+        assert_eq!(leftovers, 1, "temp files leaked");
+        let _ = std::fs::remove_dir_all(d);
+    }
 }
