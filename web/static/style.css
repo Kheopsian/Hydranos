@@ -4174,3 +4174,13 @@ th.col-drop { box-shadow: inset 3px 0 0 var(--accent, #4a9eff); }
     .wft-cond.plain small { grid-row: 1; }
     .wft-cond.plain .wft-label { grid-column: 1; }
 }
+
+/* The torrent tables scroll sideways inside their own wrapper. Their width is
+   pinned in pixels once columns are resized, so with the page doing the
+   scrolling the header and rows drifted apart from the card edge. The wrapper
+   owns the X axis; the table keeps the width of its columns, header included. */
+.table-scroll { overflow-x: auto; max-width: 100%; }
+.table-scroll > table { min-width: 100%; width: auto; }
+@media (max-width: 768px) {
+    .table-scroll { overflow-x: visible; }
+}

@@ -257,7 +257,7 @@
                 <input type="text" id="race-search" placeholder="Search…" oninput="renderRaceTable()">
                 <span id="race-filter-count"></span>
             </div>
-            <table id="race-table">
+            <div class="table-scroll"><table id="race-table">
                 <thead>
                     <tr>
                         <th data-col="name" onclick="sortRace(this)">Name</th>
@@ -277,7 +277,7 @@
                 <tbody id="race-tbody">
                     <tr><td colspan="12" class="empty">No race torrents</td></tr>
                 </tbody>
-            </table>
+            </table></div>
 
             <!-- Detail panel -->
             <div id="torrent-detail" class="detail-panel" style="display:none">
@@ -515,7 +515,7 @@
                 <div class="hoard-chips-row hoard-chips-tags" id="hoard-tag-chips"></div>
             </div>
             </div><!-- /#hoard-facets -->
-            <table id="hoard-table">
+            <div class="table-scroll"><table id="hoard-table">
                 <thead>
                     <tr>
                         <th data-col="name" onclick="sortHoard(this)">Name</th>
@@ -538,7 +538,7 @@
                 <tbody id="hoard-tbody">
                     <tr><td colspan="14" class="empty">Loading…</td></tr>
                 </tbody>
-            </table>
+            </table></div>
 
             <!-- Hoard detail panel -->
             <div id="hoard-detail-panel" class="detail-panel" style="display:none">
