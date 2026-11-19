@@ -1332,14 +1332,17 @@ input[type="file"] {
 
 /* Hoard panel: operator-chosen width, a drag handle and a collapse arrow.
    Both live outside the panel so they do not scroll with it. */
+/* The saved width, held inside the window: a window narrowed after it was
+   saved must not push the panel off screen. */
+:root { --hdw: min(var(--hoard-detail-w, min(50vw, 960px)), calc(100vw - 80px)); }
 @media (min-width: 769px) {
-    #hoard-detail-panel, #torrent-detail { width: var(--hoard-detail-w, min(50vw, 960px)); min-width: 360px; }
+    #hoard-detail-panel, #torrent-detail { width: var(--hdw); min-width: 360px; }
 }
 .detail-resizer {
     position: fixed;
     top: 0;
     bottom: 0;
-    right: calc(var(--hoard-detail-w, min(50vw, 960px)) - 3px);
+    right: calc(var(--hdw) - 3px);
     width: 6px;
     cursor: col-resize;
     z-index: 201;
@@ -1348,7 +1351,7 @@ input[type="file"] {
 .detail-toggle {
     position: fixed;
     top: 50%;
-    right: var(--hoard-detail-w, min(50vw, 960px));
+    right: var(--hdw);
     transform: translateY(-50%);
     z-index: 202;
     width: 18px;

@@ -1808,6 +1808,8 @@ async function showDetail(infoHash, agent) {
     // Auto-refresh detail
     if (detailRefreshTimer) clearInterval(detailRefreshTimer);
     await refreshDetail();
+    // Folded or closed while that first fetch was out: no timer for a hidden panel.
+    if (_hoardDetailCollapsed || selectedTorrent !== infoHash) return;
     detailRefreshTimer = setInterval(refreshDetail, 3000);
 }
 
@@ -3754,6 +3756,7 @@ async function showHoardDetail(infoHash, agent) {
     switchHoardDetailTab("info");
     document.getElementById("hoard-detail-panel").style.display = "block";
     await refreshHoardDetail();
+    if (_hoardDetailCollapsed || selectedHoardTorrent !== infoHash) return;
     hoardDetailTimer = setInterval(refreshHoardDetail, 3000);
 }
 
