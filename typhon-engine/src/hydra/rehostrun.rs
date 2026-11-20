@@ -593,3 +593,90 @@ pub(crate) fn run(state: &AppState, job: &crate::store::Job) -> Result<(), Strin
     );
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn map(keys: &[(&str, &str)]) -> BTreeMap<String, String> {
+        keys.iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    /// The passkey and the IP family are resolved at announce time by the most
+    /// specific key that covers the host, a parent domain included; the move
+    /// must read them the same way or it copies the wrong value (or none).
+    #[test]
+    fn a_passkey_is_found_through_the_longest_covering_parent() {
+        let m = map(&[
+            ("example", "short"),
+            ("tracker.example", "mid"),
+            ("other.example", "x"),
+        ]);
+        for section in ["announce_passkeys", "announce_ip_modes"] {
+            assert_eq!(
+                applying_key(section, &m, "tk.tracker.example"),
+                Some("tracker.example"),
+                "{section}"
+            );
+            assert_eq!(
+                applying_key(section, &m, "tracker.example"),
+                Some("tracker.example")
+            );
+            assert_eq!(applying_key(section, &m, "unrelated.test"), None);
+        }
+    }
+
+    /// The other sections are looked up by the exact host, case aside: a
+    /// parent's mute or hide is not the host's own, and copying it would
+    /// mute or hide a tracker nobody asked about.
+    #[test]
+    fn the_other_sections_match_the_exact_host_only() {
+        let m = map(&[("Tracker.Example", "1")]);
+        for section in [
+            "announce_min_seed_hours",
+            "announce_muted",
+            "announce_hidden",
+        ] {
+            assert_eq!(
+                applying_key(section, &m, "tracker.example"),
+                Some("Tracker.Example"),
+                "{section}: case-insensitive exact"
+            );
+            assert_eq!(
+                applying_key(section, &m, "tk.tracker.example"),
+                None,
+                "{section}: a parent key does not apply to a subdomain"
+            );
+        }
+    }
+
+    /// `host_maps` pairs each section name with the config map of that name.
+    /// A crossed pair would copy the passkey into the mute list.
+    #[test]
+    fn each_section_name_reads_its_own_config_map() {
+        let cfg = crate::config::Config {
+            announce_passkeys: map(&[("h", "passkeys")]),
+            announce_ip_modes: map(&[("h", "ip_modes")]),
+            announce_min_seed_hours: map(&[("h", "min_seed")]),
+            announce_muted: map(&[("h", "muted")]),
+            announce_hidden: map(&[("h", "hidden")]),
+            ..Default::default()
+        };
+        let maps = host_maps(&cfg);
+        assert_eq!(maps.len(), HOST_SECTIONS.len());
+        for (name, m) in maps {
+            let want = match name {
+                "announce_passkeys" => "passkeys",
+                "announce_ip_modes" => "ip_modes",
+                "announce_min_seed_hours" => "min_seed",
+                "announce_muted" => "muted",
+                "announce_hidden" => "hidden",
+                other => panic!("unexpected section {other}"),
+            };
+            assert_eq!(m["h"], want, "{name}");
+        }
+    }
+}

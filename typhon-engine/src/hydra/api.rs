@@ -28340,6 +28340,145 @@ mod write_path_tests {
             .contains_key("tracker.example"));
     }
 
+    /// Add `names` as torrents announcing to `tracker.example`.
+    fn add_on_tracker_example(s: &TestState, names: &[&str]) -> Vec<String> {
+        names
+            .iter()
+            .map(|name| {
+                add_torrent_bytes(
+                    &s.state,
+                    &torrent_bytes(name),
+                    "",
+                    "/tmp",
+                    "",
+                    true,
+                    true,
+                    "race",
+                )
+                .expect("added")
+                .0
+            })
+            .collect()
+    }
+
+    /// A move that is refused is refused before anything is counted, queued or
+    /// copied: no key, an unreadable body, a missing host and a host with a
+    /// scheme all leave the queue empty and the settings as they were.
+    #[tokio::test]
+    async fn a_refused_move_queues_nothing_and_copies_nothing() {
+        let s = state_from(
+            "rehost-refused",
+            &format!(
+                "[daemon]\napi_key = \"{KEY}\"\n\
+                 [announce_passkeys]\n\"tracker.example\" = \"SECRET\"\n"
+            ),
+        );
+        add_on_tracker_example(&s, &["alpha"]);
+        let body = r#"{"from":"tracker.example","to":"new.example"}"#;
+
+        let resp = crate::rehostrun::post_rehost(
+            State(s.state.clone()),
+            RawQuery(None),
+            axum::http::HeaderMap::new(),
+            body.to_string(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let resp = crate::rehostrun::get_rehost(
+            State(s.state.clone()),
+            RawQuery(None),
+            axum::http::HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        for bad in [
+            "not json",
+            r#"{"from":"","to":"new.example"}"#,
+            r#"{"from":"tracker.example","to":""}"#,
+        ] {
+            let (code, v) = rehost_call(&s, bad).await;
+            assert_eq!(code, StatusCode::BAD_REQUEST, "{bad}: {v}");
+        }
+        assert!(!s
+            .store
+            .lock()
+            .unwrap()
+            .job_in_flight_of_kind("tracker_rehost"));
+        assert!(!s.state.cfg().announce_passkeys.contains_key("new.example"));
+        assert_eq!(rehost_status(&s).await["state"], "none");
+    }
+
+    /// ⭐ Cancelling stops the run after the batch in hand, reports how many
+    /// were already moved, and does NOT delete the old host's settings:
+    /// the torrents not reached still announce with them.
+    #[tokio::test]
+    async fn a_cancelled_move_keeps_the_old_hosts_settings() {
+        let s = state_from(
+            "rehost-cancel",
+            &format!(
+                "[daemon]\napi_key = \"{KEY}\"\n\
+                 [announce_passkeys]\n\"tracker.example\" = \"SECRET\"\n"
+            ),
+        );
+        add_on_tracker_example(&s, &["alpha", "beta"]);
+        let (code, v) = rehost_call(&s, r#"{"from":"tracker.example","to":"new.example"}"#).await;
+        assert_eq!(code, StatusCode::OK, "{v}");
+
+        let job = s.store.lock().unwrap().claim_next_job().expect("queued");
+        assert_eq!(
+            s.store.lock().unwrap().cancel_job(&job.id).as_deref(),
+            Some("running")
+        );
+        let err = crate::rehostrun::run(&s.state, &job).unwrap_err();
+        assert_eq!(err, "cancelled; 2 torrents were already moved");
+        s.store.lock().unwrap().job_finish(&job.id, &err).unwrap();
+
+        let cfg = s.state.cfg();
+        assert_eq!(cfg.announce_passkeys["tracker.example"], "SECRET");
+        assert_eq!(cfg.announce_passkeys["new.example"], "SECRET");
+        let st = rehost_status(&s).await;
+        assert_eq!(st["changed"], 2, "{st}");
+        assert_eq!(st["done"], 2, "{st}");
+    }
+
+    /// A job found running at boot starts again: what the first run moved
+    /// (`changed` in its params) no longer matches the host, so the new total
+    /// is that plus what is left, and the counter carries on from it.
+    #[tokio::test]
+    async fn a_resumed_move_counts_what_the_first_run_already_moved() {
+        let s = state_from(
+            "rehost-resume",
+            &format!(
+                "[daemon]\napi_key = \"{KEY}\"\n\
+                 [announce_passkeys]\n\"tracker.example\" = \"SECRET\"\n"
+            ),
+        );
+        add_on_tracker_example(&s, &["alpha"]);
+        let (code, v) = rehost_call(&s, r#"{"from":"tracker.example","to":"new.example"}"#).await;
+        assert_eq!(code, StatusCode::OK, "{v}");
+        let job = s.store.lock().unwrap().claim_next_job().expect("queued");
+        let mut p: serde_json::Value = serde_json::from_str(&job.params).unwrap();
+        p["changed"] = serde_json::json!(4);
+        s.store
+            .lock()
+            .unwrap()
+            .set_job_params(&job.id, &p.to_string())
+            .unwrap();
+        let job = s.store.lock().unwrap().job(&job.id).unwrap();
+
+        crate::rehostrun::run(&s.state, &job).expect("the run ends well");
+        let st = rehost_status(&s).await;
+        assert_eq!(st["changed"], 5, "{st}");
+        assert_eq!(
+            (st["total"].as_i64(), st["done"].as_i64()),
+            (Some(5), Some(5)),
+            "{st}"
+        );
+        assert_eq!(st["skipped"], 0);
+        assert_eq!(st["failed"], 0);
+    }
+
     /// A tracker list or a speed cap the engine's state store could not keep
     /// is answered with an error, not 200, and the engine keeps what it had.
     #[tokio::test]
