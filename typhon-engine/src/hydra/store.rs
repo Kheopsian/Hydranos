@@ -1864,9 +1864,9 @@ impl Store {
     /// the entries a torrent saved there must have to name any of our files.
     /// Only the rows with one of those entries, or with none (`''`), are
     /// returned for it; `None` returns every row at that path. The entries
-    /// are folded here (`claim_key`), so callers pass them as spelled. The range under
-    /// `root` is not narrowed: a torrent saved below our folder can name our
-    /// files whatever it is called.
+    /// are folded here (`claim_key`), so callers pass them as spelled. The
+    /// range under `root` is not narrowed: a torrent saved below our folder
+    /// can name our files whatever it is called.
     ///
     /// The cost is the torrents that share a NAME with ours, not the ones that
     /// share a folder: a flat category folder holding a hundred thousand
