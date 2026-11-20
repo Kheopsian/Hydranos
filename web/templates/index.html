@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Hydranos - Torrent Daemon</title>
     <link rel="icon" type="image/png" href="/static/hydra-logo.png">
-    <link rel="stylesheet" href="/static/style.css?v=1.5.28">
+    <link rel="stylesheet" href="/static/style.css?v=1.5.29">
     <!-- Before the stylesheet paints anything. app.js loads at the end of the
          body, so choosing the theme there means a dark flash on a light theme
          and a navy one on every other. Inline and tiny on purpose. -->
@@ -671,6 +671,29 @@
                             <label>Graduate to (hoard category)</label>
                             <select id="cat-graduate-to"><option value="">- none (no graduation) -</option></select>
                             <div class="sr-desc">Race only. What happens under disk pressure is decided by the tracker, not here: a torrent that has served its minimum seed time is deleted, one that still owes seeding moves to this category to finish paying it, and is deleted there once it has. Leave this empty and a torrent that still owes seeding can only wait.</div>
+                        </div>
+                        <div class="form-group" id="cat-targets-wrap" style="grid-column:1/-1">
+                            <label>Engines for new torrents</label>
+                            <div id="cat-targets-list" class="cat-targets" role="group" aria-label="Engines for new torrents"></div>
+                            <div id="cat-targets-hint" class="sr-desc"></div>
+                        </div>
+                        <div class="form-group">
+                            <label for="cat-spread">Spread across engines</label>
+                            <select id="cat-spread" onchange="_catSpreadChanged()">
+                                <option value="bytes">Fewest bytes</option>
+                                <option value="count">Fewest torrents</option>
+                                <option value="fill">Fill in order</option>
+                                <option value="free_space">Most free space</option>
+                            </select>
+                            <div class="sr-desc" id="cat-spread-help"></div>
+                        </div>
+                        <div class="form-group">
+                            <label for="cat-reserve">Reserve (GB)</label>
+                            <input type="text" id="cat-reserve" inputmode="decimal" placeholder="0" oninput="_catSpreadChanged()">
+                            <div class="sr-desc">An engine with less free space than this is skipped. Empty means no reserve. If every engine is below it, adding is refused.</div>
+                        </div>
+                        <div class="form-group" id="cat-fill-warn" style="grid-column:1/-1;display:none">
+                            <div class="result-msg error" style="display:block">Without a reserve, everything goes to the first engine</div>
                         </div>
                     </div>
                     <div class="cat-form-actions">
@@ -1755,6 +1778,6 @@
     </div>
 
     <script src="/static/i18n.js?v=1.0.0"></script>
-    <script src="/static/app.js?v=1.6.124"></script>
+    <script src="/static/app.js?v=1.6.125"></script>
 </body>
 </html>

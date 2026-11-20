@@ -6275,7 +6275,7 @@ async function updateCategories() {
 
         const catRows = (cats || []).map(cat => `<tr>
                 <td><strong>${esc(incoCat(cat.name))}</strong></td>
-                <td><span class="mode-tag mode-${cat.mode}">${cat.mode}</span></td>
+                <td><span class="mode-tag mode-${cat.mode}">${cat.mode}</span>${_catSpreadSummary(cat) ? `<div class="cat-spread-tag">${esc(_catSpreadSummary(cat))}</div>` : ""}</td>
                 <td class="mono" style="font-size:12px">${esc(incoPath(cat.save_path))}</td>
                 <td>${cat.graduate_to ? '\u2192 ' + esc(incoCat(cat.graduate_to)) : '<span style="color:var(--text-muted)">\u2014</span>'}</td>
                 <td>
@@ -6351,7 +6351,173 @@ async function showCategoryForm(name = null) {
     _populateGraduateSelect(allCats, cat ? cat.graduate_to : "", name);
     const tr = document.getElementById("cat-transit");
     if (tr) tr.checked = !!(cat && cat.transit);
+    _catTargets = Array.isArray(cat && cat.targets) ? cat.targets.map(String) : [];
+    const sp = document.getElementById("cat-spread");
+    if (sp) sp.value = _CAT_SPREADS.includes(cat && cat.spread) ? cat.spread : "bytes";
+    const rs = document.getElementById("cat-reserve");
+    if (rs) rs.value = _catBytesToGb(cat ? cat.reserve_bytes : 0);
+    _catChoices = [];
     _catModeChanged();
+    // The list of possible engines needs two calls: the form is shown first and
+    // the list is filled in when they come back.
+    const stamp = ++_catChoicesStamp;
+    const choices = await _catTargetChoices();
+    if (stamp !== _catChoicesStamp) return; // the form was reopened meanwhile
+    _catChoices = choices;
+    _catRenderTargets();
+}
+
+// --- Category engine targets and spread -------------------------------------
+//
+// A category can name the engines its new torrents are spread over. Everything
+// that decides something is a pure function (no DOM), so the payload and the
+// unit conversion can be tested on their own.
+
+const _CAT_SPREADS = ["bytes", "count", "fill", "free_space"];
+let _catTargets = [];          // selected targets, in order ("vpn1", "nas:vpn1")
+let _catChoices = [];          // [{key, label, role}] from _catTargetChoices()
+let _catChoicesStamp = 0;
+
+function _catSpreadHelp() {
+    return {
+        bytes: t("Each new torrent goes to the engine holding the fewest bytes."),
+        count: t("Each new torrent goes to the engine holding the fewest torrents."),
+        fill: t("Fill the first engine of the list down to the reserve, then the next one."),
+        free_space: t("Each new torrent goes to the engine with the most free space at the save path."),
+    };
+}
+
+// The engines a category can target. The only place that knows where the list
+// comes from: when the server exposes it, replace the body with one api() call
+// and keep the shape [{key, label, role}].
+//   key   "vpn1" for this node's engine, "nas:vpn1" for engine vpn1 of node nas
+//   role  "race" | "hoard", or null when unknown
+// Local engines: /api/engines, fields id and role. Nodes' engines:
+// /api/nodes, field health.engines, a list of names with no role, so those
+// carry role null and the server is left to refuse a mismatch.
+async function _catTargetChoices() {
+    const out = [];
+    try {
+        const locals = await api("/api/engines");
+        for (const e of (locals || [])) {
+            out.push({ key: String(e.id), label: String(e.id), role: e.role || null });
+        }
+    } catch (e) { console.error("load engines", e); }
+    try {
+        const nodes = await api("/api/nodes");
+        for (const n of (nodes || [])) {
+            const h = n.health || {};
+            if (!h.online) continue;
+            for (const eng of (h.engines || [])) {
+                out.push({ key: n.name + ":" + eng, label: n.name + " / " + eng, role: null });
+            }
+        }
+    } catch (e) { console.error("load nodes", e); }
+    return out;
+}
+
+// GB (binary, 1024^3) typed in the form -> bytes. "" is 0 (no reserve); a
+// comma is accepted as the decimal mark. Returns null for anything that is not
+// a non-negative number.
+function _catGbToBytes(text) {
+    const s = String(text == null ? "" : text).trim().replace(",", ".");
+    if (s === "") return 0;
+    if (!/^\d+(\.\d+)?$/.test(s)) return null;
+    return Math.round(parseFloat(s) * 1073741824);
+}
+function _catBytesToGb(bytes) {
+    const n = Number(bytes);
+    if (!n || n < 0) return "";
+    return String(Math.round(n / 1073741824 * 100) / 100);
+}
+
+// A choice stays allowed when its role is the mode's, or unknown.
+function _catRoleOK(choice, mode) {
+    return !choice || !choice.role || choice.role === mode;
+}
+// Targets still valid for `mode`. A target absent from `choices` (an offline
+// node, say) is kept: nothing says it is wrong.
+function _catPruneTargets(targets, choices, mode) {
+    return (targets || []).filter(k => {
+        const c = (choices || []).find(x => x.key === k);
+        return !c || _catRoleOK(c, mode);
+    });
+}
+// Move item i by `d` (-1 or +1); returns a new array.
+function _catMove(list, i, d) {
+    const j = i + d;
+    if (i < 0 || i >= list.length || j < 0 || j >= list.length) return list.slice();
+    const out = list.slice();
+    [out[i], out[j]] = [out[j], out[i]];
+    return out;
+}
+
+// The body sent to POST/PUT /api/categories. What the form does not show comes
+// back as stored (the dead 3.x keys placement, agents, strategy,
+// min_free_bytes); the fields it sets are written over it.
+function _catBuildPayload(stored, f) {
+    return Object.assign({}, stored || null, {
+        name: f.name, save_path: f.save_path, mode: f.mode,
+        graduate_to: f.graduate_to, transit: f.transit,
+        targets: f.targets, spread: f.spread, reserve_bytes: f.reserve_bytes,
+    });
+}
+
+function _catSpreadSummary(cat) {
+    const n = Array.isArray(cat.targets) ? cat.targets.length : 0;
+    const spread = cat.spread || "bytes";
+    if (!n && spread === "bytes") return "";
+    return (n ? t("{n} target(s)", { n }) : t("all engines")) + " · " + spread;
+}
+
+function _catRenderTargets() {
+    const box = document.getElementById("cat-targets-list");
+    if (!box) return;
+    const mode = document.getElementById("cat-mode").value;
+    const byKey = new Map(_catChoices.map(c => [c.key, c]));
+    // Selected first, in their order (also the ones no longer listed), then the
+    // other engines of the right role.
+    const rows = _catTargets.map(k => byKey.get(k) || { key: k, label: k, role: null, missing: true });
+    for (const c of _catChoices) {
+        if (!_catTargets.includes(c.key) && _catRoleOK(c, mode)) rows.push(c);
+    }
+    box.innerHTML = rows.map(c => {
+        const i = _catTargets.indexOf(c.key);
+        const on = i >= 0;
+        const tag = c.missing ? t("not found") : (c.role || t("role unknown"));
+        return `<div class="cat-target-row">
+            <label><input type="checkbox" data-k="${esc(c.key)}" ${on ? "checked" : ""} onchange="_catToggleTarget(this.dataset.k, this.checked)">
+                <span class="cat-target-rank">${on ? (i + 1) + "." : ""}</span>
+                <span>${esc(c.label)} <span class="sr-desc">(${esc(tag)})</span></span></label>
+            ${on ? `<button type="button" class="btn-small" data-k="${esc(c.key)}" aria-label="${esc(t("Move up"))}" title="${esc(t("Move up"))}" ${i === 0 ? "disabled" : ""} onclick="_catMoveTarget(this.dataset.k, -1)">↑</button>
+            <button type="button" class="btn-small" data-k="${esc(c.key)}" aria-label="${esc(t("Move down"))}" title="${esc(t("Move down"))}" ${i === _catTargets.length - 1 ? "disabled" : ""} onclick="_catMoveTarget(this.dataset.k, 1)">↓</button>` : ""}
+        </div>`;
+    }).join("");
+    const hint = document.getElementById("cat-targets-hint");
+    if (hint) {
+        hint.textContent = _catTargets.length
+            ? t("The order is used by \"Fill in order\" and to break ties.")
+            : t("None ticked: all {role} engines of this node.", { role: mode });
+    }
+    _catSpreadChanged();
+}
+function _catToggleTarget(key, on) {
+    _catTargets = on ? _catTargets.concat(_catTargets.includes(key) ? [] : [key])
+                     : _catTargets.filter(k => k !== key);
+    _catRenderTargets();
+}
+function _catMoveTarget(key, d) {
+    _catTargets = _catMove(_catTargets, _catTargets.indexOf(key), d);
+    _catRenderTargets();
+}
+function _catSpreadChanged() {
+    const sp = document.getElementById("cat-spread");
+    if (!sp) return;
+    const help = document.getElementById("cat-spread-help");
+    if (help) help.textContent = _catSpreadHelp()[sp.value] || "";
+    const warn = document.getElementById("cat-fill-warn");
+    const reserve = _catGbToBytes(document.getElementById("cat-reserve").value);
+    if (warn) warn.style.display = (sp.value === "fill" && !reserve) ? "" : "none";
 }
 function _populateGraduateSelect(cats, current, selfName) {
     const sel = document.getElementById("cat-graduate-to");
@@ -6369,6 +6535,10 @@ function _catModeChanged() {
     // hoard side -- the opposite of the graduate-to picker just above.
     const tw = document.getElementById("cat-transit-wrap");
     if (tw) tw.style.display = race ? "none" : "";
+    // The engine list follows the mode: a target of the other role would be
+    // refused by the server, so it is dropped here.
+    _catTargets = _catPruneTargets(_catTargets, _catChoices, race ? "race" : "hoard");
+    _catRenderTargets();
 }
 
 function hideCategoryForm() {
@@ -6570,8 +6740,17 @@ async function saveCategory() {
         // sent back as it was stored: the 3.x routing fields (placement,
         // agents, strategy, min_free_bytes) that nothing reads any more
         // survive an edit rather than being wiped by one.
-        const payload = Object.assign({}, _editingCategory ? _editingCategoryStored : null,
-            { name, save_path, mode, graduate_to, transit });
+        const reserve_bytes = _catGbToBytes(document.getElementById("cat-reserve").value);
+        if (reserve_bytes === null) {
+            resultEl.textContent = t("The reserve must be a number of GB, or empty");
+            resultEl.className = "result-msg error";
+            resultEl.style.display = "block";
+            return;
+        }
+        const payload = _catBuildPayload(_editingCategory ? _editingCategoryStored : null,
+            { name, save_path, mode, graduate_to, transit,
+              targets: _catPruneTargets(_catTargets, _catChoices, mode),
+              spread: document.getElementById("cat-spread").value, reserve_bytes });
         if (_editingCategory) {
             await api(`/api/categories/${encodeURIComponent(_editingCategory)}`, {
                 method: "PUT",
