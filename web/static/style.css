@@ -1330,6 +1330,48 @@ input[type="file"] {
     animation: slideOutRight 0.2s ease forwards;
 }
 
+/* Hoard panel: operator-chosen width, a drag handle and a collapse arrow.
+   Both live outside the panel so they do not scroll with it. */
+/* The saved width, held inside the window: a window narrowed after it was
+   saved must not push the panel off screen. */
+:root { --hdw: min(var(--hoard-detail-w, min(50vw, 960px)), calc(100vw - 80px)); }
+@media (min-width: 769px) {
+    #hoard-detail-panel, #torrent-detail { width: var(--hdw); min-width: 360px; }
+}
+.detail-resizer {
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    right: calc(var(--hdw) - 3px);
+    width: 6px;
+    cursor: col-resize;
+    z-index: 201;
+}
+.detail-resizer:hover, .detail-resizer.dragging { background: rgba(255, 255, 255, 0.15); }
+.detail-toggle {
+    position: fixed;
+    top: 50%;
+    right: var(--hdw);
+    transform: translateY(-50%);
+    z-index: 202;
+    width: 18px;
+    height: 56px;
+    padding: 0;
+    font-size: 18px;
+    line-height: 1;
+    color: inherit;
+    background: rgba(14, 14, 20, 0.97);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-right: none;
+    border-radius: 6px 0 0 6px;
+    cursor: pointer;
+}
+.detail-toggle.collapsed { right: 0; }
+@media (max-width: 768px) {
+    .detail-resizer { display: none !important; }
+    .detail-toggle { display: none !important; }
+}
+
 .detail-header {
     display: flex;
     justify-content: space-between;
