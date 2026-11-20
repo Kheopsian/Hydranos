@@ -5535,12 +5535,17 @@ impl Store {
     }
 
     /// Record every key of an article as taken. A key already there keeps
-    /// its first record.
+    /// its first record, unless that record is a refusal: a retry that works
+    /// replaces it, so the article stops showing the refusal.
     pub fn rss_take(&self, keys: &[&str], t: &RssTaken) -> anyhow::Result<()> {
         let tx = self.conn.unchecked_transaction()?;
         for k in keys.iter().filter(|k| !k.is_empty()) {
             tx.execute(
-                "INSERT OR IGNORE INTO rss_taken (key, rule, at, info_hash, outcome) VALUES (?1,?2,?3,?4,?5)",
+                "INSERT INTO rss_taken (key, rule, at, info_hash, outcome) VALUES (?1,?2,?3,?4,?5)
+                 ON CONFLICT(key) DO UPDATE SET
+                     rule=excluded.rule, at=excluded.at,
+                     info_hash=excluded.info_hash, outcome=excluded.outcome
+                 WHERE rss_taken.outcome LIKE 'refused%'",
                 rusqlite::params![k, t.rule, t.at, t.info_hash, t.outcome],
             )?;
         }
@@ -5629,6 +5634,28 @@ mod rss_store_tests {
         assert_eq!((t.rule.as_str(), t.outcome.as_str()), ("tv", "added"));
         drop(s);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_retry_replaces_a_refusal_but_nothing_else() {
+        let s = Store::open_in_memory().unwrap();
+        s.ensure_schema().unwrap();
+        let taken = |rule: &str, outcome: &str| RssTaken {
+            rule: rule.into(),
+            at: 1,
+            info_hash: "h".into(),
+            outcome: outcome.into(),
+        };
+        s.rss_take(&["g"], &taken("(manual)", "refused: no save path"))
+            .unwrap();
+        s.rss_take(&["g"], &taken("(manual)", "added")).unwrap();
+        assert_eq!(s.rss_taken(&["g"]).unwrap().unwrap().outcome, "added");
+        s.rss_take(&["g"], &taken("tv", "refused: later")).unwrap();
+        assert_eq!(
+            s.rss_taken(&["g"]).unwrap().unwrap().outcome,
+            "added",
+            "an added article keeps its first record"
+        );
     }
 
     #[test]
