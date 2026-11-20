@@ -603,9 +603,23 @@ pub fn path_prefixes<'a>(paths: impl Iterator<Item = &'a str>) -> Vec<String> {
         set = folded;
     }
     // A folder inside another one on the list is covered by it.
-    let all: Vec<String> = set.iter().cloned().collect();
-    set.retain(|p| !all.iter().any(|q| q != p && under(p, q)));
-    set.into_iter().collect()
+    // Spellings of one Windows folder (`C:/Downloads`, `c:\downloads`) are each
+    // under the other: keep the first of them, or the folder would cover itself
+    // out of the list.
+    let mut all: Vec<String> = Vec::new();
+    for p in set {
+        if !all.iter().any(|q| under(&p, q) && under(q, &p)) {
+            all.push(p);
+        }
+    }
+    let inner: Vec<bool> = all
+        .iter()
+        .map(|p| all.iter().any(|q| under(p, q) && !under(q, p)))
+        .collect();
+    all.into_iter()
+        .zip(inner)
+        .filter_map(|(p, inner)| (!inner).then_some(p))
+        .collect()
 }
 
 /// A path written the Windows way: `C:\...`, `C:/...` or `\\server\share`.
@@ -628,11 +642,40 @@ fn separators(p: &str) -> &'static [char] {
 
 /// `p` is `dir` or inside it, on a path-component boundary: `/data/films2` is
 /// not under `/data/films`, and `C:\data\films\x` is under `C:\data\films`.
+///
+/// When both are Windows-style, `\` and `/` are alike and case is ignored:
+/// qBittorrent reports `c:/Downloads/x` where a hand-typed mapping says
+/// `C:\downloads`.
 fn under(p: &str, dir: &str) -> bool {
+    prefix_len(p, dir).is_some()
+}
+
+/// Bytes of `p` taken by `dir` when `p` is under it (see [`under`]).
+fn prefix_len(p: &str, dir: &str) -> Option<usize> {
     let dir = dir.trim_end_matches(separators(dir));
-    p == dir
-        || (p.starts_with(dir) && p[dir.len()..].starts_with(separators(dir)))
-        || dir.is_empty()
+    if dir.is_empty() {
+        return Some(0);
+    }
+    if windows_style(dir) && windows_style(p) {
+        let is_sep = |c: char| c == '/' || c == '\\';
+        let mut pc = p.char_indices();
+        let mut end = 0;
+        for d in dir.chars() {
+            let (i, c) = pc.next()?;
+            let same = (is_sep(c) && is_sep(d)) || c == d || c.to_lowercase().eq(d.to_lowercase());
+            if !same {
+                return None;
+            }
+            end = i + c.len_utf8();
+        }
+        return match p[end..].chars().next() {
+            None => Some(end),
+            Some(c) if is_sep(c) => Some(end),
+            _ => None,
+        };
+    }
+    (p == dir || (p.starts_with(dir) && p[dir.len()..].starts_with(separators(dir))))
+        .then_some(dir.len())
 }
 
 /// Rewrite a source-side path to what Hydranos sees, by the longest mapped
@@ -646,12 +689,13 @@ pub fn map_path(p: &str, map: &BTreeMap<String, String>) -> String {
         .max_by_key(|(from, _)| from.trim_end_matches(separators(from)).len());
     match best {
         Some((from, to)) => {
+            let from_len = prefix_len(p, from).unwrap_or(0);
             let from = from.trim_end_matches(separators(from));
             let to_trimmed = to.trim_end_matches(separators(to));
-            let rest = &p[from.len()..];
+            let rest = &p[from_len..];
             let rest = match (windows_style(from), windows_style(to)) {
                 (true, false) => rest.replace('\\', "/"),
-                (false, true) => rest.replace('/', "\\"),
+                (_, true) => rest.replace('/', "\\"),
                 _ => rest.to_string(),
             };
             format!("{to_trimmed}{rest}")
@@ -1246,6 +1290,22 @@ mod tests {
         assert_eq!(map_path("/elsewhere", &map), "/elsewhere");
     }
 
+    /// qBittorrent reports `C:/Downloads/x` on Windows; a typed mapping says
+    /// `C:\downloads`. Separators and case do not matter, and the user's
+    /// separator is kept in the output.
+    #[test]
+    fn a_windows_path_matches_across_separators_and_case() {
+        let map: BTreeMap<String, String> =
+            [(r"C:\Downloads".to_string(), r"D:\data".to_string())].into();
+        assert_eq!(map_path("C:/Downloads/x/y", &map), r"D:\data\x\y");
+        assert_eq!(map_path("c:/downloads/Films", &map), r"D:\data\Films");
+        assert_eq!(map_path("c:/downloads", &map), r"D:\data");
+        assert_eq!(map_path("C:/Downloads2/x", &map), "C:/Downloads2/x");
+        let to_linux: BTreeMap<String, String> =
+            [(r"c:\downloads".to_string(), "/data".to_string())].into();
+        assert_eq!(map_path("C:/Downloads/x", &to_linux), "/data/x");
+    }
+
     /// A client on Windows: its paths use `\`, whatever this node runs on.
     #[test]
     fn a_windows_client_path_is_mapped_on_its_own_separators() {
@@ -1275,6 +1335,18 @@ mod tests {
     fn windows_prefixes_drop_nested_ones() {
         let got = path_prefixes([r"C:\d\films", r"C:\d\films\hd", r"C:\e\"].into_iter());
         assert_eq!(got, vec![r"C:\d\films", r"C:\e"]);
+    }
+
+    /// Spellings of one Windows folder are not each covered by the other.
+    #[test]
+    fn mixed_spellings_of_a_windows_folder_leave_one_prefix() {
+        assert_eq!(
+            path_prefixes(["C:/Downloads/a", r"C:\Downloads"].into_iter()).len(),
+            1
+        );
+        let got = path_prefixes([r"C:\Downloads", "c:/downloads", "C:/Downloads/x"].into_iter());
+        assert_eq!(got.len(), 1);
+        assert!(under("C:/Downloads/x", &got[0]));
     }
 
     #[test]
