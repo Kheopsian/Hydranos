@@ -5198,6 +5198,14 @@ fn disk_usage(path: &str) -> (i64, i64, f64) {
     let Some((_, total, free)) = crate::platform::usage(std::path::Path::new(path)) else {
         return (0, 0, 0.0);
     };
+    panel_figures(total, free)
+}
+
+/// The panel's arithmetic on one stat's `total` and `available`, apart from
+/// the stat itself so a test can compare it with the drain's figure taken
+/// from the very same reading.
+#[cfg(test)]
+fn panel_figures(total: u64, free: u64) -> (i64, i64, f64) {
     let (total, free) = (total as i64, free as i64);
     // ⚠ Kept as total-minus-available, which is what 3.x published on this
     // endpoint. platform::usage also returns a "used" that excludes reserved
@@ -24047,12 +24055,14 @@ mod merge_tests {
     /// the drain therefore do not report the same fullness for the same disk.
     #[test]
     fn disk_usage_answers_for_a_real_path_and_zeroes_for_a_missing_one() {
-        let (total, used, pct) = disk_usage("/tmp");
+        let tmp = std::env::temp_dir();
+        let (total, used, pct) = disk_usage(tmp.to_str().unwrap());
         assert!(total > 0, "a mounted filesystem has a size");
         assert!(used <= total);
         assert!((0.0..=100.0).contains(&pct), "got {pct}");
 
-        let (t2, u2, p2) = disk_usage("/tmp/typhon-no-such-dir-3f8a");
+        let missing = tmp.join("typhon-no-such-dir-3f8a");
+        let (t2, u2, p2) = disk_usage(missing.to_str().unwrap());
         assert_eq!(
             (t2, u2, p2),
             (0, 0, 0.0),
@@ -24065,9 +24075,11 @@ mod merge_tests {
     /// and on a filesystem with reserved blocks it is strictly more.
     #[test]
     fn the_panel_counts_reserved_blocks_as_used_where_the_drain_does_not() {
-        let (_, panel_used, _) = disk_usage("/tmp");
-        let (drain_used, _, _) =
-            crate::volumes::usage(std::path::Path::new("/tmp")).expect("/tmp is a filesystem");
+        // One reading for both figures: two stats would differ by whatever
+        // other tests write between them.
+        let (drain_used, total, free) =
+            crate::volumes::usage(&std::env::temp_dir()).expect("the temp dir is on a filesystem");
+        let (_, panel_used, _) = panel_figures(total, free);
         assert!(
             panel_used >= drain_used as i64,
             "panel {panel_used} vs drain {drain_used}: the panel adds the reserved blocks"

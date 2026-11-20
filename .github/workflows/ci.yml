@@ -241,6 +241,34 @@ jobs:
           sudo journalctl -k --no-pager 2>&1 | grep -i -E 'apparmor|denied|wg' | tail -10
           cat /proc/self/attr/current 2>&1
 
+  # The engine's unit tests, on the platform most users run it on. The `rust`
+  # job below only ever runs them on Linux, and the Windows release build
+  # compiles but never tests: `linked_elsewhere`, `volume_of`,
+  # `is_block_resident`, and the Windows `reserve`/`read_at`/`sync_data`/
+  # `pwrite_all` took a path no CI run executed. Tests that need Unix are
+  # #[cfg(unix)] and are skipped here by design.
+  rust-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch of the action; the compiler is pinned below
+        with:
+          toolchain: 1.99.1
+      # aws-lc-sys assembles with NASM on Windows, as in release.yml.
+      - name: Install NASM
+        run: |
+          choco install nasm -y --no-progress
+          echo "C:\\Program Files\\NASM" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+        shell: pwsh
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: typhon-engine
+      - name: Tests
+        working-directory: typhon-engine
+        env:
+          RUSTFLAGS: "--cfg tokio_unstable"
+        run: cargo test --locked --workspace
+
   rust:
     runs-on: ubuntu-latest
     steps:

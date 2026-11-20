@@ -4420,7 +4420,13 @@ mod decision_tests {
             },
         )
         .await;
-        assert!(!in_store(&s, &h) && !f.exists());
+        // The manager lets go first; the store row and the file go after it,
+        // and on a slower filesystem (Windows CI) not within the same instant.
+        eventually("the row and the file went with it", || {
+            std::thread::sleep(Duration::from_millis(10));
+            !in_store(&s, &h) && !f.exists()
+        })
+        .await;
     }
 
     /// A volume is drained from its high watermark, inclusive: allocated 50%
