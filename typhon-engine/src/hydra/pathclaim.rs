@@ -5477,6 +5477,60 @@ mod tests {
         assert!(rows() - before <= 4, "{} rows", rows() - before);
     }
 
+    /// A torrent moved to another engine, as a move job does it (the engine,
+    /// then the store row), is still found by the narrowed lookup.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_torrent_moved_to_another_engine_is_still_found_by_the_narrow_lookup() {
+        let s = crate::api::testing::state("pathclaim-moved-engine");
+        let cat = s.dir.join("flat");
+        std::fs::create_dir_all(&cat).unwrap();
+        let h = add(
+            &s,
+            &single_over("m.mkv", &[9u8; 100], "m"),
+            &cat,
+            true,
+            true,
+        )
+        .unwrap();
+        for n in 0..5u32 {
+            add(
+                &s,
+                &single_over(&format!("o{n}.mkv"), &[n as u8; 100], &n.to_string()),
+                &cat,
+                true,
+                true,
+            )
+            .unwrap();
+        }
+        let ih = crate::store::hex20(&h).unwrap();
+        let src = s.state.engines.get("hoard").unwrap().manager.clone();
+        let dst = s.state.engines.get("race").unwrap().manager.clone();
+        let rd = src.export_state(&ih).expect("exported");
+        let blob = s
+            .state
+            .store
+            .lock()
+            .unwrap()
+            .torrent_blob(&h)
+            .unwrap()
+            .unwrap();
+        dst.import_state_bytes(&rd, &blob).expect("adopted");
+        src.remove_torrent(&ih, true).expect("released");
+        {
+            let store = s.state.store.lock().unwrap();
+            assert!(store.claim_index_ready());
+            store.set_session(&h, "hoard", "race").unwrap();
+        }
+        let found = crate::jobsrun::scan_claims(
+            &s.state,
+            &cat,
+            Some(std::ffi::OsStr::new("m.mkv")),
+            &[path_key(&cat.join("m.mkv"))].into_iter().collect(),
+            &|_: &TorrentState| false,
+        );
+        assert_eq!(found.len(), 1, "the moved torrent was not found");
+    }
+
     /// Torrents arriving in a burst while others probe: the index is kept true
     /// by the placement log, never rebuilt for them, and no folder of the store
     /// is listed on the probes' path; the torrent added last is seen.

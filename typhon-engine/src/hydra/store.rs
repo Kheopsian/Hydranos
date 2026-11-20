@@ -4578,6 +4578,15 @@ impl Store {
             "UPDATE torrents SET session = ?3 WHERE info_hash = ?1 AND session = ?2",
             rusqlite::params![info_hash, from, to],
         )?;
+        // The claim index follows the row: `rows_by_claim` joins the two on the
+        // session, so an entry left under the old one would hide the torrent
+        // from every lookup until the next restart.
+        if n > 0 {
+            self.conn.execute(
+                "UPDATE OR REPLACE claim_top SET session = ?3 WHERE info_hash = ?1 AND session = ?2",
+                rusqlite::params![info_hash, from, to],
+            )?;
+        }
         // A row re-homed ahead of the engine that will hold it is as new there
         // as an inserted one.
         if n > 0 {
@@ -6099,6 +6108,33 @@ mod tests {
         store.ensure_claim_top().unwrap();
         store.track_changes();
         store
+    }
+
+    /// A torrent re-homed to another session stays found by the narrowed
+    /// lookup, under its own name: the claim index moves with the row.
+    #[test]
+    fn a_re_homed_torrent_is_still_found_by_the_claim_lookup() {
+        let store = fresh();
+        store
+            .claim_ready
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let h = "a".repeat(40);
+        let blob = b"d4:infod6:lengthi5e4:name5:x.mkv12:piece lengthi16384e6:pieces20:aaaaaaaaaaaaaaaaaaaaee";
+        store
+            .insert_torrent(&h, "hoard", blob, "/data/cat", "", 0.0, false, "")
+            .unwrap();
+        let ask = || {
+            store
+                .rows_by_claim(
+                    &[("/data/cat".to_string(), Some(vec!["x.mkv".to_string()]))],
+                    "/data/cat/x.mkv",
+                    '/',
+                )
+                .unwrap()
+        };
+        assert_eq!(ask(), vec![(h.clone(), "hoard".to_string())]);
+        store.set_session(&h, "hoard", "race").unwrap();
+        assert_eq!(ask(), vec![(h.clone(), "race".to_string())]);
     }
 
     #[test]
