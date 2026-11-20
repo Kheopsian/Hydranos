@@ -301,6 +301,156 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("walrepair-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A header that says WAL followed by zeros: SQLite refuses it ("not a
+    /// database", page size 0), so `convert` cannot take the clean route and
+    /// has to decide about the byte rewrite.
+    fn unopenable_wal_db(dir: &Path, name: &str) -> std::path::PathBuf {
+        write(dir, name, &header(2, 2))
+    }
+
+    /// ⭐ The data-loss guard. The checkpoint was refused and the -wal still
+    /// holds bytes: rewriting offsets 18/19 now would drop committed pages, so
+    /// the database file must be left exactly as it was and the error must
+    /// say so.
+    #[test]
+    fn a_hot_log_is_never_discarded_by_the_header_rewrite() {
+        let dir = scratch("hot");
+        let db = unopenable_wal_db(&dir, "lib.db");
+        let wal = dir.join("lib.db-wal");
+        std::fs::write(&wal, b"committed pages").unwrap();
+        let before = std::fs::read(&db).unwrap();
+
+        let err = convert(&db).unwrap_err();
+        assert!(err.contains("left untouched"), "{err}");
+        assert_eq!(std::fs::read(&db).unwrap(), before, "header was rewritten");
+        // (Whether the -wal survives is SQLite's business: it may tidy an
+        // invalid one itself on close. `convert` never removes it here.)
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// With a cold log (no sidecar content) the header IS rewritten: both
+    /// format bytes go to 1, nothing else in the header moves, and the empty
+    /// -wal and -shm are gone afterwards so the next open does not trust them.
+    /// (SQLite's own failed open also tidies them, so the sidecar assertions
+    /// do not isolate `convert`'s own removal; the byte assertions do.)
+    #[test]
+    fn a_cold_log_gets_the_header_rewritten_and_the_sidecars_removed() {
+        let dir = scratch("cold");
+        let db = unopenable_wal_db(&dir, "lib.db");
+        std::fs::write(dir.join("lib.db-wal"), b"").unwrap();
+        std::fs::write(dir.join("lib.db-shm"), b"stale").unwrap();
+
+        assert_eq!(convert(&db).unwrap(), "header");
+        let after = std::fs::read(&db).unwrap();
+        assert_eq!(&after[HDR_WRITE_VERSION..=HDR_READ_VERSION], &[1, 1]);
+        let mut expect = header(2, 2);
+        expect[HDR_WRITE_VERSION] = 1;
+        expect[HDR_READ_VERSION] = 1;
+        assert_eq!(after, expect, "only the two version bytes may change");
+        assert!(!dir.join("lib.db-wal").exists());
+        assert!(!dir.join("lib.db-shm").exists());
+        assert!(!header_says_wal(&db).unwrap());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A file that is not a database is refused and left alone: `convert`
+    /// must not write two bytes into whatever it was pointed at.
+    #[test]
+    fn a_file_that_is_not_a_database_is_never_written_to() {
+        let dir = scratch("junk");
+        let junk = write(&dir, "notes.db", b"just some text, certainly not sqlite");
+        let before = std::fs::read(&junk).unwrap();
+        let err = convert(&junk).unwrap_err();
+        assert!(err.contains("not a SQLite database"), "{err}");
+        assert_eq!(std::fs::read(&junk).unwrap(), before);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The clean route keeps every row and leaves a rollback-journal header.
+    #[test]
+    fn the_clean_route_keeps_every_row_and_leaves_a_rollback_header() {
+        let dir = scratch("rows");
+        let db = dir.join("lib.db");
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.pragma_update(None, "journal_mode", "WAL").unwrap();
+            conn.execute_batch("CREATE TABLE t (a INTEGER); INSERT INTO t VALUES (1), (2), (3);")
+                .unwrap();
+        }
+        assert!(diagnose(&db).unwrap().in_wal);
+        assert_eq!(convert(&db).unwrap(), "pragma");
+        let d = diagnose(&db).unwrap();
+        assert!(!d.in_wal && !d.hot_wal, "{d:?}");
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        let n: i64 = conn
+            .query_row("SELECT count(*) FROM t", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 3);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `diagnose` reports a hot log from the sidecar's size, under either of
+    /// the two names it looks for, and a zero-byte sidecar is not hot.
+    #[test]
+    fn diagnose_sees_a_hot_log_by_its_size() {
+        let dir = scratch("diag");
+        let db = unopenable_wal_db(&dir, "lib.db");
+        assert!(!diagnose(&db).unwrap().hot_wal, "no sidecar");
+        std::fs::write(dir.join("lib.db-wal"), b"").unwrap();
+        assert!(!diagnose(&db).unwrap().hot_wal, "empty sidecar");
+        std::fs::write(dir.join("lib.db-wal"), b"x").unwrap();
+        let d = diagnose(&db).unwrap();
+        assert!(d.hot_wal && d.in_wal, "{d:?}");
+        assert_eq!(d.path, db.display().to_string());
+
+        // A name with no extension: the sidecar is `<name>-wal`.
+        let bare = unopenable_wal_db(&dir, "library");
+        assert!(!diagnose(&bare).unwrap().hot_wal);
+        std::fs::write(dir.join("library-wal"), b"x").unwrap();
+        assert!(diagnose(&bare).unwrap().hot_wal);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The backup is a byte-for-byte copy beside the original, named for the
+    /// moment it was taken, and takes neither the -wal nor the -shm. A missing
+    /// source is an error with nothing left behind.
+    #[test]
+    fn a_backup_is_a_faithful_copy_without_the_sidecars() {
+        let dir = scratch("bak");
+        let db = write(&dir, "lib.db", &header(2, 2));
+        std::fs::write(dir.join("lib.db-wal"), b"w").unwrap();
+        std::fs::write(dir.join("lib.db-shm"), b"s").unwrap();
+
+        let copy = backup(&db).unwrap();
+        assert!(
+            copy.starts_with(&format!("{}.bak-preconvert-", db.display())),
+            "{copy}"
+        );
+        assert_eq!(std::fs::read(&copy).unwrap(), header(2, 2));
+        let names: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains("bak-preconvert"))
+            .collect();
+        assert_eq!(names.len(), 1, "{names:?}: only the database is copied");
+
+        let gone = dir.join("absent.db");
+        assert!(backup(&gone).is_err());
+        assert!(!std::fs::read_dir(&dir).unwrap().any(|e| e
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with("absent.db.bak")));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn a_missing_database_is_not_an_error() {
         let path = std::env::temp_dir().join("walrepair-absent.db");
