@@ -3872,11 +3872,16 @@ pub(crate) async fn engine_page_value(
             let check_waiting = row_state == "checking_files" && t.waiting_for_check();
             let m_state = match state_filter.as_str() {
                 "" => true,
+                // Seed only serves what it holds, so the Seeding chip lists it
+                // with the finished ones.
+                "seeding" => row_state == "seeding" || row_state == "seed_only",
                 // The two halves of Checking: reading the disk, or waiting
                 // for its turn on it.
                 "__check_reading__" => row_state == "checking_files" && !check_waiting,
                 "__check_waiting__" => check_waiting,
-                "__active__" => row_state == "seeding" && upload_rate > 0,
+                "__active__" => {
+                    (row_state == "seeding" || row_state == "seed_only") && upload_rate > 0
+                }
                 "__tracker_err__" => tracker_error,
                 "__error__" => torrent_error,
                 "__pinned__" => is_pinned,
@@ -3903,7 +3908,7 @@ pub(crate) async fn engine_page_value(
                 if m_search && m_cat && m_tag && m_tracker && m_errclass {
                     n_all += 1;
                     *f_state.entry(row_state).or_insert(0) += 1;
-                    if row_state == "seeding" && upload_rate > 0 {
+                    if (row_state == "seeding" || row_state == "seed_only") && upload_rate > 0 {
                         n_active += 1;
                     }
                     if tracker_error {
