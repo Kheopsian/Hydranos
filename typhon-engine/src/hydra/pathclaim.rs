@@ -3321,6 +3321,100 @@ mod tests {
             .any(|e| e.info_hash == b && e.action == "proven" && e.engine == "race"));
     }
 
+    /// A torrent stopped while its proof waits for its turn stayed under
+    /// Checking and offered Start: the stop did nothing visible, and the
+    /// proof went on to link, check and start it once the disk was free. The
+    /// stop calls the proof off: the torrent reads as stopped at once, and
+    /// when the turn comes the proof leaves without touching it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_torrent_stopped_while_its_proof_waits_reads_stopped_and_stays_so() {
+        let _alone = THREADED_PROOFS.lock().await;
+        use std::sync::atomic::Ordering::SeqCst;
+        PROOFS_NOW.store(0, SeqCst);
+        PROOFS_DONE.store(0, SeqCst);
+        let s = crate::api::testing::state("pathclaim-stop-queued");
+        let dir = s.dir.join("movies");
+        std::fs::create_dir_all(dir.join("Film")).unwrap();
+        let video: Vec<u8> = (0..32_768u32).map(|i| (i % 251) as u8).collect();
+        std::fs::write(dir.join("Film").join("a.mkv"), &video).unwrap();
+        std::fs::write(dir.join("Film").join("a.nfo"), b"team notes v1...").unwrap();
+        add(
+            &s,
+            &torrent_over(
+                "Film",
+                &[("a.mkv", &video), ("a.nfo", b"team notes v1...")],
+                16384,
+            ),
+            &dir,
+            true,
+            true,
+        )
+        .unwrap();
+
+        // Its disk is busy: B's proof waits for its turn.
+        let key = typhon_engine::torrent::disk_key(&dir);
+        let mut busy = Vec::new();
+        for _ in 0..typhon_engine::torrent::disk_count(&key) {
+            busy.push(typhon_engine::torrent::disk_slot(&key).await);
+        }
+        THREADED.with(|t| t.set(true));
+        let b = add(
+            &s,
+            &torrent_over(
+                "Film",
+                &[("a.mkv", &video), ("a.nfo", b"stopped notes!!!")],
+                16384,
+            ),
+            &dir,
+            false,
+            false,
+        )
+        .unwrap();
+        THREADED.with(|t| t.set(false));
+        let ih = crate::store::hex20(&b).unwrap();
+        let hoard = s.state.engines.get("hoard").unwrap().manager.clone();
+        let t = hoard.get(&ih).unwrap();
+        assert!(t.held_for_proof(), "its proof waits");
+        assert_eq!(
+            typhon_engine::rpc::dispatch::torrent_core(&t).state,
+            "checking_files",
+            "it reads as checking while it waits"
+        );
+
+        crate::api::apply_pause_to_engine(&s.state, "hoard", &b, true);
+        assert!(!t.held_for_proof(), "the stop called the proof off");
+        assert_ne!(
+            typhon_engine::rpc::dispatch::torrent_core(&t).state,
+            "checking_files",
+            "a stopped torrent does not stay under Checking"
+        );
+        assert!(t.is_paused.load(SeqCst));
+
+        // The disk is free: the job gets its turn, sees the stop and leaves.
+        drop(busy);
+        for _ in 0..200 {
+            if !t.waiting_for_check() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(!t.waiting_for_check(), "the job never left the queue");
+        // A proof that wrongly went on takes 200 ms under test (`run_queued`).
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert_eq!(
+            (PROOFS_NOW.load(SeqCst), PROOFS_DONE.load(SeqCst)),
+            (0, 0),
+            "the proof ran after the stop"
+        );
+        assert!(
+            t.is_paused.load(SeqCst) && !t.rechecking.load(SeqCst),
+            "the stopped torrent was started or checked"
+        );
+        assert!(!recent()
+            .iter()
+            .any(|e| e.info_hash == b && e.action == "proven"));
+    }
+
     /// Move `hash` from hoard to race the way the move route does, landing
     /// at `save_path` when given, at the moment its proof has read its files.
     fn move_after_the_read(
