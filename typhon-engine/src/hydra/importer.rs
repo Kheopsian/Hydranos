@@ -189,7 +189,7 @@ const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 /// How long the whole library listing may take, body included. qBittorrent
 /// sends about 1.5 KB per torrent, so 200k torrents is hundreds of MB; the
 /// 30 s per-request limit cannot cover that. Gzip (on the client) shrinks it
-/// several-fold, and this bound covers what is left.
+/// several-fold (the listing asks for gzip), and this bound covers what is left.
 const LISTING_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// Why an export failed: the text, and whether qBittorrent answered at all.
@@ -399,11 +399,15 @@ impl Qbit {
 
     /// Every torrent it holds.
     ///
-    /// One request under `list_timeout`, which covers the body too. reqwest
-    /// sends `Accept-Encoding: gzip` (the `gzip` feature) and decodes it.
+    /// One request under `list_timeout`, which covers the body too. The
+    /// request asks for gzip, and the body is decoded here: the gzip support
+    /// of reqwest is not switched on, because that would add
+    /// `Accept-Encoding` to every other client in the binary (trackers, RSS,
+    /// the updater), and only this listing is large enough to need it.
     pub async fn torrents(&self) -> Result<Vec<QbitTorrent>, String> {
         let resp = self
             .get("/api/v2/torrents/info")
+            .header(reqwest::header::ACCEPT_ENCODING, "gzip")
             .timeout(self.list_timeout)
             .send()
             .await
@@ -411,9 +415,29 @@ impl Qbit {
         if !resp.status().is_success() {
             return Err(format!("torrents/info: http {}", resp.status()));
         }
-        resp.json()
+        let gzipped = resp
+            .headers()
+            .get(reqwest::header::CONTENT_ENCODING)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.trim().eq_ignore_ascii_case("gzip"));
+        let body = resp
+            .bytes()
             .await
-            .map_err(|e| format!("torrents/info body: {e}"))
+            .map_err(|e| format!("torrents/info body: {e}"))?;
+        // Decoding and parsing hundreds of MB is CPU work: off the runtime.
+        tokio::task::spawn_blocking(move || {
+            let json = if gzipped {
+                let mut out = Vec::new();
+                std::io::Read::read_to_end(&mut flate2::read::GzDecoder::new(&body[..]), &mut out)
+                    .map_err(|e| format!("torrents/info gzip: {e}"))?;
+                out
+            } else {
+                body.to_vec()
+            };
+            serde_json::from_slice(&json).map_err(|e| format!("torrents/info body: {e}"))
+        })
+        .await
+        .map_err(|e| format!("torrents/info body: {e}"))?
     }
 
     /// The .torrent file for one hash.
