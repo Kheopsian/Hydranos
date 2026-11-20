@@ -4200,7 +4200,11 @@ function _hoardMatches(t, search, skip) {
     }
     if (skip !== "state") {
         const s = _hoardStateFilter;
-        if (s === "__active__") { if (!(t.state === "seeding" && t.upload_rate > 0)) return false; }
+        // Seed only serves what it holds, so it counts as seeding here too,
+        // matching the server's filter and the chip count.
+        const seeding = t.state === "seeding" || t.state === "seed_only";
+        if (s === "__active__") { if (!(seeding && t.upload_rate > 0)) return false; }
+        else if (s === "seeding") { if (!seeding) return false; }
         else if (s === "__tracker_err__") { if (!t.tracker_error) return false; }
         else if (s === "__error__") { if (!t.torrent_error) return false; }
         else if (s === "__pinned__") { if (!_hoardPinned.has(t.info_hash)) return false; }
