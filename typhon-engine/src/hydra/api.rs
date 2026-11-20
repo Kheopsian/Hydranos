@@ -283,6 +283,9 @@ pub struct AppState {
     /// The *arr stack has a username and a password and no way to set a
     /// header, so it logs in and rides a cookie. See `crate::session`.
     pub sessions: crate::session::Sessions,
+    /// What the engines and nodes a category spreads over measured a moment
+    /// ago (`spread`).
+    pub spread: Arc<crate::spread::SpreadCache>,
 }
 
 impl AppState {
@@ -2528,7 +2531,8 @@ struct Category {
     #[serde(default, skip_serializing_if = "is_false")]
     transit: bool,
     /// ⚠ The four fields below are 3.x multi-agent routing, and NOTHING reads
-    /// them: `placement()` routes on `mode` alone. They are kept so a stored
+    /// them: `placement()` routes on `mode` alone, and the spread that replaces
+    /// them reads `targets`, `spread` and `reserve_bytes`. They are kept so a stored
     /// document round-trips unchanged, and they are no longer offered in the
     /// interface, which for all of 4.x let an operator set a strategy, a
     /// reserve and per-agent paths that changed nothing. A torrent reaches a
@@ -2541,6 +2545,26 @@ struct Category {
     strategy: String,
     #[serde(default, skip_serializing_if = "is_zero_i64")]
     min_free_bytes: i64,
+    /// Where a new torrent of this category may go: `"vpn1"` is a local
+    /// engine, `"nas:vpn1"` the engine `vpn1` of the node `nas`. Empty means
+    /// every local engine whose role is this category's mode. See `spread`.
+    ///
+    /// NEW keys, not the four 3.x ones above: a real `categories.json` still
+    /// holds those, and reading them again would switch an old configuration
+    /// on for people who never asked.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    targets: Vec<String>,
+    /// `count`, `bytes`, `fill` or `free_space`; absent means `bytes`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    spread: String,
+    /// A target with less free space than this at the category's folder is
+    /// never picked. 0 = no reserve.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    reserve_bytes: u64,
+}
+
+fn is_zero_u64(n: &u64) -> bool {
+    *n == 0
 }
 
 fn is_zero_i64(n: &i64) -> bool {
@@ -2632,6 +2656,27 @@ fn categories_map(state: &AppState) -> std::collections::BTreeMap<String, Catego
     });
     raw.and_then(|doc| serde_json::from_str(&doc).ok())
         .unwrap_or_default()
+}
+
+/// What a category asks of an add: its mode, targets, strategy, reserve and
+/// folder. `None` for a category that does not exist.
+pub(crate) fn category_rule(state: &AppState, category: &str) -> Option<crate::spread::Rule> {
+    let cat = categories_map(state).remove(category)?;
+    let strategy = if cat.spread.trim().is_empty() {
+        crate::spread::Strategy::default()
+    } else {
+        crate::spread::Strategy::parse(&cat.spread).unwrap_or_else(|| {
+            tracing::warn!(category, spread = %cat.spread, "spread: unknown strategy, using bytes");
+            crate::spread::Strategy::default()
+        })
+    };
+    Some(crate::spread::Rule {
+        hoard: cat.mode.trim().eq_ignore_ascii_case("hoard"),
+        targets: cat.targets,
+        strategy,
+        reserve: cat.reserve_bytes,
+        save_path: cat.save_path,
+    })
 }
 
 /// Which engine a category belongs to, and where it puts its files.
@@ -2774,6 +2819,19 @@ pub(crate) fn add_torrent_bytes(
     seed_mode: bool,
     engine_override: &str,
 ) -> Result<(String, String), String> {
+    // The category's spread, decided ONCE and here: the engine it names is then
+    // passed down as if the caller had asked for it, so the add, the "on add"
+    // workflows below and whoever reports where it went all agree. Asked twice
+    // it could answer twice, the first torrent having changed the counts.
+    let spread = if engine_override.is_empty() && !category.is_empty() {
+        let size = typhon_engine::torrent::metainfo::parse_torrent_bytes(bytes)
+            .map(|m| m.total_size)
+            .unwrap_or(0);
+        crate::spread::resolve_local(state, category, size)?
+    } else {
+        None
+    };
+    let engine_override = spread.as_deref().unwrap_or(engine_override);
     let added = add_torrent_bytes_as(
         state,
         bytes,
@@ -5023,6 +5081,108 @@ async fn get_engines(
     Json(out).into_response()
 }
 
+/// What one engine holds, for the spread of a category on ANOTHER node (and
+/// for this one): `{"engine","torrents","bytes","free_bytes"}`.
+///
+/// `?category=` names the category whose folder the free space is read at: the
+/// folder is this node's own, which is why the asking node sends a name and not
+/// a path. `free_bytes` is null when there is no such category here or the
+/// filesystem would not answer. Read-only, authenticated like every route.
+async fn get_engine_measure(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+    if state.engines.get(&id).is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": format!("no engine {id}")})),
+        )
+            .into_response();
+    }
+    let category = query_param(&query, "category").unwrap_or_default();
+    let path = categories_map(&state)
+        .get(&category)
+        .map(|c| c.save_path.clone())
+        .unwrap_or_default();
+    let (st, eid) = (state.clone(), id.clone());
+    // Walks the engine's torrents and asks the filesystem: off the runtime.
+    let m = tokio::task::spawn_blocking(move || crate::spread::measure_local(&st, &eid, &path))
+        .await
+        .ok()
+        .flatten();
+    match m {
+        Some(m) => Json(serde_json::json!({
+            "engine": id,
+            "torrents": m.torrents,
+            "bytes": m.bytes,
+            "free_bytes": m.free,
+        }))
+        .into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": format!("no engine {id}")})),
+        )
+            .into_response(),
+    }
+}
+
+/// Every place a category's `targets` may name: the engines here and the
+/// engines of the nodes, in the exact strings `targets` takes.
+///
+/// `{"targets":[{"target":"vpn1","engine":"vpn1","node":null,"role":"race"},
+/// {"target":"nas:vpn1","engine":"vpn1","node":"nas","role":"race"}],
+/// "unreachable":[{"node","error"}]}`. A node that did not answer is listed
+/// under `unreachable` and offers no target: its engines are unknown, and
+/// offering names that might not exist would be guessing. Nodes are asked
+/// concurrently, so several dead ones cost one timeout.
+async fn get_category_targets(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+) -> Response {
+    let query = query.unwrap_or_default();
+    guard!(state, headers, query);
+    let mut targets: Vec<serde_json::Value> = state
+        .engines
+        .engines()
+        .iter()
+        .map(|e| {
+            serde_json::json!({
+                "target": e.id, "engine": e.id, "node": null, "role": e.role,
+            })
+        })
+        .collect();
+    let nodes: Vec<crate::store::Node> = {
+        let store = state.store.lock().unwrap();
+        store.nodes().unwrap_or_default()
+    }
+    .into_iter()
+    .filter(|n| n.enabled)
+    .collect();
+    let answers = futures::future::join_all(nodes.iter().map(crate::spread::node_engines)).await;
+    let mut unreachable: Vec<serde_json::Value> = Vec::new();
+    for (n, answer) in nodes.iter().zip(answers) {
+        match answer {
+            Ok(list) => {
+                for (engine, role) in list {
+                    targets.push(serde_json::json!({
+                        "target": format!("{}:{engine}", n.name),
+                        "engine": engine,
+                        "node": n.name,
+                        "role": role,
+                    }));
+                }
+            }
+            Err(error) => unreachable.push(serde_json::json!({"node": n.name, "error": error})),
+        }
+    }
+    Json(serde_json::json!({"targets": targets, "unreachable": unreachable})).into_response()
+}
+
 // ---------------------------------------------------------------------------
 // Small listings and per-subsystem status
 // ---------------------------------------------------------------------------
@@ -5400,7 +5560,110 @@ fn checked_category(mut incoming: serde_json::Value) -> Result<serde_json::Value
         return Err(format!("mode must be race or hoard, not {mode:?}"));
     }
     obj.insert("mode".into(), serde_json::Value::String(mode));
+
+    // The spread keys (see `spread`). Read strictly: a value that does not mean
+    // what its author thought -- a strategy name from 3.x, a reserve in a
+    // string -- is refused here, not stored and ignored.
+    match obj.get("targets") {
+        None | Some(serde_json::Value::Null) => {
+            obj.remove("targets");
+        }
+        Some(serde_json::Value::Array(a)) => {
+            let mut out = Vec::with_capacity(a.len());
+            for t in a {
+                let t = t
+                    .as_str()
+                    .ok_or("targets must be a list of strings, like [\"vpn1\", \"nas:vpn1\"]")?
+                    .trim();
+                if t.is_empty() {
+                    return Err("a target is empty".into());
+                }
+                out.push(serde_json::Value::String(t.to_string()));
+            }
+            if out.is_empty() {
+                obj.remove("targets");
+            } else {
+                obj.insert("targets".into(), serde_json::Value::Array(out));
+            }
+        }
+        Some(_) => {
+            return Err("targets must be a list of strings, like [\"vpn1\", \"nas:vpn1\"]".into())
+        }
+    }
+    match obj.get("spread") {
+        None | Some(serde_json::Value::Null) => {
+            obj.remove("spread");
+        }
+        Some(serde_json::Value::String(s)) if s.trim().is_empty() => {
+            obj.remove("spread");
+        }
+        Some(serde_json::Value::String(s)) => {
+            let Some(strategy) = crate::spread::Strategy::parse(s) else {
+                return Err(format!(
+                    "spread must be count, bytes, fill or free_space, not {s:?}"
+                ));
+            };
+            let name = match strategy {
+                crate::spread::Strategy::Count => "count",
+                crate::spread::Strategy::Bytes => "bytes",
+                crate::spread::Strategy::Fill => "fill",
+                crate::spread::Strategy::FreeSpace => "free_space",
+            };
+            obj.insert("spread".into(), serde_json::Value::String(name.into()));
+        }
+        Some(_) => return Err("spread must be a string".into()),
+    }
+    match obj.get("reserve_bytes") {
+        None | Some(serde_json::Value::Null) => {
+            obj.remove("reserve_bytes");
+        }
+        Some(v) if v.as_u64() == Some(0) => {
+            obj.remove("reserve_bytes");
+        }
+        Some(v) if v.as_u64().is_some() => {}
+        Some(_) => return Err("reserve_bytes must be a whole number of bytes, 0 or more".into()),
+    }
     Ok(incoming)
+}
+
+/// The targets a checked category document names.
+fn category_targets(doc: &serde_json::Value) -> Vec<String> {
+    doc.get("targets")
+        .and_then(|t| t.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|t| t.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Whether the targets of `incoming` have to be looked up again: they are new,
+/// or the mode they must agree with changed. A save that touches neither (a new
+/// folder, say) does not depend on every node being up.
+async fn targets_refusal(
+    state: &AppState,
+    stored: Option<&serde_json::Value>,
+    incoming: &serde_json::Value,
+) -> Option<String> {
+    let targets = category_targets(incoming);
+    if targets.is_empty() {
+        return None;
+    }
+    let mode = |v: &serde_json::Value| {
+        v.get("mode")
+            .and_then(|m| m.as_str())
+            .unwrap_or("race")
+            .to_string()
+    };
+    if let Some(old) = stored {
+        if category_targets(old) == targets && mode(old) == mode(incoming) {
+            return None;
+        }
+    }
+    crate::spread::validate_targets(state, &mode(incoming), &targets)
+        .await
+        .err()
 }
 
 async fn get_arr_cleanup_scan(
@@ -7962,6 +8225,15 @@ struct StoredCategory {
     strategy: String,
     #[serde(default, skip_serializing_if = "is_zero_i64")]
     min_free_bytes: i64,
+    /// See `Category::targets`, `spread` and `reserve_bytes`. Listed here for
+    /// the reason given above: a field this struct does not know is dropped at
+    /// the next save, which for these three would quietly end a spread.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    targets: Vec<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    spread: String,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    reserve_bytes: u64,
 }
 
 async fn qbit_create_category(
@@ -8923,6 +9195,13 @@ async fn category_create(
         )
             .into_response();
     }
+    if let Some(e) = targets_refusal(&state, None, &incoming).await {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": e})),
+        )
+            .into_response();
+    }
     if let Err(e) = edit_categories(&state, |doc| {
         doc.insert(name, incoming.clone());
     }) {
@@ -8948,7 +9227,8 @@ async fn category_update(
     // What is not sent keeps its current value. The body used to replace the
     // whole entry, and a missing `mode` read as race: a PUT naming only a new
     // save path turned a hoard category into one the drain purges.
-    let mut incoming = stored_category(&state, &name).unwrap_or_else(|| serde_json::json!({}));
+    let stored = stored_category(&state, &name);
+    let mut incoming = stored.clone().unwrap_or_else(|| serde_json::json!({}));
     if let (Some(cur), Some(new)) = (incoming.as_object_mut(), sent.as_object()) {
         for (k, v) in new {
             cur.insert(k.clone(), v.clone());
@@ -8966,6 +9246,13 @@ async fn category_update(
                 .into_response()
         }
     };
+    if let Some(e) = targets_refusal(&state, stored.as_ref(), &incoming).await {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": e})),
+        )
+            .into_response();
+    }
     // A rename: the body names the category differently from the path. 4.3
     // wrote the body under the OLD name, so a rename changed nothing visible
     // and the new name never existed.
@@ -14587,7 +14874,58 @@ pub(crate) async fn post_torrent_add(
         );
     }
 
+    // The category's spread, for an add that names no engine: the engine it
+    // picked, or a node's. Decided here, once, so the answer can say where the
+    // torrent went.
+    let spread = engine.is_empty() && !s("category").is_empty();
+    let mut engine = engine;
+
     if !magnet_uri.is_empty() {
+        if spread {
+            match crate::spread::resolve(&state, &s("category"), 0).await {
+                Ok(crate::spread::Chosen::Local(Some(e))) => engine = e,
+                Ok(crate::spread::Chosen::Local(None)) => {}
+                Ok(crate::spread::Chosen::Remote {
+                    node,
+                    engine: remote,
+                }) => {
+                    let opts = crate::nodes::RemoteAdd {
+                        category: &s("category"),
+                        engine: &remote,
+                        paused,
+                        seed_mode,
+                        tags: &s("tags"),
+                        save_path: &s("save_path"),
+                    };
+                    return match crate::nodes::add_magnet(
+                        &node.url,
+                        &node.api_key,
+                        &magnet_uri,
+                        &opts,
+                    )
+                    .await
+                    {
+                        crate::nodes::RemoteOutcome::Added(v) => (
+                            StatusCode::ACCEPTED,
+                            Json(serde_json::json!({
+                                "info_hash": v.get("info_hash").cloned().unwrap_or_default(),
+                                "status": "resolving",
+                                "engine": remote,
+                                "node": node.name,
+                            })),
+                        )
+                            .into_response(),
+                        crate::nodes::RemoteOutcome::Present(e) => {
+                            refuse(StatusCode::CONFLICT, format!("node {}: {e}", node.name))
+                        }
+                        crate::nodes::RemoteOutcome::Refused(e) => {
+                            refuse(StatusCode::BAD_GATEWAY, format!("node {}: {e}", node.name))
+                        }
+                    };
+                }
+                Err(e) => return refuse(refusal_code(&e), e),
+            }
+        }
         let st = state.clone();
         let (cat, sp, tags) = (s("category"), s("save_path"), s("tags"));
         let res = tokio::task::spawn_blocking(move || {
@@ -14639,6 +14977,57 @@ pub(crate) async fn post_torrent_add(
             Err(e) => return refuse(StatusCode::BAD_REQUEST, format!("{torrent_path}: {e}")),
         }
     };
+
+    if spread {
+        let size = typhon_engine::torrent::metainfo::parse_torrent_bytes(&bytes)
+            .map(|m| m.total_size)
+            .unwrap_or(0);
+        match crate::spread::resolve(&state, &s("category"), size).await {
+            Ok(crate::spread::Chosen::Local(Some(e))) => engine = e,
+            Ok(crate::spread::Chosen::Local(None)) => {}
+            Ok(crate::spread::Chosen::Remote {
+                node,
+                engine: remote,
+            }) => {
+                let hash = typhon_engine::torrent::metainfo::parse_torrent_bytes(&bytes)
+                    .map(|m| typhon_engine::torrent::hex_encode(&m.info_hash))
+                    .unwrap_or_default();
+                let opts = crate::nodes::RemoteAdd {
+                    category: &s("category"),
+                    engine: &remote,
+                    paused,
+                    seed_mode,
+                    tags: &s("tags"),
+                    save_path: &s("save_path"),
+                };
+                return match crate::nodes::add_torrent(
+                    &node.url,
+                    &node.api_key,
+                    bytes.to_vec(),
+                    &hash,
+                    &opts,
+                )
+                .await
+                {
+                    crate::nodes::RemoteOutcome::Added(v) => Json(serde_json::json!({
+                        "info_hash": hash,
+                        "name": v.get("name").cloned().unwrap_or_default(),
+                        "engine": remote,
+                        "mode": v.get("mode").cloned().unwrap_or_default(),
+                        "node": node.name,
+                    }))
+                    .into_response(),
+                    crate::nodes::RemoteOutcome::Present(e) => {
+                        refuse(StatusCode::CONFLICT, format!("node {}: {e}", node.name))
+                    }
+                    crate::nodes::RemoteOutcome::Refused(e) => {
+                        refuse(StatusCode::BAD_GATEWAY, format!("node {}: {e}", node.name))
+                    }
+                };
+            }
+            Err(e) => return refuse(refusal_code(&e), e),
+        }
+    }
 
     let save_path = match add_save_path(
         &state,
@@ -15097,6 +15486,10 @@ enum UploadOutcome {
         name: String,
         engine: String,
         mode: String,
+        /// The node the torrent was sent to, when a category's spread chose an
+        /// engine of a node (`engine` is then that node's engine id).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        node: Option<String>,
     },
     /// Held already by the engine the add was routed to.
     Present { info_hash: String, error: String },
@@ -15108,6 +15501,7 @@ enum UploadOutcome {
 }
 
 /// The fields of a native upload, applied to every file of it.
+#[derive(Clone)]
 struct UploadFields {
     category: String,
     save_path: String,
@@ -15166,6 +15560,7 @@ fn upload_one(state: &AppState, f: &UploadFields, bytes: &[u8]) -> UploadOutcome
                 name,
                 engine,
                 mode,
+                node: None,
             }
         }
         // The engines' refusal is a string; this is how every add route tells
@@ -15180,6 +15575,63 @@ fn upload_one(state: &AppState, f: &UploadFields, bytes: &[u8]) -> UploadOutcome
         Err(error) => UploadOutcome::Refused {
             info_hash: hash_of(),
             error,
+        },
+    }
+}
+
+/// One file of a native upload, sent to the node a category's spread chose.
+///
+/// The node places it by its own category (its folder, its defaults); only an
+/// explicit `save_path` of the request travels. The answer says where it went:
+/// `engine` is the node's engine, `node` its name.
+async fn upload_remote(
+    f: &UploadFields,
+    node: &crate::store::Node,
+    engine: &str,
+    bytes: &[u8],
+) -> UploadOutcome {
+    let hash = typhon_engine::torrent::metainfo::parse_torrent_bytes(bytes)
+        .ok()
+        .map(|m| typhon_engine::torrent::hex_encode(&m.info_hash));
+    let Some(hash_hex) = hash.clone() else {
+        return UploadOutcome::Refused {
+            info_hash: None,
+            error: "torrent file did not parse".into(),
+        };
+    };
+    let opts = crate::nodes::RemoteAdd {
+        category: &f.category,
+        engine,
+        paused: f.paused,
+        seed_mode: f.seed_mode,
+        tags: &f.tags,
+        save_path: &f.save_path,
+    };
+    match crate::nodes::add_torrent(&node.url, &node.api_key, bytes.to_vec(), &hash_hex, &opts)
+        .await
+    {
+        crate::nodes::RemoteOutcome::Added(v) => {
+            let text = |k: &str| {
+                v.get(k)
+                    .and_then(|x| x.as_str())
+                    .unwrap_or_default()
+                    .to_string()
+            };
+            UploadOutcome::Added {
+                info_hash: hash_hex,
+                name: text("name"),
+                engine: engine.to_string(),
+                mode: text("mode"),
+                node: Some(node.name.clone()),
+            }
+        }
+        crate::nodes::RemoteOutcome::Present(error) => UploadOutcome::Present {
+            info_hash: hash_hex,
+            error: format!("node {}: {error}", node.name),
+        },
+        crate::nodes::RemoteOutcome::Refused(error) => UploadOutcome::Refused {
+            info_hash: hash,
+            error: format!("node {}: {error}", node.name),
         },
     }
 }
@@ -15318,28 +15770,54 @@ async fn post_torrent_upload(
     };
     let single = files.len() == 1 && !batch;
 
-    // Off the async runtime: each add takes the store's lock, writes SQLite,
-    // stats the save path and may wait on a path reservation.
-    let st = state.clone();
-    let outcomes = tokio::task::spawn_blocking(move || {
-        files
-            .iter()
-            .map(|bytes| upload_one(&st, &fields, bytes))
-            .collect::<Vec<_>>()
-    })
-    .await;
-    let mut outcomes = match outcomes {
-        Ok(o) => o,
-        Err(e) => {
-            tracing::error!(error = %e, "upload: the add task ended abnormally");
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": "the add did not complete; list the torrents to see what went in"})),
-            )
-                .into_response();
-        }
-    };
-
+    // Each file is placed on its own: a category that spreads over several
+    // engines sends two files of one request to two of them. An explicit
+    // `engine`/`mode` is never second-guessed.
+    let spread = fields.engine.is_empty() && !fields.category.is_empty();
+    let mut outcomes: Vec<UploadOutcome> = Vec::with_capacity(files.len());
+    for bytes in files {
+        let route = if spread {
+            let size = typhon_engine::torrent::metainfo::parse_torrent_bytes(&bytes)
+                .map(|m| m.total_size)
+                .unwrap_or(0);
+            crate::spread::resolve(&state, &fields.category, size).await
+        } else {
+            Ok(crate::spread::Chosen::Local(None))
+        };
+        let outcome = match route {
+            Err(error) => UploadOutcome::Refused {
+                info_hash: typhon_engine::torrent::metainfo::parse_torrent_bytes(&bytes)
+                    .ok()
+                    .map(|m| typhon_engine::torrent::hex_encode(&m.info_hash)),
+                error,
+            },
+            Ok(crate::spread::Chosen::Local(engine)) => {
+                let mut f = fields.clone();
+                if let Some(e) = engine {
+                    f.engine = e;
+                }
+                let st = state.clone();
+                // Off the async runtime: each add takes the store's lock,
+                // writes SQLite, stats the save path and may wait on a path
+                // reservation.
+                match tokio::task::spawn_blocking(move || upload_one(&st, &f, &bytes)).await {
+                    Ok(o) => o,
+                    Err(e) => {
+                        tracing::error!(error = %e, "upload: the add task ended abnormally");
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(serde_json::json!({"error": "the add did not complete; list the torrents to see what went in"})),
+                        )
+                            .into_response();
+                    }
+                }
+            }
+            Ok(crate::spread::Chosen::Remote { node, engine }) => {
+                upload_remote(&fields, &node, &engine, &bytes).await
+            }
+        };
+        outcomes.push(outcome);
+    }
     if single {
         return match outcomes.pop() {
             Some(UploadOutcome::Added {
@@ -15347,10 +15825,16 @@ async fn post_torrent_upload(
                 name,
                 engine,
                 mode,
-            }) => Json(serde_json::json!({
-                "info_hash": info_hash, "name": name, "engine": engine, "mode": mode
-            }))
-            .into_response(),
+                node,
+            }) => {
+                let mut v = serde_json::json!({
+                    "info_hash": info_hash, "name": name, "engine": engine, "mode": mode
+                });
+                if let Some(node) = node {
+                    v["node"] = serde_json::Value::String(node);
+                }
+                Json(v).into_response()
+            }
             Some(UploadOutcome::Present { error, .. }) => (
                 StatusCode::CONFLICT,
                 Json(serde_json::json!({"error": error})),
@@ -19797,6 +20281,8 @@ fn router_with(state: AppState, extra: Router<AppState>) -> Router {
         .route("/api/drain/history", get(get_drain_history))
         .route("/api/drain/graduations", get(get_drain_graduations))
         .route("/api/categories/orphans", get(get_categories_orphans))
+        .route("/api/categories/targets", get(get_category_targets))
+        .route("/api/engines/:id/measure", get(get_engine_measure))
         .route("/api/arr-cleanup/scan", get(get_arr_cleanup_scan))
         .route("/api/hoard/pinned", get(get_hoard_pinned))
         .route(
@@ -20987,6 +21473,7 @@ mod tests {
             reconnect: Default::default(),
             bench: None,
             sessions: Default::default(),
+            spread: Default::default(),
         }
     }
 
@@ -21626,6 +22113,7 @@ pub(crate) mod testing {
             // observability and must never cost the seedbox.
             bench: None,
             sessions: Default::default(),
+            spread: Default::default(),
         };
         TestState { state, dir }
     }
@@ -21745,6 +22233,10 @@ mod dedup_config_tests {
 #[cfg(test)]
 #[path = "api_nodes_tests.rs"]
 mod api_nodes_tests;
+
+#[cfg(test)]
+#[path = "api_spread_tests.rs"]
+mod api_spread_tests;
 
 #[cfg(test)]
 #[path = "api_cfgwrite_tests.rs"]

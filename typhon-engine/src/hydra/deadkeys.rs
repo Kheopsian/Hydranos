@@ -156,27 +156,29 @@ pub const DEAD_KEYS: &[DeadKey] = &[
         "the drain protects a torrent by its tracker's minimum seed time, not by its age",
         "the tracker's Minimum seed on the Trackers tab ([announce_min_seed_hours])",
     ),
-    // 3.x multi-agent routing on categories: `api::placement` routes on the
-    // mode alone. The fields are kept so a rollback to 3.x finds them.
+    // 3.x multi-agent routing on categories. Nothing reads these; the spread
+    // that replaces them (`spread.rs`) has its own keys on purpose, so an old
+    // value in a real categories.json is never woken up. Kept so a rollback to
+    // 3.x finds them.
     dead_if_set(
         Scope::Category("placement"),
-        "3.x multi-agent routing; a category routes on its mode alone (kept only so a rollback to 3.x finds it)",
-        "engine= when adding, or Move to engine afterwards",
+        "3.x multi-agent routing, read by nothing in this version (kept only so a rollback to 3.x finds it)",
+        "the category's `targets`, `spread` and `reserve_bytes` (new keys, not these), or engine= when adding",
     ),
     dead_if_set(
         Scope::Category("agents"),
-        "3.x multi-agent routing; a category routes on its mode alone (kept only so a rollback to 3.x finds it)",
-        "engine= when adding, or Move to engine afterwards",
+        "3.x multi-agent routing, read by nothing in this version (kept only so a rollback to 3.x finds it)",
+        "the category's `targets`, `spread` and `reserve_bytes` (new keys, not these), or engine= when adding",
     ),
     dead_if_set(
         Scope::Category("strategy"),
-        "3.x multi-agent routing; a category routes on its mode alone (kept only so a rollback to 3.x finds it)",
-        "engine= when adding, or Move to engine afterwards",
+        "3.x multi-agent routing, read by nothing in this version (kept only so a rollback to 3.x finds it)",
+        "the category's `targets`, `spread` and `reserve_bytes` (new keys, not these), or engine= when adding",
     ),
     dead_if_set(
         Scope::Category("min_free_bytes"),
-        "3.x multi-agent routing; a category routes on its mode alone (kept only so a rollback to 3.x finds it)",
-        "engine= when adding, or Move to engine afterwards",
+        "3.x multi-agent routing, read by nothing in this version (kept only so a rollback to 3.x finds it)",
+        "the category's `targets`, `spread` and `reserve_bytes` (new keys, not these), or engine= when adding",
     ),
 ];
 

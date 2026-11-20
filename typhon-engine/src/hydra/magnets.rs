@@ -173,6 +173,15 @@ pub fn request_with_options(
 ) -> Result<String, String> {
     let m = parse(uri)?;
     let hash = hex(&m.info_hash);
+    // The category's spread, decided once (see `api::add_torrent_bytes`). A
+    // magnet's size is not known yet, so the byte and space figures it moves
+    // are the ones measured, not its own.
+    let spread = if engine_override.is_empty() && !category.is_empty() {
+        crate::spread::resolve_local(state, category, 0)?
+    } else {
+        None
+    };
+    let engine_override = spread.as_deref().unwrap_or(engine_override);
     let (engine_id, category_path) = crate::api::placement(state, category, engine_override);
     if save_path.is_empty() && category_path.is_empty() {
         return Err(format!(

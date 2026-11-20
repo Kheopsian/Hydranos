@@ -363,6 +363,143 @@ pub async fn handoff(
     }))
 }
 
+/// What an add sent to a node asks of it. The node applies its own category
+/// (its folder, its defaults): only what the operator or the client chose
+/// travels.
+pub struct RemoteAdd<'a> {
+    pub category: &'a str,
+    pub engine: &'a str,
+    pub paused: bool,
+    pub seed_mode: bool,
+    pub tags: &'a str,
+    /// Empty = the node's own category folder.
+    pub save_path: &'a str,
+}
+
+/// What the node did with an add.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RemoteOutcome {
+    /// Taken; the node's own answer (`info_hash`, `name`, `engine`, `mode`).
+    Added(serde_json::Value),
+    /// Held by the node already.
+    Present(String),
+    /// Refused or unreachable, with the reason.
+    Refused(String),
+}
+
+/// An upload is megabytes, not a status: it gets longer than a probe.
+const ADD_TIMEOUT: Duration = Duration::from_secs(60);
+
+fn error_of(body: &[u8], status: reqwest::StatusCode) -> String {
+    serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string))
+        .unwrap_or_else(|| format!("HTTP {}", status.as_u16()))
+}
+
+/// Add a torrent to a node as a NEW add (not a handoff: there is no sender to
+/// pull from, the torrent finds its peers by its trackers like any other).
+///
+/// Through `/api/torrents/upload`, the native route that takes an `engine`.
+pub async fn add_torrent(
+    url: &str,
+    api_key: &str,
+    torrent: Vec<u8>,
+    name: &str,
+    opts: &RemoteAdd<'_>,
+) -> RemoteOutcome {
+    let base = url.trim_end_matches('/');
+    let part = match reqwest::multipart::Part::bytes(torrent)
+        .file_name(format!("{name}.torrent"))
+        .mime_str("application/x-bittorrent")
+    {
+        Ok(p) => p,
+        Err(e) => return RemoteOutcome::Refused(e.to_string()),
+    };
+    let mut form = reqwest::multipart::Form::new().part("torrents", part);
+    for (k, v) in [
+        ("category", opts.category),
+        ("engine", opts.engine),
+        ("tags", opts.tags),
+        ("save_path", opts.save_path),
+    ] {
+        if !v.is_empty() {
+            form = form.text(k, v.to_string());
+        }
+    }
+    if opts.paused {
+        form = form.text("paused", "true");
+    }
+    if opts.seed_mode {
+        form = form.text("skip_checking", "true");
+    }
+    let client = reqwest::Client::builder()
+        .timeout(ADD_TIMEOUT)
+        .build()
+        .unwrap_or_default();
+    let res = match client
+        .post(format!("{base}/api/torrents/upload"))
+        .header("X-API-Key", api_key)
+        .multipart(form)
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(_) => return RemoteOutcome::Refused("the node did not answer".into()),
+    };
+    let status = res.status();
+    let body = res.bytes().await.unwrap_or_default();
+    if status.is_success() {
+        return match serde_json::from_slice(&body) {
+            Ok(v) => RemoteOutcome::Added(v),
+            Err(_) => RemoteOutcome::Refused("the node's answer was not JSON".into()),
+        };
+    }
+    let why = error_of(&body, status);
+    if status == reqwest::StatusCode::CONFLICT {
+        RemoteOutcome::Present(why)
+    } else {
+        RemoteOutcome::Refused(why)
+    }
+}
+
+/// `add_torrent` for a magnet: the node resolves its metadata itself
+/// (`POST /api/torrents/add`, answered 202).
+pub async fn add_magnet(
+    url: &str,
+    api_key: &str,
+    magnet: &str,
+    opts: &RemoteAdd<'_>,
+) -> RemoteOutcome {
+    let body = serde_json::json!({
+        "magnet_uri": magnet,
+        "category": opts.category,
+        "engine": opts.engine,
+        "tags": opts.tags,
+        "save_path": opts.save_path,
+        "paused": opts.paused,
+        "seed_mode": opts.seed_mode,
+    });
+    match forward(
+        url,
+        api_key,
+        reqwest::Method::POST,
+        "api/torrents/add",
+        body.to_string().into_bytes(),
+    )
+    .await
+    {
+        Ok((status, bytes, _)) if status.is_success() => {
+            RemoteOutcome::Added(serde_json::from_slice(&bytes).unwrap_or_default())
+        }
+        Ok((status, bytes, _)) if status == reqwest::StatusCode::CONFLICT => {
+            RemoteOutcome::Present(error_of(&bytes, status))
+        }
+        Ok((status, bytes, _)) => RemoteOutcome::Refused(error_of(&bytes, status)),
+        Err(e) => RemoteOutcome::Refused(format!("the node did not answer ({e})")),
+    }
+}
+
 /// How long a move to a node waits for the far side to hold a full copy.
 ///
 /// Six hours: long enough for a large payload over a home link, short enough

@@ -85,6 +85,7 @@ mod sharelimits;
 mod shutdown;
 mod speedtest;
 mod spoofmigration;
+mod spread;
 mod startup;
 mod store;
 mod tomledit;
@@ -1064,6 +1065,7 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
         update_check: Arc::new(tokio::sync::Mutex::new(None)),
         bench,
         sessions: Default::default(),
+        spread: Default::default(),
     };
     pathclaim::install_claim_probe(&state);
     // Started once the shared config exists, so a changed `[daemon] exit_probe`
