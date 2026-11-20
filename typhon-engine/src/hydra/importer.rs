@@ -271,6 +271,14 @@ fn export_retry(status: u16) -> Retry {
     }
 }
 
+/// Why a login failed: qBittorrent refused it (`refused`), or it never
+/// answered (a send error, which is a network failure).
+#[derive(Debug)]
+struct LoginFailure {
+    message: String,
+    refused: bool,
+}
+
 /// Did qBittorrent accept the login?
 ///
 /// Two protocols in the wild, measured against 5.2.3 on 2026-10-02: up to 4.x
@@ -310,7 +318,9 @@ impl Qbit {
             .timeout(timeout)
             .build()
             .map_err(|e| format!("http client: {e}"))?;
-        let cookie = Self::authenticate(&client, &base, creds).await?;
+        let cookie = Self::authenticate(&client, &base, creds)
+            .await
+            .map_err(|e| e.message)?;
         Ok(Self {
             base,
             client,
@@ -326,7 +336,7 @@ impl Qbit {
     }
 
     /// Log in again on the same client, after qBit dropped the session.
-    async fn relogin(&self) -> Result<(), String> {
+    async fn relogin(&self) -> Result<(), LoginFailure> {
         let cookie = Self::authenticate(&self.client, &self.base, &self.creds).await?;
         *self.cookie.write().unwrap() = cookie;
         Ok(())
@@ -337,7 +347,7 @@ impl Qbit {
         client: &reqwest::Client,
         base: &str,
         creds: &QbitCreds,
-    ) -> Result<String, String> {
+    ) -> Result<String, LoginFailure> {
         let body = format!(
             "username={}&password={}",
             urlencoding(&creds.username),
@@ -350,7 +360,10 @@ impl Qbit {
             .body(body)
             .send()
             .await
-            .map_err(|e| format!("cannot reach qBittorrent at {base}: {e}"))?;
+            .map_err(|e| LoginFailure {
+                message: format!("cannot reach qBittorrent at {base}: {e}"),
+                refused: false,
+            })?;
 
         let status = resp.status().as_u16();
         // The session cookie, carried by hand rather than by a cookie jar:
@@ -372,7 +385,10 @@ impl Qbit {
             } else {
                 text.trim().to_string()
             };
-            return Err(format!("qBittorrent refused the login: {why}"));
+            return Err(LoginFailure {
+                message: format!("qBittorrent refused the login: {why}"),
+                refused: true,
+            });
         }
         Ok(cookie)
     }
@@ -428,13 +444,19 @@ impl Qbit {
                 Retry::Never => return Err(last),
                 Retry::Relogin => {
                     if let Err(e) = self.relogin().await {
-                        // Retrying with the same credentials cannot succeed
-                        // and only adds failed logins: stop here.
-                        return Err(ExportError {
-                            message: format!("{}; login again: {e}", last.message),
-                            network: false,
-                            login_refused: true,
-                        });
+                        if e.refused {
+                            // Retrying with the same credentials cannot succeed
+                            // and only adds failed logins: stop here.
+                            return Err(ExportError {
+                                message: format!("{}; login again: {}", last.message, e.message),
+                                network: false,
+                                login_refused: true,
+                            });
+                        }
+                        // No answer to the login: a network failure, retried
+                        // like the others.
+                        last.network = true;
+                        last.message = format!("{}; login again: {}", last.message, e.message);
                     }
                 }
                 Retry::Later => {}
@@ -1118,8 +1140,13 @@ pub async fn run_job(
                         "qBittorrent stopped answering at {net_first}; {n} {torrents} not attempted, retry when it is back"
                     )
                 };
+                let at = if login_refused {
+                    &refused_at
+                } else {
+                    &net_first
+                };
                 tracing::warn!(
-                    at = %refused_at,
+                    at = %at,
                     login_refused,
                     not_attempted = rest.len(),
                     "import: qBittorrent stopped answering or refused the login, job paused"
@@ -1925,6 +1952,8 @@ mod qbit_session_tests {
         logins: AtomicUsize,
         /// Once set, every login is refused, as after a password change.
         refuse_logins: std::sync::atomic::AtomicBool,
+        /// Once set, every login never answers in time.
+        hang_logins: std::sync::atomic::AtomicBool,
         calls: Mutex<HashMap<String, usize>>,
     }
 
@@ -1969,6 +1998,9 @@ mod qbit_session_tests {
 
     async fn login(State(f): State<Arc<Fake>>) -> axum::response::Response {
         let n = f.logins.fetch_add(1, Ordering::Relaxed) + 1;
+        if f.hang_logins.load(Ordering::Relaxed) {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        }
         if f.refuse_logins.load(Ordering::Relaxed) {
             return StatusCode::UNAUTHORIZED.into_response();
         }
@@ -2026,6 +2058,27 @@ mod qbit_session_tests {
             f.logins.load(Ordering::Relaxed),
             2,
             "one login after the first, then no more"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_login_that_gets_no_answer_is_a_network_failure_not_a_refusal() {
+        let (f, mut q) = fake().await;
+        // Keep the session cookie (SID=1, which the fake expires) and only
+        // shorten the client's timeout, so a login can time out.
+        q.client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_millis(100))
+            .build()
+            .unwrap();
+        f.hang_logins.store(true, Ordering::Relaxed);
+        let err = q.export("expired").await.unwrap_err();
+        assert!(err.network, "no answer is a network failure: {err}");
+        assert!(!err.login_refused, "not a refusal: {err}");
+        assert!(err.message.contains("cannot reach"), "{err}");
+        assert_eq!(
+            calls(&f, "expired"),
+            EXPORT_ATTEMPTS as usize,
+            "retried like a network failure, not stopped at once"
         );
     }
 
