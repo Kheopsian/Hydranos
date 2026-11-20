@@ -5472,6 +5472,172 @@ mod tests {
         assert_eq!(protected_files(&s.state, &t), want, "the scan differs");
     }
 
+    /// Adding to a folder that already holds many torrents costs the same as
+    /// adding to an empty one: the claim lookup returns the torrents of the
+    /// new file's name, not every torrent of the folder. And a torrent whose
+    /// file was renamed to that name is still found, and so is one whose
+    /// store row was never indexed (the lookup then falls back to the folder).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_add_examines_the_same_rows_however_many_torrents_the_folder_holds() {
+        let s = verify_cfg("pathclaim-flat-add");
+        let cat = s.dir.join("flat");
+        std::fs::create_dir_all(&cat).unwrap();
+        let rows = || crate::store::ROWS_BY_SAVE_PATH_ROWS.with(|c| c.get());
+        // A folder torrent named like the category, saved one level up: every
+        // add below asks about it (its entry is the next component of their
+        // path), so each lookup returns one row however narrow it is, and a
+        // counter stuck at 0 cannot pass for a constant cost.
+        add(
+            &s,
+            &torrent_over("flat", &[("zz.bin", &[9u8; 50])], 16384),
+            &s.dir,
+            true,
+            true,
+        )
+        .unwrap();
+        let mut cost = Vec::new();
+        let mut n = 0u32;
+        for target in [20u32, 400] {
+            while n < target {
+                add(
+                    &s,
+                    &single_over(
+                        &format!("x{n}.mkv"),
+                        &[(n % 251) as u8; 100],
+                        &n.to_string(),
+                    ),
+                    &cat,
+                    true,
+                    true,
+                )
+                .unwrap();
+                n += 1;
+            }
+            let before = rows();
+            add(
+                &s,
+                &single_over(&format!("probe{n}.mkv"), &[7u8; 100], &format!("p{n}")),
+                &cat,
+                true,
+                true,
+            )
+            .unwrap();
+            cost.push(rows() - before);
+            n += 1;
+        }
+        assert!(cost[0] > 0, "the counter did not move: {cost:?}");
+        assert_eq!(
+            cost[0], cost[1],
+            "rows examined per add grew with the folder: {cost:?}"
+        );
+        assert!(cost[1] <= 4, "{cost:?}");
+
+        // A file renamed to the name a newcomer has is still found.
+        let a = add(
+            &s,
+            &single_over("old.mkv", &[1u8; 100], "old"),
+            &cat,
+            true,
+            true,
+        )
+        .unwrap();
+        held(&s, &a).meta.set_disk_rel(0, PathBuf::from("new.mkv"));
+        let mine: HashSet<PathBuf> = [path_key(&cat.join("new.mkv"))].into_iter().collect();
+        let found = crate::jobsrun::scan_claims(
+            &s.state,
+            &cat,
+            Some(std::ffi::OsStr::new("new.mkv")),
+            &mine,
+            &|_: &TorrentState| false,
+        );
+        assert_eq!(found.len(), 1, "the renamed file was not found");
+
+        // Not indexed yet: the same answer, from the folder.
+        {
+            let store = s.state.store.lock().unwrap();
+            store.conn_for_test("DELETE FROM claim_top");
+            store.forget_claim_ready_for_test();
+        }
+        let found = crate::jobsrun::scan_claims(
+            &s.state,
+            &cat,
+            Some(std::ffi::OsStr::new("x5.mkv")),
+            &[path_key(&cat.join("x5.mkv"))].into_iter().collect(),
+            &|_: &TorrentState| false,
+        );
+        assert_eq!(found.len(), 1);
+        // Backfilled, it is narrow again and says the same.
+        {
+            let store = s.state.store.lock().unwrap();
+            while store.backfill_claim_top(100).unwrap() > 0 {}
+            assert!(store.claim_index_ready());
+        }
+        let before = rows();
+        let found = crate::jobsrun::scan_claims(
+            &s.state,
+            &cat,
+            Some(std::ffi::OsStr::new("x5.mkv")),
+            &[path_key(&cat.join("x5.mkv"))].into_iter().collect(),
+            &|_: &TorrentState| false,
+        );
+        assert_eq!(found.len(), 1);
+        assert!(rows() - before <= 4, "{} rows", rows() - before);
+    }
+
+    /// A torrent moved to another engine, as a move job does it (the engine,
+    /// then the store row), is still found by the narrowed lookup.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_torrent_moved_to_another_engine_is_still_found_by_the_narrow_lookup() {
+        let s = crate::api::testing::state("pathclaim-moved-engine");
+        let cat = s.dir.join("flat");
+        std::fs::create_dir_all(&cat).unwrap();
+        let h = add(
+            &s,
+            &single_over("m.mkv", &[9u8; 100], "m"),
+            &cat,
+            true,
+            true,
+        )
+        .unwrap();
+        for n in 0..5u32 {
+            add(
+                &s,
+                &single_over(&format!("o{n}.mkv"), &[n as u8; 100], &n.to_string()),
+                &cat,
+                true,
+                true,
+            )
+            .unwrap();
+        }
+        let ih = crate::store::hex20(&h).unwrap();
+        let src = s.state.engines.get("hoard").unwrap().manager.clone();
+        let dst = s.state.engines.get("race").unwrap().manager.clone();
+        let rd = src.export_state(&ih).expect("exported");
+        let blob = s
+            .state
+            .store
+            .lock()
+            .unwrap()
+            .torrent_blob(&h)
+            .unwrap()
+            .unwrap();
+        dst.import_state_bytes(&rd, &blob).expect("adopted");
+        src.remove_torrent(&ih, true).expect("released");
+        {
+            let store = s.state.store.lock().unwrap();
+            assert!(store.claim_index_ready());
+            store.set_session(&h, "hoard", "race").unwrap();
+        }
+        let found = crate::jobsrun::scan_claims(
+            &s.state,
+            &cat,
+            Some(std::ffi::OsStr::new("m.mkv")),
+            &[path_key(&cat.join("m.mkv"))].into_iter().collect(),
+            &|_: &TorrentState| false,
+        );
+        assert_eq!(found.len(), 1, "the moved torrent was not found");
+    }
+
     /// Torrents arriving in a burst while others probe: the index is kept true
     /// by the placement log, never rebuilt for them, and no folder of the store
     /// is listed on the probes' path; the torrent added last is seen.

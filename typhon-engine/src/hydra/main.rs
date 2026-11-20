@@ -915,6 +915,36 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
         });
     }
 
+    // The same for the index the path-claim lookup narrows by (`claim_top`):
+    // until this pass has run to its end the lookup keeps to the slower
+    // answer, which needs no index.
+    {
+        let store = shared_store.clone();
+        std::thread::spawn(move || {
+            let mut total = 0usize;
+            loop {
+                let done = match store.lock() {
+                    Ok(s) => s.backfill_claim_top(2000),
+                    Err(_) => break,
+                };
+                match done {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        total += n;
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                    }
+                    Err(e) => {
+                        tracing::warn!("claim index backfill: {e}");
+                        break;
+                    }
+                }
+            }
+            if total > 0 {
+                tracing::info!(examined = total, "claim index backfilled");
+            }
+        });
+    }
+
     // Put the operator's pauses back into the engines, then start the manager
     // that must not undo them.
     //
