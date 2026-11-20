@@ -195,6 +195,79 @@ mod tests {
         assert!(removed.is_empty());
     }
 
+    fn small_ring(floor: f64, cap: usize) -> Ring {
+        let r = Ring::with_floor(floor);
+        r.inner.lock().unwrap().cap = cap;
+        r
+    }
+
+    /// ⭐ When the ring overflows, the floor rises to the last dropped event:
+    /// a cursor from before it must be refused (reload), while one at or after
+    /// it is still answered with everything that was kept. Without the floor
+    /// moving, a client that missed a dropped event would get a delta that
+    /// silently omits it.
+    #[test]
+    fn overflowing_the_ring_raises_the_floor_to_the_last_dropped_event() {
+        let r = small_ring(100.0, 3);
+        for (i, h) in ["a", "b", "c", "d", "e"].iter().enumerate() {
+            r.record_at(h, true, 101.0 + i as f64);
+        }
+        // a (101) and b (102) were dropped.
+        assert!(r.changes_since(101.0).is_none(), "cursor predates a drop");
+        let (added, _) = r.changes_since(102.0).expect("floor is 102");
+        assert_eq!(added, ["c", "d", "e"]);
+        assert_eq!(r.inner.lock().unwrap().events.len(), 3);
+    }
+
+    /// Up to the cap nothing is dropped, so the floor stays where the process
+    /// started and an older-than-boot cursor is still the only refusal.
+    #[test]
+    fn a_ring_within_its_cap_keeps_its_floor() {
+        let r = small_ring(100.0, 3);
+        for (i, h) in ["a", "b", "c"].iter().enumerate() {
+            r.record_at(h, true, 101.0 + i as f64);
+        }
+        assert!(r.changes_since(100.0).is_some());
+        assert_eq!(r.changes_since(100.0).unwrap().0.len(), 3);
+    }
+
+    /// An empty hash is not an event: it would show up in a delta as a row
+    /// nobody can find.
+    #[test]
+    fn an_empty_hash_is_not_recorded() {
+        let r = Ring::with_floor(100.0);
+        r.record_at("", true, 110.0);
+        r.record_at("", false, 111.0);
+        let (added, removed) = r.changes_since(100.0).unwrap();
+        assert!(added.is_empty() && removed.is_empty());
+    }
+
+    /// `record_changed` replays every edited hash as an add (and skips an empty
+    /// one), and `record` stamps with the current time, so a cursor taken just
+    /// before sees it.
+    #[test]
+    fn a_changed_row_is_recorded_as_an_add_stamped_now() {
+        let r = Ring::with_floor(0.0);
+        r.record_changed(&["aaa".to_string(), String::new(), "bbb".to_string()]);
+        r.record("ccc", false);
+        // Stamped with the clock, not with some fixed value: a cursor taken
+        // a minute ago sees them, one taken a minute from now does not.
+        assert!(r.changes_since(now() + 60.0).unwrap().0.is_empty());
+        let (added, removed) = r.changes_since(now() - 60.0).unwrap();
+        assert_eq!(added, ["aaa", "bbb"]);
+        assert_eq!(removed, ["ccc"]);
+    }
+
+    /// A fresh ring has no history from before the process started: a cursor
+    /// from the distant past is refused rather than answered with an empty
+    /// delta, which would tell the client nothing changed.
+    #[test]
+    fn a_fresh_ring_refuses_a_cursor_from_before_it_started() {
+        let r = Ring::default();
+        assert!(r.changes_since(0.0).is_none());
+        assert!(r.changes_since(now()).is_some());
+    }
+
     /// ⭐ The bug 3.181.0 fixed. Since one engine became one agent, a
     /// multi-engine node always has agents registered, so a guard counting
     /// them never fired -- and every tab return re-streamed 187 MB.
