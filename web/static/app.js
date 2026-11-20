@@ -1184,7 +1184,7 @@ window.addEventListener("DOMContentLoaded", () => {
     window.addEventListener("load", async () => {
         if (_hashTab === "race") await updateRaceTorrents();
         else if (_hashTab === "hoard") await updateHoardStats();
-        else if (_hashTab === "categories") await updateCategories();
+        else if (_hashTab === "categories") await updateCategories(true);
         else if (_hashTab === "nodes") { await updateNodes(); }
         else if (_hashTab === "trackers") { await updateTrackers(); loadTrackerStats(); }
         else if (_hashTab === "benchmark") await updateBenchmark();
@@ -6255,8 +6255,22 @@ let _lastCategoryRows = null;
 // What each orphaned label's torrents are actually doing, in render order, so
 // adoption can start from that rather than from the form's defaults.
 let _orphanInfo = [];
+// The orphaned-labels call is the heaviest one this screen makes (it walks every
+// torrent for labels no category claims), and the list changes only when someone
+// acts on a category. So it is asked for on opening the tab and after an action
+// (force), otherwise once a minute, and the render in between reuses the last
+// list. Never two in flight.
+const ORPHANS_EVERY_MS = 60 * 1000;
+let _orphansAt = 0;
+let _orphansInFlight = false;
+let _orphansList = [];
 
-async function updateCategories() {
+function _orphansDue(now, lastAt, force, inFlight) {
+    if (inFlight) return false;
+    return !!force || !lastAt || now - lastAt >= ORPHANS_EVERY_MS;
+}
+
+async function updateCategories(force) {
     try {
         // One paint, not two. Categories and the labels wearing no category are
         // separate calls, and painting the first before the second arrived made
@@ -6264,13 +6278,25 @@ async function updateCategories() {
         // was replaced a round trip later. Fetch both, render once -- and only
         // touch the DOM when the markup actually changed, because this runs on
         // a timer against a screen that is static almost all of the time.
-        const [cats, orphans] = await Promise.all([
-            api("/api/categories"),
-            api("/api/categories/orphans").catch(e => {
-                console.error("load orphaned categories", e);
-                return [];
-            }),
-        ]);
+        const askOrphans = _orphansDue(Date.now(), _orphansAt, force, _orphansInFlight);
+        if (askOrphans) _orphansInFlight = true;
+        let cats;
+        try {
+            const got = await Promise.all([
+                api("/api/categories"),
+                askOrphans
+                    ? api("/api/categories/orphans").catch(e => {
+                        console.error("load orphaned categories", e);
+                        return null;
+                    })
+                    : Promise.resolve(null),
+            ]);
+            cats = got[0];
+            if (askOrphans && got[1]) _orphansList = got[1];
+        } finally {
+            if (askOrphans) { _orphansInFlight = false; _orphansAt = Date.now(); }
+        }
+        const orphans = _orphansList;
         const tbody = document.getElementById("categories-tbody");
 
         const catRows = (cats || []).map(cat => `<tr>
@@ -6776,7 +6802,7 @@ async function saveCategory() {
             });
         }
         hideCategoryForm();
-        await updateCategories();
+        await updateCategories(true);
     } catch (e) {
         resultEl.textContent = t("Error: {msg}", { msg: e.message });
         resultEl.className = "result-msg error";
@@ -6788,7 +6814,7 @@ async function deleteCategory(name) {
     if (!await hydraConfirm(t("Delete category \"{name}\"?", { name: name }))) return;
     try {
         await api(`/api/categories/${encodeURIComponent(name)}`, { method: "DELETE" });
-        await updateCategories();
+        await updateCategories(true);
     } catch (e) {
         hydraNotify(t("Error: {msg}", { msg: e.message }));
     }
@@ -8019,7 +8045,7 @@ document.querySelectorAll(".tab").forEach(tab => {
         const t = tab.dataset.tab;
         if (t === "race") await updateRaceTorrents();
         if (t === "hoard") await updateHoardStats();
-        if (t === "categories") await updateCategories();
+        if (t === "categories") await updateCategories(true);
         if (t === "benchmark") await updateBenchmark();
     });
 });
