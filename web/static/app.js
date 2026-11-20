@@ -6353,17 +6353,20 @@ async function showCategoryForm(name = null) {
     if (tr) tr.checked = !!(cat && cat.transit);
     _catTargets = Array.isArray(cat && cat.targets) ? cat.targets.map(String) : [];
     const sp = document.getElementById("cat-spread");
-    if (sp) sp.value = _CAT_SPREADS.includes(cat && cat.spread) ? cat.spread : "bytes";
+    // An absent key is "no setting": the category stays on its mode's engine.
+    if (sp) sp.value = _CAT_SPREADS.includes(cat && cat.spread) ? cat.spread : "";
     const rs = document.getElementById("cat-reserve");
     if (rs) rs.value = _catBytesToGb(cat ? cat.reserve_bytes : 0);
     _catChoices = [];
+    _catUnreachable = [];
     _catModeChanged();
     // The list of possible engines needs two calls: the form is shown first and
     // the list is filled in when they come back.
     const stamp = ++_catChoicesStamp;
-    const choices = await _catTargetChoices();
+    const got = await _catTargetChoices();
     if (stamp !== _catChoicesStamp) return; // the form was reopened meanwhile
-    _catChoices = choices;
+    _catChoices = got.choices;
+    _catUnreachable = got.unreachable;
     _catRenderTargets();
 }
 
@@ -6373,13 +6376,15 @@ async function showCategoryForm(name = null) {
 // that decides something is a pure function (no DOM), so the payload and the
 // unit conversion can be tested on their own.
 
-const _CAT_SPREADS = ["bytes", "count", "fill", "free_space"];
+const _CAT_SPREADS = ["bytes", "count", "fill", "free_space"];  // "" (no spread) is the form's default
 let _catTargets = [];          // selected targets, in order ("vpn1", "nas:vpn1")
 let _catChoices = [];          // [{key, label, role}] from _catTargetChoices()
 let _catChoicesStamp = 0;
+let _catUnreachable = [];     // nodes whose engines could not be listed
 
 function _catSpreadHelp() {
     return {
+        "": t("No spread: new torrents stay on the engine of the category's mode, as before."),
         bytes: t("Each new torrent goes to the engine holding the fewest bytes."),
         count: t("Each new torrent goes to the engine holding the fewest torrents."),
         fill: t("Fill the first engine of the list down to the reserve, then the next one."),
@@ -6387,33 +6392,25 @@ function _catSpreadHelp() {
     };
 }
 
-// The engines a category can target. The only place that knows where the list
-// comes from: when the server exposes it, replace the body with one api() call
-// and keep the shape [{key, label, role}].
-//   key   "vpn1" for this node's engine, "nas:vpn1" for engine vpn1 of node nas
-//   role  "race" | "hoard", or null when unknown
-// Local engines: /api/engines, fields id and role. Nodes' engines:
-// /api/nodes, field health.engines, a list of names with no role, so those
-// carry role null and the server is left to refuse a mismatch.
+// The engines a category can target: GET /api/categories/targets, which
+// answers {targets:[{target, engine, node, role}], unreachable:[{node, error}]}.
+// Returns {choices:[{key, label, role}], unreachable:[node names]}.
+//   key   the exact string stored in `targets`: "vpn1" or "nas:vpn1"
 async function _catTargetChoices() {
-    const out = [];
     try {
-        const locals = await api("/api/engines");
-        for (const e of (locals || [])) {
-            out.push({ key: String(e.id), label: String(e.id), role: e.role || null });
-        }
-    } catch (e) { console.error("load engines", e); }
-    try {
-        const nodes = await api("/api/nodes");
-        for (const n of (nodes || [])) {
-            const h = n.health || {};
-            if (!h.online) continue;
-            for (const eng of (h.engines || [])) {
-                out.push({ key: n.name + ":" + eng, label: n.name + " / " + eng, role: null });
-            }
-        }
-    } catch (e) { console.error("load nodes", e); }
-    return out;
+        const r = await api("/api/categories/targets");
+        return {
+            choices: ((r && r.targets) || []).map(x => ({
+                key: String(x.target),
+                label: x.node ? x.node + " / " + x.engine : String(x.engine),
+                role: x.role || null,
+            })),
+            unreachable: ((r && r.unreachable) || []).map(u => String(u.node)),
+        };
+    } catch (e) {
+        console.error("load category targets", e);
+        return { choices: [], unreachable: [] };
+    }
 }
 
 // GB (binary, 1024^3) typed in the form -> bytes. "" is 0 (no reserve); a
@@ -6454,20 +6451,25 @@ function _catMove(list, i, d) {
 
 // The body sent to POST/PUT /api/categories. What the form does not show comes
 // back as stored (the dead 3.x keys placement, agents, strategy,
-// min_free_bytes); the fields it sets are written over it.
+// min_free_bytes). The spread keys are written only when the user set one
+// (a target, a strategy, a reserve > 0) and removed otherwise: a category with
+// none stays on its mode's engine, and a plain save must not activate the spread.
 function _catBuildPayload(stored, f) {
-    return Object.assign({}, stored || null, {
+    const out = Object.assign({}, stored || null, {
         name: f.name, save_path: f.save_path, mode: f.mode,
         graduate_to: f.graduate_to, transit: f.transit,
-        targets: f.targets, spread: f.spread, reserve_bytes: f.reserve_bytes,
     });
+    delete out.targets; delete out.spread; delete out.reserve_bytes;
+    if (f.targets && f.targets.length) out.targets = f.targets;
+    if (f.spread) out.spread = f.spread;
+    if (f.reserve_bytes > 0) out.reserve_bytes = f.reserve_bytes;
+    return out;
 }
 
 function _catSpreadSummary(cat) {
     const n = Array.isArray(cat.targets) ? cat.targets.length : 0;
-    const spread = cat.spread || "bytes";
-    if (!n && spread === "bytes") return "";
-    return (n ? t("{n} target(s)", { n }) : t("all engines")) + " · " + spread;
+    if (!n && !cat.spread && !(cat.reserve_bytes > 0)) return "";
+    return (n ? t("{n} target(s)", { n }) : t("all engines")) + " \u00b7 " + (cat.spread || "bytes");
 }
 
 function _catRenderTargets() {
@@ -6495,10 +6497,17 @@ function _catRenderTargets() {
     }).join("");
     const hint = document.getElementById("cat-targets-hint");
     if (hint) {
+        const sp = document.getElementById("cat-spread").value;
+        const reserve = _catGbToBytes(document.getElementById("cat-reserve").value);
         hint.textContent = _catTargets.length
             ? t("The order is used by \"Fill in order\" and to break ties.")
-            : t("None ticked: all {role} engines of this node.", { role: mode });
+            : (sp || reserve > 0)
+                ? t("None ticked: all {role} engines of this node.", { role: mode })
+                : t("None ticked and no setting: as before, the {role} engine.", { role: mode });
     }
+    const un = document.getElementById("cat-targets-unreachable");
+    if (un) un.textContent = _catUnreachable
+        .map(n => t("{node} is unreachable: its engines are not offered.", { node: n })).join(" ");
     _catSpreadChanged();
 }
 function _catToggleTarget(key, on) {
@@ -6742,7 +6751,7 @@ async function saveCategory() {
         // survive an edit rather than being wiped by one.
         const reserve_bytes = _catGbToBytes(document.getElementById("cat-reserve").value);
         if (reserve_bytes === null) {
-            resultEl.textContent = t("The reserve must be a number of GB, or empty");
+            resultEl.textContent = t("The reserve must be a number of GiB, or empty");
             resultEl.className = "result-msg error";
             resultEl.style.display = "block";
             return;

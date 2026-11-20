@@ -1226,7 +1226,6 @@
   "Fewest torrents": "Le moins de torrents",
   "Fill in order": "Remplir dans l'ordre",
   "Most free space": "Le plus d'espace libre",
-  "Reserve (GB)": "Réserve (Go)",
   "An engine with less free space than this is skipped. Empty means no reserve. If every engine is below it, adding is refused.": "Un moteur qui a moins d'espace libre que cette valeur est écarté. Vide = aucune réserve. Si tous sont en dessous, l'ajout est refusé.",
   "Without a reserve, everything goes to the first engine": "Sans réserve, tout va sur la première cible",
   "Each new torrent goes to the engine holding the fewest bytes.": "Chaque nouveau torrent va sur le moteur qui porte le moins d'octets.",
@@ -1241,5 +1240,10 @@
   "Move down": "Descendre",
   "The order is used by \"Fill in order\" and to break ties.": "L'ordre sert à « Remplir dans l'ordre » et à départager les égalités.",
   "None ticked: all {role} engines of this node.": "Aucune case cochée : tous les moteurs {role} de ce node.",
-  "The reserve must be a number of GB, or empty": "La réserve doit être un nombre de Go, ou vide"
+  "Reserve (GiB)": "Réserve (Gio)",
+  "The reserve must be a number of GiB, or empty": "La réserve doit être un nombre de Gio, ou vide",
+  "No spread (the mode's engine)": "Pas de répartition (moteur du mode)",
+  "No spread: new torrents stay on the engine of the category's mode, as before.": "Pas de répartition : les nouveaux torrents restent sur le moteur du mode de la catégorie, comme avant.",
+  "None ticked and no setting: as before, the {role} engine.": "Aucune case cochée et aucun réglage : comme avant, le moteur {role}.",
+  "{node} is unreachable: its engines are not offered.": "{node} injoignable : ses moteurs ne sont pas proposés."
 }
