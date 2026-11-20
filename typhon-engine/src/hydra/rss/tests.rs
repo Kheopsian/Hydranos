@@ -1066,3 +1066,61 @@ fn a_non_ascii_link_is_judged_without_splitting_a_character() {
 
 #[path = "routes_tests.rs"]
 mod routes_tests;
+
+/// A feed whose category spreads downloads the .torrent by the exit of the
+/// engine that will add it, not by another engine's: a passkey tied to an IP
+/// is then fetched and announced from the same one. The first target's exit is
+/// a dead proxy: nothing reaches the server and nothing is added; with the
+/// working engine first, the fetch happens and the torrent lands on THAT engine.
+#[tokio::test]
+async fn a_spread_category_downloads_by_the_exit_of_the_chosen_target() {
+    let dead = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = dead.local_addr().unwrap().port();
+    drop(dead);
+    let s = st(
+        "rss-spread-exit",
+        &format!(
+            "\n[[engine]]\nname = \"vpn1\"\nrole = \"race\"\n[engine.session]\nannounce_proxy = \"socks5h://127.0.0.1:{port}\"\n\
+             [[engine]]\nname = \"vpn2\"\nrole = \"race\"\n"
+        ),
+    );
+    let dir = s.dir.join("fast").display().to_string();
+    let doc = json!({
+        "dead-first": {"save_path": dir, "mode": "race", "targets": ["vpn1", "vpn2"], "spread": "fill"},
+        "ok-first": {"save_path": dir, "mode": "race", "targets": ["vpn2", "vpn1"], "spread": "fill"},
+    });
+    s.store
+        .lock()
+        .unwrap()
+        .put_meta("categories", &doc.to_string())
+        .unwrap();
+    let fake = Fake::start().await;
+    fake.serve("/a.torrent", 200, torrent_bytes("spread-one"));
+    let article = crate::store::RssArticleRow {
+        guid: "g".into(),
+        title: "t".into(),
+        torrent_url: fake.url("/a.torrent"),
+        ..Default::default()
+    };
+
+    let res = add_article(&s, &Exits::new(&s), &article, "dead-first", &dir, "", true).await;
+    assert!(
+        matches!(res, Err(AddError::Transient(_))),
+        "the dead exit fails the fetch"
+    );
+    assert_eq!(fake.hits("/a.torrent"), 0, "never sent around vpn1's proxy");
+    assert_eq!(count(&s, "race") + count(&s, "vpn1") + count(&s, "vpn2"), 0);
+
+    let res = add_article(&s, &Exits::new(&s), &article, "ok-first", &dir, "", true).await;
+    assert!(
+        res.is_ok(),
+        "{:?}",
+        res.err().map(|e| e.message().to_string())
+    );
+    assert_eq!(fake.hits("/a.torrent"), 1);
+    assert_eq!(
+        (count(&s, "vpn2"), count(&s, "vpn1"), count(&s, "race")),
+        (1, 0, 0),
+        "added by the engine whose exit fetched it"
+    );
+}

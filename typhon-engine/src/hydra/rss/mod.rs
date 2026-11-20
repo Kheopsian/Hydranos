@@ -1114,7 +1114,21 @@ pub async fn add_article(
             format!("not a link this client can add: {}", mask_url(&url))
         }));
     }
-    let engine = crate::api::placement(state, category, "").0;
+    // The engine that will add it is chosen BEFORE the download, and the file
+    // leaves by that engine's way out: a passkey tied to an IP must not be
+    // fetched by one engine and announced by another. The size of the new
+    // torrent is not known yet and does not enter the choice (as for a magnet).
+    let engine = {
+        let (st, c) = (state.clone(), category.to_string());
+        match tokio::task::spawn_blocking(move || crate::spread::resolve_local(&st, &c, 0))
+            .await
+            .unwrap_or_else(|e| Err(e.to_string()))
+        {
+            Ok(Some(e)) => e,
+            Ok(None) => crate::api::placement(state, category, "").0,
+            Err(e) => return Err(AddError::Refused(e)),
+        }
+    };
     let (route, _) = exits.of(state, &engine).map_err(|why| {
         AddError::Transient(format!(
             "not fetched: the way out of engine {engine} is closed ({why})"
@@ -1134,8 +1148,8 @@ pub async fn add_article(
         .unwrap_or_default();
     let res = tokio::task::spawn_blocking(move || {
         let subfolder = st.cfg().daemon.create_torrent_folder;
-        let sp = crate::api::add_save_path(&st, &bytes, &cat, "", &sp, subfolder)?;
-        crate::api::add_torrent_bytes(&st, &bytes, &cat, &sp, &tg, paused, false, "")
+        let sp = crate::api::add_save_path(&st, &bytes, &cat, &engine, &sp, subfolder)?;
+        crate::api::add_torrent_bytes(&st, &bytes, &cat, &sp, &tg, paused, false, &engine)
     })
     .await
     .unwrap_or_else(|e| Err(e.to_string()));

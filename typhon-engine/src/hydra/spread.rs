@@ -11,7 +11,8 @@
 //!
 //!   * `targets`: where a new torrent may go. `"vpn1"` is a local engine,
 //!     `"nas:vpn1"` the engine `vpn1` of the node named `nas`. Empty means every
-//!     LOCAL engine whose role is the category's mode.
+//!     LOCAL engine whose role is the category's mode -- once at least one of
+//!     the three keys is set. A category with none of them is not spread at all.
 //!   * `spread`: how to pick among them (`count`, `bytes`, `fill`, `free_space`).
 //!   * `reserve_bytes`: a target with less free space than this at the
 //!     category's folder is never picked, whatever the strategy.
@@ -218,6 +219,8 @@ pub struct Rule {
     pub hoard: bool,
     pub targets: Vec<String>,
     pub strategy: Strategy,
+    /// Whether the category wrote `spread` at all (not whether it is valid).
+    pub spread_set: bool,
     pub reserve: u64,
     pub save_path: String,
 }
@@ -233,8 +236,8 @@ pub struct Plan {
 
 /// Which targets a rule means right now.
 ///
-/// `Ok(None)` is "no spreading applies": the category is unknown, or no local
-/// engine has the role (the legacy route then answers, as it always did). An
+/// `Ok(None)` is "no spreading applies": the category is unknown, it set none
+/// of `targets`, `spread` and `reserve_bytes`, or no local engine has the role (the legacy route then answers, as it always did). An
 /// error is a category whose every configured target is gone or out of reach.
 pub fn plan(
     state: &AppState,
@@ -242,6 +245,12 @@ pub fn plan(
     rule: &Rule,
     allow_remote: bool,
 ) -> Result<Option<Plan>, String> {
+    // A category that wrote none of the three keys is not spread: it files by
+    // its mode alone, as it always did, even when several local engines share
+    // the role. Spreading starts when the operator asks for it.
+    if rule.targets.is_empty() && !rule.spread_set && rule.reserve == 0 {
+        return Ok(None);
+    }
     let engines = state.engines.engines();
     let role = if rule.hoard { "hoard" } else { "race" };
     let cands: Vec<Target> = if rule.targets.is_empty() {

@@ -2674,6 +2674,7 @@ pub(crate) fn category_rule(state: &AppState, category: &str) -> Option<crate::s
         hoard: cat.mode.trim().eq_ignore_ascii_case("hoard"),
         targets: cat.targets,
         strategy,
+        spread_set: !cat.spread.trim().is_empty(),
         reserve: cat.reserve_bytes,
         save_path: cat.save_path,
     })

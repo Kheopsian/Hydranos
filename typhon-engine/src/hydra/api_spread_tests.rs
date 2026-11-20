@@ -162,7 +162,54 @@ fn the_3x_routing_keys_are_still_ignored() {
 
 // ---- local spreading ------------------------------------------------------
 
-/// No `targets`: every local engine of the category's mode shares the adds, and
+/// ⭐ Spreading is something the operator asks for. A category with none of the
+/// three keys files by its mode alone even when several local engines share the
+/// role (a prod node runs a second hoard engine that must not start taking the
+/// hoard adds).
+#[test]
+fn a_category_without_any_key_ignores_the_other_engines_of_its_role() {
+    let s = tunnels("spread-no-key-two-engines");
+    let dir = s.dir.join("data").to_string_lossy().into_owned();
+    category(
+        &s,
+        "fast",
+        serde_json::json!({"save_path": dir, "mode": "race"}),
+    );
+    category(
+        &s,
+        "empty-keys",
+        serde_json::json!({"save_path": dir, "mode": "race", "targets": [], "reserve_bytes": 0}),
+    );
+    for n in ["a", "b", "c"] {
+        add(&s, "fast", n, PIECE).unwrap();
+    }
+    add(&s, "empty-keys", "d", PIECE).unwrap();
+    assert_eq!(
+        (held(&s, "race"), held(&s, "vpn1"), held(&s, "vpn2")),
+        (4, 0, 0)
+    );
+}
+
+/// Any one of the three keys turns it on: here only a reserve.
+#[test]
+fn a_reserve_alone_turns_the_spread_on() {
+    let s = tunnels("spread-reserve-only");
+    let dir = s.dir.join("data").to_string_lossy().into_owned();
+    category(
+        &s,
+        "fast",
+        serde_json::json!({"save_path": dir, "mode": "race", "reserve_bytes": 1}),
+    );
+    for n in ["a", "b", "c"] {
+        add(&s, "fast", n, PIECE).unwrap();
+    }
+    assert_eq!(
+        (held(&s, "race"), held(&s, "vpn1"), held(&s, "vpn2")),
+        (1, 1, 1)
+    );
+}
+
+/// No `targets` but a `spread`: every local engine of the category's mode shares the adds, and
 /// the engine of the OTHER mode is never one of them.
 #[test]
 fn without_targets_the_engines_of_the_mode_share_the_adds() {
@@ -171,7 +218,7 @@ fn without_targets_the_engines_of_the_mode_share_the_adds() {
     category(
         &s,
         "fast",
-        serde_json::json!({"save_path": dir, "mode": "race"}),
+        serde_json::json!({"save_path": dir, "mode": "race", "spread": "bytes"}),
     );
     for n in ["a", "b", "c", "d", "e", "f"] {
         add(&s, "fast", n, PIECE).unwrap();
