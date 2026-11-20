@@ -2306,7 +2306,7 @@ mod qbit_session_tests {
         assert_eq!(webapi_version("2.8.11\n"), Some((2, 8, 11)));
         assert_eq!(webapi_version("2.7.0"), Some((2, 7, 0)));
         assert_eq!(webapi_version("2.8"), None);
-        assert_eq!(webapi_version("2.8.11.1"), None);
+        assert_eq!(webapi_version("2.8.11.1"), None); // leak-ok: a version, not an IP
         assert_eq!(webapi_version("<html>"), None);
         assert!(webapi_version("2.7.9").unwrap() < EXPORT_WEBAPI);
         assert!(webapi_version("2.8.11").unwrap() >= EXPORT_WEBAPI);
