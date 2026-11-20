@@ -66,6 +66,7 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 ### Fixed
 
 - Importing from qBittorrent, a single-file torrent that qBittorrent kept in a folder of its own ("Create subfolder" layout) is added in that folder. It used to be added at qBittorrent's save path, trusted as complete, and went into error over a file it could not find until it was moved by hand. A torrent whose data qBittorrent keeps in a layout the import does not reproduce -- a renamed file, a multi-file torrent without its folder -- is now added stopped, its data not trusted as complete, whatever the wizard's start choice, with a note on the torrent saying where its data is, instead of going into error or downloading everything again. A torrent whose data is gone altogether goes in as before. The wizard's "data found" counts only data the import will find, and names the others. The note is kept in memory: a restart forgets it, the torrent stays stopped.
+- An RSS or Atom feed with a malformed date is read again: such a date is taken as no date, and the rest of the article is kept, instead of the feed no longer being read.
 
 ## v4.9.1 -- a reset configuration that stays off the network, preallocation on Windows, a tracker that answers 429 left alone, and isolated torrents that reuse their files
 

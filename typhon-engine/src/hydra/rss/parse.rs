@@ -531,9 +531,9 @@ fn parse_rfc3339(s: &str) -> Option<i64> {
     let d: u32 = s.get(8..10)?.parse().ok()?;
     let rest = s.get(10..).unwrap_or("");
     if rest.is_empty() {
-        return Some(days_from_civil(y, mo, d) * 86400);
+        return unix_seconds(y, mo, d, 0, 0, 0, 0);
     }
-    let rest = &rest[1..]; // 'T' or ' '
+    let rest = rest.get(1..)?; // 'T' or ' '; not inside a multi-byte character
     let h: i64 = rest.get(0..2)?.parse().ok()?;
     let mi: i64 = rest.get(3..5)?.parse().ok()?;
     let sec: i64 = rest.get(6..8).and_then(|v| v.parse().ok()).unwrap_or(0);
@@ -542,7 +542,22 @@ fn parse_rfc3339(s: &str) -> Option<i64> {
         tz = tz.trim_start_matches(|c: char| c == '.' || c.is_ascii_digit());
     }
     let offset = zone_offset(tz).unwrap_or(0);
-    Some(days_from_civil(y, mo, d) * 86400 + h * 3600 + mi * 60 + sec - offset)
+    unix_seconds(y, mo, d, h, mi, sec, offset)
+}
+
+/// The date and time as Unix seconds, or None when a field is so far out of
+/// range that the sum would overflow: a feed chooses these digits, and a year
+/// of nineteen digits is no date.
+fn unix_seconds(y: i64, mo: u32, d: u32, h: i64, mi: i64, sec: i64, offset: i64) -> Option<i64> {
+    if !(0..=9999).contains(&y) {
+        return None;
+    }
+    days_from_civil(y, mo, d)
+        .checked_mul(86400)?
+        .checked_add(h.checked_mul(3600)?)?
+        .checked_add(mi.checked_mul(60)?)?
+        .checked_add(sec)?
+        .checked_sub(offset)
 }
 
 fn parse_rfc2822(s: &str) -> Option<i64> {
@@ -565,7 +580,7 @@ fn parse_rfc2822(s: &str) -> Option<i64> {
     let mi: i64 = t.next().unwrap_or("0").parse().ok()?;
     let sec: i64 = t.next().unwrap_or("0").parse().ok()?;
     let offset = parts.next().and_then(zone_offset).unwrap_or(0);
-    Some(days_from_civil(y, mo, d) * 86400 + h * 3600 + mi * 60 + sec - offset)
+    unix_seconds(y, mo, d, h, mi, sec, offset)
 }
 
 fn month(m: &str) -> Option<u32> {
@@ -821,5 +836,34 @@ mod tests {
         assert_eq!(parse_date("2026-10-08").unwrap(), t - 10 * 3600);
         assert_eq!(rfc2822(0), "Thu, 01 Jan 1970 00:00:00 +0000");
         assert!(parse_date("yesterday").is_none());
+    }
+
+    /// A date whose tenth byte is followed by a multi-byte character (here the
+    /// replacement character a stray 0x83 becomes) used to be cut inside it and
+    /// panic, which killed the RSS tick on that feed for good.
+    #[test]
+    fn a_date_followed_by_a_multibyte_character_does_not_panic() {
+        assert_eq!(parse_date("2000-01-01\u{fffd}"), None);
+        assert_eq!(parse_date("2000-01-01\u{e9}T00:00:00Z"), None);
+        let feed =
+            b"<feed><entry><title>t</title><updated>2000-01-01\x83\x83</updated></entry></feed>";
+        let parsed = parse(feed).expect("a feed");
+        assert_eq!(parsed.articles.len(), 1);
+        assert_eq!(parsed.articles[0].date, 0, "an unreadable date is no date");
+    }
+
+    /// A year or an hour of nineteen digits used to overflow the sum of seconds
+    /// (a panic in a debug build, a nonsense date in a release one): such a
+    /// field is no date.
+    #[test]
+    fn a_date_with_an_absurd_field_is_no_date() {
+        assert_eq!(parse_date("1 Jan 9223372036854775807"), None);
+        assert_eq!(parse_date("1 Jan 2000 9223372036854775807:00:00"), None);
+        assert_eq!(parse_date("1 Jan 2000 00:00:9223372036854775807"), None);
+        assert_eq!(parse_date("1 Jan 12000"), None);
+        assert!(parse_date("31 Dec 9999 23:59:59 +0000").is_some());
+        let feed = b"<rss><channel><item><title>t</title><pubDate>1 Jan 9223372036854775807</pubDate></item></channel></rss>";
+        let parsed = parse(feed).expect("a feed");
+        assert_eq!(parsed.articles[0].date, 0);
     }
 }
