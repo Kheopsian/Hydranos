@@ -1513,6 +1513,76 @@ mod socks_dial_tests {
         assert!(dial.await.unwrap());
     }
 
+    fn on_device(device: &str) -> crate::netpin::Egress {
+        crate::netpin::Egress {
+            device: device.into(),
+            ..Default::default()
+        }
+    }
+
+    /// ⭐⭐ Fail closed on the device. The peer is on loopback and answers: only
+    /// the pin can stop the dial. A device that does not exist (interface
+    /// down, renamed, tunnel gone) must end the dial with no connection made,
+    /// not leave by the default route. The control pins to `lo`, which exists,
+    /// and the same listener DOES see the dial -- so "nothing arrived" is the
+    /// pin's doing and not a fixture that cannot receive.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_dial_pinned_to_a_missing_device_makes_no_connection() {
+        let tcp = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let peer = tcp.local_addr().unwrap();
+
+        let dial = tokio::spawn(async move { try_tcp(peer, &on_device("lo")).await.is_some() });
+        assert!(
+            tokio::time::timeout(Duration::from_secs(3), tcp.accept())
+                .await
+                .is_ok(),
+            "control: a dial pinned to lo reaches the loopback peer"
+        );
+        assert!(dial.await.unwrap());
+
+        let gone = on_device("hy-nodev0");
+        assert!(try_tcp(peer, &gone).await.is_none(), "dial succeeded");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(500), tcp.accept())
+                .await
+                .is_err(),
+            "a socket for a missing device reached the peer"
+        );
+    }
+
+    /// Through a SOCKS5 proxy the first hop is pinned too: with the device
+    /// gone the proxy is never contacted, and nothing goes to the peer.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_proxied_dial_on_a_missing_device_reaches_neither_proxy_nor_peer() {
+        let (proxy, seen) = fake_socks5(0).await;
+        let tcp = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let peer = tcp.local_addr().unwrap();
+        let egress = crate::netpin::Egress {
+            device: "hy-nodev0".into(),
+            ..proxied(proxy)
+        };
+        assert!(try_tcp(peer, &egress).await.is_none());
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "the proxy was reached on a missing device"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(500), tcp.accept())
+                .await
+                .is_err(),
+            "a direct dial reached the peer"
+        );
+        // Control: pinned to lo, the proxy is reached.
+        let egress = crate::netpin::Egress {
+            device: "lo".into(),
+            ..proxied(proxy)
+        };
+        assert!(try_tcp(peer, &egress).await.is_some());
+        assert_eq!(seen.lock().unwrap().len(), 1);
+    }
+
     /// What each connection to a fake peer opened with: `true` = the plaintext
     /// BitTorrent handshake, `false` = anything else (an MSE key exchange).
     /// Every connection is read once and dropped, so the dial moves to its next

@@ -2631,3 +2631,53 @@ mod holepunch_flood_tests {
         });
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+mod listener_pin_tests {
+    use super::*;
+
+    fn binding(device: &str) -> crate::config::ResolvedBinding {
+        crate::config::ResolvedBinding {
+            id: 0,
+            addr: "127.0.0.1:0".parse().unwrap(),
+            peer_id: [0; 20],
+            egress: crate::netpin::Egress {
+                device: device.into(),
+                ..Default::default()
+            },
+            advertised_port: 0,
+            only_v6: false,
+        }
+    }
+
+    /// A listener whose device is gone is not opened: the round fails and
+    /// says it refuses the default route, and a bad binding anywhere in the
+    /// round fails the whole round (no half-pinned set of listeners). The
+    /// control binds the same address pinned to `lo` and gets a listener.
+    #[tokio::test]
+    async fn a_listener_on_a_missing_device_is_refused() {
+        let ok = bind_round(&[binding("lo")]).unwrap();
+        assert_eq!(ok.len(), 1, "control: a pin to lo listens");
+        drop(ok);
+
+        let err = bind_round(&[binding("hy-nodev0")]).unwrap_err();
+        assert!(
+            err.contains("refusing to listen on the default route"),
+            "{err}"
+        );
+
+        let err = bind_round(&[binding("lo"), binding("hy-nodev0")]).unwrap_err();
+        assert!(err.contains("refusing to listen"), "{err}");
+    }
+
+    /// The uTP socket is the same: a device it cannot bind to is an error, not
+    /// an unpinned socket. Control: `lo` and no device both bind.
+    #[tokio::test]
+    async fn a_utp_socket_on_a_missing_device_is_not_bound() {
+        assert!(bind_utp(0, Some("hy-nodev0")).await.is_err());
+        let live = bind_utp(0, Some("lo")).await.expect("control: lo binds");
+        live.cancel.cancel();
+        let live = bind_utp(0, None).await.expect("control: no device binds");
+        live.cancel.cancel();
+    }
+}

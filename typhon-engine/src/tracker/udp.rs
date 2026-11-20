@@ -675,6 +675,25 @@ pub async fn send_scrape_on(
 mod tests {
     use super::*;
 
+    /// A UDP tracker socket for a device that does not exist is not opened at
+    /// all (no unpinned socket to announce from), for both families; the
+    /// control shows the same call opens fine on `lo`.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_udp_tracker_socket_on_a_missing_device_is_not_opened() {
+        let e = Family::open(false, "hy-nodev0")
+            .err()
+            .expect("opened unpinned");
+        assert!(e.contains("pin to hy-nodev0"), "{e}");
+        // v6 may fail earlier on a host without IPv6; it must fail either way.
+        assert!(
+            Family::open(true, "hy-nodev0").is_err(),
+            "v6 opened unpinned"
+        );
+        assert!(Family::open(false, "lo").is_ok(), "control: lo opens");
+        assert!(Family::open(false, "").is_ok(), "control: no device opens");
+    }
+
     /// BEP 15 scrape reply: 12 bytes per hash, leechers last.
     #[test]
     fn a_udp_scrape_reply_is_read_in_request_order() {

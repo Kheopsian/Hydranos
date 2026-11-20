@@ -193,4 +193,70 @@ mod tests {
         assert_eq!(hoard.device(), Some("wg-hoard"));
         assert_ne!(race, hoard);
     }
+
+    /// The device a socket is bound to, as the kernel reports it ("" = none).
+    #[cfg(target_os = "linux")]
+    fn bound_device(fd: std::os::fd::RawFd) -> String {
+        let mut buf = [0u8; 64];
+        let mut len = buf.len() as libc::socklen_t;
+        let rc = unsafe {
+            libc::getsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_BINDTODEVICE,
+                buf.as_mut_ptr() as *mut libc::c_void,
+                &mut len,
+            )
+        };
+        assert_eq!(rc, 0, "getsockopt: {}", std::io::Error::last_os_error());
+        String::from_utf8_lossy(&buf[..len as usize])
+            .trim_end_matches('\0')
+            .to_string()
+    }
+
+    /// The pin is really applied: the kernel reports the socket bound to the
+    /// device, a name padded with blanks is trimmed to it, and an egress with
+    /// no device leaves the socket unbound. A `pin_fd` that returned Ok
+    /// without calling the kernel would pass every "is_ok" check and pin
+    /// nothing, which is the leak this module exists to close.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_pin_binds_the_socket_to_the_named_device() {
+        use std::os::fd::AsRawFd;
+        let sock = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let fd = sock.as_raw_fd();
+        assert_eq!(bound_device(fd), "", "a fresh socket is unbound");
+        pin_fd(fd, &Egress::default()).unwrap();
+        assert_eq!(bound_device(fd), "", "no device: the socket stays unbound");
+        let lo = Egress {
+            device: "  lo ".into(),
+            ..Default::default()
+        };
+        pin_fd(fd, &lo).unwrap();
+        assert_eq!(bound_device(fd), "lo");
+    }
+
+    /// An unusable device is an error from `pin_fd`, with the kernel's reason,
+    /// and the failed socket is left unbound for the caller to drop. A name
+    /// longer than IFNAMSIZ must be refused, not cut down to another
+    /// interface's name.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_unusable_device_is_an_error_and_never_a_truncated_pin() {
+        use std::os::fd::AsRawFd;
+        let sock = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let fd = sock.as_raw_fd();
+        let missing = Egress {
+            device: "hy-nodev0".into(),
+            ..Default::default()
+        };
+        let e = pin_fd(fd, &missing).unwrap_err();
+        assert_eq!(e.raw_os_error(), Some(libc::ENODEV), "{e}");
+        let long = Egress {
+            device: "lo0000000000000000".into(),
+            ..Default::default()
+        };
+        assert!(pin_fd(fd, &long).is_err(), "an over-long name was accepted");
+        assert_eq!(bound_device(fd), "", "a failed pin left a binding behind");
+    }
 }
