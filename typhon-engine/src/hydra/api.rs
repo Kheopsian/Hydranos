@@ -26143,7 +26143,11 @@ mod filter_tests {
         assert_eq!(rows(&v)[0]["state"], "seed_only", "{v}");
 
         let v = engine_page_value(&s.state, "race", "state=__active__").await;
-        assert_eq!(v["filtered"], serde_json::json!(0), "no upload, not active: {v}");
+        assert_eq!(
+            v["filtered"],
+            serde_json::json!(0),
+            "no upload, not active: {v}"
+        );
     }
 
     #[tokio::test]
