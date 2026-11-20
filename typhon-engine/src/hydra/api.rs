@@ -2825,10 +2825,9 @@ pub(crate) fn add_torrent_bytes(
     // workflows below and whoever reports where it went all agree. Asked twice
     // it could answer twice, the first torrent having changed the counts.
     let spread = if engine_override.is_empty() && !category.is_empty() {
-        let size = typhon_engine::torrent::metainfo::parse_torrent_bytes(bytes)
-            .map(|m| m.total_size)
-            .unwrap_or(0);
-        crate::spread::resolve_local(state, category, size)?
+        let meta = typhon_engine::torrent::metainfo::parse_torrent_bytes(bytes).ok();
+        let size = meta.as_ref().map(|m| m.total_size).unwrap_or(0);
+        crate::spread::resolve_local(state, category, size, meta.as_ref().map(|m| &m.info_hash))?
     } else {
         None
     };
@@ -14883,7 +14882,8 @@ pub(crate) async fn post_torrent_add(
 
     if !magnet_uri.is_empty() {
         if spread {
-            match crate::spread::resolve(&state, &s("category"), 0).await {
+            let magnet_hash = crate::magnets::parse(&magnet_uri).ok().map(|m| m.info_hash);
+            match crate::spread::resolve(&state, &s("category"), 0, magnet_hash.as_ref()).await {
                 Ok(crate::spread::Chosen::Local(Some(e))) => engine = e,
                 Ok(crate::spread::Chosen::Local(None)) => {}
                 Ok(crate::spread::Chosen::Remote {
@@ -14980,10 +14980,10 @@ pub(crate) async fn post_torrent_add(
     };
 
     if spread {
-        let size = typhon_engine::torrent::metainfo::parse_torrent_bytes(&bytes)
-            .map(|m| m.total_size)
-            .unwrap_or(0);
-        match crate::spread::resolve(&state, &s("category"), size).await {
+        let meta = typhon_engine::torrent::metainfo::parse_torrent_bytes(&bytes).ok();
+        let size = meta.as_ref().map(|m| m.total_size).unwrap_or(0);
+        let held = meta.as_ref().map(|m| m.info_hash);
+        match crate::spread::resolve(&state, &s("category"), size, held.as_ref()).await {
             Ok(crate::spread::Chosen::Local(Some(e))) => engine = e,
             Ok(crate::spread::Chosen::Local(None)) => {}
             Ok(crate::spread::Chosen::Remote {
@@ -15778,10 +15778,10 @@ async fn post_torrent_upload(
     let mut outcomes: Vec<UploadOutcome> = Vec::with_capacity(files.len());
     for bytes in files {
         let route = if spread {
-            let size = typhon_engine::torrent::metainfo::parse_torrent_bytes(&bytes)
-                .map(|m| m.total_size)
-                .unwrap_or(0);
-            crate::spread::resolve(&state, &fields.category, size).await
+            let meta = typhon_engine::torrent::metainfo::parse_torrent_bytes(&bytes).ok();
+            let size = meta.as_ref().map(|m| m.total_size).unwrap_or(0);
+            let held = meta.as_ref().map(|m| m.info_hash);
+            crate::spread::resolve(&state, &fields.category, size, held.as_ref()).await
         } else {
             Ok(crate::spread::Chosen::Local(None))
         };

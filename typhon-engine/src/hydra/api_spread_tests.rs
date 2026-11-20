@@ -557,7 +557,11 @@ async fn an_update_with_the_keys_empty_turns_the_spread_off() {
     let list =
         body_json(get_categories(State(s.state.clone()), RawQuery(None), keyed(KEY)).await).await;
     for k in ["targets", "spread", "reserve_bytes"] {
-        assert!(list[0].get(k).is_none(), "{k} survived the clear: {}", list[0]);
+        assert!(
+            list[0].get(k).is_none(),
+            "{k} survived the clear: {}",
+            list[0]
+        );
     }
 }
 
@@ -1001,4 +1005,107 @@ async fn the_targets_route_lists_engines_here_and_on_nodes_in_the_strings_target
     );
     assert_eq!(v["targets"][4]["engine"], "vpn1");
     assert_eq!(v["unreachable"][0]["node"], "dead");
+}
+
+// ---- a torrent already held is not added again elsewhere -------------------
+
+/// Category `c` over the two tunnels, nothing loaded: both weigh the same, so
+/// the first add goes to `vpn1` and the engine holding it then weighs more.
+fn empty_pair(s: &TestState, spread: &str) {
+    let dir = s.dir.join("data").to_string_lossy().into_owned();
+    category(
+        s,
+        "c",
+        serde_json::json!({
+            "save_path": dir, "mode": "race",
+            "targets": ["vpn1", "vpn2"], "spread": spread,
+        }),
+    );
+}
+
+fn copies(s: &TestState) -> usize {
+    ["race", "hoard", "vpn1", "vpn2"]
+        .iter()
+        .map(|e| held(s, e))
+        .sum()
+}
+
+/// ⭐ Before the spread a category always met the same engine, so a re-grab of
+/// a release (an *arr's retry, a watched folder) got "already added". Spread by
+/// `count`, the engine holding it weighs more and the second add used to go to
+/// the other one: the same hash twice, two tunnels on one passkey.
+#[test]
+fn a_torrent_added_twice_to_a_count_spread_is_held_once() {
+    let s = tunnels("spread-dup-count");
+    empty_pair(&s, "count");
+    add(&s, "c", "new", PIECE).unwrap();
+    assert!(holds(&s, "vpn1", "new", PIECE));
+    let e = add(&s, "c", "new", PIECE).unwrap_err();
+    assert!(e.contains("already added"), "{e}");
+    assert_eq!(copies(&s), 1);
+    assert!(holds(&s, "vpn1", "new", PIECE) && !holds(&s, "vpn2", "new", PIECE));
+}
+
+#[test]
+fn a_torrent_added_twice_to_a_bytes_spread_is_held_once() {
+    let s = tunnels("spread-dup-bytes");
+    empty_pair(&s, "bytes");
+    add(&s, "c", "new", PIECE).unwrap();
+    let e = add(&s, "c", "new", PIECE).unwrap_err();
+    assert!(e.contains("already added"), "{e}");
+    assert_eq!(copies(&s), 1);
+}
+
+/// The holder is looked for in every local engine, not only among the targets.
+#[test]
+fn a_hash_held_by_an_engine_outside_the_targets_is_not_added_again() {
+    let s = tunnels("spread-dup-outside");
+    empty_pair(&s, "count");
+    preload(&s, "race", "held-elsewhere", PIECE);
+    let e = add(&s, "c", "held-elsewhere", PIECE).unwrap_err();
+    assert!(e.contains("already added"), "{e}");
+    assert_eq!(copies(&s), 1);
+    assert!(holds(&s, "race", "held-elsewhere", PIECE));
+}
+
+/// A magnet carries its hash: the one the engines already hold is refused
+/// before anything is stored or resolved.
+#[test]
+fn a_magnet_already_held_is_not_requested_on_another_engine() {
+    let s = tunnels("spread-dup-magnet");
+    empty_pair(&s, "count");
+    add(&s, "c", "new", PIECE).unwrap();
+    let meta =
+        typhon_engine::torrent::metainfo::parse_torrent_bytes(&torrent("new", PIECE)).unwrap();
+    let uri = format!(
+        "magnet:?xt=urn:btih:{}",
+        typhon_engine::torrent::hex_encode(&meta.info_hash)
+    );
+    let e = crate::magnets::request(&s.state, &uri, "c", "", "", true, "").unwrap_err();
+    assert!(e.contains("already added"), "{e}");
+    assert_eq!(copies(&s), 1);
+    assert!(s.store.lock().unwrap().magnets().unwrap().is_empty());
+}
+
+/// The native upload answers 409, as for a category that does not spread.
+#[tokio::test]
+async fn a_native_upload_of_a_held_hash_is_a_conflict() {
+    let s = tunnels("spread-dup-upload");
+    empty_pair(&s, "count");
+    let first = upload(&s, &[("category", "c")], "new", PIECE).await;
+    assert_eq!(first["_status"], 200, "{first}");
+    let again = upload(&s, &[("category", "c")], "new", PIECE).await;
+    assert_eq!(again["_status"], 409, "{again}");
+    assert_eq!(copies(&s), 1);
+}
+
+/// A node target is not asked about a torrent this host already holds.
+#[tokio::test]
+async fn a_held_hash_is_not_sent_to_a_node() {
+    let (s, _n, uploads) =
+        over_a_node("spread-dup-node", Some(quiet()), serde_json::json!({})).await;
+    let v = upload(&s, &[("category", "films")], "already-here", 4 * PIECE).await;
+    assert_eq!(v["_status"], 409, "{v}");
+    assert!(uploads.lock().unwrap().is_empty());
+    assert_eq!(held(&s, "race"), 1);
 }

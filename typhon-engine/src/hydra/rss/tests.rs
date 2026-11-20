@@ -1124,3 +1124,51 @@ async fn a_spread_category_downloads_by_the_exit_of_the_chosen_target() {
         "added by the engine whose exit fetched it"
     );
 }
+
+/// The engine is chosen before the download, the hash known only after it. An
+/// article whose torrent an engine already holds goes to THAT engine (and is
+/// "already in this client"), not to the lighter one picked for the download:
+/// the same hash would run on two tunnels.
+#[tokio::test]
+async fn a_spread_category_does_not_add_an_article_an_engine_already_holds() {
+    let s = st(
+        "rss-spread-held",
+        "\n[[engine]]\nname = \"vpn1\"\nrole = \"race\"\n[[engine]]\nname = \"vpn2\"\nrole = \"race\"\n",
+    );
+    let dir = s.dir.join("fast").display().to_string();
+    let doc = json!({
+        "c": {"save_path": dir, "mode": "race", "targets": ["vpn1", "vpn2"], "spread": "count"},
+    });
+    s.store
+        .lock()
+        .unwrap()
+        .put_meta("categories", &doc.to_string())
+        .unwrap();
+    // vpn1 holds it, so vpn2 is the lighter engine the download is chosen for.
+    s.engines
+        .get("vpn1")
+        .unwrap()
+        .manager
+        .add_torrent_bytes(&torrent_bytes("held-already"), &dir, true, true)
+        .unwrap();
+    let fake = Fake::start().await;
+    fake.serve("/a.torrent", 200, torrent_bytes("held-already"));
+    let article = crate::store::RssArticleRow {
+        guid: "g".into(),
+        title: "t".into(),
+        torrent_url: fake.url("/a.torrent"),
+        ..Default::default()
+    };
+    let res = add_article(&s, &Exits::new(&s), &article, "c", &dir, "", true).await;
+    assert!(
+        matches!(res, Ok(Added { already: true, .. })),
+        "{:?}",
+        res.err().map(|e| e.message().to_string())
+    );
+    assert_eq!(fake.hits("/a.torrent"), 1);
+    assert_eq!(
+        (count(&s, "vpn1"), count(&s, "vpn2"), count(&s, "race")),
+        (1, 0, 0),
+        "no second copy"
+    );
+}

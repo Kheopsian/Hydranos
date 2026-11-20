@@ -1118,14 +1118,14 @@ pub async fn add_article(
     // leaves by that engine's way out: a passkey tied to an IP must not be
     // fetched by one engine and announced by another. The size of the new
     // torrent is not known yet and does not enter the choice (as for a magnet).
-    let engine = {
+    let (engine, spread) = {
         let (st, c) = (state.clone(), category.to_string());
-        match tokio::task::spawn_blocking(move || crate::spread::resolve_local(&st, &c, 0))
+        match tokio::task::spawn_blocking(move || crate::spread::resolve_local(&st, &c, 0, None))
             .await
             .unwrap_or_else(|e| Err(e.to_string()))
         {
-            Ok(Some(e)) => e,
-            Ok(None) => crate::api::placement(state, category, "").0,
+            Ok(Some(e)) => (e, true),
+            Ok(None) => (crate::api::placement(state, category, "").0, false),
             Err(e) => return Err(AddError::Refused(e)),
         }
     };
@@ -1143,9 +1143,19 @@ pub async fn add_article(
             mask_url(&url)
         )));
     }
-    let hash = typhon_engine::torrent::metainfo::parse_torrent_bytes(&bytes)
+    let meta = typhon_engine::torrent::metainfo::parse_torrent_bytes(&bytes).ok();
+    let hash = meta
+        .as_ref()
         .map(|m| typhon_engine::torrent::hex_encode(&m.info_hash))
         .unwrap_or_default();
+    // The hash is known only now. A spread category chose its engine for the
+    // download's way out, before it could ask whether a torrent was held: if an
+    // engine already holds it, the add goes there and is refused as "already
+    // added", not run a second time on the engine picked for the download.
+    let engine = match meta.as_ref().filter(|_| spread) {
+        Some(m) => crate::spread::holder(state, &m.info_hash).unwrap_or(engine),
+        None => engine,
+    };
     let res = tokio::task::spawn_blocking(move || {
         let subfolder = st.cfg().daemon.create_torrent_folder;
         let sp = crate::api::add_save_path(&st, &bytes, &cat, &engine, &sp, subfolder)?;

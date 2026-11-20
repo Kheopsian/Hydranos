@@ -30,6 +30,8 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use crate::api::AppState;
+/// A torrent's info hash (v1, or a v2 one cut to its first 20 bytes).
+type InfoHash = [u8; 20];
 
 /// How long a measure is believed. Short enough that an operator who frees a
 /// disk sees it used within seconds, long enough that a burst of adds costs one
@@ -393,6 +395,25 @@ fn conclude(
     Ok(target)
 }
 
+/// The local engine that already holds `hash`, whichever engine it is and
+/// whatever the category's targets: a key lookup in each engine, no scan.
+///
+/// A spread add that ignored it would send the re-grab of a release (an *arr's
+/// retry, a watched folder, an RSS article seen twice) to whichever engine is
+/// lightest now, so the same hash would run twice: two tunnels announcing one
+/// passkey, two engines writing the same files. Answering with the holder
+/// lets the add path refuse it as "already added", exactly as before the
+/// spread existed, when a category always landed on the same engine. Only
+/// the engines of this host are asked: a node's are not (out of scope).
+pub fn holder(state: &AppState, hash: &InfoHash) -> Option<String> {
+    state
+        .engines
+        .engines()
+        .iter()
+        .find(|e| e.manager.get(hash).is_some())
+        .map(|e| e.id.clone())
+}
+
 /// The local engine a new torrent of `category` goes to, among local targets
 /// only. `Ok(None)`: nothing to spread, the legacy route answers. For the
 /// callers that cannot follow a torrent to a node (the qBittorrent shim lists
@@ -401,6 +422,7 @@ pub fn resolve_local(
     state: &AppState,
     category: &str,
     size: u64,
+    hash: Option<&InfoHash>,
 ) -> Result<Option<String>, String> {
     let Some(rule) = crate::api::category_rule(state, category) else {
         return Ok(None);
@@ -408,6 +430,9 @@ pub fn resolve_local(
     let Some(plan) = plan(state, category, &rule, false)? else {
         return Ok(None);
     };
+    if let Some(e) = hash.and_then(|h| holder(state, h)) {
+        return Ok(Some(e));
+    }
     // One candidate and no reserve: nothing to measure, nothing to compare.
     if let ([Target::Local(e)], 0) = (plan.cands.as_slice(), plan.reserve) {
         return Ok(Some(e.clone()));
@@ -441,13 +466,21 @@ pub enum Chosen {
 }
 
 /// `resolve_local`, with nodes' engines among the candidates.
-pub async fn resolve(state: &AppState, category: &str, size: u64) -> Result<Chosen, String> {
+pub async fn resolve(
+    state: &AppState,
+    category: &str,
+    size: u64,
+    hash: Option<&InfoHash>,
+) -> Result<Chosen, String> {
     let Some(rule) = crate::api::category_rule(state, category) else {
         return Ok(Chosen::Local(None));
     };
     let Some(plan) = plan(state, category, &rule, true)? else {
         return Ok(Chosen::Local(None));
     };
+    if let Some(e) = hash.and_then(|h| holder(state, h)) {
+        return Ok(Chosen::Local(Some(e)));
+    }
     if let ([Target::Local(e)], 0) = (plan.cands.as_slice(), plan.reserve) {
         return Ok(Chosen::Local(Some(e.clone())));
     }

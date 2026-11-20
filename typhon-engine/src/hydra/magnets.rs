@@ -177,7 +177,7 @@ pub fn request_with_options(
     // magnet's size is not known yet, so the byte and space figures it moves
     // are the ones measured, not its own.
     let spread = if engine_override.is_empty() && !category.is_empty() {
-        crate::spread::resolve_local(state, category, 0)?
+        crate::spread::resolve_local(state, category, 0, Some(&m.info_hash))?
     } else {
         None
     };

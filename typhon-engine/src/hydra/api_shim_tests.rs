@@ -1286,3 +1286,56 @@ async fn a_shim_add_over_the_limit_is_413_and_adds_nothing() {
         "the file before the cut was not added"
     );
 }
+
+// ---------------------------------------------------------------------------
+// a release an *arr sends again, into a category that spreads
+// ---------------------------------------------------------------------------
+
+/// ⭐ An *arr that retries a release it has seen gets "Ok." and nothing is
+/// added a second time. Spread over two engines by `count`, the engine holding
+/// the first copy weighs more, and the retry used to land on the other one.
+#[tokio::test]
+async fn a_shim_retry_into_a_spread_category_is_held_once_and_answers_as_before() {
+    let two = "\n[[engine]]\nname = \"vpn1\"\nrole = \"race\"\n[[engine]]\nname = \"vpn2\"\nrole = \"race\"\n";
+    let s = st("shim-spread-retry", two);
+    let dir = data(&s);
+    let doc = serde_json::json!({
+        "old": {"save_path": dir, "mode": "race"},
+        "c": {"save_path": dir, "mode": "race", "targets": ["vpn1", "vpn2"], "spread": "count"},
+    });
+    s.store
+        .lock()
+        .unwrap()
+        .put_meta("categories", &doc.to_string())
+        .unwrap();
+
+    // What a duplicate answers where nothing spreads.
+    let t = single("plain-dup");
+    assert_eq!(add(&s, &t, &[("category", "old")]).await.1, "Ok.");
+    let plain = add(&s, &t, &[("category", "old")]).await;
+
+    let t = single("spread-dup");
+    let first = add(&s, &t, &[("category", "c")]).await;
+    assert_eq!(first, (StatusCode::OK, "Ok.".to_string()));
+    let retry = add(&s, &t, &[("category", "c")]).await;
+    assert_eq!(
+        retry, plain,
+        "the same answer as a duplicate without spread"
+    );
+    let held_by: Vec<&str> = ["race", "hoard", "vpn1", "vpn2"]
+        .into_iter()
+        .filter(|e| {
+            s.engines
+                .get(e)
+                .unwrap()
+                .manager
+                .get(
+                    &typhon_engine::torrent::metainfo::parse_torrent_bytes(&t)
+                        .unwrap()
+                        .info_hash,
+                )
+                .is_some()
+        })
+        .collect();
+    assert_eq!(held_by, ["vpn1"], "one copy, where it was first added");
+}
