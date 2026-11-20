@@ -288,6 +288,20 @@ struct LoginFailure {
     refused: bool,
 }
 
+/// The WebAPI version that added `/api/v2/torrents/export` (qBittorrent 4.5).
+const EXPORT_WEBAPI: (u32, u32, u32) = (2, 8, 11);
+
+/// `2.8.11` as its three numbers; `None` for anything else.
+fn webapi_version(body: &str) -> Option<(u32, u32, u32)> {
+    let mut parts = body.trim().split('.');
+    let mut num = || parts.next()?.parse::<u32>().ok();
+    let v = (num()?, num()?, num()?);
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(v)
+}
+
 /// Did qBittorrent accept the login?
 ///
 /// Two protocols in the wild, measured against 5.2.3 on 2026-10-02: up to 4.x
@@ -343,6 +357,39 @@ impl Qbit {
     /// The credentials this session logged in with, for a later retry.
     pub fn creds(&self) -> &QbitCreds {
         &self.creds
+    }
+
+    /// Refuse a qBittorrent that cannot export a `.torrent`.
+    ///
+    /// Before 4.5 there is no `/torrents/export`: every torrent would fail with
+    /// a 404 after the whole library had been asked for. So it is said up
+    /// front. A version that cannot be read, or a check that cannot reach the
+    /// client, is not a refusal: the export reports its own errors.
+    pub async fn check_export_supported(&self) -> Result<(), String> {
+        let Ok(resp) = self.get("/api/v2/app/webapiVersion").send().await else {
+            return Ok(());
+        };
+        let status = resp.status().as_u16();
+        if status == 404 {
+            return Err(
+                "qBittorrent is older than 4.5 and cannot export torrents; import needs 4.5 or newer"
+                    .into(),
+            );
+        }
+        if !(200..300).contains(&status) {
+            return Ok(());
+        }
+        let body = resp.text().await.unwrap_or_default();
+        match webapi_version(&body) {
+            Some(v) if v < EXPORT_WEBAPI => Err(format!(
+                "qBittorrent's WebAPI {} is older than {}.{}.{} and cannot export torrents; import needs qBittorrent 4.5 or newer",
+                body.trim(),
+                EXPORT_WEBAPI.0,
+                EXPORT_WEBAPI.1,
+                EXPORT_WEBAPI.2
+            )),
+            _ => Ok(()),
+        }
     }
 
     /// Log in again on the same client, after qBit dropped the session.
@@ -2252,6 +2299,80 @@ mod qbit_session_tests {
         let list = q.torrents().await.expect("the listing arrives and decodes");
         let names: Vec<_> = list.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(names, ["big one", "two"]);
+    }
+
+    #[test]
+    fn webapi_version_reads_three_numbers_and_nothing_else() {
+        assert_eq!(webapi_version("2.8.11\n"), Some((2, 8, 11)));
+        assert_eq!(webapi_version("2.7.0"), Some((2, 7, 0)));
+        assert_eq!(webapi_version("2.8"), None);
+        assert_eq!(webapi_version("2.8.11.1"), None);
+        assert_eq!(webapi_version("<html>"), None);
+        assert!(webapi_version("2.7.9").unwrap() < EXPORT_WEBAPI);
+        assert!(webapi_version("2.8.11").unwrap() >= EXPORT_WEBAPI);
+    }
+
+    /// A qBittorrent that logs in and answers `webapiVersion` with `version`,
+    /// or with a 404 when it has no such endpoint (older than 4.1).
+    async fn old_qbit(version: Option<&'static str>) -> Qbit {
+        let app = axum::Router::new()
+            .route(
+                "/api/v2/auth/login",
+                axum::routing::post(|| async { "Ok." }),
+            )
+            .route(
+                "/api/v2/app/webapiVersion",
+                axum::routing::get(move || async move {
+                    match version {
+                        Some(v) => v.into_response(),
+                        None => StatusCode::NOT_FOUND.into_response(),
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let creds = QbitCreds {
+            url: format!("http://{addr}"),
+            username: "u".into(),
+            password: "p".into(),
+        };
+        Qbit::login(&creds).await.expect("login")
+    }
+
+    #[tokio::test]
+    async fn a_qbittorrent_older_than_4_5_is_refused_before_the_library_is_asked_for() {
+        let err = old_qbit(Some("2.7.0"))
+            .await
+            .check_export_supported()
+            .await
+            .unwrap_err();
+        assert!(err.contains("4.5"), "{err}");
+        assert!(err.contains("2.7.0"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_qbittorrent_without_a_webapi_version_endpoint_is_refused() {
+        let err = old_qbit(None)
+            .await
+            .check_export_supported()
+            .await
+            .unwrap_err();
+        assert!(err.contains("older than 4.5"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_qbittorrent_4_5_or_newer_passes_the_check() {
+        assert!(old_qbit(Some("2.8.11"))
+            .await
+            .check_export_supported()
+            .await
+            .is_ok());
+        assert!(old_qbit(Some("2.11.2"))
+            .await
+            .check_export_supported()
+            .await
+            .is_ok());
     }
 
     #[test]
