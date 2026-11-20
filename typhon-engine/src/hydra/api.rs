@@ -24047,12 +24047,14 @@ mod merge_tests {
     /// the drain therefore do not report the same fullness for the same disk.
     #[test]
     fn disk_usage_answers_for_a_real_path_and_zeroes_for_a_missing_one() {
-        let (total, used, pct) = disk_usage("/tmp");
+        let tmp = std::env::temp_dir();
+        let (total, used, pct) = disk_usage(tmp.to_str().unwrap());
         assert!(total > 0, "a mounted filesystem has a size");
         assert!(used <= total);
         assert!((0.0..=100.0).contains(&pct), "got {pct}");
 
-        let (t2, u2, p2) = disk_usage("/tmp/typhon-no-such-dir-3f8a");
+        let missing = tmp.join("typhon-no-such-dir-3f8a");
+        let (t2, u2, p2) = disk_usage(missing.to_str().unwrap());
         assert_eq!(
             (t2, u2, p2),
             (0, 0, 0.0),
@@ -24065,9 +24067,10 @@ mod merge_tests {
     /// and on a filesystem with reserved blocks it is strictly more.
     #[test]
     fn the_panel_counts_reserved_blocks_as_used_where_the_drain_does_not() {
-        let (_, panel_used, _) = disk_usage("/tmp");
+        let tmp = std::env::temp_dir();
+        let (_, panel_used, _) = disk_usage(tmp.to_str().unwrap());
         let (drain_used, _, _) =
-            crate::volumes::usage(std::path::Path::new("/tmp")).expect("/tmp is a filesystem");
+            crate::volumes::usage(&tmp).expect("the temp dir is on a filesystem");
         assert!(
             panel_used >= drain_used as i64,
             "panel {panel_used} vs drain {drain_used}: the panel adds the reserved blocks"
