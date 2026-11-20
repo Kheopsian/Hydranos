@@ -15,6 +15,7 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 bytes = "1"
 tokio-util = { version = "0.7", features = ["codec"] }
+tokio = { version = "1", features = ["rt", "io-util"] }
 typhon-engine = { path = "../typhon-engine" }
 
 # The same patches as typhon-engine/Cargo.toml: a [patch] only counts in the
@@ -120,6 +121,34 @@ bench = false
 [[bin]]
 name = "udp_tracker"
 path = "fuzz_targets/udp_tracker.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mse_handshake"
+path = "fuzz_targets/mse_handshake.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "lsd_announce"
+path = "fuzz_targets/lsd_announce.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "proxy_protocol"
+path = "fuzz_targets/proxy_protocol.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "magnet_uri"
+path = "fuzz_targets/magnet_uri.rs"
 test = false
 doc = false
 bench = false

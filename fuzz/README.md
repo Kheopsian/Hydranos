@@ -15,11 +15,22 @@ own `Cargo.lock`, so `libfuzzer-sys` never enters typhon-engine's lockfile, and
 | `peer_message` | the length-prefixed wire codec and `Message::decode` |
 | `http_announce`, `http_scrape` | HTTP tracker reply bodies |
 | `udp_tracker` | BEP 15 connect / announce / scrape replies |
+| `mse_handshake` | the MSE / PE handshake (BEP 8), both sides, with fixed keys so the input reaches the stages behind the key exchange |
+| `lsd_announce` | BEP 14 `BT-SEARCH` datagrams |
+| `proxy_protocol` | the PROXY protocol v2 header in front of an inbound handshake |
+| `magnet_uri` | `magnet:?` links (`typhon_engine::magnet_uri`) |
 
-Not covered, because the code is in the `hydranos` binary crate and cannot be
-called from here without moving it: magnet URI parsing (`hydra/magnets.rs`)
-and `with_trackers` / `without_trackers` (`hydra/export.rs`, which also needs
-`crate::store`). They are exercised by unit tests only.
+Not covered: `with_trackers` / `without_trackers` (`hydra/export.rs`), which
+also needs `crate::store` and so cannot be compiled on its own. Unit tests only.
+(`src/magnet.rs` in the engine is the resolution job, not a parser: the magnet
+URI reader is `magnet_uri.rs`, moved out of the binary crate so it is reachable.)
+
+`mse_handshake` is the one target that does more than hand bytes over: the
+handshake makes a random key pair per connection, so the harness uses fixed
+private keys (`fuzz_api::mse_*`, seeds in place of the random generator) and
+encrypts the input with the session key as the real peer would. Without that
+no input could get past the `req1` hash. Its seeds are the plaintext of the
+encrypted part; a `raw` selector bit sends the input unencrypted.
 
 Parsers that are not `pub` are reached through `typhon_engine::fuzz_api`, a
 module compiled only under `--cfg fuzzing` (which cargo-fuzz sets): thin

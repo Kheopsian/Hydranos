@@ -17,7 +17,7 @@
 
 use num_bigint::BigUint;
 use sha1::{Digest, Sha1};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use super::rc4::Rc4;
 use crate::peer::transport::PeerTransport;
@@ -65,13 +65,17 @@ fn get_prime() -> BigUint {
 
 fn gen_keypair() -> (BigUint, Vec<u8>) {
     use rand::RngCore;
-    let p = get_prime();
-    let g = BigUint::from(G);
-
     // Generate 160-bit private key
     let mut xa_bytes = [0u8; 20];
     rand::thread_rng().fill_bytes(&mut xa_bytes);
-    let xa = BigUint::from_bytes_be(&xa_bytes);
+    keypair_from(&xa_bytes)
+}
+
+/// The key pair of a given 160-bit private key.
+pub(crate) fn keypair_from(xa_bytes: &[u8; 20]) -> (BigUint, Vec<u8>) {
+    let p = get_prime();
+    let g = BigUint::from(G);
+    let xa = BigUint::from_bytes_be(xa_bytes);
 
     // Ya = g^Xa mod P
     let ya = g.modpow(&xa, &p);
@@ -84,7 +88,7 @@ fn gen_keypair() -> (BigUint, Vec<u8>) {
     (xa, ya_bytes)
 }
 
-fn compute_secret(their_pubkey: &[u8], our_privkey: &BigUint) -> Vec<u8> {
+pub(crate) fn compute_secret(their_pubkey: &[u8], our_privkey: &BigUint) -> Vec<u8> {
     let p = get_prime();
     let yb = BigUint::from_bytes_be(their_pubkey);
     let s = yb.modpow(our_privkey, &p);
@@ -116,7 +120,7 @@ pub fn sha1_combine(prefix: &[u8], data: &[u8]) -> [u8; 20] {
     out
 }
 
-fn make_rc4_keys(prefix: &[u8], s: &[u8], skey: &[u8]) -> Rc4 {
+pub(crate) fn make_rc4_keys(prefix: &[u8], s: &[u8], skey: &[u8]) -> Rc4 {
     let key = sha1_combine(prefix, &[s, skey].concat());
     let mut rc4 = Rc4::new(&key);
     rc4.discard(1024);
@@ -163,8 +167,8 @@ pub(crate) fn gen_keypair_starting_with(first: u8) -> (BigUint, Vec<u8>) {
 
 /// The initiator side of `handshake_outgoing_with`, from a key pair already
 /// made.
-pub(crate) async fn handshake_outgoing_keyed(
-    stream: &mut PeerTransport,
+pub(crate) async fn handshake_outgoing_keyed<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
     info_hash: &[u8; 20],
     peer_id: &[u8; 20],
     rc4_only: bool,
@@ -397,7 +401,32 @@ pub async fn handshake_incoming_with(
     let (xb, yb_bytes) = tokio::task::spawn_blocking(gen_keypair)
         .await
         .map_err(|e| format!("spawn_blocking(gen_keypair): {}", e))?;
+    handshake_incoming_keyed(
+        stream,
+        first_byte,
+        remaining_ya,
+        our_peer_id,
+        info_hash_lookup,
+        rc4_only,
+        xb,
+        yb_bytes,
+    )
+    .await
+}
 
+/// The receiver side of `handshake_incoming_with`, from a key pair already
+/// made.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn handshake_incoming_keyed<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
+    first_byte: u8,
+    remaining_ya: &[u8],
+    our_peer_id: &[u8; 20],
+    info_hash_lookup: impl Fn(&[u8; 20]) -> Option<[u8; 20]>,
+    rc4_only: bool,
+    xb: BigUint,
+    yb_bytes: Vec<u8>,
+) -> Result<(Rc4, Rc4, MseHandshakeResult), String> {
     // Reconstruct Ya from first_byte + remaining
     let mut ya_bytes = vec![first_byte];
     ya_bytes.extend_from_slice(remaining_ya);

@@ -9,6 +9,7 @@ pub mod egress;
 pub mod ipfilter;
 pub mod lsd;
 pub mod magnet;
+pub mod magnet_uri;
 pub mod netpin;
 pub mod peer;
 pub mod rpc;

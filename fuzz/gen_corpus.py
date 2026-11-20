@@ -118,3 +118,60 @@ put("udp_tracker", "announce6", bytes([0x82]) + udp(1, 7, struct.pack(">III", 18
 put("udp_tracker", "scrape", bytes([0x83]) + udp(2, 7, struct.pack(">III", 5, 9, 2) * 3))
 put("udp_tracker", "error", bytes([0x81]) + udp(3, 7, b"seed error"))
 put("udp_tracker", "zero-tx", bytes([0x00]) + udp(0, 0, struct.pack(">Q", 1)))
+
+# ---- MSE handshake -------------------------------------------------------
+# Byte 0 = selector (bit 0: we initiate, bit 1: RC4 only, bit 2: raw), bytes
+# 1..3 = padding length, then the padding and the PLAINTEXT of the encrypted
+# part: the target encrypts it with the fixed session keys (see the target).
+bt_hs = (bytes([19]) + b"BitTorrent protocol" + bytes([0, 0, 0, 0, 0, 0x10, 0, 0x04]) +
+         b"\x33" * 20 + b"-XX0000-" + b"0" * 12)
+
+
+def mse(sel, pad, tail):
+    return bytes([sel]) + struct.pack(">H", len(pad)) + pad + tail
+
+
+vc = b"\x00" * 8
+# incoming: VC, crypto_provide, len(padC), padC, len(IA), IA
+put("mse_handshake", "in-rc4-plain", mse(0, b"\x07" * 5, vc + struct.pack(">IH", 3, 4) + b"\x01" * 4 +
+                                         struct.pack(">H", 68) + bt_hs))
+put("mse_handshake", "in-plain-only", mse(0, b"", vc + struct.pack(">IH", 1, 0) + struct.pack(">H", 68) + bt_hs))
+put("mse_handshake", "in-rc4-only", mse(2, b"", vc + struct.pack(">IH", 2, 0) + struct.pack(">H", 68) + bt_hs))
+put("mse_handshake", "in-no-ia", mse(0, b"", vc + struct.pack(">IH", 2, 0) + struct.pack(">H", 0)))
+# outgoing: VC, crypto_select, len(padD), padD, the BitTorrent handshake
+put("mse_handshake", "out-rc4", mse(1, b"\x09" * 7, vc + struct.pack(">IH", 2, 3) + b"\x02" * 3 + bt_hs))
+put("mse_handshake", "out-plain", mse(1, b"", vc + struct.pack(">IH", 1, 0) + bt_hs))
+put("mse_handshake", "out-rc4-only-plain-selected", mse(3, b"", vc + struct.pack(">IH", 1, 0) + bt_hs))
+put("mse_handshake", "raw-garbage", mse(4, b"", b"\x00" * 120))
+
+# ---- LSD (BEP 14) -----------------------------------------------------------
+ih1 = "00" * 20
+ih2 = "ab" * 20
+put("lsd_announce", "one", ("BT-SEARCH * HTTP/1.1\r\nHost: 239.192.152.143:6771\r\nPort: 6881\r\n"
+                            "Infohash: %s\r\ncookie: seed-cookie\r\n\r\n\r\n" % ih1).encode())
+put("lsd_announce", "two-bare-lf", ("BT-SEARCH * HTTP/1.1\nHost: [ff15::efc0:988f]:6771\nport: 51413\n"
+                                    "Infohash: %s\nInfoHash: %s\n\n" % (ih1, ih2.upper())).encode())
+put("lsd_announce", "v2-hash-ignored", ("BT-SEARCH * HTTP/1.1\r\nPort: 6881\r\nInfohash: %s\r\n"
+                                        "Infohash: %s\r\n\r\n" % ("11" * 32, ih2)).encode())
+put("lsd_announce", "other-protocol", b"M-SEARCH * HTTP/1.1\r\nHost: 239.255.255.250:1900\r\n\r\n")
+
+# ---- PROXY protocol v2 ----------------------------------------------------------
+sig = bytes([0x0D, 0x0A, 0x0D, 0x0A, 0x00, 0x0D, 0x0A, 0x51, 0x55, 0x49, 0x54, 0x0A])
+a4 = bytes([192, 0, 2, 1]) + bytes([198, 51, 100, 2]) + struct.pack(">HH", 51413, 6881)
+a6 = (bytes.fromhex("20010db8000000000000000000000001") + bytes.fromhex("20010db8000000000000000000000002") +
+      struct.pack(">HH", 51413, 6881))
+put("proxy_protocol", "v4", sig + bytes([0x21, 0x11]) + struct.pack(">H", len(a4)) + a4)
+put("proxy_protocol", "v6", sig + bytes([0x21, 0x21]) + struct.pack(">H", len(a6)) + a6)
+put("proxy_protocol", "v4-tlv", sig + bytes([0x21, 0x11]) + struct.pack(">H", len(a4) + 7) + a4 + b"\x04\x00\x04abcd")
+put("proxy_protocol", "local", sig + bytes([0x20, 0x00, 0x00, 0x00]))
+put("proxy_protocol", "udp-unsupported", sig + bytes([0x21, 0x12]) + struct.pack(">H", len(a4)) + a4)
+
+# ---- magnet links -----------------------------------------------------------------
+H1 = "00" * 20
+put("magnet_uri", "hex", ("magnet:?xt=urn:btih:%s&dn=seed+file%%20name&tr=udp%%3A%%2F%%2Ftracker.example.invalid%%3A6969"
+                          "%%2Fannounce&tr.1=http%%3A%%2F%%2Ftracker.example.invalid%%2Fannounce&x.pe=192.0.2.5:6881" % H1).encode())
+put("magnet_uri", "base32", b"MAGNET:?xt=urn:btih:" + b"A" * 32 + b"&dn=seed")
+put("magnet_uri", "hybrid", ("magnet:?xt=urn:btih:%s&xt=urn:btmh:1220%s&dn=seed" % (H1, "00" * 32)).encode())
+put("magnet_uri", "v2-only", ("magnet:?xt=urn:btmh:1220%s" % ("00" * 32)).encode())
+put("magnet_uri", "no-hash", b"magnet:?dn=nothing&tr=udp://tracker.example.invalid:1")
+put("magnet_uri", "not-a-magnet", b"http://host.example.invalid/x.torrent")
