@@ -6292,6 +6292,7 @@ async function updateCategories(force) {
                     : Promise.resolve(null),
             ]);
             cats = got[0];
+            if (Array.isArray(cats)) _categoriesSeen = cats;
             if (askOrphans && got[1]) _orphansList = got[1];
         } finally {
             if (askOrphans) { _orphansInFlight = false; _orphansAt = Date.now(); }
@@ -6358,22 +6359,22 @@ async function refreshCategoryOptions(cats) {
         (cats || []).map(cat => `<option value="${esc(cat.name)}"${cat.name === current ? " selected" : ""}>${esc(incoCat(cat.name))}</option>`).join("");
 }
 
-async function showCategoryForm(name = null) {
-    _editingCategory = name;
-    document.getElementById("cat-name").value = name || "";
-    document.getElementById("cat-mode").value = "race";
-    document.getElementById("cat-save-path").value = "";
-    document.getElementById("cat-result").style.display = "none";
-    document.getElementById("category-form").style.display = "block";
+// The categories as last listed by the table, to fill the edit form at once:
+// the form used to open empty and wait for its own call to the server.
+let _categoriesSeen = null;
+// One number per opening of the form, so an answer that comes back after the
+// form was closed or opened again (on the same category or another) is dropped.
+let _catFormStamp = 0;
+// Whether the person has touched the form since it opened. The server's answer
+// fills a form nobody touched; it never rewrites one being edited.
+let _catFormTouched = false;
 
-    let allCats = [];
-    try { allCats = (await api("/api/categories")) || []; } catch (e) { console.error("load categories", e); }
-    let cat = name ? (allCats.find(c => c.name === name) || null) : null;
+// Fill the form from `allCats` for the category `name` (null: a new one).
+function _catFillForm(allCats, name) {
+    const cat = name ? ((allCats || []).find(c => c.name === name) || null) : null;
     _editingCategoryStored = cat;
-    if (cat) {
-        document.getElementById("cat-mode").value = cat.mode;
-        document.getElementById("cat-save-path").value = cat.save_path;
-    }
+    document.getElementById("cat-mode").value = cat ? cat.mode : "race";
+    document.getElementById("cat-save-path").value = cat ? cat.save_path : "";
     _populateGraduateSelect(allCats, cat ? cat.graduate_to : "", name);
     const tr = document.getElementById("cat-transit");
     if (tr) tr.checked = !!(cat && cat.transit);
@@ -6383,9 +6384,39 @@ async function showCategoryForm(name = null) {
     if (sp) sp.value = _CAT_SPREADS.includes(cat && cat.spread) ? cat.spread : "";
     const rs = document.getElementById("cat-reserve");
     if (rs) rs.value = _catBytesToGb(cat ? cat.reserve_bytes : 0);
+    _catModeChanged();
+}
+
+async function showCategoryForm(name = null) {
+    const opening = ++_catFormStamp;
+    _editingCategory = name;
+    _catFormTouched = false;
+    const form = document.getElementById("category-form");
+    // A typed key, a ticked box, a pick in the folder list: any of them means
+    // the form is being edited and is no longer the server's to fill.
+    form.oninput = form.onchange = form.onclick = () => { _catFormTouched = true; };
+    document.getElementById("cat-name").value = name || "";
+    document.getElementById("cat-result").style.display = "none";
     _catChoices = [];
     _catUnreachable = [];
-    _catModeChanged();
+    // At once, from what the table shows...
+    _catFillForm(_categoriesSeen || [], name);
+    form.style.display = "block";
+
+    // ...then from the server, which may know newer values.
+    let allCats = null;
+    try { allCats = (await api("/api/categories")) || []; } catch (e) { console.error("load categories", e); }
+    if (opening !== _catFormStamp) return; // closed or reopened meanwhile
+    if (allCats) {
+        _categoriesSeen = allCats;
+        if (!_catFormTouched) {
+            _catFillForm(allCats, name);
+        } else {
+            // What is on screen stays as typed; the fields this form does not
+            // show are sent back as the server has them.
+            _editingCategoryStored = name ? (allCats.find(c => c.name === name) || null) : null;
+        }
+    }
     // The list of possible engines needs two calls: the form is shown first and
     // the list is filled in when they come back.
     const stamp = ++_catChoicesStamp;
@@ -6585,6 +6616,7 @@ function hideCategoryForm() {
     _fsBrowsedPath = null;
     _editingCategory = null;
     _editingCategoryStored = null;
+    _catFormStamp++;
 }
 
 // ─── Filesystem Dropdown ─────────────────────────────────
