@@ -826,14 +826,18 @@ pub(crate) fn claim_of(
     // PathBuf clone per torrent would be an allocation for the ones that fail.
     let r = {
         let r = other.save_path.read();
-        if !(root.starts_with(&*r) || r.starts_with(root)) {
+        if !(crate::pathclaim::path_starts_with(root, &r)
+            || crate::pathclaim::path_starts_with(&r, root))
+        {
             return None;
         }
         // Same folder, different top-level entry: no file can be shared, since
         // every path of each starts with its own entry.
-        if *r == *root {
+        if crate::pathclaim::path_starts_with(&r, root)
+            && crate::pathclaim::path_starts_with(root, &r)
+        {
             if let (Some(a), Some(b)) = (my_top, top_entry(other)) {
-                if a != b.as_os_str() {
+                if !crate::pathclaim::name_eq(a, &b) {
                     return None;
                 }
             }
