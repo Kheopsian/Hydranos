@@ -933,6 +933,7 @@
                 <h2>RSS feeds</h2>
                 <div>
                     <button class="btn-small" onclick="rssRefreshAll()">Refresh all</button>
+                    <button class="btn-small" onclick="rssShowFeedForm(true)">URL help</button>
                     <button class="btn-small" onclick="rssShowFeedForm()">+ Feed</button>
                 </div>
             </div>
@@ -955,6 +956,31 @@
                             <input type="number" id="rss-feed-every" value="30" min="5" autocomplete="off">
                         </div>
                     </div>
+                    <details class="rss-help">
+                        <summary>Which URL, and where does the API key go?</summary>
+                        <div class="rss-help-body">
+                            <div class="rss-help-key"><b>The API key goes in the URL.</b> Hydra sends no auth headers, so a header shown in the tracker's docs does not apply here. The URL is masked in logs and errors.</div>
+                            <table class="rss-help-table">
+                                <thead><tr><th>Feed</th><th>URL looks like</th><th></th></tr></thead>
+                                <tbody>
+                                    <tr><td>Torznab</td><td><code>https://tracker.example.org/api?t=search&amp;apikey=KEY</code><span class="sr-desc">Base URL, then the /api path, as Prowlarr, Sonarr and Radarr build it. Add &amp;cat=2000,2040 to narrow by category.</span></td><td><button type="button" class="btn-small" data-rss-tpl="https://tracker.example.org/api?t=search&amp;apikey=KEY">Use</button></td></tr>
+                                    <tr><td>RSS 2.0 / Atom</td><td><code>https://tracker.example.org/rss?passkey=KEY</code><span class="sr-desc">Paste the tracker's feed link as it is; the key name varies (passkey, key, torrent_pass).</span></td><td><button type="button" class="btn-small" data-rss-tpl="https://tracker.example.org/rss?passkey=KEY">Use</button></td></tr>
+                                </tbody>
+                            </table>
+                            <div class="rss-help-sub">Torznab functions (t=)</div>
+                            <div class="rss-help-chips"><code>search</code><code>tvsearch</code><code>movie</code><code>music</code><code>book</code><code>caps</code></div>
+                            <div class="sr-desc">The tracker decides which it supports. t=caps lists them, but it is a description, not a feed: open it in a browser, do not add it.</div>
+                            <div class="rss-help-sub">When a feed fails</div>
+                            <table class="rss-help-table">
+                                <tbody>
+                                    <tr><td>Wrong key</td><td>"not an RSS or Atom feed", or "answered 401"</td></tr>
+                                    <tr><td>Wrong path</td><td>"answered 404", or "not XML"</td></tr>
+                                    <tr><td>Unsupported function</td><td>"not an RSS or Atom feed". Check t=caps.</td></tr>
+                                </tbody>
+                            </table>
+                            <a class="rss-help-more" href="https://github.com/Kheopsian/Hydranos/blob/main/docs/RSS-FEEDS.md" target="_blank" rel="noopener noreferrer">Full guide</a>
+                        </div>
+                    </details>
                     <div class="cat-form-actions" style="margin-top:16px">
                         <button class="btn-small" onclick="rssSaveFeed()">Save</button>
                         <button class="btn-cancel" onclick="rssHideFeedForm()">Cancel</button>
