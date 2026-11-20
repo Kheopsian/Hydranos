@@ -6255,9 +6255,9 @@ let _lastCategoryRows = null;
 // What each orphaned label's torrents are actually doing, in render order, so
 // adoption can start from that rather than from the form's defaults.
 let _orphanInfo = [];
-// The orphaned-labels call is the heaviest one this screen makes (it walks every
-// torrent for labels no category claims), and the list changes only when someone
-// acts on a category. So it is asked for on opening the tab and after an action
+// The orphaned-labels call is the heaviest one this screen makes (it reads the
+// torrents of every label no category claims), and the list changes only when
+// someone acts on a category. So it is asked for on opening the tab and after an action
 // (force), otherwise once a minute, and the render in between reuses the last
 // list. Never two in flight.
 const ORPHANS_EVERY_MS = 60 * 1000;

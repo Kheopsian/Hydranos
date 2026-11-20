@@ -5482,9 +5482,12 @@ async fn get_categories_orphans(
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
     let configured = categories_map(&state);
+    // Only the labels no category defines are read, and on the read-only
+    // connection: a writer never waits on this.
     let usage = {
-        let store = state.store.lock().unwrap();
-        store.category_usage().unwrap_or_default()
+        let skip = configured.keys().cloned().collect();
+        let store = state.store.read().unwrap_or_else(|e| e.into_inner());
+        store.label_usage_except(&skip).unwrap_or_default()
     };
     let roles: std::collections::HashMap<String, String> = state
         .engines
@@ -22238,6 +22241,10 @@ mod api_nodes_tests;
 #[cfg(test)]
 #[path = "api_spread_tests.rs"]
 mod api_spread_tests;
+
+#[cfg(test)]
+#[path = "api_orphans_tests.rs"]
+mod api_orphans_tests;
 
 #[cfg(test)]
 #[path = "api_cfgwrite_tests.rs"]

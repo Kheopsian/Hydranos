@@ -1688,6 +1688,19 @@ impl Store {
              CREATE INDEX IF NOT EXISTS idx_torrents_paused
              ON torrents(session, info_hash, paused) WHERE paused <> 0;",
         )?;
+        // Which labels the torrents wear, label first: what the Categories
+        // tab asks to list the labels no category defines. Without it the
+        // answer grouped every labelled row by (label, engine, save path),
+        // ~981 000 groups from a 1.04 M library, 16-23 s under the store's
+        // lock, again on every refresh of the tab. Label first lets a reader
+        // step from one label to the next by seeks and walk only the rows of
+        // the labels it wants; covering, so the BLOBs are never read. Partial:
+        // unlabelled rows have nothing to say here. Additive, invisible to
+        // older versions; built once at the first start on an existing base.
+        self.conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_torrents_label
+             ON torrents(category, session, save_path) WHERE category <> '';",
+        )?;
         Ok(())
     }
 
@@ -4740,14 +4753,69 @@ impl Store {
     }
 
     /// Which labels the torrents wear, with where they run and live:
-    /// `(category, session, save_path, torrents)`, empty label excluded.
-    pub fn category_usage(&self) -> anyhow::Result<Vec<(String, String, String, i64)>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT category, session, save_path, COUNT(*) FROM torrents
-             WHERE category != '' GROUP BY category, session, save_path",
+    /// `(category, session, save_path, torrents)`, empty label excluded, and
+    /// the labels in `skip` (the configured categories) left out.
+    ///
+    /// ⚠ Never a GROUP BY over the table. Most torrents wear a configured
+    /// category, and grouping them all to throw them away was the whole cost:
+    /// 16-23 s under the store's lock at a million torrents. This steps from
+    /// one label to the next through `idx_torrents_label` (one seek each) and
+    /// reads the rows of the labels outside `skip` only.
+    pub fn label_usage_except(
+        &self,
+        skip: &std::collections::BTreeSet<String>,
+    ) -> anyhow::Result<Vec<(String, String, String, i64)>> {
+        use rusqlite::OptionalExtension;
+        // `category <> ''` written out in both, so the partial index applies.
+        let mut next = self.conn.prepare_cached(
+            "SELECT category FROM torrents
+             WHERE category > ?1 AND category <> '' ORDER BY category LIMIT 1",
         )?;
-        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
-        Ok(rows.filter_map(Result::ok).collect())
+        let mut rows_of = self.conn.prepare_cached(
+            "SELECT session, save_path, COUNT(*) FROM torrents
+             WHERE category = ?1 AND category <> '' GROUP BY session, save_path",
+        )?;
+        let mut out = Vec::new();
+        let mut after = String::new();
+        while let Some(label) = next
+            .query_row([&after], |r| r.get::<_, String>(0))
+            .optional()?
+        {
+            if !skip.contains(&label) {
+                let rows = rows_of.query_map([&label], |r| {
+                    Ok((label.clone(), r.get(0)?, r.get(1)?, r.get(2)?))
+                })?;
+                for row in rows {
+                    out.push(row?);
+                }
+            }
+            after = label;
+        }
+        Ok(out)
+    }
+
+    /// Count the SQLite VM instructions this connection runs from `on` to
+    /// off: the work a statement does, whatever the machine's speed.
+    #[cfg(test)]
+    pub fn count_vm_steps_for_test(&self, on: bool) -> u64 {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static STEPS: AtomicU64 = AtomicU64::new(0);
+        extern "C" fn tick(_: *mut std::ffi::c_void) -> std::ffi::c_int {
+            STEPS.fetch_add(1, Ordering::Relaxed);
+            0
+        }
+        // SAFETY: the handle is this connection's, alive as long as `self`;
+        // the callback touches a static only.
+        unsafe {
+            let db = self.conn.handle();
+            if on {
+                STEPS.store(0, Ordering::Relaxed);
+                rusqlite::ffi::sqlite3_progress_handler(db, 1, Some(tick), std::ptr::null_mut());
+            } else {
+                rusqlite::ffi::sqlite3_progress_handler(db, 0, None, std::ptr::null_mut());
+            }
+        }
+        STEPS.load(Ordering::Relaxed)
     }
 
     pub fn set_category_everywhere(&self, info_hash: &str, category: &str) -> anyhow::Result<()> {
