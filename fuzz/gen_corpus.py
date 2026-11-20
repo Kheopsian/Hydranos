@@ -175,3 +175,70 @@ put("magnet_uri", "hybrid", ("magnet:?xt=urn:btih:%s&xt=urn:btmh:1220%s&dn=seed"
 put("magnet_uri", "v2-only", ("magnet:?xt=urn:btmh:1220%s" % ("00" * 32)).encode())
 put("magnet_uri", "no-hash", b"magnet:?dn=nothing&tr=udp://tracker.example.invalid:1")
 put("magnet_uri", "not-a-magnet", b"http://host.example.invalid/x.torrent")
+
+# ---- RSS / Atom ---------------------------------------------------------------------
+put("rss_parse", "rss2", b"\x00" + b"""<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:torznab="http://torznab.com/schemas/2015/feed"><channel><title>Seed feed</title>
+<item><title>Seed &amp; &#65; item</title><guid>g-1</guid><link>http://host.example.invalid/page/1</link>
+<description><![CDATA[<b>seed</b> text]]></description><pubDate>Sat, 01 Jan 2000 00:00:00 +0000</pubDate>
+<category>Seed</category><author>nobody@example.invalid</author>
+<enclosure url="http://host.example.invalid/1.torrent" length="12345" type="application/x-bittorrent"/>
+<torznab:attr name="size" value="12345"/></item>
+<item><title>Magnet item</title><link>magnet:?xt=urn:btih:""" + H1.encode() + b"""</link></item>
+</channel></rss>""")
+put("rss_parse", "atom", b"\x00" + b"""<feed xmlns="http://www.w3.org/2005/Atom"><title>Seed atom</title>
+<entry><title>Entry</title><id>urn:seed:1</id><updated>2000-01-01T00:00:00Z</updated>
+<link rel="enclosure" href="http://host.example.invalid/2.torrent" length="2048"/>
+<link rel="alternate" href="http://host.example.invalid/page/2"/><summary>seed</summary>
+<author><name>nobody</name></author></entry></feed>""")
+put("rss_parse", "rdf", b"\x00" + b"""<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+xmlns="http://purl.org/rss/1.0/"><channel><title>Seed rdf</title></channel>
+<item><title>R</title><link>http://host.example.invalid/r</link></item></rdf:RDF>""")
+put("rss_parse", "date-2822", b"\x01Sat, 01 Jan 2000 00:00:00 +0000")
+put("rss_parse", "date-3339", b"\x012000-01-01T00:00:00+02:00")
+
+# ---- IP filter ----------------------------------------------------------------------------
+probe = bytes([192, 0, 2, 1]) + b"\x00" * 12
+put("ipfilter_parse", "mixed", probe + b"""# seed list
+Seed range:192.0.2.0-192.0.2.255
+198.51.100.0/24
+2001:db8::/32
+203.0.113.5
+2001:db8:1::1 - 2001:db8:1::ff
+""")
+put("ipfilter_parse", "emule-dat", probe + b"""192.000.002.000 - 192.000.002.255 , 000 , seed
+198.051.100.000 - 198.051.100.255 , 200 , allowed
+""")
+put("ipfilter_parse", "peerguardian", probe + b"Seed:name:with:colons:192.0.2.1-192.0.2.9\nbroken line\n")
+
+# ---- BEP 55 hole punch ----------------------------------------------------------------------
+put("holepunch", "rendezvous-v4", bytes([0, 0]) + bytes([192, 0, 2, 7]) + struct.pack(">H", 6881))
+put("holepunch", "connect-v4-public", bytes([1, 0]) + bytes([198, 51, 100, 9]) + struct.pack(">H", 6881))
+put("holepunch", "connect-v6", bytes([1, 1]) + bytes.fromhex("20010db8000000000000000000000009") + struct.pack(">H", 6881))
+put("holepunch", "error", bytes([2, 0]) + bytes([192, 0, 2, 7]) + struct.pack(">HI", 6881, 1))
+
+# ---- TOML editor: doc NUL section NUL key NUL value NUL id ---------------------------------------
+cfg = b"""# Seed config
+[daemon]
+port = 8080   # the API port
+name = "seed"
+
+[tracker."tracker.example.invalid"]
+user = "nobody"
+
+[[engine]]
+name = "e1"
+engine_id = "e1"
+role = "race"
+  [engine.session]
+  rate = 5
+
+[[engine]]
+name = "e2"
+role = "hoard"
+"""
+put("tomledit", "set-value", cfg + b"\x00daemon\x00port\x009090\x00e1")
+put("tomledit", "quoted-key", cfg + b"\x00tracker.\"tracker.example.invalid\"\x00user\x00\"someone\"\x00e2")
+put("tomledit", "new-table", cfg + b"\x00race\x00rate\x007\x00e1")
+put("tomledit", "agent-session", cfg + b"\x00\x00rate\x009\x00e2")
+put("tomledit", "empty", b"\x00\x00\x00\x00")

@@ -16,6 +16,7 @@ libfuzzer-sys = "0.4"
 bytes = "1"
 tokio-util = { version = "0.7", features = ["codec"] }
 tokio = { version = "1", features = ["rt", "io-util"] }
+serde_json = "1"
 typhon-engine = { path = "../typhon-engine" }
 
 # The same patches as typhon-engine/Cargo.toml: a [patch] only counts in the
@@ -149,6 +150,34 @@ bench = false
 [[bin]]
 name = "magnet_uri"
 path = "fuzz_targets/magnet_uri.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rss_parse"
+path = "fuzz_targets/rss_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ipfilter_parse"
+path = "fuzz_targets/ipfilter_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "holepunch"
+path = "fuzz_targets/holepunch.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tomledit"
+path = "fuzz_targets/tomledit.rs"
 test = false
 doc = false
 bench = false

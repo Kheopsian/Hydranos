@@ -931,6 +931,7 @@ version = "0.0.0"
 dependencies = [
  "bytes",
  "libfuzzer-sys",
+ "serde_json",
  "tokio",
  "tokio-util",
  "typhon-engine",

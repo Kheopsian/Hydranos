@@ -19,11 +19,20 @@ own `Cargo.lock`, so `libfuzzer-sys` never enters typhon-engine's lockfile, and
 | `lsd_announce` | BEP 14 `BT-SEARCH` datagrams |
 | `proxy_protocol` | the PROXY protocol v2 header in front of an inbound handshake |
 | `magnet_uri` | `magnet:?` links (`typhon_engine::magnet_uri`) |
+| `rss_parse` | RSS / Atom feed bodies and their dates |
+| `ipfilter_parse` | IP block lists (PeerGuardian, eMule dat, CIDR, ranges) |
+| `holepunch` | BEP 55 `ut_holepunch` messages and the rendezvous answer |
+| `tomledit` | the in-place TOML config editor |
 
 Not covered: `with_trackers` / `without_trackers` (`hydra/export.rs`), which
 also needs `crate::store` and so cannot be compiled on its own. Unit tests only.
 (`src/magnet.rs` in the engine is the resolution job, not a parser: the magnet
 URI reader is `magnet_uri.rs`, moved out of the binary crate so it is reachable.)
+
+`rss_parse` and `tomledit` are code of the `hydranos` binary crate, which
+cannot be depended on from here. Both files use nothing of the crate (std, and
+serde_json for the second), so the target compiles the very source file with
+`#[path = "../../typhon-engine/src/hydra/..."] mod ...;`: no copy, no move.
 
 `mse_handshake` is the one target that does more than hand bytes over: the
 handshake makes a random key pair per connection, so the harness uses fixed
