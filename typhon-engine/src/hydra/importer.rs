@@ -603,9 +603,23 @@ pub fn path_prefixes<'a>(paths: impl Iterator<Item = &'a str>) -> Vec<String> {
         set = folded;
     }
     // A folder inside another one on the list is covered by it.
-    let all: Vec<String> = set.iter().cloned().collect();
-    set.retain(|p| !all.iter().any(|q| q != p && under(p, q)));
-    set.into_iter().collect()
+    // Spellings of one Windows folder (`C:/Downloads`, `c:\downloads`) are each
+    // under the other: keep the first of them, or the folder would cover itself
+    // out of the list.
+    let mut all: Vec<String> = Vec::new();
+    for p in set {
+        if !all.iter().any(|q| under(&p, q) && under(q, &p)) {
+            all.push(p);
+        }
+    }
+    let inner: Vec<bool> = all
+        .iter()
+        .map(|p| all.iter().any(|q| under(p, q) && !under(q, p)))
+        .collect();
+    all.into_iter()
+        .zip(inner)
+        .filter_map(|(p, inner)| (!inner).then_some(p))
+        .collect()
 }
 
 /// A path written the Windows way: `C:\...`, `C:/...` or `\\server\share`.
@@ -1321,6 +1335,18 @@ mod tests {
     fn windows_prefixes_drop_nested_ones() {
         let got = path_prefixes([r"C:\d\films", r"C:\d\films\hd", r"C:\e\"].into_iter());
         assert_eq!(got, vec![r"C:\d\films", r"C:\e"]);
+    }
+
+    /// Spellings of one Windows folder are not each covered by the other.
+    #[test]
+    fn mixed_spellings_of_a_windows_folder_leave_one_prefix() {
+        assert_eq!(
+            path_prefixes(["C:/Downloads/a", r"C:\Downloads"].into_iter()).len(),
+            1
+        );
+        let got = path_prefixes([r"C:\Downloads", "c:/downloads", "C:/Downloads/x"].into_iter());
+        assert_eq!(got.len(), 1);
+        assert!(under("C:/Downloads/x", &got[0]));
     }
 
     #[test]
