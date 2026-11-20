@@ -369,7 +369,41 @@ pub struct PiecePicker {
     /// Addresses cut off for sending pieces that failed their hash, refused
     /// until this torrent completes (see `set_have`).
     banned: std::collections::HashSet<std::net::IpAddr>,
+    /// Pieces that failed their hash with several senders, so nobody could be
+    /// charged. Each is on parole: no endgame sharing, one peer at a time, so
+    /// the next failure has exactly one sender. Off it when the piece passes.
+    parole: std::collections::HashSet<u32>,
+    /// Pieces that failed with several senders, by what each block was: kept
+    /// until the piece passes, when the blocks that differ name their senders.
+    failed: HashMap<u32, Vec<Vec<FailedBlock>>>,
+    /// The sessions that have sent a block, and where each connects from, so
+    /// a verdict can ban an address after the session that earned it has gone
+    /// and is only recorded against a session still there to hear it.
+    sessions: HashMap<Owner, Option<std::net::IpAddr>>,
+    /// Sessions proven to have sent a bad block. They end themselves.
+    convicted: std::collections::HashSet<Owner>,
 }
+
+/// A piece handed over complete: its bytes and who sent which block.
+pub struct TakenPiece {
+    pub data: Vec<u8>,
+    /// Everyone who sent a block of it.
+    pub senders: Vec<Owner>,
+    pub block_size: u32,
+    pub block_src: Vec<Option<Owner>>,
+}
+
+/// One block of a failed piece: which slot, who sent it, its hash.
+struct FailedBlock {
+    index: usize,
+    owner: Owner,
+    ip: Option<std::net::IpAddr>,
+    hash: [u8; 20],
+}
+
+/// Failed pieces remembered at once, and attempts remembered per piece.
+const MAX_FAILED_PIECES: usize = 64;
+const MAX_FAILED_ATTEMPTS: usize = 4;
 
 /// A piece somebody is fetching.
 ///
@@ -392,8 +426,12 @@ struct PendingPiece {
     /// when the last of them lets go.
     owners: Vec<Owner>,
     /// Who delivered its blocks. One name means a failed hash is that peer's
-    /// doing; several (endgame) prove nothing about any of them.
+    /// doing; several (endgame) leave it open which of them sent the bad
+    /// bytes, so the piece goes on parole (see `put_on_parole`).
     sources: Vec<Owner>,
+    /// Who sent each block, by slot; `None` for a block nobody here sent (a
+    /// webseed's) or not yet in. What a failed piece is remembered by.
+    block_src: Vec<Option<Owner>>,
 }
 
 impl PendingPiece {
@@ -434,6 +472,10 @@ impl PiecePicker {
             mem: None,
             order: None,
             banned: std::collections::HashSet::new(),
+            parole: std::collections::HashSet::new(),
+            failed: HashMap::new(),
+            sessions: HashMap::new(),
+            convicted: std::collections::HashSet::new(),
         }
     }
 
@@ -589,7 +631,7 @@ impl PiecePicker {
             if self.have[piece as usize] {
                 continue;
             }
-            if !endgame && self.pending.contains_key(&piece) {
+            if self.pending.contains_key(&piece) && (!endgame || self.parole.contains(&piece)) {
                 continue;
             }
             let byte_idx = piece as usize / 8;
@@ -635,7 +677,7 @@ impl PiecePicker {
             if self.have[piece as usize] {
                 continue;
             }
-            if !endgame && self.pending.contains_key(&piece) {
+            if self.pending.contains_key(&piece) && (!endgame || self.parole.contains(&piece)) {
                 continue;
             }
             let byte_idx = piece as usize / 8;
@@ -771,6 +813,11 @@ impl PiecePicker {
     ) -> Option<Vec<(u32, u32, u32)>> {
         if let Some(p) = self.pending.get_mut(&piece) {
             if !p.owners.contains(&owner) {
+                // A piece on parole has one fetcher: a second would make a
+                // bad hash unattributable again.
+                if self.parole.contains(&piece) {
+                    return Some(Vec::new());
+                }
                 p.owners.push(owner);
             }
             return Some(p.missing(piece));
@@ -796,6 +843,7 @@ impl PiecePicker {
             piece_size,
             owners: vec![owner],
             sources: Vec::new(),
+            block_src: vec![None; num_blocks],
         };
         let requests = p.missing(piece);
         self.pending.insert(piece, p);
@@ -830,6 +878,11 @@ impl PiecePicker {
             if let Some(p) = self.pending.get_mut(&piece) {
                 if !p.sources.contains(&from) {
                     p.sources.push(from);
+                }
+                if let Some(i) = offset.checked_div(p.block_size) {
+                    if let Some(slot) = p.block_src.get_mut(i as usize) {
+                        *slot = Some(from);
+                    }
                 }
             }
         }
@@ -891,12 +944,11 @@ impl PiecePicker {
     /// here to the end of the write, for the one piece being committed, and
     /// each block is freed as soon as it has been copied in.
     pub fn take_piece_data(&mut self, piece: u32) -> Option<Vec<u8>> {
-        self.take_piece(piece).map(|(data, _)| data)
+        self.take_piece(piece).map(|t| t.data)
     }
 
-    /// `take_piece_data`, with the one peer that sent every block of it, if
-    /// a single one did.
-    pub fn take_piece(&mut self, piece: u32) -> Option<(Vec<u8>, Option<Owner>)> {
+    /// `take_piece_data`, with everyone who sent a block of it.
+    pub fn take_piece(&mut self, piece: u32) -> Option<TakenPiece> {
         let ready = self
             .pending
             .get(&piece)
@@ -905,15 +957,126 @@ impl PiecePicker {
             return None;
         }
         let p = self.drop_pending(piece)?;
-        let sole = match p.sources[..] {
-            [one] => Some(one),
-            _ => None,
-        };
         let mut out = Vec::with_capacity(p.piece_size as usize);
         for b in p.blocks.into_iter().flatten() {
             out.extend_from_slice(&b);
         }
-        Some((out, sole))
+        Some(TakenPiece {
+            data: out,
+            senders: p.sources,
+            block_size: p.block_size,
+            block_src: p.block_src,
+        })
+    }
+
+    /// A piece failed its hash and several peers had sent blocks of it: from
+    /// now on it is fetched by one peer at a time (see `parole`).
+    pub fn put_on_parole(&mut self, piece: u32) {
+        self.parole.insert(piece);
+    }
+
+    /// Remember a piece that failed its hash, block by block (see `convict`).
+    /// Bounded: a hostile swarm cannot make this grow without limit.
+    pub fn record_failed(&mut self, piece: u32, t: &TakenPiece) {
+        use sha1::{Digest, Sha1};
+        if t.block_size == 0 {
+            return;
+        }
+        let bs = t.block_size as usize;
+        let blocks: Vec<FailedBlock> = t
+            .block_src
+            .iter()
+            .enumerate()
+            .filter_map(|(i, src)| {
+                let owner = (*src)?;
+                let chunk = t.data.get(i * bs..((i + 1) * bs).min(t.data.len()))?;
+                Some(FailedBlock {
+                    index: i,
+                    owner,
+                    ip: self.sessions.get(&owner).copied().flatten(),
+                    hash: Sha1::digest(chunk).into(),
+                })
+            })
+            .collect();
+        if blocks.is_empty() {
+            return;
+        }
+        if self.failed.len() >= MAX_FAILED_PIECES && !self.failed.contains_key(&piece) {
+            if let Some(&k) = self.failed.keys().next() {
+                self.failed.remove(&k);
+            }
+        }
+        let attempts = self.failed.entry(piece).or_default();
+        if attempts.len() >= MAX_FAILED_ATTEMPTS {
+            attempts.remove(0);
+        }
+        attempts.push(blocks);
+    }
+
+    /// The piece passed: a block that failed attempts sent and that differs
+    /// from the good one was bad, and its sender sent it. Those senders are
+    /// convicted and their addresses banned. Returns them.
+    pub fn convict(&mut self, piece: u32, good: &[u8], block_size: u32) -> Vec<Owner> {
+        use sha1::{Digest, Sha1};
+        let Some(attempts) = self.failed.remove(&piece) else {
+            return Vec::new();
+        };
+        let bs = block_size as usize;
+        if bs == 0 {
+            return Vec::new();
+        }
+        let mut culprits = Vec::new();
+        for b in attempts.iter().flatten() {
+            let Some(chunk) = good.get(b.index * bs..((b.index + 1) * bs).min(good.len())) else {
+                continue;
+            };
+            let ok: [u8; 20] = Sha1::digest(chunk).into();
+            if ok != b.hash {
+                if let Some(ip) =
+                    b.ip.or_else(|| self.sessions.get(&b.owner).copied().flatten())
+                {
+                    self.banned.insert(ip);
+                }
+                if self.sessions.contains_key(&b.owner) {
+                    self.convicted.insert(b.owner);
+                }
+                if !culprits.contains(&b.owner) {
+                    culprits.push(b.owner);
+                }
+            }
+        }
+        culprits
+    }
+
+    /// Is a failed attempt at this piece remembered, to be judged by a good copy?
+    pub fn has_failed_record(&self, piece: u32) -> bool {
+        self.failed.contains_key(&piece)
+    }
+
+    /// A session sent its first block: note it, and where it connects from.
+    pub fn register_owner(&mut self, owner: Owner, ip: Option<std::net::IpAddr>) {
+        self.sessions.insert(owner, ip);
+    }
+
+    /// Did a good copy of a piece show this session sent a bad block?
+    pub fn is_convicted(&self, owner: Owner) -> bool {
+        self.convicted.contains(&owner)
+    }
+
+    /// The session is over: its address and verdict go with it.
+    pub fn forget_owner(&mut self, owner: Owner) {
+        self.sessions.remove(&owner);
+        self.convicted.remove(&owner);
+    }
+
+    /// Is this piece limited to one fetcher after failing with several?
+    pub fn is_on_parole(&self, piece: u32) -> bool {
+        self.parole.contains(&piece)
+    }
+
+    /// The piece passed its hash: it is out of parole.
+    pub fn end_parole(&mut self, piece: u32) {
+        self.parole.remove(&piece);
     }
 
     /// Refuse this address until the torrent completes.
@@ -1019,6 +1182,101 @@ mod receive_block_tests {
         let mut p = PiecePicker::new(1);
         p.begin_piece_for_test(0, piece_size, block_size);
         p
+    }
+
+    /// Fail `piece` (two 16-byte blocks) with `bad` sending a block-0 of 0xFF
+    /// and `good` the correct block 1, and remember it as the download does.
+    fn fail_piece(p: &mut PiecePicker, piece: u32, bad: super::Owner, good: super::Owner) {
+        p.start_piece(piece, 32, 16, bad);
+        p.start_piece(piece, 32, 16, good);
+        assert_eq!(
+            p.receive_block_from(piece, 0, &[0xFF; 16], bad),
+            Block::Stored
+        );
+        assert_eq!(
+            p.receive_block_from(piece, 16, &[2u8; 16], good),
+            Block::Complete
+        );
+        let taken = p.take_piece(piece).unwrap();
+        p.record_failed(piece, &taken);
+    }
+
+    fn good_piece() -> Vec<u8> {
+        let mut v = vec![1u8; 16];
+        v.extend_from_slice(&[2u8; 16]);
+        v
+    }
+
+    /// A hostile swarm cannot make the picker remember failed pieces without
+    /// limit: of 100 failed pieces only 64 can still convict anyone.
+    #[test]
+    fn only_a_bounded_number_of_failed_pieces_are_remembered() {
+        let mut p = PiecePicker::new(100);
+        for piece in 0..100u32 {
+            let (bad, good) = (super::new_owner(), super::new_owner());
+            p.register_owner(bad, None);
+            p.register_owner(good, None);
+            fail_piece(&mut p, piece, bad, good);
+        }
+        let convicting = (0..100u32)
+            .filter(|&piece| !p.convict(piece, &good_piece(), 16).is_empty())
+            .count();
+        assert_eq!(convicting, 64);
+    }
+
+    /// The same piece failing again and again by different senders remembers
+    /// only the latest attempts: of six bad senders the last four are
+    /// convicted by a good copy, the first two escape.
+    #[test]
+    fn only_the_latest_failed_attempts_of_a_piece_are_remembered() {
+        let mut p = PiecePicker::new(1);
+        let honest = super::new_owner();
+        p.register_owner(honest, None);
+        let bad: Vec<super::Owner> = (0..6).map(|_| super::new_owner()).collect();
+        for &b in &bad {
+            p.register_owner(b, None);
+            fail_piece(&mut p, 0, b, honest);
+        }
+        let culprits = p.convict(0, &good_piece(), 16);
+        assert_eq!(culprits.len(), 4);
+        assert!(bad[2..].iter().all(|b| culprits.contains(b)));
+        assert!(!culprits.contains(&bad[0]) && !culprits.contains(&bad[1]));
+        assert!(!culprits.contains(&honest));
+    }
+
+    /// Bytes a webseed supplied are nobody's to blame: a bad block from it
+    /// convicts no peer, not even the one that sent the other, good block.
+    #[test]
+    fn a_bad_block_from_a_webseed_convicts_no_peer() {
+        let mut p = PiecePicker::new(1);
+        let peer = super::new_owner();
+        p.register_owner(peer, None);
+        p.start_piece(0, 32, 16, peer);
+        assert_eq!(p.receive_block(0, 0, &[0xFF; 16]), Block::Stored);
+        assert_eq!(
+            p.receive_block_from(0, 16, &[2u8; 16], peer),
+            Block::Complete
+        );
+        let taken = p.take_piece(0).unwrap();
+        p.record_failed(0, &taken);
+        assert!(p.convict(0, &good_piece(), 16).is_empty());
+        assert!(!p.is_convicted(peer));
+    }
+
+    /// A verdict is only kept for a session still there to hear it: one that
+    /// has gone leaves nothing behind, though its address is still banned.
+    #[test]
+    fn a_verdict_on_a_session_that_has_gone_is_not_kept() {
+        let ip: std::net::IpAddr = "192.0.2.9".parse().unwrap();
+        let mut p = PiecePicker::new(1);
+        let (bad, good) = (super::new_owner(), super::new_owner());
+        p.register_owner(bad, Some(ip));
+        p.register_owner(good, None);
+        fail_piece(&mut p, 0, bad, good);
+        p.forget_owner(bad);
+        assert_eq!(p.convict(0, &good_piece(), 16), vec![bad]);
+        assert!(p.is_banned(ip));
+        assert!(!p.is_convicted(bad));
     }
 
     /// A ban lasts while the torrent downloads: once complete it fetches
