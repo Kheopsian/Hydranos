@@ -6762,7 +6762,10 @@ function editCategory(name) {
 async function adoptCategory(idx) {
     const o = _orphanInfo[idx];
     if (!o) return;
-    await showCategoryForm(); // no argument: create mode, so saveCategory POSTs
+    // No argument: create mode, so saveCategory POSTs. Not awaited: the form is
+    // shown and filled at once, and what adoption puts in it below counts as
+    // touched, so the server's answer for an empty new category never resets it.
+    const opened = showCategoryForm();
 
     const el = document.getElementById("cat-name");
     if (el) el.value = o.name;
@@ -6786,7 +6789,9 @@ async function adoptCategory(idx) {
         res.className = "result-msg";
         res.style.display = "block";
     }
+    _catFormTouched = true;
     if (sp) sp.focus();
+    await opened;
 }
 
 async function saveCategory() {

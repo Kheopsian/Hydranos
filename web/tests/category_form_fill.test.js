@@ -20,12 +20,12 @@ function grab(name, required) {
     }
     return src.slice(m.index, src.indexOf("\n}\n", m.index) + 2) + "\n";
 }
-const code = ["showCategoryForm", "hideCategoryForm", "_catModeChanged"].map(n => grab(n, true)).join("")
+const code = ["showCategoryForm", "hideCategoryForm", "_catModeChanged", "adoptCategory"].map(n => grab(n, true)).join("")
     + grab("_catFillForm", false);
 
 function harness(seen) {
     const els = {};
-    const el = (id) => els[id] || (els[id] = { id, value: "", checked: false, style: { display: "" }, innerHTML: "", textContent: "" });
+    const el = (id) => els[id] || (els[id] = { id, value: "", checked: false, style: { display: "" }, innerHTML: "", textContent: "", focus() {} });
     const document = { getElementById: el };
     const answers = []; // pending /api/categories calls, oldest first
     const api = (url) => {
@@ -36,6 +36,8 @@ function harness(seen) {
         let _editingCategory = null, _editingCategoryStored = null, _fsBrowsedPath = null;
         let _categoriesSeen = null, _catFormStamp = 0, _catFormTouched = false;
         let _catChoices = [], _catUnreachable = [], _catTargets = [], _catChoicesStamp = 0;
+        let _orphanInfo = [{ name: "old", torrents: 3, mode: "hoard", save_path: "/old/a" }];
+        function t(s) { return s; }
         const _CAT_SPREADS = ["bytes", "count", "fill", "free_space"];
         function _populateGraduateSelect(cats, current) { document.getElementById("cat-graduate-to").value = current || ""; }
         function _catBytesToGb(b) { return b ? String(b / 1073741824) : ""; }
@@ -44,7 +46,7 @@ function harness(seen) {
         function _catPruneTargets(t) { return t; }
         ${code}
         return {
-            showCategoryForm, hideCategoryForm,
+            showCategoryForm, hideCategoryForm, adoptCategory,
             seen(v) { _categoriesSeen = v; },
             stored() { return _editingCategoryStored; },
         };`);
@@ -162,6 +164,23 @@ const MOVIES = { name: "movies", mode: "hoard", save_path: "/data/movies", trans
         h3.answers[0]([{ ...TV, placement: "late" }, MOVIES]);
         await lone;
         assert.strictEqual(h3.ui.stored(), null, "a closed form keeps no stored entry from a late answer");
+    }
+
+    // 7. Adopting an orphaned label fills the form at once, and the server's
+    //    answer for an empty new category does not reset it.
+    {
+        const h = harness([TV, MOVIES]);
+        const done = h.ui.adoptCategory(0);
+        await h.settle();
+        assert.strictEqual(h.el("cat-name").value, "old", "the label is filled before the server answers");
+        assert.strictEqual(h.el("cat-mode").value, "hoard");
+        assert.strictEqual(h.el("cat-save-path").value, "/old/a");
+        h.answers[0]([TV, MOVIES]);
+        await done;
+        assert.strictEqual(h.el("cat-name").value, "old", "the answer does not empty the adopted name");
+        assert.strictEqual(h.el("cat-mode").value, "hoard", "nor its mode");
+        assert.strictEqual(h.el("cat-save-path").value, "/old/a", "nor its path");
+        assert.strictEqual(h.ui.stored(), null, "still a new category: saved by POST");
     }
 
     console.log("category_form_fill: ok");
