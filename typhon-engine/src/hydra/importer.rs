@@ -190,6 +190,9 @@ pub struct ExportError {
     /// The request never got an answer (timeout, refused, reset, unreachable).
     /// A 409 or a 500 is an answer, so qBittorrent is up: not this.
     pub network: bool,
+    /// The session expired and logging in again was refused. Every further
+    /// login counts towards qBittorrent's ban, so the job stops on the first.
+    pub login_refused: bool,
 }
 
 impl std::fmt::Display for ExportError {
@@ -412,6 +415,7 @@ impl Qbit {
         let mut last = ExportError {
             message: String::new(),
             network: false,
+            login_refused: false,
         };
         let mut wait = self.backoff;
         for attempt in 1..=EXPORT_ATTEMPTS {
@@ -424,7 +428,13 @@ impl Qbit {
                 Retry::Never => return Err(last),
                 Retry::Relogin => {
                     if let Err(e) = self.relogin().await {
-                        last.message = format!("{}; login again: {e}", last.message);
+                        // Retrying with the same credentials cannot succeed
+                        // and only adds failed logins: stop here.
+                        return Err(ExportError {
+                            message: format!("{}; login again: {e}", last.message),
+                            network: false,
+                            login_refused: true,
+                        });
                     }
                 }
                 Retry::Later => {}
@@ -447,6 +457,7 @@ impl Qbit {
                 ExportError {
                     message: format!("export {hash}{what}: {}", error_chain(&e)),
                     network: true,
+                    login_refused: false,
                 },
                 Retry::Later,
             )
@@ -475,6 +486,7 @@ impl Qbit {
                 ExportError {
                     message: format!("export {hash}: http {status}{why}"),
                     network: false,
+                    login_refused: false,
                 },
                 export_retry(status),
             ));
@@ -972,6 +984,8 @@ pub async fn run_job(
     // any answer (even a 409) or an export that worked ends the run.
     let mut net_streak = 0usize;
     let mut net_first = String::new();
+    // The torrent whose login was refused, if the job stopped on one.
+    let mut refused_at = String::new();
     let mut exported_any = false;
     let mut paused = false;
     let mut cands = cands.into_iter();
@@ -981,10 +995,12 @@ pub async fn run_job(
         // Kept whole for a retry; cheap next to the export it follows.
         let retry_copy = c.clone();
         let mut network_failure = false;
+        let mut login_refused = false;
         let bytes = match &c.source {
             Source::Qbit(hash) => match &qbit {
                 Some(q) => q.export(hash).await.map_err(|e| {
                     network_failure = e.network;
+                    login_refused = e.login_refused;
                     e.message
                 }),
                 None => Err("no qBittorrent session".into()),
@@ -996,6 +1012,9 @@ pub async fn run_job(
                     .unwrap_or_else(|e| Err(e.to_string()))
             }
         };
+        if login_refused {
+            refused_at = retry_copy.name.clone();
+        }
         if network_failure {
             if net_streak == 0 {
                 net_first = retry_copy.name.clone();
@@ -1085,15 +1104,26 @@ pub async fn run_job(
             }
         };
         progress.done.fetch_add(1, Ordering::Relaxed);
-        if net_streak >= NETWORK_STOP_AFTER {
+        if login_refused || net_streak >= NETWORK_STOP_AFTER {
             let rest: Vec<Candidate> = cands.by_ref().collect();
             if !rest.is_empty() {
                 let n = rest.len();
-                let msg = format!(
-                    "qBittorrent stopped answering at {net_first}; {n} {} not attempted, retry when it is back",
-                    if n == 1 { "torrent" } else { "torrents" }
+                let torrents = if n == 1 { "torrent" } else { "torrents" };
+                let msg = if login_refused {
+                    format!(
+                        "qBittorrent refused the login at {refused_at}; {n} {torrents} not attempted, check the username and password, then retry"
+                    )
+                } else {
+                    format!(
+                        "qBittorrent stopped answering at {net_first}; {n} {torrents} not attempted, retry when it is back"
+                    )
+                };
+                tracing::warn!(
+                    at = %refused_at,
+                    login_refused,
+                    not_attempted = rest.len(),
+                    "import: qBittorrent stopped answering or refused the login, job paused"
                 );
-                tracing::warn!(at = %net_first, not_attempted = rest.len(), "import: qBittorrent stopped answering, job paused");
                 progress.not_attempted.store(rest.len(), Ordering::Relaxed);
                 *progress.error.write().unwrap() = msg;
                 failed_cands.extend(rest);
@@ -1893,6 +1923,8 @@ mod qbit_session_tests {
     #[derive(Default)]
     struct Fake {
         logins: AtomicUsize,
+        /// Once set, every login is refused, as after a password change.
+        refuse_logins: std::sync::atomic::AtomicBool,
         calls: Mutex<HashMap<String, usize>>,
     }
 
@@ -1937,6 +1969,9 @@ mod qbit_session_tests {
 
     async fn login(State(f): State<Arc<Fake>>) -> axum::response::Response {
         let n = f.logins.fetch_add(1, Ordering::Relaxed) + 1;
+        if f.refuse_logins.load(Ordering::Relaxed) {
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
         ([("set-cookie", format!("SID={n}; HttpOnly"))], "Ok.").into_response()
     }
 
@@ -1976,6 +2011,45 @@ mod qbit_session_tests {
         assert!(q.export("expired").await.is_ok());
         assert_eq!(f.logins.load(Ordering::Relaxed), 2, "logged in again once");
         assert_eq!(calls(&f, "expired"), 2);
+    }
+
+    #[tokio::test]
+    async fn a_refused_relogin_ends_the_export_at_once() {
+        let (f, q) = fake().await;
+        f.refuse_logins.store(true, Ordering::Relaxed);
+        let err = q.export("expired").await.unwrap_err();
+        assert!(err.login_refused, "{err}");
+        assert!(!err.network, "qBittorrent answered");
+        assert!(err.message.contains("refused the login"), "{err}");
+        assert_eq!(calls(&f, "expired"), 1, "no further export attempts");
+        assert_eq!(
+            f.logins.load(Ordering::Relaxed),
+            2,
+            "one login after the first, then no more"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_login_stops_the_job_and_keeps_the_rest_for_a_retry() {
+        let (f, q) = fake().await;
+        f.refuse_logins.store(true, Ordering::Relaxed);
+        // The first export finds the session gone and the login is refused;
+        // the other three (two that would answer, one that hangs) never run.
+        let mut cands = qbit_cands(4);
+        cands[0].source = Source::Qbit("expired".into());
+        let (progress, added) = run(cands, q).await;
+
+        assert_eq!(*added.lock().unwrap(), 0);
+        assert_eq!(progress.failed.load(Ordering::Relaxed), 1);
+        assert_eq!(progress.not_attempted.load(Ordering::Relaxed), 3);
+        assert_eq!(calls(&f, "expired"), 1);
+        assert_eq!(calls(&f, "ok0"), 0);
+        assert_eq!(calls(&f, "slow"), 0);
+        assert_eq!(progress.phase.read().unwrap().as_str(), "paused");
+        let err = progress.error.read().unwrap().clone();
+        assert!(err.contains("refused the login"), "{err}");
+        assert!(err.contains("3 torrents not attempted"), "{err}");
+        assert!(progress.retry.lock().unwrap().is_some(), "retry kit kept");
     }
 
     #[tokio::test]
