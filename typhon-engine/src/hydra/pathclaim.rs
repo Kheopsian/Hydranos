@@ -139,6 +139,32 @@ pub fn path_key(p: &Path) -> PathBuf {
     }
 }
 
+/// `a == b` the way `path_key` compares names: folded to lower case on
+/// Windows (where `Été` and `été` are one file), exact elsewhere. Allocates
+/// nothing, for the callers that test every torrent.
+pub fn name_eq(a: &std::ffi::OsStr, b: &std::ffi::OsStr) -> bool {
+    #[cfg(windows)]
+    {
+        let (a, b) = (a.to_string_lossy(), b.to_string_lossy());
+        a.chars()
+            .flat_map(char::to_lowercase)
+            .eq(b.chars().flat_map(char::to_lowercase))
+    }
+    #[cfg(not(windows))]
+    {
+        a == b
+    }
+}
+
+/// `p.starts_with(base)` by component, with names compared by `name_eq`.
+pub fn path_starts_with(p: &Path, base: &Path) -> bool {
+    let mut p = p.components();
+    base.components().all(|b| match p.next() {
+        Some(a) => name_eq(a.as_os_str(), b.as_os_str()),
+        None => false,
+    })
+}
+
 /// Which of `mine` (path, size this torrent expects) other torrents name.
 ///
 /// A path named by one claimant with another size is a conflict even if a
@@ -5166,6 +5192,60 @@ mod tests {
         assert!(accepted_interior(one, false).is_empty());
         assert_eq!(INTERIOR_ONLY_OK, cfg!(unix));
     }
+    /// Where names fold (Windows), `Été.mkv` and `été.mkv` are one file, and
+    /// so are folders spelled in another case: the claim has to see a torrent
+    /// whose name or save path differs from ours only by case, whether it is
+    /// asked of the index or by walking every torrent.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_claim_sees_a_torrent_whose_name_or_folder_differs_only_by_case() {
+        let s = verify_cfg("pathclaim-case");
+        let dir = s.dir.join("Lib");
+        std::fs::create_dir_all(&dir).unwrap();
+        let data: Vec<u8> = (0..20_000u32).map(|i| (i % 241) as u8).collect();
+        std::fs::write(dir.join("Été.mkv"), &data).unwrap();
+        add(
+            &s,
+            &torrent_over("", &[("Été.mkv", &data)], 16384),
+            &dir,
+            true,
+            true,
+        )
+        .unwrap();
+        let folds = path_key(Path::new("Été")) == path_key(Path::new("été"));
+        let want = usize::from(folds);
+        for (root, name) in [
+            (dir.clone(), "été.mkv"),
+            (s.dir.join("lib"), "Été.mkv"),
+            (s.dir.join("lib"), "été.mkv"),
+        ] {
+            let mine: HashSet<PathBuf> = [path_key(&root.join(name))].into_iter().collect();
+            let skip = |_: &TorrentState| false;
+            let std_name = std::ffi::OsStr::new(name);
+            let fast = crate::jobsrun::scan_claims(&s.state, &root, Some(std_name), &mine, &skip);
+            let full =
+                crate::jobsrun::scan_claims_full(&s.state, &root, Some(std_name), &mine, &skip);
+            assert_eq!(full.len(), want, "walk: {root:?} {name}");
+            assert_eq!(fast.len(), want, "lookup: {root:?} {name}");
+        }
+    }
+
+    #[test]
+    fn names_and_prefixes_compare_the_way_path_key_does() {
+        use std::ffi::OsStr;
+        let folds = path_key(Path::new("A")) == path_key(Path::new("a"));
+        assert_eq!(name_eq(OsStr::new("Été"), OsStr::new("été")), folds);
+        assert!(name_eq(OsStr::new("été"), OsStr::new("été")));
+        assert!(!name_eq(OsStr::new("a"), OsStr::new("b")));
+        let (long, short) = (Path::new("/Data/Lib/x"), Path::new("/data/lib"));
+        assert_eq!(path_starts_with(long, short), folds);
+        assert!(path_starts_with(long, Path::new("/Data/Lib")));
+        assert!(!path_starts_with(short, long));
+        assert!(!path_starts_with(
+            Path::new("/Data/Library"),
+            Path::new("/Data/Lib")
+        ));
+    }
+
     /// The probe the write path asks names the files another torrent holds
     /// without listing a folder of the store: it reads no `rows_by_save_path`
     /// (counted), and gives the answer the full scan gives. Through the disk, a
