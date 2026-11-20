@@ -192,6 +192,33 @@ impl std::fmt::Debug for FileRenames {
     }
 }
 
+/// Every torrent that had a file renamed in this process, by info hash. The
+/// store indexes each torrent by the top-level entry its .torrent gives; a
+/// renamed one may sit under another, so a lookup that narrows by that entry
+/// adds these back. Only ever grows (a torrent whose rename is undone stays
+/// listed, which costs a check, never a miss) and is small: renames are rare.
+static RENAMED: OnceLock<Mutex<std::collections::HashSet<InfoHash>>> = OnceLock::new();
+
+fn note_renamed(ih: &InfoHash) {
+    let set = RENAMED.get_or_init(Default::default);
+    let mut g = match set.lock() {
+        Ok(g) => g,
+        Err(e) => e.into_inner(),
+    };
+    g.insert(*ih);
+}
+
+/// The info hashes `note_renamed` has seen.
+pub fn ever_renamed() -> Vec<InfoHash> {
+    match RENAMED.get() {
+        Some(set) => match set.lock() {
+            Ok(g) => g.iter().copied().collect(),
+            Err(e) => e.into_inner().iter().copied().collect(),
+        },
+        None => Vec::new(),
+    }
+}
+
 impl TorrentMeta {
     /// The tiers this metainfo lists, handed over. For metainfo just parsed:
     /// a live torrent's are in `TorrentState::live_trackers`.
@@ -260,6 +287,28 @@ impl TorrentMeta {
         root
     }
 
+    /// `common_root` as the .torrent gives it, whatever was renamed since: the
+    /// key the store indexes a torrent's top-level entry by. A torrent that
+    /// was ever renamed is listed by `ever_renamed`, because for it this may
+    /// no longer be the entry on disk.
+    pub fn original_common_root(&self) -> Option<std::ffi::OsString> {
+        let mut root: Option<std::ffi::OsString> = None;
+        for i in 0..self.files.len() {
+            let first = self
+                .original_rel(i)
+                .components()
+                .next()?
+                .as_os_str()
+                .to_os_string();
+            match &root {
+                None => root = Some(first),
+                Some(r) if *r == first => {}
+                Some(_) => return None,
+            }
+        }
+        root
+    }
+
     /// Point file `i` at `to` (below the save path). Naming its original path
     /// again undoes it.
     pub fn set_disk_rel(&self, i: usize, to: PathBuf) {
@@ -272,6 +321,7 @@ impl TorrentMeta {
         if to == original {
             map.remove(&i);
         } else {
+            note_renamed(&self.info_hash);
             map.insert(i, to);
         }
         if map.is_empty() {
