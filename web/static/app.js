@@ -6459,10 +6459,12 @@ function _catBuildPayload(stored, f) {
         name: f.name, save_path: f.save_path, mode: f.mode,
         graduate_to: f.graduate_to, transit: f.transit,
     });
-    delete out.targets; delete out.spread; delete out.reserve_bytes;
-    if (f.targets && f.targets.length) out.targets = f.targets;
-    if (f.spread) out.spread = f.spread;
-    if (f.reserve_bytes > 0) out.reserve_bytes = f.reserve_bytes;
+    // Always sent, empty when unset: the server merges a PUT into the stored
+    // entry, so a key left out would keep the old spread. It drops [], "" and
+    // 0, so a plain save of an unset category turns nothing on.
+    out.targets = (f.targets && f.targets.length) ? f.targets : [];
+    out.spread = f.spread || "";
+    out.reserve_bytes = f.reserve_bytes > 0 ? f.reserve_bytes : 0;
     return out;
 }
 

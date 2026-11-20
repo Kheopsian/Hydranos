@@ -530,6 +530,37 @@ async fn an_update_that_leaves_a_target_in_the_wrong_role_is_refused() {
     assert_eq!(categories_map(&s)["fast"].targets, vec!["vpn1"]);
 }
 
+/// A PUT merges into the stored entry, so the form clears a spread by sending
+/// the keys empty: `[]`, `""` and `0` are dropped, and the category is back to
+/// its mode's engine.
+#[tokio::test]
+async fn an_update_with_the_keys_empty_turns_the_spread_off() {
+    let s = tunnels("spread-update-clear");
+    let (status, _) = create(
+        &s,
+        serde_json::json!({
+            "name": "fast", "save_path": "/d", "mode": "race",
+            "targets": ["vpn1", "vpn2"], "spread": "fill", "reserve_bytes": 1_000u64,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let r = category_update(
+        State(s.state.clone()),
+        Path("fast".to_string()),
+        RawQuery(None),
+        keyed(KEY),
+        serde_json::json!({"targets": [], "spread": "", "reserve_bytes": 0}).to_string(),
+    )
+    .await;
+    assert_eq!(r.status(), StatusCode::OK);
+    let list =
+        body_json(get_categories(State(s.state.clone()), RawQuery(None), keyed(KEY)).await).await;
+    for k in ["targets", "spread", "reserve_bytes"] {
+        assert!(list[0].get(k).is_none(), "{k} survived the clear: {}", list[0]);
+    }
+}
+
 /// The shim's own category edits keep the new keys: the write path normalises
 /// every entry through a typed struct, and a field it does not know is dropped.
 #[tokio::test]
