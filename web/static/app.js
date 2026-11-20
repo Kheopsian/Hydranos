@@ -3516,7 +3516,10 @@ function _renderHoardCounts() {
     const nTorrentErr = F ? (F.torrent_error || 0) : 0;
     const nPinned = F ? (F.pinned || 0) : 0;
     document.querySelector(".chip-state[data-state='']").innerHTML = `All ${_chipCount("state:", nAll)}`;
-    document.querySelector(".chip-state[data-state='seeding']").innerHTML = `Seeding ${_chipCount("state:seeding", stateCounts["seeding"] || 0)}`;
+    // Seed only is a seeder that never downloads the rest: it still serves
+    // what it holds, so the Seeding chip covers it too.
+    const nSeeding = (stateCounts["seeding"] || 0) + (stateCounts["seed_only"] || 0);
+    document.querySelector(".chip-state[data-state='seeding']").innerHTML = `Seeding ${_chipCount("state:seeding", nSeeding)}`;
     document.querySelector(".chip-state[data-state='__active__']").innerHTML = `Actively Seeding ${_chipCount("state:__active__", nActive)}`;
     document.querySelector(".chip-state[data-state='downloading']").innerHTML = `Downloading ${_chipCount("state:downloading", stateCounts["downloading"] || 0)}`;
     document.querySelector(".chip-state[data-state='__pinned__']").innerHTML = `Forced ${_chipCount("state:__pinned__", nPinned)}`;
@@ -4197,7 +4200,11 @@ function _hoardMatches(t, search, skip) {
     }
     if (skip !== "state") {
         const s = _hoardStateFilter;
-        if (s === "__active__") { if (!(t.state === "seeding" && t.upload_rate > 0)) return false; }
+        // Seed only serves what it holds, so it counts as seeding here too,
+        // matching the server's filter and the chip count.
+        const seeding = t.state === "seeding" || t.state === "seed_only";
+        if (s === "__active__") { if (!(seeding && t.upload_rate > 0)) return false; }
+        else if (s === "seeding") { if (!seeding) return false; }
         else if (s === "__tracker_err__") { if (!t.tracker_error) return false; }
         else if (s === "__error__") { if (!t.torrent_error) return false; }
         else if (s === "__pinned__") { if (!_hoardPinned.has(t.info_hash)) return false; }
