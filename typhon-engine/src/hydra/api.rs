@@ -3872,11 +3872,16 @@ pub(crate) async fn engine_page_value(
             let check_waiting = row_state == "checking_files" && t.waiting_for_check();
             let m_state = match state_filter.as_str() {
                 "" => true,
+                // Seed only serves what it holds, so the Seeding chip lists it
+                // with the finished ones.
+                "seeding" => row_state == "seeding" || row_state == "seed_only",
                 // The two halves of Checking: reading the disk, or waiting
                 // for its turn on it.
                 "__check_reading__" => row_state == "checking_files" && !check_waiting,
                 "__check_waiting__" => check_waiting,
-                "__active__" => row_state == "seeding" && upload_rate > 0,
+                "__active__" => {
+                    (row_state == "seeding" || row_state == "seed_only") && upload_rate > 0
+                }
                 "__tracker_err__" => tracker_error,
                 "__error__" => torrent_error,
                 "__pinned__" => is_pinned,
@@ -3903,7 +3908,7 @@ pub(crate) async fn engine_page_value(
                 if m_search && m_cat && m_tag && m_tracker && m_errclass {
                     n_all += 1;
                     *f_state.entry(row_state).or_insert(0) += 1;
-                    if row_state == "seeding" && upload_rate > 0 {
+                    if (row_state == "seeding" || row_state == "seed_only") && upload_rate > 0 {
                         n_active += 1;
                     }
                     if tracker_error {
@@ -26119,6 +26124,37 @@ mod filter_tests {
         add(&s, "race", "alpha");
         let v = engine_page_value(&s.state, "race", "tracker_not=tracker.example").await;
         assert_eq!(v["filtered"], serde_json::json!(0), "got {v}");
+    }
+
+    /// A seed-only torrent is a seeder to the Seeding filter, as the chip counts
+    /// it: `state=seeding` lists it, while a plain `state=seed_only` names the
+    /// raw state. Pins the contract the client's `_hoardMatches` mirrors.
+    #[tokio::test]
+    async fn state_seeding_lists_seed_only_torrents() {
+        let s = st("f-seedonly");
+        let engine = s.engines.get("race").expect("engine");
+        let (ih, _) = engine
+            .manager
+            .add_torrent_bytes(&torrent_bytes("alpha"), "/tmp", false, false)
+            .unwrap_or_else(|e| panic!("add alpha: {e}"));
+        engine
+            .manager
+            .set_seed_only(&ih, true)
+            .unwrap_or_else(|e| panic!("set seed-only: {e}"));
+
+        let all = engine_page_value(&s.state, "race", "").await;
+        assert_eq!(rows(&all)[0]["state"], "seed_only", "premise: {all}");
+
+        let v = engine_page_value(&s.state, "race", "state=seeding").await;
+        assert_eq!(v["filtered"], serde_json::json!(1), "Seeding drops it: {v}");
+        assert_eq!(rows(&v)[0]["state"], "seed_only", "{v}");
+
+        let v = engine_page_value(&s.state, "race", "state=__active__").await;
+        assert_eq!(
+            v["filtered"],
+            serde_json::json!(0),
+            "no upload, not active: {v}"
+        );
     }
 
     #[tokio::test]
