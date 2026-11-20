@@ -68,6 +68,14 @@ async fn listing_the_orphans_does_not_walk_the_configured_categories() {
     let out = orphans(&s).await;
     let steps = s.store.lock().unwrap().count_vm_steps_for_test(false);
     assert_eq!(out.as_array().map(Vec::len), Some(1), "{out}");
+    // The counter sits on the connection `lock()` gives. If the route ever
+    // reads through another one (a test state with its own read connection),
+    // nothing is counted and the bound below would hold for any query: a
+    // zero is a broken measure, not a fast route.
+    assert!(
+        steps > 0,
+        "no VM step counted: the route read through another connection"
+    );
     assert!(
         steps < CONFIGURED_ROWS as u64 / 10,
         "{steps} VM steps to list one orphaned label beside {CONFIGURED_ROWS} configured torrents"
