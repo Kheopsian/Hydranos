@@ -158,7 +158,8 @@ the **[Wiki](https://github.com/Kheopsian/Hydranos/wiki)**:
 - [Configuration Reference](https://github.com/Kheopsian/Hydranos/wiki/Configuration-Reference)
 - [Troubleshooting](https://github.com/Kheopsian/Hydranos/wiki/Troubleshooting) · [Known Limitations](https://github.com/Kheopsian/Hydranos/wiki/Known-Limitations)
 
-API reference: [`docs/API.md`](docs/API.md). Companion VPS relay:
+RSS feed types, Torznab URLs and where the API key goes:
+[`docs/RSS-FEEDS.md`](docs/RSS-FEEDS.md). API reference: [`docs/API.md`](docs/API.md). Companion VPS relay:
 [hydra-relay](https://github.com/Kheopsian/hydra-relay).
 
 ---

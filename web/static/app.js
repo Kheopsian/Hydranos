@@ -12948,7 +12948,9 @@ function _rssRenderFeeds(feeds) {
     </tr>`).join("");
 }
 
-function rssShowFeedForm() {
+function rssShowFeedForm(help) {
+    const hd = document.querySelector("#rss-feed-form .rss-help");
+    if (hd) hd.open = help === true;
     _rssEditingFeed = null;
     document.getElementById("rss-feed-url").value = "";
     document.getElementById("rss-feed-name").value = "";
@@ -12966,6 +12968,14 @@ function rssEditFeed(id) {
     document.getElementById("rss-feed-name").value = f.path;
     document.getElementById("rss-feed-every").value = String(Math.round(f.refresh_secs / 60));
 }
+
+document.addEventListener("click", function (ev) {
+    const b = ev.target.closest && ev.target.closest("[data-rss-tpl]");
+    if (!b) return;
+    const url = document.getElementById("rss-feed-url");
+    url.value = b.dataset.rssTpl;
+    url.focus();
+});
 
 function rssHideFeedForm() {
     document.getElementById("rss-feed-form").style.display = "none";
