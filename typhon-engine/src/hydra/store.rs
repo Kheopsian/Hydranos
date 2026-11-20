@@ -345,6 +345,19 @@ fn claim_boot_token() -> String {
         .clone()
 }
 
+/// One batch of `Store::backfill_claim_top`: the next `?2` torrents after
+/// rowid `?1`, with the metainfo of those that have no `claim_top` row yet
+/// (NULL for the others, whose blob is then never read). `torrents` is a
+/// rowid table, so this is a range seek on its rowid, not a walk from the
+/// start.
+const CLAIM_BACKFILL_PAGE: &str = "SELECT t.rowid, t.info_hash, t.session,
+        CASE WHEN c.info_hash IS NULL THEN t.torrent END
+   FROM torrents t
+   LEFT JOIN claim_top c ON c.info_hash = t.info_hash AND c.session = t.session
+  WHERE t.rowid > ?1
+  ORDER BY t.rowid
+  LIMIT ?2";
+
 /// Split a `tags` column into tag names.
 ///
 /// The column is comma-separated, EXCEPT that some rows were written with a
@@ -1388,6 +1401,9 @@ pub struct Store {
     /// `claim_top` is known to hold a row for every torrent this process may
     /// ask about: see `claim_index_ready`.
     claim_ready: std::sync::atomic::AtomicBool,
+    /// Where `backfill_claim_top` is in `torrents`: the last rowid it looked
+    /// at, so each batch starts there instead of re-walking the rows done.
+    claim_cursor: std::sync::atomic::AtomicI64,
 }
 
 impl Store {
@@ -1569,6 +1585,7 @@ impl Store {
             ping_stall_ms: Default::default(),
             fresh: Default::default(),
             claim_ready: Default::default(),
+            claim_cursor: Default::default(),
         }
     }
 
@@ -1745,12 +1762,26 @@ impl Store {
 
     /// The `claim_top` value of a metainfo: what the .torrent says, renames
     /// aside (`ever_renamed` covers those). Empty when it is not one entry.
+    /// Folded by `claim_key`, like every value it is compared with.
     fn claim_top_of(blob: &[u8]) -> String {
         typhon_engine::torrent::metainfo::parse_torrent_bytes(blob)
             .ok()
             .and_then(|m| m.original_common_root())
-            .map(|t| t.to_string_lossy().into_owned())
+            .map(|t| Self::claim_key(&t.to_string_lossy()))
             .unwrap_or_default()
+    }
+
+    /// A `claim_top` value as the claim compares it: `pathclaim::path_key`,
+    /// so on Windows `Été.mkv` and `été.mkv` are one entry, as they are one
+    /// file on NTFS. The column's NOCASE folds ASCII only; it stays, harmless
+    /// on values already folded, and on other platforms it only widens the
+    /// candidates, which the claim then checks exactly. (Rows written by the
+    /// earlier, unfolded revision of this index were never released, so there
+    /// is nothing to migrate.)
+    fn claim_key(top: &str) -> String {
+        crate::pathclaim::path_key(Path::new(top))
+            .to_string_lossy()
+            .into_owned()
     }
 
     /// Whether `claim_top` has a row for every torrent that exists. False
@@ -1779,55 +1810,61 @@ impl Store {
         ok
     }
 
-    /// Give a row to every torrent that has none, `limit` at a time; Ok(0)
-    /// once none is left, which also marks the index ready. Like
-    /// `backfill_content_index`, in batches so the store lock is let go.
+    /// Give a row to every torrent that has none: one forward pass over
+    /// `torrents` by rowid, `limit` rows a batch, each batch starting where
+    /// the last one stopped, so every batch costs the same however far the
+    /// pass has got. Returns the rows looked at; Ok(0) once the pass is at the
+    /// end, which also marks the index ready and rewinds the cursor. A torrent
+    /// that already has a row keeps it (its metainfo is not even read), and
+    /// one written during the pass got its row from `insert_torrent`, so one
+    /// pass is complete. Like `backfill_content_index`, in batches so the
+    /// store lock is let go.
     pub fn backfill_claim_top(&self, limit: usize) -> anyhow::Result<usize> {
-        let mut q = self.conn.prepare(
-            "SELECT t.info_hash, t.session, t.torrent
-               FROM torrents t
-               LEFT JOIN claim_top c
-                 ON c.info_hash = t.info_hash AND c.session = t.session
-              WHERE c.info_hash IS NULL
-              LIMIT ?1",
-        )?;
-        let pending = q
-            .query_map([limit as i64], |r| {
+        use std::sync::atomic::Ordering;
+        let after = self.claim_cursor.load(Ordering::Relaxed);
+        let mut q = self.conn.prepare_cached(CLAIM_BACKFILL_PAGE)?;
+        let page = q
+            .query_map(rusqlite::params![after, limit as i64], |r| {
                 Ok((
-                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(0)?,
                     r.get::<_, String>(1)?,
-                    r.get::<_, Vec<u8>>(2)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, Option<Vec<u8>>>(3)?,
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
         drop(q);
-        if pending.is_empty() {
+        let Some(&(last, ..)) = page.last() else {
             if !self.read_only {
                 self.conn.execute(
                     "INSERT OR REPLACE INTO meta (key, value) VALUES ('claim_top_ready', ?1)",
                     [claim_boot_token()],
                 )?;
             }
-            self.claim_ready
-                .store(true, std::sync::atomic::Ordering::Relaxed);
+            self.claim_ready.store(true, Ordering::Relaxed);
+            self.claim_cursor.store(0, Ordering::Relaxed);
             return Ok(0);
-        }
+        };
         let tx = self.conn.unchecked_transaction()?;
-        for (ih, sess, blob) in &pending {
-            tx.execute(
-                "INSERT OR REPLACE INTO claim_top (info_hash, session, top) VALUES (?1,?2,?3)",
-                rusqlite::params![ih, sess, Self::claim_top_of(blob)],
-            )?;
+        for (_, ih, sess, blob) in &page {
+            if let Some(blob) = blob {
+                tx.execute(
+                    "INSERT OR IGNORE INTO claim_top (info_hash, session, top) VALUES (?1,?2,?3)",
+                    rusqlite::params![ih, sess, Self::claim_top_of(blob)],
+                )?;
+            }
         }
         tx.commit()?;
-        Ok(pending.len())
+        self.claim_cursor.store(last, Ordering::Relaxed);
+        Ok(page.len())
     }
 
     /// `rows_by_save_path`, narrowed by top-level entry. Each `exact` item is
     /// a save path and, when the caller can say which entries of it matter,
     /// the entries a torrent saved there must have to name any of our files.
     /// Only the rows with one of those entries, or with none (`''`), are
-    /// returned for it; `None` returns every row at that path. The range under
+    /// returned for it; `None` returns every row at that path. The entries
+    /// are folded here (`claim_key`), so callers pass them as spelled. The range under
     /// `root` is not narrowed: a torrent saved below our folder can name our
     /// files whatever it is called.
     ///
@@ -1865,8 +1902,14 @@ impl Store {
                     }
                 }
                 Some(tops) => {
-                    for top in tops.iter().map(String::as_str).chain(std::iter::once("")) {
-                        for r in narrow.query_map([top, path.as_str()], |r| {
+                    // Folded as the stored values are; '' is every row with
+                    // no single entry.
+                    let keys = tops
+                        .iter()
+                        .map(|t| Self::claim_key(t))
+                        .chain(std::iter::once(String::new()));
+                    for top in keys {
+                        for r in narrow.query_map([top.as_str(), path.as_str()], |r| {
                             Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
                         })? {
                             out.push(r?);
@@ -6135,6 +6178,143 @@ mod tests {
         assert_eq!(ask(), vec![(h.clone(), "hoard".to_string())]);
         store.set_session(&h, "hoard", "race").unwrap();
         assert_eq!(ask(), vec![(h.clone(), "race".to_string())]);
+    }
+
+    /// On Windows `Été.mkv` and `été.mkv` are one file, and SQLite's NOCASE
+    /// folds ASCII only: the narrowed lookup for a new `été.mkv` must still
+    /// return the `Été.mkv` already in the folder, whether its index row was
+    /// written by the add or by the boot pass. Elsewhere they are two files
+    /// (`path_key` keeps case) and the lookup need not return it.
+    #[test]
+    fn the_claim_lookup_folds_accented_names_like_the_claim() {
+        let store = fresh();
+        store
+            .claim_ready
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let sep = std::path::MAIN_SEPARATOR;
+        let cat = format!("{sep}data{sep}cat");
+        let h = "e".repeat(40);
+        let name = "Été.mkv";
+        let blob = format!(
+            "d4:infod6:lengthi5e4:name{}:{name}12:piece lengthi16384e6:pieces20:aaaaaaaaaaaaaaaaaaaaee",
+            name.len()
+        );
+        store
+            .insert_torrent(&h, "hoard", blob.as_bytes(), &cat, "", 0.0, false, "")
+            .unwrap();
+        let same = crate::pathclaim::path_key(Path::new("Été.mkv"))
+            == crate::pathclaim::path_key(Path::new("été.mkv"));
+        let want = if same {
+            vec![(h.clone(), "hoard".to_string())]
+        } else {
+            Vec::new()
+        };
+        let ask = || {
+            store
+                .rows_by_claim(
+                    &[(cat.clone(), Some(vec!["été.mkv".to_string()]))],
+                    &format!("{cat}{sep}été.mkv"),
+                    sep,
+                )
+                .unwrap()
+        };
+        assert_eq!(ask(), want, "row written by the add");
+        store.conn_for_test("DELETE FROM claim_top");
+        while store.backfill_claim_top(10).unwrap() > 0 {}
+        assert_eq!(ask(), want, "row written by the boot pass");
+    }
+
+    /// The boot pass over more torrents than one batch: each batch seeks to
+    /// where the last one stopped instead of walking from the start, every
+    /// torrent ends with exactly one row, one already indexed keeps its row,
+    /// and the index is ready only once a batch comes back empty.
+    #[test]
+    fn the_claim_backfill_pages_forward_and_indexes_each_torrent_once() {
+        let store = fresh();
+        let hash = |n: u32| format!("{n:040}");
+        for n in 0..10u32 {
+            let name = format!("f{n}.mkv");
+            let blob = format!(
+                "d4:infod6:lengthi5e4:name{}:{name}12:piece lengthi16384e6:pieces20:aaaaaaaaaaaaaaaaaaaaee",
+                name.len()
+            );
+            store
+                .conn
+                .execute(
+                    "INSERT INTO torrents (info_hash, session, torrent, save_path)
+                     VALUES (?1, 'hoard', ?2, '/data/cat')",
+                    rusqlite::params![hash(n), blob.as_bytes()],
+                )
+                .unwrap();
+        }
+        // Indexed already, under a value the pass must leave alone.
+        store
+            .conn
+            .execute(
+                "INSERT INTO claim_top (info_hash, session, top) VALUES (?1, 'hoard', 'kept')",
+                [hash(4)],
+            )
+            .unwrap();
+
+        // A batch is a seek on the rowid and costs the same wherever it starts.
+        let steps = |after: i64| {
+            let mut plan = String::new();
+            let mut q = store
+                .conn
+                .prepare(&format!("EXPLAIN QUERY PLAN {CLAIM_BACKFILL_PAGE}"))
+                .unwrap();
+            let mut rows = q.query(rusqlite::params![after, 3i64]).unwrap();
+            while let Some(r) = rows.next().unwrap() {
+                plan.push_str(&r.get::<_, String>(3).unwrap());
+                plan.push('\n');
+            }
+            let mut stmt = store.conn.prepare(CLAIM_BACKFILL_PAGE).unwrap();
+            let mut rows = stmt.query(rusqlite::params![after, 3i64]).unwrap();
+            while rows.next().unwrap().is_some() {}
+            drop(rows);
+            (plan, stmt.get_status(rusqlite::StatementStatus::VmStep))
+        };
+        let (plan, first) = steps(0);
+        assert!(plan.contains("rowid>?"), "not a rowid seek:\n{plan}");
+        assert_eq!(steps(6).1, first, "a later batch cost more:\n{plan}");
+
+        let indexed = || {
+            store
+                .conn
+                .query_row("SELECT COUNT(*) FROM claim_top", [], |r| r.get::<_, i64>(0))
+                .unwrap()
+        };
+        let mut batches = Vec::new();
+        loop {
+            assert!(!store.claim_index_ready(), "ready mid-pass: {batches:?}");
+            let n = store.backfill_claim_top(3).unwrap();
+            batches.push((n, indexed()));
+            if n == 0 {
+                break;
+            }
+        }
+        assert_eq!(batches, vec![(3, 4), (3, 6), (3, 9), (1, 10), (0, 10)]);
+        assert!(store.claim_index_ready());
+        let top = |n: u32| {
+            store
+                .conn
+                .query_row(
+                    "SELECT top FROM claim_top WHERE info_hash = ?1 AND session = 'hoard'",
+                    [hash(n)],
+                    |r| r.get::<_, String>(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(top(4), "kept");
+        for n in (0..10).filter(|&n| n != 4) {
+            assert_eq!(top(n), format!("f{n}.mkv"));
+        }
+        // The cursor was rewound: a second pass walks from the start again.
+        store.conn_for_test(
+            "DELETE FROM claim_top WHERE info_hash = '0000000000000000000000000000000000000000'",
+        );
+        while store.backfill_claim_top(3).unwrap() > 0 {}
+        assert_eq!(top(0), "f0.mkv");
     }
 
     #[test]

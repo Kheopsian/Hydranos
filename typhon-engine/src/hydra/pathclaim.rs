@@ -5389,6 +5389,18 @@ mod tests {
         let cat = s.dir.join("flat");
         std::fs::create_dir_all(&cat).unwrap();
         let rows = || crate::store::ROWS_BY_SAVE_PATH_ROWS.with(|c| c.get());
+        // A folder torrent named like the category, saved one level up: every
+        // add below asks about it (its entry is the next component of their
+        // path), so each lookup returns one row however narrow it is, and a
+        // counter stuck at 0 cannot pass for a constant cost.
+        add(
+            &s,
+            &torrent_over("flat", &[("zz.bin", &[9u8; 50])], 16384),
+            &s.dir,
+            true,
+            true,
+        )
+        .unwrap();
         let mut cost = Vec::new();
         let mut n = 0u32;
         for target in [20u32, 400] {
@@ -5419,6 +5431,7 @@ mod tests {
             cost.push(rows() - before);
             n += 1;
         }
+        assert!(cost[0] > 0, "the counter did not move: {cost:?}");
         assert_eq!(
             cost[0], cost[1],
             "rows examined per add grew with the folder: {cost:?}"

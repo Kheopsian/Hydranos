@@ -939,7 +939,7 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
                 }
             }
             if total > 0 {
-                tracing::info!(indexed = total, "claim index backfilled");
+                tracing::info!(examined = total, "claim index backfilled");
             }
         });
     }
