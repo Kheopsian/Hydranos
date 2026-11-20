@@ -6327,9 +6327,18 @@ async function refreshCategoryOptions(cats) {
         try { cats = await api("/api/categories"); }
         catch (e) { console.error("load categories", e); return; }
     }
-    const current = sel.value;
+    // The pick survives a page refresh through localStorage.
+    let saved = "";
+    try { saved = localStorage.getItem("add-category") || ""; } catch (e) {}
+    const current = sel.value || saved;
     sel.innerHTML = '<option value="">- none -</option>' +
         (cats || []).map(cat => `<option value="${esc(cat.name)}"${cat.name === current ? " selected" : ""}>${esc(incoCat(cat.name))}</option>`).join("");
+    if (!sel.dataset.persist) {
+        sel.dataset.persist = "1";
+        sel.addEventListener("change", () => {
+            try { localStorage.setItem("add-category", sel.value); } catch (e) {}
+        });
+    }
 }
 
 async function showCategoryForm(name = null) {
