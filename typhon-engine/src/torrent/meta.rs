@@ -1168,6 +1168,11 @@ pub struct TorrentState {
     /// (`cancel_check`) -- not by the end of the
     /// task, which also comes after a pass that could not read the disk.
     pub(crate) recheck_owed: AtomicBool,
+    /// The running check has published its verdict (`run_check`, under
+    /// `check_publish`) and has not yet let go of `rechecking`. Set in the
+    /// same step as the verdict, cleared when a check is asked: a start
+    /// landing in between holds nothing back, the status is final.
+    pub(crate) check_verdict_in: AtomicBool,
     /// How many proofs hold this torrent (see `ProofHold`). Above 0 it is read
     /// as checking: it is stopped at 0 % only because a job is still hashing
     /// what it shares with another torrent, and a verification asked in that
@@ -1892,6 +1897,7 @@ impl TorrentState {
             is_removed: AtomicBool::new(false),
             rechecking: AtomicBool::new(false),
             recheck_owed: AtomicBool::new(false),
+            check_verdict_in: AtomicBool::new(false),
             proof_holds: AtomicU32::new(0),
             check_gen: AtomicU64::new(0),
             check_publish: parking_lot::Mutex::new(()),

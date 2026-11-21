@@ -1543,18 +1543,26 @@ impl TorrentManager {
         // lifted above; what the torrent becomes is the verdict's to say
         // (`run_check` reads the flag), and a stop in the meantime calls the
         // check off (`cancel_check`) and stays stopped.
-        if t.rechecking.load(Ordering::SeqCst) && !t.files_absent.load(Ordering::Relaxed) {
-            {
-                // Under the lock a verdict is published under: a check that
-                // is still waiting has published nothing, so `Checking` is
-                // replaced by it; one called off since (`rechecking` let go
-                // under this lock) must not be left showing a check.
-                let _publish = t.check_publish();
-                if t.rechecking.load(Ordering::SeqCst) && t.waiting_for_check() {
-                    t.status
-                        .store(TorrentStatus::Checking as u8, Ordering::Relaxed);
-                }
+        let held = {
+            // Decided under the lock a verdict is published under, so it is
+            // wholly before the verdict (held here, `Checking` while the
+            // check still waits) or wholly after (the status is final, and
+            // the start goes on: the torrent is a seed or a download by its
+            // verified bitfield, not left `Stopped` with the pause lifted).
+            // `rechecking` is let go a moment after the verdict, so it alone
+            // cannot say. A check called off since (`rechecking` let go under
+            // this lock) must not be left showing a check.
+            let _publish = t.check_publish();
+            let held = t.rechecking.load(Ordering::SeqCst)
+                && !t.check_verdict_in.load(Ordering::SeqCst)
+                && !t.files_absent.load(Ordering::Relaxed);
+            if held && t.waiting_for_check() {
+                t.status
+                    .store(TorrentStatus::Checking as u8, Ordering::Relaxed);
             }
+            held
+        };
+        if held {
             t.fold_seed_time(crate::torrent::meta::now_secs());
             return Ok(());
         }
@@ -4347,6 +4355,7 @@ impl TorrentManager {
             // Known from now: the Content tab tells the file a waiting check
             // is for from the others.
             t.begin_recheck_progress_of(asked);
+            t.check_verdict_in.store(false, Ordering::SeqCst);
             // Owed until its verdict, and noted with the generation in the
             // same step: a stop (`cancel_check`) takes this lock, so it lands
             // wholly before (this check then starts from the generation it
@@ -4656,6 +4665,10 @@ impl TorrentManager {
         if off(&t) {
             return;
         }
+        // The verdict is published from here to the end of this section, the
+        // lock held: a start that comes after it (`start_torrent`) is no
+        // longer held back by the check, whatever `rechecking` still says.
+        t.check_verdict_in.store(true, Ordering::SeqCst);
         // A recheck is somebody saying the underlying problem is dealt with.
         // Without this the torrent came back working and went on displaying
         // the fault it no longer had. Here, not when the check starts: a
@@ -6514,6 +6527,41 @@ mod lifecycle_tests {
             TorrentStatus::Seeding as u8
         );
         assert_eq!(t.total_downloaded.load(Ordering::Relaxed), 0);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// ⭐ A start landing after the verdict of a check is published and before
+    /// the check lets go of `rechecking` (a held torrent, its check nearly
+    /// instant, then started) lifted the pause, found `rechecking` set and
+    /// returned: `Stopped`, not paused, never started or announced. The
+    /// check is over for the start: it goes on, and the torrent is a seed by
+    /// its verified bitfield.
+    #[tokio::test]
+    async fn a_start_after_the_verdict_but_before_the_flag_clears_starts_the_torrent() {
+        let (mgr, root, ih, t) = whole_two_piece_torrent("verdictwindow");
+        wait_recheck_end(&t).await;
+        mgr.recheck(&ih).expect("recheck starts");
+        wait_recheck_end(&t).await;
+        assert!(
+            t.check_verdict_in.load(Ordering::SeqCst),
+            "the verdict said so"
+        );
+        mgr.stop_torrent(&ih).unwrap();
+        // The window: verdict published for a paused torrent, `rechecking`
+        // not yet let go.
+        t.rechecking.store(true, Ordering::SeqCst);
+        assert_eq!(
+            t.status.load(Ordering::Relaxed),
+            TorrentStatus::Stopped as u8
+        );
+        mgr.start_torrent(&ih).unwrap();
+        assert!(!t.is_paused.load(Ordering::Relaxed));
+        assert_eq!(
+            t.status.load(Ordering::Relaxed),
+            TorrentStatus::Seeding as u8,
+            "started by its verified bitfield"
+        );
+        t.rechecking.store(false, Ordering::SeqCst);
         std::fs::remove_dir_all(&root).ok();
     }
 
