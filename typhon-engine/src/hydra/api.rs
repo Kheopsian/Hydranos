@@ -1655,12 +1655,12 @@ async fn post_node_fetch(
     let mut queued = 0usize;
     if let Some((_, torrent)) = find_torrent(&state, &hash) {
         if let Ok(addr) = format!("{host}:{port}").parse::<std::net::SocketAddr>() {
-            typhon_engine::tracker::enqueue_dial(addr, torrent.clone());
+            typhon_engine::tracker::enqueue_explicit_dial(addr, torrent.clone());
             queued = 1;
         } else if let Ok(mut it) = format!("{host}:{port}").to_socket_addrs() {
             // A node declared by hostname still has to resolve to something.
             if let Some(addr) = it.next() {
-                typhon_engine::tracker::enqueue_dial(addr, torrent.clone());
+                typhon_engine::tracker::enqueue_explicit_dial(addr, torrent.clone());
                 queued = 1;
             }
         }
@@ -6942,6 +6942,7 @@ fn status_payload(state: &AppState) -> serde_json::Value {
             "unknown_skey_handshakes": typhon_engine::peer::UNKNOWN_SKEY_HANDSHAKES.load(std::sync::atomic::Ordering::Relaxed),
             "inbound_refused_busy": typhon_engine::peer::INBOUND_REFUSED_BUSY.load(std::sync::atomic::Ordering::Relaxed),
             "inbound_refused_cap": typhon_engine::peer::INBOUND_REFUSED_CAP.load(std::sync::atomic::Ordering::Relaxed),
+            "inbound_evicted": typhon_engine::peer::INBOUND_EVICTED.load(std::sync::atomic::Ordering::Relaxed),
             "dial_queue_full": typhon_engine::tracker::DIAL_QUEUE_FULL.load(std::sync::atomic::Ordering::Relaxed),
             "holepunch_connects_ignored": typhon_engine::peer::holepunch::CONNECTS_IGNORED.load(std::sync::atomic::Ordering::Relaxed),
             "worker_threads": typhon_engine::runtime::worker_threads(),
@@ -11105,7 +11106,7 @@ async fn post_torrent_peers(
         };
         match resolved {
             Some(addr) => {
-                typhon_engine::tracker::enqueue_dial(addr, torrent.clone());
+                typhon_engine::tracker::enqueue_explicit_dial(addr, torrent.clone());
                 queued += 1;
             }
             None => rejected.push(text.to_string()),

@@ -699,6 +699,13 @@ pub async fn run(
                 rate_timer_at = None;
                 continue;
             }
+            // Asked to make room for a new peer at the connection ceiling
+            // (`peer::turnover`). Woken, so an idle session closes now rather
+            // than at its idle deadline.
+            _ = stats.evict_wake.notified() => {
+                tracing::debug!("[peer-debug] {} BREAK evicted at the connection ceiling", addr);
+                break;
+            }
             // Another peer's task asked us to introduce this one. Woken rather
             // than polled: an idle seeding session registers no timer, and a
             // hole left unmentioned for a minute has closed long before.

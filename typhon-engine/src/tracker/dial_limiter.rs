@@ -15,13 +15,10 @@
 //!     key existed and was echoed by `get_config` for a long time while being
 //!     enforced nowhere; setting it did nothing at all.
 //!
-//!     It bounds what this engine *opens*: at the ceiling we stop dialing, but
-//!     an inbound peer is still accepted. Inbound connections count towards
-//!     the total (so they do shut dialing down), they are just never refused
-//!     -- turning away a peer that wants to leech from us would trade upload,
-//!     the thing a seedbox exists for, against a number. The live count is
-//!     therefore allowed to sit above the ceiling; what it cannot do is climb
-//!     there by our own doing.
+//!     At the ceiling we stop dialing. An inbound peer takes the place of an
+//!     idle session, which is asked to close (`peer::turnover`), and is
+//!     refused only when no session may go. The live count can sit above the
+//!     ceiling by the sessions evicted and not closed yet, a moment each.
 //!   * the startup pause — a process-level gate, see `dials_paused`.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -58,6 +55,8 @@ pub struct DialLimiter {
     skipped_paused: AtomicU64,
     /// Dials that had to wait on the token bucket.
     delayed: AtomicU64,
+    /// This engine's sessions, as candidates to make room at the ceiling.
+    turnover: crate::peer::turnover::Turnover,
 }
 
 impl Default for DialLimiter {
@@ -70,6 +69,7 @@ impl Default for DialLimiter {
             skipped_conn_cap: AtomicU64::new(0),
             skipped_paused: AtomicU64::new(0),
             delayed: AtomicU64::new(0),
+            turnover: Default::default(),
         }
     }
 }
@@ -100,6 +100,11 @@ impl DialLimiter {
     pub fn conn_cap_reached(&self) -> bool {
         let cap = self.max_conns.load(Ordering::Relaxed);
         cap != 0 && self.live.load(Ordering::Relaxed) >= cap
+    }
+
+    /// The sessions an inbound peer may displace at the ceiling.
+    pub fn turnover(&self) -> &crate::peer::turnover::Turnover {
+        &self.turnover
     }
 
     /// Sets the outbound dial ceiling in dials per second. Anything that is not
