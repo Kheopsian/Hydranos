@@ -268,16 +268,17 @@ impl ReadCache {
         }
     }
 
-    /// Keep a slice read from disk, unless a write went by since the read
-    /// looked at `seen`. Checked under the shard lock, which `invalidate`
-    /// takes after the write's bump: either this lands first and the write
-    /// pops it, or the write came first and this read may predate it.
+    /// `keep` for a slice a request asked for: the tests' shorthand.
+    #[cfg(test)]
     pub(super) fn put(&self, key: Key, data: Bytes, seen: u64) {
         self.keep(key, data, seen, false);
     }
 
-    /// `put`, for a slice read ahead (`prefetched`) or asked for. Answers
-    /// whether it was kept.
+    /// Keep a slice read from disk, read ahead (`prefetched`) or asked for,
+    /// unless a write went by since the read looked at `seen`. Checked under
+    /// the shard lock, which `invalidate` takes after the write's bump: either
+    /// this lands first and the write pops it, or the write came first and
+    /// this read may predate it. Answers whether it was kept.
     pub(super) fn keep(&self, key: Key, data: Bytes, seen: u64, prefetched: bool) -> bool {
         let cap = self.shard_cap();
         let len = data.len() as u64;
