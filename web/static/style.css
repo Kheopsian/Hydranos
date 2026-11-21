@@ -910,6 +910,17 @@ select {
     cursor: pointer;
 }
 
+/* The open list is drawn by the browser, and it takes its colours from the
+   options. Without these it opens white with the theme's pale text on top, so a
+   dark theme's list is unreadable (#136). */
+select option, select optgroup {
+    background-color: var(--bg-tertiary);
+    color: var(--text-primary);
+}
+select option:disabled {
+    color: var(--text-secondary);
+}
+
 
 input[type="file"] {
     color: var(--text-secondary);
