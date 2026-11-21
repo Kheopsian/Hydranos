@@ -19,13 +19,22 @@ fn engine(tag: &str) -> (Arc<TorrentManager>, Arc<DiskManager>) {
     (mgr, disk)
 }
 
-/// A TCP port nobody holds right now.
+/// A port free for TCP AND for UDP, since uTP follows the TCP port. Free for
+/// TCP alone is not enough on Windows: a port in one of its excluded UDP
+/// ranges (Hyper-V, WinNAT) refuses the uTP bind with WSAEACCES (10013),
+/// which failed these tests on the windows-latest runner.
 fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
+    for _ in 0..100 {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        if std::net::UdpSocket::bind(("0.0.0.0", port)).is_ok() {
+            return port;
+        }
+    }
+    panic!("no port free for both TCP and UDP in 100 tries");
 }
 
 /// How long a port closed a moment ago may still read as busy. A neighbour
