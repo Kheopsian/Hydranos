@@ -244,6 +244,31 @@ pub struct Cache {
 pub struct HostOutcomes {
     pub ok: std::sync::atomic::AtomicU64,
     pub failed: std::sync::atomic::AtomicU64,
+    /// The last `interval` (high 32 bits) and `min interval` (low 32 bits,
+    /// [`NO_MIN_INTERVAL`] when the protocol has none) this host answered with,
+    /// in ONE word so a reader never pairs one answer's interval with the
+    /// next one's floor.
+    last_interval: std::sync::atomic::AtomicU64,
+    /// Epoch seconds of that answer. 0 = no answer seen yet.
+    interval_seen_at: std::sync::atomic::AtomicI64,
+    /// Smallest and largest `interval` seen since start (the smallest stored
+    /// as `u32::MAX - interval`). 0 = none yet.
+    interval_min_inv: std::sync::atomic::AtomicU32,
+    interval_max: std::sync::atomic::AtomicU32,
+}
+
+/// `min_interval` of a response whose protocol has no such field (UDP, BEP 15).
+const NO_MIN_INTERVAL: u32 = u32::MAX;
+
+/// What one tracker host last said about its re-announce interval.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IntervalSeen {
+    pub interval: u32,
+    /// None for UDP, which has no `min interval`. HTTP without one is Some(0).
+    pub min_interval: Option<u32>,
+    pub seen_at: i64,
+    pub interval_min: u32,
+    pub interval_max: u32,
 }
 
 impl Cache {
@@ -253,6 +278,56 @@ impl Cache {
         self.host(host)
             .ok
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Keep what a tracker answered about its interval: a handful of atomics
+    /// on the per-host entry (a read lock to find it), nothing per torrent.
+    /// `min_interval` is None for a UDP answer. A zero `interval` is stored as
+    /// received but leaves the smallest/largest alone.
+    pub fn record_interval(&self, host: &str, interval: u32, min_interval: Option<u32>, now: i64) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let h = self.host(host);
+        let min = min_interval.unwrap_or(NO_MIN_INTERVAL);
+        h.last_interval
+            .store(((interval as u64) << 32) | min as u64, Relaxed);
+        h.interval_seen_at.store(now.max(1), Relaxed);
+        if interval > 0 {
+            // Smallest, kept as `u32::MAX - interval` so a `fetch_max` finds it
+            // and 0 still means "none yet".
+            h.interval_min_inv.fetch_max(u32::MAX - interval, Relaxed);
+            h.interval_max.fetch_max(interval, Relaxed);
+        }
+    }
+
+    /// host -> the interval answers seen; hosts with none are absent.
+    pub fn interval_seen(&self) -> HashMap<String, IntervalSeen> {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.per_host
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter_map(|(host, h)| {
+                let seen_at = h.interval_seen_at.load(Relaxed);
+                if seen_at == 0 {
+                    return None;
+                }
+                let w = h.last_interval.load(Relaxed);
+                let min = w as u32;
+                Some((
+                    host.clone(),
+                    IntervalSeen {
+                        interval: (w >> 32) as u32,
+                        min_interval: (min != NO_MIN_INTERVAL).then_some(min),
+                        seen_at,
+                        interval_min: match h.interval_min_inv.load(Relaxed) {
+                            0 => 0,
+                            inv => u32::MAX - inv,
+                        },
+                        interval_max: h.interval_max.load(Relaxed),
+                    },
+                ))
+            })
+            .collect()
     }
 
     pub fn count_failed(&self) {
@@ -624,6 +699,28 @@ mod tests {
         assert_eq!(p.len(), 2, "{p:?}");
         assert_eq!(p["tr-a.test"].0, 2);
         assert_eq!(p["tr-b.test"].0, 1);
+    }
+
+    /// The interval a host last answered, and the range seen since start.
+    #[test]
+    fn the_interval_a_host_answers_is_kept_with_its_range() {
+        let c = Cache::default();
+        assert!(c.interval_seen().is_empty());
+        c.record_interval("a.test", 1800, Some(900), 100);
+        c.record_interval("a.test", 2700, Some(0), 200);
+        c.record_interval("u.test", 900, None, 150);
+        let m = c.interval_seen();
+        assert_eq!(
+            m["a.test"],
+            IntervalSeen {
+                interval: 2700,
+                min_interval: Some(0),
+                seen_at: 200,
+                interval_min: 1800,
+                interval_max: 2700
+            }
+        );
+        assert_eq!(m["u.test"].min_interval, None, "UDP has no min interval");
     }
 
     /// What an entry holds is what `host_of` leaves of the announce URL.

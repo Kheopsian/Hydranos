@@ -5853,6 +5853,16 @@ struct TrackerRow {
     /// requiring nothing.
     min_seed_hours: i64,
     sources: Vec<String>,
+    /// What this tracker last answered as `interval` (s), and when
+    /// (`interval_seen_at`, epoch s). null until a response has been seen.
+    interval_s: Option<u32>,
+    /// Its `min interval` (s): 0 = the HTTP response carried none, null = no
+    /// response yet or the last one was UDP (BEP 15 has no such field).
+    min_interval_s: Option<u32>,
+    /// Smallest and largest `interval` seen since start (it can vary by torrent).
+    interval_min_s: Option<u32>,
+    interval_max_s: Option<u32>,
+    interval_seen_at: Option<i64>,
 }
 
 /// The zero time Go marshals for a tracker that has never answered.
@@ -5906,10 +5916,42 @@ async fn get_trackers(
         }
     }
 
+    // The interval each host answers with. Per host, held by the announce
+    // cache next to the outcome counters: reading it costs a pass over the
+    // hosts, never over the torrents. Engines are merged: the latest answer
+    // wins, the range is the widest.
+    let mut intervals: std::collections::HashMap<String, crate::announce::cache::IntervalSeen> =
+        Default::default();
+    for engine in state.engines.engines() {
+        for (host, v) in engine.announce_cache.interval_seen() {
+            match intervals.get_mut(&host) {
+                Some(cur) => {
+                    let (lo, hi) = (
+                        match (cur.interval_min, v.interval_min) {
+                            (0, b) | (b, 0) => b,
+                            (a, b) => a.min(b),
+                        },
+                        cur.interval_max.max(v.interval_max),
+                    );
+                    if v.seen_at > cur.seen_at {
+                        *cur = v;
+                    }
+                    cur.interval_min = lo;
+                    cur.interval_max = hi;
+                }
+                None => {
+                    intervals.insert(host, v);
+                }
+            }
+        }
+    }
+
     let mut hosts: std::collections::BTreeSet<String> = observed.keys().cloned().collect();
     hosts.extend(cfg.announce_passkeys.keys().cloned());
     hosts.extend(cfg.announce_ip_modes.keys().cloned());
     hosts.extend(held.keys().cloned());
+    // A host that answered has a row even once its cache entries are gone.
+    hosts.extend(intervals.keys().cloned());
     // And the trackers that have only ever FAILED.
     //
     // `per_tracker` is built from the announce cache, which is written on
@@ -5942,7 +5984,13 @@ async fn get_trackers(
             if holds > 0 {
                 sources.push("catalogue".to_string());
             }
+            let iv = intervals.get(&host);
             TrackerRow {
+                interval_s: iv.map(|v| v.interval),
+                min_interval_s: iv.and_then(|v| v.min_interval),
+                interval_min_s: iv.map(|v| v.interval_min),
+                interval_max_s: iv.map(|v| v.interval_max),
+                interval_seen_at: iv.map(|v| v.seen_at),
                 // The catalogue count, not the announce count: they are
                 // different questions, and `announces` below already answers
                 // the second one.
@@ -27434,6 +27482,50 @@ mod populated_tests {
         .await;
         let text = body.to_string();
         assert!(text.contains("tracker.example"), "got {body}");
+    }
+
+    /// The Trackers table says what each tracker answers as `interval` and
+    /// `min interval`: last values, the range since start, and `null` for a
+    /// host nobody has answered. A second answer without a floor reads 0.
+    #[tokio::test]
+    async fn the_tracker_tab_shows_the_interval_each_host_answers() {
+        let (s, _h) = populated("pop-intervals");
+        let engines = s.state.engines.engines();
+        let cache = &engines[0].announce_cache;
+        cache.record_interval("answered.test", 1800, Some(900), 1_000);
+        cache.record_interval("answered.test", 2700, Some(0), 2_000);
+        cache.record_interval("udp.test", 900, None, 1_500);
+        let body = body_json(
+            super::get_trackers(State(s.state.clone()), RawQuery(None), keyed(KEY)).await,
+        )
+        .await;
+        let row = |host: &str| {
+            body.as_array()
+                .unwrap()
+                .iter()
+                .find(|r| r["host"] == host)
+                .unwrap_or_else(|| panic!("no row for {host} in {body}"))
+                .clone()
+        };
+        let a = row("answered.test");
+        assert_eq!(a["interval_s"], 2700, "{a}");
+        assert_eq!(a["min_interval_s"], 0, "{a}");
+        assert_eq!(a["interval_min_s"], 1800, "{a}");
+        assert_eq!(a["interval_max_s"], 2700, "{a}");
+        assert_eq!(a["interval_seen_at"], 2_000, "{a}");
+        let u = row("udp.test");
+        assert_eq!(u["interval_s"], 900, "{u}");
+        assert!(u["min_interval_s"].is_null(), "UDP has no floor: {u}");
+        let never = row("tracker.example");
+        for k in [
+            "interval_s",
+            "min_interval_s",
+            "interval_min_s",
+            "interval_max_s",
+            "interval_seen_at",
+        ] {
+            assert!(never[k].is_null(), "{k} of a silent host: {never}");
+        }
     }
 
     /// The per-tracker pass counts each engine's torrents under the host baked

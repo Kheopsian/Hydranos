@@ -642,6 +642,13 @@ pub(super) async fn announce_one(
                     Ok(resp) => {
                         breaker.record(&host, true, std::time::Instant::now());
                         cache.count_ok(&host);
+                        // UDP (BEP 15) has no `min interval`: None, not 0.
+                        cache.record_interval(
+                            &host,
+                            resp.interval,
+                            req.udp.is_none().then_some(resp.min_interval),
+                            typhon_engine::torrent::meta::now_secs(),
+                        );
                         if let Some(w) = &resp.warning {
                             // Accepted, with a remark. Worth an operator's eye,
                             // not an error: the announce counted.
@@ -1423,6 +1430,83 @@ mod announce_one_tests {
     /// `d8:completei3e10:incompletei1e8:intervali1800e12:min intervali900e5:peers0:e`
     const OK_BODY: &[u8] =
         b"d8:completei3e10:incompletei1e8:intervali1800e12:min intervali900e5:peers0:e";
+
+    /// A tracker that answers each request with the next body of the list (the
+    /// last one repeats).
+    async fn scripted_tracker(bodies: &'static [&'static [u8]]) -> FakeTracker {
+        let n = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let app = axum::Router::new().route(
+            "/announce",
+            axum::routing::get(move || {
+                let n = n.clone();
+                async move {
+                    let i = n.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    bodies[i.min(bodies.len() - 1)].to_vec()
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = rx.await;
+                })
+                .await;
+        });
+        FakeTracker {
+            url: format!("http://{addr}/announce"),
+            _stop: tx,
+        }
+    }
+
+    /// The interval a tracker answers is kept per host: the last one with its
+    /// floor (0 when the response has none), and the range seen so far.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_interval_a_tracker_answers_is_kept_per_host() {
+        let t = scripted_tracker(&[
+            b"d8:completei3e10:incompletei1e8:intervali1800e12:min intervali900e5:peers0:e",
+            b"d8:intervali2700e5:peers0:e",
+        ])
+        .await;
+        let (mgr, _root) = manager("intervals");
+        let hash = add(&mgr, "iv", &t.url);
+        let (policy, breaker, cache) = parts();
+        assert!(cache.interval_seen().is_empty(), "nothing answered yet");
+
+        announce_one(
+            &mgr,
+            &policy,
+            &breaker,
+            &cache,
+            16371,
+            Mode::Hoard,
+            job(&hash),
+        )
+        .await;
+        let seen = cache.interval_seen();
+        let v = seen.get("127.0.0.1").expect("the host answered");
+        assert_eq!((v.interval, v.min_interval), (1800, Some(900)));
+        assert_eq!((v.interval_min, v.interval_max), (1800, 1800));
+        assert!(v.seen_at > 0);
+
+        // Forced: the 900 s floor of the first answer holds a plain visit back.
+        let mut again = job(&hash);
+        again.forced = true;
+        announce_one(&mgr, &policy, &breaker, &cache, 16371, Mode::Hoard, again).await;
+        let v = cache.interval_seen()["127.0.0.1"];
+        assert_eq!((v.interval, v.min_interval), (2700, Some(0)));
+        assert_eq!((v.interval_min, v.interval_max), (1800, 2700));
+    }
+
+    fn job(hash: &str) -> Job {
+        Job {
+            info_hash: hash.to_string(),
+            first: false,
+            forced: false,
+        }
+    }
 
     /// ⚠️ `stopped: false`. A PAUSED torrent announces to nobody and is
     /// reported as `gone` -- which is correct behaviour, not a bug, and it
