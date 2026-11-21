@@ -382,6 +382,19 @@ fn next_announce_in(interval: Duration) -> Duration {
     interval
 }
 
+/// The wait when no tracker answered, or one answered without an `interval`.
+const DEFAULT_INTERVAL: Duration = Duration::from_secs(30 * 60);
+
+/// How long one tracker asks us to wait: its `interval` (the default when it
+/// states none), raised to its `min interval`.
+fn tracker_wait(interval: u32, min_interval: u32) -> Duration {
+    let stated = match interval {
+        0 => DEFAULT_INTERVAL,
+        s => Duration::from_secs(s as u64),
+    };
+    stated.max(Duration::from_secs(min_interval as u64))
+}
+
 pub(super) async fn announce_one(
     manager: &Arc<TorrentManager>,
     policy: &Policy,
@@ -501,7 +514,12 @@ pub(super) async fn announce_one(
     // and `meta.trackers` is only what the .torrent said when it was added.
     let tiers: Vec<Vec<String>> = torrent.live_trackers.read().clone();
 
-    let mut interval = Duration::from_secs(30 * 60);
+    // The shortest wait any tracker that answered asked for. One pass serves
+    // every tracker, and with `announce_tiers` several of them answer: the
+    // last to answer must not stretch the visit of one that wants us sooner.
+    // A tracker whose `min interval` is longer still waits it out, in
+    // `book::step`, when the pass comes back early for another.
+    let mut interval: Option<Duration> = None;
     let mut announced_at_all = false;
     // Any tracker answered 429: reported to the scheduler's concurrency control.
     let mut throttled = false;
@@ -660,17 +678,13 @@ pub(super) async fn announce_one(
                             // leaving, no interval to wait for.
                             continue;
                         }
-                        if resp.interval > 0 {
-                            interval = Duration::from_secs(resp.interval as u64);
-                        }
                         // `min interval` is a floor, not a suggestion. It exists
                         // so a tracker can refuse to be asked again too soon
                         // whatever the client thinks -- so it wins over
                         // `interval` when the two disagree.
-                        let floor = Duration::from_secs(resp.min_interval as u64);
-                        if resp.min_interval > 0 && interval < floor {
-                            interval = floor;
-                        }
+                        let wants = tracker_wait(resp.interval, resp.min_interval);
+                        interval = Some(interval.map_or(wants, |i| i.min(wants)));
+                        let interval = interval.unwrap_or(DEFAULT_INTERVAL);
                         // The swarm counts only exist here. Nothing else in the
                         // process can tell how many seeders a parked torrent has.
                         cache.record(
@@ -869,7 +883,7 @@ pub(super) async fn announce_one(
         *torrent.announced_peer_id.write() = Some((sent, now));
     }
 
-    let mut next_in = next_announce_in(interval);
+    let mut next_in = next_announce_in(interval.unwrap_or(DEFAULT_INTERVAL));
     // A race the tracker has not registered yet: the .torrent reached us
     // before the tracker finished taking the upload, and it answers
     // "unregistered torrent". Retried every 7 seconds, 50 times at most --
@@ -2292,6 +2306,49 @@ mod announce_one_tests {
         run(&mgr, &policy, &breaker, &cache, Mode::Hoard, &hash).await;
         assert_eq!(a.queries().len(), 2);
         assert_eq!(b.queries().len(), 2, "every tier hears every announce");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Several tiers answer one pass: it comes back on the shortest wait any
+    /// of them asked for, not on whichever answered last.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn every_tier_comes_back_on_the_shortest_interval() {
+        const HALF_HOUR: &[u8] = b"d8:intervali1800e5:peers0:e";
+        const HOUR: &[u8] = b"d8:intervali3600e5:peers0:e";
+        let a = recording_tracker(HALF_HOUR).await;
+        let b = recording_tracker(HOUR).await;
+        let (mgr, root) = manager("tiers-shortest");
+        let hash = add(&mgr, "tiershort", &a.url);
+        *state(&mgr, &hash).live_trackers.write() = vec![vec![a.url.clone()], vec![b.url.clone()]];
+        let (policy, breaker, cache) = parts();
+        let out = run(&mgr, &policy, &breaker, &cache, Mode::Hoard, &hash).await;
+        assert_eq!(b.queries().len(), 1, "the hour tier answered too");
+        assert_eq!(out.next_in, Duration::from_secs(1800));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The pass that comes back early for one tracker does not cross
+    /// another's `min interval`: that tracker waits it out, and its floor
+    /// counts in the wait it asks for.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn every_tier_still_respects_each_trackers_min_interval() {
+        const FLOORED: &[u8] = b"d8:intervali600e12:min intervali2400e5:peers0:e";
+        const OPEN: &[u8] = b"d8:intervali1800e5:peers0:e";
+        let a = recording_tracker(FLOORED).await;
+        let b = recording_tracker(OPEN).await;
+        let (mgr, root) = manager("tiers-floor");
+        let hash = add(&mgr, "tierfloor", &a.url);
+        *state(&mgr, &hash).live_trackers.write() = vec![vec![a.url.clone()], vec![b.url.clone()]];
+        let (policy, breaker, cache) = parts();
+        let out = run(&mgr, &policy, &breaker, &cache, Mode::Hoard, &hash).await;
+        assert_eq!(
+            out.next_in,
+            Duration::from_secs(1800),
+            "600 s raised to its 2400 s floor, so the 1800 s tier is the shortest"
+        );
+        run(&mgr, &policy, &breaker, &cache, Mode::Hoard, &hash).await;
+        assert_eq!(a.queries().len(), 1, "inside its min interval: not asked");
+        assert_eq!(b.queries().len(), 2);
         let _ = std::fs::remove_dir_all(root);
     }
 

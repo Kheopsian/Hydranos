@@ -194,6 +194,9 @@ session (`TrackerSlot`), and derives every event from it:
   (`announce_to_all_tiers`): many put each tracker in a tier of its own, and
   the leechers on the others would never see us. The top-level key
   `announce_tiers` sets this: `auto` (default, as above), `all` or `first`.
+  When several tiers answer, the next announce comes after the shortest
+  interval any of them asked for; a tracker whose `min interval` is longer
+  is skipped until it has passed.
   A race, a torrent being downloaded now, announces to every tracker it
   carries, as libtorrent's `announce_to_all_trackers` does.
 - **The catalogue joins gradually.** At startup, torrents enter the schedule
@@ -394,7 +397,7 @@ interoperability suite, which needs Docker.
 | Rule | Spec | Test |
 |---|---|---|
 | A private hoard stops at the first tier that answers | BEP 12 | `a_hoard_stops_at_the_first_tier_that_answers` |
-| A public hoard announces to every tier, and stops at the first URL of each that answers | BEP 12 | `a_public_hoard_announces_to_every_tier_by_default`, `every_tier_still_stops_at_the_first_url_of_a_tier_that_answers`, `announce_tiers_all_and_first_override_the_private_flag` |
+| A public hoard announces to every tier, and stops at the first URL of each that answers | BEP 12 | `a_public_hoard_announces_to_every_tier_by_default`, `every_tier_still_stops_at_the_first_url_of_a_tier_that_answers`, `every_tier_comes_back_on_the_shortest_interval`, `every_tier_still_respects_each_trackers_min_interval`, `announce_tiers_all_and_first_override_the_private_flag` |
 | A tracker that has us and asked for quiet still holds its tier | BEP 12 | `a_quiet_tracker_holds_its_tier_and_a_dead_one_does_not` |
 
 ### Identity
