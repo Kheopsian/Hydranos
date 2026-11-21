@@ -2081,7 +2081,7 @@ pub fn guarded_recheck_file(
     if t.held_for_proof() {
         return Ok(FileCheck::Torrent);
     }
-    if !protected_files(state, t).is_empty() {
+    if !t.is_seed_only() && !protected_files(state, t).is_empty() {
         guarded_recheck(state, engine_id, t)?;
         return Ok(FileCheck::Torrent);
     }
@@ -2110,7 +2110,15 @@ pub(crate) fn guarded_recheck_then(
     if t.held_for_proof() {
         return Ok(());
     }
-    let protected = protected_files(state, t);
+    // A seed-only torrent never downloads and refuses every write, so a
+    // recheck can only learn which pieces it holds: nothing to protect, as for
+    // its Start. Held for a file that is a partial copy of its own, it could
+    // never be rechecked, and so never seed what does verify.
+    let protected = if t.is_seed_only() {
+        HashSet::new()
+    } else {
+        protected_files(state, t)
+    };
     let hash = typhon_engine::torrent::hex_encode(&t.info_hash);
     if protected.is_empty() {
         engine.manager.recheck(&t.info_hash)?;
@@ -2900,6 +2908,50 @@ mod tests {
         guarded_start(&s.state, "hoard", &t).unwrap();
 
         assert!(!t.is_paused.load(SeqCst), "started");
+        assert_eq!(
+            recent().iter().filter(|e| e.info_hash == b).count(),
+            before,
+            "no proof was run for it: {:?}",
+            recent()
+        );
+    }
+
+    /// A recheck of a seed-only torrent runs no proof either: over a file
+    /// another torrent names with other bytes (or a partial copy of its own) it
+    /// is a plain recheck, not a hold.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_recheck_of_a_seed_only_torrent_runs_no_proof() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let s = crate::api::testing::state_from(
+            "pathclaim-recheck-seed-only",
+            "[dedup]\npath_collision = \"legacy\"\n",
+        );
+        let dir = s.dir.join("d");
+        std::fs::create_dir_all(dir.join("R")).unwrap();
+        std::fs::write(dir.join("R").join("r.nfo"), b"held first notes").unwrap();
+        add(
+            &s,
+            &torrent_over("R", &[("r.nfo", b"held first notes")], 16384),
+            &dir,
+            true,
+            true,
+        )
+        .unwrap();
+        let b = add(
+            &s,
+            &torrent_over("R", &[("r.nfo", b"held other notes")], 16384),
+            &dir,
+            true,
+            false,
+        )
+        .unwrap();
+        let mgr = s.state.engines.get("hoard").unwrap().manager.clone();
+        let t = mgr.get(&crate::store::hex20(&b).unwrap()).unwrap();
+        t.seed_only.store(true, SeqCst);
+        let before = recent().iter().filter(|e| e.info_hash == b).count();
+
+        guarded_recheck(&s.state, "hoard", &t).unwrap();
+
         assert_eq!(
             recent().iter().filter(|e| e.info_hash == b).count(),
             before,
