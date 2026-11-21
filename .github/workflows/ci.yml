@@ -92,8 +92,31 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      # Compiling cargo-audit from source was most of this job's time. The
+      # binary is cached; the advisory database is still fetched fresh on every
+      # run, so a new advisory still turns this red. The version is pinned and
+      # is the key: a cache entry is never overwritten, so upgrading means
+      # changing CARGO_AUDIT, in both places at once.
+      - id: audit-bin
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/cargo-audit
+          key: cargo-audit-0.23.0-${{ runner.os }}
+      # `cargo audit --version`, not `command -v`: a cached binary that no
+      # longer runs on a newer runner image is rebuilt instead of trusted.
       - name: Install cargo-audit
-        run: cargo install cargo-audit --locked
+        env:
+          CARGO_AUDIT: 0.23.0
+        run: cargo audit --version >/dev/null 2>&1 || cargo install cargo-audit --version "$CARGO_AUDIT" --locked
+      # Saved right after the install, not at the end of the job: the post-job
+      # save of actions/cache only runs when the job passes, and a red audit
+      # (a new advisory) would otherwise rebuild the binary on every run until
+      # it is fixed.
+      - if: steps.audit-bin.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/cargo-audit
+          key: ${{ steps.audit-bin.outputs.cache-primary-key }}
       - name: cargo audit
         working-directory: typhon-engine
         run: cargo audit
