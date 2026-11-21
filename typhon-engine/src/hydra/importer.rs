@@ -426,13 +426,14 @@ impl Qbit {
             .map_err(|e| format!("torrents/info body: {e}"))?;
         // Decoding and parsing hundreds of MB is CPU work: off the runtime.
         tokio::task::spawn_blocking(move || {
-            let json = if gzipped {
+            // An uncompressed body is parsed where it lies, not copied first.
+            let json: std::borrow::Cow<'_, [u8]> = if gzipped {
                 let mut out = Vec::new();
                 std::io::Read::read_to_end(&mut flate2::read::GzDecoder::new(&body[..]), &mut out)
                     .map_err(|e| format!("torrents/info gzip: {e}"))?;
-                out
+                out.into()
             } else {
-                body.to_vec()
+                body[..].into()
             };
             serde_json::from_slice(&json).map_err(|e| format!("torrents/info body: {e}"))
         })
