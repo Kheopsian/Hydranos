@@ -359,8 +359,9 @@ pub struct Session {
     /// `false` announces only torrents still downloading.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lsd_announce_seeds: Option<bool>,
-    /// Keep finished torrents on the DHT. Absent means yes (the behaviour so
-    /// far); `false` follows only torrents still downloading.
+    /// Keep searching the DHT for finished torrents. Absent means yes (the
+    /// behaviour so far); `false` searches only for torrents still
+    /// downloading, and announces finished ones every 15 minutes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dht_follow_seeds: Option<bool>,
     #[serde(default)]

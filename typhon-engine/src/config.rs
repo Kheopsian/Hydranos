@@ -191,12 +191,14 @@ pub struct EngineConfig {
     /// progress.
     #[serde(default = "default_resume_fast_secs")]
     pub resume_fast_secs: u64,
-    /// Keep a `get_peers` stream running for torrents that have finished
+    /// Keep a `get_peers` search running for torrents that have finished
     /// downloading. On by default, as it has always been. Off, a finished
-    /// torrent is not tracked, and one already tracked stops when its lookup
-    /// next finds a peer (its entry is dropped then); only torrents still
-    /// downloading use the DHT. A torrent that needs pieces again is followed
-    /// again the next time it is started or resumed.
+    /// torrent does not search (one already searching stops when its lookup
+    /// next finds a peer) but is still announced, by one short lookup every
+    /// 15 minutes whose peers are not dialed; only torrents still downloading
+    /// search the DHT. A torrent that needs pieces again searches again the
+    /// next time it is started or resumed. Either way every lookup of a
+    /// public torrent announces the engine's port.
     #[serde(default = "default_true")]
     pub dht_follow_seeds: bool,
     /// Take part in BEP 11 peer exchange. On by default. Off, we do not

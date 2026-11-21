@@ -4,6 +4,15 @@
 //! spawn a task that streams peers via `get_peers()` and funnels them into
 //! the existing dial queue (`crate::tracker::enqueue_dial`).
 //!
+//! Each lookup carries the engine's announced port, so the nodes closest to
+//! the info hash are sent `announce_peer` and the swarm learns our address.
+//! Without a port `librqbit-dht` only searches, and nobody who relied on the
+//! DHT could find us, seeds included.
+//!
+//! A finished torrent whose seeds are not followed (`dht_follow_seeds =
+//! false`) drops the endless search but is still announced: one short lookup
+//! every `ANNOUNCE_INTERVAL`, its peers left to dial us.
+//!
 //! Private-tracker torrents (`TorrentMeta.private == true`) are skipped — BEP 27
 //! forbids DHT for those and many trackers ban clients that announce them.
 //!
@@ -15,12 +24,15 @@
 //! unbounded `FuturesUnordered`, so an orphaned task is not merely idle: it grows
 //! the heap for as long as the process lives.
 
+use std::ops::ControlFlow;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use dashmap::DashMap;
 use futures::StreamExt;
 use librqbit_dht::{Dht, DhtBuilder, Id20};
+use tokio::sync::Notify;
 use tokio::task::AbortHandle;
 use tracing::{info, warn};
 
@@ -124,14 +136,35 @@ async fn tunnel_bootstrap(device: &str) -> Vec<String> {
 /// which is what keeps 240k idle torrents from paying for a DHT they never use.
 pub struct DhtSession {
     dht: Dht,
-    /// Live `get_peers` tasks, keyed by info hash. One entry per tracked torrent.
-    tracked: DashMap<InfoHash, AbortHandle>,
+    /// Live tasks, keyed by info hash. One entry per tracked torrent.
+    tracked: DashMap<InfoHash, Tracked>,
     torrents_tracked: AtomicU64,
     peers_discovered: AtomicU64,
     peers_dialed: AtomicU64,
     /// `dht_follow_seeds`: keep `get_peers` running for finished torrents.
     /// Starts true, the behaviour so far; `session.rs` sets it from the config.
     follow_seeds: AtomicBool,
+    /// The port to announce, asked again for every lookup. Unset, or None
+    /// (the port is not known yet), a lookup only searches.
+    announce_port: OnceLock<PortSource>,
+}
+
+/// Where the port to announce comes from (`set_announce_port`).
+type PortSource = Box<dyn Fn() -> Option<u16> + Send + Sync>;
+
+/// How often a finished torrent whose seeds are not followed is announced:
+/// libtorrent's `dht_announce_interval`. Nodes keep a peer about 30 minutes.
+const ANNOUNCE_INTERVAL: Duration = Duration::from_secs(15 * 60);
+
+/// How long one announce-only lookup runs: the recursion reaches the nodes
+/// closest to the hash, and announces to them, well within it.
+const ANNOUNCE_WINDOW: Duration = Duration::from_secs(30);
+
+/// One tracked torrent: its task, and the bell `track_torrent` rings so a
+/// waiting task looks again at whether it should search.
+struct Tracked {
+    abort: AbortHandle,
+    wake: Arc<Notify>,
 }
 
 /// Whether a torrent has nothing left to download: seed mode, or no picker
@@ -143,9 +176,10 @@ fn is_finished(t: &TorrentState) -> bool {
             .is_none_or(|p| p.lock().unwrap_or_else(|e| e.into_inner()).is_complete())
 }
 
-/// Whether the DHT should follow this torrent: never a private one (BEP 27),
-/// and a finished one only when `follow_seeds` is on.
-pub fn tracks_in_dht(t: &TorrentState, follow_seeds: bool) -> bool {
+/// Whether the DHT should keep searching peers for this torrent: never a
+/// private one (BEP 27), and a finished one only when `follow_seeds` is on.
+/// A public torrent that does not search is still announced.
+pub fn searches_in_dht(t: &TorrentState, follow_seeds: bool) -> bool {
     t.meta.allows_peer_discovery() && (follow_seeds || !is_finished(t))
 }
 
@@ -179,6 +213,7 @@ impl DhtSession {
                     peers_discovered: AtomicU64::new(0),
                     peers_dialed: AtomicU64::new(0),
                     follow_seeds: AtomicBool::new(true),
+                    announce_port: OnceLock::new(),
                 }))
             }
             Err(e) => {
@@ -191,6 +226,20 @@ impl DhtSession {
     /// Set `dht_follow_seeds` (default true) for the torrents tracked from now on.
     pub fn set_follow_seeds(&self, follow: bool) {
         self.follow_seeds.store(follow, Ordering::Relaxed);
+    }
+
+    /// Where the port to announce comes from: the engine's announced port
+    /// (the external one behind NAT-PMP), None while it is not known. Set
+    /// once, before any torrent is tracked; asked again at every lookup.
+    pub fn set_announce_port(&self, port: impl Fn() -> Option<u16> + Send + Sync + 'static) {
+        let _ = self.announce_port.set(Box::new(port));
+    }
+
+    fn port_to_announce(&self) -> Option<u16> {
+        self.announce_port
+            .get()
+            .and_then(|port| port())
+            .filter(|p| *p != 0)
     }
 
     /// Handle to the node. Magnet resolution needs peers for an info hash that
@@ -222,72 +271,125 @@ impl DhtSession {
     }
 
     /// Register a torrent with the DHT. Skips `private` torrents (BEP 27).
-    /// Spawns a task that streams peers and enqueues them for dialing.
+    /// Spawns a task that streams peers, enqueues them for dialing, and
+    /// announces the torrent on every lookup.
     ///
     /// Idempotent: a torrent already tracked keeps its existing task rather
     /// than gaining a second one. `start_torrent` calls this on every resume,
-    /// and the boot loop calls it for every loaded torrent.
+    /// and the boot loop calls it for every loaded torrent. The existing task
+    /// is woken, so a finished torrent that needs pieces again searches now
+    /// rather than at its next announce.
     pub fn track_torrent(self: &Arc<Self>, torrent: Arc<TorrentState>) {
-        if !tracks_in_dht(&torrent, self.follow_seeds.load(Ordering::Relaxed)) {
+        if !torrent.meta.allows_peer_discovery() {
             return;
         }
         let ih = torrent.info_hash;
-        if self.tracked.contains_key(&ih) {
+        if let Some(entry) = self.tracked.get(&ih) {
+            entry.wake.notify_one();
             return;
         }
-        let stream = self.dht.get_peers(Id20::new(ih), None);
-        self.track_with(torrent, stream);
+        let dht = self.dht.clone();
+        self.track_with(torrent, move |port| dht.get_peers(Id20::new(ih), port));
     }
 
-    /// The body of `track_torrent`, over any stream of peers.
+    /// The body of `track_torrent`, over any lookup: `lookup(port)` opens a
+    /// stream of peers that announces `port` when it is Some.
     ///
-    /// When the stream stops being followed (the torrent finished while seeds
-    /// are not followed, was removed, or the stream ended) the entry leaves
-    /// `tracked` and `torrents_tracked` with it, so a torrent that needs peers
-    /// again (a recheck) is tracked afresh and the count stays true.
-    fn track_with<S>(self: &Arc<Self>, torrent: Arc<TorrentState>, stream: S)
+    /// The task searches while `searches_in_dht` says so. Once it does not
+    /// (finished, seeds not followed) it announces every `ANNOUNCE_INTERVAL`
+    /// instead, and searches again when woken for a torrent that needs pieces
+    /// again. When the task ends (the torrent was removed, or a search stream
+    /// ended) the entry leaves `tracked` and `torrents_tracked` with it, so a
+    /// later `track_torrent` tracks it afresh and the count stays true.
+    fn track_with<L, S>(self: &Arc<Self>, torrent: Arc<TorrentState>, mut lookup: L)
     where
+        L: FnMut(Option<u16>) -> S + Send + 'static,
         S: futures::Stream<Item = std::net::SocketAddr> + Send + 'static,
     {
         let ih = torrent.info_hash;
         let session = self.clone();
+        let wake = Arc::new(Notify::new());
+        let woken = wake.clone();
         let handle = tokio::spawn(async move {
-            let mut stream = Box::pin(stream);
-            while let Some(peer_addr) = stream.next().await {
-                if torrent.is_removed.load(Ordering::Relaxed) {
-                    break;
-                }
-                // Finished since it was tracked, and seeds are not followed.
-                if !tracks_in_dht(&torrent, session.follow_seeds.load(Ordering::Relaxed)) {
-                    break;
-                }
-                session.peers_discovered.fetch_add(1, Ordering::Relaxed);
-                if torrent.peers.contains_key(&peer_addr) {
+            while !torrent.is_removed.load(Ordering::Relaxed) {
+                if session.searches(&torrent) {
+                    let stream = lookup(session.port_to_announce());
+                    if session.search(&torrent, stream).await.is_break() {
+                        break;
+                    }
                     continue;
                 }
-                session.peers_dialed.fetch_add(1, Ordering::Relaxed);
-                crate::tracker::enqueue_dial(peer_addr, torrent.clone());
+                if let Some(port) = session.port_to_announce() {
+                    announce_once(lookup(Some(port))).await;
+                }
+                tokio::select! {
+                    _ = tokio::time::sleep(ANNOUNCE_INTERVAL) => {}
+                    _ = woken.notified() => {}
+                }
             }
             session.untrack_torrent(&ih);
         });
         // Race: two concurrent track_torrent calls for the same hash both pass
-        // the contains_key check. The loser's task is aborted so we never leak
-        // one.
-        if let Some(previous) = self.tracked.insert(ih, handle.abort_handle()) {
-            previous.abort();
+        // the `tracked.get` check. The loser's task is aborted so we never
+        // leak one.
+        let entry = Tracked {
+            abort: handle.abort_handle(),
+            wake,
+        };
+        if let Some(previous) = self.tracked.insert(ih, entry) {
+            previous.abort.abort();
         } else {
             self.torrents_tracked.fetch_add(1, Ordering::Relaxed);
         }
     }
 
-    /// Cancel a torrent's `get_peers` task. Safe to call for a torrent that was
+    fn searches(&self, torrent: &TorrentState) -> bool {
+        searches_in_dht(torrent, self.follow_seeds.load(Ordering::Relaxed))
+    }
+
+    /// Dial what a search stream finds. Continue: the torrent stopped
+    /// searching (finished, seeds not followed). Break: it was removed or the
+    /// stream ended, and the task is over.
+    async fn search<S>(&self, torrent: &Arc<TorrentState>, stream: S) -> ControlFlow<()>
+    where
+        S: futures::Stream<Item = std::net::SocketAddr>,
+    {
+        let mut stream = std::pin::pin!(stream);
+        while let Some(peer_addr) = stream.next().await {
+            if torrent.is_removed.load(Ordering::Relaxed) {
+                return ControlFlow::Break(());
+            }
+            // Finished since it was tracked, and seeds are not followed.
+            if !self.searches(torrent) {
+                return ControlFlow::Continue(());
+            }
+            self.peers_discovered.fetch_add(1, Ordering::Relaxed);
+            if torrent.peers.contains_key(&peer_addr) {
+                continue;
+            }
+            self.peers_dialed.fetch_add(1, Ordering::Relaxed);
+            crate::tracker::enqueue_dial(peer_addr, torrent.clone());
+        }
+        ControlFlow::Break(())
+    }
+
+    /// Cancel a torrent's DHT task. Safe to call for a torrent that was
     /// never tracked (private, or added before the DHT bootstrapped).
     pub fn untrack_torrent(&self, info_hash: &InfoHash) {
-        if let Some((_, handle)) = self.tracked.remove(info_hash) {
-            handle.abort();
+        if let Some((_, entry)) = self.tracked.remove(info_hash) {
+            entry.abort.abort();
             self.torrents_tracked.fetch_sub(1, Ordering::Relaxed);
         }
     }
+}
+
+/// Run one lookup long enough to announce, then drop it. What it finds is
+/// left alone: a seed that is not followed waits for peers to dial it.
+async fn announce_once<S>(stream: S)
+where
+    S: futures::Stream<Item = std::net::SocketAddr>,
+{
+    let _ = tokio::time::timeout(ANNOUNCE_WINDOW, stream.for_each(|_| async {})).await;
 }
 
 #[cfg(test)]
@@ -382,10 +484,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    /// `dht_follow_seeds = false` keeps finished torrents off the DHT; a
-    /// download is followed either way, and a private torrent never is.
+    /// `dht_follow_seeds = false` stops the search for finished torrents; a
+    /// download searches either way, and a private torrent never does.
     #[test]
-    fn finished_torrents_follow_the_dht_only_when_the_option_says_so() {
+    fn finished_torrents_search_the_dht_only_when_the_option_says_so() {
         let (mgr, root) = manager("follow");
         let add = |name: &str, private: bool, seed: bool| {
             let (ih, _) = mgr
@@ -399,21 +501,24 @@ mod tests {
         assert!(private.meta.private);
         for follow in [true, false] {
             assert!(
-                tracks_in_dht(&down, follow),
-                "a download is followed (follow={follow})"
+                searches_in_dht(&down, follow),
+                "a download searches (follow={follow})"
             );
             assert!(
-                !tracks_in_dht(&private, follow),
-                "a private torrent never is (follow={follow})"
+                !searches_in_dht(&private, follow),
+                "a private torrent never does (follow={follow})"
             );
         }
-        assert!(tracks_in_dht(&seed, true), "default: a seed is followed");
-        assert!(!tracks_in_dht(&seed, false), "option off: a seed is not");
+        assert!(searches_in_dht(&seed, true), "default: a seed searches");
+        assert!(
+            !searches_in_dht(&seed, false),
+            "option off: a seed does not"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
     /// A node with no bootstrap peers: enough to own a `tracked` table.
-    async fn offline_session() -> Arc<DhtSession> {
+    async fn offline_session(follow_seeds: bool, port: Option<u16>) -> Arc<DhtSession> {
         let config = librqbit_dht::DhtConfig {
             bootstrap_addrs: Some(Vec::new()),
             ..Default::default()
@@ -421,76 +526,213 @@ mod tests {
         let dht = DhtBuilder::with_config(config)
             .await
             .expect("offline dht node");
-        Arc::new(DhtSession {
+        let session = Arc::new(DhtSession {
             dht,
             tracked: DashMap::new(),
             torrents_tracked: AtomicU64::new(0),
             peers_discovered: AtomicU64::new(0),
             peers_dialed: AtomicU64::new(0),
-            follow_seeds: AtomicBool::new(false),
-        })
+            follow_seeds: AtomicBool::new(follow_seeds),
+            announce_port: OnceLock::new(),
+        });
+        session.set_announce_port(move || port);
+        session
     }
 
-    /// `dht_follow_seeds = false`: when the lookup stops because the torrent
-    /// finished, its entry leaves the table and the count, so a torrent that
-    /// needs peers again is tracked afresh and `torrents_tracked` stays true.
+    type SocketAddr = std::net::SocketAddr;
+    /// One lookup the task opened: the port it announces, and the sender
+    /// behind its stream of peers (dropped, the stream ends).
+    type Lookup = (Option<u16>, tokio::sync::mpsc::UnboundedSender<SocketAddr>);
+
+    /// A lookup that reports every stream it opens instead of asking the DHT.
+    fn fake_lookups() -> (
+        impl Fn(Option<u16>) -> futures::stream::BoxStream<'static, SocketAddr> + Send + 'static,
+        tokio::sync::mpsc::UnboundedReceiver<Lookup>,
+    ) {
+        let (opened_tx, opened_rx) = tokio::sync::mpsc::unbounded_channel();
+        let lookup = move |port| {
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let _ = opened_tx.send((port, tx));
+            futures::stream::poll_fn(move |cx| rx.poll_recv(cx)).boxed()
+        };
+        (lookup, opened_rx)
+    }
+
+    async fn next_lookup(opened: &mut tokio::sync::mpsc::UnboundedReceiver<Lookup>) -> Lookup {
+        tokio::time::timeout(Duration::from_secs(5), opened.recv())
+            .await
+            .expect("no lookup was opened")
+            .expect("the task is gone")
+    }
+
+    const PORT: u16 = 51413;
+
+    /// ⭐ The lookup of a public torrent announces the engine's port, so the
+    /// DHT nodes closest to the hash learn where to find us.
     #[tokio::test]
-    async fn a_lookup_stopped_for_a_finished_torrent_is_forgotten() {
-        let (mgr, root) = manager("forget");
+    async fn a_public_torrent_is_announced_with_the_engine_port() {
+        let (mgr, root) = manager("announce");
         let (ih, _) = mgr
-            .add_torrent_bytes(&torrent_bytes("fin", false), "/tmp", false, false)
+            .add_torrent_bytes(&torrent_bytes("down", false), "/tmp", false, false)
             .unwrap();
-        let torrent = mgr.get(&ih).unwrap();
-        let session = offline_session().await;
-        let peer: std::net::SocketAddr = "192.168.99.7:6881".parse().unwrap();
+        let session = offline_session(true, Some(PORT)).await;
+        let (lookup, mut opened) = fake_lookups();
+        session.track_with(mgr.get(&ih).unwrap(), lookup);
+        assert_eq!(next_lookup(&mut opened).await.0, Some(PORT));
+        let _ = std::fs::remove_dir_all(root);
+    }
 
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        session.track_with(torrent.clone(), tokio_stream_from(rx));
+    /// A private torrent never reaches the DHT, announce or search (BEP 27).
+    #[tokio::test]
+    async fn a_private_torrent_is_never_announced() {
+        let (mgr, root) = manager("private");
+        let (ih, _) = mgr
+            .add_torrent_bytes(&torrent_bytes("priv", true), "/tmp", false, false)
+            .unwrap();
+        let session = offline_session(true, Some(PORT)).await;
+        session.track_torrent(mgr.get(&ih).unwrap());
+        assert_eq!(session.tracked_count(), 0);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// ⭐ `dht_follow_seeds = false`: a seed does not search, but is announced
+    /// once per `ANNOUNCE_INTERVAL` by a lookup that lasts `ANNOUNCE_WINDOW`
+    /// and dials nothing it finds.
+    #[tokio::test(start_paused = true)]
+    async fn a_seed_not_followed_is_announced_every_interval_and_dials_nothing() {
+        let (mgr, root) = manager("seed-announce");
+        let (ih, _) = mgr
+            .add_torrent_bytes(&torrent_bytes("seed", false), "/tmp", false, true)
+            .unwrap();
+        let session = offline_session(false, Some(PORT)).await;
+        let (lookup, mut opened) = fake_lookups();
+        session.track_with(mgr.get(&ih).unwrap(), lookup);
+
+        let started = tokio::time::Instant::now();
+        let (port, peers) = next_lookup(&mut opened).await;
+        assert_eq!(port, Some(PORT));
+        peers.send("192.168.99.7:6881".parse().unwrap()).unwrap();
+        tokio::time::sleep(ANNOUNCE_WINDOW + Duration::from_secs(1)).await;
+        assert!(peers.is_closed(), "the announce lookup outlived its window");
+        assert_eq!(
+            (session.peers_discovered(), session.peers_dialed()),
+            (0, 0),
+            "an announce-only lookup dialed what it found"
+        );
         assert_eq!(
             (session.tracked_count(), session.torrents_tracked()),
-            (1, 1)
+            (1, 1),
+            "the seed left the DHT"
         );
 
-        // The torrent finishes; the next peer found stops the lookup.
-        torrent
-            .picker
-            .get()
-            .expect("picker")
-            .lock()
-            .unwrap()
-            .set_have(0);
-        assert!(!tracks_in_dht(&torrent, false));
-        tx.send(peer).unwrap();
-        for _ in 0..100 {
-            if session.tracked_count() == 0 {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-        assert_eq!(
-            session.tracked_count(),
-            0,
-            "the stopped lookup left its entry behind"
-        );
-        assert_eq!(
-            session.torrents_tracked(),
-            0,
-            "torrents_tracked counts a lookup that is gone"
-        );
+        let (port, _peers) = next_lookup_after(&mut opened, ANNOUNCE_INTERVAL).await;
+        assert_eq!(port, Some(PORT));
+        assert!(started.elapsed() >= ANNOUNCE_INTERVAL);
+        let _ = std::fs::remove_dir_all(root);
+    }
 
-        // An incomplete torrent can be followed again (the same hash, new task).
-        let (_tx2, rx2) = tokio::sync::mpsc::unbounded_channel();
-        session.track_with(torrent, tokio_stream_from(rx2));
-        assert_eq!(
-            (session.tracked_count(), session.torrents_tracked()),
-            (1, 1)
+    /// No port known yet (a forwarded port still pending): a seed that is not
+    /// followed opens no lookup at all, rather than one that announces
+    /// nothing.
+    #[tokio::test(start_paused = true)]
+    async fn a_seed_not_followed_is_not_looked_up_while_the_port_is_unknown() {
+        let (mgr, root) = manager("seed-noport");
+        let (ih, _) = mgr
+            .add_torrent_bytes(&torrent_bytes("seed", false), "/tmp", false, true)
+            .unwrap();
+        let session = offline_session(false, None).await;
+        let (lookup, mut opened) = fake_lookups();
+        session.track_with(mgr.get(&ih).unwrap(), lookup);
+        let none = tokio::time::timeout(ANNOUNCE_INTERVAL * 2, opened.recv()).await;
+        assert!(
+            none.is_err(),
+            "a lookup was opened with no port to announce"
         );
         let _ = std::fs::remove_dir_all(root);
     }
 
-    fn tokio_stream_from(
-        mut rx: tokio::sync::mpsc::UnboundedReceiver<std::net::SocketAddr>,
-    ) -> impl futures::Stream<Item = std::net::SocketAddr> + Send + 'static {
-        futures::stream::poll_fn(move |cx| rx.poll_recv(cx))
+    /// `dht_follow_seeds = false`: a download that finishes drops its search
+    /// at the next peer found and is announced instead, still tracked. Once it
+    /// needs pieces again, `track_torrent` (a start) wakes it into a search at
+    /// once rather than at its next announce.
+    #[tokio::test(start_paused = true)]
+    async fn a_finished_download_stops_searching_and_searches_again_when_started() {
+        let (mgr, root) = manager("finish");
+        let (ih, _) = mgr
+            .add_torrent_bytes(&torrent_bytes("fin", false), "/tmp", false, false)
+            .unwrap();
+        let torrent = mgr.get(&ih).unwrap();
+        let session = offline_session(false, Some(PORT)).await;
+        let (lookup, mut opened) = fake_lookups();
+        session.track_with(torrent.clone(), lookup);
+        let (_, search) = next_lookup(&mut opened).await;
+
+        let picker = || torrent.picker.get().expect("picker").lock().unwrap();
+        picker().set_have(0);
+        assert!(!searches_in_dht(&torrent, false));
+        search.send("192.168.99.7:6881".parse().unwrap()).unwrap();
+        let (port, announce) = next_lookup(&mut opened).await;
+        assert_eq!(port, Some(PORT), "the finished torrent is not announced");
+        assert!(search.is_closed(), "the search outlived the download");
+        assert_eq!(
+            (session.tracked_count(), session.torrents_tracked()),
+            (1, 1)
+        );
+        tokio::time::sleep(ANNOUNCE_WINDOW + Duration::from_secs(1)).await;
+        assert!(announce.is_closed());
+
+        // Needs a piece again; started, it searches now.
+        picker().clear_have(0);
+        let woken = tokio::time::Instant::now();
+        session.track_torrent(torrent.clone());
+        let (port, search) = next_lookup(&mut opened).await;
+        assert_eq!(port, Some(PORT));
+        assert!(
+            woken.elapsed() < ANNOUNCE_INTERVAL,
+            "waited for the next announce"
+        );
+        tokio::time::sleep(ANNOUNCE_WINDOW * 2).await;
+        assert!(
+            !search.is_closed(),
+            "a search is not an announce: it stays open"
+        );
+        assert_eq!(session.torrents_tracked(), 1);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A search stream that ends takes its entry with it, so a later
+    /// `track_torrent` tracks the torrent afresh and the count stays true.
+    #[tokio::test]
+    async fn a_search_that_ends_is_forgotten() {
+        let (mgr, root) = manager("forget");
+        let (ih, _) = mgr
+            .add_torrent_bytes(&torrent_bytes("fin", false), "/tmp", false, false)
+            .unwrap();
+        let session = offline_session(true, Some(PORT)).await;
+        let (lookup, mut opened) = fake_lookups();
+        session.track_with(mgr.get(&ih).unwrap(), lookup);
+        drop(next_lookup(&mut opened).await);
+        for _ in 0..100 {
+            if session.tracked_count() == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            (session.tracked_count(), session.torrents_tracked()),
+            (0, 0),
+            "the ended search left its entry behind"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    async fn next_lookup_after(
+        opened: &mut tokio::sync::mpsc::UnboundedReceiver<Lookup>,
+        wait: Duration,
+    ) -> Lookup {
+        tokio::time::timeout(wait * 2, opened.recv())
+            .await
+            .expect("no lookup was opened")
+            .expect("the task is gone")
     }
 }
