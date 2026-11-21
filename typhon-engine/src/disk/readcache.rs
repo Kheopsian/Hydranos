@@ -46,6 +46,19 @@ pub static BYPASS: AtomicU64 = AtomicU64::new(0);
 /// Requests that waited on a read another request had started for the same
 /// slice instead of reading it again.
 pub static JOINED: AtomicU64 = AtomicU64::new(0);
+/// Slices read ahead of the requests for them (`DiskManager::prefetch_next`).
+pub static PREFETCH_ISSUED: AtomicU64 = AtomicU64::new(0);
+/// Read-ahead slices a request then used: found in the cache, or joined
+/// while still being read. Counted once per slice.
+pub static PREFETCH_HIT: AtomicU64 = AtomicU64::new(0);
+/// Read-ahead slices that left the cache, or were never kept, without a
+/// request using them: a disk read for nothing.
+pub static PREFETCH_WASTED: AtomicU64 = AtomicU64::new(0);
+
+/// Read-aheads one engine may have under way at once. Each holds a
+/// blocking-pool thread and a slice of memory while it reads, and a spinning
+/// disk does them one seek at a time: past a few, more only queue.
+pub const PREFETCH_MAX: usize = 8;
 
 #[derive(Clone, Copy, Hash, Eq, PartialEq, Debug)]
 pub(super) struct Key {
@@ -69,9 +82,40 @@ pub(super) fn keys(info_hash: [u8; 20], first: u64, end: u64) -> impl Iterator<I
         .map(move |start| Key { info_hash, start })
 }
 
+/// Where one peer's requests are going: whether each starts where the one
+/// before it ended, in the same piece. Kept by the peer's session.
+#[derive(Default, Debug)]
+pub struct Walk {
+    /// Where the next request starts if the peer keeps walking.
+    next: Option<(u32, u32)>,
+    /// The slice last read ahead for this peer, so the eight requests of one
+    /// slice ask for the next one once.
+    pub(super) asked: Option<u64>,
+}
+
+impl Walk {
+    /// Note a request, and answer whether it follows the last one.
+    pub fn step(&mut self, piece: u32, offset: u32, length: u32) -> bool {
+        let in_order = self.next == Some((piece, offset));
+        self.next = offset.checked_add(length).map(|end| (piece, end));
+        in_order
+    }
+}
+
 struct Entry {
     data: Bytes,
     at: Instant,
+    /// Read ahead and not yet asked for. Cleared by the first request that
+    /// uses it; still set when the slice goes, it was read for nothing.
+    prefetched: bool,
+}
+
+impl Entry {
+    fn gone(&self) {
+        if self.prefetched {
+            PREFETCH_WASTED.fetch_add(1, Ordering::Relaxed);
+        }
+    }
 }
 
 struct Shard {
@@ -83,6 +127,7 @@ impl Shard {
     fn pop(&mut self, key: &Key) {
         if let Some(e) = self.lru.pop(key) {
             self.bytes -= e.data.len() as u64;
+            e.gone();
         }
     }
 
@@ -96,6 +141,7 @@ impl Shard {
             }
             if let Some((_, e)) = self.lru.pop_lru() {
                 self.bytes -= e.data.len() as u64;
+                e.gone();
             }
         }
     }
@@ -197,9 +243,14 @@ impl ReadCache {
     /// one is dropped and counted stale.
     pub(super) fn get(&self, key: &Key) -> Option<Bytes> {
         let mut s = self.shard(key).lock();
-        let fresh = match s.lru.get(key) {
+        let fresh = match s.lru.get_mut(key) {
             None => return None,
-            Some(e) if e.at.elapsed() < TTL => Some(e.data.clone()),
+            Some(e) if e.at.elapsed() < TTL => {
+                if std::mem::take(&mut e.prefetched) {
+                    PREFETCH_HIT.fetch_add(1, Ordering::Relaxed);
+                }
+                Some(e.data.clone())
+            }
             Some(_) => None,
         };
         match fresh {
@@ -222,14 +273,20 @@ impl ReadCache {
     /// takes after the write's bump: either this lands first and the write
     /// pops it, or the write came first and this read may predate it.
     pub(super) fn put(&self, key: Key, data: Bytes, seen: u64) {
+        self.keep(key, data, seen, false);
+    }
+
+    /// `put`, for a slice read ahead (`prefetched`) or asked for. Answers
+    /// whether it was kept.
+    pub(super) fn keep(&self, key: Key, data: Bytes, seen: u64, prefetched: bool) -> bool {
         let cap = self.shard_cap();
         let len = data.len() as u64;
         if len > cap {
-            return;
+            return false;
         }
         let mut s = self.shard(&key).lock();
         if self.generation(&key) != seen {
-            return;
+            return false;
         }
         s.pop(&key);
         s.lru.put(
@@ -237,10 +294,52 @@ impl ReadCache {
             Entry {
                 data,
                 at: Instant::now(),
+                prefetched,
             },
         );
         s.bytes += len;
         s.trim(cap);
+        true
+    }
+
+    /// A request got this slice from a read it joined rather than from the
+    /// cache: if that read was a read-ahead, it was used.
+    pub(super) fn used(&self, key: &Key) {
+        let mut s = self.shard(key).lock();
+        if let Some(e) = s.lru.peek_mut(key) {
+            if std::mem::take(&mut e.prefetched) {
+                PREFETCH_HIT.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// A new flight for a read-ahead of this slice, listed so requests join
+    /// it; None when the slice is held fresh or already being read. Looked at
+    /// without counting a hit: no request asked.
+    pub(super) fn begin_prefetch(&self, key: Key) -> Option<Arc<Flight>> {
+        if self
+            .shard(&key)
+            .lock()
+            .lru
+            .peek(&key)
+            .is_some_and(|e| e.at.elapsed() < TTL)
+        {
+            return None;
+        }
+        match self.flights.lock().entry(key) {
+            std::collections::hash_map::Entry::Occupied(_) => None,
+            std::collections::hash_map::Entry::Vacant(v) => Some(v.insert(Arc::default()).clone()),
+        }
+    }
+
+    /// The hold on a flight `begin_prefetch` listed, for the read-ahead
+    /// that runs it.
+    pub(super) fn adopt(&self, key: Key, flight: Arc<Flight>) -> FlightGuard<'_> {
+        FlightGuard {
+            cache: self,
+            key,
+            flight,
+        }
     }
 
     /// Mark the slices from `first` to `end` as written over: a read already
@@ -277,6 +376,16 @@ impl ReadCache {
     #[cfg(test)]
     pub(super) fn holds(&self, key: &Key) -> Option<Bytes> {
         self.shard(key).lock().lru.peek(key).map(|e| e.data.clone())
+    }
+
+    /// Whether the slice is held, read ahead and not yet used.
+    #[cfg(test)]
+    pub(super) fn holds_unused_prefetch(&self, key: &Key) -> bool {
+        self.shard(key)
+            .lock()
+            .lru
+            .peek(key)
+            .is_some_and(|e| e.prefetched)
     }
 
     /// Whether the slice is held and nothing else refers to its memory.
@@ -371,6 +480,45 @@ mod tests {
         c.bump([1; 20], 0, SLICE);
         c.put(key(1, 0), slice_of(1), seen);
         assert!(c.get(&key(1, 0)).is_none());
+    }
+
+    /// A slice read ahead is used once: the first request through counts the
+    /// hit, and it is no longer waste when it goes.
+    #[test]
+    fn a_read_ahead_slice_is_used_by_its_first_request() {
+        let c = ReadCache::new(4 * SLICE, 1);
+        assert!(c.keep(key(9, 0), slice_of(1), 0, true));
+        assert!(c.holds_unused_prefetch(&key(9, 0)));
+        let hits = PREFETCH_HIT.load(Ordering::Relaxed);
+        assert!(c.get(&key(9, 0)).is_some());
+        assert!(PREFETCH_HIT.load(Ordering::Relaxed) > hits);
+        assert!(!c.holds_unused_prefetch(&key(9, 0)));
+        assert!(c.get(&key(9, 0)).is_some(), "still held for the others");
+    }
+
+    /// A slice read ahead and pushed out unused is counted as waste.
+    #[test]
+    fn a_read_ahead_slice_pushed_out_unused_is_waste() {
+        let c = ReadCache::new(4 * SLICE, 1);
+        assert!(c.keep(key(8, 0), slice_of(1), 0, true));
+        let wasted = PREFETCH_WASTED.load(Ordering::Relaxed);
+        c.set_budget(0);
+        assert!(PREFETCH_WASTED.load(Ordering::Relaxed) > wasted);
+    }
+
+    /// A read-ahead starts only for a slice neither held nor being read, and
+    /// requests for that slice then join it.
+    #[test]
+    fn a_read_ahead_starts_only_for_a_slice_neither_held_nor_in_flight() {
+        let c = ReadCache::new(4 * SLICE, 1);
+        c.put(key(7, 0), slice_of(1), 0);
+        assert!(c.begin_prefetch(key(7, 0)).is_none(), "held");
+        let asked = c.flight(key(7, 1));
+        assert!(c.begin_prefetch(key(7, 1)).is_none(), "being read");
+        drop(asked);
+        let ahead = c.begin_prefetch(key(7, 2)).expect("cold");
+        assert!(c.begin_prefetch(key(7, 2)).is_none(), "already ahead");
+        assert!(Arc::ptr_eq(&c.flight(key(7, 2)).flight, &ahead), "joined");
     }
 
     /// Several shards share the budget, and each still keeps at least a slice.

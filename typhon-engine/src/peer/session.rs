@@ -230,7 +230,8 @@ fn may_serve(
 
 /// Read one block and put it on the wire, by sendfile when it can and the
 /// buffered path otherwise. Answers false when the connection is broken and
-/// the session must end.
+/// the session must end. A buffered read that follows the peer's last request
+/// also reads the next slice ahead (`DiskManager::prefetch_next`).
 #[allow(clippy::too_many_arguments)]
 async fn serve_block(
     framed: &mut Framed<CryptoStream, BtCodec>,
@@ -240,10 +241,12 @@ async fn serve_block(
     addr: SocketAddr,
     serve_zerocopy: bool,
     fast_ext: bool,
+    walk: &mut crate::disk::readcache::Walk,
     index: u32,
     begin: u32,
     length: u32,
 ) -> bool {
+    let in_order = walk.step(index, begin, length);
     // Zero-copy sendfile fast-path: plaintext TCP peer whose
     // block lives in a single file. Splices from the page cache
     // to the socket, skipping the userspace copies the buffered
@@ -288,6 +291,9 @@ async fn serve_block(
     }
     match disk.read_block(torrent, index, begin, length).await {
         Ok(data) => {
+            if in_order {
+                disk.prefetch_next(walk, torrent, index, begin);
+            }
             let len = data.len() as u64;
             if framed
                 .send(Message::Piece { index, begin, data })
@@ -427,6 +433,8 @@ pub async fn run(
     // keeps blocks in the ARC (compressed, scan-resistant, prefetch).
     let serve_zerocopy =
         !is_encrypted && !crate::disk::path_is_zfs(torrent.save_path.read().as_path());
+    // Whether this peer's requests walk a piece in order, for read-ahead.
+    let mut walk = crate::disk::readcache::Walk::default();
     let mut local_choking_gen: u32 = stats.choking_gen.load(Ordering::Relaxed);
 
     // Both timers are built once and reset in place. Building them inside the
@@ -559,6 +567,7 @@ pub async fn run(
                             addr,
                             serve_zerocopy,
                             fast_ext,
+                            &mut walk,
                             index,
                             begin,
                             length,
@@ -844,7 +853,7 @@ pub async fn run(
                                 };
                                 match admit {
                                     Admit::Now => {
-                                        if !serve_block(&mut framed, &torrent, &disk, &stats, addr, serve_zerocopy, fast_ext, index, begin, length).await {
+                                        if !serve_block(&mut framed, &torrent, &disk, &stats, addr, serve_zerocopy, fast_ext, &mut walk, index, begin, length).await {
                                             break;
                                         }
                                     }
