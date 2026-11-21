@@ -1533,6 +1533,31 @@ impl TorrentManager {
             t.fold_seed_time(crate::torrent::meta::now_secs());
             return Ok(());
         }
+        // A check asked and not over owns the verdict, whatever the status
+        // says. A torrent held stopped when its check was asked (an add
+        // waiting for the proof of files it shares, `pathclaim`) kept
+        // `Stopped` under the queued check, and this start, finding it
+        // neither `Checking` nor complete, made it a download: it fetched
+        // everything while the check waited for its disk, over pieces that
+        // were on disk and the proof had already vouched for. The pause is
+        // lifted above; what the torrent becomes is the verdict's to say
+        // (`run_check` reads the flag), and a stop in the meantime calls the
+        // check off (`cancel_check`) and stays stopped.
+        if t.rechecking.load(Ordering::SeqCst) && !t.files_absent.load(Ordering::Relaxed) {
+            {
+                // Under the lock a verdict is published under: a check that
+                // is still waiting has published nothing, so `Checking` is
+                // replaced by it; one called off since (`rechecking` let go
+                // under this lock) must not be left showing a check.
+                let _publish = t.check_publish();
+                if t.rechecking.load(Ordering::SeqCst) && t.waiting_for_check() {
+                    t.status
+                        .store(TorrentStatus::Checking as u8, Ordering::Relaxed);
+                }
+            }
+            t.fold_seed_time(crate::torrent::meta::now_secs());
+            return Ok(());
+        }
         // Parked because its files were absent (an unmounted disk): a start
         // looks again, and goes on as a plain start if they are all back. At
         // most `volume::PROBE_TIMEOUT` on a disk that does not answer.
@@ -6375,6 +6400,148 @@ mod lifecycle_tests {
         assert_eq!(
             t.status.load(Ordering::Relaxed),
             TorrentStatus::Seeding as u8
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The torrent of `whole_two_piece_torrent`, left a download one piece
+    /// short, then its file whole again: what a check asked now has to find,
+    /// and until it has the torrent is an incomplete one a start would fetch.
+    async fn incomplete_before_its_check(
+        tag: &str,
+    ) -> (
+        Arc<TorrentManager>,
+        std::path::PathBuf,
+        InfoHash,
+        Arc<TorrentState>,
+    ) {
+        let (mgr, root, ih, t) = whole_two_piece_torrent(tag);
+        wait_recheck_end(&t).await;
+        let file = root.join("data").join("whole");
+        let whole = std::fs::read(&file).unwrap();
+        std::fs::write(&file, &whole[..16384]).unwrap();
+        mgr.recheck(&ih).expect("recheck starts");
+        wait_recheck_end(&t).await;
+        assert_eq!(num_have(&t), 1);
+        assert_eq!(
+            t.status.load(Ordering::Relaxed),
+            TorrentStatus::Downloading as u8,
+            "an incomplete download"
+        );
+        std::fs::write(&file, &whole).unwrap();
+        (mgr, root, ih, t)
+    }
+
+    /// ⭐ A torrent held stopped while it was proven, its check asked behind a
+    /// busy disk, then started (what `pathclaim` does at the end of a proof):
+    /// the check stayed `Stopped` under the queue and the start made it a
+    /// download, which fetched everything while the check waited, over data
+    /// that was on disk. It stays under its check until the verdict, then is
+    /// what the verdict says, having downloaded nothing.
+    #[tokio::test]
+    async fn a_torrent_started_under_a_queued_check_does_not_download_before_the_verdict() {
+        let (mgr, root, ih, t) = incomplete_before_its_check("startqueued").await;
+        mgr.stop_torrent(&ih).unwrap();
+        let key = torrent_disk_key(&t);
+        let disk = disk_sem(&key)
+            .acquire_many_owned(disk_count(&key) as u32)
+            .await
+            .unwrap();
+        mgr.recheck(&ih).expect("recheck starts");
+        assert!(t.rechecking.load(Ordering::SeqCst), "queued");
+        assert!(t.is_paused.load(Ordering::Relaxed), "held stopped");
+
+        mgr.start_torrent(&ih).unwrap();
+        for _ in 0..3 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            assert!(t.rechecking.load(Ordering::SeqCst), "still queued");
+            assert!(!t.is_paused.load(Ordering::Relaxed), "the pause is lifted");
+            assert_eq!(
+                t.status.load(Ordering::Relaxed),
+                TorrentStatus::Checking as u8,
+                "it downloads nothing while its check waits"
+            );
+            mgr.start_torrent(&ih).unwrap();
+        }
+        assert_eq!(t.total_downloaded.load(Ordering::Relaxed), 0);
+        drop(disk);
+        wait_recheck_end(&t).await;
+        assert_eq!(num_have(&t), 2, "the check found what was on disk");
+        assert_eq!(
+            t.status.load(Ordering::Relaxed),
+            TorrentStatus::Seeding as u8
+        );
+        assert_eq!(t.total_downloaded.load(Ordering::Relaxed), 0);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The same torrent started all along, its check queued: a start (a slot
+    /// freed, a resume) leaves it under the check, and a stop then a start
+    /// of the queue managers' own (not the operator's) does not make it a
+    /// download either.
+    #[tokio::test]
+    async fn a_running_torrent_with_a_queued_check_does_not_download_before_the_verdict() {
+        let (mgr, root, ih, t) = incomplete_before_its_check("runqueued").await;
+        let key = torrent_disk_key(&t);
+        let disk = disk_sem(&key)
+            .acquire_many_owned(disk_count(&key) as u32)
+            .await
+            .unwrap();
+        mgr.recheck(&ih).expect("recheck starts");
+        assert_eq!(
+            t.status.load(Ordering::Relaxed),
+            TorrentStatus::Checking as u8
+        );
+        mgr.start_torrent(&ih).unwrap();
+        assert_eq!(
+            t.status.load(Ordering::Relaxed),
+            TorrentStatus::Checking as u8,
+            "a start"
+        );
+        mgr.stop_torrent(&ih).unwrap();
+        mgr.start_torrent(&ih).unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        assert_eq!(
+            t.status.load(Ordering::Relaxed),
+            TorrentStatus::Checking as u8,
+            "a stop and a start"
+        );
+        assert_eq!(t.total_downloaded.load(Ordering::Relaxed), 0);
+        drop(disk);
+        wait_recheck_end(&t).await;
+        assert_eq!(
+            t.status.load(Ordering::Relaxed),
+            TorrentStatus::Seeding as u8
+        );
+        assert_eq!(t.total_downloaded.load(Ordering::Relaxed), 0);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A torrent the operator stopped while its check waited stays stopped
+    /// after the check is called off, and a start with no check owed any more
+    /// is a plain start: the guard above does not hold a stopped torrent to
+    /// a check that is gone.
+    #[tokio::test]
+    async fn a_stop_the_operator_asks_leaves_no_check_to_hold_a_start() {
+        let (mgr, root, ih, t) = incomplete_before_its_check("userstop").await;
+        let key = torrent_disk_key(&t);
+        let disk = disk_sem(&key)
+            .acquire_many_owned(disk_count(&key) as u32)
+            .await
+            .unwrap();
+        mgr.recheck(&ih).expect("recheck starts");
+        mgr.stop_torrent_by_user(&ih).unwrap();
+        assert!(!t.rechecking.load(Ordering::SeqCst));
+        assert_eq!(
+            t.status.load(Ordering::Relaxed),
+            TorrentStatus::Stopped as u8
+        );
+        drop(disk);
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        assert_eq!(
+            t.status.load(Ordering::Relaxed),
+            TorrentStatus::Stopped as u8,
+            "the called-off check did not start it"
         );
         std::fs::remove_dir_all(&root).ok();
     }

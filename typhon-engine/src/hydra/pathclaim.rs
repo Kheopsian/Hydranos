@@ -3946,6 +3946,95 @@ mod tests {
         );
     }
 
+    /// Every turn of the disk under `dir`, held: a check asked meanwhile
+    /// waits in the queue until they are dropped.
+    async fn hold_disk(dir: &Path) -> Vec<tokio::sync::OwnedSemaphorePermit> {
+        let key = typhon_engine::torrent::disk_key(dir);
+        let mut turns = Vec::new();
+        for _ in 0..typhon_engine::torrent::disk_count(&key) {
+            turns.push(typhon_engine::torrent::disk_slot(&key).await);
+        }
+        turns
+    }
+
+    /// While the verdict of a check is awaited -- queued behind a busy disk --
+    /// the torrent downloads nothing: it is not a download, asks for no
+    /// piece, and has fetched no byte. Then, the disk free, it is a seed.
+    async fn assert_nothing_downloaded_until_verdict(
+        t: &Arc<TorrentState>,
+        turns: Vec<tokio::sync::OwnedSemaphorePermit>,
+    ) {
+        use std::sync::atomic::Ordering::SeqCst;
+        use typhon_engine::torrent::meta::TorrentStatus;
+        for _ in 0..4 {
+            assert!(t.rechecking.load(SeqCst), "the check is queued");
+            assert!(!t.is_paused.load(SeqCst), "asked to run, not held");
+            assert_ne!(
+                status_of(t),
+                TorrentStatus::Downloading as u8,
+                "it downloads while its check waits"
+            );
+            assert_eq!(status_of(t), TorrentStatus::Checking as u8);
+            assert_eq!(t.total_downloaded.load(SeqCst), 0);
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        drop(turns);
+        settled(t).await;
+        assert_eq!(status_of(t), TorrentStatus::Seeding as u8);
+        assert_eq!(t.total_downloaded.load(SeqCst), 0);
+        assert!(missing(t).is_empty(), "the check found it all on disk");
+    }
+
+    /// ⭐ Files in the *arr library (a second name, nlink 2) that nobody
+    /// else's torrent names are proven before the torrent runs, which holds
+    /// it stopped; the proof ends, the check is asked and the torrent
+    /// started. With the disk busy the check waits, and the start used to make
+    /// the held, never-verified torrent a download that fetched all of it
+    /// while the check waited (1.3 TB on 50 torrents whose data was there).
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_hardlinked_torrent_does_not_download_while_its_check_waits_for_the_disk() {
+        let s = crate::api::testing::state("pathclaim-linkq");
+        let dir = s.dir.join("d");
+        let lib = s.dir.join("library");
+        std::fs::create_dir_all(dir.join("P")).unwrap();
+        std::fs::create_dir_all(&lib).unwrap();
+        let data: Vec<u8> = (0..40_000u32).map(|i| (i % 251) as u8).collect();
+        std::fs::write(dir.join("P").join("ep.mkv"), &data).unwrap();
+        std::fs::hard_link(dir.join("P").join("ep.mkv"), lib.join("ep.mkv")).unwrap();
+        assert_eq!(
+            std::os::unix::fs::MetadataExt::nlink(
+                &std::fs::metadata(dir.join("P").join("ep.mkv")).unwrap()
+            ),
+            2
+        );
+        let bytes = torrent_over("P", &[("ep.mkv", &data)], 16384);
+        wire_one(&s, &bytes);
+        let turns = hold_disk(&dir).await;
+        let hash = add(&s, &bytes, &dir, false, false).unwrap();
+        let t = held(&s, &hash);
+        assert_eq!(engine_save_path(&s, &hash), dir, "proven in place");
+        assert_nothing_downloaded_until_verdict(&t, turns).await;
+        assert_eq!(std::fs::read(lib.join("ep.mkv")).unwrap(), data);
+    }
+
+    /// The same, with no hardlink: a check simply queued behind a busy disk
+    /// does not let the started torrent download before its verdict.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_torrent_does_not_download_while_its_check_waits_for_the_disk() {
+        let s = crate::api::testing::state("pathclaim-plainq");
+        let dir = s.dir.join("d");
+        std::fs::create_dir_all(dir.join("P")).unwrap();
+        let data: Vec<u8> = (0..40_000u32).map(|i| (i % 251) as u8).collect();
+        std::fs::write(dir.join("P").join("ep.mkv"), &data).unwrap();
+        let bytes = torrent_over("P", &[("ep.mkv", &data)], 16384);
+        wire_one(&s, &bytes);
+        let turns = hold_disk(&dir).await;
+        let hash = add(&s, &bytes, &dir, false, false).unwrap();
+        let t = held(&s, &hash);
+        assert_nothing_downloaded_until_verdict(&t, turns).await;
+    }
+
     /// A single-file torrent (`length` in the info dict, no `files`).
     fn single_over(name: &str, data: &[u8], salt: &str) -> Vec<u8> {
         use sha1::{Digest, Sha1};
