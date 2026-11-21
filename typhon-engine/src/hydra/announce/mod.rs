@@ -18,6 +18,7 @@ pub mod policy;
 pub mod runner;
 pub mod scheduler;
 pub mod scrape;
+pub mod seedreach;
 pub mod url;
 
 use crate::config::Config;
