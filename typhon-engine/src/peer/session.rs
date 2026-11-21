@@ -33,6 +33,18 @@ pub fn peer_sources_allowed(torrent: &crate::torrent::meta::TorrentState) -> boo
     torrent.meta.allows_peer_discovery() && torrent.policy().pex()
 }
 
+/// Who a peer could be told about over PEX: every other peer of this torrent
+/// that said where it listens.
+fn pex_swarm(torrent: &TorrentState, to: &Arc<PeerStats>) -> std::collections::HashSet<SocketAddr> {
+    let mut out = std::collections::HashSet::new();
+    torrent.peers.for_each(|p| {
+        if !Arc::ptr_eq(p, to) {
+            out.extend(p.listen_addr());
+        }
+    });
+    out
+}
+
 fn we_are_complete(t: &std::sync::Arc<crate::torrent::meta::TorrentState>) -> bool {
     t.status.load(Ordering::Relaxed) == TorrentStatus::Seeding as u8
 }
@@ -476,6 +488,7 @@ pub async fn run(
     let mut rate_timer: Option<std::pin::Pin<Box<tokio::time::Sleep>>> = None;
     let mut rate_timer_at: Option<tokio::time::Instant> = None;
     let mut connect_budget = crate::peer::holepunch::ConnectBudget::default();
+    let mut pex_budget = extension::PexDialBudget::default();
 
     loop {
         // A ban has to reach the peers already connected, not only the next
@@ -523,6 +536,28 @@ pub async fn run(
             if framed.send(msg).await.is_err() {
                 tracing::debug!("[peer-debug] {} BREAK send-choke-msg failed", addr);
                 break;
+            }
+        }
+
+        // BEP 11: tell the peer who else is in the swarm, once a minute at
+        // most. Asked on every turn but answered by an `Option` and a clock
+        // read until the minute is up; no timer of its own, so an idle seeding
+        // session stays without one (see `PeerExt::next_pex`).
+        if let Some(ext) = peer_ext.as_mut().filter(|e| e.ut_pex_id.is_some()) {
+            if peer_sources_allowed(&torrent) {
+                if let Some((ext_id, payload)) =
+                    ext.next_pex(std::time::Instant::now(), || pex_swarm(&torrent, &stats))
+                {
+                    let payload = Bytes::from(payload);
+                    if framed
+                        .send(Message::Extended { ext_id, payload })
+                        .await
+                        .is_err()
+                    {
+                        tracing::debug!("[peer-debug] {} BREAK send-pex failed", addr);
+                        break;
+                    }
+                }
             }
         }
 
@@ -912,6 +947,10 @@ pub async fn run(
                                             parsed.ut_holepunch_id.is_some(),
                                             Ordering::Relaxed,
                                         );
+                                        stats.listen_port.store(
+                                            parsed.listen_port.unwrap_or(0),
+                                            Ordering::Relaxed,
+                                        );
                                         if let Some(ext) = peer_ext.as_mut() {
                                             ext.ut_pex_id = parsed.ut_pex_id;
                                             ext.ut_metadata_id = parsed.ut_metadata_id;
@@ -1026,7 +1065,18 @@ pub async fn run(
                                             new_peers.len() as u64,
                                             Ordering::Relaxed,
                                         );
-                                        for _a in new_peers { /* PEX-triggered dial disabled: session::run future non-Send. Peers reachable via tracker/DHT. */ }
+                                        // Through the engine's dial queue, like
+                                        // a hole-punch connect: its pacer and
+                                        // connection cap apply, and it skips a
+                                        // peer a dial is already in flight to.
+                                        for a in extension::pex_dials(
+                                            new_peers,
+                                            |a| torrent.peers.contains_key(a),
+                                            &mut pex_budget,
+                                            std::time::Instant::now(),
+                                        ) {
+                                            crate::tracker::enqueue_dial(a, torrent.clone());
+                                        }
                                     }
                                 }
                             }
