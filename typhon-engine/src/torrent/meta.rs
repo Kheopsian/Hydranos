@@ -578,6 +578,14 @@ pub struct PeerStats {
     /// timer at all, so without a wake it would drain the queue at its next
     /// scrap of traffic -- long after the hole at the other end has closed.
     pub punch_wake: tokio::sync::Notify,
+    /// Set once this session is on its way out: asked to close to make room
+    /// for a new peer at the connection ceiling (`peer::turnover`), or its
+    /// guard already dropped. Whoever flips it first decides; a session is
+    /// never evicted twice, and never after it ended on its own.
+    pub closing: AtomicBool,
+    /// Wakes the session to close, once `closing` was set by an eviction.
+    /// The socket belongs to the session's task, so the task does the close.
+    pub evict_wake: tokio::sync::Notify,
 }
 
 impl PeerStats {
@@ -611,6 +619,8 @@ impl PeerStats {
             supports_holepunch: AtomicBool::new(false),
             punch_outbox: std::sync::Mutex::new(Vec::new()),
             punch_wake: tokio::sync::Notify::new(),
+            closing: AtomicBool::new(false),
+            evict_wake: tokio::sync::Notify::new(),
         }
     }
 
@@ -632,12 +642,30 @@ impl PeerStats {
         self.punch_wake.notify_one();
         true
     }
+
+    /// Ask this session to close, to make room for another peer. False when
+    /// it was already closing, so the caller must look for another one.
+    ///
+    /// The session leaves `peers_connected` here, not when its task ends, so
+    /// the next eviction already sees the torrent one peer down and cannot
+    /// take it below its floor. Whichever of this and the guard's drop claims
+    /// `closing` first is the one that counts the session out.
+    #[must_use]
+    pub fn evict(&self, torrent: &TorrentState) -> bool {
+        if self.closing.swap(true, Ordering::AcqRel) {
+            return false;
+        }
+        torrent.peers_connected.fetch_sub(1, Ordering::Relaxed);
+        self.evict_wake.notify_one();
+        true
+    }
 }
 
 /// RAII guard: ensures peer is removed from registry and counter
 /// decremented even on panic/early return.
 pub struct PeerGuard {
     torrent: Arc<TorrentState>,
+    stats: Arc<PeerStats>,
     addr: std::net::SocketAddr,
     was_interested: std::sync::atomic::AtomicBool,
 }
@@ -645,14 +673,20 @@ pub struct PeerGuard {
 impl PeerGuard {
     pub fn new(torrent: Arc<TorrentState>, stats: Arc<PeerStats>) -> Self {
         let addr = stats.addr;
-        torrent.peers.insert(addr, stats);
+        torrent.peers.insert(addr, stats.clone());
         torrent.peers_connected.fetch_add(1, Ordering::Relaxed);
         // Process-wide live connection count backing `max_connections`.
         // Maintained here rather than at the dial site so inbound sessions are
         // counted too, and so the decrement is RAII-guaranteed below.
         torrent.limiter().connection_opened();
+        // A candidate to make room for a new peer once the ceiling is hit.
+        torrent
+            .limiter()
+            .turnover()
+            .enlist(&torrent, &stats, std::time::Instant::now());
         Self {
             torrent,
+            stats,
             addr,
             was_interested: std::sync::atomic::AtomicBool::new(false),
         }
@@ -675,7 +709,12 @@ impl PeerGuard {
 impl Drop for PeerGuard {
     fn drop(&mut self) {
         self.torrent.peers.remove(&self.addr);
-        self.torrent.peers_connected.fetch_sub(1, Ordering::Relaxed);
+        // An evicted session was counted out of `peers_connected` by
+        // `PeerStats::evict`. Any other is counted out here, and marked
+        // closing so no eviction picks it afterwards.
+        if !self.stats.closing.swap(true, Ordering::AcqRel) {
+            self.torrent.peers_connected.fetch_sub(1, Ordering::Relaxed);
+        }
         self.torrent.limiter().connection_closed();
         if self.was_interested.load(Ordering::Relaxed) {
             self.torrent

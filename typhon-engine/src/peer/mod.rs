@@ -12,6 +12,7 @@ pub mod proxy_protocol;
 mod rebind_tests;
 pub mod session;
 pub mod transport;
+pub mod turnover;
 
 use std::net::SocketAddr;
 use std::sync::atomic::AtomicU64;
@@ -922,18 +923,30 @@ pub static INBOUND_REFUSED_PAUSED: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
 /// Inbound handshakes refused because the engine already holds
-/// `max_connections` live sessions.
+/// `max_connections` live sessions and none of them was idle enough to go.
 pub static INBOUND_REFUSED_CAP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// Whether the engine is at its `max_connections` ceiling. The ceiling used to
-/// bound only the dials we made: a peer reaching us added a session past it.
+/// Sessions asked to close at the `max_connections` ceiling so an inbound peer
+/// could take their place (`turnover`).
+pub static INBOUND_EVICTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Whether an inbound peer is turned away at the engine's `max_connections`
+/// ceiling. The ceiling used to bound only the dials we made: a peer reaching
+/// us added a session past it. At the ceiling an idle session is asked to
+/// close and the new peer takes its place; refused only when none may go.
 /// Checked once the torrent is named, before our handshake goes back.
 fn at_connection_cap(t: &crate::torrent::meta::TorrentState) -> bool {
-    if t.limiter().conn_cap_reached() {
-        INBOUND_REFUSED_CAP.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        return true;
+    use std::sync::atomic::Ordering;
+    let limiter = t.limiter();
+    if !limiter.conn_cap_reached() {
+        return false;
     }
-    false
+    if limiter.turnover().evict_one(std::time::Instant::now()) {
+        INBOUND_EVICTED.fetch_add(1, Ordering::Relaxed);
+        return false;
+    }
+    INBOUND_REFUSED_CAP.fetch_add(1, Ordering::Relaxed);
+    true
 }
 
 /// Whether an inbound peer may open a session on this torrent.
@@ -2105,6 +2118,157 @@ mod paused_inbound_tests {
         assert!(
             answered.len() >= 48 && answered[0] == 19,
             "under the ceiling it answers"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Fills the engine to `max` with sessions of the torrent `ih`, connected
+    /// long enough ago to count as idle. The guards are the sessions.
+    fn fill_to_ceiling(
+        mgr: &TorrentManager,
+        ih: [u8; 20],
+        max: u8,
+    ) -> (
+        Vec<crate::torrent::meta::PeerGuard>,
+        Vec<Arc<crate::torrent::meta::PeerStats>>,
+    ) {
+        use crate::torrent::meta::{PeerGuard, PeerStats};
+        let t = mgr.get(&ih).unwrap();
+        let limiter = mgr.limiter().clone();
+        limiter.set_max_connections(max as usize);
+        let stats: Vec<_> = (1..=max)
+            .map(|n| {
+                let addr: std::net::SocketAddr = format!("93.184.216.{n}:6881").parse().unwrap();
+                Arc::new(PeerStats::new(addr, [n; 20], "test".into(), false, false))
+            })
+            .collect();
+        let guards = stats
+            .iter()
+            .map(|s| PeerGuard::new(t.clone(), s.clone()))
+            .collect();
+        limiter.turnover().age(super::turnover::IDLE_FOR);
+        assert!(limiter.conn_cap_reached());
+        (guards, stats)
+    }
+
+    /// ⭐ At the ceiling, the oldest idle session is asked to close and the new
+    /// peer is answered in its place. Before turnover it was refused.
+    #[tokio::test]
+    async fn at_the_ceiling_an_idle_session_makes_room_for_a_new_peer() {
+        use std::sync::atomic::Ordering;
+        let (mgr, disk, root) = manager("turnover");
+        let (ih, _) = mgr
+            .add_torrent_bytes(
+                &torrent_bytes(),
+                root.join("data").to_str().unwrap(),
+                false,
+                false,
+            )
+            .unwrap();
+        let (_guards, stats) = fill_to_ceiling(&mgr, ih, 4);
+        let evicted = super::INBOUND_EVICTED.load(Ordering::Relaxed);
+
+        let answered = knock(mgr.clone(), disk.clone(), ih).await;
+        assert!(
+            answered.len() >= 48 && answered[0] == 19,
+            "an engine with an idle session to drop refused a new peer"
+        );
+        let closing: Vec<bool> = stats
+            .iter()
+            .map(|s| s.closing.load(Ordering::Relaxed))
+            .collect();
+        assert_eq!(closing, [true, false, false, false], "the oldest one went");
+        assert!(super::INBOUND_EVICTED.load(Ordering::Relaxed) > evicted);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Sessions that are busy -- here, peers that want our pieces -- are
+    /// never dropped for a newcomer: at the ceiling it is refused instead.
+    #[tokio::test]
+    async fn at_the_ceiling_a_busy_engine_still_refuses_a_new_peer() {
+        use std::sync::atomic::Ordering;
+        let (mgr, disk, root) = manager("turnover-busy");
+        let (ih, _) = mgr
+            .add_torrent_bytes(
+                &torrent_bytes(),
+                root.join("data").to_str().unwrap(),
+                false,
+                false,
+            )
+            .unwrap();
+        let (_guards, stats) = fill_to_ceiling(&mgr, ih, 4);
+        for s in &stats {
+            s.interested.store(true, Ordering::Relaxed);
+        }
+
+        let refused = knock(mgr.clone(), disk.clone(), ih).await;
+        assert!(
+            refused.is_empty(),
+            "a peer that wants our pieces was dropped for a newcomer"
+        );
+        assert!(stats.iter().all(|s| !s.closing.load(Ordering::Relaxed)));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// An evicted session's task ends on its own, so its socket closes and its
+    /// guard gives the slot back.
+    #[tokio::test]
+    async fn an_evicted_session_closes_its_connection() {
+        use crate::torrent::meta::{PeerStats, TorrentState};
+        let (mgr, disk, root) = manager("turnover-close");
+        let (ih, _) = mgr
+            .add_torrent_bytes(
+                &torrent_bytes(),
+                root.join("data").to_str().unwrap(),
+                false,
+                false,
+            )
+            .unwrap();
+        let t: Arc<TorrentState> = mgr.get(&ih).unwrap();
+
+        // A real session over a real socket, its peer silent.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let at = listener.local_addr().unwrap();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (s, addr) = listener.accept().await.unwrap();
+            let _ = tx.send(addr);
+            let framed = tokio_util::codec::Framed::new(
+                crate::crypto::stream::CryptoStream::plain(super::PeerTransport::Tcp(s)),
+                crate::wire::codec::BtCodec::new(),
+            );
+            super::session::run(
+                framed, addr, t, disk, [7u8; 20], [9u8; 20], false, false, false, None, 0,
+            )
+            .await;
+        });
+        let mut c = tokio::net::TcpStream::connect(at).await.unwrap();
+        let addr = rx.await.unwrap();
+        let t = mgr.get(&ih).unwrap();
+        let stats: Arc<PeerStats> = loop {
+            if let Some(s) = t.peers.get(&addr) {
+                break s;
+            }
+            tokio::task::yield_now().await;
+        };
+
+        assert!(stats.evict(&t));
+        let ended = tokio::time::timeout(std::time::Duration::from_secs(5), server).await;
+        assert!(ended.is_ok(), "the evicted session kept running");
+        let mut buf = [0u8; 256];
+        loop {
+            match tokio::time::timeout(std::time::Duration::from_secs(5), c.read(&mut buf)).await {
+                Ok(Ok(0)) | Ok(Err(_)) => break,
+                Ok(Ok(_)) => continue,
+                Err(_) => panic!("the evicted session's socket stayed open"),
+            }
+        }
+        assert_eq!(
+            t.peers_connected.load(std::sync::atomic::Ordering::Relaxed),
+            0
         );
 
         let _ = std::fs::remove_dir_all(&root);
