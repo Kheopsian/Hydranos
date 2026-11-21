@@ -390,9 +390,9 @@ const DEFAULT_INTERVAL: Duration = Duration::from_secs(30 * 60);
 fn tracker_wait(interval: u32, min_interval: u32) -> Duration {
     let stated = match interval {
         0 => DEFAULT_INTERVAL,
-        s => Duration::from_secs(s as u64),
+        s => Duration::from_secs(u64::from(s)),
     };
-    stated.max(Duration::from_secs(min_interval as u64))
+    stated.max(Duration::from_secs(u64::from(min_interval)))
 }
 
 pub(super) async fn announce_one(
@@ -683,8 +683,8 @@ pub(super) async fn announce_one(
                         // whatever the client thinks -- so it wins over
                         // `interval` when the two disagree.
                         let wants = tracker_wait(resp.interval, resp.min_interval);
-                        interval = Some(interval.map_or(wants, |i| i.min(wants)));
-                        let interval = interval.unwrap_or(DEFAULT_INTERVAL);
+                        let shortest = interval.map_or(wants, |i| i.min(wants));
+                        interval = Some(shortest);
                         // The swarm counts only exist here. Nothing else in the
                         // process can tell how many seeders a parked torrent has.
                         cache.record(
@@ -720,7 +720,7 @@ pub(super) async fn announce_one(
                             torrent.last_announce_at.store(now_unix, Ordering::Relaxed);
                             torrent
                                 .next_announce_at
-                                .store(now_unix + interval.as_secs() as i64, Ordering::Relaxed);
+                                .store(now_unix + shortest.as_secs() as i64, Ordering::Relaxed);
                             torrent.last_announce_ok.store(true, Ordering::Relaxed);
                             if let Ok(mut g) = torrent.last_announce_error.lock() {
                                 g.clear();
