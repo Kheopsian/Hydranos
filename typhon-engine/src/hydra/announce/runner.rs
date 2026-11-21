@@ -65,14 +65,15 @@ fn classify(err: &str) -> &'static str {
 ///
 /// Cheap on purpose: the point is a trickle of evidence per tracker per hour,
 /// not a measurement campaign. A check costs one `numwant` a tracker would have
-/// answered anyway.
+/// answered anyway. Counted per engine (`Cache::next_verify_tick`).
+const VERIFY_EVERY: u64 = 64;
+
 /// Whether a failed announce still shows the tracker is up, for the breaker.
 /// A 429 is the tracker answering, and asking us to slow down.
 fn proves_alive(kind: &str) -> bool {
     kind == "rate_limited"
 }
 
-const VERIFY_EVERY: u64 = 64;
 /// How soon to look again at a torrent whose data is being checked.
 const CHECKING_RETRY: Duration = Duration::from_secs(60);
 /// How many peers a self-check asks for. Small enough that a tracker returning
@@ -85,7 +86,6 @@ const VERIFY_NUMWANT: u32 = 50;
 /// storm that made seeding passive in the first place. Fifty finds the leechers
 /// that are themselves reachable, which is most of them.
 const UNREACHABLE_SEED_NUMWANT: u32 = 50;
-static VERIFY_TICK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// How an engine announces.
 ///
@@ -510,10 +510,7 @@ pub(super) async fn announce_one(
 
     // Sampled self-check. Only on a torrent that is already seeding: a leecher
     // asks for peers anyway, so its answer says nothing about numwant.
-    let verify_this = left == 0
-        && VERIFY_TICK
-            .fetch_add(1, Ordering::Relaxed)
-            .is_multiple_of(VERIFY_EVERY);
+    let verify_this = left == 0 && cache.next_verify_tick().is_multiple_of(VERIFY_EVERY);
 
     // The list actually announced to: the operator can edit it at runtime,
     // and `meta.trackers` is only what the .torrent said when it was added.
@@ -2259,13 +2256,9 @@ mod announce_one_tests {
         st.scrape_leechers.store(8, Ordering::Relaxed);
         assert_eq!(st.peers_connected.load(Ordering::Relaxed), 0);
         // Not the sampled self-check, which asks for its own 50 whatever the
-        // swarm says: the tick is process-wide and starts on a sample.
-        if VERIFY_TICK
-            .load(Ordering::Relaxed)
-            .is_multiple_of(VERIFY_EVERY)
-        {
-            VERIFY_TICK.fetch_add(1, Ordering::Relaxed);
-        }
+        // swarm says. The tick is this engine's, and its first one is a
+        // sample: spend it here.
+        assert!(cache.next_verify_tick().is_multiple_of(VERIFY_EVERY));
 
         run(&mgr, &policy, &breaker, &cache, Mode::Hoard, &hash).await;
         let q = t.last();

@@ -239,6 +239,10 @@ pub struct Cache {
     per_host: RwLock<HashMap<String, Arc<HostOutcomes>>>,
     /// What this engine's reachable seeds may still ask for this minute.
     seed_reach: super::seedreach::Budget,
+    /// Seeding announces so far, for the one-in-N self-check sample. Per
+    /// engine, not per process: a test with its own cache knows which of its
+    /// announces is a sample, whatever other tests run alongside it.
+    verify_tick: std::sync::atomic::AtomicU64,
 }
 
 /// One tracker's lifetime announce outcomes.
@@ -416,6 +420,12 @@ impl Cache {
     /// The budget [`super::seedreach::numwant`] spends, one per engine.
     pub fn seed_reach(&self) -> &super::seedreach::Budget {
         &self.seed_reach
+    }
+
+    /// The next seeding announce's number, from 0.
+    pub fn next_verify_tick(&self) -> u64 {
+        self.verify_tick
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn record_verify(&self, host: &str, v: Verify) {
