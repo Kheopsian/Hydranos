@@ -612,6 +612,20 @@ fn read_cache_families(x: &mut Exposition) {
         "Requests that found their slice older than a minute and read it again.",
         &[(vec![], rc::STALE.load(Relaxed) as f64)],
     );
+    let mut prefetch = Vec::new();
+    for (result, n) in [
+        ("issued", &rc::PREFETCH_ISSUED),
+        ("hit", &rc::PREFETCH_HIT),
+        ("wasted", &rc::PREFETCH_WASTED),
+    ] {
+        prefetch.push((vec![("result", result.to_string())], n.load(Relaxed) as f64));
+    }
+    x.family(
+        "hydra_read_cache_prefetch_total",
+        "counter",
+        "Slices read ahead for a peer walking a piece in order: issued (read from disk), hit (then used by a request), wasted (left the cache unused).",
+        &prefetch,
+    );
     x.family(
         "hydra_read_cache_bytes",
         "gauge",
@@ -1137,6 +1151,8 @@ mod tests {
             "# TYPE hydra_read_cache_requests_total counter",
             "hydra_read_cache_requests_total{result=\"hit\"} ",
             "hydra_read_cache_requests_total{result=\"joined\"} ",
+            "hydra_read_cache_prefetch_total{result=\"issued\"} ",
+            "hydra_read_cache_prefetch_total{result=\"wasted\"} ",
             "hydra_read_cache_bytes ",
             "hydra_read_cache_budget_bytes ",
         ] {

@@ -50,6 +50,49 @@ pub struct Policy {
     /// `Warn` by default: one log line per tracker host, the announce goes
     /// out unchanged.
     pub cleartext_passkey: CleartextPasskey,
+    /// How far down the tiers a hoard's periodic announce goes. `Auto` by
+    /// default: every tier for a public torrent, the first that answers for
+    /// a private one.
+    pub tiers: AnnounceTiers,
+}
+
+/// `announce_tiers`: which tiers a hoard announces to.
+///
+/// A race announces to every tracker it carries whatever this says. Within
+/// one tier the first URL that answers still ends that tier (BEP 12): its
+/// other URLs are usually other names of the same tracker.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum AnnounceTiers {
+    /// Every tier for a public torrent, the first that answers for a private
+    /// one. Public torrents often put each tracker in a tier of its own, and
+    /// the leechers on the others never saw us. A private torrent's trackers
+    /// share one swarm, and would count its upload once per tier.
+    #[default]
+    Auto,
+    /// Every tier, public or private.
+    All,
+    /// The first tier that answers, public or private: BEP 12 to the letter.
+    First,
+}
+
+impl AnnounceTiers {
+    /// Unknown or empty values mean `Auto`.
+    pub fn parse(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "all" => Self::All,
+            "first" => Self::First,
+            _ => Self::Auto,
+        }
+    }
+
+    /// Whether a hoard goes on to the next tier once one has answered.
+    pub fn every_tier(self, private: bool) -> bool {
+        match self {
+            Self::Auto => !private,
+            Self::All => true,
+            Self::First => false,
+        }
+    }
 }
 
 /// `announce_cleartext_passkey`: the policy for an `http://` tracker whose
@@ -652,6 +695,22 @@ mod tests {
         assert!(refused_for_cleartext(&p, u));
         assert_eq!(CleartextPasskey::parse(""), CleartextPasskey::Warn);
         assert_eq!(CleartextPasskey::parse("Refuse"), CleartextPasskey::Refuse);
+    }
+
+    /// `announce_tiers` left out or misspelt keeps the default: every tier
+    /// for a public torrent, the first that answers for a private one.
+    #[test]
+    fn announce_tiers_defaults_to_every_tier_for_public_torrents_only() {
+        for unset in ["", "bogus"] {
+            assert_eq!(AnnounceTiers::parse(unset), AnnounceTiers::Auto);
+        }
+        assert_eq!(AnnounceTiers::parse(" ALL "), AnnounceTiers::All);
+        assert_eq!(AnnounceTiers::parse("first"), AnnounceTiers::First);
+        let auto = AnnounceTiers::default();
+        assert!(auto.every_tier(false));
+        assert!(!auto.every_tier(true));
+        assert!(AnnounceTiers::All.every_tier(true));
+        assert!(!AnnounceTiers::First.every_tier(false));
     }
 
     /// With `refuse` no request is built, so none can leave; https, udp and
