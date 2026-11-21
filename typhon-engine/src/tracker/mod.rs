@@ -1,3 +1,4 @@
+pub mod dial_backoff;
 pub mod dial_limiter;
 pub mod http;
 pub mod scrape;
@@ -97,6 +98,9 @@ impl Drop for UtpInflightGuard {
 pub static DIAL_SKIPPED_INFLIGHT: AtomicU64 = AtomicU64::new(0);
 pub static DIAL_SKIPPED_CONNECTED: AtomicU64 = AtomicU64::new(0);
 pub static DIAL_SKIPPED_SELF: AtomicU64 = AtomicU64::new(0);
+/// Dials not made because the same (info_hash, addr) failed recently and is
+/// still inside its backoff (`dial_backoff::DIAL_BACKOFF`).
+pub static DIAL_SKIPPED_BACKOFF: AtomicU64 = AtomicU64::new(0);
 
 /// Self-dial filter. Tracker can hand us back our own public IP (VPS egress)
 /// as a "peer" — we'd loop back through haproxy and handshake ourselves. Set
@@ -259,6 +263,44 @@ impl Drop for DialInflightGuard {
         dial_inflight().remove(&self.0);
     }
 }
+
+/// Whether a queued dial would be refused anyway: the peer is already
+/// connected on this torrent, or another dial to it is in flight. Counted
+/// under the same `DIAL_SKIPPED_*` counters as `dial_peer`'s own checks; a
+/// dial is skipped by one or the other, never both.
+///
+/// The dial queue asks this before taking a pacing slot. Re-announces mostly
+/// return peers we already hold, and each one used to cost a slot of
+/// `max_dials_per_sec` only for `dial_peer` to drop it.
+fn dial_is_redundant(addr: std::net::SocketAddr, torrent: &TorrentState, traced: bool) -> bool {
+    if torrent.peers.contains_key(&addr) {
+        DIAL_SKIPPED_CONNECTED.fetch_add(1, AtomicOrdering::Relaxed);
+        if traced {
+            info!("[dialtrace] {} SKIPPED already connected", addr);
+        }
+        return true;
+    }
+    if dial_inflight().contains(&(torrent.info_hash, addr)) {
+        DIAL_SKIPPED_INFLIGHT.fetch_add(1, AtomicOrdering::Relaxed);
+        if traced {
+            info!("[dialtrace] {} SKIPPED inflight", addr);
+        }
+        return true;
+    }
+    false
+}
+
+/// How a `dial_peer` call ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DialOutcome {
+    /// Not dialled: self-dial, already connected, or already in flight.
+    Skipped,
+    /// Dialled, and no transport or handshake succeeded.
+    Failed,
+    /// A session ran, and has ended.
+    SessionEnded,
+}
+
 pub static DIAL_HANDSHAKE_OK: AtomicU64 = AtomicU64::new(0);
 pub static DIAL_HANDSHAKE_FAIL: AtomicU64 = AtomicU64::new(0);
 
@@ -383,7 +425,17 @@ static DIAL_TX: std::sync::OnceLock<DialTx> = std::sync::OnceLock::new();
 /// to start owned it, and every other engine's dials left with that engine's
 /// binding, peer id, uTP socket and connection limits -- out of the wrong
 /// tunnel, under the wrong identity.
-type DialTx = tokio::sync::mpsc::Sender<(std::net::SocketAddr, Arc<TorrentState>)>;
+type DialTx = tokio::sync::mpsc::Sender<(std::net::SocketAddr, Arc<TorrentState>, DialAsk)>;
+
+/// Who asked for a dial. A peer named by an operator or a node (`add_peers`,
+/// a pull from a node) is dialled even if it failed a moment ago: the reason
+/// it failed may be what was just fixed. Peers from trackers, DHT, LSD and
+/// PEX respect the backoff.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DialAsk {
+    Discovered,
+    Explicit,
+}
 static ENGINE_DIAL_TX: std::sync::OnceLock<
     std::sync::Mutex<std::collections::HashMap<usize, DialTx>>,
 > = std::sync::OnceLock::new();
@@ -399,10 +451,21 @@ fn dial_tx_for(torrent: &TorrentState) -> Option<DialTx> {
     DIAL_TX.get().cloned()
 }
 
+/// Queue a dial to a peer found by a tracker, DHT, LSD or PEX.
 pub fn enqueue_dial(addr: std::net::SocketAddr, torrent: Arc<TorrentState>) {
+    enqueue(addr, torrent, DialAsk::Discovered);
+}
+
+/// Queue a dial to a peer someone named on purpose. It skips the failure
+/// backoff, nothing else: pacing, the ceiling and the pause still apply.
+pub fn enqueue_explicit_dial(addr: std::net::SocketAddr, torrent: Arc<TorrentState>) {
+    enqueue(addr, torrent, DialAsk::Explicit);
+}
+
+fn enqueue(addr: std::net::SocketAddr, torrent: Arc<TorrentState>, ask: DialAsk) {
     let traced = is_traced(&torrent.info_hash);
     match dial_tx_for(&torrent) {
-        Some(tx) => match tx.try_send((addr, torrent)) {
+        Some(tx) => match tx.try_send((addr, torrent, ask)) {
             Ok(()) => {
                 DIAL_ENQUEUED.fetch_add(1, AtomicOrdering::Relaxed);
                 if traced {
@@ -499,7 +562,9 @@ pub fn start_announce_loop(
     // it picks one binding by hashing the peer addr → consistent peer_id+src
     // per peer across reconnects.
     let (dial_tx, mut dial_rx) =
-        tokio::sync::mpsc::channel::<(std::net::SocketAddr, Arc<TorrentState>)>(DIAL_QUEUE_CAP);
+        tokio::sync::mpsc::channel::<(std::net::SocketAddr, Arc<TorrentState>, DialAsk)>(
+            DIAL_QUEUE_CAP,
+        );
     // This engine's queue, for this engine's torrents. The first one is also
     // the fallback for a torrent that has no engine handle yet.
     ENGINE_DIAL_TX
@@ -523,6 +588,9 @@ pub fn start_announce_loop(
         // so an engine that starts unlimited can be capped later without a
         // restart.
         let mut pacer = dial_limiter::DialPacer::new();
+        // This engine's recently failed peers. Shared with the dial tasks,
+        // which record the failures.
+        let backoff = Arc::new(dial_backoff::DialBackoff::default());
         if max_dials_per_sec > 0.0 {
             info!(
                 "[peer] outbound dial rate limit active: {}/s",
@@ -530,7 +598,7 @@ pub fn start_announce_loop(
             );
         }
         tokio::spawn(async move {
-            while let Some((addr, t)) = dial_rx.recv().await {
+            while let Some((addr, t, ask)) = dial_rx.recv().await {
                 // Startup pause: drop rather than queue. The peer is not lost
                 // -- the next announce hands it back -- whereas queueing a
                 // paused hoard's worth of peers would grow without bound and
@@ -545,6 +613,22 @@ pub fn start_announce_loop(
                     limiter.note_skipped_conn_cap();
                     continue;
                 }
+                // Peers that would be dropped by `dial_peer` anyway, and peers
+                // that failed a moment ago, must not cost a pacing slot.
+                let traced = is_traced(&t.info_hash);
+                if dial_is_redundant(addr, &t, traced) {
+                    continue;
+                }
+                let key = (t.info_hash, addr);
+                if ask == DialAsk::Discovered
+                    && backoff.is_backing_off(&key, std::time::Instant::now())
+                {
+                    DIAL_SKIPPED_BACKOFF.fetch_add(1, AtomicOrdering::Relaxed);
+                    if traced {
+                        info!("[dialtrace] {} SKIPPED backoff (failed recently)", addr);
+                    }
+                    continue;
+                }
                 pacer.acquire(&limiter).await;
                 let d = disk_c.clone();
                 // Read per dial: a listen-port rebind replaces the socket,
@@ -556,8 +640,12 @@ pub fn start_announce_loop(
                 // binding's copy is the port of the first bind -- stale after
                 // a rebind, and never the public port behind a translating NAT.
                 let port = mgr_c.announced_port(b.addr.port());
+                let backoff = backoff.clone();
                 tokio::spawn(async move {
-                    dial_peer(addr, t, d, b.peer_id, u, port, &b.egress).await;
+                    let outcome = dial_peer(addr, t, d, b.peer_id, u, port, &b.egress).await;
+                    if outcome == DialOutcome::Failed {
+                        backoff.record_failure(key, std::time::Instant::now());
+                    }
                 });
             }
         });
@@ -978,7 +1066,7 @@ pub async fn dial_peer(
     utp_socket: Option<Arc<UtpSocketUdp>>,
     listen_port: u16,
     egress: &crate::netpin::Egress,
-) {
+) -> DialOutcome {
     use crate::wire::codec::BtCodec;
     use tokio_util::codec::Framed;
 
@@ -996,15 +1084,17 @@ pub async fn dial_peer(
         if traced {
             info!("[dialtrace] {} SKIPPED self-dial", addr);
         }
-        return;
+        return DialOutcome::Skipped;
     }
-    // Skip if we're already connected to this peer on this torrent.
+    // Skip if we're already connected to this peer on this torrent. The dial
+    // queue checked this before pacing, but a session may have come up while
+    // the dial waited, and other callers come straight here.
     if torrent.peers.contains_key(&addr) {
         DIAL_SKIPPED_CONNECTED.fetch_add(1, AtomicOrdering::Relaxed);
         if traced {
             info!("[dialtrace] {} SKIPPED already connected", addr);
         }
-        return;
+        return DialOutcome::Skipped;
     }
     // Skip if another dial_peer task is already in flight for (info_hash, addr).
     let inflight_key = (torrent.info_hash, addr);
@@ -1016,7 +1106,7 @@ pub async fn dial_peer(
                 addr
             );
         }
-        return;
+        return DialOutcome::Skipped;
     }
     let _dial_guard = DialInflightGuard(inflight_key);
 
@@ -1042,7 +1132,7 @@ pub async fn dial_peer(
             if traced {
                 info!("[dialtrace] {} all legs exhausted, no session", addr);
             }
-            return;
+            return DialOutcome::Failed;
         }
     };
     if traced {
@@ -1066,6 +1156,7 @@ pub async fn dial_peer(
         listen_port,
     )
     .await;
+    DialOutcome::SessionEnded
 }
 
 /// ⚠️ SELF_IPS and OWN_IPS are process-wide and `cargo test` runs tests in
@@ -1262,7 +1353,7 @@ mod self_dial_tests {
 #[cfg(test)]
 mod per_engine_dial_tests {
     use super::*;
-    use crate::torrent::meta::TorrentMeta;
+    use crate::torrent::meta::{PeerStats, TorrentMeta};
 
     fn torrent_of(limiter: &Arc<dial_limiter::DialLimiter>, n: u8) -> Arc<TorrentState> {
         let t = Arc::new(TorrentState::new(
@@ -1293,24 +1384,7 @@ mod per_engine_dial_tests {
     /// pacer lets one dial out every 1000 s and 10 000 are pushed.
     #[tokio::test]
     async fn a_dial_queue_fed_faster_than_it_drains_drops_the_excess() {
-        let root = std::env::temp_dir().join(format!("typhon-dialq-{}", std::process::id()));
-        std::fs::create_dir_all(root.join("r")).unwrap();
-        let disk = Arc::new(crate::disk::DiskManager::new(1));
-        let mgr = Arc::new(crate::torrent::TorrentManager::new(
-            root.to_string_lossy().into_owned(),
-            root.join("r").to_string_lossy().into_owned(),
-            disk.clone(),
-        ));
-        let limiter = Arc::new(dial_limiter::DialLimiter::default());
-        limiter.set_max_dials_per_sec(0.001);
-        start_announce_loop(
-            disk,
-            Vec::new(),
-            crate::peer::UtpHandle::off(),
-            0.001,
-            limiter.clone(),
-            mgr,
-        );
+        let limiter = engine(0.001);
         let t = torrent_of(&limiter, 9);
         let before = DIAL_ENQUEUE_DROPPED.load(AtomicOrdering::Relaxed);
         for i in 0..10_000u32 {
@@ -1321,6 +1395,139 @@ mod per_engine_dial_tests {
         assert!(
             dropped >= 5000,
             "only {dropped} of 10000 dropped: the queue kept the rest"
+        );
+    }
+
+    /// An engine with its dial queue running at `rate` dials/s.
+    fn engine(rate: f64) -> Arc<dial_limiter::DialLimiter> {
+        let root = std::env::temp_dir().join(format!("typhon-dialq-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("r")).unwrap();
+        let disk = Arc::new(crate::disk::DiskManager::new(1));
+        let mgr = Arc::new(crate::torrent::TorrentManager::new(
+            root.to_string_lossy().into_owned(),
+            root.join("r").to_string_lossy().into_owned(),
+            disk.clone(),
+        ));
+        let limiter = Arc::new(dial_limiter::DialLimiter::default());
+        limiter.set_max_dials_per_sec(rate);
+        start_announce_loop(
+            disk,
+            Vec::new(),
+            crate::peer::UtpHandle::off(),
+            rate,
+            limiter.clone(),
+            mgr,
+        );
+        limiter
+    }
+
+    /// Wait until `done` holds, or fail after `secs`.
+    async fn until(secs: u64, what: &str, done: impl Fn() -> bool) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(secs);
+        while !done() {
+            assert!(tokio::time::Instant::now() < deadline, "timed out: {what}");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    fn peer(n: u16) -> std::net::SocketAddr {
+        std::net::SocketAddr::from(([192, 0, 2, 50], 2000 + n))
+    }
+
+    /// ⭐ A re-announce mostly returns peers we already hold. Those are dropped
+    /// before the pacer, so they cost no slot: here the pacer lets one dial
+    /// out every 1000 s, and fifty connected peers still clear the queue.
+    /// Taking the slot first parks the queue on the first of them.
+    #[tokio::test]
+    async fn a_peer_already_connected_does_not_spend_a_pacing_slot() {
+        let limiter = engine(0.001);
+        let t = torrent_of(&limiter, 31);
+        for n in 0..50 {
+            let s = PeerStats::new(peer(n), [7; 20], "test".into(), false, false);
+            t.peers.insert(peer(n), Arc::new(s));
+        }
+        let before = DIAL_SKIPPED_CONNECTED.load(AtomicOrdering::Relaxed);
+        for n in 0..50 {
+            enqueue_dial(peer(n), t.clone());
+        }
+        until(10, "the connected peers to be skipped", || {
+            DIAL_SKIPPED_CONNECTED.load(AtomicOrdering::Relaxed) - before >= 50
+        })
+        .await;
+        assert_eq!(limiter.delayed(), 0, "a connected peer waited on the pacer");
+    }
+
+    /// The same for a peer whose dial is already in flight.
+    #[tokio::test]
+    async fn a_peer_already_being_dialled_does_not_spend_a_pacing_slot() {
+        let limiter = engine(0.001);
+        let t = torrent_of(&limiter, 32);
+        let guards: Vec<_> = (0..50)
+            .map(|n| {
+                let key = (t.info_hash, peer(n));
+                dial_inflight().insert(key);
+                DialInflightGuard(key)
+            })
+            .collect();
+        let before = DIAL_SKIPPED_INFLIGHT.load(AtomicOrdering::Relaxed);
+        for n in 0..50 {
+            enqueue_dial(peer(n), t.clone());
+        }
+        until(10, "the in-flight peers to be skipped", || {
+            DIAL_SKIPPED_INFLIGHT.load(AtomicOrdering::Relaxed) - before >= 50
+        })
+        .await;
+        assert_eq!(
+            limiter.delayed(),
+            0,
+            "an in-flight peer waited on the pacer"
+        );
+        drop(guards);
+    }
+
+    /// ⭐ A peer whose dial failed is not dialled again when the next tracker,
+    /// DHT or LSD answer hands it back. Nothing listens on port 1, so the
+    /// first dial fails; the repeats that follow are skipped and counted.
+    #[tokio::test]
+    async fn a_peer_that_failed_is_not_redialled_by_the_next_repeat() {
+        let limiter = engine(0.0);
+        let t = torrent_of(&limiter, 33);
+        let dead: std::net::SocketAddr = "127.0.0.1:1".parse().unwrap();
+        let before = DIAL_SKIPPED_BACKOFF.load(AtomicOrdering::Relaxed);
+        enqueue_dial(dead, t.clone());
+        until(30, "the failed peer to be skipped on a repeat", || {
+            // Repeats arrive while the first dial is in flight (skipped as
+            // in flight) and after it failed (skipped as backing off).
+            enqueue_dial(dead, t.clone());
+            DIAL_SKIPPED_BACKOFF.load(AtomicOrdering::Relaxed) > before
+        })
+        .await;
+    }
+
+    /// ⭐ A peer an operator names again is dialled again, backoff or not:
+    /// whatever made it fail may be what they just fixed.
+    #[tokio::test]
+    async fn a_peer_named_on_purpose_is_dialled_despite_its_backoff() {
+        let limiter = engine(0.0);
+        let t = torrent_of(&limiter, 34);
+        // A port nobody listens on, so the first dial fails.
+        let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = probe.local_addr().unwrap();
+        drop(probe);
+        let before = DIAL_SKIPPED_BACKOFF.load(AtomicOrdering::Relaxed);
+        enqueue_dial(addr, t.clone());
+        until(30, "the failed peer to be skipped on a repeat", || {
+            enqueue_dial(addr, t.clone());
+            DIAL_SKIPPED_BACKOFF.load(AtomicOrdering::Relaxed) > before
+        })
+        .await;
+        // Backing off now. The peer comes up, and is named again on purpose.
+        let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+        enqueue_explicit_dial(addr, t.clone());
+        let accepted = tokio::time::timeout(Duration::from_secs(30), listener.accept()).await;
+        assert!(
+            matches!(accepted, Ok(Ok(_))),
+            "the explicit dial was held back by the backoff"
         );
     }
 

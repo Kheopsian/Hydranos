@@ -1655,12 +1655,12 @@ async fn post_node_fetch(
     let mut queued = 0usize;
     if let Some((_, torrent)) = find_torrent(&state, &hash) {
         if let Ok(addr) = format!("{host}:{port}").parse::<std::net::SocketAddr>() {
-            typhon_engine::tracker::enqueue_dial(addr, torrent.clone());
+            typhon_engine::tracker::enqueue_explicit_dial(addr, torrent.clone());
             queued = 1;
         } else if let Ok(mut it) = format!("{host}:{port}").to_socket_addrs() {
             // A node declared by hostname still has to resolve to something.
             if let Some(addr) = it.next() {
-                typhon_engine::tracker::enqueue_dial(addr, torrent.clone());
+                typhon_engine::tracker::enqueue_explicit_dial(addr, torrent.clone());
                 queued = 1;
             }
         }
@@ -11054,7 +11054,7 @@ async fn post_torrent_peers(
         };
         match resolved {
             Some(addr) => {
-                typhon_engine::tracker::enqueue_dial(addr, torrent.clone());
+                typhon_engine::tracker::enqueue_explicit_dial(addr, torrent.clone());
                 queued += 1;
             }
             None => rejected.push(text.to_string()),
