@@ -573,6 +573,12 @@ pub struct PeerStats {
     /// handshake. Introducing two peers where one cannot read the message
     /// leaves the other waiting on a connection nobody was asked to make.
     pub supports_holepunch: AtomicBool,
+    /// The port this peer listens on, from its extension handshake (BEP 10
+    /// `p`); 0 while unknown. `addr` is where the connection came from, which
+    /// for a peer that dialled us is a port nobody else can reach it on, so
+    /// PEX advertises this instead -- and a peer that never said is not
+    /// advertised at all.
+    pub listen_port: std::sync::atomic::AtomicU16,
     /// Peers this session should be told to dial, put here by ANOTHER peer's
     /// task when it asked us for an introduction.
     ///
@@ -626,10 +632,20 @@ impl PeerStats {
             dl_rate: RateTracker::new(),
             ul_rate: RateTracker::new(),
             supports_holepunch: AtomicBool::new(false),
+            listen_port: std::sync::atomic::AtomicU16::new(0),
             punch_outbox: std::sync::Mutex::new(Vec::new()),
             punch_wake: tokio::sync::Notify::new(),
             closing: AtomicBool::new(false),
             evict_wake: tokio::sync::Notify::new(),
+        }
+    }
+
+    /// Where another peer could reach this one, if it told us (see
+    /// `listen_port`).
+    pub fn listen_addr(&self) -> Option<std::net::SocketAddr> {
+        match self.listen_port.load(Ordering::Relaxed) {
+            0 => None,
+            port => Some(std::net::SocketAddr::new(self.addr.ip(), port)),
         }
     }
 
