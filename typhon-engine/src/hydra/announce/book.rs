@@ -233,6 +233,22 @@ pub fn earliest_open(book: &[TrackerSlot], now: i64) -> Duration {
         .unwrap_or(Duration::ZERO)
 }
 
+/// How long before every live tracker that has us accepts a periodic
+/// announce again, as a delay from `now`: the wait that respects each one's
+/// `min interval`. Zero when none holds us yet.
+///
+/// The latest, not the earliest (`earliest_open`): in a hoard the tier that
+/// holds us ends the pass, so a pass sent while the first tracker's floor
+/// still holds tells nobody anything, and comes back an interval later.
+pub fn all_open(book: &[TrackerSlot], now: i64) -> Duration {
+    book.iter()
+        .filter(|s| !s.disabled && s.started)
+        .map(|s| (s.not_before.max(s.hint_until) - now).max(0) as u64)
+        .max()
+        .map(Duration::from_secs)
+        .unwrap_or(Duration::ZERO)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -671,5 +687,41 @@ mod tests {
         ];
         assert_eq!(earliest_open(&book, 100), Duration::from_secs(100));
         assert_eq!(earliest_open(&book, 300), Duration::ZERO);
+    }
+
+    /// Every tracker that has us must be past its floor; one that never
+    /// registered us or that is switched off has no say.
+    #[test]
+    fn every_tracker_that_has_us_must_be_open_again() {
+        let book = vec![
+            TrackerSlot {
+                key: 1,
+                started: true,
+                not_before: 500,
+                ..Default::default()
+            },
+            TrackerSlot {
+                key: 2,
+                started: true,
+                not_before: 200,
+                hint_until: 700,
+                ..Default::default()
+            },
+            TrackerSlot {
+                key: 3,
+                not_before: 900,
+                ..Default::default()
+            },
+            TrackerSlot {
+                key: 4,
+                started: true,
+                not_before: 900,
+                disabled: true,
+                ..Default::default()
+            },
+        ];
+        assert_eq!(all_open(&book, 100), Duration::from_secs(600));
+        assert_eq!(all_open(&book, 800), Duration::ZERO);
+        assert_eq!(all_open(&[], 100), Duration::ZERO);
     }
 }
