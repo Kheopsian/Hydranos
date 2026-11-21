@@ -35,6 +35,26 @@ const SCAN: usize = 64;
 /// Line length below which ended sessions are left for the front to drop.
 const SWEEP_FROM: usize = 128;
 
+/// The line, and when it is next swept of ended sessions.
+struct Line {
+    queue: VecDeque<Entry>,
+    /// Length at which the next sweep runs: twice what the last one left,
+    /// and never below [`SWEEP_FROM`].
+    sweep_at: usize,
+    /// Sweeps run so far.
+    sweeps: u64,
+}
+
+impl Default for Line {
+    fn default() -> Self {
+        Self {
+            queue: VecDeque::new(),
+            sweep_at: SWEEP_FROM,
+            sweeps: 0,
+        }
+    }
+}
+
 struct Entry {
     stats: Weak<PeerStats>,
     torrent: Weak<TorrentState>,
@@ -47,7 +67,7 @@ struct Entry {
 /// The sessions of one engine, oldest first, as eviction candidates.
 #[derive(Default)]
 pub struct Turnover {
-    line: Mutex<VecDeque<Entry>>,
+    line: Mutex<Line>,
 }
 
 impl Turnover {
@@ -55,9 +75,11 @@ impl Turnover {
     ///
     /// Ended sessions are not taken out when they end: a `VecDeque` has no
     /// cheap removal from the middle. They are dropped when they reach the
-    /// front, or in a sweep each time the line doubles past [`SWEEP_FROM`],
-    /// so it stays within twice the sessions alive (or `SWEEP_FROM`) and
-    /// every sweep is paid for by the enlistments that filled it.
+    /// front, or in a sweep once the line reaches twice what the last sweep
+    /// left (and at least [`SWEEP_FROM`]). It stays within about twice the
+    /// sessions alive, and every sweep is paid for by at least as many
+    /// enlistments as it keeps: a live count hovering at some size does not
+    /// sweep the whole line on each connect.
     pub fn enlist(&self, torrent: &Arc<TorrentState>, stats: &Arc<PeerStats>, now: Instant) {
         let entry = Entry {
             stats: Arc::downgrade(stats),
@@ -68,13 +90,15 @@ impl Turnover {
         let Ok(mut line) = self.line.lock() else {
             return;
         };
-        line.push_back(entry);
-        if line.len() >= SWEEP_FROM && line.len().is_power_of_two() {
-            line.retain(|e| {
+        line.queue.push_back(entry);
+        if line.queue.len() >= line.sweep_at {
+            line.queue.retain(|e| {
                 e.stats
                     .upgrade()
                     .is_some_and(|s| !s.closing.load(Ordering::Relaxed))
             });
+            line.sweep_at = line.queue.len().saturating_mul(2).max(SWEEP_FROM);
+            line.sweeps += 1;
         }
     }
 
@@ -85,8 +109,8 @@ impl Turnover {
         let Ok(mut line) = self.line.lock() else {
             return false;
         };
-        for _ in 0..SCAN.min(line.len()) {
-            let Some(mut e) = line.pop_front() else {
+        for _ in 0..SCAN.min(line.queue.len()) {
+            let Some(mut e) = line.queue.pop_front() else {
                 break;
             };
             let (Some(stats), Some(torrent)) = (e.stats.upgrade(), e.torrent.upgrade()) else {
@@ -108,7 +132,7 @@ impl Turnover {
             if idle && staying > FLOOR_PER_TORRENT && stats.evict(&torrent) {
                 return true;
             }
-            line.push_back(e);
+            line.queue.push_back(e);
         }
         false
     }
@@ -116,7 +140,13 @@ impl Turnover {
     /// Sessions in the line, ended ones included.
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
-        self.line.lock().map(|l| l.len()).unwrap_or(0)
+        self.line.lock().map(|l| l.queue.len()).unwrap_or(0)
+    }
+
+    /// Sweeps of ended sessions run so far.
+    #[cfg(test)]
+    pub(crate) fn sweeps(&self) -> u64 {
+        self.line.lock().map(|l| l.sweeps).unwrap_or(0)
     }
 
     /// Move every session's last look `by` into the past, as if that long
@@ -124,7 +154,7 @@ impl Turnover {
     #[cfg(test)]
     pub(crate) fn age(&self, by: Duration) {
         if let Ok(mut line) = self.line.lock() {
-            for e in line.iter_mut() {
+            for e in line.queue.iter_mut() {
                 e.seen = e.seen.checked_sub(by).unwrap_or(e.seen);
             }
         }
@@ -303,6 +333,36 @@ mod tests {
             "the line kept {} ended sessions",
             line.len()
         );
+    }
+
+    /// A live count that hovers -- one session ends, another connects -- must
+    /// not sweep the whole line on every connect. It did when the sweep ran at
+    /// each power of two: 1023 alive put the line at 1024 after each connect,
+    /// the sweep took it back to 1023, and the next connect swept again.
+    #[test]
+    fn a_hovering_live_count_does_not_sweep_on_every_connect() {
+        let line = Turnover::default();
+        let t = torrent();
+        let now = Instant::now();
+        let mut alive: std::collections::VecDeque<_> = (0..1023u32)
+            .map(|i| {
+                let s = session(&t, (i % 250) as u8);
+                line.enlist(&t, &s, now);
+                s
+            })
+            .collect();
+        let before = line.sweeps();
+
+        for i in 0..1000u32 {
+            alive.pop_front(); // one session ends
+            let s = session(&t, (i % 250) as u8);
+            line.enlist(&t, &s, now);
+            alive.push_back(s);
+        }
+
+        let swept = line.sweeps() - before;
+        assert!(swept <= 1, "{swept} sweeps for 1000 connects");
+        assert!(line.len() <= 2 * 1023, "the line grew to {}", line.len());
     }
 
     /// The look is bounded: past `SCAN` busy sessions nobody else is tried.
