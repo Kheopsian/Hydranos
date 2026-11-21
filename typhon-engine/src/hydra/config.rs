@@ -912,6 +912,12 @@ pub struct Config {
     #[serde(default)]
     pub announce_cleartext_passkey: String,
 
+    /// Which tracker tiers a hoard announces to: "auto" (default, every tier
+    /// for a public torrent, the first that answers for a private one),
+    /// "all" or "first". A race announces to every tracker regardless.
+    #[serde(default)]
+    pub announce_tiers: String,
+
     #[serde(default)]
     pub vpn_speedtest: VpnSpeedtest,
 
