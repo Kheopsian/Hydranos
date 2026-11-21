@@ -285,6 +285,11 @@ pub struct TorrentManager {
     /// cannot be named from here; unset, events wait for the next scheduled
     /// announce, which is how every test and a trackerless engine run.
     announce_hook: std::sync::OnceLock<Arc<dyn Fn(InfoHash) + Send + Sync>>,
+    /// Told when the announced port moves after trackers were given one (a
+    /// NAT-PMP renewal, gluetun's rotation, a rebind from the API): every
+    /// tracker still hands peers the old port until each torrent's next
+    /// announce, which for a seed is half an hour away. Set by the announcer.
+    port_change_hook: std::sync::OnceLock<Arc<dyn Fn() + Send + Sync>>,
     /// Told when a torrent finishes DOWNLOADING -- the moment its trackers are
     /// owed `completed`, and no other. Set by the binary, whose workflows run
     /// on it; unset, a completion is persisted and announced and that is all.
@@ -458,8 +463,36 @@ impl TorrentManager {
 
     /// Called by the listener once a new port is bound.
     pub fn set_live_port(&self, port: u16) {
-        self.live_port
-            .store(port, std::sync::atomic::Ordering::Relaxed);
+        let was = self
+            .live_port
+            .swap(port, std::sync::atomic::Ordering::Relaxed);
+        // Behind a translating NAT the listen port is not what trackers are
+        // told, so moving it changes nothing they hold.
+        if self
+            .external_port
+            .load(std::sync::atomic::Ordering::Relaxed)
+            == 0
+        {
+            self.announced_port_moved(was, port);
+        }
+    }
+
+    /// Install the announcer's "the announced port moved" entry point. Once.
+    pub fn set_port_change_hook(&self, hook: Arc<dyn Fn() + Send + Sync>) {
+        let _ = self.port_change_hook.set(hook);
+    }
+
+    /// The announced port went from `was` to `now`. Only a move away from a
+    /// port trackers were actually given is news: 0 is the listener's first
+    /// bind (nothing was announced on it yet), and while the port is pending
+    /// nothing was announced at all -- the release does that.
+    fn announced_port_moved(&self, was: u16, now: u16) {
+        if was == 0 || was == now || self.port_pending() {
+            return;
+        }
+        if let Some(hook) = self.port_change_hook.get() {
+            hook();
+        }
     }
 
     /// One more peer from outside opened a connection to this engine.
@@ -500,8 +533,12 @@ impl TorrentManager {
 
     /// Set (or clear, with 0) the port a translating NAT gives the outside.
     pub fn set_external_port(&self, port: u16) {
-        self.external_port
-            .store(port, std::sync::atomic::Ordering::Relaxed);
+        let was = self
+            .external_port
+            .swap(port, std::sync::atomic::Ordering::Relaxed);
+        let live = self.live_port.load(std::sync::atomic::Ordering::Relaxed);
+        let announced = |external: u16| if external == 0 { live } else { external };
+        self.announced_port_moved(announced(was), announced(port));
     }
 
     /// Hold (or release) every announce until the listen port is known.
@@ -683,6 +720,7 @@ impl TorrentManager {
             piece_mem: Default::default(),
             mark_writes: Default::default(),
             announce_hook: std::sync::OnceLock::new(),
+            port_change_hook: std::sync::OnceLock::new(),
             completion_hook: std::sync::OnceLock::new(),
             state_db,
             #[cfg(test)]
@@ -5246,6 +5284,60 @@ mod lifecycle_tests {
         assert_eq!(asked.load(Ordering::Relaxed), 1);
         mgr.start_torrent(&ih).expect("resumed");
         assert_eq!(asked.load(Ordering::Relaxed), 2);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A port the trackers were given that then moves asks for every torrent
+    /// to be announced again (#116). The first port is not a move: nothing
+    /// was announced on it, and a held port is released by its own announce.
+    #[test]
+    fn a_forwarded_port_that_changes_asks_for_a_reannounce_and_the_first_does_not() {
+        let (mgr, root) = manager("porthook");
+        let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let a = asked.clone();
+        mgr.set_port_change_hook(Arc::new(move || {
+            a.fetch_add(1, Ordering::Relaxed);
+        }));
+        let asked = || asked.load(Ordering::Relaxed);
+
+        // NAT-PMP: the listener comes up, the first grant is applied while
+        // announces are held, then released.
+        mgr.set_live_port(16171);
+        mgr.set_port_pending(true);
+        mgr.set_external_port(45133);
+        mgr.set_port_pending(false);
+        assert_eq!(asked(), 0, "the first port is not a change");
+        mgr.set_external_port(45133);
+        assert_eq!(asked(), 0, "a renewal on the same port is not a change");
+        mgr.set_external_port(45200);
+        assert_eq!(asked(), 1, "a new grant after a reconnect is");
+        // Behind the NAT the listen port is not what trackers hold.
+        mgr.set_live_port(16172);
+        assert_eq!(asked(), 1, "the announced port did not move");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// gluetun and the API move the listener itself, and trackers are told
+    /// the listen port: a second rebind is a move, a held first one is not.
+    #[test]
+    fn a_listener_rebind_after_the_first_port_asks_for_a_reannounce() {
+        let (mgr, root) = manager("rebindhook");
+        let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let a = asked.clone();
+        mgr.set_port_change_hook(Arc::new(move || {
+            a.fetch_add(1, Ordering::Relaxed);
+        }));
+        let asked = || asked.load(Ordering::Relaxed);
+
+        mgr.set_port_pending(true);
+        mgr.set_live_port(6881);
+        mgr.set_live_port(51413);
+        mgr.set_port_pending(false);
+        assert_eq!(asked(), 0, "nothing was announced on a held port");
+        mgr.set_live_port(51414);
+        assert_eq!(asked(), 1, "gluetun's rotation");
+        mgr.set_live_port(51414);
+        assert_eq!(asked(), 1, "the same port again is not a move");
         std::fs::remove_dir_all(&root).ok();
     }
 
