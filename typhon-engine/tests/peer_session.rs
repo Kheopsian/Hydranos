@@ -287,6 +287,20 @@ fn private_seed(num_pieces: u32) -> Arc<TorrentState> {
     t
 }
 
+/// Held by every test that dials or counts dials. The dial counters are the
+/// process's, and tests run side by side: a public torrent's PEX dial landing
+/// inside a private test's window would read as the private torrent dialling.
+static DIAL_COUNTERS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn dial_counters() -> std::sync::MutexGuard<'static, ()> {
+    DIAL_COUNTERS.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+fn dials() -> u64 {
+    use typhon_engine::tracker::{DIAL_ENQUEUED, DIAL_ENQUEUE_DROPPED};
+    DIAL_ENQUEUED.load(Ordering::Relaxed) + DIAL_ENQUEUE_DROPPED.load(Ordering::Relaxed)
+}
+
 /// Send one PEX message naming a public peer, and report how many peers the
 /// torrent says it learned from PEX.
 async fn pex_learned(torrent: Arc<TorrentState>) -> u64 {
@@ -313,6 +327,7 @@ async fn pex_learned(torrent: Arc<TorrentState>) -> u64 {
 /// learned peer at all -- a probe that always reads zero proves nothing.
 #[test]
 fn bep27_a_private_torrent_learns_no_peer_from_pex_even_unasked() {
+    let _dials = dial_counters();
     rt().block_on(async {
         assert!(
             pex_learned(seeding(8)).await > 0,
@@ -332,10 +347,6 @@ fn bep27_a_private_torrent_learns_no_peer_from_pex_even_unasked() {
 #[test]
 fn bep27_a_private_torrent_dials_no_peer_a_hole_punch_names() {
     use typhon_engine::peer::holepunch::{Punch, OUR_UT_HOLEPUNCH_ID};
-    use typhon_engine::tracker::{DIAL_ENQUEUED, DIAL_ENQUEUE_DROPPED};
-    fn dials() -> u64 {
-        DIAL_ENQUEUED.load(Ordering::Relaxed) + DIAL_ENQUEUE_DROPPED.load(Ordering::Relaxed)
-    }
     async fn punched(torrent: Arc<TorrentState>) -> u64 {
         let (ours, theirs) = pair().await;
         let mut peer = start_extended(torrent, ours, theirs);
@@ -352,6 +363,7 @@ fn bep27_a_private_torrent_dials_no_peer_a_hole_punch_names() {
         tokio::time::sleep(Duration::from_millis(300)).await;
         dials() - before
     }
+    let _dials = dial_counters();
     rt().block_on(async {
         assert!(
             punched(seeding(8)).await > 0,
@@ -361,6 +373,144 @@ fn bep27_a_private_torrent_dials_no_peer_a_hole_punch_names() {
             punched(private_seed(8)).await,
             0,
             "a private torrent dials nobody a peer names"
+        );
+    });
+}
+
+/// Send one PEX message naming `n` public peers and report how many dials it
+/// put on the engine's queue.
+async fn pex_dialled(torrent: Arc<TorrentState>, n: u8) -> u64 {
+    use typhon_engine::peer::extension::{build_pex_message, OUR_UT_PEX_ID};
+    let (ours, theirs) = pair().await;
+    let mut peer = start_extended(torrent, ours, theirs);
+    wait_for(&mut peer, "unchoke", |m| matches!(m, Message::Unchoke)).await;
+    let before = dials();
+    let added: Vec<SocketAddr> = (0..n)
+        .map(|i| SocketAddr::from(([93, 184, 216, i], 6881)))
+        .collect();
+    peer.send(Message::Extended {
+        ext_id: OUR_UT_PEX_ID,
+        payload: bytes::Bytes::from(build_pex_message(&added, &[])),
+    })
+    .await
+    .expect("sent");
+    peer.send(Message::KeepAlive).await.expect("sent");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    dials() - before
+}
+
+/// ⭐ BEP 11: the peers a PEX message names are dialled -- they used to be
+/// counted and dropped -- and one sender gets at most one message's worth a
+/// minute, so a peer cannot make us open connections without end.
+#[test]
+fn bep11_peers_learned_over_pex_are_dialled_within_a_budget() {
+    use typhon_engine::peer::extension::PEX_DIALS_PER_MINUTE;
+    let _dials = dial_counters();
+    rt().block_on(async {
+        assert_eq!(
+            pex_dialled(seeding(8), 3).await,
+            3,
+            "every peer PEX named is put on the dial queue"
+        );
+        assert_eq!(
+            pex_dialled(seeding(8), 60).await,
+            u64::from(PEX_DIALS_PER_MINUTE),
+            "past the sender's budget a named peer is not dialled"
+        );
+        assert_eq!(
+            pex_dialled(private_seed(8), 3).await,
+            0,
+            "a private torrent dials nobody PEX names"
+        );
+    });
+}
+
+/// A session with the extension protocol on, registered under `addr`.
+fn start_extended_at(
+    addr: SocketAddr,
+    torrent: Arc<TorrentState>,
+    ours: TcpStream,
+    theirs: TcpStream,
+) -> Framed<CryptoStream, BtCodec> {
+    tokio::spawn(session::run(
+        framed(ours),
+        addr,
+        torrent,
+        Arc::new(DiskManager::new(16)),
+        OUR_ID,
+        THEIR_ID,
+        false,
+        true,
+        true,
+        None,
+        16171,
+    ));
+    framed(theirs)
+}
+
+/// A BEP 10 handshake: `ut_pex` under `pex_id` if any, listening on `port`.
+fn ext_handshake(pex_id: Option<i64>, port: i64) -> Message {
+    use std::collections::BTreeMap;
+    use typhon_engine::peer::bencode::Bencode;
+    let mut m = BTreeMap::new();
+    if let Some(id) = pex_id {
+        m.insert(b"ut_pex".to_vec(), Bencode::Int(id));
+    }
+    let mut root = BTreeMap::new();
+    root.insert(b"m".to_vec(), Bencode::Dict(m));
+    root.insert(b"p".to_vec(), Bencode::Int(port));
+    Message::Extended {
+        ext_id: 0,
+        payload: bytes::Bytes::from(Bencode::Dict(root).to_vec()),
+    }
+}
+
+/// Two peers on one torrent; the first says it listens on 51413. Report what
+/// the second, which advertised `ut_pex` under 7, is told over PEX.
+async fn pex_told(torrent: Arc<TorrentState>) -> Option<Vec<SocketAddr>> {
+    let other: SocketAddr = "93.184.216.34:40000".parse().unwrap();
+    let (ours, theirs) = pair().await;
+    let mut first = start_extended_at(other, torrent.clone(), ours, theirs);
+    wait_for(&mut first, "unchoke", |m| matches!(m, Message::Unchoke)).await;
+    first.send(ext_handshake(None, 51413)).await.expect("sent");
+    first.send(Message::KeepAlive).await.expect("sent");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let (ours, theirs) = pair().await;
+    let me: SocketAddr = "93.184.216.35:40001".parse().unwrap();
+    let mut second = start_extended_at(me, torrent, ours, theirs);
+    wait_for(&mut second, "unchoke", |m| matches!(m, Message::Unchoke)).await;
+    second
+        .send(ext_handshake(Some(7), 6881))
+        .await
+        .expect("sent");
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(800);
+    while let Ok(Some(Ok(msg))) = tokio::time::timeout_at(deadline, second.next()).await {
+        if let Message::Extended { ext_id: 7, payload } = msg {
+            return Some(typhon_engine::peer::extension::parse_pex(
+                &payload,
+                &typhon_engine::peer::extension::DEFAULT_POLICY,
+            ));
+        }
+    }
+    None
+}
+
+/// ⭐ BEP 11: we advertise `ut_pex`, so we send it. A peer that speaks it is
+/// told who else is connected, at the port that peer LISTENS on -- not the
+/// one its connection came from -- and a private torrent tells nobody.
+#[test]
+fn bep11_a_peer_that_speaks_pex_is_told_who_else_is_connected() {
+    rt().block_on(async {
+        assert_eq!(
+            pex_told(seeding(8)).await,
+            Some(vec!["93.184.216.34:51413".parse().unwrap()]),
+            "the other peer, at its listen port"
+        );
+        assert_eq!(
+            pex_told(private_seed(8)).await,
+            None,
+            "a private torrent sends no PEX"
         );
     });
 }

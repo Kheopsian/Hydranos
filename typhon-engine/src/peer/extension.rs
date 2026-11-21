@@ -73,6 +73,107 @@ impl Default for PeerExt {
     }
 }
 
+/// BEP 11: a peer is sent at most one PEX message per this interval.
+pub const PEX_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// BEP 11: at most this many peers in the `added` (and in the `dropped`) list
+/// of one message. What does not fit goes out in the next one.
+pub const PEX_MAX_PER_MESSAGE: usize = 50;
+
+impl PeerExt {
+    /// The PEX message owed to this peer at `now`, as (their ut_pex id,
+    /// payload), or `None` when nothing is owed.
+    ///
+    /// Nothing is owed to a peer that did not advertise `ut_pex`, nor sooner
+    /// than `PEX_INTERVAL` after the last look. `swarm` is who this peer could
+    /// be told about; it is only called once the interval has passed, so a
+    /// session that asks on every turn of its loop scans the torrent's peers at
+    /// most once a minute. Asking costs no timer: the session asks when it
+    /// wakes for something else, and an idle seed's peer hears from us at its
+    /// next message.
+    pub fn next_pex(
+        &mut self,
+        now: Instant,
+        swarm: impl FnOnce() -> HashSet<SocketAddr>,
+    ) -> Option<(u8, Vec<u8>)> {
+        let id = self.ut_pex_id?;
+        if self
+            .last_pex_sent
+            .is_some_and(|t| now.duration_since(t) < PEX_INTERVAL)
+        {
+            return None;
+        }
+        // Marked even when nothing goes out: the scan is what costs, and it
+        // is what the interval bounds.
+        self.last_pex_sent = Some(now);
+        let swarm = swarm();
+        let added: Vec<SocketAddr> = swarm
+            .difference(&self.sent_peers)
+            .take(PEX_MAX_PER_MESSAGE)
+            .copied()
+            .collect();
+        let dropped: Vec<SocketAddr> = self
+            .sent_peers
+            .difference(&swarm)
+            .take(PEX_MAX_PER_MESSAGE)
+            .copied()
+            .collect();
+        if added.is_empty() && dropped.is_empty() {
+            return None;
+        }
+        for a in &dropped {
+            self.sent_peers.remove(a);
+        }
+        self.sent_peers.extend(added.iter().copied());
+        Some((id, build_pex_message(&added, &dropped)))
+    }
+}
+
+/// How many peers one PEX sender may have us dial per minute: one full BEP 11
+/// message. A peer that sends more, or sends more often, is asking us to open
+/// connections on its behalf, and past the budget it is ignored.
+pub const PEX_DIALS_PER_MINUTE: u32 = PEX_MAX_PER_MESSAGE as u32;
+
+/// One session's budget of PEX-learned dials: `PEX_DIALS_PER_MINUTE` per window.
+#[derive(Default)]
+pub struct PexDialBudget {
+    window: Option<Instant>,
+    used: u32,
+}
+
+impl PexDialBudget {
+    /// Whether one more PEX-learned peer may be dialled at `now`.
+    pub fn take(&mut self, now: Instant) -> bool {
+        match self.window {
+            Some(start) if now.duration_since(start) < PEX_INTERVAL => {}
+            _ => {
+                self.window = Some(now);
+                self.used = 0;
+            }
+        }
+        if self.used >= PEX_DIALS_PER_MINUTE {
+            return false;
+        }
+        self.used += 1;
+        true
+    }
+}
+
+/// Which of the peers a PEX message named should be dialled: the ones we are
+/// not already connected to, while the sender's budget lasts.
+pub fn pex_dials(
+    added: Vec<SocketAddr>,
+    connected: impl Fn(&SocketAddr) -> bool,
+    budget: &mut PexDialBudget,
+    now: Instant,
+) -> Vec<SocketAddr> {
+    added
+        .into_iter()
+        .filter(|a| !connected(a))
+        .take_while(|_| budget.take(now))
+        .collect()
+}
+
 /// Build the BEP 10 extension handshake payload (without the leading extended_id=0 byte).
 /// Caller prepends 0x00 (extended_id 0 = extension handshake) before sending.
 /// `metadata_size` is the size of our info dict when we hold it (so peers know
@@ -135,6 +236,9 @@ pub struct ExtHandshake {
     pub ut_holepunch_id: Option<u8>,
     /// Total size of their info dict, from the top-level `metadata_size` key.
     pub metadata_size: Option<usize>,
+    /// The port they listen on (BEP 10 `p`). For a peer that dialled us, the
+    /// only way to know where somebody else could reach it.
+    pub listen_port: Option<u16>,
 }
 
 /// Parse a peer's extension handshake. Absent or zero ids mean "not offered":
@@ -168,6 +272,11 @@ pub fn parse_extension_handshake_full(payload: &[u8], policy: &PeerPolicy) -> Op
             None
         },
         metadata_size,
+        listen_port: bv
+            .dict_get(b"p")
+            .and_then(|v| v.as_int())
+            .and_then(|n| u16::try_from(n).ok())
+            .filter(|p| *p != 0),
     })
 }
 
@@ -584,14 +693,33 @@ fn parse_compact_v4(buf: &[u8]) -> Vec<SocketAddr> {
 
 /// Build a BEP 11 PEX message payload (without the leading extended_id byte).
 /// Caller prepends `peer.ut_pex_id` byte before sending.
+///
+/// IPv6 peers go in `added6` / `dropped6` (BEP 11), and each `.f` list holds
+/// one flag byte per peer of ITS list, so the flags line up with the peers.
 pub fn build_pex_message(added: &[SocketAddr], dropped: &[SocketAddr]) -> Vec<u8> {
+    let added4 = encode_compact_v4(added);
+    let added6 = encode_compact_v6(added);
+    let dropped6 = encode_compact_v6(dropped);
     let mut root = BTreeMap::new();
-    root.insert(b"added".to_vec(), Bencode::Bytes(encode_compact_v4(added)));
-    root.insert(b"added.f".to_vec(), Bencode::Bytes(vec![0u8; added.len()]));
+    root.insert(
+        b"added.f".to_vec(),
+        Bencode::Bytes(vec![0u8; added4.len() / 6]),
+    );
+    root.insert(b"added".to_vec(), Bencode::Bytes(added4));
     root.insert(
         b"dropped".to_vec(),
         Bencode::Bytes(encode_compact_v4(dropped)),
     );
+    if !added6.is_empty() {
+        root.insert(
+            b"added6.f".to_vec(),
+            Bencode::Bytes(vec![0u8; added6.len() / 18]),
+        );
+        root.insert(b"added6".to_vec(), Bencode::Bytes(added6));
+    }
+    if !dropped6.is_empty() {
+        root.insert(b"dropped6".to_vec(), Bencode::Bytes(dropped6));
+    }
     Bencode::Dict(root).to_vec()
 }
 
@@ -601,6 +729,17 @@ fn encode_compact_v4(addrs: &[SocketAddr]) -> Vec<u8> {
         if let SocketAddr::V4(v4) = a {
             out.extend_from_slice(&v4.ip().octets());
             out.extend_from_slice(&v4.port().to_be_bytes());
+        }
+    }
+    out
+}
+
+fn encode_compact_v6(addrs: &[SocketAddr]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for a in addrs {
+        if let SocketAddr::V6(v6) = a {
+            out.extend_from_slice(&v6.ip().octets());
+            out.extend_from_slice(&v6.port().to_be_bytes());
         }
     }
     out
@@ -967,6 +1106,165 @@ mod protocol_tests {
         let on = PeerPolicy::default();
         let lan: std::net::SocketAddr = "192.168.99.50:6881".parse().unwrap();
         assert_eq!(parse_pex(&build_pex_message(&[lan], &[]), &on), vec![lan]);
+    }
+
+    fn swarm(n: u8) -> HashSet<SocketAddr> {
+        (0..n)
+            .map(|i| SocketAddr::from(([93, 184, 216, i], 6881)))
+            .collect()
+    }
+
+    fn pex_peer() -> PeerExt {
+        let mut ext = PeerExt::new();
+        ext.ut_pex_id = Some(7);
+        ext
+    }
+
+    /// A peer that advertised `ut_pex` is told who else is in the swarm, under
+    /// the id IT advertised.
+    #[test]
+    fn bep11_a_peer_that_speaks_pex_is_told_about_the_swarm() {
+        let mut ext = pex_peer();
+        let (id, msg) = ext
+            .next_pex(Instant::now(), || swarm(3))
+            .expect("a PEX message");
+        assert_eq!(id, 7, "sent under the peer's id, not ours");
+        let mut told = parse_pex(&msg, &PeerPolicy::default());
+        told.sort();
+        let mut want: Vec<_> = swarm(3).into_iter().collect();
+        want.sort();
+        assert_eq!(told, want);
+    }
+
+    #[test]
+    fn bep11_a_peer_that_did_not_advertise_ut_pex_is_sent_nothing() {
+        let mut ext = PeerExt::new();
+        assert!(ext.next_pex(Instant::now(), || swarm(3)).is_none());
+    }
+
+    /// BEP 11: at most one message a minute, and the swarm is not even looked
+    /// at before the minute is up.
+    #[test]
+    fn bep11_pex_goes_out_at_most_once_a_minute() {
+        let mut ext = pex_peer();
+        let t0 = Instant::now();
+        assert!(ext.next_pex(t0, || swarm(1)).is_some());
+        let soon = t0 + std::time::Duration::from_secs(59);
+        assert!(
+            ext.next_pex(soon, || panic!("scanned the swarm inside the minute"))
+                .is_none(),
+            "a second message inside the minute"
+        );
+        let later = t0 + PEX_INTERVAL;
+        assert!(
+            ext.next_pex(later, || swarm(2)).is_some(),
+            "the new peer is told once the minute is up"
+        );
+    }
+
+    /// BEP 11: at most 50 added per message; the rest go in the next one, and
+    /// nobody is told twice.
+    #[test]
+    fn bep11_at_most_fifty_peers_are_added_per_message() {
+        let mut ext = pex_peer();
+        let on = PeerPolicy::default();
+        let t0 = Instant::now();
+        let (_, first) = ext.next_pex(t0, || swarm(70)).unwrap();
+        let first = parse_pex(&first, &on);
+        assert_eq!(first.len(), PEX_MAX_PER_MESSAGE);
+        let (_, second) = ext.next_pex(t0 + PEX_INTERVAL, || swarm(70)).unwrap();
+        let second = parse_pex(&second, &on);
+        assert_eq!(second.len(), 20, "the twenty that did not fit");
+        assert!(second.iter().all(|a| !first.contains(a)), "told twice");
+    }
+
+    /// A peer that left since the last message is listed as dropped, and a
+    /// swarm that did not change sends nothing.
+    #[test]
+    fn bep11_a_peer_that_left_is_sent_as_dropped() {
+        let mut ext = pex_peer();
+        let t0 = Instant::now();
+        ext.next_pex(t0, || swarm(2)).unwrap();
+        assert!(
+            ext.next_pex(t0 + PEX_INTERVAL, || swarm(2)).is_none(),
+            "nothing changed, nothing to say"
+        );
+        let (_, msg) = ext.next_pex(t0 + PEX_INTERVAL * 2, || swarm(1)).unwrap();
+        let bv = decode(&msg).unwrap();
+        let dropped = bv.dict_get(b"dropped").and_then(|v| v.as_bytes()).unwrap();
+        assert_eq!(
+            parse_compact_v4(dropped),
+            vec![SocketAddr::from(([93, 184, 216, 1], 6881))]
+        );
+        assert!(parse_pex(&msg, &PeerPolicy::default()).is_empty());
+    }
+
+    /// An IPv6 peer goes in `added6`, so `added.f` keeps one flag per IPv4
+    /// peer and a client reading both lists pairs them correctly.
+    #[test]
+    fn bep11_an_ipv6_peer_travels_in_added6() {
+        let v4: SocketAddr = "93.184.216.34:6881".parse().unwrap();
+        let v6: SocketAddr = "[2001:4860::1]:6881".parse().unwrap();
+        let msg = build_pex_message(&[v4, v6], &[]);
+        let bv = decode(&msg).unwrap();
+        assert_eq!(
+            bv.dict_get(b"added.f")
+                .and_then(|v| v.as_bytes())
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            bv.dict_get(b"added6.f")
+                .and_then(|v| v.as_bytes())
+                .unwrap()
+                .len(),
+            1
+        );
+        let v6_on = PeerPolicy::default();
+        v6_on.set_ipv6(true);
+        assert_eq!(parse_pex(&msg, &v6_on), vec![v4, v6]);
+    }
+
+    /// The listen port a peer gives in its handshake is what PEX advertises
+    /// for it; 0 or out of range is no port.
+    #[test]
+    fn bep10_the_listen_port_is_read_from_the_handshake() {
+        let hs = |p: i64| {
+            let mut root = BTreeMap::new();
+            root.insert(b"m".to_vec(), Bencode::Dict(BTreeMap::new()));
+            root.insert(b"p".to_vec(), Bencode::Int(p));
+            parse_extension_handshake_full(&Bencode::Dict(root).to_vec(), &DEFAULT_POLICY)
+                .unwrap()
+                .listen_port
+        };
+        assert_eq!(hs(51413), Some(51413));
+        assert_eq!(hs(0), None);
+        assert_eq!(hs(70000), None);
+    }
+
+    /// Received PEX peers are dialled, except the ones already connected,
+    /// and one sender gets at most one message's worth a minute.
+    #[test]
+    fn bep11_received_peers_are_dialled_within_the_senders_budget() {
+        let mut budget = PexDialBudget::default();
+        let t0 = Instant::now();
+        let connected = SocketAddr::from(([93, 184, 216, 0], 6881));
+        let named: Vec<SocketAddr> = swarm(60).into_iter().collect();
+        let dials = pex_dials(named.clone(), |a| *a == connected, &mut budget, t0);
+        assert_eq!(dials.len(), PEX_DIALS_PER_MINUTE as usize);
+        assert!(
+            !dials.contains(&connected),
+            "dialled a peer already connected"
+        );
+        assert!(
+            pex_dials(named.clone(), |_| false, &mut budget, t0).is_empty(),
+            "over budget inside the minute"
+        );
+        assert!(
+            !pex_dials(named, |_| false, &mut budget, t0 + PEX_INTERVAL).is_empty(),
+            "the budget comes back with the next minute"
+        );
     }
 
     #[test]
