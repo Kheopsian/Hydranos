@@ -1028,6 +1028,15 @@ static RECHECK_SEEN: std::sync::LazyLock<
     parking_lot::Mutex<std::collections::HashMap<usize, CheckSeen>>,
 > = std::sync::LazyLock::new(Default::default);
 
+/// A torrent dropped under a check -- removed, or a test's -- takes its piece
+/// map with it. The map is filed by address: left behind, it was found by
+/// the next torrent allocated there, which then showed a check it never had.
+impl Drop for TorrentState {
+    fn drop(&mut self) {
+        RECHECK_SEEN.lock().remove(&self.seen_key());
+    }
+}
+
 /// One running check: the pieces it reads and those it has read.
 struct CheckSeen {
     /// The pieces the check reads: every piece, or one file's
@@ -2947,6 +2956,20 @@ mod tests {
             handle.lock().unwrap_or_else(|e| e.into_inner()).clone()
         }));
         (st, hashes, slot)
+    }
+
+    /// A torrent dropped while its check's piece map is held takes the map
+    /// with it: filed by address, the map was otherwise found by the next
+    /// torrent allocated at that address (seen on Windows CI as
+    /// `rechecked_bytes_follow_the_pieces_read` reporting a check it never had).
+    #[test]
+    fn a_dropped_torrent_leaves_no_check_map_behind() {
+        let st = Box::new(state_for("seenleak", 2).0);
+        st.begin_recheck_progress();
+        let key = st.seen_key();
+        assert!(RECHECK_SEEN.lock().contains_key(&key));
+        drop(st);
+        assert!(!RECHECK_SEEN.lock().contains_key(&key));
     }
 
     /// A torrent whose metainfo the store does not have cannot verify, and says

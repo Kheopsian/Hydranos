@@ -2,7 +2,7 @@ use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::fs::File;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::OnceLock;
 #[cfg(test)]
@@ -389,6 +389,9 @@ pub struct DiskManager {
     /// below its save path). Set by the host that knows the other torrents;
     /// without it only a hardlink protects a file.
     claim_probe: OnceLock<ClaimProbe>,
+    /// Read-aheads under way for this engine (`prefetch_next`), at most
+    /// `readcache::PREFETCH_MAX`.
+    prefetches: Arc<AtomicUsize>,
 }
 
 /// The files other torrents name, for the torrent with this info hash.
@@ -435,6 +438,7 @@ impl DiskManager {
             cache,
             written: Arc::new(Mutex::new(HashMap::new())),
             claim_probe: OnceLock::new(),
+            prefetches: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -565,13 +569,15 @@ impl DiskManager {
             .flight
             .get_or_init(|| {
                 ran = true;
-                self.read_slice(torrent, key)
+                readcache::MISS.fetch_add(1, Ordering::Relaxed);
+                read_slice(&self.cache, torrent, key, false)
             })
             .await
             .clone();
         drop(guard);
         if !ran {
             readcache::JOINED.fetch_add(1, Ordering::Relaxed);
+            self.cache.used(&key);
         }
         match read {
             Ok(slice) => cut(&slice),
@@ -587,32 +593,57 @@ impl DiskManager {
         }
     }
 
-    /// One slice from disk, kept unless a write went by while it was read.
-    async fn read_slice(
+    /// Read the next slice of this piece into the cache, in the background,
+    /// for a peer whose request here followed its last one (`Walk::step`):
+    /// its next requests then find the slice in memory, or join the read
+    /// already under way, rather than each new slice waiting a seek. Called
+    /// after `read_block` answered the request, and only then: a block served
+    /// by sendfile was in the page cache, where the kernel's own readahead
+    /// already works.
+    ///
+    /// The read is the buffered one `read_block` does, into the read cache,
+    /// so on ZFS the bytes still come through the ARC, which is why that
+    /// path is taken there (see `path_is_zfs`).
+    ///
+    /// Skipped when the next slice is past this piece (the peer may want
+    /// another piece next), held, already being read, asked for this peer
+    /// already, or when the engine has `PREFETCH_MAX` read-aheads under way.
+    /// A read-ahead that fails is dropped: the request that wants the slice
+    /// reads it, and only then is anything blamed. The handle is for tests.
+    pub fn prefetch_next(
         &self,
-        torrent: &TorrentState,
-        key: readcache::Key,
-    ) -> Result<Bytes, ReadFailure> {
-        readcache::MISS.fetch_add(1, Ordering::Relaxed);
-        let seen = self.cache.generation(&key);
-        let piece_size = torrent.meta.piece_length as u64;
-        let slice_end = (key.start + SLICE).min(torrent.meta.total_size);
-        // A slice past the end must not wrap the subtraction into a huge read.
-        let Some(len) = slice_end.checked_sub(key.start) else {
-            return Err(ReadFailure {
-                missing: false,
-                unreadable: false,
-                msg: format!("slice start {} past end {}", key.start, slice_end),
-            });
+        walk: &mut readcache::Walk,
+        torrent: &Arc<TorrentState>,
+        piece: u32,
+        offset: u32,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        let plen = torrent.meta.piece_length as u64;
+        let piece_start = piece as u64 * plen;
+        let piece_end = piece_start + torrent.meta.piece_size(piece) as u64;
+        let start = ((piece_start + offset as u64) / SLICE + 1) * SLICE;
+        if start >= piece_end || walk.asked == Some(start) {
+            return None;
+        }
+        let slot = PrefetchSlot::take(&self.prefetches)?;
+        walk.asked = Some(start);
+        let key = readcache::Key {
+            info_hash: torrent.info_hash,
+            start,
         };
-        // Lossless: `start` is inside the torrent, so its piece is one of the
-        // torrent's (a u32 on the wire), its offset is below a piece length
-        // (a u32 in the metainfo) and `len` is at most SLICE.
-        let piece = (key.start / piece_size) as u32;
-        let in_piece = (key.start % piece_size) as u32;
-        let slice = read_range(torrent, piece, in_piece, len as u32).await?;
-        self.cache.put(key, slice.clone(), seen);
-        Ok(slice)
+        let flight = self.cache.begin_prefetch(key)?;
+        let cache = self.cache.clone();
+        let torrent = torrent.clone();
+        Some(tokio::spawn(async move {
+            let _slot = slot;
+            let guard = cache.adopt(key, flight);
+            let _ = guard
+                .flight
+                .get_or_init(|| {
+                    readcache::PREFETCH_ISSUED.fetch_add(1, Ordering::Relaxed);
+                    read_slice(&cache, &torrent, key, true)
+                })
+                .await;
+        }))
     }
 
     /// Write a complete piece to disk and verify SHA1.
@@ -1259,6 +1290,56 @@ pub async fn serve_block_sendfile(
     _len: usize,
 ) -> std::io::Result<bool> {
     Ok(false)
+}
+
+/// One of an engine's `PREFETCH_MAX` read-ahead places, given back when
+/// the read-ahead ends, however it ends.
+struct PrefetchSlot(Arc<AtomicUsize>);
+
+impl PrefetchSlot {
+    fn take(count: &Arc<AtomicUsize>) -> Option<Self> {
+        // A bound, not a hand-off: nothing is published through it. Taken,
+        // then given back when it went over.
+        let slot = PrefetchSlot(count.clone());
+        (count.fetch_add(1, Ordering::Relaxed) < readcache::PREFETCH_MAX).then_some(slot)
+    }
+}
+
+impl Drop for PrefetchSlot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// One slice from disk, kept unless a write went by while it was read.
+/// `prefetched`: read ahead, not asked for (see `prefetch_next`).
+async fn read_slice(
+    cache: &ReadCache,
+    torrent: &TorrentState,
+    key: readcache::Key,
+    prefetched: bool,
+) -> Result<Bytes, ReadFailure> {
+    let seen = cache.generation(&key);
+    let piece_size = torrent.meta.piece_length as u64;
+    let slice_end = (key.start + SLICE).min(torrent.meta.total_size);
+    // A slice past the end must not wrap the subtraction into a huge read.
+    let Some(len) = slice_end.checked_sub(key.start) else {
+        return Err(ReadFailure {
+            missing: false,
+            unreadable: false,
+            msg: format!("slice start {} past end {}", key.start, slice_end),
+        });
+    };
+    // Lossless: `start` is inside the torrent, so its piece is one of the
+    // torrent's (a u32 on the wire), its offset is below a piece length
+    // (a u32 in the metainfo) and `len` is at most SLICE.
+    let piece = (key.start / piece_size) as u32;
+    let in_piece = (key.start % piece_size) as u32;
+    let slice = read_range(torrent, piece, in_piece, len as u32).await?;
+    if !cache.keep(key, slice.clone(), seen, prefetched) && prefetched {
+        readcache::PREFETCH_WASTED.fetch_add(1, Ordering::Relaxed);
+    }
+    Ok(slice)
 }
 
 async fn read_block_direct(
@@ -2189,6 +2270,218 @@ mod disk_tests {
             .unwrap();
         f.disk.read_block(&f.torrent, 0, 0, 16384).await.unwrap();
         assert_eq!(served_reads().lock().get(&path), Some(&2));
+    }
+
+    /// What `serve_block` does for one buffered request: note it on the
+    /// walk, read it, and read ahead if it followed the last one.
+    async fn serve(
+        f: &Fixture,
+        walk: &mut readcache::Walk,
+        piece: u32,
+        offset: u32,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        let in_order = walk.step(piece, offset, 16384);
+        f.disk
+            .read_block(&f.torrent, piece, offset, 16384)
+            .await
+            .unwrap();
+        if in_order {
+            f.disk.prefetch_next(walk, &f.torrent, piece, offset)
+        } else {
+            None
+        }
+    }
+
+    fn slice_key(f: &Fixture, start: u64) -> readcache::Key {
+        readcache::Key {
+            info_hash: f.torrent.info_hash,
+            start,
+        }
+    }
+
+    /// ⭐ Issue #123. A peer walking a piece in order: by the time it asks
+    /// for the next slice, that slice was read ahead and is answered from
+    /// memory, so the walk costs one disk read per slice and none of them
+    /// waits for the request. Without the read-ahead the third read below
+    /// is the request's own, on its path.
+    #[tokio::test]
+    async fn a_peer_walking_a_piece_in_order_finds_the_next_slice_read_ahead() {
+        let content: Vec<u8> = (0..512 * 1024).map(|i| (i % 251) as u8).collect();
+        let f = fixture("readahead", &content);
+        assert!(f
+            .disk
+            .write_piece(&f.torrent, 0, content.clone())
+            .await
+            .unwrap());
+        let path = f.root.join("data").join("payload.bin");
+        served_reads().lock().remove(&path);
+        let issued = readcache::PREFETCH_ISSUED.load(Ordering::Relaxed);
+
+        let mut walk = readcache::Walk::default();
+        assert!(
+            serve(&f, &mut walk, 0, 0).await.is_none(),
+            "one request is no walk"
+        );
+        serve(&f, &mut walk, 0, 16384)
+            .await
+            .expect("the second in order reads ahead")
+            .await
+            .unwrap();
+        assert_eq!(served_reads().lock().get(&path), Some(&2));
+        assert!(f
+            .disk
+            .read_cache()
+            .holds_unused_prefetch(&slice_key(&f, SLICE)));
+        assert!(readcache::PREFETCH_ISSUED.load(Ordering::Relaxed) > issued);
+
+        // The rest of the slice asks for nothing more.
+        for i in 2..8 {
+            assert!(
+                serve(&f, &mut walk, 0, i * 16384).await.is_none(),
+                "block {i}"
+            );
+        }
+        // Into the next slice: from memory, and the one after is read ahead.
+        let ahead = serve(&f, &mut walk, 0, 8 * 16384).await;
+        assert!(!f
+            .disk
+            .read_cache()
+            .holds_unused_prefetch(&slice_key(&f, SLICE)));
+        ahead.expect("the slice after").await.unwrap();
+        assert_eq!(
+            served_reads().lock().get(&path),
+            Some(&3),
+            "slice 1 came out of memory; slice 2 was read ahead"
+        );
+        assert_eq!(
+            f.disk.prefetches.load(Ordering::Relaxed),
+            0,
+            "its place is given back"
+        );
+    }
+
+    /// Nothing is read ahead for requests out of order, nor past the end of
+    /// the piece being walked: the peer may want any piece next.
+    #[tokio::test]
+    async fn nothing_is_read_ahead_out_of_order_or_past_the_piece() {
+        let content: Vec<u8> = (0..512 * 1024).map(|i| (i % 251) as u8).collect();
+        let f = fixture_in_pieces("readahead-edge", &content, 128 * 1024);
+        for (i, piece) in content.chunks(128 * 1024).enumerate() {
+            assert!(f
+                .disk
+                .write_piece(&f.torrent, i as u32, piece.to_vec())
+                .await
+                .unwrap());
+        }
+        let mut walk = readcache::Walk::default();
+        assert!(!walk.step(0, 32768, 16384));
+        assert!(!walk.step(0, 0, 16384), "backwards");
+        assert!(!walk.step(1, 16384, 16384), "another piece");
+        assert!(walk.step(1, 32768, 16384));
+
+        // A piece of one slice: walking piece 0 never reads past it.
+        let mut walk = readcache::Walk::default();
+        for i in 0..8 {
+            assert!(
+                serve(&f, &mut walk, 0, i * 16384).await.is_none(),
+                "block {i}"
+            );
+        }
+        assert!(f.disk.read_cache().holds(&slice_key(&f, SLICE)).is_none());
+    }
+
+    /// A slice already held is not read again ahead of time.
+    #[tokio::test]
+    async fn a_held_slice_is_not_read_ahead() {
+        let content: Vec<u8> = (0..512 * 1024).map(|i| (i % 251) as u8).collect();
+        let f = fixture("readahead-held", &content);
+        assert!(f
+            .disk
+            .write_piece(&f.torrent, 0, content.clone())
+            .await
+            .unwrap());
+        let path = f.root.join("data").join("payload.bin");
+        f.disk
+            .read_block(&f.torrent, 0, 131072, 16384)
+            .await
+            .unwrap();
+        served_reads().lock().remove(&path);
+
+        let mut walk = readcache::Walk::default();
+        serve(&f, &mut walk, 0, 0).await;
+        assert!(serve(&f, &mut walk, 0, 16384).await.is_none());
+        assert_eq!(served_reads().lock().get(&path), Some(&1), "slice 0 only");
+    }
+
+    /// The engine has at most `PREFETCH_MAX` read-aheads under way. One
+    /// refused for that is asked again by the peer's next request.
+    #[tokio::test]
+    async fn read_ahead_waits_for_a_place_under_the_engine_bound() {
+        let content: Vec<u8> = (0..512 * 1024).map(|i| (i % 251) as u8).collect();
+        let f = fixture("readahead-bound", &content);
+        assert!(f
+            .disk
+            .write_piece(&f.torrent, 0, content.clone())
+            .await
+            .unwrap());
+        f.disk
+            .prefetches
+            .store(readcache::PREFETCH_MAX, Ordering::Relaxed);
+        let mut walk = readcache::Walk::default();
+        serve(&f, &mut walk, 0, 0).await;
+        assert!(serve(&f, &mut walk, 0, 16384).await.is_none(), "no place");
+        assert!(f.disk.read_cache().holds(&slice_key(&f, SLICE)).is_none());
+
+        f.disk
+            .prefetches
+            .store(readcache::PREFETCH_MAX - 1, Ordering::Relaxed);
+        serve(&f, &mut walk, 0, 32768)
+            .await
+            .expect("a place freed")
+            .await
+            .unwrap();
+        assert!(f.disk.read_cache().holds(&slice_key(&f, SLICE)).is_some());
+        assert_eq!(
+            f.disk.prefetches.load(Ordering::Relaxed),
+            readcache::PREFETCH_MAX - 1
+        );
+    }
+
+    /// A request for a slice still being read ahead waits on that read: one
+    /// disk read, and the read-ahead counts as used.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_request_joins_the_read_ahead_of_its_slice() {
+        let content: Vec<u8> = (0..512 * 1024).map(|i| (i % 251) as u8).collect();
+        let f = fixture("readahead-join", &content);
+        assert!(f
+            .disk
+            .write_piece(&f.torrent, 0, content.clone())
+            .await
+            .unwrap());
+        let path = f.root.join("data").join("payload.bin");
+        let mut walk = readcache::Walk::default();
+        serve(&f, &mut walk, 0, 0).await;
+        served_reads().lock().remove(&path);
+
+        // The read-ahead starts and blocks on the descriptor cache.
+        let held = fd_cache().lock();
+        let ahead = serve(&f, &mut walk, 0, 16384).await.expect("read ahead");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let (disk, t) = (f.disk.clone(), f.torrent.clone());
+        let request = tokio::spawn(async move { disk.read_block(&t, 0, 131072, 16384).await });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(held);
+        ahead.await.unwrap();
+        assert_eq!(
+            &request.await.unwrap().unwrap()[..],
+            &content[131072..147456]
+        );
+        assert_eq!(served_reads().lock().get(&path), Some(&1), "one read");
+        assert!(!f
+            .disk
+            .read_cache()
+            .holds_unused_prefetch(&slice_key(&f, SLICE)));
     }
 
     /// The request running a slice's read can be dropped (its peer went
