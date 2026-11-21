@@ -73,6 +73,15 @@ pub async fn start(
             let device = Some(config.bind_device.trim()).filter(|d| !d.is_empty());
             if let Some(session) = crate::dht::DhtSession::start(device).await {
                 session.set_follow_seeds(config.dht_follow_seeds);
+                // Announce where the outside reaches us (the NAT-PMP external
+                // port, else the listener), asked again at every lookup and
+                // every `PORT_CHECK`. Weak: the manager owns this session.
+                let weak = Arc::downgrade(&mgr);
+                let configured = config.listen_port;
+                session.set_announce_port(move || {
+                    weak.upgrade()
+                        .and_then(|m| crate::dht::engine_port(&m, configured))
+                });
                 mgr.set_dht(session);
             }
             for t in mgr.all().iter() {
