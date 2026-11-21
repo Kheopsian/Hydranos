@@ -161,6 +161,14 @@ impl Catalogue for EngineCatalogue {
             AnnounceSort::Ratio => ratio_key(crate::row::torrent_ratio(&t)),
         }
     }
+
+    fn reopens_in(&self, info_hash: &typhon_engine::torrent::meta::InfoHash) -> Duration {
+        let Some(t) = self.manager.get(info_hash) else {
+            return Duration::ZERO;
+        };
+        let book = t.announce_book.lock().unwrap_or_else(|e| e.into_inner());
+        book::all_open(&book, typhon_engine::torrent::meta::now_secs())
+    }
 }
 
 /// A share ratio as a key that sorts the same way: the bits of a float that is
@@ -330,8 +338,15 @@ pub fn start(
             });
         }));
     }
+    // A new forwarded port (NAT-PMP renewal, gluetun, the API) reaches every
+    // tracker now, spread out, not at each torrent's next interval (#116).
+    let port_changed = Arc::new(tokio::sync::Notify::new());
+    {
+        let port_changed = port_changed.clone();
+        hook_manager.set_port_change_hook(Arc::new(move || port_changed.notify_one()));
+    }
     tokio::spawn(async move {
-        scheduler::run(catalogue, announce, bump_rx, admission).await;
+        scheduler::run(catalogue, announce, bump_rx, port_changed, admission).await;
     });
     bump_tx
 }
