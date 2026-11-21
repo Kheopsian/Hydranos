@@ -7,11 +7,14 @@
 //! Each lookup carries the engine's announced port, so the nodes closest to
 //! the info hash are sent `announce_peer` and the swarm learns our address.
 //! Without a port `librqbit-dht` only searches, and nobody who relied on the
-//! DHT could find us, seeds included.
+//! DHT could find us, seeds included. A stream keeps the port it was opened
+//! with, so a search whose port to announce changed (a forwarded port that
+//! arrives or moves, a rebind, the startup hold released) is reopened.
 //!
 //! A finished torrent whose seeds are not followed (`dht_follow_seeds =
 //! false`) drops the endless search but is still announced: one short lookup
-//! every `ANNOUNCE_INTERVAL`, its peers left to dial us.
+//! every `ANNOUNCE_INTERVAL`, the first one spread over that interval, its
+//! peers left to dial us.
 //!
 //! Private-tracker torrents (`TorrentMeta.private == true`) are skipped — BEP 27
 //! forbids DHT for those and many trackers ban clients that announce them.
@@ -36,7 +39,7 @@ use tokio::sync::Notify;
 use tokio::task::AbortHandle;
 use tracing::{info, warn};
 
-use crate::torrent::meta::{InfoHash, TorrentState};
+use crate::torrent::meta::{InfoHash, TorrentState, TorrentStatus};
 
 /// Whether an engine may run a DHT node, and why not when it may not.
 ///
@@ -145,7 +148,7 @@ pub struct DhtSession {
     /// Starts true, the behaviour so far; `session.rs` sets it from the config.
     follow_seeds: AtomicBool,
     /// The port to announce, asked again for every lookup. Unset, or None
-    /// (the port is not known yet), a lookup only searches.
+    /// (`engine_port`), a lookup only searches.
     announce_port: OnceLock<PortSource>,
 }
 
@@ -159,6 +162,22 @@ const ANNOUNCE_INTERVAL: Duration = Duration::from_secs(15 * 60);
 /// How long one announce-only lookup runs: the recursion reaches the nodes
 /// closest to the hash, and announces to them, well within it.
 const ANNOUNCE_WINDOW: Duration = Duration::from_secs(30);
+
+/// How often a search looks again at the port it announces when no peer
+/// comes. The tracker runner looks as often at a held announce.
+const PORT_CHECK: Duration = Duration::from_secs(15);
+
+/// The wait before a torrent's first announce-only lookup: somewhere in
+/// `[0, ANNOUNCE_INTERVAL)`, from its info hash, which is uniform. Without
+/// it every seed that is not followed would look up at boot together and
+/// stay in step every interval after. Fixed per torrent, so a restart does
+/// not bunch them either.
+fn announce_jitter(info_hash: &InfoHash) -> Duration {
+    let mut head = [0u8; 8];
+    head.copy_from_slice(&info_hash[..8]);
+    let span = ANNOUNCE_INTERVAL.as_secs() * 1000;
+    Duration::from_millis(u64::from_le_bytes(head) % span)
+}
 
 /// One tracked torrent: its task, and the bell `track_torrent` rings so a
 /// waiting task looks again at whether it should search.
@@ -181,6 +200,18 @@ fn is_finished(t: &TorrentState) -> bool {
 /// A public torrent that does not search is still announced.
 pub fn searches_in_dht(t: &TorrentState, follow_seeds: bool) -> bool {
     t.meta.allows_peer_discovery() && (follow_seeds || !is_finished(t))
+}
+
+/// The port an engine's DHT lookups announce, None when they must not
+/// announce at all: the same holds as the tracker runner's. Held at startup
+/// (`start_paused`: no dial, no announce until released), and while a
+/// forwarded port is not known yet (a lookup would hand out a port nothing
+/// listens on).
+pub fn engine_port(mgr: &crate::torrent::TorrentManager, configured: u16) -> Option<u16> {
+    if mgr.limiter().dials_paused() || mgr.port_pending() {
+        return None;
+    }
+    Some(mgr.announced_port(configured))
 }
 
 impl DhtSession {
@@ -229,8 +260,9 @@ impl DhtSession {
     }
 
     /// Where the port to announce comes from: the engine's announced port
-    /// (the external one behind NAT-PMP), None while it is not known. Set
-    /// once, before any torrent is tracked; asked again at every lookup.
+    /// (the external one behind NAT-PMP), None while lookups must not
+    /// announce (`engine_port`). Set once, before any torrent is tracked;
+    /// asked again at every lookup and, during a search, every `PORT_CHECK`.
     pub fn set_announce_port(&self, port: impl Fn() -> Option<u16> + Send + Sync + 'static) {
         let _ = self.announce_port.set(Box::new(port));
     }
@@ -295,12 +327,14 @@ impl DhtSession {
     /// The body of `track_torrent`, over any lookup: `lookup(port)` opens a
     /// stream of peers that announces `port` when it is Some.
     ///
-    /// The task searches while `searches_in_dht` says so. Once it does not
-    /// (finished, seeds not followed) it announces every `ANNOUNCE_INTERVAL`
-    /// instead, and searches again when woken for a torrent that needs pieces
-    /// again. When the task ends (the torrent was removed, or a search stream
-    /// ended) the entry leaves `tracked` and `torrents_tracked` with it, so a
-    /// later `track_torrent` tracks it afresh and the count stays true.
+    /// The task searches while `searches_in_dht` says so, and reopens the
+    /// search when the port to announce changes (`search`). Once it does not
+    /// search (finished, seeds not followed) it announces every
+    /// `ANNOUNCE_INTERVAL` instead, the first time after `announce_jitter`,
+    /// and searches again when woken for a torrent that needs pieces again.
+    /// When the task ends (the torrent was removed, or a search stream ended)
+    /// the entry leaves `tracked` and `torrents_tracked` with it, so a later
+    /// `track_torrent` tracks it afresh and the count stays true.
     fn track_with<L, S>(self: &Arc<Self>, torrent: Arc<TorrentState>, mut lookup: L)
     where
         L: FnMut(Option<u16>) -> S + Send + 'static,
@@ -311,19 +345,26 @@ impl DhtSession {
         let wake = Arc::new(Notify::new());
         let woken = wake.clone();
         let handle = tokio::spawn(async move {
+            let mut next_announce = announce_jitter(&ih);
             while !torrent.is_removed.load(Ordering::Relaxed) {
                 if session.searches(&torrent) {
-                    let stream = lookup(session.port_to_announce());
-                    if session.search(&torrent, stream).await.is_break() {
+                    let port = session.port_for(&torrent);
+                    if session
+                        .search(&torrent, lookup(port), port)
+                        .await
+                        .is_break()
+                    {
                         break;
                     }
                     continue;
                 }
-                if let Some(port) = session.port_to_announce() {
-                    announce_once(lookup(Some(port))).await;
-                }
                 tokio::select! {
-                    _ = tokio::time::sleep(ANNOUNCE_INTERVAL) => {}
+                    _ = tokio::time::sleep(next_announce) => {
+                        next_announce = ANNOUNCE_INTERVAL;
+                        if let Some(port) = session.port_for(&torrent) {
+                            announce_once(lookup(Some(port))).await;
+                        }
+                    }
                     _ = woken.notified() => {}
                 }
             }
@@ -347,22 +388,59 @@ impl DhtSession {
         searches_in_dht(torrent, self.follow_seeds.load(Ordering::Relaxed))
     }
 
-    /// Dial what a search stream finds. Continue: the torrent stopped
-    /// searching (finished, seeds not followed). Break: it was removed or the
-    /// stream ended, and the task is over.
-    async fn search<S>(&self, torrent: &Arc<TorrentState>, stream: S) -> ControlFlow<()>
+    /// The port this torrent's lookups announce: the engine's, unless the
+    /// torrent is in error. A torrent whose data is gone (`mark_data_lost`,
+    /// `park_absent`) cannot serve a piece, and the tracker runner is silent
+    /// for it too.
+    fn port_for(&self, torrent: &TorrentState) -> Option<u16> {
+        if torrent.status.load(Ordering::Relaxed) == TorrentStatus::Error as u8 {
+            return None;
+        }
+        self.port_to_announce()
+    }
+
+    /// Dial what a search stream, opened announcing `opened`, finds.
+    /// Continue: the torrent stopped searching (finished, seeds not followed)
+    /// or the port to announce is no longer `opened`, which a stream cannot
+    /// change: the caller opens another. Break: it was removed or the stream
+    /// ended, and the task is over.
+    ///
+    /// Checked every `PORT_CHECK` as well as at each peer, so a quiet stream
+    /// does not keep announcing a port the engine left (a forwarded port that
+    /// was still pending when the search opened, or that moved since).
+    async fn search<S>(
+        &self,
+        torrent: &Arc<TorrentState>,
+        stream: S,
+        opened: Option<u16>,
+    ) -> ControlFlow<()>
     where
         S: futures::Stream<Item = std::net::SocketAddr>,
     {
         let mut stream = std::pin::pin!(stream);
-        while let Some(peer_addr) = stream.next().await {
+        let mut check =
+            tokio::time::interval_at(tokio::time::Instant::now() + PORT_CHECK, PORT_CHECK);
+        check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            // None: the check is due, no peer came.
+            let peer = tokio::select! {
+                peer = stream.next() => match peer {
+                    Some(addr) => Some(addr),
+                    None => return ControlFlow::Break(()),
+                },
+                _ = check.tick() => None,
+            };
             if torrent.is_removed.load(Ordering::Relaxed) {
                 return ControlFlow::Break(());
             }
-            // Finished since it was tracked, and seeds are not followed.
-            if !self.searches(torrent) {
+            // Finished since it was tracked and seeds are not followed, or
+            // the port moved.
+            if !self.searches(torrent) || self.port_for(torrent) != opened {
                 return ControlFlow::Continue(());
             }
+            let Some(peer_addr) = peer else {
+                continue;
+            };
             self.peers_discovered.fetch_add(1, Ordering::Relaxed);
             if torrent.peers.contains_key(&peer_addr) {
                 continue;
@@ -370,7 +448,6 @@ impl DhtSession {
             self.peers_dialed.fetch_add(1, Ordering::Relaxed);
             crate::tracker::enqueue_dial(peer_addr, torrent.clone());
         }
-        ControlFlow::Break(())
     }
 
     /// Cancel a torrent's DHT task. Safe to call for a torrent that was
@@ -518,7 +595,10 @@ mod tests {
     }
 
     /// A node with no bootstrap peers: enough to own a `tracked` table.
-    async fn offline_session(follow_seeds: bool, port: Option<u16>) -> Arc<DhtSession> {
+    async fn offline_session(
+        follow_seeds: bool,
+        port: impl Fn() -> Option<u16> + Send + Sync + 'static,
+    ) -> Arc<DhtSession> {
         let config = librqbit_dht::DhtConfig {
             bootstrap_addrs: Some(Vec::new()),
             ..Default::default()
@@ -535,7 +615,7 @@ mod tests {
             follow_seeds: AtomicBool::new(follow_seeds),
             announce_port: OnceLock::new(),
         });
-        session.set_announce_port(move || port);
+        session.set_announce_port(port);
         session
     }
 
@@ -567,6 +647,20 @@ mod tests {
 
     const PORT: u16 = 51413;
 
+    /// A public seed that can serve. Added in seed mode with no files on
+    /// disk it is in error (data gone), which announces nothing: set it to
+    /// Seeding, as a seed whose data is there.
+    fn healthy_seed(mgr: &crate::torrent::TorrentManager) -> InfoHash {
+        let (ih, _) = mgr
+            .add_torrent_bytes(&torrent_bytes("seed", false), "/tmp", false, true)
+            .unwrap();
+        mgr.get(&ih)
+            .unwrap()
+            .status
+            .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+        ih
+    }
+
     /// ⭐ The lookup of a public torrent announces the engine's port, so the
     /// DHT nodes closest to the hash learn where to find us.
     #[tokio::test]
@@ -575,7 +669,7 @@ mod tests {
         let (ih, _) = mgr
             .add_torrent_bytes(&torrent_bytes("down", false), "/tmp", false, false)
             .unwrap();
-        let session = offline_session(true, Some(PORT)).await;
+        let session = offline_session(true, || Some(PORT)).await;
         let (lookup, mut opened) = fake_lookups();
         session.track_with(mgr.get(&ih).unwrap(), lookup);
         assert_eq!(next_lookup(&mut opened).await.0, Some(PORT));
@@ -589,7 +683,7 @@ mod tests {
         let (ih, _) = mgr
             .add_torrent_bytes(&torrent_bytes("priv", true), "/tmp", false, false)
             .unwrap();
-        let session = offline_session(true, Some(PORT)).await;
+        let session = offline_session(true, || Some(PORT)).await;
         session.track_torrent(mgr.get(&ih).unwrap());
         assert_eq!(session.tracked_count(), 0);
         let _ = std::fs::remove_dir_all(root);
@@ -601,16 +695,19 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_seed_not_followed_is_announced_every_interval_and_dials_nothing() {
         let (mgr, root) = manager("seed-announce");
-        let (ih, _) = mgr
-            .add_torrent_bytes(&torrent_bytes("seed", false), "/tmp", false, true)
-            .unwrap();
-        let session = offline_session(false, Some(PORT)).await;
+        let ih = healthy_seed(&mgr);
+        let session = offline_session(false, || Some(PORT)).await;
         let (lookup, mut opened) = fake_lookups();
         session.track_with(mgr.get(&ih).unwrap(), lookup);
 
         let started = tokio::time::Instant::now();
-        let (port, peers) = next_lookup(&mut opened).await;
+        let (port, peers) = next_lookup_after(&mut opened, ANNOUNCE_INTERVAL).await;
         assert_eq!(port, Some(PORT));
+        assert!(
+            started.elapsed() >= announce_jitter(&ih),
+            "the first announce did not wait for its jitter"
+        );
+        let first = tokio::time::Instant::now();
         peers.send("192.168.99.7:6881".parse().unwrap()).unwrap();
         tokio::time::sleep(ANNOUNCE_WINDOW + Duration::from_secs(1)).await;
         assert!(peers.is_closed(), "the announce lookup outlived its window");
@@ -627,7 +724,7 @@ mod tests {
 
         let (port, _peers) = next_lookup_after(&mut opened, ANNOUNCE_INTERVAL).await;
         assert_eq!(port, Some(PORT));
-        assert!(started.elapsed() >= ANNOUNCE_INTERVAL);
+        assert!(first.elapsed() >= ANNOUNCE_INTERVAL);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -637,10 +734,8 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_seed_not_followed_is_not_looked_up_while_the_port_is_unknown() {
         let (mgr, root) = manager("seed-noport");
-        let (ih, _) = mgr
-            .add_torrent_bytes(&torrent_bytes("seed", false), "/tmp", false, true)
-            .unwrap();
-        let session = offline_session(false, None).await;
+        let ih = healthy_seed(&mgr);
+        let session = offline_session(false, || None).await;
         let (lookup, mut opened) = fake_lookups();
         session.track_with(mgr.get(&ih).unwrap(), lookup);
         let none = tokio::time::timeout(ANNOUNCE_INTERVAL * 2, opened.recv()).await;
@@ -662,7 +757,7 @@ mod tests {
             .add_torrent_bytes(&torrent_bytes("fin", false), "/tmp", false, false)
             .unwrap();
         let torrent = mgr.get(&ih).unwrap();
-        let session = offline_session(false, Some(PORT)).await;
+        let session = offline_session(false, || Some(PORT)).await;
         let (lookup, mut opened) = fake_lookups();
         session.track_with(torrent.clone(), lookup);
         let (_, search) = next_lookup(&mut opened).await;
@@ -671,7 +766,7 @@ mod tests {
         picker().set_have(0);
         assert!(!searches_in_dht(&torrent, false));
         search.send("192.168.99.7:6881".parse().unwrap()).unwrap();
-        let (port, announce) = next_lookup(&mut opened).await;
+        let (port, announce) = next_lookup_after(&mut opened, ANNOUNCE_INTERVAL).await;
         assert_eq!(port, Some(PORT), "the finished torrent is not announced");
         assert!(search.is_closed(), "the search outlived the download");
         assert_eq!(
@@ -708,7 +803,7 @@ mod tests {
         let (ih, _) = mgr
             .add_torrent_bytes(&torrent_bytes("fin", false), "/tmp", false, false)
             .unwrap();
-        let session = offline_session(true, Some(PORT)).await;
+        let session = offline_session(true, || Some(PORT)).await;
         let (lookup, mut opened) = fake_lookups();
         session.track_with(mgr.get(&ih).unwrap(), lookup);
         drop(next_lookup(&mut opened).await);
@@ -724,6 +819,116 @@ mod tests {
             "the ended search left its entry behind"
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// ⭐ A stream announces the port it was opened with, so a search whose
+    /// port changes is reopened: none yet (a forwarded port pending, the
+    /// startup hold) -> the forwarded one -> the one it moved to. A search
+    /// whose port holds still is left alone.
+    #[tokio::test(start_paused = true)]
+    async fn a_search_reopens_when_the_port_to_announce_changes() {
+        let (mgr, root) = manager("reopen");
+        let (ih, _) = mgr
+            .add_torrent_bytes(&torrent_bytes("down", false), "/tmp", false, false)
+            .unwrap();
+        let port = Arc::new(std::sync::Mutex::new(None::<u16>));
+        let source = port.clone();
+        let session = offline_session(true, move || *source.lock().unwrap()).await;
+        let (lookup, mut opened) = fake_lookups();
+        session.track_with(mgr.get(&ih).unwrap(), lookup);
+
+        let (first, unknown) = next_lookup(&mut opened).await;
+        assert_eq!(first, None);
+        // Senders held, so a stream ends only when the task drops it.
+        let mut held = Vec::new();
+        for now in [40001, 40002] {
+            *port.lock().unwrap() = Some(now);
+            let (announced, peers) = next_lookup_after(&mut opened, PORT_CHECK).await;
+            assert_eq!(announced, Some(now), "the search kept its old port");
+            held.push(peers);
+        }
+        assert!(held[0].is_closed(), "the search on the old port lives on");
+        assert!(
+            unknown.is_closed(),
+            "the search opened without a port lives on"
+        );
+        let quiet = tokio::time::timeout(PORT_CHECK * 4, opened.recv()).await;
+        assert!(
+            quiet.is_err(),
+            "a search was reopened for an unchanged port"
+        );
+        assert_eq!(session.torrents_tracked(), 1);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A torrent whose data is gone (status Error, as `mark_data_lost` and
+    /// `park_absent` leave it) stops announcing, as the tracker runner does.
+    #[tokio::test(start_paused = true)]
+    async fn a_torrent_whose_data_is_gone_stops_announcing() {
+        let (mgr, root) = manager("gone");
+        let (ih, _) = mgr
+            .add_torrent_bytes(&torrent_bytes("down", false), "/tmp", false, false)
+            .unwrap();
+        let torrent = mgr.get(&ih).unwrap();
+        let session = offline_session(true, || Some(PORT)).await;
+        let (lookup, mut opened) = fake_lookups();
+        session.track_with(torrent.clone(), lookup);
+        let (port, _search) = next_lookup(&mut opened).await;
+        assert_eq!(port, Some(PORT));
+
+        torrent.mark_data_lost("test: the files are gone");
+        assert_eq!(
+            torrent.status.load(Ordering::Relaxed),
+            TorrentStatus::Error as u8
+        );
+        let (port, _held) = next_lookup_after(&mut opened, PORT_CHECK).await;
+        assert_eq!(port, None, "a torrent with no data is still announced");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The engine's lookups announce nothing while dials and announces are
+    /// held at startup (`start_paused`) or the forwarded port is pending, and
+    /// the external port behind NAT-PMP otherwise.
+    #[test]
+    fn the_engine_port_is_held_while_dials_are_paused_or_the_port_is_pending() {
+        let (mgr, root) = manager("engine-port");
+        assert_eq!(engine_port(&mgr, 6881), Some(6881));
+        mgr.set_external_port(41000);
+        assert_eq!(engine_port(&mgr, 6881), Some(41000), "not the NAT's port");
+
+        mgr.limiter().set_dials_paused(true);
+        assert_eq!(
+            engine_port(&mgr, 6881),
+            None,
+            "announced during start_paused"
+        );
+        mgr.limiter().set_dials_paused(false);
+
+        mgr.set_port_pending(true);
+        assert_eq!(engine_port(&mgr, 6881), None, "announced a pending port");
+        mgr.set_port_pending(false);
+        assert_eq!(engine_port(&mgr, 6881), Some(41000));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Seeds that are not followed do not all make their first announce at
+    /// once: the wait is spread over the interval by info hash.
+    #[test]
+    fn first_announces_are_spread_over_the_interval() {
+        let waits: std::collections::HashSet<Duration> = (0..=255u8)
+            .map(|b| {
+                let mut ih = [0u8; 20];
+                ih[0] = b;
+                ih[5] = b.wrapping_mul(31);
+                announce_jitter(&ih)
+            })
+            .collect();
+        assert!(waits.iter().all(|w| *w < ANNOUNCE_INTERVAL));
+        assert!(
+            waits.len() > 200,
+            "first announces bunch up: {}",
+            waits.len()
+        );
     }
 
     async fn next_lookup_after(
