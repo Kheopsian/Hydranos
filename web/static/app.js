@@ -7718,9 +7718,34 @@ async function loadRacePolicy() {
     // Never redraw under the user's fingers: this polls, and rebuilding the
     // markup while a threshold is half typed would eat the edit.
     if (box.contains(document.activeElement)) return;
-    box.innerHTML = _rpVols.map((v, i) => _rpVolCard(v, i)).join("");
-    _rpVols.forEach((v, i) => { if (_rpHistOpen.has(v.id)) _rpRenderHist(i); });
+    // The open histories are fetched first and written with their cards, in one
+    // assignment. Rebuilding a card with its history still hidden and showing it
+    // after a fetch made every open history blink on each one-second poll.
+    const hists = await _rpFetchOpenHists();
+    if (box.contains(document.activeElement)) return;
+    box.innerHTML = _rpVols.map((v, i) => _rpVolCard(v, i, hists[v.id])).join("");
     _rpLoadGraduations();
+}
+// The drain history table for each open volume, keyed by volume id. One request
+// serves every card, filtered per volume (the list is capped at 50 rows).
+async function _rpFetchOpenHists() {
+    const out = {};
+    if (!_rpHistOpen.size) return out;
+    let h;
+    try { h = await api("/api/drain/history"); } catch (e) { h = []; }
+    for (const id of _rpHistOpen) out[id] = _rpHistHtml((h || []).filter(d => d.volume === id));
+    return out;
+}
+function _rpHistHtml(rows) {
+    if (!rows.length) return '<div class="rp2-disk" style="padding:8px 0">' + t("No drain on this volume yet.") + "</div>";
+    return "<table><thead><tr><th>" + t("When") + "</th><th>" + t("Before") + "</th><th>"
+        + t("After") + "</th><th>" + t("Freed") + "</th><th>" + t("Deleted") + "</th><th>"
+        + t("Graduated") + "</th><th>" + t("Stuck") + "</th></tr></thead><tbody>"
+        + rows.map(d => "<tr><td>" + new Date((d.timestamp || 0) * 1000).toLocaleString() + "</td><td>"
+            + (d.before_pct ?? 0) + "%</td><td>" + (d.after_pct ?? 0) + "%</td><td>"
+            + formatBytes(d.freed || 0) + "</td><td>" + (d.deleted || 0) + "</td><td>"
+            + (d.graduated || 0) + "</td><td>" + (d.stuck || 0) + "</td></tr>").join("")
+        + "</tbody></table>";
 }
 // A graduation copies for minutes. Showing it only in the log means the panel
 // looks idle while the disk is busy.
@@ -7739,7 +7764,9 @@ async function _rpLoadGraduations() {
                 + '<div class="rp2-grad-pct">' + formatBytes(x.copied || 0) + " / " + formatBytes(x.total || 0) + "</div></div>";
         }).join("");
 }
-function _rpVolCard(v, i) {
+// histHtml is set only for a history that is open: then it is shown in the same
+// write as the card, never hidden first.
+function _rpVolCard(v, i, histHtml) {
     const pct = Math.min(100, Math.max(0, v.used_pct || 0));
     const hot = pct >= (v.high_watermark || 100);
     const fill = hot
@@ -7793,7 +7820,7 @@ function _rpVolCard(v, i) {
         + '<span class="rp2-info">i<span class="rp2-tip" style="left:auto;right:0">' + esc(t("Tells the SSD which blocks the drain just freed. An SSD that is never trimmed treats deleted races as live data and can fall to a fraction of its write speed. Needs CAP_SYS_ADMIN; ZFS, network shares and hard disks refuse it.")) + "</span></span></div>"
         + _rpTrimLast(v.last_trim) + "</div>"
         + '<div class="rp2-row rp2-drain-result" id="rp-res-' + i + '" style="display:none"></div>'
-        + '<div class="rp2-hist" id="rp-hist-' + i + '" style="display:none"></div>'
+        + '<div class="rp2-hist" id="rp-hist-' + i + '"' + (histHtml === undefined ? ' style="display:none"' : "") + ">" + (histHtml || "") + "</div>"
         + "</div></div>";
 }
 // The last trim, or why it was refused: a switch that is on and silently does
@@ -7874,22 +7901,13 @@ async function _rpRenderHist(i) {
     if (!_rpHistOpen.has(v.id)) { box.style.display = "none"; return; }
     let h;
     try { h = await api("/api/drain/history"); } catch (e) { h = []; }
-    // Filtered here rather than server-side: the list is capped at 50 rows, and
-    // one request serves every card instead of one per open.
-    h = (h || []).filter(d => d.volume === v.id);
-    if (h.length) {
-        box.innerHTML = "<table><thead><tr><th>" + t("When") + "</th><th>" + t("Before") + "</th><th>"
-            + t("After") + "</th><th>" + t("Freed") + "</th><th>" + t("Deleted") + "</th><th>"
-            + t("Graduated") + "</th><th>" + t("Stuck") + "</th></tr></thead><tbody>"
-            + h.map(d => "<tr><td>" + new Date((d.timestamp || 0) * 1000).toLocaleString() + "</td><td>"
-                + (d.before_pct ?? 0) + "%</td><td>" + (d.after_pct ?? 0) + "%</td><td>"
-                + formatBytes(d.freed || 0) + "</td><td>" + (d.deleted || 0) + "</td><td>"
-                + (d.graduated || 0) + "</td><td>" + (d.stuck || 0) + "</td></tr>").join("")
-            + "</tbody></table>";
-    } else {
-        box.innerHTML = '<div class="rp2-disk" style="padding:8px 0">' + t("No drain on this volume yet.") + "</div>";
-    }
-    box.style.display = "";
+    // Shut again while the fetch was out: leave it shut.
+    if (!_rpHistOpen.has(v.id)) { box.style.display = "none"; return; }
+    // Re-read by id: a poll may have rebuilt the card meanwhile, and the old box is detached.
+    const cur = document.getElementById("rp-hist-" + i);
+    if (!cur) return;
+    cur.innerHTML = _rpHistHtml((h || []).filter(d => d.volume === v.id));
+    cur.style.display = "";
 }
 
 async function updateUptime() {
