@@ -17404,6 +17404,9 @@ async fn qbit_library(
     let qbit = crate::importer::Qbit::login(&creds)
         .await
         .map_err(|e| bad_request(&e))?;
+    qbit.check_export_supported()
+        .await
+        .map_err(|e| bad_request(&e))?;
     let list = qbit.torrents().await.map_err(|e| {
         (
             StatusCode::BAD_GATEWAY,
