@@ -178,10 +178,19 @@ pub struct Qbit {
     creds: QbitCreds,
     /// First wait between two export attempts; doubles each time.
     backoff: std::time::Duration,
+    /// How long the library listing may take, body included. Longer than
+    /// `REQUEST_TIMEOUT`: a large library is hundreds of MB of JSON.
+    list_timeout: std::time::Duration,
 }
 
 /// How long one request to qBittorrent may take before it counts as lost.
 const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// How long the whole library listing may take, body included. qBittorrent
+/// sends about 1.5 KB per torrent, so 200k torrents is hundreds of MB; the
+/// 30 s per-request limit cannot cover that. Gzip (on the client) shrinks it
+/// several-fold (the listing asks for gzip), and this bound covers what is left.
+const LISTING_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// Why an export failed: the text, and whether qBittorrent answered at all.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -327,6 +336,7 @@ impl Qbit {
             cookie: std::sync::RwLock::new(cookie),
             creds: creds.clone(),
             backoff: std::time::Duration::from_secs(1),
+            list_timeout: LISTING_TIMEOUT,
         })
     }
 
@@ -407,18 +417,47 @@ impl Qbit {
     }
 
     /// Every torrent it holds.
+    ///
+    /// One request under `list_timeout`, which covers the body too. The
+    /// request asks for gzip, and the body is decoded here: the gzip support
+    /// of reqwest is not switched on, because that would add
+    /// `Accept-Encoding` to every other client in the binary (trackers, RSS,
+    /// the updater), and only this listing is large enough to need it.
     pub async fn torrents(&self) -> Result<Vec<QbitTorrent>, String> {
         let resp = self
             .get("/api/v2/torrents/info")
+            .header(reqwest::header::ACCEPT_ENCODING, "gzip")
+            .timeout(self.list_timeout)
             .send()
             .await
             .map_err(|e| format!("torrents/info: {e}"))?;
         if !resp.status().is_success() {
             return Err(format!("torrents/info: http {}", resp.status()));
         }
-        resp.json()
+        let gzipped = resp
+            .headers()
+            .get(reqwest::header::CONTENT_ENCODING)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.trim().eq_ignore_ascii_case("gzip"));
+        let body = resp
+            .bytes()
             .await
-            .map_err(|e| format!("torrents/info body: {e}"))
+            .map_err(|e| format!("torrents/info body: {e}"))?;
+        // Decoding and parsing hundreds of MB is CPU work: off the runtime.
+        tokio::task::spawn_blocking(move || {
+            // An uncompressed body is parsed where it lies, not copied first.
+            let json: std::borrow::Cow<'_, [u8]> = if gzipped {
+                let mut out = Vec::new();
+                std::io::Read::read_to_end(&mut flate2::read::GzDecoder::new(&body[..]), &mut out)
+                    .map_err(|e| format!("torrents/info gzip: {e}"))?;
+                out.into()
+            } else {
+                body[..].into()
+            };
+            serde_json::from_slice(&json).map_err(|e| format!("torrents/info body: {e}"))
+        })
+        .await
+        .map_err(|e| format!("torrents/info body: {e}"))?
     }
 
     /// The .torrent file for one hash.
@@ -2171,6 +2210,48 @@ mod qbit_session_tests {
             err.message.to_lowercase().contains("timed out"),
             "the cause must follow: {err}"
         );
+    }
+
+    /// A listing that is gzipped only when the client asks, and slower than
+    /// the per-request timeout: it must still arrive, and decode.
+    #[tokio::test]
+    async fn a_large_listing_is_gzipped_and_outlives_the_request_timeout() {
+        use std::io::Write;
+        async fn listing(headers: HeaderMap) -> axum::response::Response {
+            let accepts_gzip = headers
+                .get("accept-encoding")
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|v| v.contains("gzip"));
+            if !accepts_gzip {
+                return StatusCode::NOT_ACCEPTABLE.into_response();
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+            let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+            enc.write_all(br#"[{"hash":"aa","name":"big one"},{"hash":"bb","name":"two"}]"#)
+                .unwrap();
+            let gz = enc.finish().unwrap();
+            ([("content-encoding", "gzip")], gz).into_response()
+        }
+        let app = axum::Router::new()
+            .route("/api/v2/auth/login", axum::routing::post(login))
+            .route("/api/v2/torrents/info", axum::routing::get(listing))
+            .with_state(Arc::new(Fake::default()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let creds = QbitCreds {
+            url: format!("http://{addr}"),
+            username: "u".into(),
+            password: "p".into(),
+        };
+        // The client gives up on any request after 150 ms; the listing alone
+        // is allowed far longer.
+        let q = Qbit::login_with_timeout(&creds, std::time::Duration::from_millis(150))
+            .await
+            .unwrap();
+        let list = q.torrents().await.expect("the listing arrives and decodes");
+        let names: Vec<_> = list.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, ["big one", "two"]);
     }
 
     #[test]
