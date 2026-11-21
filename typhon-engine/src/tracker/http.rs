@@ -1154,6 +1154,50 @@ mod announce_wire_tests {
         assert_eq!(resp.min_interval, 900, "the floor is carried, not dropped");
     }
 
+    /// An announce asks for no compressed body. Trackers see these headers as
+    /// part of the client's fingerprint, so the gzip the qBittorrent listing
+    /// asks for must not reach them.
+    #[tokio::test]
+    async fn an_announce_sends_no_accept_encoding() {
+        use axum::http::HeaderMap;
+        // One entry per request: the header's value, or None when absent.
+        let seen: std::sync::Arc<std::sync::Mutex<Vec<Option<String>>>> = Default::default();
+        let s = seen.clone();
+        let app = Router::new().route(
+            "/announce",
+            get(move |headers: HeaderMap| {
+                let s = s.clone();
+                async move {
+                    let v = headers
+                        .get("accept-encoding")
+                        .map(|v| v.to_str().unwrap_or("?").to_string());
+                    s.lock().unwrap().push(v);
+                    OK_BODY.to_vec()
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        announce(
+            &format!("http://{addr}/announce"),
+            &[0xABu8; 20],
+            &[0xCDu8; 20],
+            16371,
+            0,
+            0,
+            0,
+            "started",
+        )
+        .await
+        .expect("the tracker answered");
+        assert_eq!(*seen.lock().unwrap(), vec![None], "no Accept-Encoding");
+    }
+
     /// The swarm counts and the compact peer list are decoded as BEP 3 spells
     /// them: 6 bytes a peer, port big-endian.
     #[tokio::test]
