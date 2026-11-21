@@ -101,6 +101,239 @@ fn open_rw_fresh(path: &PathBuf) -> std::io::Result<Arc<File>> {
 }
 
 // ---------------------------------------------------------------------------
+// One lane per volume for piece I/O.
+// ---------------------------------------------------------------------------
+
+/// Threads of the blocking pool that piece reads and writes on ONE volume may
+/// hold at once. Tokio's pool (512 threads) is shared with everything else
+/// the daemon blocks on: the store, the API's file work, moves, imports.
+/// Uncapped, a volume that takes writes slower than they arrive (a USB SMR
+/// drive behind hundreds of downloads) had every thread of it stuck in D
+/// state, and the API and the other volumes waited behind it. Capped, the
+/// slow volume's next pieces wait for a turn without holding a thread, and
+/// only its own torrents slow down. Disks pooled behind one FUSE mount
+/// (mergerfs, shfs) are one volume here and share one lane: a slow one slows
+/// its neighbours, not the rest of the daemon. Sampled once a second for 30 s on a
+/// library of about a million torrents over three volumes: at most 23 of the
+/// daemon's threads were inside an I/O system call (read, write, pread,
+/// pwrite, sendfile, fsync, fdatasync) at once, all volumes and all callers
+/// together.
+pub const VOLUME_LANE: usize = 32;
+
+/// The lane of each volume, by `lane_key`.
+fn lanes() -> &'static Mutex<HashMap<String, Arc<tokio::sync::Semaphore>>> {
+    static L: OnceLock<Mutex<HashMap<String, Arc<tokio::sync::Semaphore>>>> = OnceLock::new();
+    L.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// The lane of the volume holding `save_path`, or none when the volume
+/// cannot be told without touching the disk (see `lane_key`): a volume that
+/// no longer answers must not be able to hold a thread before its lane caps
+/// it, and one lane for every disk would let a slow one hold up the others.
+fn volume_lane(save_path: &std::path::Path) -> Option<Arc<tokio::sync::Semaphore>> {
+    let key = lane_key(save_path)?;
+    Some(
+        lanes()
+            .lock()
+            .entry(key)
+            .or_insert_with(|| Arc::new(tokio::sync::Semaphore::new(VOLUME_LANE)))
+            .clone(),
+    )
+}
+
+/// A mount, as `/proc/self/mountinfo` gives it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Mount {
+    at: PathBuf,
+    /// `major:minor`: what `st_dev` says for the files below it.
+    dev: String,
+}
+
+/// The mounts in a `/proc/self/mountinfo` text. A line that does not parse is
+/// skipped.
+fn parse_mountinfo(text: &str) -> Vec<Mount> {
+    text.lines()
+        .filter_map(|line| {
+            let mut f = line.split(' ');
+            let dev = f.nth(2)?;
+            let at = f.nth(1)?;
+            Some(Mount {
+                at: PathBuf::from(unescape_mount(at)),
+                dev: dev.to_string(),
+            })
+        })
+        .collect()
+}
+
+/// Spaces, tabs, newlines and backslashes in a mount point come escaped as
+/// `\040`, `\011`, `\012` and `\134`.
+fn unescape_mount(s: &str) -> String {
+    s.replace("\\040", " ")
+        .replace("\\011", "\t")
+        .replace("\\012", "\n")
+        .replace("\\134", "\\")
+}
+
+/// The volume `path` is on, without a system call on the path itself, so a
+/// save path not created yet, or on a disk that hangs, gets an answer at
+/// once. On Windows, its drive or share (`C:`, `\\server\share`), read off
+/// the path. Elsewhere, the deepest mount point above it in `mounts`, the
+/// last one mounted when several are at the same place. None when neither
+/// tells (no mount table: macOS, or no /proc; a relative path): that I/O then
+/// runs uncapped, as before lanes, rather than in one lane for every disk.
+fn lane_key_in(mounts: &[Mount], path: &std::path::Path) -> Option<String> {
+    if let Some(std::path::Component::Prefix(p)) = path.components().next() {
+        return Some(format!(
+            "root:{}",
+            p.as_os_str().to_string_lossy().to_lowercase()
+        ));
+    }
+    mounts
+        .iter()
+        .filter(|m| path.starts_with(&m.at))
+        // `max_by_key` keeps the LAST of equal keys: the mount on top.
+        .max_by_key(|m| m.at.components().count())
+        .map(|m| format!("dev:{}", m.dev))
+}
+
+/// How long a read of the mount table is used before it is read again: a
+/// disk mounted later gets its own lane at most this long after.
+const MOUNTS_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The mount table, read again when older than `MOUNTS_TTL`. procfs answers
+/// from the kernel's memory, not from any disk. Empty where there is no
+/// `/proc` (Windows, macOS): every path then falls back to its root.
+fn mounts() -> Arc<Vec<Mount>> {
+    type Cached = Mutex<Option<(std::time::Instant, Arc<Vec<Mount>>)>>;
+    static M: OnceLock<Cached> = OnceLock::new();
+    let mut m = M.get_or_init(|| Mutex::new(None)).lock();
+    if let Some((at, list)) = m.as_ref() {
+        if at.elapsed() < MOUNTS_TTL {
+            return list.clone();
+        }
+    }
+    let list = Arc::new(
+        std::fs::read_to_string("/proc/self/mountinfo")
+            .map(|t| parse_mountinfo(&t))
+            .unwrap_or_default(),
+    );
+    *m = Some((std::time::Instant::now(), list.clone()));
+    list
+}
+
+#[cfg(not(test))]
+fn lane_key(save_path: &std::path::Path) -> Option<String> {
+    lane_key_in(&mounts(), save_path)
+}
+
+/// Tests share one file system: a save path can be told which volume it is.
+#[cfg(test)]
+fn lane_key(save_path: &std::path::Path) -> Option<String> {
+    if let Some(k) = lane_keys_for_test().lock().get(save_path) {
+        return Some(k.clone());
+    }
+    lane_key_in(&mounts(), save_path)
+}
+
+#[cfg(test)]
+fn lane_keys_for_test() -> &'static Mutex<HashMap<PathBuf, String>> {
+    static K: OnceLock<Mutex<HashMap<PathBuf, String>>> = OnceLock::new();
+    K.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Run `f` on the blocking pool, in the lane of the volume holding
+/// `save_path`: it waits for a turn there first, without holding a thread.
+/// A volume without a lane (`lane_key`) runs it at once.
+async fn on_volume<T, F>(save_path: &std::path::Path, f: F) -> Result<T, tokio::task::JoinError>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    let turn = match volume_lane(save_path) {
+        // Never closed: the lanes live as long as the process.
+        Some(lane) => Some(lane.acquire_owned().await.expect("volume lanes are never closed")),
+        None => None,
+    };
+    // The turn goes with the blocking task, not with this future: a caller
+    // dropped while the disk hangs (a peer gone mid-read) must not hand the
+    // turn back while the thread is still stuck.
+    tokio::task::spawn_blocking(move || {
+        let _turn = turn;
+        f()
+    })
+    .await
+}
+
+/// A write held at the disk, for tests: every write below a stalled folder
+/// waits there until the folder is let go. Counts the writes held at once.
+#[cfg(test)]
+mod write_stall {
+    use std::path::{Path, PathBuf};
+    use std::sync::{Condvar, Mutex};
+
+    /// Per stalled folder: tests running side by side keep their counts apart.
+    struct Stalled {
+        root: PathBuf,
+        held: usize,
+        most_held: usize,
+    }
+
+    struct State {
+        stalled: Vec<Stalled>,
+    }
+
+    static STATE: Mutex<State> = Mutex::new(State {
+        stalled: Vec::new(),
+    });
+    static WAKE: Condvar = Condvar::new();
+
+    pub(super) fn stall(root: &Path) {
+        STATE.lock().unwrap().stalled.push(Stalled {
+            root: root.to_path_buf(),
+            held: 0,
+            most_held: 0,
+        });
+    }
+
+    pub(super) fn release(root: &Path) {
+        STATE.lock().unwrap().stalled.retain(|s| s.root != root);
+        WAKE.notify_all();
+    }
+
+    /// The most writes held at once below `root`.
+    pub(super) fn most_held(root: &Path) -> usize {
+        let s = STATE.lock().unwrap();
+        s.stalled.iter().find(|s| s.root == root).map_or(0, |s| s.most_held)
+    }
+
+    /// The writes held below `root` right now.
+    pub(super) fn held(root: &Path) -> usize {
+        let s = STATE.lock().unwrap();
+        s.stalled.iter().find(|s| s.root == root).map_or(0, |s| s.held)
+    }
+
+    pub(super) fn wait(path: &Path) {
+        let mut s = STATE.lock().unwrap();
+        let Some(root) = s
+            .stalled
+            .iter()
+            .find(|r| path.starts_with(&r.root))
+            .map(|r| r.root.clone())
+        else {
+            return;
+        };
+        // Counted until the folder is let go: its entry then goes with it.
+        if let Some(r) = s.stalled.iter_mut().find(|r| r.root == root) {
+            r.held += 1;
+            r.most_held = r.most_held.max(r.held);
+        }
+        while s.stalled.iter().any(|r| r.root == root) {
+            s = WAKE.wait(s).unwrap();
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // `[daemon] preallocate`: reserve a torrent's files at its first write.
 // ---------------------------------------------------------------------------
 
@@ -716,7 +949,8 @@ impl DiskManager {
         };
         let picker = torrent.picker.get().cloned();
         let (free_task, spans_task) = (free.clone(), free_spans.clone());
-        let outcome = tokio::task::spawn_blocking(move || {
+        let lane_path = save_path.clone();
+        let outcome = on_volume(&lane_path, move || {
             if !check.matches(&data) {
                 return Ok(false);
             }
@@ -858,6 +1092,8 @@ impl DiskManager {
 
                 {
                     let chunk = &data[data_offset..data_offset + op.length as usize];
+                    #[cfg(test)]
+                    write_stall::wait(&full_path);
                     pwrite_all(&file, chunk, op.file_offset)
                         .map_err(|e| format!("pwrite {:?}: {}", full_path, e))?;
                 }
@@ -1412,7 +1648,8 @@ async fn read_range(
     // `op.path` is below the save path: save_path/<name>/<file-path> for a
     // multi-file torrent (`files` key, even with one entry), save_path/<name>
     // for a single-file one, or wherever the file was renamed to.
-    tokio::task::spawn_blocking(move || {
+    let lane_path = save_path.clone();
+    on_volume(&lane_path, move || {
         let mut result = Vec::with_capacity(length as usize);
 
         for op in ops {
@@ -1583,7 +1820,8 @@ pub async fn read_piece_on_disk(torrent: &TorrentState, piece: u32) -> PieceRead
     let ops = torrent.meta.map_block(piece, 0, plen);
     let save_path = torrent.save_path.read().clone();
 
-    let out = tokio::task::spawn_blocking(move || {
+    let lane_path = save_path.clone();
+    let out = on_volume(&lane_path, move || {
         let classify = classify_io;
         // Read straight into the piece: one buffer, no copy per file.
         let mut data = vec![0u8; plen as usize];
@@ -3493,6 +3731,183 @@ mod disk_tests {
             f.disk.block_file(&f.torrent, 0, 0, 99_999).is_none(),
             "a length the file cannot satisfy is declined, not truncated"
         );
+    }
+
+    /// The lane of a save path comes from the mount table alone: the deepest
+    /// mount above it, the one on top when two share a place, escaped names
+    /// read back, a path that does not exist yet answered all the same, and
+    /// nothing above it put with the root. Nothing here touches a disk.
+    #[test]
+    fn a_save_path_finds_its_volume_in_the_mount_table_without_the_disk() {
+        let table = "\
+22 1 0:21 / / rw,relatime - overlay overlay rw
+30 22 0:44 / /data rw,noatime - zfs tank/data rw
+31 22 0:45 / /scratch rw,noatime - ntfs3 /dev/sdx1 rw
+32 22 0:46 / /scratch rw,noatime - ext4 /dev/sdy1 rw
+33 30 0:47 / /data/usb\\040disk rw - ext4 /dev/sdz1 rw
+garbage
+";
+        let m = parse_mountinfo(table);
+        assert_eq!(m.len(), 5, "the line that does not parse is skipped");
+        let key = |p: &str| lane_key_in(&m, std::path::Path::new(p));
+        let dev = |d: &str| Some(format!("dev:{d}"));
+        assert_eq!(key("/data/tv/Show/not-created-yet"), dev("0:44"));
+        assert_eq!(key("/scratch/x"), dev("0:46"), "the mount on top");
+        assert_eq!(key("/data/usb disk/a"), dev("0:47"));
+        assert_eq!(key("/database"), dev("0:21"), "a prefix of a name is not a parent");
+        assert_eq!(key("/configs"), dev("0:21"));
+        assert_eq!(key("relative/dir"), None);
+    }
+
+    /// No mount table (macOS, no /proc): no lane at all, the I/O runs as it
+    /// did before lanes. One lane for every disk would let a slow disk hold
+    /// up all the others again.
+    #[test]
+    fn without_a_mount_table_piece_io_gets_no_lane() {
+        for p in ["/", "/Volumes/usb/torrents", "/Users/me/Downloads"] {
+            assert_eq!(lane_key_in(&[], std::path::Path::new(p)), None, "{p}");
+        }
+    }
+
+    /// Windows: each drive and each share is its own lane, read off the path.
+    #[cfg(windows)]
+    #[test]
+    fn on_windows_each_drive_and_share_is_its_own_lane() {
+        let key = |p: &str| lane_key_in(&[], std::path::Path::new(p));
+        assert_eq!(key(r"C:\Downloads\torrents"), Some("root:c:".to_string()));
+        assert_eq!(key(r"c:\other"), key(r"C:\Downloads"));
+        assert_eq!(key(r"E:\torrents"), Some("root:e:".to_string()));
+        assert_ne!(key(r"\\nas\media\tv"), key(r"\\nas\other"));
+        assert_ne!(key(r"\\nas\media\tv"), key(r"C:\Downloads"));
+    }
+
+    /// A read or write whose caller is dropped while the disk hangs (a peer
+    /// gone mid-read) keeps its turn of the lane until its thread is back:
+    /// otherwise every dropped caller would let one more thread into the
+    /// hanging disk, past the cap.
+    #[test]
+    fn a_caller_dropped_while_its_disk_hangs_keeps_its_turn() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let content = pattern(9, 4096);
+            let f = fixture("lane-dropped", &content);
+            let save = f.torrent.save_path.read().clone();
+            let key = "test:dropped-caller-volume";
+            lane_keys_for_test().lock().insert(save.clone(), key.into());
+            write_stall::stall(&f.root);
+            let _let_go = LetGo(f.root.clone());
+            let (disk, t, c) = (f.disk.clone(), f.torrent.clone(), content.clone());
+            let caller = tokio::spawn(async move { disk.write_piece(&t, 0, c).await });
+            for _ in 0..500 {
+                if write_stall::held(&f.root) == 1 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            assert_eq!(write_stall::held(&f.root), 1, "the write reached the disk");
+            caller.abort();
+            let _ = caller.await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let lane = lanes().lock().get(key).cloned().expect("the lane exists");
+            assert_eq!(
+                lane.available_permits(),
+                VOLUME_LANE - 1,
+                "the dropped caller's thread is still on the disk and keeps its turn"
+            );
+            write_stall::release(&f.root);
+            for _ in 0..500 {
+                if lane.available_permits() == VOLUME_LANE {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            assert_eq!(lane.available_permits(), VOLUME_LANE, "given back once the disk answers");
+        });
+        rt.shutdown_timeout(Duration::from_secs(5));
+    }
+
+    /// Lets a stalled folder go however the test ends: a blocking task still
+    /// held would keep the runtime from shutting down.
+    struct LetGo(std::path::PathBuf);
+    impl Drop for LetGo {
+        fn drop(&mut self) {
+            write_stall::release(&self.0);
+        }
+    }
+
+    /// ⭐ A volume whose writes do not come back holds at most its lane of
+    /// the blocking pool: the work everything else runs there (the store, the
+    /// API) still gets a thread, a torrent on another volume still writes, and
+    /// the held pieces all land once the disk answers again.
+    #[test]
+    fn a_volume_whose_writes_hang_leaves_the_blocking_pool_to_the_rest() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .max_blocking_threads(VOLUME_LANE + 8)
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let content = pattern(5, 4096);
+            let slow = fixture("lane-slow", &content);
+            let other = fixture("lane-other", &content);
+            let slow_save = slow.torrent.save_path.read().clone();
+            let other_save = other.torrent.save_path.read().clone();
+            lane_keys_for_test()
+                .lock()
+                .insert(slow_save, "test:slow-volume".into());
+            lane_keys_for_test()
+                .lock()
+                .insert(other_save, "test:other-volume".into());
+
+            write_stall::stall(&slow.root);
+            let _let_go = LetGo(slow.root.clone());
+            let held: Vec<_> = (0..VOLUME_LANE + 16)
+                .map(|_| {
+                    let (disk, t, c) = (slow.disk.clone(), slow.torrent.clone(), content.clone());
+                    tokio::spawn(async move { disk.write_piece(&t, 0, c).await })
+                })
+                .collect();
+            tokio::time::sleep(Duration::from_millis(500)).await;
+
+            let store = tokio::time::timeout(
+                Duration::from_secs(5),
+                tokio::task::spawn_blocking(|| 7),
+            )
+            .await;
+            assert!(
+                matches!(store, Ok(Ok(7))),
+                "blocking work beside the stuck volume waits for a thread"
+            );
+            let elsewhere = tokio::time::timeout(
+                Duration::from_secs(5),
+                other.disk.write_piece(&other.torrent, 0, content.clone()),
+            )
+            .await;
+            assert!(
+                matches!(elsewhere, Ok(Ok(true))),
+                "a torrent on another volume cannot write: {elsewhere:?}"
+            );
+            let most = write_stall::most_held(&slow.root);
+            assert!(
+                most <= VOLUME_LANE,
+                "{most} writes held on one volume at once, lane is {VOLUME_LANE}"
+            );
+
+            write_stall::release(&slow.root);
+            for h in held {
+                let r = tokio::time::timeout(Duration::from_secs(10), h)
+                    .await
+                    .expect("a held write ends once the disk answers")
+                    .unwrap();
+                assert_eq!(r, Ok(true), "a held piece lands");
+            }
+        });
+        rt.shutdown_timeout(Duration::from_secs(5));
     }
 }
 
