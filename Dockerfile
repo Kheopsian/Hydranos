@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 # Stage 1: Typhon engine builder — the BitTorrent engine.
-FROM rust:1-bookworm@sha256:e12566d5abc17a0da741628782cdb504b68b8961f5bfcf677936bf3e8b32de29 AS typhon-builder
+FROM rust:1-bookworm@sha256:ade39a710ef85f3506cffcfec3e8a24ba090badef1dff2fb798f71d878833fea AS typhon-builder
 
 WORKDIR /build/typhon-engine
 ENV RUSTFLAGS="--cfg tokio_unstable"
