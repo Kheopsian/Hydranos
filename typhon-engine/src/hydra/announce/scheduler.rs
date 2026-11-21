@@ -170,6 +170,29 @@ const MAX_JITTER: Duration = Duration::from_secs(120);
 /// shortest honest gap between two announces of one torrent.
 const BUMP_COOLDOWN: Duration = Duration::from_secs(60);
 
+/// A port change brings every torrent forward into a window this long per
+/// torrent (100 a second), within the bounds below.
+///
+/// Until #116 a new forwarded port reached a tracker only at each torrent's
+/// next announce, so after a VPN reconnect every tracker handed leechers a
+/// dead port for up to a whole interval. Bringing all of it forward at once
+/// would be the burst admission spreads out (`admit_quota`); the window
+/// spreads it the same way, by hash.
+const REANNOUNCE_PER_TORRENT: Duration = Duration::from_millis(10);
+/// The shortest window: a handful of torrents still leave across a cycle.
+const REANNOUNCE_MIN_WINDOW: Duration = RECONCILE;
+/// The longest window: a third of an interval, so a hoard re-announces at no
+/// more than three times its steady rate (250k: ~420/s against ~140/s), and
+/// each tracker's own limit (`Tracker`) still paces what reaches it.
+const REANNOUNCE_MAX_WINDOW: Duration = Duration::from_secs(DEFAULT_INTERVAL.as_secs() / 3);
+
+/// How long a re-announce of `total` torrents is spread over.
+fn reannounce_window(total: usize) -> Duration {
+    REANNOUNCE_PER_TORRENT
+        .saturating_mul(u32::try_from(total).unwrap_or(u32::MAX))
+        .clamp(REANNOUNCE_MIN_WINDOW, REANNOUNCE_MAX_WINDOW)
+}
+
 /// How long a torrent waits after an announce, given what the runner asked.
 ///
 /// Under a minute is not an honest gap between two announces of one torrent
@@ -230,6 +253,9 @@ struct State {
     /// The next dispatch carries a forced bump. Cleared once it has.
     forced_next: bool,
     in_flight: bool,
+    /// The port moved while this torrent's announce was in flight, so that
+    /// announce carried the old one: it comes back soon, not an interval on.
+    port_stale: bool,
     /// Bumped every time this torrent is rescheduled out of band.
     ///
     /// A manual reannounce pushes a second deadline for a hash that already has
@@ -330,6 +356,12 @@ pub trait Catalogue: Send + Sync + 'static {
     /// it starts waiting, and again only if the order changes while it waits.
     fn rank_key(&self, _info_hash: &InfoHash, _sort: AnnounceSort) -> u64 {
         0
+    }
+    /// How long before every tracker holding this torrent takes a periodic
+    /// announce again: each one's `min interval`. Asked only when the port
+    /// moved and the whole catalogue is brought forward.
+    fn reopens_in(&self, _info_hash: &InfoHash) -> Duration {
+        Duration::ZERO
     }
 }
 
@@ -512,10 +544,15 @@ impl Admission {
 /// `announce` is called on a worker for one torrent, and returns when to come
 /// back. It is given no lock and no shared state on purpose: everything the
 /// scheduler owns stays on this task.
+///
+/// `port_changed` is notified when the announced port moves; the catalogue is
+/// then re-announced (`reannounce_all`). A `Notify`, so a port that flaps
+/// several times before the scheduler wakes costs one pass, not one each.
 pub async fn run<C, F, Fut>(
     catalogue: Arc<C>,
     announce: Arc<F>,
     mut bump_rx: mpsc::Receiver<BumpReq>,
+    port_changed: Arc<tokio::sync::Notify>,
     admission: Arc<Admission>,
 ) where
     C: Catalogue,
@@ -620,7 +657,7 @@ pub async fn run<C, F, Fut>(
                     continue;
                 }
                 state.first_announce = false;
-                let wait = wait_after(&outcome);
+                let wait = wait_for(state, &outcome, || catalogue.reopens_in(&key));
                 // Spread the return too, or the group re-forms: everyone
                 // admitted together gets the same `wait` and comes due in the
                 // same millisecond, thirty minutes later, for ever. The offset
@@ -641,6 +678,16 @@ pub async fn run<C, F, Fut>(
                     // and not an error here.
                     let _ = reply.send(outcome);
                 }
+            }
+            _ = port_changed.notified() => {
+                let now = Instant::now();
+                let moved = off_the_runtime(|| reannounce_all(catalogue.as_ref(), &mut states, &mut heap, now));
+                tracing::info!(
+                    moved,
+                    tracked = states.len(),
+                    window_s = reannounce_window(states.len()).as_secs(),
+                    "announced port changed: re-announcing every torrent"
+                );
             }
             _ = reconcile.tick() => {
                 let health = off_the_runtime(|| measure(&states, &heap, &pool, Instant::now()));
@@ -1053,6 +1100,7 @@ fn reconcile_now<C: Catalogue>(
                 first_announce: true,
                 forced_next: false,
                 in_flight: false,
+                port_stale: false,
                 epoch: 0,
                 last_bump: None,
                 interval_s: DEFAULT_INTERVAL.as_secs() as u32,
@@ -1143,6 +1191,69 @@ fn reconcile_now<C: Catalogue>(
     added
 }
 
+/// The announced port moved: bring every torrent's next announce forward so
+/// trackers stop handing out the old port, spread across
+/// `reannounce_window` by hash and never before each tracker's `min
+/// interval` (`Catalogue::reopens_in`). A deadline already sooner is kept.
+///
+/// The heap is rebuilt rather than pushed onto: a second deadline per torrent
+/// would double it for a 250k hoard, and the stale ones are dropped on the
+/// way. A torrent in flight carried the old port; its result brings it back
+/// soon (`wait_for`). One waiting for a tracker slot is due already, and
+/// reads the port when it goes.
+///
+/// Returns how many deadlines moved.
+fn reannounce_all<C: Catalogue + ?Sized>(
+    catalogue: &C,
+    states: &mut HashMap<InfoHash, State>,
+    heap: &mut BinaryHeap<Reverse<Deadline>>,
+    now: Instant,
+) -> usize {
+    let window = reannounce_window(states.len());
+    let mut moved = 0usize;
+    let mut kept = Vec::with_capacity(states.len().min(heap.len()));
+    for Reverse(d) in std::mem::take(heap).into_vec() {
+        // What `dispatch` would drop anyway: gone, superseded, or in flight.
+        let Some(state) = states.get(&d.info_hash) else {
+            continue;
+        };
+        if d.epoch != state.epoch || state.in_flight {
+            continue;
+        }
+        let mut at = now + spread(&d.info_hash, window);
+        if at < d.at {
+            // Read only for what may move: a book lock per torrent.
+            at = at.max(now + catalogue.reopens_in(&d.info_hash));
+        }
+        if at < d.at {
+            moved += 1;
+            kept.push(Reverse(Deadline { at, ..d }));
+        } else {
+            kept.push(Reverse(d));
+        }
+    }
+    *heap = BinaryHeap::from(kept);
+    for state in states.values_mut() {
+        if state.in_flight {
+            state.port_stale = true;
+        }
+    }
+    moved
+}
+
+/// How long a torrent waits after an announce, given the runner's answer and
+/// whether the port moved while it was out (`State::port_stale`). That
+/// announce told its trackers the old port, so it goes again as soon as they
+/// accept it, rather than an interval on.
+fn wait_for(state: &mut State, outcome: &Outcome, reopens: impl FnOnce() -> Duration) -> Duration {
+    let wait = wait_after(outcome);
+    if std::mem::take(&mut state.port_stale) {
+        wait.min(reopens().max(MIN_INTERVAL))
+    } else {
+        wait
+    }
+}
+
 /// Move one torrent to the head of the queue, out of band.
 ///
 /// Returns whether it was actually scheduled: a caller too soon after the last
@@ -1163,6 +1274,7 @@ fn bump_now(
         first_announce: true,
         forced_next: false,
         in_flight: false,
+        port_stale: false,
         epoch: 0,
         last_bump: None,
         interval_s: DEFAULT_INTERVAL.as_secs() as u32,
@@ -1737,6 +1849,7 @@ mod tests {
             first_announce: false,
             forced_next: false,
             in_flight: false,
+            port_stale: false,
             epoch: 0,
             last_bump: None,
             interval_s: DEFAULT_INTERVAL.as_secs() as u32,
@@ -2311,6 +2424,169 @@ mod tests {
             "and it announces as a first announce"
         );
         assert_eq!(heap.len(), 1);
+    }
+
+    /// `n` torrents tracked, each due `due` from `now`.
+    fn tracked(
+        n: usize,
+        now: Instant,
+        due: Duration,
+    ) -> (HashMap<InfoHash, State>, BinaryHeap<Reverse<Deadline>>) {
+        let mut states = HashMap::new();
+        let mut heap = BinaryHeap::new();
+        for i in 0..n {
+            states.insert(nth(i), fresh());
+            heap.push(Reverse(Deadline {
+                at: now + due,
+                info_hash: nth(i),
+                epoch: 0,
+            }));
+        }
+        (states, heap)
+    }
+
+    /// No tracker holds a floor.
+    struct Open;
+    impl Catalogue for Open {
+        fn hashes(&self) -> Vec<InfoHash> {
+            Vec::new()
+        }
+    }
+
+    /// ⭐ #116: a new port reaches the trackers inside the window, not at each
+    /// torrent's next interval half an hour away -- and spread across it, not
+    /// as one burst.
+    #[test]
+    fn a_port_change_brings_every_announce_into_the_window_spread_out() {
+        let now = Instant::now();
+        let n = 5_000;
+        let (mut states, mut heap) = tracked(n, now, DEFAULT_INTERVAL);
+        let window = reannounce_window(n);
+
+        assert_eq!(reannounce_all(&Open, &mut states, &mut heap, now), n);
+
+        assert_eq!(heap.len(), n, "one deadline per torrent, no more");
+        let at: Vec<Duration> = heap.iter().map(|Reverse(d)| d.at - now).collect();
+        assert!(at.iter().all(|d| *d < window), "all inside {window:?}");
+        // Ten slices of the window, none empty and none holding most of it.
+        let mut slices = [0usize; 10];
+        for d in &at {
+            slices[(d.as_secs_f64() / window.as_secs_f64() * 10.0) as usize] += 1;
+        }
+        assert!(
+            slices.iter().all(|&s| s > n / 20 && s < n / 5),
+            "spread across the window: {slices:?}"
+        );
+    }
+
+    /// A torrent already due keeps its turn, and one whose deadline a
+    /// bump superseded leaves the heap rather than announce twice.
+    #[test]
+    fn a_port_change_keeps_a_due_deadline_and_drops_stale_ones() {
+        let now = Instant::now();
+        let (mut states, mut heap) = tracked(2, now, Duration::ZERO);
+        // nth(1) was bumped: its old deadline is stale, its new one is live.
+        states.get_mut(&nth(1)).unwrap().epoch = 1;
+        heap.push(Reverse(Deadline {
+            at: now,
+            info_hash: nth(1),
+            epoch: 1,
+        }));
+
+        assert_eq!(reannounce_all(&Open, &mut states, &mut heap, now), 0);
+
+        let mut left: Vec<(InfoHash, u64, Duration)> = heap
+            .iter()
+            .map(|Reverse(d)| (d.info_hash, d.epoch, d.at - now))
+            .collect();
+        left.sort();
+        assert_eq!(
+            left,
+            vec![(nth(0), 0, Duration::ZERO), (nth(1), 1, Duration::ZERO),]
+        );
+    }
+
+    /// A tracker's `min interval` still holds: brought forward, but not
+    /// before every tracker that has the torrent takes an announce again.
+    #[test]
+    fn a_port_change_waits_for_each_tracker_s_min_interval() {
+        struct Floored;
+        impl Catalogue for Floored {
+            fn hashes(&self) -> Vec<InfoHash> {
+                Vec::new()
+            }
+            fn reopens_in(&self, info_hash: &InfoHash) -> Duration {
+                if *info_hash == nth(0) {
+                    Duration::from_secs(900)
+                } else {
+                    Duration::ZERO
+                }
+            }
+        }
+        let now = Instant::now();
+        let (mut states, mut heap) = tracked(2, now, DEFAULT_INTERVAL);
+
+        reannounce_all(&Floored, &mut states, &mut heap, now);
+
+        let at = |h: InfoHash| {
+            heap.iter()
+                .find(|Reverse(d)| d.info_hash == h)
+                .map(|Reverse(d)| d.at - now)
+                .expect("a deadline")
+        };
+        assert!(at(nth(0)) >= Duration::from_secs(900), "the floor holds");
+        assert!(at(nth(0)) < DEFAULT_INTERVAL, "and it still comes forward");
+        assert!(at(nth(1)) < reannounce_window(2));
+    }
+
+    /// An announce in flight when the port moved told its trackers the old
+    /// one: it comes back once they accept it again, not an interval on.
+    #[test]
+    fn an_announce_in_flight_at_a_port_change_goes_again_soon() {
+        let now = Instant::now();
+        let (mut states, mut heap) = tracked(1, now, DEFAULT_INTERVAL);
+        states.insert(
+            k("out"),
+            State {
+                in_flight: true,
+                ..fresh()
+            },
+        );
+
+        reannounce_all(&Open, &mut states, &mut heap, now);
+
+        let state = states.get_mut(&k("out")).unwrap();
+        assert!(state.port_stale);
+        let floor = Duration::from_secs(300);
+        assert_eq!(wait_for(state, &answered(false), || floor), floor);
+        assert!(!state.port_stale, "once");
+        assert_eq!(
+            wait_for(state, &answered(false), || floor),
+            DEFAULT_INTERVAL
+        );
+        // Never under the shortest honest gap between two announces.
+        state.port_stale = true;
+        assert_eq!(
+            wait_for(state, &answered(false), || Duration::ZERO),
+            MIN_INTERVAL
+        );
+    }
+
+    /// The window grows with the catalogue so a hoard is not re-announced in
+    /// one burst, and is capped so it still beats the interval it replaces.
+    #[test]
+    fn the_reannounce_window_scales_with_the_catalogue_and_is_capped() {
+        assert_eq!(reannounce_window(0), REANNOUNCE_MIN_WINDOW);
+        assert_eq!(reannounce_window(5), REANNOUNCE_MIN_WINDOW);
+        assert_eq!(reannounce_window(20_000), Duration::from_secs(200));
+        let hoard = 250_000;
+        let window = reannounce_window(hoard);
+        assert_eq!(window, REANNOUNCE_MAX_WINDOW);
+        assert!(window < DEFAULT_INTERVAL);
+        // At most three times the steady rate the hoard already runs at.
+        let steady = hoard as f64 / DEFAULT_INTERVAL.as_secs_f64();
+        assert!(hoard as f64 / window.as_secs_f64() <= 3.0 * steady + 1e-9);
+        assert_eq!(reannounce_window(usize::MAX), REANNOUNCE_MAX_WINDOW);
     }
 
     /// A tracker asking for a one-second interval is broken or hostile, and
