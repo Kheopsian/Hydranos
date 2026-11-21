@@ -45,10 +45,20 @@ fn we_are_complete(t: &std::sync::Arc<crate::torrent::meta::TorrentState>) -> bo
 /// timeout exists to drop peers that do nothing, and a peer whose entire
 /// contribution is "still here" is doing nothing.
 ///
+/// The one exception is a peer the choker holds: interested, and choked by
+/// us while it waits for its turn. Keep-alives are all such a peer has to
+/// say, and it is not idle -- we are the ones making it wait. Dropping it
+/// after `peer_timeout` would cut it off before its turn came round.
+///
 /// Split out of the loop so the rule can be tested without standing up a
 /// session, and so restoring the bug means deleting a test.
-fn pushes_idle_deadline(m: &Message) -> bool {
-    !matches!(m, Message::KeepAlive)
+fn pushes_idle_deadline(m: &Message, held_by_choker: bool) -> bool {
+    held_by_choker || !matches!(m, Message::KeepAlive)
+}
+
+/// Is this peer waiting on the choker: interested in us, and choked by us?
+fn held_by_choker(stats: &crate::torrent::meta::PeerStats) -> bool {
+    stats.interested.load(Ordering::Relaxed) && stats.choked.load(Ordering::Relaxed)
 }
 
 /// turned the loop, so a non-seeding session reset its own 300s timeout every
@@ -386,7 +396,7 @@ pub async fn run(
         }
     }
     // Immediate Unchoke so peers can Request right away. The choking engine
-    // may re-choke via `choking_gen` if the peer underperforms.
+    // may re-choke via `choking_gen` while the peer waits for its turn.
     stats.choked.store(false, Ordering::Relaxed);
     if framed.send(Message::Unchoke).await.is_err() {
         tracing::debug!("[peer-debug] {} EARLY-RETURN send-unchoke failed", addr);
@@ -758,7 +768,7 @@ pub async fn run(
                         // ~350/h with no plateau. The two numbers are not a
                         // contradiction -- they are the portrait of a peer
                         // kept alive by its own keep-alives.
-                        if pushes_idle_deadline(&message) {
+                        if pushes_idle_deadline(&message, held_by_choker(&stats)) {
                             let now = tokio::time::Instant::now();
                             if now.duration_since(deadline_set_at) >= DEADLINE_GRANULARITY {
                                 deadline_set_at = now;
@@ -1123,18 +1133,21 @@ mod idle_deadline_tests {
 
     #[test]
     fn a_keep_alive_does_not_push_the_deadline() {
-        assert!(!pushes_idle_deadline(&Message::KeepAlive));
+        assert!(!pushes_idle_deadline(&Message::KeepAlive, false));
     }
 
     #[test]
     fn a_peer_that_asks_for_data_is_alive() {
-        assert!(pushes_idle_deadline(&Message::Request {
-            index: 0,
-            begin: 0,
-            length: 16384
-        }));
-        assert!(pushes_idle_deadline(&Message::Interested));
-        assert!(pushes_idle_deadline(&Message::Have { piece: 3 }));
+        assert!(pushes_idle_deadline(
+            &Message::Request {
+                index: 0,
+                begin: 0,
+                length: 16384
+            },
+            false
+        ));
+        assert!(pushes_idle_deadline(&Message::Interested, false));
+        assert!(pushes_idle_deadline(&Message::Have { piece: 3 }, false));
     }
 
     #[test]
@@ -1155,8 +1168,39 @@ mod idle_deadline_tests {
                 payload: Bytes::new(),
             },
         ] {
-            assert!(pushes_idle_deadline(&m), "{m:?} should push the deadline");
+            assert!(
+                pushes_idle_deadline(&m, false),
+                "{m:?} should push the deadline"
+            );
         }
+    }
+
+    /// ⭐ A peer we choke while it waits for its turn has nothing to send but
+    /// keep-alives. Those keep it connected while the choker holds it, or the
+    /// rotation would lose it at `peer_timeout` before its turn came.
+    #[test]
+    fn a_keep_alive_from_a_peer_the_choker_holds_pushes_the_deadline() {
+        let addr: std::net::SocketAddr = "203.0.113.1:6881".parse().unwrap();
+        let s = crate::torrent::meta::PeerStats::new(addr, [1; 20], "t".into(), false, false);
+        s.interested.store(true, Ordering::Relaxed);
+        s.choked.store(true, Ordering::Relaxed);
+        assert!(held_by_choker(&s), "interested and choked by us");
+        assert!(pushes_idle_deadline(
+            &Message::KeepAlive,
+            held_by_choker(&s)
+        ));
+
+        s.choked.store(false, Ordering::Relaxed);
+        assert!(
+            !pushes_idle_deadline(&Message::KeepAlive, held_by_choker(&s)),
+            "unchoked: it can ask for blocks, a keep-alive alone is idle"
+        );
+        s.choked.store(true, Ordering::Relaxed);
+        s.interested.store(false, Ordering::Relaxed);
+        assert!(
+            !pushes_idle_deadline(&Message::KeepAlive, held_by_choker(&s)),
+            "not interested: it is not waiting for anything from us"
+        );
     }
 }
 

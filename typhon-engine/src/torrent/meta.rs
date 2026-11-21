@@ -553,8 +553,15 @@ pub struct PeerStats {
     /// them, so a peer that choked us reads 0.
     pub requests_in_flight: AtomicU32,
     /// Bytes uploaded to this peer since the choking engine last tick.
-    /// Used to score peers by actual upload speed; reset to 0 by the engine.
+    /// Reset to 0 by the engine every tick.
     pub uploaded_last_tick: AtomicU64,
+    /// What the choker last gave this peer: `peer::choking::Turn` as a byte.
+    /// Written by the choker only.
+    pub choke_turn: AtomicU8,
+    /// The choker round that turn began, or, for a peer waiting for one, the
+    /// round it joined the queue. 0 = the choker has not seen it yet. Written
+    /// by the choker only.
+    pub choke_round: AtomicU64,
     /// Transfer rates for this peer. Nothing ticks these in the background:
     /// at a hundred thousand torrents a periodic sweep over every connected
     /// peer would cost O(all peers) forever to feed a panel that is almost
@@ -614,6 +621,8 @@ impl PeerStats {
             am_interested: AtomicBool::new(false),
             requests_in_flight: AtomicU32::new(0),
             uploaded_last_tick: AtomicU64::new(0),
+            choke_turn: AtomicU8::new(0),
+            choke_round: AtomicU64::new(0),
             dl_rate: RateTracker::new(),
             ul_rate: RateTracker::new(),
             supports_holepunch: AtomicBool::new(false),
@@ -3644,7 +3653,7 @@ mod punch_queue_tests {
 
     fn stats() -> PeerStats {
         PeerStats::new(
-            "93.184.216.34:6881".parse().unwrap(),
+            "203.0.113.34:6881".parse().unwrap(),
             [0u8; 20],
             "test".into(),
             false,
@@ -3653,7 +3662,7 @@ mod punch_queue_tests {
     }
 
     fn addr(n: u8) -> SocketAddr {
-        format!("93.184.216.{n}:6881").parse().unwrap()
+        format!("203.0.113.{n}:6881").parse().unwrap()
     }
 
     #[test]
