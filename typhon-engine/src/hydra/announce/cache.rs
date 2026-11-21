@@ -237,6 +237,8 @@ pub struct Cache {
     /// the engine totals, so Prometheus can `rate()` them per tracker; the
     /// windowed `errors` above answers "what is wrong now" and cannot.
     per_host: RwLock<HashMap<String, Arc<HostOutcomes>>>,
+    /// What this engine's reachable seeds may still ask for this minute.
+    seed_reach: super::seedreach::Budget,
 }
 
 /// One tracker's lifetime announce outcomes.
@@ -409,6 +411,11 @@ impl Cache {
             v.sort_by_key(|a| std::cmp::Reverse(a.1));
         }
         out
+    }
+
+    /// The budget [`super::seedreach::numwant`] spends, one per engine.
+    pub fn seed_reach(&self) -> &super::seedreach::Budget {
+        &self.seed_reach
     }
 
     pub fn record_verify(&self, host: &str, v: Verify) {

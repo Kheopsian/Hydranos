@@ -374,6 +374,9 @@ pub fn start(
 ///   this is for.
 /// - a conclusive answer that did not find us: we are invisible, so dial.
 /// - anything else: the ordinary sampled behaviour.
+///
+/// `None` is not the last word: a seed the tracker says is wanted, with few
+/// peers connected, still asks for a few (`seedreach`).
 fn seed_numwant(verify: Option<&Verify>, sampled: bool) -> Option<u32> {
     match verify {
         None => Some(VERIFY_NUMWANT),
@@ -524,6 +527,8 @@ pub(super) async fn announce_one(
     // Hoard: the first tier that has us ends the pass for periodic announces.
     // Owed events still reach every tracker they are owed to.
     let mut tier_done = false;
+    // A starved seed asked one tracker for peers this pass (`seedreach`).
+    let mut reached_out = false;
     for tier in &tiers {
         // A 429 from one URL of this tier: the rest of the tier waits too, for
         // periodic announces. A 429 is an answer -- the tracker exists and asks
@@ -579,8 +584,23 @@ pub(super) async fn announce_one(
                 }
                 // Per tracker, not per torrent: we can be visible to one and
                 // not to another -- an IPv6-only tracker on a v4-only host, say.
+                // A reachable seed the tracker says is wanted, and that nobody
+                // dialled, reaches out -- once a pass, however many trackers a
+                // race announces to, and within the engine's budget.
                 let numwant_this = if left == 0 && event != "stopped" {
-                    seed_numwant(cache.verify_for(&host).as_ref(), verify_this)
+                    seed_numwant(cache.verify_for(&host).as_ref(), verify_this).or_else(|| {
+                        if reached_out {
+                            return None;
+                        }
+                        let n = super::seedreach::numwant(
+                            torrent.scrape_leechers.load(Ordering::Relaxed),
+                            torrent.peers_connected.load(Ordering::Relaxed),
+                            cache.seed_reach(),
+                            std::time::Instant::now(),
+                        );
+                        reached_out = n.is_some();
+                        n
+                    })
                 } else {
                     None
                 };
@@ -2212,6 +2232,49 @@ mod announce_one_tests {
         }
         run(&mgr, &policy, &breaker, &cache, Mode::Race, &hash).await;
         assert_eq!(param(&a.last(), "event"), None, "completed is said once");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// ⭐ A seed the self-check found reachable, whose tracker counts leechers
+    /// while nobody is connected, asks for a few peers to dial rather than
+    /// `numwant=0` and waiting for leechers that never come (#117).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reachable_seed_with_unserved_leechers_asks_for_peers() {
+        use std::sync::atomic::Ordering;
+        let t = recording_tracker(OPEN_BODY).await;
+        let (mgr, root) = manager("reach");
+        let hash = add(&mgr, "reach", &t.url);
+        let (policy, breaker, cache) = parts();
+        cache.record_verify(
+            &override_host(&t.url),
+            Verify {
+                at: std::time::Instant::now(),
+                v4: true,
+                v6: true,
+                conclusive: true,
+                swarm: 9,
+            },
+        );
+        let st = state(&mgr, &hash);
+        st.scrape_leechers.store(8, Ordering::Relaxed);
+        assert_eq!(st.peers_connected.load(Ordering::Relaxed), 0);
+        // Not the sampled self-check, which asks for its own 50 whatever the
+        // swarm says: the tick is process-wide and starts on a sample.
+        if VERIFY_TICK
+            .load(Ordering::Relaxed)
+            .is_multiple_of(VERIFY_EVERY)
+        {
+            VERIFY_TICK.fetch_add(1, Ordering::Relaxed);
+        }
+
+        run(&mgr, &policy, &breaker, &cache, Mode::Hoard, &hash).await;
+        let q = t.last();
+        assert_eq!(param(&q, "left").as_deref(), Some("0"), "a seed: {q}");
+        assert_eq!(
+            param(&q, "numwant"),
+            Some(crate::announce::seedreach::REACH_NUMWANT.to_string()),
+            "leechers to serve and nobody connected: {q}"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
