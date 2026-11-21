@@ -251,7 +251,11 @@ where
 {
     let turn = match volume_lane(save_path) {
         // Never closed: the lanes live as long as the process.
-        Some(lane) => Some(lane.acquire_owned().await.expect("volume lanes are never closed")),
+        Some(lane) => Some(
+            lane.acquire_owned()
+                .await
+                .expect("volume lanes are never closed"),
+        ),
         None => None,
     };
     // The turn goes with the blocking task, not with this future: a caller
@@ -303,13 +307,19 @@ mod write_stall {
     /// The most writes held at once below `root`.
     pub(super) fn most_held(root: &Path) -> usize {
         let s = STATE.lock().unwrap();
-        s.stalled.iter().find(|s| s.root == root).map_or(0, |s| s.most_held)
+        s.stalled
+            .iter()
+            .find(|s| s.root == root)
+            .map_or(0, |s| s.most_held)
     }
 
     /// The writes held below `root` right now.
     pub(super) fn held(root: &Path) -> usize {
         let s = STATE.lock().unwrap();
-        s.stalled.iter().find(|s| s.root == root).map_or(0, |s| s.held)
+        s.stalled
+            .iter()
+            .find(|s| s.root == root)
+            .map_or(0, |s| s.held)
     }
 
     pub(super) fn wait(path: &Path) {
@@ -3754,7 +3764,11 @@ garbage
         assert_eq!(key("/data/tv/Show/not-created-yet"), dev("0:44"));
         assert_eq!(key("/scratch/x"), dev("0:46"), "the mount on top");
         assert_eq!(key("/data/usb disk/a"), dev("0:47"));
-        assert_eq!(key("/database"), dev("0:21"), "a prefix of a name is not a parent");
+        assert_eq!(
+            key("/database"),
+            dev("0:21"),
+            "a prefix of a name is not a parent"
+        );
         assert_eq!(key("/configs"), dev("0:21"));
         assert_eq!(key("relative/dir"), None);
     }
@@ -3825,7 +3839,11 @@ garbage
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
-            assert_eq!(lane.available_permits(), VOLUME_LANE, "given back once the disk answers");
+            assert_eq!(
+                lane.available_permits(),
+                VOLUME_LANE,
+                "given back once the disk answers"
+            );
         });
         rt.shutdown_timeout(Duration::from_secs(5));
     }
@@ -3874,11 +3892,9 @@ garbage
                 .collect();
             tokio::time::sleep(Duration::from_millis(500)).await;
 
-            let store = tokio::time::timeout(
-                Duration::from_secs(5),
-                tokio::task::spawn_blocking(|| 7),
-            )
-            .await;
+            let store =
+                tokio::time::timeout(Duration::from_secs(5), tokio::task::spawn_blocking(|| 7))
+                    .await;
             assert!(
                 matches!(store, Ok(Ok(7))),
                 "blocking work beside the stuck volume waits for a thread"
