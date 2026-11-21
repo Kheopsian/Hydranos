@@ -21,7 +21,7 @@ decided when the release is cut, by looking at what went in: whoever tags it
 renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 `HYDRANOS_VERSION` in the same commit.
 
-## Unreleased -- batches of adds sent straight to hoard, less memory per torrent, and rechecks that no longer fight over the same disk
+## v4.10.0 -- batches of adds sent straight to hoard, less memory per torrent, and rechecks that no longer fight over the same disk
 
 ### Added
 
