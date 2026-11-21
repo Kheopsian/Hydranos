@@ -5,6 +5,12 @@
 # usual. "allow": silent. "refuse": no announce, scrape or magnet lookup to it,
 # shown as a tracker error. A top-level key: it stays above the first [table].
 # announce_cleartext_passkey = "warn"
+# Which tracker tiers a hoard announces to. "auto" (default): every tier for a
+# public torrent, the first that answers for a private one, whose trackers
+# share a swarm and would count its upload once per tier. "all": every tier.
+# "first": the first tier that answers (BEP 12). Within a tier the first URL
+# that answers always ends it; a race announces to every tracker regardless.
+# announce_tiers = "auto"
 
 [daemon]
 api_host = "0.0.0.0"

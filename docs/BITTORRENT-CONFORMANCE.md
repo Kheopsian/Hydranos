@@ -188,9 +188,13 @@ session (`TrackerSlot`), and derives every event from it:
   qBittorrent driven by autobrr. No `min interval` is crossed,
   because a tracker that refuses a torrent has set none for it. A 429, a
   timeout or a tracker that does not answer at all is never retried this way.
-- **Tier order is respected** (BEP 12). The first tracker in the tier list that
-  answers ends the attempt; the next tier is only for failure. The exception is
-  a race, a torrent being downloaded now, which announces to every tracker it
+- **Tier order is respected** (BEP 12). Within a tier, the first tracker that
+  answers ends the attempt. For a private torrent the next tier is only for
+  failure. A public torrent is announced to every tier, as qBittorrent does
+  (`announce_to_all_tiers`): many put each tracker in a tier of its own, and
+  the leechers on the others would never see us. The top-level key
+  `announce_tiers` sets this: `auto` (default, as above), `all` or `first`.
+  A race, a torrent being downloaded now, announces to every tracker it
   carries, as libtorrent's `announce_to_all_trackers` does.
 - **The catalogue joins gradually.** At startup, torrents enter the schedule
   spread over one default interval, so that every torrent does not fall due at
@@ -389,7 +393,8 @@ interoperability suite, which needs Docker.
 
 | Rule | Spec | Test |
 |---|---|---|
-| A hoard stops at the first tier that answers | BEP 12 | `a_hoard_stops_at_the_first_tier_that_answers` |
+| A private hoard stops at the first tier that answers | BEP 12 | `a_hoard_stops_at_the_first_tier_that_answers` |
+| A public hoard announces to every tier, and stops at the first URL of each that answers | BEP 12 | `a_public_hoard_announces_to_every_tier_by_default`, `every_tier_still_stops_at_the_first_url_of_a_tier_that_answers`, `announce_tiers_all_and_first_override_the_private_flag` |
 | A tracker that has us and asked for quiet still holds its tier | BEP 12 | `a_quiet_tracker_holds_its_tier_and_a_dead_one_does_not` |
 
 ### Identity

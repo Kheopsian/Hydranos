@@ -506,10 +506,16 @@ pub(super) async fn announce_one(
     // Any tracker answered 429: reported to the scheduler's concurrency control.
     let mut throttled = false;
     let mut timed_out = false;
-    // Hoard: the first tier that has us ends the pass for periodic announces.
-    // Owed events still reach every tracker they are owed to.
+    // Hoard: the first tier that has us ends the pass for periodic announces,
+    // or only that tier when `announce_tiers` asks for every one (a public
+    // torrent by default). Owed events still reach every tracker they are
+    // owed to.
+    let every_tier = policy.tiers.every_tier(torrent.meta.private);
     let mut tier_done = false;
     for tier in &tiers {
+        if every_tier {
+            tier_done = false;
+        }
         // A 429 from one URL of this tier: the rest of the tier waits too, for
         // periodic announces. A 429 is an answer -- the tracker exists and asks
         // us to slow down -- and its other names often lead to the same server,
@@ -746,7 +752,8 @@ pub(super) async fn announce_one(
                         for peer in &resp.peers {
                             typhon_engine::tracker::enqueue_dial(*peer, torrent.clone());
                         }
-                        // Hoard: this tier has us. A race stays in every swarm
+                        // Hoard: this tier has us (and, unless every tier is
+                        // announced, the pass). A race stays in every swarm
                         // it belongs to: a cross-seeded torrent announced only
                         // to its first tracker is absent from the others,
                         // which is where its peers are.
@@ -1347,6 +1354,11 @@ mod announce_one_tests {
     /// The fixture torrent with `pieces` pieces of 16 KiB, so its one file is
     /// `pieces * 16384` bytes. One piece is exactly [`torrent_bytes`].
     fn torrent_bytes_of(name: &str, announce: &str, pieces: u64) -> Vec<u8> {
+        torrent_bytes_with(name, announce, pieces, false)
+    }
+
+    /// [`torrent_bytes_of`], private (BEP 27) when `private` is set.
+    fn torrent_bytes_with(name: &str, announce: &str, pieces: u64, private: bool) -> Vec<u8> {
         let length = pieces * 16384;
         let mut info = Vec::new();
         info.extend_from_slice(
@@ -1359,6 +1371,9 @@ mod announce_one_tests {
         piece[0] = name.as_bytes()[0];
         for _ in 0..pieces {
             info.extend_from_slice(&piece);
+        }
+        if private {
+            info.extend_from_slice(b"7:privatei1e");
         }
         info.push(b'e');
         let mut out = Vec::new();
@@ -1433,9 +1448,24 @@ mod announce_one_tests {
 
     /// [`add`] for a torrent of `pieces` pieces of 16 KiB.
     fn add_of(mgr: &Arc<TorrentManager>, name: &str, announce: &str, pieces: u64) -> String {
+        add_with(mgr, name, announce, pieces, false)
+    }
+
+    /// [`add`] for a private torrent (BEP 27).
+    fn add_private(mgr: &Arc<TorrentManager>, name: &str, announce: &str) -> String {
+        add_with(mgr, name, announce, 1, true)
+    }
+
+    fn add_with(
+        mgr: &Arc<TorrentManager>,
+        name: &str,
+        announce: &str,
+        pieces: u64,
+        private: bool,
+    ) -> String {
         let (ih, _) = mgr
             .add_torrent_bytes(
-                &torrent_bytes_of(name, announce, pieces),
+                &torrent_bytes_with(name, announce, pieces, private),
                 &seed_dir_of(name, pieces),
                 false,
                 true,
@@ -2201,13 +2231,14 @@ mod announce_one_tests {
     }
 
     /// A departure says `stopped` to the tracker that heard `started`, and
-    /// to no one else; the book forgets the session.
+    /// to no one else; the book forgets the session. Private, so the second
+    /// tier is only a fail-over and never hears `started`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_departure_tells_the_tracker_that_heard_started() {
         let a = recording_tracker(OPEN_BODY).await;
         let b = recording_tracker(OPEN_BODY).await;
         let (mgr, root) = manager("depart");
-        let hash = add(&mgr, "leaving", &a.url);
+        let hash = add_private(&mgr, "leaving", &a.url);
         let st = state(&mgr, &hash);
         *st.live_trackers.write() = vec![vec![a.url.clone()], vec![b.url.clone()]];
         let (policy, breaker, cache) = parts();
@@ -2225,14 +2256,15 @@ mod announce_one_tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    /// BEP 12 in hoard mode: the first tier that answers has us; the next
-    /// tier is not announced to at all.
+    /// BEP 12 in hoard mode, for a private torrent under the default
+    /// `announce_tiers`: the first tier that answers has us; the next tier is
+    /// not announced to at all.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_hoard_stops_at_the_first_tier_that_answers() {
         let a = recording_tracker(OPEN_BODY).await;
         let b = recording_tracker(OPEN_BODY).await;
         let (mgr, root) = manager("tiers");
-        let hash = add(&mgr, "tier", &a.url);
+        let hash = add_private(&mgr, "tier", &a.url);
         *state(&mgr, &hash).live_trackers.write() = vec![vec![a.url.clone()], vec![b.url.clone()]];
         let (policy, breaker, cache) = parts();
         run(&mgr, &policy, &breaker, &cache, Mode::Hoard, &hash).await;
@@ -2243,6 +2275,67 @@ mod announce_one_tests {
             "the backup tier is for failure, not for every announce"
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// ⭐ A public torrent with one tracker per tier is seen by every one of
+    /// them under the default `announce_tiers`. It used to be seen by the
+    /// first only, and the leechers on the others never found us.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_public_hoard_announces_to_every_tier_by_default() {
+        let a = recording_tracker(OPEN_BODY).await;
+        let b = recording_tracker(OPEN_BODY).await;
+        let (mgr, root) = manager("tiers-public");
+        let hash = add(&mgr, "tierpub", &a.url);
+        *state(&mgr, &hash).live_trackers.write() = vec![vec![a.url.clone()], vec![b.url.clone()]];
+        let (policy, breaker, cache) = parts();
+        run(&mgr, &policy, &breaker, &cache, Mode::Hoard, &hash).await;
+        run(&mgr, &policy, &breaker, &cache, Mode::Hoard, &hash).await;
+        assert_eq!(a.queries().len(), 2);
+        assert_eq!(b.queries().len(), 2, "every tier hears every announce");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Every tier is announced to, but within one tier the first URL that
+    /// answers still ends it (BEP 12): its other URLs are fail-overs.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn every_tier_still_stops_at_the_first_url_of_a_tier_that_answers() {
+        let a = recording_tracker(OPEN_BODY).await;
+        let a2 = recording_tracker(OPEN_BODY).await;
+        let b = recording_tracker(OPEN_BODY).await;
+        let (mgr, root) = manager("tiers-inner");
+        let hash = add(&mgr, "tierinner", &a.url);
+        *state(&mgr, &hash).live_trackers.write() =
+            vec![vec![a.url.clone(), a2.url.clone()], vec![b.url.clone()]];
+        let (policy, breaker, cache) = parts();
+        run(&mgr, &policy, &breaker, &cache, Mode::Hoard, &hash).await;
+        assert_eq!(a.queries().len(), 1);
+        assert!(a2.queries().is_empty(), "the tier's fail-over is not asked");
+        assert_eq!(b.queries().len(), 1);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The setting wins over the torrent's flag either way: `all` reaches the
+    /// second tier of a private torrent, `first` stops a public one at the
+    /// first.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn announce_tiers_all_and_first_override_the_private_flag() {
+        for (tiers, private, second_tier_hears) in [
+            (crate::announce::policy::AnnounceTiers::All, true, 1),
+            (crate::announce::policy::AnnounceTiers::First, false, 0),
+        ] {
+            let a = recording_tracker(OPEN_BODY).await;
+            let b = recording_tracker(OPEN_BODY).await;
+            let (mgr, root) = manager(&format!("tiers-{tiers:?}"));
+            let hash = add_with(&mgr, "tierset", &a.url, 1, private);
+            *state(&mgr, &hash).live_trackers.write() =
+                vec![vec![a.url.clone()], vec![b.url.clone()]];
+            let (mut policy, breaker, cache) = parts();
+            policy.tiers = tiers;
+            run(&mgr, &policy, &breaker, &cache, Mode::Hoard, &hash).await;
+            assert_eq!(a.queries().len(), 1, "{tiers:?}");
+            assert_eq!(b.queries().len(), second_tier_hears, "{tiers:?}");
+            let _ = std::fs::remove_dir_all(root);
+        }
     }
 
     /// ⭐ A fail-over tracker hears `started` first. It used to hear a
