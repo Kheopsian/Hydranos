@@ -3630,7 +3630,7 @@ mod punch_queue_tests {
 
     fn stats() -> PeerStats {
         PeerStats::new(
-            "93.184.216.34:6881".parse().unwrap(),
+            "203.0.113.34:6881".parse().unwrap(),
             [0u8; 20],
             "test".into(),
             false,
@@ -3639,7 +3639,7 @@ mod punch_queue_tests {
     }
 
     fn addr(n: u8) -> SocketAddr {
-        format!("93.184.216.{n}:6881").parse().unwrap()
+        format!("203.0.113.{n}:6881").parse().unwrap()
     }
 
     #[test]

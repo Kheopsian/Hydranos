@@ -475,7 +475,7 @@ mod tests {
 
     /// Register a peer on the torrent, the way a real session's RAII guard does.
     fn peer(t: &TorrentState, n: u8, have: u32, interested: bool, bytes: u64) -> Arc<PeerStats> {
-        let addr: std::net::SocketAddr = format!("93.184.216.{n}:6881").parse().unwrap();
+        let addr: std::net::SocketAddr = format!("203.0.113.{n}:6881").parse().unwrap();
         let s = Arc::new(PeerStats::new(addr, [n; 20], "test".into(), false, false));
         s.num_pieces_have.store(have, Ordering::Relaxed);
         s.interested.store(interested, Ordering::Relaxed);

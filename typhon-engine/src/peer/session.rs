@@ -1171,7 +1171,7 @@ mod idle_deadline_tests {
     /// rotation would lose it at `peer_timeout` before its turn came.
     #[test]
     fn a_keep_alive_from_a_peer_the_choker_holds_pushes_the_deadline() {
-        let addr: std::net::SocketAddr = "93.184.216.1:6881".parse().unwrap();
+        let addr: std::net::SocketAddr = "203.0.113.1:6881".parse().unwrap();
         let s = crate::torrent::meta::PeerStats::new(addr, [1; 20], "t".into(), false, false);
         s.interested.store(true, Ordering::Relaxed);
         s.choked.store(true, Ordering::Relaxed);
