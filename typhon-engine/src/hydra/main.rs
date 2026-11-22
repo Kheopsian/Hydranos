@@ -64,6 +64,7 @@ mod netmode;
 mod netprobe;
 mod nodes;
 mod obs;
+mod page_refresh;
 mod pathclaim;
 mod pathroots;
 mod platform;
@@ -1076,6 +1077,7 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
 
     let state = api::AppState {
         imports: Default::default(),
+        page_refreshes: Default::default(),
         boot_roots: Arc::new(pathroots::BootRoots::from_config(&config)),
         config: Arc::new(std::sync::RwLock::new(Arc::new(config))),
         engines: engine_host,
@@ -2000,3 +2002,7 @@ mod seed_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+#[cfg(test)]
+#[path = "../bench_support.rs"]
+mod bench_support;

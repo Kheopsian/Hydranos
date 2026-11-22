@@ -100,6 +100,7 @@ fn state_with(key: &str, password_hash: &str, in_query: bool) -> AppState {
     cfg.auth.username = "admin".into();
     AppState {
         imports: Default::default(),
+        page_refreshes: Default::default(),
         boot_roots: Arc::new(crate::pathroots::BootRoots::from_config(&cfg)),
         config: Arc::new(std::sync::RwLock::new(Arc::new(cfg))),
         config_path: std::path::PathBuf::from("/nonexistent.toml"),

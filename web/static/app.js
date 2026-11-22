@@ -362,7 +362,7 @@ function setUnitPref(kind, value) {
     localStorage.setItem(kind === "size" ? "hydra_unit_size" : "hydra_unit_speed", value);
     try { updateOverview(); } catch (_) {}
     try { if (typeof _scheduleHoardRender === "function") _scheduleHoardRender(); } catch (_) {}
-    try { if (typeof updateRaceTorrents === "function") updateRaceTorrents(); } catch (_) {}
+    try { if (typeof renderRaceTable === "function") renderRaceTable(); } catch (_) {}
 }
 
 function formatBytes(bytes) {
@@ -1663,12 +1663,11 @@ function sortRace(th) {
         h.classList.remove("sort-asc", "sort-desc");
     });
     th.classList.add(_raceSortAsc ? "sort-asc" : "sort-desc");
-    updateRaceTorrents();
+    renderRaceTable();
 }
 
 // Cache hoard torrents
 let _hoardAllTorrents = [];
-let _hoardLastFetch = 0;
 let _hoardStatsPainted = false;
 let _hoardStateFilter = "";
 // Under the Checking chip: "" (all of them), "__check_reading__" or
@@ -1704,19 +1703,32 @@ function _paintChips(sel, key, inc, exc) {
 }
 let _hoardSortCol = localStorage.getItem("hydra_hoard_sort_col") || "added_time";
 let _hoardSortAsc = localStorage.getItem("hydra_hoard_sort_asc") === "1";
-const HOARD_FETCH_INTERVAL = 30000; // bumped 2026-04-19: SSE /api/events fournit le live, ce poll reste un backstop statique (name, category, scrape)
 const HOARD_RENDER_LIMIT = 500;
 
 let _raceTorrents = [];
+let _raceLastFetchAt = 0;
+let _raceFetchMs = 0;
+let _racePageBusy = false;
+let _raceMembershipDirty = true;
 
-async function updateRaceTorrents() {
+async function updateRaceTorrents(force = true) {
     loadRacePolicy();
+    if (_racePageBusy) return;
+    const interval = _raceMembershipDirty ? Math.max(1000, _raceFetchMs * 20)
+        : Math.max(HOARD_REFRESH_MS, _raceFetchMs * 20);
+    if (!force && _liveStreamFresh() && Date.now() - _raceLastFetchAt < interval) return;
+    _racePageBusy = true;
+    _raceMembershipDirty = false;
+    const started = Date.now();
     try {
         _raceTorrents = await api("/api/race/torrents");
         renderRaceTable();
+        _raceLastFetchAt = Date.now();
+        _raceFetchMs = Date.now() - started;
     } catch (e) {
+        _raceMembershipDirty = true;
         console.error("Failed to update race torrents:", e);
-    }
+    } finally { _racePageBusy = false; }
 }
 
 // Split out of the fetch so the search box can re-render from the rows already
@@ -3190,7 +3202,7 @@ let _hoardFacets = null;
 let _hoardPageSeq = 0;
 // Highest sequence number whose answer has been rendered.
 let _hoardPageApplied = 0;
-let _hoardPageBusy = false;
+let _hoardPageBusy = 0;
 
 // Ask the server for the rows the current sort and filters select.
 //
@@ -3198,18 +3210,39 @@ let _hoardPageBusy = false;
 // the page to draw. renderHoardTable() still runs its own filter and sort over
 // those rows, which is a no-op on an already-filtered, already-sorted 500 -- it
 // is left in place so a stale page never renders rows that no longer match.
-// How long a page stays good enough for a background refresh to be skipped.
-// Row figures move over SSE (stats_snapshot) and adds/removes arrive as their
-// own events, so re-running a 300k scan on every poll bought nothing and kept
-// the server scanning continuously.
+// Static pages use SSE row updates with a slower membership backstop.
+// Live state pages use engine indexes; whole-library facets refresh separately.
 const HOARD_REFRESH_MS = 20000;
+const LIVE_REFRESH_MS = 1000;
+let _hoardFullFetchAt = 0;
+let _hoardFullFetchMs = 0;
+let _hoardLiveFetchMs = 0;
+let _hoardLiveDirty = true;
+let _hoardMembershipDirty = false;
+
+function _hoardFullRefreshInterval() {
+    // Keep automatic catalogue scans below roughly 5% request duty time.
+    return Math.max(_hoardMembershipDirty ? 1000 : HOARD_REFRESH_MS, _hoardFullFetchMs * 20);
+}
+
+function _hoardFastRefresh() {
+    return ["__active__", "downloading", "seed_only", "checking_files", "__check_reading__",
+        "__check_waiting__", "__error__", "error"].includes(_hoardStateFilter)
+        && !_hoardMembershipDirty && _hoardFacets && Date.now() - _hoardFullFetchAt < _hoardFullRefreshInterval();
+}
+
+function _hoardRefreshInterval() {
+    return _hoardFastRefresh()
+        ? Math.max(LIVE_REFRESH_MS, _hoardLiveFetchMs * 10)
+        : _hoardFullRefreshInterval();
+}
 let _hoardInFlightQuery = "";
 let _hoardLastFetchAt = 0;
 
-function _hoardPageQuery() {
+function _hoardPageQuery(facets = true) {
     const q = new URLSearchParams();
     q.set("limit", String(HOARD_RENDER_LIMIT));
-    q.set("facets", "1");
+    q.set("facets", facets ? "1" : "0");
     q.set("sort", _hoardSortCol);
     q.set("order", _hoardSortAsc ? "asc" : "desc");
     _hoardFilterParams(q);
@@ -3241,7 +3274,8 @@ function _hoardFilterQuery() {
 }
 
 async function fetchHoardPage(force) {
-    const qs = _hoardPageQuery();
+    const fast = !force && _hoardFastRefresh();
+    const qs = _hoardPageQuery(!fast) + (force ? "" : "&live=1");
     // A Ctrl+A means the filter it was typed on. Once the filter changes, it
     // would silently mean a different set: drop it instead.
     if (_selAll && _selAll.filter !== _hoardFilterQuery()) {
@@ -3254,15 +3288,27 @@ async function fetchHoardPage(force) {
     if (_hoardPageBusy && qs === _hoardInFlightQuery) return;
     if (_hoardPageBusy && !force) return;
     // Background refreshes are rate limited; anything the user did is not.
-    if (!force && Date.now() - _hoardLastFetchAt < HOARD_REFRESH_MS) return;
+    if (!force) {
+        const last = fast ? _hoardLastFetchAt : _hoardFullFetchAt;
+        if (Date.now() - last < _hoardRefreshInterval()) return;
+        if (fast && !_hoardLiveDirty && _liveStreamFresh()) return;
+    }
 
-    _hoardPageBusy = true;
+    _hoardPageBusy++;
     _hoardInFlightQuery = qs;
+    _hoardLiveDirty = false;
+    if (!fast) _hoardMembershipDirty = false;
+    const started = Date.now();
     try {
-        await _fetchHoardPageInner(qs);
+        const applied = await _fetchHoardPageInner(qs);
+        if (applied) {
+            const elapsed = Date.now() - started;
+            if (fast) _hoardLiveFetchMs = elapsed;
+            else { _hoardFullFetchMs = elapsed; _hoardFullFetchAt = Date.now(); }
+        } else { _hoardLiveDirty = true; if (!fast) _hoardMembershipDirty = true; }
     } finally {
-        _hoardPageBusy = false;
-        _hoardInFlightQuery = "";
+        _hoardPageBusy--;
+        if (!_hoardPageBusy) _hoardInFlightQuery = "";
         _hoardLastFetchAt = Date.now();
     }
 }
@@ -3275,7 +3321,11 @@ async function _fetchHoardPageInner(qs) {
     // against the latest request INSTEAD starved the list completely: the
     // request takes about a second, poll() starts another before it lands, so
     // every response found a newer one in flight and discarded itself.
-    if (!d || seq <= _hoardPageApplied) return;
+    const current = new URLSearchParams(_hoardPageQuery());
+    const requested = new URLSearchParams(qs);
+    requested.set("facets", "1");
+    requested.delete("live");
+    if (!d || seq <= _hoardPageApplied || requested.toString() !== current.toString()) return false;
     _hoardPageApplied = seq;
     // The search this page answers. renderHoardTable() refilters with THIS,
     // not with what the box says now: the stats refresh redraws the table every
@@ -3285,21 +3335,32 @@ async function _fetchHoardPageInner(qs) {
     _hoardServerTotal = d.total || 0;
     _hoardServerFiltered = d.filtered || 0;
     if (d.facets) _hoardFacets = d.facets;
+    else if (_hoardFacets) {
+        const state = requested.get("state");
+        if (state === "__active__") _hoardFacets.active = _hoardServerFiltered;
+        else if (state === "__error__") _hoardFacets.torrent_error = _hoardServerFiltered;
+        else if (state === "__check_waiting__") _hoardFacets.check_waiting = _hoardServerFiltered;
+        else if (_hoardFacets.state && ["downloading", "seed_only", "checking_files", "error"].includes(state)) {
+            _hoardFacets.state[state] = _hoardServerFiltered;
+        }
+    }
     const rows = Array.isArray(d.rows) ? d.rows : [];
     _hoardAllTorrents = rows;
-    _hydMap = null;
     // Chips and rows in the same frame. The chips used to follow a pins round
     // trip later, and the table jumped by their change in height 35 ms after
     // the rows had landed.
     try { _renderHoardCounts(); } catch (_) {}
-    _refreshHoardPins().then(() => { try { _renderHoardCounts(); } catch (_) {} });
+    if (d.facets) _refreshHoardPins().then(() => { try { _renderHoardCounts(); } catch (_) {} });
     renderHoardTable();
     const tb = document.getElementById("hoard-tbody");
     if (tb) {
         tb.classList.remove("pending");
-        // Restart the fade-in: the class has to come off for a frame first.
-        tb.classList.remove("fresh"); void tb.offsetWidth; tb.classList.add("fresh");
+        // Background updates should not flash the whole table every second.
+        if (new URLSearchParams(qs).get("facets") === "1") {
+            tb.classList.remove("fresh"); void tb.offsetWidth; tb.classList.add("fresh");
+        }
     }
+    return true;
 }
 
 // Debounced, for the search box: one request per pause, not one per keystroke.
@@ -3666,30 +3727,18 @@ function _renderHoardStatsHeader(data) {
         annText);
 }
 
-// Called on tab activation, hash change, or page load. Live updates flow
-// through SSE (status_snapshot + hoard_stats_snapshot + stats_snapshot) so
-// the periodic poll does NOT call this anymore, it would duplicate the SSE
-// stream over HTTP, which was the original bug we set out to kill.
-//
-// Two responsibilities:
-//   1. Fire an immediate /api/hoard/stats fetch only if SSE hasn't painted
-//      the header yet (cold tab activation).
-//   2. Refresh the static-ish torrent list (/api/hoard/torrents) at most
-//      every HOARD_FETCH_INTERVAL, backstop for name / category / scrape.
+// Called by the poll and on tab activation, hash change, or page load.
+// SSE owns the live header; REST fills in on startup or a stalled stream.
+// Page membership refreshes independently from the loaded rows' SSE figures.
 async function updateHoardStats() {
     try {
-        // The hoard torrent list is now hydrated + kept live entirely over SSE
-        // (torrent_batch on connect, then torrent_added/removed + stats_snapshot).
-        // Here we only ensure the stats HEADER is painted on a cold tab open
-        // before the first SSE snapshot lands.
-        if (!_hoardStatsPainted) {
-            const stats = await api("/api/hoard/stats");
-            _renderHoardStatsHeader(stats);
-            _hoardStatsPainted = true;
-        }
-        // And the rows themselves: the stream no longer carries them, so
-        // opening the tab is what asks for the first page.
-        fetchHoardPage();
+        // Rows and the fallback header do not depend on one another.
+        const header = _hoardStatsPainted && _liveStreamFresh() ? null
+            : api("/api/hoard/stats").then(stats => {
+                _renderHoardStatsHeader(stats);
+                _hoardStatsPainted = true;
+            });
+        await Promise.all([fetchHoardPage(), header]);
     } catch (e) {
         console.error("Failed to update hoard stats:", e);
     }
@@ -8119,17 +8168,19 @@ async function removeMagnet(hash) {
 }
 
 async function poll() {
-    if (_polling) return;
+    if (_polling || document.hidden) return;
     _polling = true;
     try {
-        await checkHealth();
+        const tasks = [checkHealth()];
+        if (!_liveStreamFresh()) tasks.push(updateOverview());
         const activeTab = document.querySelector(".tab.active")?.dataset.tab;
-        if (activeTab === "race") await updateRaceTorrents();
-        if (activeTab === "hoard") await updateHoardStats();
-        if (activeTab === "categories") await updateCategories();
-        if (activeTab === "benchmark") await updateBenchmark();
-        if (activeTab === "trackers") { await updateTrackers(); loadTrackerStats(); }
-        if (activeTab === "add") await updateMagnets();
+        if (activeTab === "race") tasks.push(updateRaceTorrents(false));
+        if (activeTab === "hoard") tasks.push(updateHoardStats());
+        if (activeTab === "categories") tasks.push(updateCategories());
+        if (activeTab === "benchmark") tasks.push(updateBenchmark());
+        if (activeTab === "trackers") tasks.push(updateTrackers(), loadTrackerStats());
+        if (activeTab === "add") tasks.push(updateMagnets());
+        await Promise.allSettled(tasks);
     } finally {
         _polling = false;
     }
@@ -8244,23 +8295,21 @@ _checkStartup();
 
 
 // ---- Hydranos SSE live updates (2026-04-19) ----
-// Push-based live stats from Typhon via /api/events. Replaces part of the
-// 3-second poll for the hoard table: upload_rate / download_rate / peers /
-// state are updated in-place within ~1s of the engine emitting them.
-// The periodic poll keeps running at POLL_INTERVAL for everything else
-// (categories, session stats, tracker errors, etc.).
-const _STATUS_TO_STATE = { 0: "paused", 1: "checking_files", 2: "downloading", 3: "seeding" };
+// One stream updates both torrent views and their live headers. REST loads
+// row metadata and repairs membership; it does not duplicate healthy SSE.
+const _STATUS_TO_STATE = { 0: "paused", 1: "checking_files", 2: "downloading", 3: "seeding", 4: "error" };
 let _sseConn = null;
+let _lastStatusEventAt = 0;
+let _lastHoardStatsEventAt = 0;
+let _lastHoardUploading = null;
+let _lastHoardLiveRevision = null;
+
+function _liveStreamFresh() {
+    return !!_sseConn && _sseConn.readyState === 1
+        && Date.now() - _lastStatusEventAt < 5000
+        && Date.now() - _lastHoardStatsEventAt < 5000;
+}
 let _syncCursor = 0; // last server_ts seen; echoed as ?since= for delta reconnects
-let _resyncing = false; // tab-return full re-hydration in progress
-let _resyncSeen = null;
-let _hydMap = null; // persistent upsert map during a hydration stream (avoids O(N^2))
-
-// A row is identified by node AND hash. The same torrent on two nodes is two
-// rows, which is the whole point of duplicating one; keyed by hash alone the
-// second simply replaced the first.
-function _rowKey(t) { return _agentKey(t.agent) + "|" + t.info_hash; }
-
 // _agentKey folds every name this node answers to onto one key. Hydration rows
 // carry "local-hoard" while a live torrent_added frame carries nothing: keyed
 // literally, the same torrent would appear twice in the table, once per frame
@@ -8277,7 +8326,7 @@ function setupHoardSSE() {
 }
 
 function _openHoardSSE() {
-    if (_sseConn) return;
+    if (_sseConn || document.hidden) return;
     // On a reconnect where we already hold the hoard list (e.g. returning to a
     // backgrounded tab, which closed the SSE), skip server re-hydration with
     // hydrate=0: the header still refreshes via the immediate snapshot and live
@@ -8296,149 +8345,65 @@ function _openHoardSSE() {
         console.warn("SSE not available:", e);
         return;
     }
+    _sseConn.onopen = () => {
+        // Reconnects can miss removals and changes outside the loaded page.
+        _hoardMembershipDirty = true;
+        _hoardLiveDirty = true;
+        _raceMembershipDirty = true;
+        if (_hoardTabVisible()) fetchHoardPage();
+    };
     _sseConn.onmessage = (ev) => {
         if (document.hidden) return;
         let payload;
         try { payload = JSON.parse(ev.data); } catch (_) { return; }
         const type = payload.event;
         const data = payload.data || {};
-        if (type === "sync") {
-            // full = server re-hydrates the whole list (cursor too old / first
-            // load); drop what we hold so stale rows get pruned by the restream.
-            if (data.mode === "full") {
-                // Resync (tab-return / cursor too old): keep current rows to
-                // avoid a blank flash, upsert the fresh full stream, then prune
-                // rows not seen once done. Fixes surviving rows staying stale
-                // (id instead of name, no category) after a delta-only reconnect.
-                _resyncing = true;
-                _resyncSeen = new Set();
-            }
-            return;
-        }
+        if (type === "sync") return;
         if (type === "status_snapshot") {
+            _lastStatusEventAt = Date.now();
             if (data.server_ts) _syncCursor = data.server_ts;
             try { _renderStatus(data); } catch (_) {}
             return;
         }
         if (type === "hoard_stats_snapshot") {
+            _lastHoardStatsEventAt = Date.now();
+            if (_lastHoardUploading !== data.torrents_uploading || _lastHoardLiveRevision !== data.live_revision) {
+                _hoardLiveDirty = true;
+                _lastHoardUploading = data.torrents_uploading;
+                _lastHoardLiveRevision = data.live_revision;
+            }
             try { _renderHoardStatsHeader(data); _hoardStatsPainted = true; } catch (_) {}
             return;
         }
-        if (type === "torrent_batch") {
-            // Progressive hydration of the hoard list (replaces the ~76MB REST
-            // fetch). Race keeps its own on-view fetch (small list), so ignore it.
-            if (data.mode !== "hoard") return;
-            // A partial batch carries the remote agents' rows, re-pushed every
-            // few seconds because no agent event reaches this node's hub. It is
-            // a subset of the list, so it upserts and nothing more: it must
-            // never end a hydration or prune the rows it does not carry.
-            if (data.partial) {
-                const rows = Array.isArray(data.torrents) ? data.torrents : [];
-                if (!rows.length) return;
-                if (_hydMap) {
-                    // Hydration in flight: feed its accumulator instead, or the
-                    // batch we are in the middle of would overwrite these.
-                    for (const t of rows) {
-                        _hydMap.set(t.info_hash, t);
-                        if (_resyncing) _resyncSeen.add(t.info_hash);
-                    }
-                    return;
-                }
-                const byHash = new Map(_hoardAllTorrents.map(t => [t.info_hash, t]));
-                let fresh = false;
-                for (const t of rows) {
-                    if (!byHash.has(t.info_hash)) fresh = true;
-                    byHash.set(t.info_hash, t);
-                }
-                _hoardAllTorrents = Array.from(byHash.values());
-                if (fresh) _refreshHoardPins().then(() => { try { _renderHoardCounts(); } catch (_) {} });
-                _scheduleHoardRender();
-                return;
-            }
-            // Accumulate into a persistent map (O(1)/row) and materialize the
-            // array + counts + render ONCE at done. Rebuilding map+array per
-            // batch was O(N^2) => ~24s at 106k though the server streams in <1s.
-            if (!_hydMap) _hydMap = new Map(_hoardAllTorrents.map(t => [_rowKey(t), t]));
-            if (Array.isArray(data.torrents) && data.torrents.length) {
-                for (const t of data.torrents) {
-                    _hydMap.set(_rowKey(t), t);
-                    if (_resyncing) _resyncSeen.add(_rowKey(t));
-                }
-            }
-            if (data.done) {
-                if (_resyncing) {
-                    // Prune rows removed while we were away.
-                    for (const h of Array.from(_hydMap.keys())) {
-                        if (!_resyncSeen.has(h)) _hydMap.delete(h);
-                    }
-                    _resyncing = false; _resyncSeen = null;
-                }
-                _hoardAllTorrents = Array.from(_hydMap.values());
-                _hydMap = null;
-                _refreshHoardPins().then(() => { try { _renderHoardCounts(); } catch (_) {} });
-                _scheduleHoardRender();
-            }
-            return;
-        }
-        if (type === "torrent_added" && data.info_hash) {
-            if (_hoardAllTorrents && !_hoardAllTorrents.some(
-                    t => t.info_hash === data.info_hash && _isLocalAgent(t.agent))) {
-                _hoardAllTorrents.unshift(data); // newest first; dynamic fields fill via stats_snapshot
-                _refreshHoardPins().then(() => { try { _renderHoardCounts(); } catch (_) {} });
-                _scheduleHoardRender();
-            }
+        // hydrate=0 requests rows through the page routes. Its terminal
+        // batches must never mutate a page that REST has already painted.
+        if (type === "torrent_batch") return;
+        if (type === "page_invalidated" || type === "torrent_added") {
+            if (data.mode === "race") _raceMembershipDirty = true;
+            if (data.mode === "hoard") { _hoardMembershipDirty = true; _hoardLiveDirty = true; }
             return;
         }
         if (type === "stats_snapshot" && Array.isArray(data.torrents)) {
-            if (!_hoardAllTorrents || !_hoardAllTorrents.length) return;
-            // Every engine's snapshot comes down this stream, keyed by hash
-            // alone. The same hash held by race and hoard got the race copy's
-            // figures painted onto the hoard row: a hoard download at 64 %
-            // flapped to "seeding 100 %" each time race reported (06/10/2026).
-            if (data.mode !== "hoard") return;
-            const byHash = new Map();
-            for (let i = 0; i < _hoardAllTorrents.length; i++) {
-                const row = _hoardAllTorrents[i];
-                // Local-engine stats: an agent's copy of the same hash keeps its
-                // own figures, which arrive with the next hydration.
-                if (!_isLocalAgent(row.agent)) continue;
-                byHash.set(row.info_hash, row);
+            const rows = data.mode === "race" ? _raceTorrents
+                : data.mode === "hoard" ? _hoardAllTorrents : null;
+            if (!rows) return;
+            if (data.mode === "hoard") _hoardLiveDirty = true;
+            const touched = _applyLiveRows(rows, data);
+            if (touched) {
+                if (data.mode === "hoard") _scheduleHoardRender();
+                else _scheduleRaceRender();
             }
-            let touched = 0;
-            for (const m of data.torrents) {
-                const t = byHash.get(m.info_hash);
-                if (!t) continue;
-                // A row under a check keeps saying so: the engine's status of a
-                // stopped torrent being checked is still "stopped".
-                // The stream says how far a check has got (null when none
-                // runs), so the row follows it without a refetch.
-                if (m.checking_progress == null) {
-                    t.state = _STATUS_TO_STATE[m.status] || t.state;
-                } else {
-                    t.state = "checking_files";
-                }
-                t.checking_progress = m.checking_progress ?? null;
-                t.check_queued = !!m.check_queued;
-                t.upload_rate = m.upload_rate;
-                t.download_rate = m.download_rate;
-                t.total_upload = m.total_uploaded;
-                t.total_download = m.total_downloaded;
-                t.num_peers = m.peers_connected;
-                if (typeof m.progress === "number") t.progress = m.progress;
-                // The ratio is left as the server computed it; the next page
-                // brings the new one. Recomputing it here is how the table
-                // came to disagree with the sort (02/10/2026).
-                touched++;
-            }
-            if (touched > 0) _scheduleHoardRender();
         } else if (type === "torrent_removed" && data.info_hash) {
-            // Same stream, same trap: removing the race copy must not drop
-            // the hoard row of the same hash.
-            if (data.mode !== "hoard") return;
-            if (_hoardAllTorrents) {
-                _hoardAllTorrents = _hoardAllTorrents.filter(
-                    t => !(t.info_hash === data.info_hash && _isLocalAgent(t.agent)));
+            const keep = row => !(row.info_hash === data.info_hash && _liveRowMatches(row, data));
+            if (data.mode === "hoard") {
+                _hoardAllTorrents = _hoardAllTorrents.filter(keep);
+                _hoardMembershipDirty = true;
+                _hoardLiveDirty = true;
                 _scheduleHoardRender();
+            } else if (data.mode === "race") {
+                _raceTorrents = _raceTorrents.filter(keep);
+                _raceMembershipDirty = true;
+                _scheduleRaceRender();
             }
         }
     };
@@ -8454,6 +8419,48 @@ function _openHoardSSE() {
             }, 3000);
         }
     };
+}
+
+// New servers identify the exact engine. Legacy frames only identify a role.
+function _liveRowMatches(row, data) {
+    if (!_isLocalAgent(row.agent)) return false;
+    return !data.agent || row.agent === data.agent || !row.agent || row.agent === "local";
+}
+
+function _applyLiveRows(rows, data) {
+    const byHash = new Map(rows.filter(row => _liveRowMatches(row, data)).map(row => [row.info_hash, row]));
+    let touched = 0;
+    for (const m of data.torrents) {
+        const row = byHash.get(m.info_hash);
+        if (!row) continue;
+        const raw = m.state || _STATUS_TO_STATE[m.status];
+        if (m.checking_progress != null) row.state = "checking_files";
+        else if (m.state) row.state = m.state;
+        else if (raw === "paused" || raw === "stopped") {
+            row.state = row.state === "stopped" ? "stopped" : "queued";
+        } else if (raw) row.state = raw;
+        row.checking_progress = m.checking_progress ?? null;
+        row.check_queued = !!m.check_queued;
+        row.upload_rate = m.upload_rate;
+        row.download_rate = m.download_rate;
+        row.total_upload = m.total_uploaded;
+        row.total_download = m.total_downloaded;
+        row.num_peers = m.peers_connected;
+        if (typeof m.progress === "number") row.progress = m.progress;
+        if (typeof m.ratio === "number") row.ratio = m.ratio;
+        touched++;
+    }
+    return touched;
+}
+
+let _raceRenderScheduled = false;
+function _scheduleRaceRender() {
+    if (!document.getElementById("tab-race")?.classList.contains("active") || _raceRenderScheduled) return;
+    _raceRenderScheduled = true;
+    requestAnimationFrame(() => {
+        _raceRenderScheduled = false;
+        if (!document.hidden) renderRaceTable();
+    });
 }
 
 let _hoardRenderScheduled = false;
@@ -8486,11 +8493,11 @@ document.addEventListener("visibilitychange", () => {
     if (document.hidden) {
         if (_sseConn) { _sseConn.close(); _sseConn = null; }
     } else {
-        _syncCursor = 0; // force full re-hydration on tab-return (a delta
-                         // reconnect leaves surviving rows stale: id-not-name,
-                         // missing category, frozen stats).
+        _syncCursor = 0; // REST refreshes membership; SSE resumes live figures.
         setupHoardSSE();
-        _hoardLastFetch = 0;
+        _hoardFullFetchAt = 0;
+        _hoardLiveDirty = true;
+        _raceLastFetchAt = 0;
         updateOverview();
         if (typeof updateHoardStats === "function") updateHoardStats();
     }
@@ -10781,7 +10788,7 @@ function _wireHeaderDnD(tableId) {
 }
 function _rerenderTable(tableId) {
     if (tableId === "hoard-table") { renderTableHeader("hoard-table", _hoardSortCol, _hoardSortAsc); renderHoardTable(); }
-    else if (tableId === "race-table") { renderTableHeader("race-table", _raceSortCol, _raceSortAsc); updateRaceTorrents(); }
+    else if (tableId === "race-table") { renderTableHeader("race-table", _raceSortCol, _raceSortAsc); renderRaceTable(); }
     else if (PEER_TABLES.includes(tableId)) { renderPeerHeader(tableId); renderPeerRows(tableId, _peerLast[tableId]); }
 }
 function showColumnMenu(ev, tableId) {
@@ -11931,6 +11938,17 @@ function hydraPrompt(title, body, value, okLabel) {
 // link would suggest the engines talk to each other, and they do not.
 const NET_STATE_COLOR = { ok: "#3ddc84", warn: "#f5a524", bad: "#f2555a", off: "#4a5568" };
 
+function _netEngineDisplay(e) {
+    const held = e.port_pending || e.announce_held;
+    const state = held && e.state !== "bad" && e.state !== "off" ? "warn" : e.state;
+    const reason = e.port_pending ? t("Announces held: waiting for forwarded port")
+        : e.announce_held ? t("Announces held: startup pause") : "";
+    const listen = e.listen_port ? t("listening port {port}", { port: e.listen_port }) : "";
+    const announced = e.port_pending ? t("announced port pending")
+        : e.announced_port ? t("announced port {port}", { port: e.announced_port }) : "";
+    return { state, word: reason || _netStateWord(state), ports: [listen, announced].filter(Boolean).join(" · ") };
+}
+
 function _netPolyMarkup(engines, size) {
     const n = engines.length;
     if (!n) return "";
@@ -11944,9 +11962,11 @@ function _netPolyMarkup(engines, size) {
     const ring = n > 1 ? `<path class="np-edge" d="${d}"/>` : "";
     const rr = n <= 3 ? 4.6 : (n <= 6 ? 4 : 3.4);
     const dots = pts.map((p, i) => {
-        const e = engines[i];
+        const raw = engines[i];
+        const display = _netEngineDisplay(raw);
+        const e = { ...raw, state: display.state };
         const cls = e.state === "warn" ? "np-node np-warn" : "np-node";
-        return `<g class="${cls}"><title>${esc(_netRowName(e) + " — " + _netStateWord(e.state))}</title>` +
+        return `<g class="${cls}"><title>${esc(_netRowName(e) + " — " + display.word)}</title>` +
             `<circle cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="${rr}" fill="${NET_STATE_COLOR[e.state] || NET_STATE_COLOR.off}"/></g>`;
     }).join("");
     return `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">${ring}${dots}</svg>`;
@@ -11977,15 +11997,17 @@ async function updateNetPoly() {
     _netEngines = (d && d.engines) || [];
     if (!_netEngines.length) return;
     el.innerHTML = _netPolyMarkup(_netEngines, 30);
-    const worst = _netEngines.some(e => e.state === "bad") ? "bad"
-        : _netEngines.some(e => e.state === "off") ? "off"
-        : _netEngines.some(e => e.state === "unknown") ? "unknown"
-        : _netEngines.some(e => e.state === "warn") ? "warn" : "ok";
+    const states = _netEngines.map(e => _netEngineDisplay(e).state);
+    const worst = states.includes("bad") ? "bad"
+        : states.includes("off") ? "off"
+        : states.includes("warn") ? "warn"
+        : states.includes("unknown") ? "unknown" : "ok";
     // "engine", not "agent". The dots ARE the engines -- one vertex each --
     // and this panel lists them by engine id, so the tooltip was the only
     // place still using the 3.x word for them.
     el.title = tp(_netEngines.length, "{n} engine", "{n} engines", { n: _netEngines.length })
-        + " — " + _netStateWord(worst);
+        + " — " + (_netEngines.some(e => e.port_pending) ? t("Announces held: waiting for forwarded port")
+            : _netEngines.some(e => e.announce_held) ? t("Announces held: startup pause") : _netStateWord(worst));
 
     // The address only when there is ONE. Several engines behind several
     // tunnels have several exits, and printing one of them would name an
@@ -12011,16 +12033,17 @@ function openNetPanel(from) {
     if (!panel || !from) return;
     const rows = document.getElementById("net-panel-rows");
     rows.innerHTML = _netEngines.map(e => {
+        const display = _netEngineDisplay(e);
         const where = e.bind_interface
             ? `<span class="nr-iface">${esc(e.bind_interface)}</span>`
             : t("default route");
-        const port = e.listen_port ? " · " + t("port {port}", { port: e.listen_port }) : "";
+        const port = display.ports ? " · " + esc(display.ports) : "";
         const ip = e.exit_ip ? esc(incoExitIP(e.exit_ip)) : "\u2014";
         const ip6 = e.exit_ip_v6 ? "<br>" + esc(incoExitIP(e.exit_ip_v6)) : "";
         return `<div class="net-row">
-            <div class="nr-dot" style="background:${NET_STATE_COLOR[e.state] || NET_STATE_COLOR.off}" title="${esc(_netStateWord(e.state) + ". " + t("Outbound only: whether peers can reach this engine is the health dot's tooltip."))}"></div>
+            <div class="nr-dot" style="background:${NET_STATE_COLOR[display.state] || NET_STATE_COLOR.off}" title="${esc(display.word)}"></div>
             <div><div class="nr-name">${esc(_netRowName(e))}</div>
-                 <div class="nr-sub">${esc(e.role)} · ${where}${port}${e.detail ? " · " + esc(e.detail) : ""}</div></div>
+                 <div class="nr-sub">${esc(e.role)} · ${where}${port}${e.detail ? " · " + esc(e.detail) : ""}</div>${e.port_pending || e.announce_held ? `<div class="nr-sub">${esc(display.word)}</div>` : ""}</div>
             <div class="nr-ip">${ip}${ip6}</div>
         </div>`;
     }).join("") || `<div class="net-row"><div></div><div class="nr-sub">${t("No engine measured yet")}</div><div></div></div>`;

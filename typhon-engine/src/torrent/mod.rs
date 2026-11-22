@@ -129,6 +129,16 @@ pub struct StartupIssue {
     pub detail: String,
 }
 
+/// Candidate sets for live filters, refreshed by the existing rate pass.
+/// Cold seeds are not copied into an index: storage follows the working set.
+#[derive(Default, PartialEq)]
+struct LiveIndex {
+    uploading: Vec<InfoHash>,
+    downloading: Vec<InfoHash>,
+    checking: Vec<InfoHash>,
+    errors: Vec<InfoHash>,
+}
+
 /// The issues are listed up to this many per group (skipped rows, and every
 /// other kind apart); the count is not capped.
 pub const MAX_STARTUP_ISSUES: usize = 500;
@@ -154,6 +164,10 @@ pub struct TorrentManager {
     pub cached_active_peers: std::sync::atomic::AtomicUsize,
     pub cached_torrents_with_peers: std::sync::atomic::AtomicUsize,
     pub cached_torrents_uploading: std::sync::atomic::AtomicUsize,
+    /// Uploading candidates from the existing rate tick; live pages never
+    /// need to clone the cold catalogue to find a handful of active seeds.
+    live_index: std::sync::RwLock<LiveIndex>,
+    live_revision: std::sync::atomic::AtomicU64,
     /// Torrents per `TorrentStatus`, indexed by its discriminant, plus the
     /// paused ones at `STATUS_PAUSED`. Counted by the same walk, so /metrics
     /// and the anomaly report read a count instead of scanning a million
@@ -685,6 +699,8 @@ impl TorrentManager {
             cached_active_peers: std::sync::atomic::AtomicUsize::new(0),
             cached_torrents_with_peers: std::sync::atomic::AtomicUsize::new(0),
             cached_torrents_uploading: std::sync::atomic::AtomicUsize::new(0),
+            live_index: Default::default(),
+            live_revision: Default::default(),
             cached_status_counts: Default::default(),
             restore_total: std::sync::atomic::AtomicUsize::new(0),
             restore_done: std::sync::atomic::AtomicUsize::new(0),
@@ -1057,6 +1073,83 @@ impl TorrentManager {
 
     pub fn all(&self) -> Vec<Arc<TorrentState>> {
         self.torrents.iter().map(|r| r.value().clone()).collect()
+    }
+
+    pub fn live_filter(filter: &str) -> bool {
+        matches!(
+            filter,
+            "__active__"
+                | "downloading"
+                | "seed_only"
+                | "checking_files"
+                | "__check_reading__"
+                | "__check_waiting__"
+                | "__error__"
+                | "error"
+        )
+    }
+
+    pub fn live_index_ready(&self) -> bool {
+        self.totals_ready.load(Ordering::Acquire)
+    }
+
+    /// Allocated hash storage, excluding the small index headers and allocator overhead.
+    pub fn live_index_bytes(&self) -> usize {
+        let index = self.live_index.read().unwrap();
+        [
+            index.uploading.capacity(),
+            index.downloading.capacity(),
+            index.checking.capacity(),
+            index.errors.capacity(),
+        ]
+        .into_iter()
+        .sum::<usize>()
+            * std::mem::size_of::<InfoHash>()
+    }
+
+    pub fn live_revision(&self) -> u64 {
+        self.live_revision.load(Ordering::Relaxed)
+    }
+
+    /// None before the first rate tick or for an unindexed filter. Candidates
+    /// are a superset: page predicates recheck state, intent and check queues.
+    pub fn live_candidates(&self, filter: &str) -> Option<Vec<Arc<TorrentState>>> {
+        self.live_candidates_limited(filter, usize::MAX)
+    }
+
+    /// A bounded candidate snapshot for the cheap worker lane. Large live
+    /// sets use the full-scan gate even though they have an index.
+    pub fn live_candidates_limited(
+        &self,
+        filter: &str,
+        limit: usize,
+    ) -> Option<Vec<Arc<TorrentState>>> {
+        if !self.live_index_ready() {
+            return None;
+        }
+        let hashes = {
+            let index = self.live_index.read().unwrap();
+            let hashes = match filter {
+                "__active__" => &index.uploading,
+                "downloading" | "seed_only" => &index.downloading,
+                "checking_files" | "__check_reading__" | "__check_waiting__" => &index.checking,
+                "__error__" | "error" => &index.errors,
+                _ => return None,
+            };
+            if hashes.len() > limit {
+                return None;
+            }
+            hashes.clone()
+        };
+        Some(hashes.iter().filter_map(|h| self.get(h)).collect())
+    }
+
+    pub fn uploading(&self) -> Option<Vec<Arc<TorrentState>>> {
+        self.live_candidates("__active__").map(|rows| {
+            rows.into_iter()
+                .filter(|t| t.upload_rate.get() > 0)
+                .collect()
+        })
     }
 
     /// How many torrents this engine holds, counted in place. `all().len()`
@@ -2512,11 +2605,17 @@ impl TorrentManager {
 
     /// Update rate counters — called every second.
     pub fn update_rates(&self) {
+        self.update_rates_observed(|_| {});
+    }
+
+    // The no-op observer optimizes away in production. Benchmarks can evaluate
+    // one-pass sampling against the actual rate pass without duplicating it.
+    pub(crate) fn update_rates_observed(&self, mut observe: impl FnMut(&TorrentState)) {
         let mut total_ul = 0u64;
         let mut total_dl = 0u64;
         let mut active_peers = 0usize;
         let mut with_peers = 0usize;
-        let mut uploading = 0usize;
+        let mut live = LiveIndex::default();
         let mut moved = (0u64, 0u64);
         let mut by_status = [0usize; STATUS_SLOTS];
         for entry in self.torrents.iter() {
@@ -2525,8 +2624,23 @@ impl TorrentManager {
             // per-state counts for /metrics come for free here.
             let s = t.status.load(Ordering::Relaxed) as usize;
             by_status[s.min(STATUS_PAUSED - 1)] += 1;
-            if t.is_paused.load(Ordering::Relaxed) {
+            let paused = t.is_paused.load(Ordering::Relaxed);
+            if paused {
                 by_status[STATUS_PAUSED] += 1;
+            }
+            let state = crate::rpc::dispatch::state_of(
+                t,
+                s as u8,
+                paused,
+                t.rechecking.load(Ordering::Relaxed) || t.held_for_proof(),
+            );
+            match state {
+                "downloading" | "seed_only" => live.downloading.push(t.info_hash),
+                "checking_files" => live.checking.push(t.info_hash),
+                _ => {}
+            }
+            if s == meta::TorrentStatus::Error as usize {
+                live.errors.push(t.info_hash);
             }
             let ul = t.total_uploaded.load(Ordering::Relaxed);
             let dl = t.total_downloaded.load(Ordering::Relaxed);
@@ -2546,9 +2660,6 @@ impl TorrentManager {
             if peers > 0 {
                 with_peers += 1;
             }
-            if t.upload_rate.get() > 0 {
-                uploading += 1;
-            }
             // Cold torrents (no peers, rate already 0) moved no bytes since the
             // last tick -> skip the EMA update so per-tick cost tracks the hot
             // set, not total N. One-tick under-report on wake is harmless.
@@ -2556,10 +2667,15 @@ impl TorrentManager {
                 && t.upload_rate.get() == 0
                 && t.download_rate.get() == 0
             {
+                observe(t);
                 continue;
             }
             t.upload_rate.update(ul);
             t.download_rate.update(dl);
+            if t.upload_rate.get() > 0 {
+                live.uploading.push(t.info_hash);
+            }
+            observe(t);
         }
         self.credit_moved(moved);
         // Fed from what this engine moved, not the lifetime sum: a torrent
@@ -2572,13 +2688,21 @@ impl TorrentManager {
             .store(total_ul, Ordering::Relaxed);
         self.cached_total_downloaded
             .store(total_dl, Ordering::Relaxed);
+        let uploading_count = live.uploading.len();
+        {
+            let mut previous = self.live_index.write().unwrap();
+            if *previous != live {
+                *previous = live;
+                self.live_revision.fetch_add(1, Ordering::Relaxed);
+            }
+        }
         self.totals_ready.store(true, Ordering::Release);
         self.cached_active_peers
             .store(active_peers, Ordering::Relaxed);
         self.cached_torrents_with_peers
             .store(with_peers, Ordering::Relaxed);
         self.cached_torrents_uploading
-            .store(uploading, Ordering::Relaxed);
+            .store(uploading_count, Ordering::Relaxed);
         for (slot, n) in self.cached_status_counts.iter().zip(by_status) {
             slot.store(n, Ordering::Relaxed);
         }
@@ -7241,6 +7365,57 @@ mod lifecycle_tests {
     // -----------------------------------------------------------------------
     // Editing
     // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn live_stats_emit_rate_only_and_pause_only_changes() {
+        use crate::rpc::events::Event;
+        let (mgr, root) = manager("live-deltas");
+        let ih = add(&mgr, &root, "live");
+        let t = mgr.get(&ih).unwrap();
+        t.is_paused.store(false, Ordering::Relaxed);
+        t.status
+            .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+        t.peers_connected.store(1, Ordering::Relaxed);
+        t.upload_rate.update(0);
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        t.total_uploaded.store(1024, Ordering::Relaxed);
+        t.upload_rate.update(1024);
+        let events = mgr.bus().subscribe();
+        let emitter = crate::session::spawn_stats_emitter(mgr.clone());
+        let next = |mut events: tokio::sync::broadcast::Receiver<Event>| async move {
+            let event = tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            let Event::StatsSnapshot { torrents } = event else {
+                panic!("stats expected")
+            };
+            (
+                events,
+                torrents
+                    .into_iter()
+                    .find(|r| r.info_hash == hex_encode(&ih))
+                    .unwrap(),
+            )
+        };
+        let (rx, first) = next(events).await;
+        assert!(first.upload_rate > 0);
+        t.upload_rate.update(1024);
+        let (rx, stopped) = next(rx).await;
+        assert_eq!(stopped.total_uploaded, first.total_uploaded);
+        assert_eq!(stopped.peers_connected, first.peers_connected);
+        assert_eq!(stopped.upload_rate, 0, "rate-only changes must be emitted");
+        t.is_paused.store(true, Ordering::Relaxed);
+        let (_, paused) = next(rx).await;
+        assert_eq!(
+            paused.state, "paused",
+            "pause flags are not the raw status byte"
+        );
+        emitter.abort();
+        drop(t);
+        drop(mgr);
+        std::fs::remove_dir_all(&root).ok();
+    }
 
     #[test]
     fn trackers_and_save_path_can_be_changed() {

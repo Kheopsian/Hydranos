@@ -163,6 +163,13 @@ lto = "thin"
 strip = false
 debug = 1
 
+# Optimized, reproducible UI benchmarks without a production LTO link.
+[profile.live-bench]
+inherits = "release"
+lto = false
+debug = 0
+codegen-units = 16
+
 [profile.release-dbg]
 inherits = "release"
 strip = false

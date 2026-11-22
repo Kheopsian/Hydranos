@@ -84,6 +84,8 @@ pub enum Event {
 pub struct TorrentStatsMini {
     pub info_hash: String,
     pub status: u8, // TorrentStatus as u8
+    pub state: &'static str,
+    pub total_done: u64,
     pub total_uploaded: u64,
     pub total_downloaded: u64,
     pub upload_rate: u64,

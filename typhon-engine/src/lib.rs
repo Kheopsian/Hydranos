@@ -27,3 +27,6 @@ pub mod wire;
 // normal build never does: nothing here exists in a shipped binary.
 #[cfg(fuzzing)]
 pub mod fuzz_api;
+
+#[cfg(test)]
+mod bench_support;

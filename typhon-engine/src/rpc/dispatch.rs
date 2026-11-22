@@ -277,7 +277,7 @@ pub fn tracker_host_str(url: &str) -> &str {
 /// Not `progress`: that is what the torrent holds and stays so until the
 /// verdict lands (the *arr read it), whereas this only says how much of the
 /// disk the check has read.
-pub fn checking_progress(t: &Arc<crate::torrent::meta::TorrentState>) -> Option<f64> {
+pub fn checking_progress(t: &crate::torrent::meta::TorrentState) -> Option<f64> {
     if !t.rechecking.load(Ordering::SeqCst) {
         return None;
     }

@@ -237,6 +237,7 @@ pub fn engine_session(state: &AppState, engine_id: &str) -> (i64, i64) {
 
 #[derive(Clone)]
 pub struct AppState {
+    pub page_refreshes: Arc<crate::page_refresh::PageRefreshes>,
     /// Imports in flight, by job id. An import outlives the request that
     /// started it, so its progress lives where the later polls can find it.
     pub imports:
@@ -3403,6 +3404,7 @@ pub(crate) struct LiveStats {
     pub(crate) torrents_with_peers: i64,
     pub(crate) torrents_uploading: i64,
     pub(crate) unseeded_peers: i64,
+    pub(crate) revision: u64,
 }
 
 /// Leechers the trackers report across the hoard, summed from the announce
@@ -3432,6 +3434,13 @@ pub(crate) fn live_stats(state: &AppState, engine_id: &str) -> LiveStats {
         torrents_with_peers: m.cached_torrents_with_peers.load(Ordering::Relaxed) as i64,
         torrents_uploading: m.cached_torrents_uploading.load(Ordering::Relaxed) as i64,
         unseeded_peers: m.cached_unseeded_peers.load(Ordering::Relaxed) as i64,
+        revision: state
+            .engines
+            .engines()
+            .iter()
+            .filter(|e| e.id == engine_id || e.role == engine_id)
+            .map(|e| e.manager.live_revision())
+            .sum(),
     }
 }
 
@@ -3612,6 +3621,43 @@ pub(crate) async fn engine_page_value(
     engine_id: &str,
     query: &str,
 ) -> serde_json::Value {
+    let filter = query_param(query, "state").unwrap_or_default();
+    let candidates = if query_param(query, "facets").as_deref() != Some("1")
+        && typhon_engine::torrent::TorrentManager::live_filter(&filter)
+    {
+        state
+            .engines
+            .get(engine_id)
+            .and_then(|e| e.manager.live_candidates_limited(&filter, 4096))
+    } else {
+        None
+    };
+    let gate = if candidates.is_some() {
+        &state.page_refreshes.indexed
+    } else {
+        &state.page_refreshes.scans
+    };
+    let permit = gate
+        .clone()
+        .acquire_owned()
+        .await
+        .expect("page gates are never closed");
+    let (state, engine_id, query) = (state.clone(), engine_id.to_owned(), query.to_owned());
+    tokio::task::spawn_blocking(move || {
+        // The permit stays with the worker even if its HTTP caller disconnects.
+        let _permit = permit;
+        engine_page_value_blocking(&state, &engine_id, &query, candidates)
+    })
+    .await
+    .expect("page worker panicked")
+}
+
+fn engine_page_value_blocking(
+    state: &AppState,
+    engine_id: &str,
+    query: &str,
+    candidates: Option<Vec<Arc<typhon_engine::torrent::meta::TorrentState>>>,
+) -> serde_json::Value {
     let Some(engine) = state.engines.get(engine_id) else {
         return serde_json::json!({"total": 0, "filtered": 0, "rows": []});
     };
@@ -3740,8 +3786,21 @@ pub(crate) async fn engine_page_value(
         .filter_map(|t| facts.tag_bit(t))
         .fold(0u64, |m, b| m | b);
 
-    let torrents = engine.manager.all();
-    let total = torrents.len();
+    // Facets describe the entire library, even for an active-only page.
+    // Without facets the rate tick's index supplies the same candidates in
+    // O(live candidates), shared by every viewer instead of another catalogue walk.
+    let torrents = candidates.unwrap_or_else(|| {
+        if !want_facets {
+            engine
+                .manager
+                .live_candidates(&state_filter)
+                .unwrap_or_else(|| engine.manager.all())
+        } else {
+            engine.manager.all()
+        }
+    });
+    let total = engine.manager.len();
+    let scan_len = torrents.len();
     // The hardlink columns read a summary the link scanner (or a workflow
     // pass) already computed, cf `linkindex::Summary`: one `Arc` clone here,
     // one hash lookup per row below, and only when the sort asks for it or the
@@ -4072,15 +4131,23 @@ pub(crate) async fn engine_page_value(
         .clamp(1, LIST_SCAN_THREADS);
     // `!(FROM..).contains(&n)` is `n < FROM`, written so it stays a real test when
     // FROM is 0 (under test) instead of a comparison clippy sees as always false.
-    let slices: Vec<Slice> = if threads == 1 || !(LIST_SCAN_PARALLEL_FROM..).contains(&total) {
-        vec![scan(0..total)]
+    let parallel_from = LIST_SCAN_PARALLEL_FROM;
+    #[cfg(test)]
+    let parallel_from = if crate::bench_support::RUNNING.load(std::sync::atomic::Ordering::Relaxed)
+    {
+        20_000
     } else {
-        let per = total.div_ceil(threads);
+        parallel_from
+    };
+    let slices: Vec<Slice> = if threads == 1 || !(parallel_from..).contains(&scan_len) {
+        vec![scan(0..scan_len)]
+    } else {
+        let per = scan_len.div_ceil(threads);
         std::thread::scope(|sc| {
             let scan = &scan;
             let handles: Vec<_> = (0..threads)
                 .map(|i| {
-                    let range = (i * per).min(total)..((i + 1) * per).min(total);
+                    let range = (i * per).min(scan_len)..((i + 1) * per).min(scan_len);
                     sc.spawn(move || scan(range))
                 })
                 .collect();
@@ -4771,7 +4838,23 @@ pub(crate) async fn fleet_page(
 }
 
 async fn get_engine_page(state: &AppState, engine_id: &str, query: &str) -> Response {
-    Json(fleet_page(state, engine_id, query).await).into_response()
+    if query_param(query, "live").as_deref() != Some("1")
+        || query_param(query, "fields").as_deref() == Some("hash")
+    {
+        state.page_refreshes.clear().await;
+        return Json(fleet_page(state, engine_id, query).await).into_response();
+    }
+    let bytes = state
+        .page_refreshes
+        .response(crate::page_refresh::key(engine_id, query), || {
+            fleet_page(state, engine_id, query)
+        })
+        .await;
+    (
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        bytes,
+    )
+        .into_response()
 }
 
 async fn get_hoard_page(
@@ -5040,6 +5123,7 @@ async fn get_hoard_stats(
         "swarm_leechers": swarm_leechers_total(&state),
         "torrents_announced": announced_count(&state, "hoard"),
         "torrents_uploading": live.torrents_uploading,
+                    "live_revision": live.revision,
         "torrents_with_peers": live.torrents_with_peers,
         "total_torrents": torrents,
         "unseeded_peers": live.unseeded_peers,
@@ -6663,10 +6747,33 @@ async fn get_network_engines(
         .await;
     }
 
-    let (rows, measured_at) = {
+    let (mut rows, measured_at) = {
         let slot = state.net_engines.lock().await;
         slot.clone()
     };
+
+    // Port holds can change between exit probes; overlay live engine state.
+    for row in &mut rows {
+        if row.get("local").and_then(|v| v.as_bool()) != Some(true) {
+            continue;
+        }
+        let Some(engine) = row.get("engine").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let Some(engine) = state.engines.get(engine) else {
+            continue;
+        };
+        let pending = engine.manager.port_pending();
+        let port = engine.manager.listen_port_now(engine.listen_port);
+        row["listen_port"] = serde_json::json!(port);
+        row["port_pending"] = serde_json::json!(pending);
+        row["announce_held"] = serde_json::json!(engine.manager.limiter().dials_paused());
+        row["announced_port"] = if pending {
+            serde_json::Value::Null
+        } else {
+            serde_json::json!(engine.manager.announced_port(port))
+        };
+    }
 
     // The DISTINCT exit addresses. This is what decides whether the header can
     // honestly print an address at all: one means it can, several mean the
@@ -7021,6 +7128,7 @@ async fn stream_events(
                     "swarm_leechers": swarm_leechers_total(&state),
                     "torrents_announced": announced_count(&state, "hoard"),
                     "torrents_uploading": live.torrents_uploading,
+                    "live_revision": live.revision,
                     "torrents_with_peers": live.torrents_with_peers,
                     "total_torrents": state
                         .engines
@@ -7131,6 +7239,9 @@ async fn stream_events(
             let mut bus = engine.manager.bus().subscribe();
             let tx = tx.clone();
             let mode = engine.role.clone();
+            let agent = local_agent(&engine.id);
+            let engine_id = engine.id.clone();
+            let store = state.store.clone();
             tokio::spawn(async move {
                 // Never waits on the client. A page that stops reading (a dead
                 // socket not yet noticed) would hold this task, and the bus would
@@ -7144,20 +7255,40 @@ async fn stream_events(
                 let mut held_rows: std::collections::HashMap<String, TorrentStatsMini> = Default::default();
                 let mut held_removed: std::collections::BTreeSet<String> = Default::default();
                 let stats = |rows: Vec<TorrentStatsMini>| {
-                    serde_json::json!({"event": "stats_snapshot", "data": {"mode": mode, "torrents": rows}})
+                    let facts = if rows.iter().any(|r| matches!(r.state, "paused" | "stopped" | "error")) {
+                        store.lock().unwrap().slim_facts_current(&engine_id).ok()
+                    } else { None };
+                    let rows: Vec<_> = rows.into_iter().map(|mut r| {
+                        let paused = facts.as_ref().and_then(|f| {
+                            typhon_engine::torrent::hex_decode(&r.info_hash).ok().map(|h| f.get(&h).user_paused)
+                        }).unwrap_or(false);
+                        r.state = crate::row::derive_state_static(r.state, paused);
+                        let ratio = crate::row::share_ratio(r.total_uploaded, r.total_downloaded, r.total_done);
+                        let mut row = serde_json::to_value(r).unwrap_or_default();
+                        row["ratio"] = serde_json::json!(ratio);
+                        row
+                    }).collect();
+                    serde_json::json!({"event": "stats_snapshot", "data": {"mode": mode, "agent": agent, "torrents": rows}})
                 };
                 let removed = |h: String| {
-                    serde_json::json!({"event": "torrent_removed", "data": {"mode": mode, "info_hash": h}})
+                    serde_json::json!({"event": "torrent_removed", "data": {"mode": mode, "agent": agent, "info_hash": h}})
                 };
+                let mut invalidated = false;
                 loop {
-                    let holding = !held_rows.is_empty() || !held_removed.is_empty();
+                    let holding = !held_rows.is_empty() || !held_removed.is_empty() || invalidated;
                     tokio::select! {
+                        _ = tx.closed() => return,
                         permit = tx.reserve(), if holding => {
                             let Ok(permit) = permit else { return };
                             if let Some(h) = held_removed.pop_first() {
                                 permit.send(removed(h));
-                            } else {
+                            } else if !held_rows.is_empty() {
                                 permit.send(stats(held_rows.drain().map(|(_, r)| r).collect()));
+                            } else {
+                                // Repair after buffered deltas, so an old frame
+                                // cannot overwrite the page's recovery fetch.
+                                invalidated = false;
+                                permit.send(serde_json::json!({"event": "page_invalidated", "data": {"mode": mode, "agent": agent}}));
                             }
                         }
                         ev = bus.recv() => match ev {
@@ -7191,11 +7322,9 @@ async fn stream_events(
                                     Err(tokio::sync::mpsc::error::TrySendError::Closed(())) => return,
                                 }
                             }
-                            // Other events carry no field the list reads.
-                            Ok(_) => {}
-                            // Lagged means the bus overran this relay; the next
-                            // snapshot carries what moved since.
-                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                            Ok(Event::TorrentAdded { .. }) => { invalidated = true; }
+                            // Deltas and removals are not repeated after a lag.
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => { invalidated = true; }
                             Err(_) => return,
                         },
                     }
@@ -7252,6 +7381,7 @@ async fn stream_events(
                         "swarm_leechers": swarm_leechers_total(&state),
                         "torrents_announced": announced_count(&state, "hoard"),
                         "torrents_uploading": live.torrents_uploading,
+                    "live_revision": live.revision,
                         "torrents_with_peers": live.torrents_with_peers,
                         "total_torrents": state
                             .engines
@@ -7421,6 +7551,13 @@ async fn get_bench_current(
                 "peers": s.peers, "uploading": s.uploading, "torrents": s.torrents,
             }))
             .collect::<Vec<_>>(),
+        "ui": {
+            "page_cache_hits": state.page_refreshes.hits.load(std::sync::atomic::Ordering::Relaxed),
+            "background_page_computations": state.page_refreshes.computations.load(std::sync::atomic::Ordering::Relaxed),
+            "full_scan_workers": 1 - state.page_refreshes.scans.available_permits(),
+            "indexed_workers": 4 - state.page_refreshes.indexed.available_permits(),
+            "live_index_bytes": state.engines.engines().iter().map(|e| e.manager.live_index_bytes()).sum::<usize>(),
+        },
         "ts": now,
     }))
     .into_response()
@@ -18123,6 +18260,7 @@ pub(crate) mod testing {
 
         let state = AppState {
             imports: Default::default(),
+            page_refreshes: Default::default(),
             boot_roots: Arc::new(crate::pathroots::BootRoots::from_config(&config)),
             config: Arc::new(std::sync::RwLock::new(Arc::new(config))),
             config_path,
@@ -18393,3 +18531,7 @@ mod api_job_view_tests;
 #[cfg(test)]
 #[path = "api_detail_panel_tests.rs"]
 mod api_detail_panel_tests;
+
+#[cfg(test)]
+#[path = "api_live_bench.rs"]
+mod api_live_bench;

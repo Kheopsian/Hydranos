@@ -296,3 +296,196 @@ async fn the_page_routes_answer_a_caller_with_the_key() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["name"], serde_json::json!("alpha"));
 }
+
+/// Active-only refreshes use the shared rate index, while facets still describe
+/// the whole catalogue. Both paths must select and sort exactly the same rows.
+#[tokio::test]
+async fn indexed_active_pages_match_full_scan_and_drop_stale_candidates() {
+    use std::sync::atomic::Ordering;
+    let s = st("page-active-index");
+    add(&s, "hoard", "active");
+    add(&s, "hoard", "cold");
+    let manager = &s.state.engines.get("hoard").unwrap().manager;
+    assert!(
+        manager.uploading().is_none(),
+        "cold startup uses the full path"
+    );
+    let active = manager
+        .all()
+        .into_iter()
+        .find(|t| t.meta.name == "active")
+        .unwrap();
+    active.is_paused.store(false, Ordering::Relaxed);
+    active.status.store(3, Ordering::Relaxed);
+    active.peers_connected.store(1, Ordering::Relaxed);
+    manager.update_rates();
+    tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+    active.total_uploaded.store(1024, Ordering::Relaxed);
+    manager.update_rates();
+    assert_eq!(manager.uploading().unwrap().len(), 1);
+    for suffix in [
+        "",
+        "&search=active",
+        "&search=cold",
+        "&category=__none__",
+        "&limit=1&sort=upload_rate",
+    ] {
+        let query = format!("state=__active__{suffix}");
+        let indexed = engine_page_value(&s.state, "hoard", &query).await;
+        let scanned = engine_page_value(&s.state, "hoard", &format!("{query}&facets=1")).await;
+        assert_eq!(indexed["total"], 2);
+        assert_eq!(indexed["filtered"], scanned["filtered"], "{query}");
+        assert_eq!(indexed["rows"], scanned["rows"], "{query}");
+        assert!(indexed["facets"].is_null());
+        if suffix.is_empty() {
+            assert_eq!(scanned["facets"]["all"], 2);
+        }
+    }
+    active.is_paused.store(true, Ordering::Relaxed);
+    assert!(rows(&engine_page_value(&s.state, "hoard", "state=__active__").await).is_empty());
+    active.is_paused.store(false, Ordering::Relaxed);
+    manager.remove_torrent(&active.info_hash, true).unwrap();
+    assert!(
+        manager.uploading().unwrap().is_empty(),
+        "a removed candidate is revalidated"
+    );
+    assert!(rows(&engine_page_value(&s.state, "hoard", "state=__active__").await).is_empty());
+}
+
+#[tokio::test]
+async fn live_state_indexes_match_full_scans_across_transitions() {
+    use std::sync::atomic::Ordering;
+    let s = st("page-live-states");
+    for name in ["down", "check", "error", "cold"] {
+        add(&s, "hoard", name);
+    }
+    let manager = &s.state.engines.get("hoard").unwrap().manager;
+    let all = manager.all();
+    // These are synthetic states: add() cannot find their files on disk.
+    for torrent in &all {
+        torrent.is_paused.store(false, Ordering::Relaxed);
+        torrent.status.store(3, Ordering::Relaxed);
+    }
+    let down = all.iter().find(|t| t.meta.name == "down").unwrap();
+    let check = all.iter().find(|t| t.meta.name == "check").unwrap();
+    let error = all.iter().find(|t| t.meta.name == "error").unwrap();
+    down.is_paused.store(false, Ordering::Relaxed);
+    down.status.store(2, Ordering::Relaxed);
+    check.rechecking.store(true, Ordering::Relaxed);
+    error.status.store(4, Ordering::Relaxed);
+    // A recheck of an errored torrent belongs to BOTH predicate families.
+    error.rechecking.store(true, Ordering::Relaxed);
+    manager.update_rates();
+    assert!(
+        manager.live_candidates_limited("downloading", 0).is_none(),
+        "large candidate sets cannot enter the cheap lane"
+    );
+    let revision = manager.live_revision();
+    manager.update_rates();
+    assert_eq!(
+        revision,
+        manager.live_revision(),
+        "no new revision for an unchanged index"
+    );
+    for filter in [
+        "downloading",
+        "seed_only",
+        "checking_files",
+        "__check_reading__",
+        "__check_waiting__",
+        "__error__",
+        "error",
+    ] {
+        for suffix in [
+            "",
+            "&search=down",
+            "&category=__none__",
+            "&sort=progress&limit=1",
+        ] {
+            let q = format!("state={filter}{suffix}");
+            let indexed = engine_page_value(&s.state, "hoard", &q).await;
+            let scanned = engine_page_value(&s.state, "hoard", &format!("{q}&facets=1")).await;
+            assert_eq!(indexed["rows"], scanned["rows"], "{q}");
+            assert_eq!(indexed["filtered"], scanned["filtered"], "{q}");
+        }
+    }
+    down.is_paused.store(true, Ordering::Relaxed);
+    assert!(
+        rows(&engine_page_value(&s.state, "hoard", "state=downloading").await).is_empty(),
+        "stale candidates are filtered immediately"
+    );
+    manager.update_rates();
+    assert!(manager.live_revision() > revision);
+    assert!(manager.live_candidates("downloading").unwrap().is_empty());
+    check.rechecking.store(false, Ordering::Relaxed);
+    error.rechecking.store(false, Ordering::Relaxed);
+    manager.update_rates();
+    assert!(manager
+        .live_candidates("checking_files")
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        rows(&engine_page_value(&s.state, "hoard", "state=__error__").await).len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn background_pages_share_work_but_selection_and_manual_requests_are_fresh() {
+    use std::sync::atomic::Ordering;
+    let s = st("page-sharing");
+    add(&s, "hoard", "one");
+    let results = futures::future::join_all(
+        (0..10).map(|_| get_engine_page(&s.state, "hoard", "live=1&limit=500")),
+    )
+    .await;
+    for response in results {
+        assert_eq!(body_json(response).await["total"], 1);
+    }
+    assert_eq!(
+        s.state.page_refreshes.computations.load(Ordering::Relaxed),
+        1
+    );
+    add(&s, "hoard", "two");
+    let selection = body_json(get_engine_page(&s.state, "hoard", "live=1&fields=hash").await).await;
+    assert_eq!(
+        selection["total"], 2,
+        "selection never uses a response cache"
+    );
+    let manual = body_json(get_engine_page(&s.state, "hoard", "limit=500").await).await;
+    assert_eq!(manual["total"], 2);
+    let background = body_json(get_engine_page(&s.state, "hoard", "live=1&limit=500").await).await;
+    assert_eq!(
+        background["total"], 2,
+        "manual requests invalidate old background responses"
+    );
+}
+
+#[tokio::test]
+async fn a_queued_full_scan_does_not_block_indexed_queries_or_async_timers() {
+    let s = st("page-scan-gate");
+    add(&s, "hoard", "one");
+    s.state.engines.get("hoard").unwrap().manager.update_rates();
+    let held = s
+        .state
+        .page_refreshes
+        .scans
+        .clone()
+        .acquire_owned()
+        .await
+        .unwrap();
+    let state = s.state.clone();
+    let full = tokio::spawn(async move { engine_page_value(&state, "hoard", "facets=1").await });
+    tokio::task::yield_now().await;
+    assert!(!full.is_finished());
+    let indexed = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        engine_page_value(&s.state, "hoard", "state=downloading"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(indexed["filtered"], 0);
+    assert!(!full.is_finished());
+    drop(held);
+    assert_eq!(full.await.unwrap()["total"], 1);
+}

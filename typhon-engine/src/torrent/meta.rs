@@ -1100,6 +1100,8 @@ pub struct TorrentState {
 
     pub status: AtomicU8,
     pub total_uploaded: AtomicU64,
+    #[cfg(test)]
+    pub(crate) bench_dirty: AtomicBool,
     pub total_downloaded: AtomicU64,
     pub peers_connected: AtomicUsize,
     pub peers_interested: AtomicUsize,
@@ -1906,6 +1908,8 @@ impl TorrentState {
             seed_mode,
             status: AtomicU8::new(status),
             total_uploaded: AtomicU64::new(0),
+            #[cfg(test)]
+            bench_dirty: AtomicBool::new(false),
             total_downloaded: AtomicU64::new(0),
             peers_connected: AtomicUsize::new(0),
             peers_interested: AtomicUsize::new(0),

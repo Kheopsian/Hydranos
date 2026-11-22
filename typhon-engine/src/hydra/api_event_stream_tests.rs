@@ -35,6 +35,8 @@ async fn a_page_that_stops_reading_does_not_hold_the_bus() {
     let mini = || typhon_engine::rpc::events::TorrentStatsMini {
         info_hash: "ab".repeat(20),
         status: 0,
+        state: "stopped",
+        total_done: 0,
         total_uploaded: 0,
         total_downloaded: 0,
         upload_rate: 0,
@@ -60,6 +62,13 @@ async fn a_page_that_stops_reading_does_not_hold_the_bus() {
         "the bus still holds {held} of 500 events for a page that stopped reading"
     );
     drop(body);
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while manager.bus().receiver_count() != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("closing the last page releases its event subscriber");
 }
 
 /// ⭐ What a stalled page could not take is held, not dropped: once it reads
@@ -91,6 +100,8 @@ async fn a_page_that_reads_again_gets_every_removal_and_the_latest_figures() {
     let row = |hash: &str, up: u64| typhon_engine::rpc::events::TorrentStatsMini {
         info_hash: hash.to_string(),
         status: 3,
+        state: "seeding",
+        total_done: 100,
         total_uploaded: up,
         total_downloaded: 0,
         upload_rate: up,
@@ -131,4 +142,63 @@ async fn a_page_that_reads_again_gets_every_removal_and_the_latest_figures() {
     }
     assert!(saw_removal, "the removal reached the page");
     assert!(saw_last, "the latest figures reached the page");
+    assert!(
+        text.contains("\"ratio\":12.99"),
+        "the stream uses the row's ratio definition"
+    );
+    assert!(
+        text.contains("\"agent\":\"local-"),
+        "live figures identify their engine"
+    );
+}
+
+#[tokio::test]
+async fn adding_a_torrent_invalidates_the_paged_view_without_hydrating_the_library() {
+    let s = state_from("sse-added", &format!("[daemon]\napi_key = \"{KEY}\"\n"));
+    let resp = stream_events(
+        State(s.state.clone()),
+        RawQuery(Some("hydrate=0".into())),
+        keyed(KEY),
+    )
+    .await;
+    let mut body = resp.into_body().into_data_stream();
+    let mut statuses = 0;
+    while statuses < 2 {
+        let chunk = tokio::time::timeout(std::time::Duration::from_secs(5), body.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        statuses += String::from_utf8_lossy(&chunk)
+            .matches("\"status_snapshot\"")
+            .count();
+    }
+    let engines = s.state.engines.engines();
+    let engine = &engines[0];
+    engine
+        .manager
+        .bus()
+        .publish(typhon_engine::rpc::events::Event::TorrentAdded {
+            info_hash: "aa".repeat(20),
+            name: "new".into(),
+            save_path: "/tmp".into(),
+            total_size: 1,
+            num_pieces: 1,
+            private: true,
+            seed_mode: true,
+        });
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let chunk = tokio::time::timeout_at(deadline, body.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let text = String::from_utf8_lossy(&chunk);
+        if text.contains("page_invalidated") {
+            assert!(text.contains(&format!("local-{}", engine.id)));
+            assert!(!text.contains("torrent_batch"));
+            break;
+        }
+    }
 }
