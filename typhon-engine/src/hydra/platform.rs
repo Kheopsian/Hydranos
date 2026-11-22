@@ -461,9 +461,99 @@ pub fn trim(_mount: &Path) -> std::io::Result<u64> {
     Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
 }
 
+/// What stands in the way of a TRIM before one is tried.
+///
+/// `trim` only learns it is refused when a drain has run and the ioctl comes
+/// back `EPERM`: until the first drain, a switch turned on in a container
+/// without the capability looked like it worked. The process can tell from
+/// its own capabilities, so the Race tab says so beside the switch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrimBlock {
+    /// No CAP_SYS_ADMIN: a Docker container without `cap_add: SYS_ADMIN`, or
+    /// a non-root process outside one.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    NoCapability,
+    /// No FITRIM on this system (Windows trims as files are deleted).
+    #[cfg_attr(target_os = "linux", allow(dead_code))]
+    Unsupported,
+}
+
+impl TrimBlock {
+    /// The code the API sends; the page words it, in the reader's language.
+    pub fn code(self) -> &'static str {
+        match self {
+            TrimBlock::NoCapability => "no_cap",
+            TrimBlock::Unsupported => "unsupported",
+        }
+    }
+}
+
+/// `None` when nothing the process can see forbids a TRIM. The filesystem may
+/// still refuse (ZFS, NFS, a hard disk); that is only known by trying, and the
+/// last attempt says so.
+#[cfg(target_os = "linux")]
+pub fn trim_blocked() -> Option<TrimBlock> {
+    // An unreadable status is not a refusal: say nothing rather than warn
+    // about a capability the process may well have.
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    match cap_sys_admin_in(&status)? {
+        true => None,
+        false => Some(TrimBlock::NoCapability),
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn trim_blocked() -> Option<TrimBlock> {
+    Some(TrimBlock::Unsupported)
+}
+
+/// Whether the effective capability set in a `/proc/<pid>/status` holds
+/// CAP_SYS_ADMIN (bit 21, linux/capability.h). `None` when there is no
+/// readable `CapEff` line.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn cap_sys_admin_in(status: &str) -> Option<bool> {
+    const CAP_SYS_ADMIN: u32 = 21;
+    let line = status.lines().find(|l| l.starts_with("CapEff:"))?;
+    let mask = u64::from_str_radix(line["CapEff:".len()..].trim(), 16).ok()?;
+    Some(mask & (1u64 << CAP_SYS_ADMIN) != 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The masks as a real kernel writes them: Docker's default set (no
+    /// SYS_ADMIN), the same set with `cap_add: SYS_ADMIN`, a privileged
+    /// container, and an ordinary user with nothing.
+    #[test]
+    fn cap_sys_admin_is_read_from_the_effective_set() {
+        let status = |eff: &str| {
+            format!("Name:\thydranos\nCapInh:\t0000000000000000\nCapPrm:\t000001ffffffffff\nCapEff:\t{eff}\nCapBnd:\t000001ffffffffff\n")
+        };
+        assert_eq!(
+            cap_sys_admin_in(&status("00000000a80425fb")),
+            Some(false),
+            "docker default"
+        );
+        assert_eq!(
+            cap_sys_admin_in(&status("00000000a82425fb")),
+            Some(true),
+            "cap_add SYS_ADMIN"
+        );
+        assert_eq!(
+            cap_sys_admin_in(&status("000001ffffffffff")),
+            Some(true),
+            "privileged"
+        );
+        assert_eq!(
+            cap_sys_admin_in(&status("0000000000000000")),
+            Some(false),
+            "plain user"
+        );
+        // The permitted set is not what the ioctl checks.
+        assert_eq!(cap_sys_admin_in("CapPrm:\t000001ffffffffff\n"), None);
+        assert_eq!(cap_sys_admin_in("CapEff:\tnot-hex\n"), None);
+    }
 
     /// A real hardlink on a real filesystem, because the whole point of
     /// `file_id` is a claim ABOUT a filesystem: a table of made-up numbers

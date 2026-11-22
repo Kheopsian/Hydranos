@@ -24,8 +24,11 @@ services:
     # interfaces to IPv6 off, and it cannot be changed from inside).
     # The daemon keeps NET_ADMIN after dropping to PUID/PGID whenever the
     # container has it; HYDRANOS_CAP_NET_ADMIN: 0 drops it anyway.
+    # SYS_ADMIN is for "TRIM after drain" on a race SSD (Race tab), kept the
+    # same way; HYDRANOS_CAP_SYS_ADMIN: 0 drops it anyway.
     # cap_add:
     #   - NET_ADMIN
+    #   - SYS_ADMIN
     # sysctls:
     #   net.ipv6.conf.default.disable_ipv6: 0
     # Hardening, off by default so the file works as is. Checked together with

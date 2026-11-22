@@ -21,6 +21,29 @@ decided when the release is cut, by looking at what went in: whoever tags it
 renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 `HYDRANOS_VERSION` in the same commit.
 
+## Unreleased -- one look for every tab
+
+### Added
+
+- The Race tab says beside "TRIM after drain", as soon as it is switched on, when this daemon is not allowed to TRIM, before any drain has tried: without CAP_SYS_ADMIN (a Docker container without `cap_add: [SYS_ADMIN]`), or on a system with no TRIM call (Windows, macOS). Until now the switch could be turned on and look fine until the first drain came back refused. The volumes of `GET /api/drain/status` carry `trim_blocked`: `"no_cap"`, `"unsupported"`, or `null` when nothing the daemon can see forbids it (the filesystem may still refuse, as the last attempt then says).
+
+### Changed
+
+- The French interface is complete: about 330 strings were still shown in English. Some had no French entry (the Nodes, Workflows and Trackers pages, the drain history, the tunnels, the add options, the Benchmark announce figures, the settings tab "Other"); others were written by the page in English whatever the language, never looked up at all (the Hoard state pills, "No race torrents" and the other empty lists, the login and import dialogs, the Edit / Delete / Remove buttons of the lists). "Import" and "Jobs" are translated too ("Importer", "Tâches"), and the drain is "vidange" everywhere. German, Spanish, Italian, Portuguese and Dutch are complete too: each translated about a hundred strings out of some 1,400, typed without accents ("Loschen", "Categoria"), and a few showed a raw placeholder ("{id}") their English text does not have.
+
+- The web interface builds every tab the same way, with the same colours and themes. Each page has a title with its actions grouped on the right (the action the page is for drawn as the accent button), a description under it, and titled blocks further down (This node / Other nodes, Activity, Automatic download rules, Per-tracker stats). Every list sits in a card with a single frame: Categories, Nodes, Trackers and Jobs drew bare tables, Workflows and RSS a table framed twice. Empty lists read the same everywhere. Inline forms open with an accent edge and end the same way, Save first and Cancel on the right. Benchmark, Logs and Changelog get the same page title as the rest. Buttons are one size and one style across the interface, a little larger than the 11px ones before, and "+ Add Torrent" reads as a button in the tab bar.
+- Race and Hoard open on the same summary strip, one figure per cell with the engine's colour on its edge. Hoard said it in one sentence at the right of its title ("10 torrents: 0 uploading, 0 with peers..."), Race in a row of "label: value" pairs. Hoard's cells are Torrents, Uploading, With peers, Peers (out of the swarm) and Announced (a percentage, with the count beside it until every torrent is announced).
+- The Config tab has a row of shortcuts to its six cards (Account, IP filter, Watched folders, Personalisation, Duplicate data, Advanced settings).
+- The advanced settings have one Save button, held at the bottom of the screen, instead of one under each tab: it saves every changed setting, whichever tab it is in. A search shows its results grouped under the name of the tab each one belongs to (General, Session Race, Network...), where it used to repeat each tab's note and Save button between the groups. The Network tab keeps its own "Save this mode", and Import has no Save.
+
+### Fixed
+
+- "TRIM after drain" works in the Docker image when the container is given `cap_add: [SYS_ADMIN]` and runs as PUID/PGID (the default). The entrypoint kept only NET_ADMIN when it dropped to that user, so SYS_ADMIN was lost and every TRIM was refused whatever the container was granted. It is now kept the same way as NET_ADMIN, when the container has it; `HYDRANOS_CAP_SYS_ADMIN=0` drops it anyway. A `--privileged` container has every capability, so it now keeps SYS_ADMIN as well as NET_ADMIN after the drop to PUID/PGID: set `HYDRANOS_CAP_SYS_ADMIN=0` to keep it as before, with NET_ADMIN only.
+- Benchmark: "Run now" of the speedtest also counted as a chart range button, so clicking it unselected the chart range and redrew the charts over an invalid span.
+- The Daylight theme: the Logs tab, the Incognito and Sign out icons, the footer, and the frames of cards and tables kept colours made for a dark background (white icons on white, a GitHub-dark log pane).
+- The search box of the settings found nothing: as soon as a letter was typed it stopped on the first setting of the Network tab (the SOCKS5 proxy fields, the interface per engine), which it could not read. Those settings are found by their name now, like the others.
+- The torrent detail drew its piece map inside the Connected Peers card, between the card's title and its table. It is a card of its own, above the peers.
+
 ## v4.10.0 -- batches of adds sent straight to hoard, less memory per torrent, and rechecks that no longer fight over the same disk
 
 ### Added
