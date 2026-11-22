@@ -1,4 +1,4 @@
-//! One scheduler and a fixed pool of workers, for any number of torrents.
+//! One scheduler and workers allocated only for in-flight announces.
 //!
 //! 3.x first ran one goroutine per torrent. At 65k torrents that left ~63k
 //! parked goroutines whose stacks the garbage collector had to walk, and the
@@ -13,7 +13,8 @@
 //! torrent announces once every thirty minutes.
 //!
 //! The scheduler owns `states` and the heap outright and never locks them. The
-//! workers only ever speak through channels.
+//! workers only ever speak through channels. Its limits bound their number;
+//! an idle engine holds no announce futures.
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet};
@@ -29,8 +30,7 @@ use crate::config::AnnounceSort;
 
 use typhon_engine::torrent::{hex_decode, hex_encode};
 
-/// Tasks spawned once: the most announces in flight across every tracker.
-/// Idle ones cost a parked future each, not a thread.
+/// The most announces in flight across every tracker, including queued jobs.
 const MAX_CONCURRENCY: usize = 4096;
 /// Announces in flight to ONE tracker: where it starts, and its bounds.
 ///
@@ -557,7 +557,7 @@ pub async fn run<C, F, Fut>(
 ) where
     C: Catalogue,
     F: Fn(Job) -> Fut + Send + Sync + 'static,
-    Fut: std::future::Future<Output = Outcome> + Send,
+    Fut: std::future::Future<Output = Outcome> + Send + 'static,
 {
     let stop = typhon_engine::stop::global();
     if !stop.sleep(BOOT_DELAY).await {
@@ -566,32 +566,7 @@ pub async fn run<C, F, Fut>(
 
     let (work_tx, work_rx) = mpsc::channel::<Job>(2 * MAX_CONCURRENCY);
     let (result_tx, mut result_rx) = mpsc::channel::<(Outcome, Duration)>(2 * MAX_CONCURRENCY);
-    let work_rx = Arc::new(tokio::sync::Mutex::new(work_rx));
-
-    // Every task the pool may ever use is spawned now; how many are allowed
-    // to work at once is decided by the scheduler when it hands out jobs.
-    for _ in 0..MAX_CONCURRENCY {
-        let rx = work_rx.clone();
-        let tx = result_tx.clone();
-        let announce = announce.clone();
-        tokio::spawn(async move {
-            loop {
-                let job = {
-                    let mut rx = rx.lock().await;
-                    match rx.recv().await {
-                        Some(j) => j,
-                        None => return,
-                    }
-                };
-                let started = Instant::now();
-                let outcome = announce(job).await;
-                if tx.send((outcome, started.elapsed())).await.is_err() {
-                    return;
-                }
-            }
-        });
-    }
-    drop(result_tx);
+    tokio::spawn(work(announce, work_rx, result_tx));
 
     let mut states: HashMap<InfoHash, State> = HashMap::new();
     let mut heap: BinaryHeap<Reverse<Deadline>> = BinaryHeap::new();
@@ -822,6 +797,28 @@ impl Tracker {
         self.sum_s = 0.0;
         self.throttled = 0;
         self.timed_out = 0;
+    }
+}
+
+/// `Pool::dispatch` counts queued and running jobs against the same limits.
+/// Spawn only those jobs: a parked announce future used 7 KiB, or 28 MiB
+/// per engine when all 4096 workers were reserved up front.
+async fn work<F, Fut>(
+    announce: Arc<F>,
+    mut work_rx: mpsc::Receiver<Job>,
+    result_tx: mpsc::Sender<(Outcome, Duration)>,
+) where
+    F: Fn(Job) -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = Outcome> + Send + 'static,
+{
+    while let Some(job) = work_rx.recv().await {
+        let announce = announce.clone();
+        let tx = result_tx.clone();
+        tokio::spawn(async move {
+            let started = Instant::now();
+            let outcome = announce(job).await;
+            let _ = tx.send((outcome, started.elapsed())).await;
+        });
     }
 }
 
@@ -1322,6 +1319,86 @@ mod tests {
         let mut h = [0u8; 20];
         h[12..].copy_from_slice(&(i as u64).to_be_bytes());
         h
+    }
+
+    #[tokio::test]
+    async fn idle_workers_hold_no_announce_futures_and_jobs_run_concurrently() {
+        let permits = Arc::new(tokio::sync::Semaphore::new(0));
+        let announce_permits = permits.clone();
+        let (started_tx, mut started_rx) = mpsc::channel(2);
+        let announce = Arc::new(move |job: Job| {
+            let permits = announce_permits.clone();
+            let started_tx = started_tx.clone();
+            async move {
+                let large_state = [0u8; 16 << 10];
+                started_tx.send(job.info_hash.clone()).await.unwrap();
+                let _permit = permits.acquire().await.unwrap();
+                std::hint::black_box(large_state);
+                Outcome {
+                    info_hash: job.info_hash,
+                    ..answered(false)
+                }
+            }
+        });
+        let (work_tx, work_rx) = mpsc::channel(4);
+        let (result_tx, mut result_rx) = mpsc::channel(4);
+        let dispatcher = work(announce, work_rx, result_tx);
+        assert!(
+            std::mem::size_of_val(&dispatcher) < 1024,
+            "the dispatcher must not embed the large announce future"
+        );
+        let metrics = tokio::runtime::Handle::current().metrics();
+        let before = metrics.num_alive_tasks();
+        let task = tokio::spawn(dispatcher);
+        tokio::task::yield_now().await;
+        assert_eq!(
+            metrics.num_alive_tasks(),
+            before + 1,
+            "only the dispatcher is parked"
+        );
+        assert!(started_rx.try_recv().is_err());
+
+        for label in ["a", "b"] {
+            work_tx
+                .send(Job {
+                    info_hash: label.into(),
+                    first: true,
+                    forced: false,
+                })
+                .await
+                .unwrap();
+        }
+        // Both must start before either finishes; a serial dispatcher hangs.
+        for _ in 0..2 {
+            tokio::time::timeout(Duration::from_secs(1), started_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        // Closing the queue drains admitted work without losing its results.
+        drop(work_tx);
+        task.await.unwrap();
+        assert!(matches!(
+            result_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        permits.add_permits(2);
+        let mut answers = Vec::new();
+        for _ in 0..2 {
+            let (outcome, _) = tokio::time::timeout(Duration::from_secs(1), result_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            answers.push(outcome.info_hash);
+        }
+        answers.sort();
+        assert_eq!(answers, ["a", "b"]);
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), result_rx.recv())
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     /// One of each per torrent the scheduler holds: they must not grow by
@@ -2082,6 +2159,58 @@ mod tests {
             t.adjust();
         }
         assert_eq!(t.limit, HOST_MIN, "backing off never goes to zero");
+    }
+
+    #[test]
+    fn queued_and_running_jobs_share_the_global_concurrency_limit() {
+        let (tx, mut rx) = mpsc::channel(2 * MAX_CONCURRENCY);
+        let mut pool = Pool::default();
+        let mut states = HashMap::new();
+        let mut heap = BinaryHeap::new();
+        let now = Instant::now();
+        for host in 0..3 {
+            let host_name: Arc<str> = Arc::from(format!("{host}.test"));
+            let mut tracker = Tracker::new();
+            tracker.limit = HOST_MAX;
+            pool.trackers.insert(host_name.clone(), tracker);
+            for i in 0..HOST_MAX {
+                let hash = nth(host * HOST_MAX + i);
+                states.insert(
+                    hash,
+                    State {
+                        host: host_name.clone(),
+                        ..fresh()
+                    },
+                );
+                heap.push(Reverse(Deadline {
+                    at: now,
+                    info_hash: hash,
+                    epoch: 0,
+                }));
+            }
+        }
+        pool.dispatch(now, &mut heap, &mut states, &tx);
+        assert_eq!(pool.in_flight, MAX_CONCURRENCY);
+        assert_eq!(rx.len(), MAX_CONCURRENCY);
+        assert_eq!(
+            pool.trackers
+                .values()
+                .map(|t| t.pending.len())
+                .sum::<usize>(),
+            HOST_MAX
+        );
+
+        let job = rx.try_recv().unwrap();
+        let hash = hex_decode(&job.info_hash).unwrap();
+        states.get_mut(&hash).unwrap().in_flight = false;
+        pool.done(Some(&hash), &answered(false), Duration::from_millis(1));
+        pool.dispatch(now, &mut heap, &mut states, &tx);
+        assert_eq!(pool.in_flight, MAX_CONCURRENCY);
+        assert_eq!(
+            rx.len(),
+            MAX_CONCURRENCY,
+            "one completed job admits one replacement"
+        );
     }
 
     /// ⭐ Isolation: a saturated tracker fills its own queue and leaves the
