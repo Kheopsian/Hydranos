@@ -838,7 +838,7 @@
   "{addr}, stale socket (bound {iface}, interface recreated)": "{addr}, socket périmée (liée à {iface}, interface recréée)",
   "{done}/{total} announced ({pct}%)": "{done}/{total} annoncés ({pct} %)",
   "{done}/{total} · {seeding} seeding · {resuming} resuming · {failed} failed": "{done}/{total} · {seeding} en partage · {resuming} en reprise · {failed} en échec",
-  "{engine} listen port": "port d'écoute {moteur}",
+  "{engine} listen port": "port d'écoute de {engine}",
   "{files} file(s), {size}, are hardlinked elsewhere (usually the Sonarr or Radarr library). The target is on another filesystem, so copying them leaves a second full copy on disk.": "{files} fichier(s), {size}, ont un lien physique ailleurs (en général la bibliothèque Sonarr ou Radarr). La cible est sur un autre système de fichiers, donc les copier laisse une seconde copie complète sur le disque.",
   "{id} engine interface ({role})": "Interface de l'moteur {id} ({role})",
   "{id} listen port": "Port d'écoute de {id}",

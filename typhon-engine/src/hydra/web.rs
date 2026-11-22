@@ -272,6 +272,43 @@ mod tests {
         assert!(lookup("../../etc/passwd").is_none(), "no climbing out");
         assert!(lookup("nope.js").is_none());
     }
+
+    /// A translation carries exactly the placeholders of its English key.
+    /// i18n.js fills `{name}` by name, so a translated placeholder is shown
+    /// raw and the value it stood for never appears: fr.json had
+    /// "{engine} listen port" as "port d'écoute {moteur}", and the engine's
+    /// name was missing from the label. Counted, not just listed, so a
+    /// placeholder dropped from a sentence that uses it twice is caught too.
+    #[test]
+    fn every_translation_keeps_the_placeholders_of_its_key() {
+        let placeholder = regex::Regex::new(r"\{[A-Za-z0-9_]+\}").unwrap();
+        let count = |s: &str| {
+            let mut v: Vec<String> = placeholder
+                .find_iter(s)
+                .map(|m| m.as_str().to_owned())
+                .collect();
+            v.sort_unstable();
+            v
+        };
+        let mut bad = Vec::new();
+        for lang in ["de", "es", "fr", "it", "nl", "pt"] {
+            let name = format!("i18n/{lang}.json");
+            let (bytes, _) = lookup(&name).unwrap_or_else(|| panic!("{name} is missing"));
+            let dict: std::collections::BTreeMap<String, String> =
+                serde_json::from_slice(&bytes).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert!(dict.len() > 1000, "{name} lost most of its entries");
+            for (key, value) in &dict {
+                if count(key) != count(value) {
+                    bad.push(format!("{lang}: {key:?} => {value:?}"));
+                }
+            }
+        }
+        assert!(
+            bad.is_empty(),
+            "translations whose placeholders differ from their key:\n{}",
+            bad.join("\n")
+        );
+    }
 }
 
 #[cfg(test)]
