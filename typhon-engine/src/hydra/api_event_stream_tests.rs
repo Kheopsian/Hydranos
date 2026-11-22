@@ -125,8 +125,8 @@ async fn a_page_that_reads_again_gets_every_removal_and_the_latest_figures() {
             break;
         };
         text.push_str(&String::from_utf8_lossy(&chunk));
-        saw_removal = text.contains(&format!("\"info_hash\":\"{gone}\""))
-            && text.contains("torrent_removed");
+        saw_removal =
+            text.contains(&format!("\"info_hash\":\"{gone}\"")) && text.contains("torrent_removed");
         saw_last = text.contains("\"upload_rate\":1299");
     }
     assert!(saw_removal, "the removal reached the page");

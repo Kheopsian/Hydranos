@@ -168,8 +168,7 @@ async fn a_poll_between_a_delete_and_the_next_tick_leaves_the_session_alone() {
     assert_eq!(day.0, 300);
 
     let hash = typhon_engine::torrent::hex_encode(&old);
-    remove_one_torrent(&s.state, &hash, &["hoard".to_string()], "hoard", false)
-        .expect("removed");
+    remove_one_torrent(&s.state, &hash, &["hoard".to_string()], "hoard", false).expect("removed");
 
     // The poll lands before the 1 Hz cache refresh.
     let (_, session, day) = session_and_day(&s.state);

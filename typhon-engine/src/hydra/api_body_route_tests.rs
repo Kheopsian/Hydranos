@@ -380,8 +380,7 @@ async fn a_port_in_use_keeps_the_old_listener() {
     let squatter = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let taken = squatter.local_addr().unwrap().port();
     let before = std::fs::read_to_string(&s.state.config_path).unwrap();
-    let resp =
-        super::set_listen_port(&s.state, "race", &format!(r#"{{"port":{taken}}}"#)).await;
+    let resp = super::set_listen_port(&s.state, "race", &format!(r#"{{"port":{taken}}}"#)).await;
     assert_eq!(resp.status(), StatusCode::CONFLICT);
     let body = body_json(resp).await;
     assert_eq!(
@@ -454,8 +453,7 @@ async fn another_engines_port_is_refused() {
     listening(&s, "race").await;
     let hoard = s.state.engines.get("hoard").unwrap();
     let theirs = hoard.manager.announced_port(hoard.listen_port);
-    let resp =
-        super::set_listen_port(&s.state, "race", &format!(r#"{{"port":{theirs}}}"#)).await;
+    let resp = super::set_listen_port(&s.state, "race", &format!(r#"{{"port":{theirs}}}"#)).await;
     assert_eq!(resp.status(), StatusCode::CONFLICT);
     let body = body_json(resp).await;
     assert!(
@@ -686,11 +684,11 @@ async fn exit_probe_false_asks_nothing_and_says_unknown() {
 /// engine's row, in an engine creation -- and an empty one is fine.
 #[test]
 fn bind_interface_is_refused_where_it_cannot_be_applied() {
-    let form = serde_json::json!({"fields": {"race_bind_interface": "wg0", "hoard_bind_interface": ""}});
+    let form =
+        serde_json::json!({"fields": {"race_bind_interface": "wg0", "hoard_bind_interface": ""}});
     let err = super::interface_pin_allowed(false, &form).unwrap_err();
     assert!(err.contains("Linux-only") && err.contains("wg0"), "{err}");
-    let extra =
-        serde_json::json!({"extra_engines": [{"id": "vpn7", "bind_interface": "tun1"}]});
+    let extra = serde_json::json!({"extra_engines": [{"id": "vpn7", "bind_interface": "tun1"}]});
     assert!(super::interface_pin_allowed(false, &extra).is_err());
     let create = serde_json::json!({"id": "x", "bind_interface": "  "});
     assert!(
@@ -793,8 +791,7 @@ async fn port_forward_reports_what_the_engines_do() {
     let get = |s: &TestState| {
         let st = s.state.clone();
         async move {
-            body_json(super::get_port_forward(State(st), RawQuery(None), keyed(KEY)).await)
-                .await
+            body_json(super::get_port_forward(State(st), RawQuery(None), keyed(KEY)).await).await
         }
     };
     // Nothing on the network yet: not listening, and said.
@@ -859,8 +856,7 @@ async fn port_forward_names_a_refused_mapping() {
 async fn dial_limits_on_an_absent_engine_is_refused() {
     let s = st("dial-limits-absent");
     let resp =
-        super::set_dial_limits(&s.state, "no-such-engine", r#"{"max_dials_per_sec":1.0}"#)
-            .await;
+        super::set_dial_limits(&s.state, "no-such-engine", r#"{"max_dials_per_sec":1.0}"#).await;
     assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
 
@@ -926,10 +922,9 @@ async fn a_category_is_created_and_then_listed() {
     .await;
     assert!(made.status().is_success(), "got {:?}", made.status());
 
-    let listed = body_json(
-        super::get_categories(State(s.state.clone()), RawQuery(None), keyed(KEY)).await,
-    )
-    .await;
+    let listed =
+        body_json(super::get_categories(State(s.state.clone()), RawQuery(None), keyed(KEY)).await)
+            .await;
     assert!(
         listed.to_string().contains("films"),
         "the category we just made is listed: {listed}"
@@ -965,10 +960,8 @@ async fn a_volume_policy_is_refused_without_a_key() {
         // The struct has no Default; every optional field does, so a
         // document naming only the volume is the smallest valid body.
         Json(
-            serde_json::from_value::<VolumePolicyBody>(
-                serde_json::json!({"volume": "/mnt/race"}),
-            )
-            .expect("volume is the only required field"),
+            serde_json::from_value::<VolumePolicyBody>(serde_json::json!({"volume": "/mnt/race"}))
+                .expect("volume is the only required field"),
         ),
     )
     .await;

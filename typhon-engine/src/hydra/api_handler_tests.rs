@@ -116,10 +116,9 @@ async fn settings_serve_keys_the_struct_does_not_model() {
             "[daemon]\napi_key = \"{KEY}\"\n\n[a_section_the_binary_never_heard_of]\nkept = \"yes\"\n"
         ),
     );
-    let body = body_json(
-        super::get_settings(State(s.state.clone()), RawQuery(None), keyed(KEY)).await,
-    )
-    .await;
+    let body =
+        body_json(super::get_settings(State(s.state.clone()), RawQuery(None), keyed(KEY)).await)
+            .await;
     assert_eq!(
         body["a_section_the_binary_never_heard_of"]["kept"],
         serde_json::json!("yes"),
@@ -133,11 +132,9 @@ async fn settings_serve_keys_the_struct_does_not_model() {
 async fn a_fresh_install_reports_empty_collections_not_null() {
     let s = with_key("route-empty");
     let jobs =
-        body_json(super::get_jobs(State(s.state.clone()), RawQuery(None), keyed(KEY)).await)
-            .await;
+        body_json(super::get_jobs(State(s.state.clone()), RawQuery(None), keyed(KEY)).await).await;
     assert!(!jobs.is_null(), "jobs answered null: {jobs}");
     let tags =
-        body_json(super::get_tags(State(s.state.clone()), RawQuery(None), keyed(KEY)).await)
-            .await;
+        body_json(super::get_tags(State(s.state.clone()), RawQuery(None), keyed(KEY)).await).await;
     assert!(!tags.is_null(), "tags answered null: {tags}");
 }

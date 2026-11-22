@@ -23,8 +23,8 @@ async fn a_purge_takes_the_race_copy_and_only_it() {
     std::fs::create_dir_all(&dir).unwrap();
     let bytes = torrent_bytes("purged");
     let save = dir.display().to_string();
-    let (hash, _) = add_torrent_bytes(&s.state, &bytes, "", &save, "", true, true, "race")
-        .expect("race add");
+    let (hash, _) =
+        add_torrent_bytes(&s.state, &bytes, "", &save, "", true, true, "race").expect("race add");
     add_torrent_bytes(&s.state, &bytes, "", &save, "", true, true, "hoard").expect("hoard add");
     assert_eq!(
         s.state.store.lock().unwrap().sessions_of(&hash),

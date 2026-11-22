@@ -392,8 +392,7 @@ async fn fixture(
         .into_iter()
         .enumerate()
         {
-            let addr: std::net::SocketAddr =
-                format!("192.0.2.{}:{port}", n + 10).parse().unwrap();
+            let addr: std::net::SocketAddr = format!("192.0.2.{}:{port}", n + 10).parse().unwrap();
             let p = std::sync::Arc::new(PeerStats::new(
                 addr,
                 [n as u8; 20],

@@ -63,8 +63,7 @@ fn everything_is_reachable_but_only_on_purpose() {
 #[test]
 fn a_normal_selection_still_parses() {
     let req: BulkBody =
-        serde_json::from_str(r#"{"action":"stop","hashes":["aa","BB"],"exclude":["cc"]}"#)
-            .unwrap();
+        serde_json::from_str(r#"{"action":"stop","hashes":["aa","BB"],"exclude":["cc"]}"#).unwrap();
     assert_eq!(req.hashes, vec!["aa", "BB"]);
     assert_eq!(req.exclude, vec!["cc"]);
     assert!(!req.all);

@@ -235,8 +235,7 @@ async fn the_status_card_counts_the_torrents_that_are_there() {
 async fn a_tag_given_at_add_time_appears_in_the_tag_list() {
     let (s, _h) = populated("pop-tags");
     let body =
-        body_json(super::get_tags(State(s.state.clone()), RawQuery(None), keyed(KEY)).await)
-            .await;
+        body_json(super::get_tags(State(s.state.clone()), RawQuery(None), keyed(KEY)).await).await;
     assert!(body.to_string().contains("fr"), "got {body}");
 }
 
@@ -245,10 +244,9 @@ async fn a_tag_given_at_add_time_appears_in_the_tag_list() {
 #[tokio::test]
 async fn the_tracker_tab_groups_by_host() {
     let (s, _h) = populated("pop-trackers");
-    let body = body_json(
-        super::get_trackers(State(s.state.clone()), RawQuery(None), keyed(KEY)).await,
-    )
-    .await;
+    let body =
+        body_json(super::get_trackers(State(s.state.clone()), RawQuery(None), keyed(KEY)).await)
+            .await;
     let text = body.to_string();
     assert!(text.contains("tracker.example"), "got {body}");
 }
@@ -264,10 +262,9 @@ async fn the_tracker_tab_shows_the_interval_each_host_answers() {
     cache.record_interval("answered.test", 1800, Some(900), 1_000);
     cache.record_interval("answered.test", 2700, Some(0), 2_000);
     cache.record_interval("udp.test", 900, None, 1_500);
-    let body = body_json(
-        super::get_trackers(State(s.state.clone()), RawQuery(None), keyed(KEY)).await,
-    )
-    .await;
+    let body =
+        body_json(super::get_trackers(State(s.state.clone()), RawQuery(None), keyed(KEY)).await)
+            .await;
     let row = |host: &str| {
         body.as_array()
             .unwrap()
@@ -361,10 +358,9 @@ async fn categories_are_listed_alphabetically_whatever_their_case() {
     for name in ["Music", "animes", "Comics", "kids", "ABNormal"] {
         crate::api::testing::put_category(&s.state, name, "hoard", "/tmp");
     }
-    let v = body_json(
-        super::get_categories(State(s.state.clone()), RawQuery(None), keyed(KEY)).await,
-    )
-    .await;
+    let v =
+        body_json(super::get_categories(State(s.state.clone()), RawQuery(None), keyed(KEY)).await)
+            .await;
     let names: Vec<&str> = v
         .as_array()
         .unwrap()
@@ -390,8 +386,7 @@ async fn a_transmission_folder_is_imported_into_the_hoard_and_not_twice() {
         b"d11:destination10:/tmp/films8:uploadedi77ee",
     )
     .unwrap();
-    let body =
-        serde_json::json!({"dir": dir, "path_map": {}, "start_stopped": true}).to_string();
+    let body = serde_json::json!({"dir": dir, "path_map": {}, "start_stopped": true}).to_string();
 
     let preview = body_json(
         super::post_transmission_preview(

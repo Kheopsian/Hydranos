@@ -129,8 +129,7 @@ fn state_with(key: &str, password_hash: &str, in_query: bool) -> AppState {
 /// An unconfigured instance whose config is a real file, so first-run
 /// setup can write the account.
 fn unconfigured(name: &str) -> (AppState, std::path::PathBuf) {
-    let path =
-        std::env::temp_dir().join(format!("hydra-setup-{}-{name}.toml", std::process::id()));
+    let path = std::env::temp_dir().join(format!("hydra-setup-{}-{name}.toml", std::process::id()));
     std::fs::write(&path, include_str!("../../../configs/default.toml")).unwrap();
     let mut st = state("k", "");
     st.config_path = path.clone();

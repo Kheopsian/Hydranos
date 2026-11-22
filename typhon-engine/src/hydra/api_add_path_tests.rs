@@ -243,8 +243,7 @@ async fn the_qbit_shim_reports_a_version_an_arr_client_accepts() {
         "a client parses this to decide what it can call"
     );
 
-    let api =
-        super::qbit_webapi_version(State(s.state.clone()), RawQuery(None), keyed(KEY)).await;
+    let api = super::qbit_webapi_version(State(s.state.clone()), RawQuery(None), keyed(KEY)).await;
     assert!(api.status().is_success());
     let bytes = axum::body::to_bytes(api.into_body(), usize::MAX)
         .await

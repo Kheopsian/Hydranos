@@ -140,8 +140,7 @@ async fn a_declared_node_is_stored_and_listed() {
     declare(&s, "node-a", "http://10.0.0.5:8199", "the-remote-key");
 
     let listed =
-        body_json(super::get_nodes(State(s.state.clone()), RawQuery(None), keyed(KEY)).await)
-            .await;
+        body_json(super::get_nodes(State(s.state.clone()), RawQuery(None), keyed(KEY)).await).await;
     let text = listed.to_string();
     assert!(text.contains("node-a"), "the node is listed: {listed}");
     assert!(
@@ -172,8 +171,7 @@ async fn a_node_that_does_not_answer_is_not_stored() {
     );
 
     let listed =
-        body_json(super::get_nodes(State(s.state.clone()), RawQuery(None), keyed(KEY)).await)
-            .await;
+        body_json(super::get_nodes(State(s.state.clone()), RawQuery(None), keyed(KEY)).await).await;
     assert!(
         !listed.to_string().contains("ghost"),
         "and nothing was stored: {listed}"
@@ -305,13 +303,12 @@ async fn the_enrol_command_uses_the_public_url_when_one_is_set() {
     h.insert(axum::http::header::HOST, "10.0.0.2:8199".parse().unwrap());
 
     let s = st("node-enrol-host");
-    let cmd = body_json(
-        super::post_node_enrol(State(s.state.clone()), RawQuery(None), h.clone()).await,
-    )
-    .await["command"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let cmd =
+        body_json(super::post_node_enrol(State(s.state.clone()), RawQuery(None), h.clone()).await)
+            .await["command"]
+            .as_str()
+            .unwrap()
+            .to_string();
     assert!(
         cmd.contains("http://10.0.0.2:8199/install.sh"),
         "the default follows Host: {cmd}"

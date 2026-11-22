@@ -164,8 +164,7 @@ async fn the_qbit_shim_refuses_an_unauthenticated_caller_too() {
     for resp in [
         super::qbit_version(State(s.state.clone()), RawQuery(None), HeaderMap::new()).await,
         super::qbit_preferences(State(s.state.clone()), RawQuery(None), HeaderMap::new()).await,
-        super::qbit_transfer_info(State(s.state.clone()), RawQuery(None), HeaderMap::new())
-            .await,
+        super::qbit_transfer_info(State(s.state.clone()), RawQuery(None), HeaderMap::new()).await,
     ] {
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
@@ -192,8 +191,7 @@ async fn the_status_card_answers_on_an_empty_node() {
 async fn a_fresh_install_has_no_declared_nodes() {
     let s = with_key("nodes-empty");
     let body =
-        body_json(super::get_nodes(State(s.state.clone()), RawQuery(None), keyed(KEY)).await)
-            .await;
+        body_json(super::get_nodes(State(s.state.clone()), RawQuery(None), keyed(KEY)).await).await;
     let empty = body.as_array().map(|a| a.is_empty()).unwrap_or(false)
         || body
             .get("nodes")

@@ -128,8 +128,7 @@ async fn each_engine_gets_a_tunnel_direct_or_nothing() {
     assert_eq!(assign(&s, bad).await.0, StatusCode::BAD_REQUEST);
     // The Network tab's answer carries the same verdicts.
     let mode =
-        body_json(get_network_mode(State(s.state.clone()), RawQuery(None), keyed(KEY)).await)
-            .await;
+        body_json(get_network_mode(State(s.state.clone()), RawQuery(None), keyed(KEY)).await).await;
     assert_eq!(mode["kill_switch"]["armed"], true, "{mode:#}");
     assert!(mode["kill_switch"]["summary"]
         .as_array()
@@ -172,8 +171,7 @@ async fn a_conf_is_stored_listed_and_never_served_back() {
             0o600
         );
     }
-    let (st, body) =
-        upload_raw(&s, "broken.conf", "[Interface]\nAddress = 10.0.0.2/32\n").await;
+    let (st, body) = upload_raw(&s, "broken.conf", "[Interface]\nAddress = 10.0.0.2/32\n").await;
     assert_eq!(st, StatusCode::BAD_REQUEST);
     assert!(
         body["error"].as_str().unwrap().contains("PrivateKey"),
@@ -199,8 +197,8 @@ async fn a_conf_is_accepted_from_the_pages_form() {
         .unwrap();
     let mut headers = keyed(KEY);
     headers.insert("content-type", ct.parse().unwrap());
-    let r = post_wireguard_config_upload(State(s.state.clone()), RawQuery(None), headers, req)
-        .await;
+    let r =
+        post_wireguard_config_upload(State(s.state.clone()), RawQuery(None), headers, req).await;
     assert_eq!(r.status(), StatusCode::OK);
     assert!(status(&s).await.contains("\"name\":\"mine.conf\""));
 }
@@ -256,8 +254,7 @@ async fn without_net_admin_the_tunnels_are_refused_with_the_reason() {
     assert_eq!(page["supported"], false);
     assert_eq!(page["unsupported_reason"], crate::wgtunnel::NEEDS_NET_ADMIN);
     let mode =
-        body_json(get_network_mode(State(s.state.clone()), RawQuery(None), keyed(KEY)).await)
-            .await;
+        body_json(get_network_mode(State(s.state.clone()), RawQuery(None), keyed(KEY)).await).await;
     assert_eq!(mode["wireguard"]["supported"], false);
     assert_eq!(
         mode["wireguard"]["reason"],
@@ -375,8 +372,7 @@ async fn an_assignment_switches_the_node_to_wireguard_and_another_mode_clears_it
 async fn the_network_mode_reports_what_each_engine_runs() {
     let s = node("wg-state");
     let mode =
-        body_json(get_network_mode(State(s.state.clone()), RawQuery(None), keyed(KEY)).await)
-            .await;
+        body_json(get_network_mode(State(s.state.clone()), RawQuery(None), keyed(KEY)).await).await;
     let rows = mode["engine_state"].as_array().unwrap();
     assert_eq!(rows.len(), 2);
     let race = rows.iter().find(|r| r["id"] == "race").unwrap();

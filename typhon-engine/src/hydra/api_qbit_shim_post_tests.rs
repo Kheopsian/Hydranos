@@ -51,8 +51,8 @@ fn single_file_bytes() -> Vec<u8> {
 
 fn populated(tag: &str, bytes: &[u8]) -> (TestState, String) {
     let s = state_from(tag, &format!("[daemon]\napi_key = \"{KEY}\"\n"));
-    let (hash, _) = add_torrent_bytes(&s.state, bytes, "", "/tmp", "fr", true, true, "race")
-        .expect("added");
+    let (hash, _) =
+        add_torrent_bytes(&s.state, bytes, "", "/tmp", "fr", true, true, "race").expect("added");
     (s, hash)
 }
 
@@ -351,8 +351,7 @@ async fn the_lsd_tracker_row_shows_the_real_state() {
     private.extend_from_slice(&[1u8; 20]);
     private.extend_from_slice(b"7:privatei1eee");
     let (secret, _) =
-        add_torrent_bytes(&s.state, &private, "", "/tmp", "fr", true, true, "race")
-            .expect("added");
+        add_torrent_bytes(&s.state, &private, "", "/tmp", "fr", true, true, "race").expect("added");
 
     let port = std::net::UdpSocket::bind("0.0.0.0:0")
         .unwrap()

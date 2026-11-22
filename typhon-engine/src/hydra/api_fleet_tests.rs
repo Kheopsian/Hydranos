@@ -201,8 +201,7 @@ fn facets_stay_null_when_no_node_counted() {
 #[test]
 fn a_seeding_row_sorts_as_complete_whatever_its_progress() {
     let seeding = serde_json::json!({"state": "seeding", "progress": 0.2, "info_hash": "aa"});
-    let leeching =
-        serde_json::json!({"state": "downloading", "progress": 0.9, "info_hash": "bb"});
+    let leeching = serde_json::json!({"state": "downloading", "progress": 0.9, "info_hash": "bb"});
     assert_eq!(row_sort_key(&seeding, "progress").1, 1.0);
     assert_eq!(row_sort_key(&leeching, "progress").1, 0.9);
 }

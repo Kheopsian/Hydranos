@@ -65,14 +65,10 @@ async fn the_tracker_row_flags_a_passkey_that_could_not_be_placed() {
     let mut p = crate::announce::policy::Policy::default();
     p.passkeys
         .insert("row-unplaced.example.invalid".into(), "0123abcd".into());
-    crate::announce::policy::keyed_url(
-        &p,
-        "https://row-unplaced.example.invalid/tracker/announce",
-    );
-    let body = body_json(
-        super::get_trackers(State(s.state.clone()), RawQuery(None), keyed(KEY)).await,
-    )
-    .await;
+    crate::announce::policy::keyed_url(&p, "https://row-unplaced.example.invalid/tracker/announce");
+    let body =
+        body_json(super::get_trackers(State(s.state.clone()), RawQuery(None), keyed(KEY)).await)
+            .await;
     let row = |h: &str| {
         body.as_array()
             .and_then(|a| a.iter().find(|r| r["host"] == h))
@@ -635,8 +631,7 @@ async fn moving_a_subdomain_carries_the_settings_its_parent_gave_it() {
     .await;
     assert_eq!(r.status(), StatusCode::OK);
 
-    let (code, v) =
-        rehost_call(&s, r#"{"from":"tk.tracker.example","to":"new.example"}"#).await;
+    let (code, v) = rehost_call(&s, r#"{"from":"tk.tracker.example","to":"new.example"}"#).await;
     assert_eq!(code, StatusCode::OK, "{v}");
     // Carried BEFORE any torrent is rewritten: the job is only queued.
     let cfg = s.state.cfg();
@@ -754,8 +749,7 @@ async fn moving_a_tracker_host_rewrites_the_torrents_and_carries_the_settings() 
     )
     .await;
     assert_eq!(code, StatusCode::BAD_REQUEST);
-    let (code, _) =
-        rehost_call(&s, r#"{"from":"tracker.example","to":"tracker.example"}"#).await;
+    let (code, _) = rehost_call(&s, r#"{"from":"tracker.example","to":"tracker.example"}"#).await;
     assert_eq!(code, StatusCode::BAD_REQUEST);
 
     // A dry run counts and writes nothing.
@@ -884,8 +878,7 @@ async fn moving_a_tracker_format_rewrites_the_matching_urls_only() {
         assert_eq!(r.status(), StatusCode::OK);
         hashes.push(h);
     }
-    let body =
-        |extra: &str| format!(r#"{{"from_template":"{FROM}","to_template":"{TO}"{extra}}}"#);
+    let body = |extra: &str| format!(r#"{{"from_template":"{FROM}","to_template":"{TO}"{extra}}}"#);
 
     // Refusals: a hole the old format lacks, a mix with nothing to match.
     let (code, _) = rehost_call(
@@ -1351,8 +1344,7 @@ async fn a_job_is_listed_and_readable_by_its_id() {
     };
 
     let listed =
-        body_json(super::get_jobs(State(s.state.clone()), RawQuery(None), keyed(KEY)).await)
-            .await;
+        body_json(super::get_jobs(State(s.state.clone()), RawQuery(None), keyed(KEY)).await).await;
     assert!(
         listed.to_string().contains(&id),
         "the job is listed: {listed}"

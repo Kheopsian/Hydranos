@@ -89,10 +89,9 @@ async fn a_category_lives_and_dies_with_its_labels() {
 
     let h2 = "b".repeat(40);
     labelled(&s, &h2, "ghost");
-    let v = body_json(
-        get_categories_orphans(State(s.state.clone()), RawQuery(None), keyed(KEY)).await,
-    )
-    .await;
+    let v =
+        body_json(get_categories_orphans(State(s.state.clone()), RawQuery(None), keyed(KEY)).await)
+            .await;
     assert_eq!(v[0]["name"], "ghost");
     assert_eq!(v[0]["torrents"], 1);
     assert_eq!(v[0]["mode"], "hoard");

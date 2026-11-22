@@ -236,8 +236,7 @@ async fn network_secrets_are_masked_and_a_masked_save_keeps_them() {
 /// and posting the mask back (a form saved as it was) keeps the real value.
 #[tokio::test]
 async fn tracker_passkeys_are_masked_and_a_masked_save_keeps_them() {
-    let file =
-        format!("{DIRECT_FILE}\n[announce_passkeys]\n\"tracker.example\" = \"pk-s3cr3t\"\n");
+    let file = format!("{DIRECT_FILE}\n[announce_passkeys]\n\"tracker.example\" = \"pk-s3cr3t\"\n");
     let s = state_from("passkey-mask", &file);
 
     let settings =
@@ -247,8 +246,7 @@ async fn tracker_passkeys_are_masked_and_a_masked_save_keeps_them() {
         settings["announce_passkeys"]["tracker.example"],
         SECRET_MASK
     );
-    let list =
-        body_json(get_passkeys(State(s.clone()), RawQuery(None), keyed(KEY)).await).await;
+    let list = body_json(get_passkeys(State(s.clone()), RawQuery(None), keyed(KEY)).await).await;
     assert!(!list.to_string().contains("pk-s3cr3t"), "{list}");
     assert_eq!(
         list["tracker.example"], SECRET_MASK,
@@ -278,8 +276,7 @@ async fn tracker_passkeys_are_masked_and_a_masked_save_keeps_them() {
     assert_eq!(r.status(), StatusCode::OK);
     assert_eq!(kept(&s), "pk-s3cr3t", "the mask was written as the passkey");
 
-    let body =
-        serde_json::json!({"host": "tracker.example", "passkey": SECRET_MASK}).to_string();
+    let body = serde_json::json!({"host": "tracker.example", "passkey": SECRET_MASK}).to_string();
     let r = set_announce_passkey(State(s.clone()), RawQuery(None), keyed(KEY), body).await;
     let answer = body_json(r).await;
     assert!(!answer.to_string().contains("pk-s3cr3t"), "{answer}");
@@ -302,8 +299,7 @@ async fn tracker_passkeys_are_masked_and_a_masked_save_keeps_them() {
 #[tokio::test]
 async fn the_api_key_and_password_hash_are_masked_and_a_masked_save_keeps_them() {
     let hash = "$2b$12$abcdefghijklmnopqrstuuABCDEFGHIJKLMNOPQRSTUVWXYZ01234";
-    let file =
-        format!("{DIRECT_FILE}\n[auth]\nusername = \"admin\"\npassword_hash = \"{hash}\"\n");
+    let file = format!("{DIRECT_FILE}\n[auth]\nusername = \"admin\"\npassword_hash = \"{hash}\"\n");
     let s = state_from("daemon-secrets-mask", &file);
 
     let settings =

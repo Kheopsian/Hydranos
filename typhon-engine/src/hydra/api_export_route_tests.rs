@@ -18,8 +18,8 @@ fn torrent_bytes(name: &str) -> Vec<u8> {
 fn populated(tag: &str) -> (TestState, String, Vec<u8>) {
     let s = state_from(tag, &format!("[daemon]\napi_key = \"{KEY}\"\n"));
     let bytes = torrent_bytes("alpha");
-    let (hash, _) = add_torrent_bytes(&s.state, &bytes, "", "/tmp", "", true, true, "hoard")
-        .expect("added");
+    let (hash, _) =
+        add_torrent_bytes(&s.state, &bytes, "", "/tmp", "", true, true, "hoard").expect("added");
     (s, hash, bytes)
 }
 
@@ -76,8 +76,7 @@ async fn a_zip_export_downloads_the_stored_torrent() {
         .to_str()
         .unwrap()
         .starts_with("attachment;"));
-    let mut z =
-        zip::ZipArchive::new(std::io::Cursor::new(body(resp).await)).expect("a valid zip");
+    let mut z = zip::ZipArchive::new(std::io::Cursor::new(body(resp).await)).expect("a valid zip");
     assert_eq!(z.len(), 1);
     let mut got = Vec::new();
     z.by_index(0).unwrap().read_to_end(&mut got).unwrap();
@@ -160,8 +159,7 @@ async fn every_export_path_carries_the_edited_trackers() {
         form(&[("hashes", &hash)]),
     )
     .await;
-    let mut z =
-        zip::ZipArchive::new(std::io::Cursor::new(body(resp).await)).expect("a valid zip");
+    let mut z = zip::ZipArchive::new(std::io::Cursor::new(body(resp).await)).expect("a valid zip");
     let mut zipped = Vec::new();
     z.by_index(0).unwrap().read_to_end(&mut zipped).unwrap();
 
@@ -238,8 +236,7 @@ async fn stripping_still_strips_an_edited_torrent() {
         form(&[("hashes", &hash), ("strip_trackers", "1")]),
     )
     .await;
-    let mut z =
-        zip::ZipArchive::new(std::io::Cursor::new(body(resp).await)).expect("a valid zip");
+    let mut z = zip::ZipArchive::new(std::io::Cursor::new(body(resp).await)).expect("a valid zip");
     let mut got = Vec::new();
     z.by_index(0).unwrap().read_to_end(&mut got).unwrap();
     assert!(tiers_of(&got).is_empty(), "no announce survives");
