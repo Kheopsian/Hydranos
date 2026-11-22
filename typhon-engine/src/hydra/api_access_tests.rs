@@ -222,7 +222,14 @@ async fn every_route_but_the_open_ones_refuses_a_caller_with_no_key() {
     for (_, src) in merged {
         paths.extend(routes_in(fn_body(src, "pub fn routes()")));
     }
-    // The qBittorrent `/api/v2` shim is merged from its own file.
+    // The qBittorrent `/api/v2` shim is merged from its own file. The
+    // `named` check above cannot see that merge, so pin it here: exactly one,
+    // and its source is the file read below.
+    assert_eq!(
+        router_src.matches(".merge(api_qbit::routes())").count(),
+        1,
+        "the qBittorrent shim must be merged into the router exactly once"
+    );
     paths.extend(routes_in(fn_body(
         include_str!("api_qbit.rs"),
         "pub(super) fn routes()",

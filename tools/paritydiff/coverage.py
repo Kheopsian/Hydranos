@@ -24,12 +24,14 @@ def normalise(path):
 
 
 def rust_routes(repo):
-    src = open(os.path.join(repo, "typhon-engine/src/hydra/api.rs")).read()
     routes = set()
-    for match in re.finditer(r'\.route\("([^"]+)"\s*,\s*(.+?)\)\s*$', src, re.M):
-        path, spec = match.group(1), match.group(2)
-        for method in re.findall(r"\b(get|post|put|delete|any)\s*\(", spec):
-            routes.add((method.upper(), normalise(path)))
+    # The /api/v2 shim lives in api_qbit.rs, merged into the router.
+    for name in ("api.rs", "api_qbit.rs"):
+        src = open(os.path.join(repo, "typhon-engine/src/hydra", name)).read()
+        for match in re.finditer(r'\.route\("([^"]+)"\s*,\s*(.+?)\)\s*$', src, re.M):
+            path, spec = match.group(1), match.group(2)
+            for method in re.findall(r"\b(get|post|put|delete|any)\s*\(", spec):
+                routes.add((method.upper(), normalise(path)))
     return routes
 
 

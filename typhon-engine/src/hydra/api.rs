@@ -12,8 +12,10 @@
 
 #[path = "api_qbit.rs"]
 mod api_qbit;
+#[cfg(test)]
+pub(crate) use api_qbit::engine_qbit_rows;
+pub(crate) use api_qbit::qbit_default_save_path;
 use api_qbit::*;
-pub(crate) use api_qbit::{engine_qbit_rows, qbit_default_save_path};
 
 use axum::{
     extract::{RawQuery, State},
