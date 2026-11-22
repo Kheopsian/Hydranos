@@ -11979,17 +11979,6 @@ function hydraPrompt(title, body, value, okLabel) {
 // link would suggest the engines talk to each other, and they do not.
 const NET_STATE_COLOR = { ok: "#3ddc84", warn: "#f5a524", bad: "#f2555a", off: "#4a5568" };
 
-function _netEngineDisplay(e) {
-    const held = e.port_pending || e.announce_held;
-    const state = held && e.state !== "bad" && e.state !== "off" ? "warn" : e.state;
-    const reason = e.port_pending ? t("Announces held: waiting for forwarded port")
-        : e.announce_held ? t("Announces held: startup pause") : "";
-    const listen = e.listen_port ? t("listening port {port}", { port: e.listen_port }) : "";
-    const announced = e.port_pending ? t("announced port pending")
-        : e.announced_port ? t("announced port {port}", { port: e.announced_port }) : "";
-    return { state, word: reason || _netStateWord(state), ports: [listen, announced].filter(Boolean).join(" · ") };
-}
-
 function _netPolyMarkup(engines, size) {
     const n = engines.length;
     if (!n) return "";
@@ -12003,11 +11992,9 @@ function _netPolyMarkup(engines, size) {
     const ring = n > 1 ? `<path class="np-edge" d="${d}"/>` : "";
     const rr = n <= 3 ? 4.6 : (n <= 6 ? 4 : 3.4);
     const dots = pts.map((p, i) => {
-        const raw = engines[i];
-        const display = _netEngineDisplay(raw);
-        const e = { ...raw, state: display.state };
+        const e = engines[i];
         const cls = e.state === "warn" ? "np-node np-warn" : "np-node";
-        return `<g class="${cls}"><title>${esc(_netRowName(e) + " — " + display.word)}</title>` +
+        return `<g class="${cls}"><title>${esc(_netRowName(e) + " — " + _netStateWord(e.state))}</title>` +
             `<circle cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="${rr}" fill="${NET_STATE_COLOR[e.state] || NET_STATE_COLOR.off}"/></g>`;
     }).join("");
     return `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">${ring}${dots}</svg>`;
@@ -12038,17 +12025,15 @@ async function updateNetPoly() {
     _netEngines = (d && d.engines) || [];
     if (!_netEngines.length) return;
     el.innerHTML = _netPolyMarkup(_netEngines, 30);
-    const states = _netEngines.map(e => _netEngineDisplay(e).state);
-    const worst = states.includes("bad") ? "bad"
-        : states.includes("off") ? "off"
-        : states.includes("warn") ? "warn"
-        : states.includes("unknown") ? "unknown" : "ok";
+    const worst = _netEngines.some(e => e.state === "bad") ? "bad"
+        : _netEngines.some(e => e.state === "off") ? "off"
+        : _netEngines.some(e => e.state === "unknown") ? "unknown"
+        : _netEngines.some(e => e.state === "warn") ? "warn" : "ok";
     // "engine", not "agent". The dots ARE the engines -- one vertex each --
     // and this panel lists them by engine id, so the tooltip was the only
     // place still using the 3.x word for them.
     el.title = tp(_netEngines.length, "{n} engine", "{n} engines", { n: _netEngines.length })
-        + " — " + (_netEngines.some(e => e.port_pending) ? t("Announces held: waiting for forwarded port")
-            : _netEngines.some(e => e.announce_held) ? t("Announces held: startup pause") : _netStateWord(worst));
+        + " — " + _netStateWord(worst);
 
     // The address only when there is ONE. Several engines behind several
     // tunnels have several exits, and printing one of them would name an
@@ -12074,17 +12059,16 @@ function openNetPanel(from) {
     if (!panel || !from) return;
     const rows = document.getElementById("net-panel-rows");
     rows.innerHTML = _netEngines.map(e => {
-        const display = _netEngineDisplay(e);
         const where = e.bind_interface
             ? `<span class="nr-iface">${esc(e.bind_interface)}</span>`
             : t("default route");
-        const port = display.ports ? " · " + esc(display.ports) : "";
+        const port = e.listen_port ? " · " + t("port {port}", { port: e.listen_port }) : "";
         const ip = e.exit_ip ? esc(incoExitIP(e.exit_ip)) : "\u2014";
         const ip6 = e.exit_ip_v6 ? "<br>" + esc(incoExitIP(e.exit_ip_v6)) : "";
         return `<div class="net-row">
-            <div class="nr-dot" style="background:${NET_STATE_COLOR[display.state] || NET_STATE_COLOR.off}" title="${esc(display.word)}"></div>
+            <div class="nr-dot" style="background:${NET_STATE_COLOR[e.state] || NET_STATE_COLOR.off}" title="${esc(_netStateWord(e.state) + ". " + t("Outbound only: whether peers can reach this engine is the health dot's tooltip."))}"></div>
             <div><div class="nr-name">${esc(_netRowName(e))}</div>
-                 <div class="nr-sub">${esc(e.role)} · ${where}${port}${e.detail ? " · " + esc(e.detail) : ""}</div>${e.port_pending || e.announce_held ? `<div class="nr-sub">${esc(display.word)}</div>` : ""}</div>
+                 <div class="nr-sub">${esc(e.role)} · ${where}${port}${e.detail ? " · " + esc(e.detail) : ""}</div></div>
             <div class="nr-ip">${ip}${ip6}</div>
         </div>`;
     }).join("") || `<div class="net-row"><div></div><div class="nr-sub">${t("No engine measured yet")}</div><div></div></div>`;

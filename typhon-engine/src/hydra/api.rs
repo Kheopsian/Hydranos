@@ -6747,33 +6747,10 @@ async fn get_network_engines(
         .await;
     }
 
-    let (mut rows, measured_at) = {
+    let (rows, measured_at) = {
         let slot = state.net_engines.lock().await;
         slot.clone()
     };
-
-    // Port holds can change between exit probes; overlay live engine state.
-    for row in &mut rows {
-        if row.get("local").and_then(|v| v.as_bool()) != Some(true) {
-            continue;
-        }
-        let Some(engine) = row.get("engine").and_then(|v| v.as_str()) else {
-            continue;
-        };
-        let Some(engine) = state.engines.get(engine) else {
-            continue;
-        };
-        let pending = engine.manager.port_pending();
-        let port = engine.manager.listen_port_now(engine.listen_port);
-        row["listen_port"] = serde_json::json!(port);
-        row["port_pending"] = serde_json::json!(pending);
-        row["announce_held"] = serde_json::json!(engine.manager.limiter().dials_paused());
-        row["announced_port"] = if pending {
-            serde_json::Value::Null
-        } else {
-            serde_json::json!(engine.manager.announced_port(port))
-        };
-    }
 
     // The DISTINCT exit addresses. This is what decides whether the header can
     // honestly print an address at all: one means it can, several mean the
