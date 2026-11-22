@@ -1720,8 +1720,11 @@ async function updateRaceTorrents(force = true) {
     _racePageBusy = true;
     _raceMembershipDirty = false;
     const started = Date.now();
+    const liveRevision = _liveRowRevision;
     try {
-        _raceTorrents = await api("/api/race/torrents");
+        const rows = await api("/api/race/torrents");
+        if (!force) _preserveLiveRows(rows, _raceTorrents, liveRevision);
+        _raceTorrents = rows;
         renderRaceTable();
         _raceLastFetchAt = Date.now();
         _raceFetchMs = Date.now() - started;
@@ -3236,6 +3239,19 @@ function _hoardRefreshInterval() {
         ? Math.max(LIVE_REFRESH_MS, _hoardLiveFetchMs * 10)
         : _hoardFullRefreshInterval();
 }
+let _hoardPageRefreshTimer = null;
+
+function _scheduleHoardPageRefresh() {
+    if (_hoardPageRefreshTimer !== null || document.hidden || !_hoardTabVisible() || !_hoardFastRefresh()) return;
+    const delay = Math.max(_hoardPageBusy ? LIVE_REFRESH_MS : 0,
+        _hoardRefreshInterval() - (Date.now() - _hoardLastFetchAt));
+    _hoardPageRefreshTimer = setTimeout(async () => {
+        _hoardPageRefreshTimer = null;
+        if (document.hidden || !_hoardTabVisible() || !_hoardFastRefresh()) return;
+        await fetchHoardPage();
+        if (_hoardLiveDirty) _scheduleHoardPageRefresh();
+    }, delay);
+}
 let _hoardInFlightQuery = "";
 let _hoardLastFetchAt = 0;
 
@@ -3315,6 +3331,7 @@ async function fetchHoardPage(force) {
 
 async function _fetchHoardPageInner(qs) {
     const seq = ++_hoardPageSeq;
+    const liveRevision = _liveRowRevision, started = Date.now();
     let d;
     try { d = await api("/api/hoard/page?" + qs); } catch (e) { return; }
     // Drop an answer only if a NEWER one has already been applied. Comparing
@@ -3323,6 +3340,7 @@ async function _fetchHoardPageInner(qs) {
     // every response found a newer one in flight and discarded itself.
     const current = new URLSearchParams(_hoardPageQuery());
     const requested = new URLSearchParams(qs);
+    const background = requested.get("live") === "1";
     requested.set("facets", "1");
     requested.delete("live");
     if (!d || seq <= _hoardPageApplied || requested.toString() !== current.toString()) return false;
@@ -3345,6 +3363,9 @@ async function _fetchHoardPageInner(qs) {
         }
     }
     const rows = Array.isArray(d.rows) ? d.rows : [];
+    // Background pages are shared for one second. Keep recent SSE figures,
+    // and any update that arrived while this request was in flight.
+    if (background) _preserveLiveRows(rows, _hoardAllTorrents, liveRevision, started - LIVE_REFRESH_MS);
     _hoardAllTorrents = rows;
     // Chips and rows in the same frame. The chips used to follow a pins round
     // trip later, and the table jumped by their change in height 35 ms after
@@ -8303,6 +8324,7 @@ let _lastStatusEventAt = 0;
 let _lastHoardStatsEventAt = 0;
 let _lastHoardUploading = null;
 let _lastHoardLiveRevision = null;
+let _liveRowRevision = 0;
 
 function _liveStreamFresh() {
     return !!_sseConn && _sseConn.readyState === 1
@@ -8371,6 +8393,7 @@ function _openHoardSSE() {
                 _hoardLiveDirty = true;
                 _lastHoardUploading = data.torrents_uploading;
                 _lastHoardLiveRevision = data.live_revision;
+                _scheduleHoardPageRefresh();
             }
             try { _renderHoardStatsHeader(data); _hoardStatsPainted = true; } catch (_) {}
             return;
@@ -8387,7 +8410,7 @@ function _openHoardSSE() {
             const rows = data.mode === "race" ? _raceTorrents
                 : data.mode === "hoard" ? _hoardAllTorrents : null;
             if (!rows) return;
-            if (data.mode === "hoard") _hoardLiveDirty = true;
+            if (data.mode === "hoard") { _hoardLiveDirty = true; _scheduleHoardPageRefresh(); }
             const touched = _applyLiveRows(rows, data);
             if (touched) {
                 if (data.mode === "hoard") _scheduleHoardRender();
@@ -8448,9 +8471,27 @@ function _applyLiveRows(rows, data) {
         row.num_peers = m.peers_connected;
         if (typeof m.progress === "number") row.progress = m.progress;
         if (typeof m.ratio === "number") row.ratio = m.ratio;
+        row._liveRevision = ++_liveRowRevision;
+        row._liveUpdatedAt = Date.now();
         touched++;
     }
     return touched;
+}
+
+function _preserveLiveRows(rows, previous, since, recentAfter = Infinity) {
+    const liveByHash = new Map();
+    for (const row of previous) {
+        if (!(row._liveRevision > since || row._liveUpdatedAt >= recentAfter)) continue;
+        const matches = liveByHash.get(row.info_hash) || [];
+        matches.push(row);
+        liveByHash.set(row.info_hash, matches);
+    }
+    const fields = ["state", "checking_progress", "check_queued", "upload_rate", "download_rate",
+        "total_upload", "total_download", "num_peers", "progress", "ratio", "_liveRevision", "_liveUpdatedAt"];
+    for (const row of rows) {
+        const live = liveByHash.get(row.info_hash)?.find(old => _liveRowMatches(old, { agent: row.agent }));
+        if (live) for (const field of fields) if (field in live) row[field] = live[field];
+    }
 }
 
 let _raceRenderScheduled = false;

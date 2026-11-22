@@ -35,6 +35,7 @@ assert.equal(intervals({ ...state, conn: null }).fast, true, "disconnected activ
 assert.equal(intervals({ ...state, stats: 4000 }).fast, true, "silent active streams also have a cheap fallback");
 assert.equal(intervals({ ...state, membership: true }).fast, false, "adds and missed events repair membership");
 const apply = new Function(`
+    let _liveRowRevision = 0;
     const _STATUS_TO_STATE = { 0: "paused", 2: "downloading", 3: "seeding", 4: "error" };
     ${fn("_isLocalAgent")}
     ${fn("_liveRowMatches")}
@@ -65,10 +66,12 @@ async function raceRequests() {
     const race = new Function("env", `
         let _racePageBusy = false, _raceMembershipDirty = false;
         let _raceLastFetchAt = 9000, _raceFetchMs = 0, _raceTorrents = [];
+        let _liveRowRevision = 0;
         const HOARD_REFRESH_MS = 20000;
         const Date = { now: () => env.now() };
         const _liveStreamFresh = env.fresh, api = env.api;
         const loadRacePolicy = () => {}, renderRaceTable = () => {};
+        ${fn("_preserveLiveRows")}
         ${fn("updateRaceTorrents")}
         return { updateRaceTorrents, changed: () => { _raceMembershipDirty = true; } };
     `)({ now: () => now, fresh: () => fresh, api: async url => {
@@ -132,4 +135,101 @@ async function requests() {
     assert.equal(calls[2], "facets=1", "user actions refresh facets immediately");
     release(); await forced;
 }
-Promise.all([requests(), raceRequests()]).then(() => console.log("live_refresh: ok")).catch(e => { console.error(e); process.exitCode = 1; });
+async function pageCannotOverwriteLiveRows() {
+    let now = 10000, release;
+    const page = new Function("env", `
+        let _hoardPageSeq = 0, _hoardPageApplied = 0, _liveRowRevision = 0;
+        let _hoardAllTorrents = [{ agent: "local-hoard", info_hash: "same", upload_rate: 10 }];
+        let _hoardAppliedSearch, _hoardServerTotal, _hoardServerFiltered, _hoardFacets;
+        const _STATUS_TO_STATE = { 3: "seeding" }, LIVE_REFRESH_MS = 1000;
+        const Date = { now: env.now }, document = { getElementById: () => null };
+        const api = env.request, _hoardPageQuery = () => "facets=1";
+        const renderHoardTable = () => {}, _renderHoardCounts = () => {};
+        ${fn("_isLocalAgent")}
+        ${fn("_liveRowMatches")}
+        ${fn("_applyLiveRows")}
+        ${src.includes("function _preserveLiveRows(") ? fn("_preserveLiveRows") : ""}
+        ${fn("_fetchHoardPageInner")}
+        return { fetch: _fetchHoardPageInner, rows: () => _hoardAllTorrents,
+            delta: () => _applyLiveRows(_hoardAllTorrents, { agent: "local-hoard", torrents: [{
+                info_hash: "same", state: "seeding", upload_rate: 20, download_rate: 0,
+                total_uploaded: 200, total_downloaded: 100, peers_connected: 1, progress: 1, ratio: 2
+            }] }) };
+    `)({ now: () => now, request: () => new Promise(r => { release = r; }) });
+    const response = rate => ({ total: 1, filtered: 1, rows: [
+        { agent: "local-hoard", info_hash: "same", upload_rate: rate, name: "fresh metadata" },
+        { agent: "local-vpn", info_hash: "same", upload_rate: rate },
+        { agent: "remote-hoard", info_hash: "same", upload_rate: rate }
+    ] });
+    const pending = page.fetch("facets=1&live=1");
+    page.delta();
+    release(response(10)); await pending;
+    assert.equal(page.rows()[0].upload_rate, 20, "REST must not overwrite SSE received during its request");
+    assert.equal(page.rows()[0].name, "fresh metadata");
+    assert.equal(page.rows()[1].upload_rate, 10, "another engine must remain independent");
+    assert.equal(page.rows()[2].upload_rate, 10, "remote rows must remain independent");
+    now += 100;
+    const cached = page.fetch("facets=1&live=1");
+    release(response(10)); await cached;
+    assert.equal(page.rows()[0].upload_rate, 20, "a shared cached page must not roll back recent SSE");
+    const manual = page.fetch("facets=1");
+    page.delta();
+    release(response(30)); await manual;
+    assert.equal(page.rows()[0].upload_rate, 30, "manual fresh responses supersede queued SSE");
+    now += 10000;
+    const fallback = page.fetch("facets=1&live=1");
+    release(response(40)); await fallback;
+    assert.equal(page.rows()[0].upload_rate, 40, "stale SSE must not override REST recovery");
+}
+
+function membershipEventsScheduleRefresh() {
+    let scheduled = 0;
+    const conn = new Function("schedule", `
+        let _sseConn = null, _syncCursor = 0, _hoardAllTorrents = [];
+        let _lastHoardStatsEventAt, _lastHoardUploading, _lastHoardLiveRevision;
+        let _hoardLiveDirty = false, _hoardStatsPainted = false;
+        const document = { hidden: false }, EventSource = class {};
+        const _scheduleHoardPageRefresh = schedule, _renderHoardStatsHeader = () => {};
+        ${fn("_openHoardSSE")}
+        _openHoardSSE(); return _sseConn;
+    `)(() => scheduled++);
+    conn.onmessage({ data: JSON.stringify({ event: "hoard_stats_snapshot",
+        data: { torrents_uploading: 3, live_revision: 5 } }) });
+    assert.equal(scheduled, 1, "membership changes should schedule a page refresh without waiting for poll()");
+}
+
+async function membershipRefreshesAreBounded() {
+    const env = { now: 10100, interval: 1000, hidden: false, visible: true, fast: true, calls: 0, timers: [] };
+    const scheduler = new Function("env", `
+        let _hoardPageRefreshTimer = null, _hoardPageBusy = 0, _hoardLastFetchAt = 10000, _hoardLiveDirty = true;
+        const LIVE_REFRESH_MS = 1000, Date = { now: () => env.now };
+        const document = { get hidden() { return env.hidden; } };
+        const _hoardTabVisible = () => env.visible, _hoardFastRefresh = () => env.fast;
+        const _hoardRefreshInterval = () => env.interval;
+        const setTimeout = (callback, delay) => { env.timers.push({ callback, delay }); return env.timers.length; };
+        const fetchHoardPage = async () => { env.calls++; _hoardLiveDirty = false; _hoardLastFetchAt = env.now; };
+        ${fn("_scheduleHoardPageRefresh")}
+        return { schedule: _scheduleHoardPageRefresh, busy: value => { _hoardPageBusy = value; } };
+    `)(env);
+    scheduler.schedule(); scheduler.schedule();
+    assert.equal(env.timers.length, 1, "bursts coalesce into one scheduled request");
+    assert.equal(env.timers[0].delay, 900, "refresh runs when due, independently of the global poll phase");
+    env.now = 11000;
+    await env.timers.shift().callback();
+    assert.equal(env.calls, 1);
+    assert.equal(env.timers.length, 0, "no recurring timer after a successful clean refresh");
+    env.hidden = true; scheduler.schedule();
+    env.hidden = false; env.visible = false; scheduler.schedule();
+    env.visible = true; env.fast = false; scheduler.schedule();
+    assert.equal(env.timers.length, 0, "hidden and full-scan views keep their existing backstop");
+    env.fast = true; env.interval = 5000; env.now = 11100;
+    scheduler.schedule();
+    assert.equal(env.timers[0].delay, 4900, "slow indexed requests retain adaptive backoff");
+    await env.timers.shift().callback();
+    env.now = 20000; env.interval = 1000;
+    scheduler.busy(1); scheduler.schedule();
+    assert.equal(env.timers[0].delay, 1000, "a busy page cannot cause zero-delay timer spinning");
+}
+
+Promise.all([requests(), raceRequests(), pageCannotOverwriteLiveRows(), membershipRefreshesAreBounded(), Promise.resolve().then(membershipEventsScheduleRefresh)])
+    .then(() => console.log("live_refresh: ok")).catch(e => { console.error(e); process.exitCode = 1; });
