@@ -38,7 +38,7 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 
 ### Fixed
 
-- "TRIM after drain" works in the Docker image when the container is given `cap_add: [SYS_ADMIN]` and runs as PUID/PGID (the default). The entrypoint kept only NET_ADMIN when it dropped to that user, so SYS_ADMIN was lost and every TRIM was refused whatever the container was granted. It is now kept the same way as NET_ADMIN, when the container has it; `HYDRANOS_CAP_SYS_ADMIN=0` drops it anyway.
+- "TRIM after drain" works in the Docker image when the container is given `cap_add: [SYS_ADMIN]` and runs as PUID/PGID (the default). The entrypoint kept only NET_ADMIN when it dropped to that user, so SYS_ADMIN was lost and every TRIM was refused whatever the container was granted. It is now kept the same way as NET_ADMIN, when the container has it; `HYDRANOS_CAP_SYS_ADMIN=0` drops it anyway. A `--privileged` container has every capability, so it now keeps SYS_ADMIN as well as NET_ADMIN after the drop to PUID/PGID: set `HYDRANOS_CAP_SYS_ADMIN=0` to keep it as before, with NET_ADMIN only.
 - Benchmark: "Run now" of the speedtest also counted as a chart range button, so clicking it unselected the chart range and redrew the charts over an invalid span.
 - The Daylight theme: the Logs tab, the Incognito and Sign out icons, the footer, and the frames of cards and tables kept colours made for a dark background (white icons on white, a GitHub-dark log pane).
 - The search box of the settings found nothing: as soon as a letter was typed it stopped on the first setting of the Network tab (the SOCKS5 proxy fields, the interface per engine), which it could not read. Those settings are found by their name now, like the others.
