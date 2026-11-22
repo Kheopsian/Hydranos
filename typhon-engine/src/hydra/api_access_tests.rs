@@ -222,6 +222,11 @@ async fn every_route_but_the_open_ones_refuses_a_caller_with_no_key() {
     for (_, src) in merged {
         paths.extend(routes_in(fn_body(src, "pub fn routes()")));
     }
+    // The qBittorrent `/api/v2` shim is merged from its own file.
+    paths.extend(routes_in(fn_body(
+        include_str!("api_qbit.rs"),
+        "pub(super) fn routes()",
+    )));
     assert!(paths.len() > 250, "only {} routes found", paths.len());
     for open in OPEN {
         assert!(
