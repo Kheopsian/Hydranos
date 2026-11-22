@@ -563,12 +563,12 @@ async function promptLogin(reason) {
     const ov = document.createElement("div");
     ov.className = "modal-overlay";
     ov.innerHTML = `<div class="modal-box">
-        <h3>Hydranos login</h3>
+        <h3>${t("Hydranos login")}</h3>
         <p class="modal-desc" id="login-msg">${esc(reason || "Sign in to continue.")}</p>
-        <input type="text" id="login-user" placeholder="Username" autocomplete="username" value="admin" style="width:100%;margin-bottom:8px">
-        <input type="password" id="login-pass" placeholder="Password" autocomplete="current-password" style="width:100%">
+        <input type="text" id="login-user" placeholder="${t("Username")}" autocomplete="username" value="admin" style="width:100%;margin-bottom:8px">
+        <input type="password" id="login-pass" placeholder="${t("Password")}" autocomplete="current-password" style="width:100%">
         <div class="modal-actions">
-            <button class="btn-primary" id="login-go">Sign in</button>
+            <button class="btn-primary" id="login-go">${t("Sign in")}</button>
         </div>
     </div>`;
     document.body.appendChild(ov);
@@ -592,7 +592,7 @@ async function promptLogin(reason) {
             localStorage.setItem("hydra_api_key", d.api_key);
             location.reload();
         } catch (err) {
-            msg.textContent = "Network error: " + err.message;
+            msg.textContent = t("Network error: {msg}", { msg: err.message });
             msg.style.color = "var(--accent-red)";
         }
     };
@@ -609,11 +609,11 @@ function promptApiKey(reason) {
     const ov = document.createElement("div");
     ov.className = "modal-overlay";
     ov.innerHTML = `<div class="modal-box">
-        <h3>API key</h3>
+        <h3>${t("API key")}</h3>
         <p class="modal-desc">${esc(reason || "Enter the daemon API key (config: [daemon] api_key).")}</p>
         <input type="text" id="apikey-input" placeholder="X-Api-Key" value="${esc(API_KEY || "")}" autocomplete="off" spellcheck="false" style="width:100%">
         <div class="modal-actions">
-            <button class="btn-primary" id="apikey-save">Save &amp; reload</button>
+            <button class="btn-primary" id="apikey-save">${t("Save & reload")}</button>
         </div>
     </div>`;
     document.body.appendChild(ov);
@@ -652,7 +652,7 @@ function importWizard(opts) {
     const close = () => { ov.remove(); _importOpen = false; };
 
     function stepSource() {
-        box.innerHTML = `<h3>Import an existing library</h3>
+        box.innerHTML = `<h3>${t("Import an existing library")}</h3>
             <p class="modal-desc">Hydranos seeds the data already on your disk, completed torrents skip the hash-check, so nothing is re-downloaded.</p>
             <div style="display:flex;gap:8px;margin:12px 0">
                 <button class="btn-primary" id="src-qbit" style="flex:1">qBittorrent</button>
@@ -739,8 +739,8 @@ function importWizard(opts) {
             <label style="display:block;margin-bottom:6px"><input type="checkbox" id="tr-stopped" checked> ${t("Import everything stopped, no announce until you start them")}</label>
             <p class="modal-desc" id="tr-msg2" style="min-height:1em"></p>
             <div class="modal-actions">
-                <button id="tr-back2">Back</button>
-                <button class="btn-primary" id="tr-go">Import ${d.total} torrents</button>
+                <button id="tr-back2">${t("Back")}</button>
+                <button class="btn-primary" id="tr-go">${t("Import {n} torrents", { n: d.total })}</button>
             </div>`;
         box.querySelector("#tr-back2").onclick = () => stepTransmission({ dir: req.dir });
         box.querySelector("#tr-go").onclick = async () => {
@@ -1735,7 +1735,7 @@ function renderRaceTable() {
 
     const torrents = _raceTorrents || [];
     if (torrents.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="${_visibleCols("race-table").length}" class="empty">No race torrents</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="${_visibleCols("race-table").length}" class="empty">${t("No race torrents")}</td></tr>`;
         if (raceCount) raceCount.textContent = "";
         return;
     }
@@ -1769,7 +1769,7 @@ function renderRaceTable() {
     if (raceCount) raceCount.textContent = query ? `${fmtInt(visible.length)} / ${fmtInt(torrents.length)}` : "";
 
     if (visible.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="${_visibleCols("race-table").length}" class="empty">No match</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="${_visibleCols("race-table").length}" class="empty">${t("No match")}</td></tr>`;
     } else {
         tbody.innerHTML = visible.map(t => {
             return `<tr class="t-row clickable" data-hash="${esc(t.info_hash)}" data-mode="race" data-agent="${esc(t.agent || 'local')}" onclick="handleRowClick(event,this.dataset.hash,'race')" oncontextmenu="handleRowContextMenu(event,this.dataset.hash,'race')">${renderRowCells("race-table", t)}</tr>`;
@@ -2036,7 +2036,7 @@ async function loadTorrentContent(infoHash, bodyId, summaryId, agent, mode, quie
     if (!body) return;
     const req = ++_contentReq;
     if (!quiet) {
-        body.innerHTML = `<div class="tc-empty">Loading…</div>`;
+        body.innerHTML = `<div class="tc-empty">${t("Loading…")}</div>`;
         if (summary) summary.textContent = "";
     }
     let files, avail, order;
@@ -2054,12 +2054,12 @@ async function loadTorrentContent(infoHash, bodyId, summaryId, agent, mode, quie
         order = { sequential: !!d.sequential, first_last_piece: !!d.first_last_piece, complete: !!d.complete };
     } catch (err) {
         if (req !== _contentReq) return;
-        body.innerHTML = `<div class="tc-empty">Could not read the file list, ${esc(err.message || String(err))}</div>`;
+        body.innerHTML = `<div class="tc-empty">${t("Could not read the file list: {msg}", { msg: esc(err.message || String(err)) })}</div>`;
         return;
     }
     if (req !== _contentReq) return;
     if (files.length === 0) {
-        body.innerHTML = `<div class="tc-empty">The engine reports no files for this torrent.</div>`;
+        body.innerHTML = `<div class="tc-empty">${t("The engine reports no files for this torrent.")}</div>`;
         return;
     }
     const total = files.reduce((a, f) => a + (f.size || 0), 0);
@@ -2197,7 +2197,7 @@ async function loadTimeline(infoHash) {
         if (events.length === 0 && snapshots.length === 0) {
             document.getElementById("tl-result").style.display = "none";
             document.getElementById("tl-meta").style.display = "none";
-            document.getElementById("tl-events-log").innerHTML = '<div class="empty">No timeline data</div>';
+            document.getElementById("tl-events-log").innerHTML = '<div class="empty">' + t("No timeline data") + '</div>';
             return;
         }
 
@@ -2489,7 +2489,7 @@ function renderTimelinePeers(snapshot, t0) {
     document.getElementById("tl-peer-time").textContent = `T+${formatDuration(snapshot.ts - t0)}`;
     const tbody = document.getElementById("tl-peer-tbody");
     if (!snapshot.peers_json || snapshot.peers_json === "[]") {
-        tbody.innerHTML = '<tr><td colspan="5" class="empty">No peer data</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="5" class="empty">' + t("No peer data") + '</td></tr>';
         return;
     }
     try {
@@ -2508,7 +2508,7 @@ function renderTimelinePeers(snapshot, t0) {
             </tr>`;
         }).join("");
     } catch(_) {
-        tbody.innerHTML = '<tr><td colspan="5" class="empty">Parse error</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="5" class="empty">' + t("Parse error") + '</td></tr>';
     }
 }
 
@@ -2518,7 +2518,7 @@ function renderTimelineEvents(events, t0) {
     const container = document.getElementById("tl-events-log");
 
     if (events.length === 0) {
-        container.innerHTML = '<div class="empty">No events</div>';
+        container.innerHTML = '<div class="empty">' + t("No events") + '</div>';
         return;
     }
 
@@ -2656,7 +2656,7 @@ async function refreshDetail() {
             if (d.trackers && d.trackers.length > 0) {
                 ttbody.innerHTML = d.trackers.map(trackerRowHtml).join("");
             } else {
-                ttbody.innerHTML = '<tr><td colspan="5" class="empty">No trackers</td></tr>';
+                ttbody.innerHTML = '<tr><td colspan="5" class="empty">' + t("No trackers") + '</td></tr>';
             }
         });
     } catch (e) {
@@ -3064,7 +3064,7 @@ async function _showTagPicker(ev) {
         `<div class="ctx-separator"></div>` +
         `<div style="padding:6px 10px"><input type="text" id="ctx-new-tag" placeholder="${t("new tag + Enter")}" style="width:100%" onclick="event.stopPropagation()" onkeydown="if(event.key==='Enter'){event.preventDefault();_addNewTagSelected();}"></div>` +
         `<div class="ctx-separator"></div>` +
-        `<div class="ctx-scroll">${rows || '<div class="ctx-item" style="opacity:.6">No tags yet</div>'}</div>`, anchor);
+        `<div class="ctx-scroll">${rows || '<div class="ctx-item" style="opacity:.6">' + t("No tags yet") + '</div>'}</div>`, anchor);
 }
 
 async function _applyTagOp(tags, op) {
@@ -3515,31 +3515,31 @@ function _renderHoardCounts() {
     const nTrackerErr = F ? (F.tracker_error || 0) : 0;
     const nTorrentErr = F ? (F.torrent_error || 0) : 0;
     const nPinned = F ? (F.pinned || 0) : 0;
-    document.querySelector(".chip-state[data-state='']").innerHTML = `All ${_chipCount("state:", nAll)}`;
+    document.querySelector(".chip-state[data-state='']").innerHTML = `${t("All")} ${_chipCount("state:", nAll)}`;
     // Seed only is a seeder that never downloads the rest: it still serves
     // what it holds, so the Seeding chip covers it too.
     const nSeeding = (stateCounts["seeding"] || 0) + (stateCounts["seed_only"] || 0);
-    document.querySelector(".chip-state[data-state='seeding']").innerHTML = `Seeding ${_chipCount("state:seeding", nSeeding)}`;
-    document.querySelector(".chip-state[data-state='__active__']").innerHTML = `Actively Seeding ${_chipCount("state:__active__", nActive)}`;
-    document.querySelector(".chip-state[data-state='downloading']").innerHTML = `Downloading ${_chipCount("state:downloading", stateCounts["downloading"] || 0)}`;
-    document.querySelector(".chip-state[data-state='__pinned__']").innerHTML = `Forced ${_chipCount("state:__pinned__", nPinned)}`;
+    document.querySelector(".chip-state[data-state='seeding']").innerHTML = `${t("Seeding")} ${_chipCount("state:seeding", nSeeding)}`;
+    document.querySelector(".chip-state[data-state='__active__']").innerHTML = `${t("Actively Seeding")} ${_chipCount("state:__active__", nActive)}`;
+    document.querySelector(".chip-state[data-state='downloading']").innerHTML = `${t("Downloading")} ${_chipCount("state:downloading", stateCounts["downloading"] || 0)}`;
+    document.querySelector(".chip-state[data-state='__pinned__']").innerHTML = `${t("Forced")} ${_chipCount("state:__pinned__", nPinned)}`;
     // Stopped is the user's doing, Queued is a scheduler's. Both are halted,
     // and telling them apart is the whole point of the two chips.
-    document.querySelector(".chip-state[data-state='stopped']").innerHTML = `Stopped ${_chipCount("state:stopped", stateCounts["stopped"] || 0)}`;
-    document.querySelector(".chip-state[data-state='queued']").innerHTML = `Queued ${_chipCount("state:queued", stateCounts["queued"] || 0)}`;
-    document.querySelector(".chip-state[data-state='checking_files']").innerHTML = `Checking ${_chipCount("state:checking_files", stateCounts["checking_files"] || 0)}`;
+    document.querySelector(".chip-state[data-state='stopped']").innerHTML = `${t("Stopped")} ${_chipCount("state:stopped", stateCounts["stopped"] || 0)}`;
+    document.querySelector(".chip-state[data-state='queued']").innerHTML = `${t("Queued")} ${_chipCount("state:queued", stateCounts["queued"] || 0)}`;
+    document.querySelector(".chip-state[data-state='checking_files']").innerHTML = `${t("Checking")} ${_chipCount("state:checking_files", stateCounts["checking_files"] || 0)}`;
     {
         // Counted by the server like the chip: the waiting ones of the whole
         // library, not of this page.
         const nChecking = stateCounts["checking_files"] || 0;
         const nWaiting = Math.min(F.check_waiting || 0, nChecking);
         const pill = v => document.querySelector(`.chip-check[data-check='${v}']`);
-        if (pill("")) pill("").innerHTML = `All ${_chipCount("check:", nChecking)}`;
-        if (pill("__check_reading__")) pill("__check_reading__").innerHTML = `Reading ${_chipCount("check:reading", nChecking - nWaiting)}`;
-        if (pill("__check_waiting__")) pill("__check_waiting__").innerHTML = `Waiting ${_chipCount("check:waiting", nWaiting)}`;
+        if (pill("")) pill("").innerHTML = `${t("All")} ${_chipCount("check:", nChecking)}`;
+        if (pill("__check_reading__")) pill("__check_reading__").innerHTML = `${t("Reading")} ${_chipCount("check:reading", nChecking - nWaiting)}`;
+        if (pill("__check_waiting__")) pill("__check_waiting__").innerHTML = `${t("Waiting")} ${_chipCount("check:waiting", nWaiting)}`;
     }
-    document.querySelector(".chip-state[data-state='__tracker_err__']").innerHTML = `Tracker Error ${_chipCount("state:__tracker_err__", nTrackerErr)}`;
-    document.querySelector(".chip-state[data-state='__error__']").innerHTML = `Error ${_chipCount("state:__error__", nTorrentErr)}`;
+    document.querySelector(".chip-state[data-state='__tracker_err__']").innerHTML = `${t("Tracker Error")} ${_chipCount("state:__tracker_err__", nTrackerErr)}`;
+    document.querySelector(".chip-state[data-state='__error__']").innerHTML = `${t("Error")} ${_chipCount("state:__error__", nTorrentErr)}`;
 
     const resetBtn = document.getElementById("hoard-reset-filters");
     if (resetBtn) {
@@ -3557,13 +3557,13 @@ function _renderHoardCounts() {
     const container = document.getElementById("hoard-cat-chips");
     if (container) {
         let html = cats.map(c =>
-            `<button class="chip chip-cat${(catCounts[c] || 0) ? "" : " chip-orphan"}${_hoardCatInc.includes(c) ? " active" : ""}${_hoardCatExc.includes(c) ? " excluded" : ""}" data-cat="${esc(c)}" onclick="setHoardCatFilter(this,this.dataset.cat)" oncontextmenu="setHoardCatFilter(this,this.dataset.cat,true);return false" title="Click to include, right-click to exclude">${esc(incoCat(c))} ${_chipCount("cat:" + c, catCounts[c] || 0)}</button>`
+            `<button class="chip chip-cat${(catCounts[c] || 0) ? "" : " chip-orphan"}${_hoardCatInc.includes(c) ? " active" : ""}${_hoardCatExc.includes(c) ? " excluded" : ""}" data-cat="${esc(c)}" onclick="setHoardCatFilter(this,this.dataset.cat)" oncontextmenu="setHoardCatFilter(this,this.dataset.cat,true);return false" title="${t("Click to include, right-click to exclude")}">${esc(incoCat(c))} ${_chipCount("cat:" + c, catCounts[c] || 0)}</button>`
         ).join("");
         // Meta-filter: only meaningful when at least one real category exists and
         // some torrents lack one (e.g. after a category was deleted).
         if (cats.length > 0 && nUncat > 0) _hoardSeenChips.uncat = true;
         if (_hoardSeenChips.uncat || (cats.length > 0 && nUncat > 0) || _hoardCatInc.includes("__none__") || _hoardCatExc.includes("__none__")) {
-            html = `<button class="chip chip-cat chip-none${nUncat ? "" : " chip-orphan"}${_hoardCatInc.includes("__none__") ? " active" : ""}${_hoardCatExc.includes("__none__") ? " excluded" : ""}" data-cat="__none__" style="font-style:italic;opacity:.85" onclick="setHoardCatFilter(this,'__none__')" oncontextmenu="setHoardCatFilter(this,'__none__',true);return false" title="Click to include, right-click to exclude">Uncategorized ${_chipCount("cat:__none__", nUncat)}</button>` + html;
+            html = `<button class="chip chip-cat chip-none${nUncat ? "" : " chip-orphan"}${_hoardCatInc.includes("__none__") ? " active" : ""}${_hoardCatExc.includes("__none__") ? " excluded" : ""}" data-cat="__none__" style="font-style:italic;opacity:.85" onclick="setHoardCatFilter(this,'__none__')" oncontextmenu="setHoardCatFilter(this,'__none__',true);return false" title="${t("Click to include, right-click to exclude")}">${t("Uncategorized")} ${_chipCount("cat:__none__", nUncat)}</button>` + html;
         }
         container.innerHTML = html;
     }
@@ -3574,14 +3574,14 @@ function _renderHoardCounts() {
     const trkContainer = document.getElementById("hoard-tracker-chips");
     if (trkContainer) {
         let trkHtml = trks.map(h =>
-            `<button class="chip chip-tracker${(trkCounts[h] || 0) ? "" : " chip-orphan"}${_hoardTrackerInc.includes(h) ? " active" : ""}${_hoardTrackerExc.includes(h) ? " excluded" : ""}" data-tracker="${esc(h)}" onclick="setHoardTrackerFilter(this,this.dataset.tracker)" oncontextmenu="setHoardTrackerFilter(this,this.dataset.tracker,true);return false" title="Click to include, right-click to exclude">${esc(incoTracker(h))} ${_chipCount("tracker:" + h, trkCounts[h] || 0)}</button>`
+            `<button class="chip chip-tracker${(trkCounts[h] || 0) ? "" : " chip-orphan"}${_hoardTrackerInc.includes(h) ? " active" : ""}${_hoardTrackerExc.includes(h) ? " excluded" : ""}" data-tracker="${esc(h)}" onclick="setHoardTrackerFilter(this,this.dataset.tracker)" oncontextmenu="setHoardTrackerFilter(this,this.dataset.tracker,true);return false" title="${t("Click to include, right-click to exclude")}">${esc(incoTracker(h))} ${_chipCount("tracker:" + h, trkCounts[h] || 0)}</button>`
         ).join("");
         // First in the row, like Uncategorized and Untagged: a torrent with no
         // tracker at all was in no facet and matched by no filter, so the only
         // way to reach one was to already know its name.
         if (nNoTracker > 0) _hoardSeenChips.notracker = true;
         if (_hoardSeenChips.notracker || nNoTracker > 0 || _hoardTrackerInc.includes("__none__") || _hoardTrackerExc.includes("__none__")) {
-            trkHtml = `<button class="chip chip-tracker chip-none${nNoTracker ? "" : " chip-orphan"}${_hoardTrackerInc.includes("__none__") ? " active" : ""}${_hoardTrackerExc.includes("__none__") ? " excluded" : ""}" data-tracker="__none__" style="font-style:italic;opacity:.85" onclick="setHoardTrackerFilter(this,'__none__')" oncontextmenu="setHoardTrackerFilter(this,'__none__',true);return false" title="Click to include, right-click to exclude">No tracker ${_chipCount("tracker:__none__", nNoTracker)}</button>` + trkHtml;
+            trkHtml = `<button class="chip chip-tracker chip-none${nNoTracker ? "" : " chip-orphan"}${_hoardTrackerInc.includes("__none__") ? " active" : ""}${_hoardTrackerExc.includes("__none__") ? " excluded" : ""}" data-tracker="__none__" style="font-style:italic;opacity:.85" onclick="setHoardTrackerFilter(this,'__none__')" oncontextmenu="setHoardTrackerFilter(this,'__none__',true);return false" title="${t("Click to include, right-click to exclude")}">${t("No tracker")} ${_chipCount("tracker:__none__", nNoTracker)}</button>` + trkHtml;
         }
         trkContainer.innerHTML = trkHtml;
     }
@@ -3612,12 +3612,12 @@ function _renderHoardCounts() {
     const tagContainer = document.getElementById("hoard-tag-chips");
     if (tagContainer) {
         let html = tagNames.map(tg =>
-            `<button class="chip chip-tag${(tagCounts[tg] || 0) ? "" : " chip-orphan"}${_hoardTagInc.includes(tg) ? " active" : ""}${_hoardTagExc.includes(tg) ? " excluded" : ""}" data-tag="${esc(tg)}" onclick="setHoardTagFilter(this,this.dataset.tag)" oncontextmenu="setHoardTagFilter(this,this.dataset.tag,true);return false" title="Click to include, right-click to exclude">${esc(tg)} ${_chipCount("tag:" + tg, tagCounts[tg] || 0)}</button>`
+            `<button class="chip chip-tag${(tagCounts[tg] || 0) ? "" : " chip-orphan"}${_hoardTagInc.includes(tg) ? " active" : ""}${_hoardTagExc.includes(tg) ? " excluded" : ""}" data-tag="${esc(tg)}" onclick="setHoardTagFilter(this,this.dataset.tag)" oncontextmenu="setHoardTagFilter(this,this.dataset.tag,true);return false" title="${t("Click to include, right-click to exclude")}">${esc(tg)} ${_chipCount("tag:" + tg, tagCounts[tg] || 0)}</button>`
         ).join("");
         // Untagged meta-filter: only when tags are actually in use.
         if (tagNames.length > 0 && nUntagged > 0) _hoardSeenChips.untagged = true;
         if (_hoardSeenChips.untagged || (tagNames.length > 0 && nUntagged > 0) || _hoardTagInc.includes("__none__") || _hoardTagExc.includes("__none__")) {
-            html = `<button class="chip chip-tag chip-none${nUntagged ? "" : " chip-orphan"}${_hoardTagInc.includes("__none__") ? " active" : ""}${_hoardTagExc.includes("__none__") ? " excluded" : ""}" data-tag="__none__" style="font-style:italic;opacity:.85" onclick="setHoardTagFilter(this,'__none__')" oncontextmenu="setHoardTagFilter(this,'__none__',true);return false" title="Click to include, right-click to exclude">Untagged ${_chipCount("tag:__none__", nUntagged)}</button>` + html;
+            html = `<button class="chip chip-tag chip-none${nUntagged ? "" : " chip-orphan"}${_hoardTagInc.includes("__none__") ? " active" : ""}${_hoardTagExc.includes("__none__") ? " excluded" : ""}" data-tag="__none__" style="font-style:italic;opacity:.85" onclick="setHoardTagFilter(this,'__none__')" oncontextmenu="setHoardTagFilter(this,'__none__',true);return false" title="${t("Click to include, right-click to exclude")}">${t("Untagged")} ${_chipCount("tag:__none__", nUntagged)}</button>` + html;
         }
         tagContainer.innerHTML = html;
     }
@@ -3646,10 +3646,24 @@ function _renderHoardStatsHeader(data) {
             peerText = t("{n}/{swarm} peers ({pct}%)", { n: fmtInt(peers), swarm: formatCount(swarm), pct: peerPct });
         }
 
-    document.getElementById("hoard-summary-text").textContent =
-        t("{total} torrents: {up} uploading, {withPeers} with peers, {peers}. {announced}", {
-            total: fmtInt(data.total_torrents), up: fmtInt(data.torrents_uploading),
-            withPeers: fmtInt(data.torrents_with_peers), peers: peerText, announced: annText });
+    // One figure per cell of the strip, as Race shows its own. The share of
+    // the swarm and the announce count go in a small line and the tooltip:
+    // the big figure stays a number that can be compared across polls.
+    const set = (id, html, title) => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        el.innerHTML = html;
+        el.parentElement.title = title || "";
+    };
+    set("hoard-st-total", fmtInt(data.total_torrents));
+    set("hoard-st-up", fmtInt(data.torrents_uploading));
+    set("hoard-st-withpeers", fmtInt(data.torrents_with_peers));
+    set("hoard-st-peers",
+        fmtInt(peers) + (swarm > 0 ? ` <small>/ ${esc(formatCount(swarm))}</small>` : ""),
+        peerText);
+    set("hoard-st-ann",
+        annPct + "&nbsp;%" + (annPct < 100 ? ` <small>${fmtInt(announced)} / ${fmtInt(data.total_torrents)}</small>` : ""),
+        annText);
 }
 
 // Called on tab activation, hash change, or page load. Live updates flow
@@ -3889,7 +3903,7 @@ async function updateNodes() {
         const tb = document.getElementById("local-engines-tbody");
         if (tb) {
             tb.innerHTML = (!engines || !engines.length)
-                ? `<tr><td colspan="8" class="empty">No engine</td></tr>`
+                ? `<tr><td colspan="8" class="empty">${t("No engine")}</td></tr>`
                 : engines.map(e => {
                     // race and hoard come from the [race] and [hoard] sections
                     // every install has, not from a block that can be dropped.
@@ -3904,7 +3918,7 @@ async function updateNodes() {
                         ? `<span class="sev sev-green"></span><span class="sev-label">listening</span>`
                         : `<span class="sev sev-red"></span><span class="sev-label">not listening</span>`}</td>
                      <td>${e.torrents ?? 0}</td>
-                     <td>${removable ? `<button class="btn-small" data-id="${esc(e.id)}" onclick="removeEngine(this.dataset.id)">Remove</button>` : ""}</td>
+                     <td>${removable ? `<button class="btn-small" data-id="${esc(e.id)}" onclick="removeEngine(this.dataset.id)">${t("Remove")}</button>` : ""}</td>
                    </tr>`;
                   }).join("");
         }
@@ -3915,7 +3929,7 @@ async function updateNodes() {
         const tb = document.getElementById("nodes-tbody");
         if (!tb) return;
         if (!nodes || !nodes.length) {
-            tb.innerHTML = `<tr><td colspan="7" class="empty">No other node</td></tr>`;
+            tb.innerHTML = `<tr><td colspan="7" class="empty">${t("No other node")}</td></tr>`;
             return;
         }
         tb.innerHTML = nodes.map(n => {
@@ -3926,7 +3940,7 @@ async function updateNodes() {
                 ? `<span class="sev sev-green"></span><span class="sev-label">online</span>`
                 : `<span class="sev sev-red"></span><span class="sev-label">${esc(h.error || "offline")}</span>`;
             const open = h.online
-                ? `<button class="btn-small" data-name="${esc(n.name)}" onclick="openNode(this.dataset.name)">Open</button>`
+                ? `<button class="btn-small" data-name="${esc(n.name)}" onclick="openNode(this.dataset.name)">${t("Open")}</button>`
                 : "";
             return `<tr>
                 <td><strong>${esc(n.name)}</strong></td>
@@ -3991,7 +4005,7 @@ async function saveEngine() {
         hideEngineForm();
         if (res && res.restart_required) {
             const b = document.getElementById("engine-restart-banner");
-            if (b) b.style.display = "block";
+            if (b) b.style.display = "flex";
         }
         await updateNodes();
     } catch (e) {
@@ -4006,7 +4020,7 @@ async function removeEngine(id) {
         const res = await api("/api/engines/" + encodeURIComponent(id), { method: "DELETE" });
         if (res && res.restart_required) {
             const b = document.getElementById("engine-restart-banner");
-            if (b) b.style.display = "block";
+            if (b) b.style.display = "flex";
         }
     } catch (e) {
         hydraNotify(String(e.message || e));
@@ -5882,7 +5896,7 @@ async function refreshHoardDetail() {
             if (d.trackers && d.trackers.length > 0) {
                 ttbody.innerHTML = d.trackers.map(trackerRowHtml).join("");
             } else {
-                ttbody.innerHTML = '<tr><td colspan="5" class="empty">No trackers</td></tr>';
+                ttbody.innerHTML = '<tr><td colspan="5" class="empty">' + t("No trackers") + '</td></tr>';
             }
         });
     } catch (e) {
@@ -6228,7 +6242,7 @@ document.getElementById("add-torrent-form").addEventListener("submit", async (e)
         resultEl.style.display = "";
         clearTimeout(_addMsgTimer);
         _addMsgTimer = setTimeout(() => { resultEl.style.display = "none"; }, 6000);
-        btn.textContent = "Added";
+        btn.textContent = t("Added");
         setTimeout(() => { btn.textContent = btn.dataset.label || t("Add Torrent"); }, 1500);
 
         // Reset form
@@ -6313,8 +6327,8 @@ async function updateCategories(force) {
                 <td class="mono" style="font-size:12px">${esc(incoPath(cat.save_path))}</td>
                 <td>${cat.graduate_to ? '\u2192 ' + esc(incoCat(cat.graduate_to)) : '<span style="color:var(--text-muted)">\u2014</span>'}</td>
                 <td>
-                    <button class="btn-small" data-name="${esc(cat.name)}" onclick="editCategory(this.dataset.name)">Edit</button>
-                    <button class="btn-small btn-danger" data-name="${esc(cat.name)}" onclick="deleteCategory(this.dataset.name)">Delete</button>
+                    <button class="btn-small" data-name="${esc(cat.name)}" onclick="editCategory(this.dataset.name)">${t("Edit")}</button>
+                    <button class="btn-small btn-danger" data-name="${esc(cat.name)}" onclick="deleteCategory(this.dataset.name)">${t("Delete")}</button>
                 </td>
             </tr>`).join("");
 
@@ -6334,12 +6348,12 @@ async function updateCategories(force) {
                     <td><span style="color:var(--text-muted)">\u2014</span></td>
                     <td>
                         <button class="btn-small" data-i="${Number(i)}" onclick="adoptCategory(Number(this.dataset.i))">${t("Adopt")}</button>
-                        <button class="btn-small btn-danger" data-name="${esc(o.name)}" onclick="deleteCategory(this.dataset.name)">Delete</button>
+                        <button class="btn-small btn-danger" data-name="${esc(o.name)}" onclick="deleteCategory(this.dataset.name)">${t("Delete")}</button>
                     </td>
                 </tr>`).join("");
 
         const html = (catRows + orphanRows) ||
-            '<tr><td colspan="5" class="empty">No categories</td></tr>';
+            '<tr><td colspan="5" class="empty">' + t("No categories") + '</td></tr>';
         if (html !== _lastCategoryRows) {
             tbody.innerHTML = html;
             _lastCategoryRows = html;
@@ -6720,7 +6734,7 @@ async function _openFsDropdown() {
     }
 
     _positionFsDropdown();
-    dropdown.innerHTML = '<div class="fs-dir-item fs-empty">Loading…</div>';
+    dropdown.innerHTML = '<div class="fs-dir-item fs-empty">' + t("Loading…") + '</div>';
     dropdown.style.display = "block";
     try {
         const data = await api(`/api/fs/browse?path=${encodeURIComponent(parent)}`);
@@ -7818,10 +7832,21 @@ function _rpVolCard(v, i, histHtml) {
         + (v.trim_after_drain ? " checked" : "") + ' onchange="_rpVolSave(' + i + ',\'trim_after_drain\',this.checked)">'
         + '<span class="rp2-sl"></span></label>' + t("TRIM after drain")
         + '<span class="rp2-info">i<span class="rp2-tip" style="left:auto;right:0">' + esc(t("Tells the SSD which blocks the drain just freed. An SSD that is never trimmed treats deleted races as live data and can fall to a fraction of its write speed. Needs CAP_SYS_ADMIN; ZFS, network shares and hard disks refuse it.")) + "</span></span></div>"
-        + _rpTrimLast(v.last_trim) + "</div>"
+        // Only once the switch is on: a refusal is news to the one turning it
+        // on, and noise on every volume that never asked for a TRIM.
+        + (v.trim_after_drain && v.trim_blocked ? _rpTrimBlocked(v.trim_blocked) : _rpTrimLast(v.last_trim)) + "</div>"
         + '<div class="rp2-row rp2-drain-result" id="rp-res-' + i + '" style="display:none"></div>'
         + '<div class="rp2-hist" id="rp-hist-' + i + '"' + (histHtml === undefined ? ' style="display:none"' : "") + ">" + (histHtml || "") + "</div>"
         + "</div></div>";
+}
+// What forbids a TRIM before any drain has tried one, from the daemon's own
+// capabilities. Without it, a switch turned on in a container lacking
+// SYS_ADMIN looked fine until the first drain came back refused.
+function _rpTrimBlocked(code) {
+    const msg = code === "no_cap"
+        ? t("Not allowed: TRIM needs CAP_SYS_ADMIN. In Docker, add cap_add: [SYS_ADMIN] to the service, then recreate the container.")
+        : t("TRIM is not available on this system.");
+    return '<span class="rp2-warn" style="color:var(--accent-yellow)">&#9888; ' + esc(msg) + "</span>";
 }
 // The last trim, or why it was refused: a switch that is on and silently does
 // nothing is worse than no switch.
@@ -8856,8 +8881,8 @@ function _settingField(id, v, k) {
     if (k === "api_key") {
         return `<div class="sr-keygen">` +
             `<input type="text" id="${id}" value="${esc(String(v))}" class="sr-input">` +
-            `<button type="button" class="btn-small" data-field="${esc(id)}" onclick="genApiKey(this.dataset.field)" title="Generate random key">\u21bb</button>` +
-            `<button type="button" class="btn-small" data-field="${esc(id)}" onclick="copyField(this.dataset.field, this)" title="Copy">\u29c9</button>` +
+            `<button type="button" class="btn-small" data-field="${esc(id)}" onclick="genApiKey(this.dataset.field)" title="${t("Generate random key")}">\u21bb</button>` +
+            `<button type="button" class="btn-small" data-field="${esc(id)}" onclick="copyField(this.dataset.field, this)" title="${t("Copy")}">\u29c9</button>` +
             `</div>`;
     }
     if (typeof v === "boolean") {
@@ -8972,16 +8997,20 @@ async function updateSettings() {
                 body += `<div class="settings-section"><div class="settings-section-title">[${esc(path)}]</div>${rows}</div>`;
             }
             if (dom.id === "race" || dom.id === "hoard") {
-                body = `<p class="sr-desc" style="margin:0 0 12px">${t("Ports, interface and proxy live in the Network tab, which writes them as one coherent set.")}</p>` + body;
+                body = `<p class="sr-desc settings-panel-note" style="margin:0 0 12px">${t("Ports, interface and proxy live in the Network tab, which writes them as one coherent set.")}</p>` + body;
             }
             _tabsHtml += `<button type="button" class="settings-tab" data-domain="${esc(dom.id)}" onclick="showSettingsPanel(this.dataset.domain)"><span class="sg-title">${esc(t(dom.label))}</span> <span class="sg-count">${count}</span></button>`;
-            _panelsHtml += `<div class="settings-panel" data-domain="${dom.id}"><div class="settings-group-body">${body}</div>` +
-                `<div class="settings-save-bar"><button class="btn-primary" onclick="saveSettings()">${t("Save settings")}</button></div></div>`;
+            _panelsHtml += `<div class="settings-panel" data-domain="${dom.id}" data-label="${esc(t(dom.label))}"><div class="settings-group-body">${body}</div></div>`;
         }
         _tabsHtml += `<button type="button" class="settings-tab" data-domain="__import" onclick="showSettingsPanel('__import')"><span class="sg-title">${t("Import")}</span></button>`;
         _panelsHtml += `<div class="settings-panel" data-domain="__import"><div class="settings-import"><h3 style="margin:0 0 .5em">${t("Import from another client")}</h3><p class="sr-desc" style="margin:.4em 0 1em">${t("From <b>qBittorrent</b> (via its WebUI) or <b>Transmission</b> (by reading its config folder \u2014 it does not even need to be running). Seeds data already on disk (completed torrents skip the hash-check) \u2014 nothing is re-downloaded. Torrents stopped in the old client stay stopped. Already-present torrents are skipped, so it is safe to re-run.")}</p><button class="btn-primary" onclick="importFromQbit()">${t("Import\u2026")}</button></div></div>`;
-        html += `<div class="settings-tabs" id="settings-tabs">${_tabsHtml}</div><div class="settings-panels" id="settings-panels">${_panelsHtml}</div>`;
+        html += `<div class="settings-tabs" id="settings-tabs">${_tabsHtml}</div><div class="settings-panels" id="settings-panels">${_panelsHtml}</div>` +
+            `<div class="settings-save-bar" id="settings-save-bar"><button class="btn-primary" onclick="saveSettings()">${t("Save settings")}</button></div>`;
         editor.innerHTML = html;
+        // Search results are grouped by the tab they live in, headed by its
+        // name: the Network panel is built elsewhere and gets its label here.
+        const _netPanel = editor.querySelector('.settings-panel[data-domain="__network"]');
+        if (_netPanel) _netPanel.dataset.label = t("Network");
         {
             const _active = (_activeDomSaved === "__network" || (_activeDomSaved && buckets[_activeDomSaved] && buckets[_activeDomSaved].length)) ? _activeDomSaved : _firstDom;
             if (_active) showSettingsPanel(_active);
@@ -9019,6 +9048,7 @@ function showSettingsPanel(id) {
     document.querySelectorAll("#settings-panels .settings-panel").forEach((pn) => { pn.hidden = pn.dataset.domain !== id; });
     document.querySelectorAll("#settings-tabs .settings-tab").forEach((t) => { t.classList.toggle("active", t.dataset.domain === id); });
     localStorage.setItem("hydra_settings_tab", id);
+    _syncSettingsSaveBar();
 }
 
 window.addEventListener("beforeunload", (e) => {
@@ -9046,7 +9076,13 @@ function filterSettings() {
             let secVisible = 0;
             sec.querySelectorAll(".settings-row").forEach((r) => {
                 const advOk = showAdv || !r.dataset.adv;
-                const m = advOk && (!q || r.dataset.search.includes(q));
+                // The Network panel builds its rows by hand (_netField and the
+                // per-engine interfaces) without data-search. Reading
+                // `.includes` off undefined threw on the first of them and
+                // stopped the whole filter as soon as a letter was typed; those
+                // rows are matched on their visible text instead.
+                const hay = r.dataset.search ?? r.textContent.toLowerCase();
+                const m = advOk && (!q || hay.includes(q));
                 r.style.display = m ? "" : "none";
                 if (m) { secVisible++; shown++; }
             });
@@ -9059,6 +9095,22 @@ function filterSettings() {
     });
     const c = document.getElementById("settings-search-count");
     if (c) c.textContent = shown + (showAdv ? " settings" : " common");
+    const panels = document.getElementById("settings-panels");
+    if (panels) panels.classList.toggle("searching", searching);
+    _syncSettingsSaveBar();
+}
+
+// The one Save bar saves the fields of the generic panels. Network has its own
+// "Save this mode" (it writes the network keys as a set) and Import saves
+// nothing, so on those two tabs the bar would offer a button that does nothing
+// for what is shown. While searching, results come from any tab: it shows.
+function _syncSettingsSaveBar() {
+    const bar = document.getElementById("settings-save-bar");
+    if (!bar) return;
+    const panels = document.getElementById("settings-panels");
+    const searching = !!(panels && panels.classList.contains("searching"));
+    const active = localStorage.getItem("hydra_settings_tab");
+    bar.hidden = !searching && (active === "__network" || active === "__import");
 }
 
 function _readSettingField(id, orig) {
@@ -9807,7 +9859,7 @@ function _renderTrackerStatsTable(rows) {
     const tbody = document.getElementById("trkstats-tbody");
     if (!tbody) return;
     if (!rows.length) {
-        tbody.innerHTML = '<tr><td colspan="10" class="empty">No tracker stats yet</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="10" class="empty">' + t("No tracker stats yet") + '</td></tr>';
         return;
     }
     const byTracker = {};
@@ -12281,7 +12333,7 @@ async function updateWorkflows() {
     try {
         const rows = await api("/api/workflows");
         if (!rows.length) {
-            body.innerHTML = `<tr><td colspan="6" class="sr-desc">No workflow yet.</td></tr>`;
+            body.innerHTML = `<tr><td colspan="6" class="sr-desc">${t("No workflow yet.")}</td></tr>`;
         } else {
             body.innerHTML = rows.map(w => {
                 const acts = (w.then || []).map(a => a.type).join(", ");
@@ -12293,8 +12345,8 @@ async function updateWorkflows() {
                 // mean inventing a completion. Preview, in Edit, shows which
                 // downloads it would act on.
                 const runs = onEvent ? "" : `
-                        <button class="btn-small" data-id="${esc(w.id)}" onclick="runWorkflow(this.dataset.id, true)">Dry-run</button>
-                        <button class="btn-small" data-id="${esc(w.id)}" onclick="runWorkflow(this.dataset.id, false)">Run now</button>`;
+                        <button class="btn-small" data-id="${esc(w.id)}" onclick="runWorkflow(this.dataset.id, true)">${t("Dry-run")}</button>
+                        <button class="btn-small" data-id="${esc(w.id)}" onclick="runWorkflow(this.dataset.id, false)">${t("Run now")}</button>`;
                 return `<tr>
                     <td><input type="checkbox" ${w.enabled ? "checked" : ""}
                         data-id="${esc(w.id)}" onchange="toggleWorkflow(this.dataset.id, this.checked)"></td>
@@ -12303,8 +12355,8 @@ async function updateWorkflows() {
                     <td>${esc(last)}</td>
                     <td>${esc(acts)}</td>
                     <td>${runs}
-                        <button class="btn-small" data-id="${esc(w.id)}" onclick="editWorkflow(this.dataset.id)">Edit</button>
-                        <button class="btn-small" data-id="${esc(w.id)}" onclick="deleteWorkflow(this.dataset.id)">Delete</button>
+                        <button class="btn-small" data-id="${esc(w.id)}" onclick="editWorkflow(this.dataset.id)">${t("Edit")}</button>
+                        <button class="btn-small" data-id="${esc(w.id)}" onclick="deleteWorkflow(this.dataset.id)">${t("Delete")}</button>
                     </td>
                 </tr>`;
             }).join("");
@@ -12345,7 +12397,7 @@ async function loadWorkflowActivity() {
         const d = await api("/api/workflows/activity");
         const rows = d.activity || [];
         if (!rows.length) {
-            body.innerHTML = `<tr><td colspan="6" class="sr-desc">Nothing yet.</td></tr>`;
+            body.innerHTML = `<tr><td colspan="6" class="sr-desc">${t("Nothing yet.")}</td></tr>`;
             return;
         }
         body.innerHTML = rows.map(e => `<tr>
@@ -12528,7 +12580,7 @@ function addCondRow(cond, wrap) {
         ${_wfValueControl(f0, cond ? cond.value : "")}
         ${_wfForControl(cond ? cond.for : "")}
         <span class="sr-desc wf-c-hint"></span>
-        <button class="btn-cancel wf-row-del" onclick="this.parentElement.remove()" title="Remove this condition">Remove</button>`;
+        <button class="btn-cancel wf-row-del" onclick="this.parentElement.remove()" title="${t("Remove this condition")}">${t("Remove")}</button>`;
     wrap.appendChild(div);
     if (cond) div.querySelector(".wf-c-op").dataset.want = cond.op;
     if (cond && cond.tag) div.dataset.wantTag = cond.tag;
@@ -12799,7 +12851,7 @@ function addActionRow(act) {
         <select class="wf-a-type" onchange="syncActionRow(this)">${opts}</select>
         ${_wfArgControl(type, arg, act)}
         <span class="sr-desc wf-a-note">${esc(_wfActionNote(type))}</span>
-        <button class="btn-cancel wf-row-del" onclick="this.parentElement.remove()" title="Remove this action">Remove</button>`;
+        <button class="btn-cancel wf-row-del" onclick="this.parentElement.remove()" title="${t("Remove this action")}">${t("Remove")}</button>`;
     wrap.appendChild(div);
 }
 

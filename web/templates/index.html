@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Hydranos - Torrent Daemon</title>
     <link rel="icon" type="image/png" href="/static/hydra-logo.png">
-    <link rel="stylesheet" href="/static/style.css?v=1.5.31">
+    <link rel="stylesheet" href="/static/style.css?v=1.6.3">
     <!-- Before the stylesheet paints anything. app.js loads at the end of the
          body, so choosing the theme there means a dark flash on a light theme
          and a navy one on every other. Inline and tiny on purpose. -->
@@ -82,7 +82,7 @@
                 <span class="stat-value" id="header-exit-ip" style="font-size:13px">--</span>
             </div>
             {{end}}
-            <button id="incognito-toggle" type="button" onclick="toggleIncognito()" aria-label="Incognito" title="Anonymize names, categories & IPs for screenshots" style="background:none;border:none;cursor:pointer;color:#ffffff;padding:4px;display:flex;align-items:center">
+            <button id="incognito-toggle" class="icon-btn" type="button" onclick="toggleIncognito()" aria-label="Incognito" title="Anonymize names, categories & IPs for screenshots">
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/><line x1="3" y1="21" x2="21" y2="3"/></svg>
             </button>
             <!-- One vertex per engine, one polygon. Two labelled dots were
@@ -92,7 +92,7 @@
                     aria-label="Network of the engines" title="Network"></button>
             <!-- Sign out: forgets the key this browser holds and asks for
                  the password again. -->
-            <button id="logout-btn" type="button" onclick="logout()" aria-label="Sign out" title="Sign out" style="background:none;border:none;cursor:pointer;color:#ffffff;padding:4px;display:flex;align-items:center">
+            <button id="logout-btn" class="icon-btn" type="button" onclick="logout()" aria-label="Sign out" title="Sign out">
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
             </button>
         </div>
@@ -230,13 +230,15 @@
             <div class="section-header">
                 <h2>Race Torrents</h2>
             </div>
-            <div class="race-stats-bar">
-                <span>Downloading: <strong id="race-active-dl">0</strong></span>
-                <span>Uploading: <strong id="race-active-seeds">0</strong></span>
-                <span>Current UL: <strong id="race-current-ul">0 B/s</strong></span>
-                <span>Ratio: <strong id="race-session-ratio">0.00</strong></span>
-                <span>Grabbed: <strong id="race-session-grabbed">0</strong></span>
-                <span>Avg Share: <strong id="race-avg-share">-</strong></span>
+            <!-- The same strip as Hoard's: one figure per cell, the engine's
+                 colour on its edge. -->
+            <div class="engine-stats engine-race">
+                <div class="es"><span class="es-label">Downloading</span><strong id="race-active-dl">0</strong></div>
+                <div class="es"><span class="es-label">Uploading</span><strong id="race-active-seeds">0</strong></div>
+                <div class="es"><span class="es-label">Current UL</span><strong id="race-current-ul">0 B/s</strong></div>
+                <div class="es"><span class="es-label">Ratio</span><strong id="race-session-ratio">0.00</strong></div>
+                <div class="es"><span class="es-label">Grabbed</span><strong id="race-session-grabbed">0</strong></div>
+                <div class="es"><span class="es-label">Avg Share</span><strong id="race-avg-share">-</strong></div>
             </div>
             <!-- One card per VOLUME. The drain acts per filesystem, so the
                  panel is shaped like the thing it commands: a global bar over
@@ -333,15 +335,15 @@
                     </div>
                 </div>
 
-                <div class="card" style="margin-top:16px">
-                    <h3>Connected Peers</h3>
-
-                <div class="card" style="margin-top:12px" id="detail-pieces-card" style="display:none">
+                <div class="card" style="margin-top:16px" id="detail-pieces-card">
                     <h3>Pieces <small id="detail-pieces-info"></small></h3>
                     <div class="card-body" style="padding:8px">
                         <canvas id="detail-pieces-canvas" height="40" style="width:100%;image-rendering:pixelated"></canvas>
                     </div>
                 </div>
+
+                <div class="card" style="margin-top:16px">
+                    <h3>Connected Peers</h3>
                     <div class="peers-scroll"><table id="detail-peers-table">
                         <thead>
                             <tr>
@@ -450,9 +452,16 @@
         <section id="tab-hoard" class="tab-content">
             <div class="section-header">
                 <h2>Hoard Torrents</h2>
-                <div class="hoard-summary">
-                    <span id="hoard-summary-text"></span>
-                </div>
+            </div>
+            <!-- Was one sentence at the right of the title ("10 torrents: 0
+                 uploading, ..."), where Race had a strip of figures: the
+                 same engine summary, read two ways. Now the same strip. -->
+            <div class="engine-stats engine-hoard">
+                <div class="es"><span class="es-label">Torrents</span><strong id="hoard-st-total">-</strong></div>
+                <div class="es"><span class="es-label">Uploading</span><strong id="hoard-st-up">-</strong></div>
+                <div class="es"><span class="es-label">With peers</span><strong id="hoard-st-withpeers">-</strong></div>
+                <div class="es"><span class="es-label">Peers</span><strong id="hoard-st-peers">-</strong></div>
+                <div class="es"><span class="es-label">Announced</span><strong id="hoard-st-ann">-</strong></div>
             </div>
             <!-- The progress bar is gone. At 300k torrents "19 uploading" and
                  "945 with peers" are sub-pixel slivers: the bar read as full and
@@ -591,15 +600,15 @@
                         </div>
                     </div>
                 </div>
-                <div class="card" style="margin-top:16px">
-                    <h3>Connected Peers</h3>
-
-                <div class="card" style="margin-top:12px" id="h-detail-pieces-card" style="display:none">
+                <div class="card" style="margin-top:16px" id="h-detail-pieces-card">
                     <h3>Pieces <small id="h-detail-pieces-info"></small></h3>
                     <div class="card-body" style="padding:8px">
                         <canvas id="h-detail-pieces-canvas" height="40" style="width:100%;image-rendering:pixelated"></canvas>
                     </div>
                 </div>
+
+                <div class="card" style="margin-top:16px">
+                    <h3>Connected Peers</h3>
                     <div class="peers-scroll"><table id="h-detail-peers-table">
                         <thead><tr>
                             <th>IP</th><th>Client</th><th>Progress</th>
@@ -642,7 +651,9 @@
         <section id="tab-categories" class="tab-content">
             <div class="section-header">
                 <h2>Categories</h2>
-                <button class="btn-small" onclick="showCategoryForm()">+ New</button>
+                <div class="section-actions">
+                    <button class="btn-small btn-accent" onclick="showCategoryForm()">+ New</button>
+                </div>
             </div>
 
             <div id="category-form" class="card" style="display:none; margin-bottom:16px">
@@ -706,7 +717,7 @@
                 </div>
             </div>
 
-            <table id="categories-table">
+            <div class="card table-card"><table id="categories-table">
                 <thead>
                     <tr>
                         <th>Name</th>
@@ -719,7 +730,7 @@
                 <tbody id="categories-tbody">
                     <tr><td colspan="5" class="empty">No categories</td></tr>
                 </tbody>
-            </table>
+            </table></div>
         </section>
 
         <!-- Config -->
@@ -727,10 +738,12 @@
         <section id="tab-nodes" class="tab-content">
             <div class="section-header">
                 <h2>Nodes</h2>
-                <button class="btn-small" onclick="enrolNode()">+ Enrol a machine</button>
-                <button class="btn-small" onclick="showNodeForm()">+ Declare an existing one</button>
+                <div class="section-actions">
+                    <button class="btn-small" onclick="showNodeForm()">+ Declare an existing one</button>
+                    <button class="btn-small btn-accent" onclick="enrolNode()">+ Enrol a machine</button>
+                </div>
             </div>
-            <p class="sr-desc" style="margin:0 0 16px">
+            <p class="page-desc">
                 A node is a whole Hydranos. This one runs the engines listed below; the others are
                 separate instances reached over their own API. An engine is a session inside a node,
                 and a node can run as many as it has tunnels to leave by.
@@ -777,9 +790,9 @@
                 </div>
             </div>
 
-            <div class="section-header" style="margin-top:18px">
-                <h3 style="margin:0;font-size:15px">This node</h3>
-                <button class="btn-small" onclick="showEngineForm()">+ Add an engine</button>
+            <div class="subhead">
+                <h3>This node</h3>
+                <button class="btn-small btn-accent" onclick="showEngineForm()">+ Add an engine</button>
             </div>
             <div id="engine-form" class="card" style="display:none; margin-bottom:12px">
                 <div class="card-body">
@@ -808,36 +821,38 @@
                     <div id="en-result" class="result-msg"></div>
                 </div>
             </div>
-            <table id="local-engines-table">
+            <div class="card table-card"><table id="local-engines-table">
                 <thead>
                     <tr><th>Engine</th><th>Role</th><th>Listen port</th><th>Interface</th><th>IPv6</th><th>Socket</th><th>Torrents</th><th>Actions</th></tr>
                 </thead>
                 <tbody id="local-engines-tbody">
                     <tr><td colspan="8" class="empty">Loading...</td></tr>
                 </tbody>
-            </table>
-            <div id="engine-restart-banner" style="display:none;margin-top:8px;padding:8px;background:#3a2a00;border-radius:4px">
-                The config changed. Engines are built at boot, so this takes a restart.
-                <button class="btn-small" onclick="restartHydra()">Restart now</button>
+            </table></div>
+            <div id="engine-restart-banner" class="notice notice-warn" style="display:none">
+                <span>The config changed. Engines are built at boot, so this takes a restart.</span>
+                <button class="btn-small btn-accent" onclick="restartHydra()">Restart now</button>
             </div>
 
-            <h3 style="margin:26px 0 8px;font-size:15px">Other nodes</h3>
-            <table id="nodes-table">
+            <div class="subhead"><h3>Other nodes</h3></div>
+            <div class="card table-card"><table id="nodes-table">
                 <thead>
                     <tr><th>Name</th><th>URL</th><th>Version</th><th>Engines</th><th>Torrents</th><th>Status</th><th>Actions</th></tr>
                 </thead>
                 <tbody id="nodes-tbody">
                     <tr><td colspan="7" class="empty">No other node</td></tr>
                 </tbody>
-            </table>
+            </table></div>
         </section>
 
         <section id="tab-workflows" class="tab-content">
             <div class="section-header">
                 <h2>Workflows</h2>
-                <button class="btn-small" onclick="newWorkflow()">+ New workflow</button>
+                <div class="section-actions">
+                    <button class="btn-small btn-accent" onclick="newWorkflow()">+ New workflow</button>
+                </div>
             </div>
-            <p class="sr-desc" style="margin:0 0 16px">
+            <p class="page-desc">
                 Conditions in, actions out, checked on a timer or run the moment a download
                 completes. What people otherwise write as a script: file a torrent under another
                 category once it finishes, seed for two days then stop. A new workflow starts
@@ -869,7 +884,7 @@
                         </div>
                     </div>
 
-                    <h3 style="margin:16px 0 6px">When</h3>
+                    <h3 class="form-subhead">When</h3>
                     <p class="sr-desc wf-completed-only" style="margin:0 0 6px; display:none">
                         Once per download, when its last piece is verified: the moment its trackers
                         are told it completed. A torrent added with its data already on disk, or
@@ -883,13 +898,13 @@
                     </p>
                     <div id="wf-conds"></div>
 
-                    <h3 style="margin:16px 0 6px">Then</h3>
+                    <h3 class="form-subhead">Then</h3>
                     <div id="wf-actions"></div>
                     <button class="btn-small" onclick="addActionRow()">+ Action</button>
 
-                    <div class="cat-form-actions" style="margin-top:16px">
+                    <div class="cat-form-actions">
+                        <button class="btn-primary" onclick="saveWorkflow()">Save</button>
                         <button class="btn-small" onclick="previewWorkflow()">Preview</button>
-                        <button class="btn-small" onclick="saveWorkflow()">Save</button>
                         <button class="btn-cancel" onclick="hideWorkflowForm()">Cancel</button>
                     </div>
                     <div id="wf-result" class="result-msg"></div>
@@ -911,8 +926,8 @@
             </div>
             <p class="sr-desc" id="wf-links" style="margin:10px 0 0"></p>
 
-            <div class="section-header" style="margin-top:24px"><h2>Activity</h2></div>
-            <p class="sr-desc" style="margin:0 0 8px">
+            <div class="subhead"><h2>Activity</h2></div>
+            <p class="page-desc">
                 The last seven days. Refusals are kept with their reason: "why did my rule not
                 fire" is the question this answers.
             </p>
@@ -931,13 +946,13 @@
         <section id="tab-rss" class="tab-content">
             <div class="section-header">
                 <h2>RSS feeds</h2>
-                <div>
-                    <button class="btn-small" onclick="rssRefreshAll()">Refresh all</button>
+                <div class="section-actions">
                     <button class="btn-small" onclick="rssShowFeedForm(true)">URL help</button>
-                    <button class="btn-small" onclick="rssShowFeedForm()">+ Feed</button>
+                    <button class="btn-small" onclick="rssRefreshAll()">Refresh all</button>
+                    <button class="btn-small btn-accent" onclick="rssShowFeedForm()">+ Feed</button>
                 </div>
             </div>
-            <p class="sr-desc" style="margin:0 0 16px">Each feed is fetched on its own interval, by the way out of the engine its torrents go to (its tunnel, interface or proxy): a tracker's feed carries your passkey, and the tracker sees the address it is fetched from. An engine the kill switch keeps off the network fetches nothing, and the feed says so.</p>
+            <p class="page-desc">Each feed is fetched on its own interval, by the way out of the engine its torrents go to (its tunnel, interface or proxy): a tracker's feed carries your passkey, and the tracker sees the address it is fetched from. An engine the kill switch keeps off the network fetches nothing, and the feed says so.</p>
             <p class="result-msg error" id="rss-disabled" style="display:none">RSS is switched off by [rss] enabled = false: feeds are kept, nothing is fetched or added.</p>
 
             <div id="rss-feed-form" class="card" style="display:none; margin-bottom:16px">
@@ -981,8 +996,8 @@
                             <a class="rss-help-more" href="https://github.com/Kheopsian/Hydranos/blob/main/docs/RSS-FEEDS.md" target="_blank" rel="noopener noreferrer">Full guide</a>
                         </div>
                     </details>
-                    <div class="cat-form-actions" style="margin-top:16px">
-                        <button class="btn-small" onclick="rssSaveFeed()">Save</button>
+                    <div class="cat-form-actions">
+                        <button class="btn-primary" onclick="rssSaveFeed()">Save</button>
                         <button class="btn-cancel" onclick="rssHideFeedForm()">Cancel</button>
                     </div>
                     <div id="rss-feed-result" class="result-msg"></div>
@@ -1004,9 +1019,9 @@
             </div>
 
             <div id="rss-articles-box" style="display:none; margin-top:24px">
-                <div class="section-header">
+                <div class="subhead">
                     <h2 id="rss-articles-title">Articles</h2>
-                    <div>
+                    <div class="section-actions">
                         <label class="sr-desc">Download to category
                             <select id="rss-dl-category"></select>
                         </label>
@@ -1027,11 +1042,11 @@
                 <div id="rss-articles-result" class="result-msg"></div>
             </div>
 
-            <div class="section-header" style="margin-top:24px">
+            <div class="subhead">
                 <h2>Automatic download rules</h2>
-                <button class="btn-small" onclick="rssNewRule()">+ New rule</button>
+                <button class="btn-small btn-accent" onclick="rssNewRule()">+ New rule</button>
             </div>
-            <p class="sr-desc" style="margin:0 0 16px">qBittorrent's rules, read the same way: in Must contain, a space means AND and | means OR, * and ? are wildcards, case is ignored. The first rule that matches an unread article adds it, through the same path as any add: the category picks the engine and the folder. An article taken once is never taken again. What the rules added or refused, and why, is in the Workflows tab's activity, under "RSS: rule name".</p>
+            <p class="page-desc">qBittorrent's rules, read the same way: in Must contain, a space means AND and | means OR, * and ? are wildcards, case is ignored. The first rule that matches an unread article adds it, through the same path as any add: the category picks the engine and the folder. An article taken once is never taken again. What the rules added or refused, and why, is in the Workflows tab's activity, under "RSS: rule name".</p>
 
             <div id="rss-rule-form" class="card" style="display:none; margin-bottom:16px">
                 <div class="card-body">
@@ -1071,11 +1086,11 @@
                             <label><input type="checkbox" id="rss-rule-paused"> Add paused</label>
                         </div>
                     </div>
-                    <h3 style="margin:16px 0 6px">Feeds</h3>
+                    <h3 class="form-subhead">Feeds</h3>
                     <div id="rss-rule-feeds"></div>
-                    <div class="cat-form-actions" style="margin-top:16px">
+                    <div class="cat-form-actions">
+                        <button class="btn-primary" onclick="rssSaveRule()">Save</button>
                         <button class="btn-small" onclick="rssPreviewRule()">Preview</button>
-                        <button class="btn-small" onclick="rssSaveRule()">Save</button>
                         <button class="btn-cancel" onclick="rssHideRuleForm()">Cancel</button>
                     </div>
                     <div id="rss-rule-result" class="result-msg"></div>
@@ -1101,9 +1116,11 @@
         <section id="tab-trackers" class="tab-content">
             <div class="section-header">
                 <h2>Trackers</h2>
-                <button class="btn-small" onclick="showTrackerForm()">+ Manual host</button>
+                <div class="section-actions">
+                    <button class="btn-small btn-accent" onclick="showTrackerForm()">+ Manual host</button>
+                </div>
             </div>
-            <p class="sr-desc" style="margin:0 0 12px">Trackers we are actively announcing to (hot torrents only). Override the announce passkey, the announce IP family, or the seed obligation. Applies on the next announce, no restart.</p>
+            <p class="page-desc">Trackers we are actively announcing to (hot torrents only). Override the announce passkey, the announce IP family, or the seed obligation. Applies on the next announce, no restart.</p>
             <div id="trk-form" class="card" style="display:none;margin-bottom:16px">
                 <div class="card-body">
                     <div class="cat-form-grid">
@@ -1163,30 +1180,29 @@
             <!-- Listing trackers from the catalogue turned 15 rows into 91 on a
                  300k library: every public tracker baked into a stray .torrent
                  gets one. Hiding is a view choice, kept apart from Mute. -->
-            <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px;flex-wrap:wrap">
-                <span class="sr-desc">Hide unconfigured trackers holding fewer than</span>
-                <input type="number" id="trk-hide-below" value="10" min="1" step="1"
-                       style="width:70px" aria-label="torrent count">
-                <span class="sr-desc">torrents</span>
+            <div class="toolbar">
+                <span>Hide unconfigured trackers holding fewer than</span>
+                <input type="number" id="trk-hide-below" value="10" min="1" step="1" aria-label="torrent count">
+                <span>torrents</span>
                 <button class="btn-small" onclick="hideSmallTrackers()">Hide them</button>
-                <span id="trk-hide-note" class="sr-desc"></span>
+                <span id="trk-hide-note" class="toolbar-note"></span>
             </div>
-            <table id="trackers-table">
+            <div class="card table-card"><table id="trackers-table">
                 <thead>
                     <tr><th>Tracker</th><th>Torrents</th><th>Status</th><th>Passkey</th><th>Min seed</th><th>Announce</th><th>Errors (1h)</th><th>Actions</th></tr>
                 </thead>
                 <tbody id="trackers-tbody">
-                    <tr><td colspan="7" class="empty">No announces yet</td></tr>
+                    <tr><td colspan="8" class="empty">No announces yet</td></tr>
                 </tbody>
-            </table>
+            </table></div>
             <!-- A list of its own rather than rows mixed into the one above.
                  Finding the four you want to bring back among ninety is the
                  problem hiding was meant to solve, not one to hand back. -->
             <div id="trk-hidden-section" style="display:none;margin-top:18px">
-                <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap">
+                <div class="toolbar">
                     <button class="btn-small" id="trk-hidden-toggle" onclick="toggleHiddenTrackers()">Hidden trackers</button>
                     <button class="btn-small" onclick="unhideAllTrackers()">Unhide all</button>
-                    <span class="sr-desc">Still announced to, and out of the table and the tab badge above.</span>
+                    <span class="toolbar-note">Still announced to, and out of the table and the tab badge above.</span>
                 </div>
                 <table id="trk-hidden-table" style="display:none">
                     <thead>
@@ -1196,21 +1212,25 @@
                 </table>
             </div>
 
-            <div class="card" style="margin-top:20px">
-                <h3>Per-tracker stats</h3>
-                <p class="sr-desc" style="margin:0 0 12px">Upload/download split by tracker across all engines. Sampled every few seconds; cumulative totals are lifetime.</p>
-                <table id="trkstats-table">
+            <div class="subhead"><h3>Per-tracker stats</h3></div>
+            <p class="page-desc">Upload/download split by tracker across all engines. Sampled every few seconds; cumulative totals are lifetime.</p>
+            <div class="card table-card"><table id="trkstats-table">
                     <thead>
                         <tr><th>Tracker</th><th>Engine</th><th>&#8593; rate</th><th>&#8595; rate</th><th>Peers</th><th>Active/Total</th><th>Seed size</th><th>&#8593; total</th><th>&#8595; total</th><th>Ratio</th></tr>
                     </thead>
                     <tbody id="trkstats-tbody">
-                        <tr><td colspan="9" class="empty">No tracker stats yet</td></tr>
+                        <tr><td colspan="10" class="empty">No tracker stats yet</td></tr>
                     </tbody>
-                </table>
-                <div style="margin-top:18px">
-                    <label style="margin-right:8px">Tracker chart</label>
-                    <select id="trkstats-select" onchange="loadTrackerStatsChart(this.value)"></select>
-                    <div style="position:relative;height:260px;margin-top:12px"><canvas id="trkstats-chart"></canvas></div>
+                </table></div>
+            <div class="card" style="margin-top:16px">
+                <div class="card-head-row">
+                    <h3>Tracker chart</h3>
+                    <div class="toolbar" style="margin:0">
+                        <select id="trkstats-select" onchange="loadTrackerStatsChart(this.value)" aria-label="Tracker chart"></select>
+                    </div>
+                </div>
+                <div class="card-body">
+                    <div style="position:relative;height:260px"><canvas id="trkstats-chart"></canvas></div>
                 </div>
             </div>
         </section>
@@ -1219,7 +1239,17 @@
             <div class="section-header">
                 <h2>Configuration</h2>
             </div>
-            <div class="card">
+            <!-- Six cards on one long page: the bar stays put so each is one
+                 click away. Buttons, not #anchors: the hash is the tab. -->
+            <div class="config-nav" role="navigation" aria-label="Configuration">
+                <button type="button" onclick="document.getElementById('cfg-account').scrollIntoView({behavior:'smooth'})">Account</button>
+                <button type="button" onclick="document.getElementById('cfg-ipfilter').scrollIntoView({behavior:'smooth'})">IP filter</button>
+                <button type="button" onclick="document.getElementById('cfg-watch').scrollIntoView({behavior:'smooth'})">Watched folders</button>
+                <button type="button" onclick="document.getElementById('cfg-perso').scrollIntoView({behavior:'smooth'})">Personalisation</button>
+                <button type="button" onclick="document.getElementById('cfg-dedup').scrollIntoView({behavior:'smooth'})">Duplicate data</button>
+                <button type="button" onclick="document.getElementById('cfg-advanced').scrollIntoView({behavior:'smooth'})">Advanced settings (default.toml)</button>
+            </div>
+            <div class="card" id="cfg-account">
                 <h3>Account</h3>
                 <div class="card-body">
                     <div class="settings-row">
@@ -1229,7 +1259,7 @@
                     <div id="newpass-result" class="result-msg" style="margin-top:8px"></div>
                 </div>
             </div>
-            <div class="card">
+            <div class="card" id="cfg-ipfilter">
                 <h3>IP filter</h3>
                 <div class="card-body">
                     <p class="sr-desc" style="margin:0 0 10px">Addresses no connection is made with, in or out; a peer already connected is dropped when it becomes blocked. Block lists come from a file on this node or a URL (PeerGuardian P2P, eMule .dat or CIDR, gzip or zip); bans are addresses you named, and apply even with the lists off.</p>
@@ -1246,8 +1276,8 @@
                         <div class="sr-field"><input type="number" id="ipf-refresh" class="sr-input" min="1" value="24"><button class="btn-small btn-accent" onclick="saveIpFilter()" style="margin-left:6px">Save and load</button></div>
                     </div>
                     <div id="ipf-status" class="sr-desc" style="margin:8px 0"></div>
-                    <h4 style="margin:12px 0 6px">Bans</h4>
-                    <div style="display:flex;gap:6px;margin-bottom:6px">
+                    <h4 class="form-subhead">Bans</h4>
+                    <div class="toolbar">
                         <input type="text" id="ipf-ban-ip" class="sr-input" placeholder="203.0.113.7, 203.0.113.0/24 or a-b">
                         <input type="text" id="ipf-ban-reason" class="sr-input" placeholder="reason (optional)">
                         <button class="btn-small" onclick="addBan()">Ban</button>
@@ -1256,7 +1286,7 @@
                     <div id="ipf-result" class="result-msg" style="margin-top:8px"></div>
                 </div>
             </div>
-            <div class="card">
+            <div class="card" id="cfg-watch">
                 <h3>Watched folders</h3>
                 <div class="card-body">
                     <p class="sr-desc" style="margin:0 0 10px">A .torrent or .magnet file dropped in one of these folders is added in the folder's category, which decides the engine and the save path. Checked every 10 seconds; a file is read once it has stopped changing. Added files move to <code>added/</code>; a refused one is renamed <code>.invalid</code> with a <code>.txt</code> saying why. Nothing is deleted.</p>
@@ -1274,7 +1304,7 @@
             <!-- Personalisation. This browser only, applied instantly, saved to
                  localStorage: nothing here is a daemon setting, so nothing here
                  needs a restart or shows up in the dirty-settings count. -->
-            <div class="card">
+            <div class="card" id="cfg-perso">
                 <div class="card-header-row">
                     <h3>Personalisation</h3>
                     <button class="btn-small" onclick="resetPersonalisation()">Reset to defaults</button>
@@ -1303,7 +1333,7 @@
                  seen, because a torrent's piece hashes cover the bytes and not
                  the names. The action this card comments on is the method
                  picker, so the result line sits directly under it. -->
-            <div class="card">
+            <div class="card" id="cfg-dedup">
                 <div class="card-header-row">
                     <h3>Duplicate data</h3>
                 </div>
@@ -1338,7 +1368,7 @@
                     <div id="prealloc-result" class="result-msg" style="display:none;margin-top:8px"></div>
                 </div>
             </div>
-            <div class="card">
+            <div class="card" id="cfg-advanced">
                 <div class="card-header-row">
                     <h3>Advanced settings (default.toml)</h3>
                 </div>
@@ -1352,6 +1382,9 @@
 
         <!-- Benchmark -->
         <section id="tab-benchmark" class="tab-content">
+            <div class="section-header">
+                <h2>Benchmark</h2>
+            </div>
 
             <!-- Live metrics -->
             <div class="bm-metrics-grid">
@@ -1467,7 +1500,7 @@
             <div class="bm-vpn-section">
                 <div class="bm-vpn-header">
                     <h3 class="bm-compare-title">Speedtest</h3>
-                    <button class="bm-range-btn" id="vpn-run-btn" onclick="runVpnSpeedtest()">▶ Run now</button>
+                    <button class="btn-small btn-accent" id="vpn-run-btn" onclick="runVpnSpeedtest()">▶ Run now</button>
                 </div>
                 <div class="bm-vpn-cards">
                     <div class="bm-metric-card">
@@ -1554,7 +1587,7 @@
                             <select id="torrent-category" style="flex:1"></select>
                             <button type="button" class="btn-small" onclick="activateTab('categories');showCategoryForm()" title="Create a category">+ New</button>
                         </div>
-                        <div style="color:var(--text-secondary);font-size:12px;margin-top:4px">Sets the save path and mode automatically. Change them under Advanced.</div>
+                        <div class="form-hint">Sets the save path and mode automatically. Change them under Advanced.</div>
                     </div>
 
                     <div class="form-group" id="torrent-path-group">
@@ -1572,7 +1605,7 @@
                             <input type="checkbox" id="torrent-preview-enabled" checked>
                             <span>Preview contents before adding</span>
                         </label>
-                        <div style="color:var(--text-secondary);font-size:12px;margin-top:4px">Reads the selected .torrent files in your browser. Nothing is uploaded until you press Add.</div>
+                        <div class="form-hint">Reads the selected .torrent files in your browser. Nothing is uploaded until you press Add.</div>
                     </div>
 
                     <div class="form-group" id="magnet-group">
@@ -1580,8 +1613,8 @@
                         <input type="text" id="magnet-uri" placeholder="magnet:?xt=urn:btih:...">
                     </div>
 
-                    <details class="add-advanced" style="margin-bottom:16px">
-                        <summary style="cursor:pointer;color:var(--text-secondary)">Advanced, override mode &amp; save path</summary>
+                    <details class="add-advanced">
+                        <summary>Advanced, override mode &amp; save path</summary>
                         <div class="form-group" style="margin-top:12px">
                             <label>Mode</label>
                             <div class="mode-selector">
@@ -1600,7 +1633,7 @@
                                 <input type="checkbox" id="add-create-subfolder">
                                 <span>Put the payload in its own subfolder</span>
                             </label>
-                            <div style="color:var(--text-secondary);font-size:12px;margin-top:4px">Starts on the daemon setting (create_torrent_folder). A multi-file torrent always brings its own folder, so this only changes single-file ones, on the hoard agent.</div>
+                            <div class="form-hint">Starts on the daemon setting (create_torrent_folder). A multi-file torrent always brings its own folder, so this only changes single-file ones, on the hoard agent.</div>
                         </div>
 
                         <div class="form-group">
@@ -1608,23 +1641,23 @@
                                 <input type="checkbox" id="add-skip-recheck">
                                 <span>Skip the hash check, the data is already on disk</span>
                             </label>
-                            <div style="color:var(--text-secondary);font-size:12px;margin-top:4px">Seeds straight away instead of hashing the payload. The add is refused if a file is missing or the wrong size: it never falls back to downloading it.</div>
+                            <div class="form-hint">Seeds straight away instead of hashing the payload. The add is refused if a file is missing or the wrong size: it never falls back to downloading it.</div>
                         </div>
                         <div class="form-group">
                             <label class="preview-toggle">
                                 <input type="checkbox" id="add-start-paused">
                                 <span>Add without starting</span>
                             </label>
-                            <div style="color:var(--text-secondary);font-size:12px;margin-top:4px">The torrent is listed with its trackers but never announces and never connects, until you start it.</div>
+                            <div class="form-hint">The torrent is listed with its trackers but never announces and never connects, until you start it.</div>
                         </div>
                     </details>
 
                     <button type="submit" class="btn-primary" id="add-btn">Add Torrent</button>
                     <div id="add-result" class="result-msg"></div>
                 </form>
-                <div id="magnets-card" style="display:none; margin-top:20px">
-                    <h3 style="margin:0 0 6px">Magnets</h3>
-                    <p class="sr-desc" style="margin:0 0 8px">Waiting for their metadata from the swarm. Each appears in the list once it arrives; one nobody answers is retried a few times, then kept here with the reason.</p>
+                <div id="magnets-card" style="display:none">
+                    <h3 class="form-subhead">Magnets</h3>
+                    <p class="page-desc" style="margin-bottom:10px">Waiting for their metadata from the swarm. Each appears in the list once it arrives; one nobody answers is retried a few times, then kept here with the reason.</p>
                     <table class="data-table">
                         <thead><tr><th>Name</th><th>Engine</th><th>State</th><th></th></tr></thead>
                         <tbody id="magnets-list"></tbody>
@@ -1640,23 +1673,25 @@
         </section>
         <!-- Changelog -->
         <section id="tab-changelog" class="tab-content">
-            <div class="add-form-container">
+            <div class="section-header">
                 <h2>Changelog</h2>
-                <div id="changelog-body" class="changelog">Loading\u2026</div>
+            </div>
+            <div class="card changelog-card">
+                <div id="changelog-body" class="changelog">Loading…</div>
             </div>
         </section>
         <!-- Logs -->
         <section id="tab-jobs" class="tab-content">
             <div class="section-header">
                 <h2>Jobs</h2>
-                <div class="logs-controls">
-                    <label><input type="checkbox" id="jobs-active-only"> Active only</label>
-                    <button class="btn" onclick="loadJobs()">Refresh</button>
+                <div class="section-actions">
+                    <label class="settings-adv-toggle"><input type="checkbox" id="jobs-active-only"> Active only</label>
+                    <button class="btn-small" onclick="loadJobs()">Refresh</button>
                 </div>
             </div>
-            <p class="modal-desc">Long-running work: moving a torrent's data between filesystems keeps
+            <p class="page-desc">Long-running work: moving a torrent's data between filesystems keeps
                 running here, and the torrent keeps seeding while it does.</p>
-            <table id="jobs-table">
+            <div class="card table-card"><table id="jobs-table">
                 <thead>
                     <tr>
                         <th class="jt-state">State</th>
@@ -1671,12 +1706,14 @@
                 <tbody id="jobs-tbody">
                     <tr><td colspan="7">Loading...</td></tr>
                 </tbody>
-            </table>
+            </table></div>
         </section>
 
         <section id="tab-logs" class="tab-content">
-            <div class="add-form-container">
+            <div class="section-header">
                 <h2>Logs</h2>
+            </div>
+            <div>
                 <div class="logs-controls">
                     <!-- Modules, filled from the lines the server holds. The
                          3.x sources listed here (go, gin, engine:*) matched
@@ -1697,11 +1734,11 @@
                         <option value="24h">Last 24 h</option>
                     </select>
                     <input id="logs-q" type="text" placeholder="search text…">
-                    <button onclick="loadLogs()">Refresh</button>
                     <label class="logs-live"><input id="logs-tail" type="checkbox"> Live</label>
-                    <button onclick="copyLogs()">Copy</button>
-                    <button onclick="exportLogs()">Export</button>
-                    <a id="logs-issue" href="#" target="_blank" rel="noopener">Report issue</a>
+                    <button class="btn-small" onclick="loadLogs()">Refresh</button>
+                    <button class="btn-small" onclick="copyLogs()">Copy</button>
+                    <button class="btn-small" onclick="exportLogs()">Export</button>
+                    <a id="logs-issue" class="btn-small" href="#" target="_blank" rel="noopener">Report issue</a>
                 </div>
                 <pre id="logs-body" class="logs-view">Loading…</pre>
             </div>
@@ -1806,6 +1843,6 @@
     </div>
 
     <script src="/static/i18n.js?v=1.0.0"></script>
-    <script src="/static/app.js?v=1.6.128"></script>
+    <script src="/static/app.js?v=1.6.133"></script>
 </body>
 </html>

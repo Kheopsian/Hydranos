@@ -5290,6 +5290,9 @@ async fn get_drain_status(
                 "inherited": v.policy.inherited,
                 "trim_after_drain": crate::volumes::trim_enabled(&state, &v.id),
                 "last_trim": crate::volumes::last_trim(&state, &v.id),
+                // Why a TRIM would be refused before any drain tries one:
+                // "no_cap" (no CAP_SYS_ADMIN), "unsupported", or null.
+                "trim_blocked": crate::platform::trim_blocked().map(|b| b.code()),
             }));
         }
     }

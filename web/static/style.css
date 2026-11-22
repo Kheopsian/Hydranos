@@ -42,6 +42,17 @@ html[data-theme="abyss"] {
     --nav-bg: rgba(10, 14, 24, 0.7);
     --hairline-a: rgba(88, 166, 255, 0.5);
     --hairline-b: rgba(160, 210, 255, 0.9);
+    /* Shared by every theme: shapes, and surfaces derived from the palette,
+       so a theme block only ever names colours. Daylight overrides the
+       surfaces, the one theme where white-on-dark tints would vanish. */
+    --radius-sm: 6px;
+    --radius-lg: 12px;
+    --font-mono: ui-monospace, SFMono-Regular, "Cascadia Mono", Menlo, monospace;
+    --surface-sunken: rgba(0, 0, 0, 0.2);
+    --surface-raised: rgba(255, 255, 255, 0.05);
+    --border-strong: rgba(255, 255, 255, 0.16);
+    --accent: var(--accent-hoard);
+    --row-hover: color-mix(in srgb, var(--accent) 6%, transparent);
 }
 
 /* Slate: the same room with the lights off. No blue cast, for anyone who
@@ -169,6 +180,9 @@ html[data-theme="daylight"] {
     --nav-bg: rgba(255, 255, 255, 0.75);
     --hairline-a: rgba(31, 111, 235, 0.35);
     --hairline-b: rgba(31, 111, 235, 0.6);
+    --surface-sunken: rgba(10, 25, 50, 0.04);
+    --surface-raised: rgba(10, 25, 50, 0.04);
+    --border-strong: rgba(10, 25, 50, 0.24);
 }
 
 * {
@@ -482,9 +496,9 @@ main {
 }
 
 .card {
-    background: rgba(255, 255, 255, 0.03);
-    border: 1px solid rgba(255, 255, 255, 0.07);
-    border-radius: 12px;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
     overflow: hidden;
     backdrop-filter: blur(20px);
     -webkit-backdrop-filter: blur(20px);
@@ -543,8 +557,8 @@ main {
 table {
     width: 100%;
     border-collapse: collapse;
-    background: rgba(255, 255, 255, 0.03);
-    border: 1px solid rgba(255, 255, 255, 0.07);
+    background: var(--bg-card);
+    border: 1px solid var(--border);
     border-radius: var(--radius);
     overflow: hidden;
     backdrop-filter: blur(20px);
@@ -552,7 +566,7 @@ table {
 }
 
 thead {
-    background: rgba(0, 0, 0, 0.2);
+    background: var(--surface-sunken);
 }
 
 th {
@@ -605,7 +619,7 @@ td.empty {
 }
 
 tr:hover td {
-    background: rgba(88, 166, 255, 0.04);
+    background: var(--row-hover);
 }
 
 /* Progress bar */
@@ -808,37 +822,80 @@ tr:hover td {
     opacity: 0.6;
 }
 
-.hoard-summary {
-    font-variant-numeric: tabular-nums;
-    white-space: nowrap;
-}
-
 /* Section header */
 .section-header {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    margin-bottom: 16px;
+    flex-wrap: wrap;
+    gap: 8px 16px;
+    margin-bottom: 12px;
+    min-height: 32px;
 }
 
 .section-header h2 {
-    font-size: 18px;
-    font-weight: 600;
+    font-size: 20px;
+    font-weight: 700;
+    letter-spacing: -0.01em;
 }
 
-.race-stats-bar {
+/* Whatever a page offers to do, grouped on the right of its title. Pages
+   used to scatter these (two buttons straight in the header, a bare <div>,
+   a label in between), so the same kind of action sat somewhere else on
+   every tab. */
+.section-actions {
     display: flex;
-    gap: 24px;
-    padding: 8px 12px;
-    margin-bottom: 12px;
-    background: var(--card-bg, #1e1e2e);
-    border-radius: 6px;
-    font-size: 13px;
-    color: var(--text-secondary, #a0a0b0);
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
 }
+.section-actions .btn-small { margin-right: 0; }
 
-.race-stats-bar strong {
-    color: var(--text-primary, #e0e0e0);
+.engine-stats {
+    display: flex;
+    flex-wrap: wrap;
+    margin: 0 0 16px;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--accent);
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+}
+.engine-stats.engine-race { border-left-color: var(--accent-race); }
+.engine-stats.engine-hoard { border-left-color: var(--accent-hoard); }
+.engine-stats .es {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    min-width: 120px;
+    padding: 10px 18px;
+    border-right: 1px solid var(--border);
+}
+.engine-stats .es:last-child { border-right: none; }
+.engine-stats .es-label {
+    font-size: 10.5px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: .06em;
+    color: var(--text-secondary);
+    white-space: nowrap;
+}
+.engine-stats .es strong {
+    font-size: 17px;
+    font-weight: 600;
+    color: var(--text-primary);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+.engine-stats .es small {
+    margin-left: 2px;
+    font-size: 11px;
+    font-weight: 400;
+    color: var(--text-muted);
+}
+@media (max-width: 768px) {
+    .engine-stats .es { flex: 1 1 33%; min-width: 0; padding: 8px 12px; border-right: none; }
+    .engine-stats .es strong { font-size: 15px; }
 }
 
 /* Add form */
@@ -1275,20 +1332,48 @@ input[type="file"] {
 
 .btn-cancel:hover { border-color: var(--text-secondary); }
 
+/* The one secondary button. Page actions, row actions, toolbars: every place
+   that had its own (.btn, a bare <button>, a range button borrowed for "Run
+   now") uses this, so a button looks like a button on every page. 11px text
+   in a 20px box was also the smallest target on the page. */
 .btn-small {
-    padding: 3px 10px;
-    background: rgba(255, 255, 255, 0.04);
-    border: 1px solid rgba(255, 255, 255, 0.08);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding: 5px 12px;
+    min-height: 28px;
+    background: var(--surface-raised);
+    border: 1px solid var(--border);
     color: var(--text-secondary);
-    border-radius: 4px;
-    font-size: 11px;
+    border-radius: var(--radius-sm);
+    font-size: 12px;
+    font-weight: 500;
+    font-family: inherit;
+    line-height: 1.2;
+    white-space: nowrap;
+    text-decoration: none;
     cursor: pointer;
     margin-right: 4px;
+    transition: border-color .15s, color .15s, background .15s;
 }
 
-.btn-small:hover { border-color: var(--text-primary); color: var(--text-primary); }
-.btn-small.btn-danger { color: var(--accent-red); border-color: var(--accent-red); }
-.btn-small.btn-danger:hover { background: rgba(247,129,102,0.1); }
+.btn-small:hover { border-color: var(--border-strong); color: var(--text-primary); }
+.btn-small:disabled { opacity: .45; cursor: not-allowed; }
+/* The action a section exists for: "+ New", "Save", "Run now". It was used
+   in the markup for years and never defined, so it looked like every other
+   button. */
+.btn-small.btn-accent {
+    color: var(--accent);
+    border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+.btn-small.btn-accent:hover {
+    border-color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+.btn-small.btn-danger { color: var(--accent-red); border-color: color-mix(in srgb, var(--accent-red) 50%, transparent); }
+.btn-small.btn-danger:hover { border-color: var(--accent-red); background: color-mix(in srgb, var(--accent-red) 12%, transparent); }
 
 .mode-tag {
     padding: 2px 8px;
@@ -1807,8 +1892,10 @@ tr.row-selected td {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    padding: 12px 16px;
+    gap: 12px;
+    padding: 8px 12px 8px 16px;
     border-bottom: 1px solid var(--border);
+    min-height: 44px;
 }
 
 /* The row pads; the heading must not pad again.
@@ -1890,8 +1977,8 @@ footer {
     padding: 12px 24px;
     font-size: 12px;
     color: var(--text-muted);
-    border-top: 1px solid rgba(255, 255, 255, 0.05);
-    background: rgba(8, 12, 20, 0.6);
+    border-top: 1px solid var(--border);
+    background: var(--nav-bg);
     backdrop-filter: blur(20px);
     -webkit-backdrop-filter: blur(20px);
 }
@@ -2032,15 +2119,6 @@ footer {
     .tab-content {
         overflow-x: auto;
         -webkit-overflow-scrolling: touch;
-    }
-
-    /* A summary is a SENTENCE: it wraps. Kept on one line it was 761px wide on
-       its own and dragged the page with it. (A truncated phrase says nothing,
-       so ellipsis is not the answer here -- see the Exit IP note.) */
-    .hoard-summary, #hoard-summary-text,
-    .race-summary, #race-summary-text {
-        white-space: normal;
-        overflow-wrap: anywhere;
     }
 
     /* ── One card per torrent ────────────────────────────────────────────
@@ -2832,7 +2910,11 @@ footer {
     align-items: center;
     justify-content: space-between;
     gap: 12px;
+    padding: 8px 12px 8px 16px;
+    border-bottom: 1px solid var(--border);
+    min-height: 44px;
 }
+.card-head-row h3 { margin: 0; padding: 0; border-bottom: none; }
 .trk-edit-box { width: 640px; max-width: 92vw; }
 .trk-err-box { width: 720px; max-width: 94vw; }
 .trk-err-body { max-height: 60vh; overflow-y: auto; margin: 8px 0 4px; }
@@ -3020,21 +3102,21 @@ footer {
    Exit IP was 44px against 24px everywhere else. The capsule now bleeds
    into the existing gap instead of widening it. */
 .exit-ip-stat { cursor: url("data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20width%3D%2722%27%20height%3D%2722%27%20viewBox%3D%270%200%2024%2024%27%20fill%3D%27none%27%20stroke%3D%27%23ffffff%27%20stroke-width%3D%272.2%27%20stroke-linecap%3D%27round%27%20stroke-linejoin%3D%27round%27%3E%3Cpath%20d%3D%27M23%204v6h-6%27%2F%3E%3Cpath%20d%3D%27M20.49%2015a9%209%200%201%201-2.12-9.36L23%2010%27%2F%3E%3C%2Fsvg%3E") 11 11, pointer; border: 1px solid transparent; border-radius: var(--radius); padding: 3px 10px; margin: 0 -10px; transition: background .15s, border-color .15s; }
-.exit-ip-stat:hover { background: #0d1117; border-color: #30363d; }
-.exit-ip-stat:hover .ip-refresh-btn { color:#58a6ff; }
+.exit-ip-stat:hover { background: var(--surface-raised); border-color: var(--border); }
+.exit-ip-stat:hover .ip-refresh-btn { color: var(--accent); }
 
 .exit-ip-stat { cursor: pointer; }
 
-.logs-controls { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-bottom:10px; }
-.logs-controls select, .logs-controls input[type=text] { background:#0d1117; color:#c9d1d9; border:1px solid #30363d; border-radius:6px; padding:5px 8px; font-size:13px; }
-.logs-controls input[type=text] { flex:1; min-width:140px; }
-.logs-controls button, .logs-controls a#logs-issue { background:#21262d; color:#c9d1d9; border:1px solid #30363d; border-radius:6px; padding:5px 10px; cursor:pointer; text-decoration:none; font-size:13px; }
-.logs-controls button:hover, .logs-controls a#logs-issue:hover { border-color:#58a6ff; }
-.logs-controls .logs-live { display:flex; align-items:center; gap:4px; font-size:13px; color:#8b949e; }
-.logs-controls select { width:auto; flex:0 0 auto; }
+/* The theme's colours, not GitHub's: these were literal #0d1117 / #c9d1d9,
+   so the Logs tab stayed GitHub-dark under Daylight, Ember and Kelp. */
+.logs-controls { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-bottom:12px; }
+.logs-controls select, .logs-controls input[type=text] { padding:6px 10px; font-size:13px; border-radius:var(--radius-sm); }
+.logs-controls select { width:auto; flex:0 0 auto; padding-right:30px; }
+.logs-controls input[type=text] { flex:1; min-width:160px; }
+.logs-controls .logs-live { display:flex; align-items:center; gap:4px; font-size:13px; color:var(--text-secondary); flex:0 0 auto; }
 .logs-controls input[type=checkbox] { width:auto; flex:0 0 auto; margin:0; -webkit-appearance:auto; appearance:auto; }
-.logs-controls .logs-live { flex:0 0 auto; }
-.logs-view { background:#010409; border:1px solid #30363d; border-radius:8px; padding:10px 12px; height:62vh; overflow:auto; font:12px/1.45 ui-monospace,"Cascadia Mono",monospace; white-space:pre; color:#c9d1d9; transition:border-color .2s; }
+.logs-controls .btn-small { margin-right: 0; }
+.logs-view { background:var(--surface-sunken); border:1px solid var(--border); border-radius:var(--radius-lg); padding:12px 14px; height:64vh; overflow:auto; font:12px/1.5 var(--font-mono); white-space:pre; color:var(--text-primary); transition:border-color .2s; }
 
 #tab-logs .add-form-container { max-width: none; }
 
@@ -3421,7 +3503,41 @@ th.col-drop { box-shadow: inset 3px 0 0 var(--accent, #4a9eff); }
 .net-warn { color: var(--accent-orange); }
 .net-fail { color: var(--accent-red); }
 
-.settings-save-bar { display: flex; justify-content: flex-start; padding: 14px 0 4px; margin-top: 8px; border-top: 1px solid rgba(255, 255, 255, 0.06); }
+/* One Save for every tab, held at the bottom of the screen while the
+   settings scroll: it saves every changed field, whichever tab it is in.
+   A solid surface (the card's), so nothing scrolls visibly under it. */
+.settings-save-bar {
+    position: sticky;
+    bottom: 0;
+    z-index: 2;
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+    gap: 12px;
+    margin: 12px -16px -16px;
+    padding: 12px 16px;
+    background: var(--card-bg);
+    border-top: 1px solid var(--border);
+}
+.settings-save-bar[hidden] { display: none; }
+.settings-save-bar .btn-primary { width: auto; margin-top: 0; padding: 9px 28px; }
+
+/* Searching shows every tab's matches at once: each group is headed by the
+   tab it lives in, and the per-tab note ("ports are in the Network tab")
+   would repeat under every heading, so it goes. */
+#settings-panels.searching > .settings-panel:not([hidden])::before {
+    content: attr(data-label);
+    display: block;
+    margin: 18px 0 4px;
+    padding-bottom: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: .06em;
+    color: var(--accent);
+    border-bottom: 1px solid var(--border);
+}
+#settings-panels.searching .settings-panel-note { display: none; }
 
 /* One polygon, one vertex per engine. */
 .net-poly { background: none; border: 0; padding: 4px; line-height: 0; cursor: pointer; border-radius: 8px; }
@@ -3824,14 +3940,6 @@ th.col-drop { box-shadow: inset 3px 0 0 var(--accent, #4a9eff); }
     .rp2-gauge { width: 100%; flex: 1 1 100%; }
     /* "that is 1.728 TiB, back to 1.546" is a sentence: it wraps. */
     .rp2-body .abs, .rp2-row .abs { white-space: normal; overflow-wrap: anywhere; }
-}
-
-/* The race summary row: `.race-stats-bar`, not `.race-stats` -- I wrote the
-   wrong class first and it silently did nothing, which is the whole reason
-   "Grabbed" was still cut off. Declared at line ~799, so the override belongs
-   here, after it. A 24px gap is also too wide once the items wrap. */
-@media (max-width: 768px) {
-    .race-stats-bar { flex-wrap: wrap; gap: 6px 16px; }
 }
 
 /* ── Two rules that beat the card layout on SPECIFICITY, not on order ───────
@@ -4280,3 +4388,322 @@ th.col-drop { box-shadow: inset 3px 0 0 var(--accent, #4a9eff); }
 .rss-help-chips { display: flex; flex-wrap: wrap; gap: 8px; }
 .rss-help-more { justify-self: start; margin-top: 2px; color: var(--accent-blue); text-decoration: none; }
 .rss-help-more:hover { text-decoration: underline; }
+
+/* ═════════════════════════════════════════════════════════════════════════
+   Page kit (v4.11)
+
+   One way to build each part of a page, shared by every tab:
+
+     .section-header   title on the left, .section-actions on the right
+     .page-desc        the paragraph that says what the page is for
+     .subhead          a titled block further down the same page
+     .table-card       a table in a card, flush, never framed twice
+     .toolbar          a row of filters or controls above a table
+     .notice           a banner that says something needs doing
+     .form-subhead     a heading inside a form (When / Then / Feeds / Bans)
+
+   Before this each tab had its own: Categories and Trackers drew bare tables,
+   Workflows and RSS put theirs in a padded card (a frame inside a frame),
+   Jobs described itself with the modal's paragraph style, Logs and Changelog
+   used the Add form's container for a title, and empty tables said so in
+   four different styles. Colours are the theme's tokens throughout: nothing
+   here adds a colour a theme does not already name.
+   ═════════════════════════════════════════════════════════════════════════ */
+
+/* ── Header ─────────────────────────────────────────────────────────────── */
+
+/* Incognito and Sign out carried `color:#ffffff` inline, white on white
+   under Daylight. */
+.icon-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    background: none;
+    border: 1px solid transparent;
+    border-radius: var(--radius);
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition: color .15s, background .15s, border-color .15s;
+}
+.icon-btn:hover {
+    color: var(--text-primary);
+    background: var(--surface-raised);
+    border-color: var(--border);
+}
+
+/* The header figures read as a group: one hairline between the live rates
+   and the totals, the way the eye already splits them. */
+.header-stats .stat-value { letter-spacing: -0.01em; }
+
+/* ── Tab bar ────────────────────────────────────────────────────────────── */
+
+nav {
+    align-items: stretch;
+    gap: 2px;
+}
+.tab {
+    position: relative;
+    padding: 13px 14px 11px;
+    font-weight: 500;
+    border-bottom: 2px solid transparent;
+    transition: color .15s, border-color .15s, background .15s;
+}
+.tab:hover { background: var(--surface-raised); }
+.tab.active {
+    color: var(--text-primary);
+    border-bottom-color: var(--accent);
+}
+/* "+ Add Torrent" is an action, not a place: it reads as a button. */
+.tab:last-child {
+    align-self: center;
+    margin-left: auto;
+    padding: 6px 14px;
+    border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+    border-radius: var(--radius-sm);
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    color: var(--accent);
+    font-weight: 600;
+}
+.tab:last-child:hover,
+.tab:last-child.active {
+    border-color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 18%, transparent);
+    color: var(--accent);
+}
+
+/* ── Page head ──────────────────────────────────────────────────────────── */
+
+.page-desc {
+    max-width: 960px;
+    margin: 0 0 20px;
+    font-size: 13px;
+    line-height: 1.55;
+    color: var(--text-secondary);
+}
+.section-header + .page-desc { margin-top: -4px; }
+
+/* A titled block further down a page (This node / Other nodes, Activity,
+   Automatic download rules). A step down from the page title, with the same
+   right-hand actions. */
+.subhead {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 8px 16px;
+    margin: 32px 0 10px;
+    min-height: 28px;
+}
+.subhead h2,
+.subhead h3 {
+    margin: 0;
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+.subhead + .page-desc { margin: -4px 0 12px; }
+.subhead .btn-small { margin-right: 0; }
+
+/* ── Tables ─────────────────────────────────────────────────────────────── */
+
+/* A table inside a card is part of the card: one frame, not two. */
+.card table {
+    border: none;
+    border-radius: 0;
+    background: transparent;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+}
+.table-card { overflow-x: auto; }
+.table-card > table thead,
+.card > .card-body > .data-table:first-child thead { background: var(--surface-sunken); }
+/* Workflows and RSS wrapped their tables in a padded card body; the padding
+   framed the table a second time. */
+.card > .card-body:has(> .data-table:only-child) { padding: 0; }
+.card > .card-body:has(> .data-table:only-child) .data-table thead th:first-child,
+.card > .card-body:has(> .data-table:only-child) .data-table tbody td:first-child { padding-left: 16px; }
+
+/* Empty and loading rows, whoever writes them. app.js draws them as a single
+   spanning cell, with `.empty`, `.sr-desc`, or nothing at all, so the same
+   "nothing here yet" read four different ways. */
+tbody > tr:only-child > td[colspan] {
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 13px;
+    font-weight: 400;
+    padding: 28px 16px;
+}
+tbody > tr:only-child:hover > td[colspan] { background: transparent; }
+
+/* ── Toolbar ────────────────────────────────────────────────────────────── */
+
+.toolbar {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin: 0 0 12px;
+    font-size: 13px;
+    color: var(--text-secondary);
+}
+.toolbar input[type="number"] { width: 80px; padding: 5px 8px; font-size: 13px; }
+.toolbar select { width: auto; padding: 5px 30px 5px 10px; font-size: 13px; }
+.toolbar .btn-small { margin-right: 0; }
+.toolbar .toolbar-note { color: var(--text-muted); }
+
+.race-filter-bar input[type="text"],
+.hoard-filter-bar input[type="text"] {
+    padding: 6px 10px;
+    border-radius: var(--radius-sm);
+}
+
+/* ── Notices ────────────────────────────────────────────────────────────── */
+
+.notice {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 8px 16px;
+    margin: 12px 0;
+    padding: 10px 14px;
+    border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+    border-left-width: 3px;
+    border-radius: var(--radius);
+    background: color-mix(in srgb, var(--accent) 8%, transparent);
+    font-size: 13px;
+    color: var(--text-primary);
+}
+.notice-warn {
+    border-color: color-mix(in srgb, var(--accent-yellow) 50%, transparent);
+    border-left-color: var(--accent-yellow);
+    background: color-mix(in srgb, var(--accent-yellow) 9%, transparent);
+}
+.notice .btn-small { margin-right: 0; }
+
+/* ── Forms ──────────────────────────────────────────────────────────────── */
+
+.form-subhead {
+    margin: 20px 0 8px;
+    padding: 0;
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: .06em;
+    color: var(--text-secondary);
+    border: none;
+}
+.card .form-subhead { padding: 0; border-bottom: none; }
+
+/* Every inline form ends the same way: Save, then the rest, then Cancel. */
+.cat-form-actions {
+    flex-wrap: wrap;
+    align-items: center;
+    margin-top: 16px;
+    padding-top: 14px;
+    border-top: 1px solid var(--border);
+}
+.cat-form-actions .btn-small { margin-right: 0; }
+.cat-form-actions .btn-primary,
+.cat-form-actions .btn-cancel { min-height: 36px; padding: 7px 20px; font-size: 13px; }
+.cat-form-actions .btn-cancel { margin-left: auto; }
+
+/* The inline create/edit forms opened above a list: the same card, set off
+   from the list it edits by the accent on its edge. */
+#category-form, #node-form, #engine-form, #enrol-card, #wf-form,
+#rss-feed-form, #rss-rule-form, #trk-form {
+    border-color: color-mix(in srgb, var(--accent) 35%, transparent);
+    box-shadow: inset 3px 0 0 var(--accent);
+}
+
+/* ── Config ─────────────────────────────────────────────────────────────── */
+
+/* Six cards, one long page: a row of shortcuts under the title. Not pinned:
+   a pinned bar needs a background of its own to scroll over the cards, and
+   any fill painted over the page's glow read as a smudged band. */
+.config-nav {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin: 0 0 16px;
+}
+.config-nav button {
+    padding: 5px 12px;
+    background: var(--surface-raised);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text-secondary);
+    font-size: 12px;
+    font-family: inherit;
+    cursor: pointer;
+    transition: color .15s, border-color .15s;
+}
+.config-nav button:hover { color: var(--text-primary); border-color: var(--border-strong); }
+#tab-config > .card { scroll-margin-top: 16px; }
+
+/* ── Add torrent ────────────────────────────────────────────────────────── */
+
+#tab-add .add-form-container,
+.add-preview-col {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: 20px;
+}
+#tab-add .add-form-container h2,
+.add-preview-col h2 {
+    margin: 0 0 18px;
+    font-size: 15px;
+    font-weight: 600;
+}
+.form-hint {
+    margin-top: 6px;
+    font-size: 12px;
+    line-height: 1.45;
+    color: var(--text-secondary);
+}
+.add-advanced {
+    margin-bottom: 16px;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+}
+.add-advanced > summary { cursor: pointer; color: var(--text-secondary); font-size: 13px; }
+.add-advanced[open] > summary { margin-bottom: 4px; }
+
+/* ── Changelog ──────────────────────────────────────────────────────────── */
+
+.changelog-card {
+    max-width: 980px;
+    padding: 8px 28px 24px;
+}
+.changelog-card .changelog h1:first-child,
+.changelog-card .changelog h2:first-child { margin-top: .6em; }
+
+/* ── Benchmark ──────────────────────────────────────────────────────────── */
+
+.bm-group-label {
+    margin: 4px 0 8px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: .08em;
+    color: var(--text-muted);
+}
+.bm-range-bar { margin-top: 8px; }
+
+/* ── Footer ─────────────────────────────────────────────────────────────── */
+
+/* The file opens with its own "# Changelog": the page head already says it. */
+.changelog-card .changelog > h1:first-child { display: none; }
+
+@media (max-width: 768px) {
+    .tab:last-child { margin-left: 0; }
+    .subhead { margin-top: 24px; }
+    .cat-form-actions .btn-cancel { margin-left: 0; }
+    #tab-add .add-form-container, .add-preview-col { padding: 14px; }
+    .changelog-card { padding: 4px 14px 16px; }
+}

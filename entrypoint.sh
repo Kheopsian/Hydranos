@@ -94,26 +94,48 @@ else
         fi
     fi
     echo "hydranos: dropping privileges to $RUN_UID:$RUN_GID ($EXIST_USR:$EXIST_GRP)"
-    # Managed WireGuard (the Network tab's WireGuard mode) runs `ip` and
-    # `wg`, and fwmark-based VPN routing sets SO_MARK: both need
-    # CAP_NET_ADMIN. It is lost when we drop privileges, so it is kept as an
-    # AMBIENT capability -- inherited by `ip` and `wg` -- whenever the
-    # container was granted it (--cap-add=NET_ADMIN): granting it is the ask.
-    # A container that ran as root before 4.5 kept it the same way.
-    # HYDRANOS_CAP_NET_ADMIN=0 drops it anyway.
-    if [ "$HYDRANOS_CAP_NET_ADMIN" != "0" ] && command -v capsh >/dev/null 2>&1; then
-        # The container only has CAP_NET_ADMIN if it was granted one
-        # (--cap-add=NET_ADMIN or --privileged). Probe before exec'ing, so a
-        # container without it still starts instead of dying on capsh.
-        if capsh --caps="cap_net_admin+eip cap_setuid+ep cap_setgid+ep" \
-            --addamb=cap_net_admin -- -c true >/dev/null 2>&1; then
-            exec capsh --caps="cap_net_admin+eip cap_setuid+ep cap_setgid+ep" \
-                --keep=1 --user="$EXIST_USR" --addamb=cap_net_admin \
-                -- -c 'exec hydranos "$@"' hydranos "$@"
-        fi
-        if [ "$HYDRANOS_CAP_NET_ADMIN" = "1" ]; then
-            echo "hydranos: CAP_NET_ADMIN not available, add --cap-add=NET_ADMIN for managed WireGuard and fwmark routing"
-        fi
+    # Capabilities lost when we drop privileges, kept as AMBIENT ones
+    # (inherited by `ip` and `wg`) whenever the container was granted them
+    # (--cap-add, or --privileged): granting one is the ask. A container that
+    # ran as root before 4.5 kept them the same way.
+    #   NET_ADMIN  managed WireGuard (the Network tab's WireGuard mode) runs
+    #              `ip` and `wg`, and fwmark-based VPN routing sets SO_MARK.
+    #              HYDRANOS_CAP_NET_ADMIN=0 drops it anyway.
+    #   SYS_ADMIN  "TRIM after drain" on a race volume (the FITRIM ioctl).
+    #              Only NET_ADMIN used to be kept, so a container given
+    #              --cap-add=SYS_ADMIN still had every TRIM refused once it
+    #              ran as PUID. HYDRANOS_CAP_SYS_ADMIN=0 drops it anyway.
+    KEEP=""
+    if command -v capsh >/dev/null 2>&1; then
+        for cap in net_admin sys_admin; do
+            case "$cap" in
+                net_admin) [ "$HYDRANOS_CAP_NET_ADMIN" = "0" ] && continue ;;
+                sys_admin) [ "$HYDRANOS_CAP_SYS_ADMIN" = "0" ] && continue ;;
+            esac
+            # Probe each before exec'ing, so a container without it still
+            # starts instead of dying on capsh.
+            if capsh --caps="cap_$cap+eip cap_setuid+ep cap_setgid+ep" \
+                --addamb="cap_$cap" -- -c true >/dev/null 2>&1; then
+                KEEP="$KEEP $cap"
+            fi
+        done
+    fi
+    case " $KEEP " in
+        *" net_admin "*) ;;
+        *) if [ "$HYDRANOS_CAP_NET_ADMIN" = "1" ]; then
+               echo "hydranos: CAP_NET_ADMIN not available, add --cap-add=NET_ADMIN for managed WireGuard and fwmark routing"
+           fi ;;
+    esac
+    if [ -n "$KEEP" ]; then
+        CAPS="cap_setuid+ep cap_setgid+ep"
+        AMB=""
+        for cap in $KEEP; do
+            CAPS="cap_$cap+eip $CAPS"
+            AMB="${AMB:+$AMB,}cap_$cap"
+        done
+        echo "hydranos: keeping$KEEP"
+        exec capsh --caps="$CAPS" --keep=1 --user="$EXIST_USR" --addamb="$AMB" \
+            -- -c 'exec hydranos "$@"' hydranos "$@"
     fi
     exec gosu "$RUN_UID:$RUN_GID" hydranos "$@"
 fi
