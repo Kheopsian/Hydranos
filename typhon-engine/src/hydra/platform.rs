@@ -474,6 +474,7 @@ pub enum TrimBlock {
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     NoCapability,
     /// No FITRIM on this system (Windows trims as files are deleted).
+    #[cfg_attr(target_os = "linux", allow(dead_code))]
     Unsupported,
 }
 
