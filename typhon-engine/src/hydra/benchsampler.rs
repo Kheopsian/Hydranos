@@ -788,15 +788,15 @@ mod tests {
         a1.total_uploaded.store(100, Relaxed);
         a1.total_downloaded.store(40, Relaxed);
         a1.peers_connected.store(3, Relaxed);
-        a1.status.store(TorrentStatus::Downloading as u8, Relaxed);
+        a1.set_status(TorrentStatus::Downloading as u8, Relaxed);
         let a2 = add(&s, "race", "a2", Some("https://tk-a.example:8443/announce"));
-        a2.status.store(TorrentStatus::Seeding as u8, Relaxed);
+        a2.set_status(TorrentStatus::Seeding as u8, Relaxed);
         let b = add(&s, "race", "b1", Some("https://tk-b.example/announce"));
-        b.status.store(TorrentStatus::Seeding as u8, Relaxed);
-        b.is_paused.store(true, Relaxed);
+        b.set_status(TorrentStatus::Seeding as u8, Relaxed);
+        b.set_paused(true, Relaxed);
         add(&s, "race", "n1", None);
         let h = add(&s, "hoard", "h1", Some("https://tk-a.example/announce"));
-        h.status.store(TorrentStatus::Seeding as u8, Relaxed);
+        h.set_status(TorrentStatus::Seeding as u8, Relaxed);
         h.peers_connected.store(1, Relaxed);
 
         let rows = tracker_totals(&s.engines, &s.store, 1_700_000_123);

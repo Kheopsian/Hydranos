@@ -1497,9 +1497,8 @@ mod gate_tests {
     fn a_seed_only_torrent_never_pulls_from_a_webseed() {
         let (mgr, root) = manager("seedonly");
         let t = torrent(&mgr, "held", Some("https://archive.example/files/"), false);
-        t.status
-            .store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
-        t.is_paused.store(false, Ordering::Relaxed);
+        t.set_status(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+        t.set_paused(false, Ordering::Relaxed);
         assert!(wants_webseed(&t), "an ordinary download does want it");
         t.seed_only.store(true, Ordering::Relaxed);
         assert!(!wants_webseed(&t), "seed only has nothing to fetch");
@@ -1518,10 +1517,10 @@ mod gate_tests {
             false,
         );
 
-        t.is_paused.store(true, Ordering::Relaxed);
+        t.set_paused(true, Ordering::Relaxed);
         assert!(!wants_webseed(&t), "a paused torrent pulls nothing");
 
-        t.is_paused.store(false, Ordering::Relaxed);
+        t.set_paused(false, Ordering::Relaxed);
         t.is_removed.store(true, Ordering::Relaxed);
         assert!(!wants_webseed(&t), "a removed torrent pulls nothing");
         let _ = std::fs::remove_dir_all(root);
@@ -1543,7 +1542,7 @@ mod gate_tests {
             TorrentStatus::Stopped,
             TorrentStatus::Error,
         ] {
-            t.status.store(status as u8, Ordering::Relaxed);
+            t.set_status(status as u8, Ordering::Relaxed);
             assert!(!wants_webseed(&t), "{status:?} must not pull");
         }
         let _ = std::fs::remove_dir_all(root);
@@ -1629,8 +1628,7 @@ mod gate_tests {
             Some("https://archive.example/files/"),
             false,
         );
-        t.status
-            .store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+        t.set_status(TorrentStatus::Downloading as u8, Ordering::Relaxed);
 
         mgr.webseed().queue.lock().unwrap().push_back(t.info_hash);
         let got = next_candidate(&mgr);

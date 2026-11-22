@@ -103,7 +103,7 @@ fn add(fx: &Fixture, name: &str, tracker: &str, seed: bool) -> (String, Arc<Torr
         .expect("fixture parses");
     let st = fx.mgr.get(&ih).unwrap();
     *st.live_trackers.write() = vec![vec![tracker.to_string()]];
-    st.status.store(
+    st.set_status(
         if seed {
             TorrentStatus::Seeding
         } else {
@@ -137,8 +137,7 @@ fn finish(st: &TorrentState) {
     if let Some(p) = st.picker.get() {
         p.lock().unwrap().set_have(0);
     }
-    st.status
-        .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+    st.set_status(TorrentStatus::Seeding as u8, Ordering::Relaxed);
     st.pending_announce_event
         .fetch_or(ANNOUNCE_EVENT_COMPLETED, Ordering::Relaxed);
 }

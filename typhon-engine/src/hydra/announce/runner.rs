@@ -1935,8 +1935,7 @@ mod announce_one_tests {
             let st = mgr
                 .get(&typhon_engine::torrent::hex_decode(&hash).unwrap())
                 .unwrap();
-            st.is_paused
-                .store(true, std::sync::atomic::Ordering::Relaxed);
+            st.set_paused(true, std::sync::atomic::Ordering::Relaxed);
         }
         let (policy, breaker, cache) = parts();
 
@@ -1974,8 +1973,7 @@ mod announce_one_tests {
             let st = mgr
                 .get(&typhon_engine::torrent::hex_decode(&hash).unwrap())
                 .unwrap();
-            st.is_paused
-                .store(true, std::sync::atomic::Ordering::Relaxed);
+            st.set_paused(true, std::sync::atomic::Ordering::Relaxed);
             st.pending_announce_event
                 .store(ANNOUNCE_EVENT_STOPPED, std::sync::atomic::Ordering::Relaxed);
         }
@@ -2285,8 +2283,7 @@ mod announce_one_tests {
         let hash = typhon_engine::torrent::hex_encode(&ih);
         let st = state(&mgr, &hash);
         *st.live_trackers.write() = vec![vec![t.url.clone()]];
-        st.status
-            .store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+        st.set_status(TorrentStatus::Downloading as u8, Ordering::Relaxed);
         let (policy, breaker, cache) = parts();
 
         let race = run(&mgr, &policy, &breaker, &cache, Mode::Race, &hash).await;
@@ -2305,8 +2302,7 @@ mod announce_one_tests {
         let hoard = run(&mgr, &policy, &breaker, &cache, Mode::Hoard, &hash).await;
         assert!(!hoard.registration_retry, "a hoard is not racing");
 
-        st.status
-            .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+        st.set_status(TorrentStatus::Seeding as u8, Ordering::Relaxed);
         let seed = run(&mgr, &policy, &breaker, &cache, Mode::Race, &hash).await;
         assert!(
             !seed.registration_retry,
@@ -2330,8 +2326,7 @@ mod announce_one_tests {
         let hash = typhon_engine::torrent::hex_encode(&ih);
         let st = state(&mgr, &hash);
         *st.live_trackers.write() = vec![vec![a.url.clone()], vec![b.url.clone()]];
-        st.status
-            .store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+        st.set_status(TorrentStatus::Downloading as u8, Ordering::Relaxed);
         let (policy, breaker, cache) = parts();
 
         run(&mgr, &policy, &breaker, &cache, Mode::Race, &hash).await;
@@ -2345,8 +2340,7 @@ mod announce_one_tests {
             );
         }
 
-        st.status
-            .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+        st.set_status(TorrentStatus::Seeding as u8, Ordering::Relaxed);
         st.pending_announce_event
             .fetch_or(ANNOUNCE_EVENT_COMPLETED, Ordering::Relaxed);
         run(&mgr, &policy, &breaker, &cache, Mode::Race, &hash).await;
@@ -2733,7 +2727,7 @@ mod announce_one_tests {
         let t = recording_tracker(OPEN_BODY).await;
         let (mgr, root) = manager("checking");
         let hash = add(&mgr, "chk", &t.url);
-        state(&mgr, &hash).status.store(
+        state(&mgr, &hash).set_status(
             TorrentStatus::Checking as u8,
             std::sync::atomic::Ordering::Relaxed,
         );

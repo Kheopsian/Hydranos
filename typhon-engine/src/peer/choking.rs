@@ -468,8 +468,7 @@ mod tests {
 
     fn seeding(num_pieces: u32) -> TorrentState {
         let t = TorrentState::new(meta(num_pieces), PathBuf::from("/tmp"), true);
-        t.status
-            .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+        t.set_status(TorrentStatus::Seeding as u8, Ordering::Relaxed);
         t
     }
 
@@ -490,8 +489,7 @@ mod tests {
     #[test]
     fn a_torrent_that_is_not_seeding_is_left_alone() {
         let t = TorrentState::new(meta(100), PathBuf::from("/tmp"), false);
-        t.status
-            .store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+        t.set_status(TorrentStatus::Downloading as u8, Ordering::Relaxed);
         peer(&t, 1, 0, true, 0);
         assert_eq!(tick_torrent(&t, 4, 1), (0, 0, false));
     }

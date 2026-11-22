@@ -132,8 +132,7 @@ async fn a_move_between_engines_takes_the_stores_folder_and_stops_it_if_either_s
             .manager
             .get(&ih(h))
             .unwrap()
-            .is_paused
-            .store(false, std::sync::atomic::Ordering::Relaxed)
+            .set_paused(false, std::sync::atomic::Ordering::Relaxed)
     };
     let store_says = |h: &str, folder: &str, paused: bool| {
         let store = s.store.lock().unwrap();

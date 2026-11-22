@@ -1347,17 +1347,13 @@ impl TorrentManager {
         self.adopt(&state);
 
         if stopped {
-            state
-                .status
-                .store(TorrentStatus::Stopped as u8, Ordering::Relaxed);
-            state.is_paused.store(true, Ordering::Relaxed);
+            state.set_status(TorrentStatus::Stopped as u8, Ordering::Relaxed);
+            state.set_paused(true, Ordering::Relaxed);
         } else if !seed_mode {
             // Default-start fresh DL torrents in Downloading so the public
             // API doesn't surface "stopped" between add_torrent and the
             // first start_torrent call. Previously status stayed at 0.
-            state
-                .status
-                .store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+            state.set_status(TorrentStatus::Downloading as u8, Ordering::Relaxed);
         }
 
         // skip_checking vouches for the bytes, not for the path. A save_path
@@ -1598,7 +1594,7 @@ impl TorrentManager {
 
     pub fn start_torrent(self: &Arc<Self>, info_hash: &InfoHash) -> Result<(), String> {
         let t = self.get(info_hash).ok_or("torrent not found")?;
-        let was_paused = t.is_paused.swap(false, Ordering::Relaxed);
+        let was_paused = t.swap_paused(false, Ordering::Relaxed);
         if was_paused {
             // A resume opens a new announce session: the trackers dropped us
             // at the stop (or are about to), so each one is owed `started`,
@@ -1650,8 +1646,7 @@ impl TorrentManager {
                 && !t.check_verdict_in.load(Ordering::SeqCst)
                 && !t.files_absent.load(Ordering::Relaxed);
             if held && t.waiting_for_check() {
-                t.status
-                    .store(TorrentStatus::Checking as u8, Ordering::Relaxed);
+                t.set_status(TorrentStatus::Checking as u8, Ordering::Relaxed);
             }
             held
         };
@@ -1707,6 +1702,7 @@ impl TorrentManager {
                 .try_update(Ordering::SeqCst, Ordering::SeqCst, |cur| {
                     (cur != TorrentStatus::Checking as u8).then_some(TorrentStatus::Error as u8)
                 });
+            t.mark_live_dirty();
             return Ok(());
         }
         // Data found missing (`mark_error`) is not undone by a resume: a start
@@ -1740,6 +1736,7 @@ impl TorrentManager {
                     || (cur == TorrentStatus::Error as u8 && suspended);
                 (!busy).then_some(target as u8)
             });
+        t.mark_live_dirty();
         // The status is settled: open the interval if this is now a seed.
         t.fold_seed_time(crate::torrent::meta::now_secs());
         Ok(())
@@ -1935,9 +1932,8 @@ impl TorrentManager {
             // ended is credited. After it, fold_seed_time would see a paused
             // torrent and drop the open interval on the floor.
             t.fold_seed_time(crate::torrent::meta::now_secs());
-            t.is_paused.store(true, Ordering::Relaxed);
-            t.status
-                .store(TorrentStatus::Stopped as u8, Ordering::Relaxed);
+            t.set_paused(true, Ordering::Relaxed);
+            t.set_status(TorrentStatus::Stopped as u8, Ordering::Relaxed);
         }
         // BEP 3: tell the trackers we are leaving. Without it a stop is silent
         // and every tracker keeps us in the swarm until the entry goes stale,
@@ -1991,7 +1987,7 @@ impl TorrentManager {
             t.check_gen.fetch_add(1, Ordering::SeqCst);
             // The counter goes first, as at the end of a check.
             t.end_recheck_progress();
-            t.rechecking.store(false, Ordering::SeqCst);
+            t.set_rechecking(false, Ordering::SeqCst);
             t.recheck_owed.swap(false, Ordering::Relaxed)
         };
         if owed {
@@ -2519,22 +2515,16 @@ impl TorrentManager {
             // re-processing of the whole hoard on every restart (costly at tens
             // of thousands of torrents) plus a brief non-seeding window.
             if rd.paused {
-                state.is_paused.store(true, Ordering::Relaxed);
-                state
-                    .status
-                    .store(TorrentStatus::Stopped as u8, Ordering::Relaxed);
+                state.set_paused(true, Ordering::Relaxed);
+                state.set_status(TorrentStatus::Stopped as u8, Ordering::Relaxed);
             } else if rd.seed_mode
                 || state.picker.get().is_none()
                 || state.picker.get().unwrap().lock().unwrap().is_complete()
             {
-                state
-                    .status
-                    .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+                state.set_status(TorrentStatus::Seeding as u8, Ordering::Relaxed);
                 state.release_have_tx();
             } else {
-                state
-                    .status
-                    .store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+                state.set_status(TorrentStatus::Downloading as u8, Ordering::Relaxed);
             }
             // Parked for lost data by the run before: it stays parked, and is
             // neither offered as a seed nor queued as a download below.
@@ -2605,12 +2595,19 @@ impl TorrentManager {
 
     /// Update rate counters — called every second.
     pub fn update_rates(&self) {
-        self.update_rates_observed(|_| {});
+        self.update_rates_inner(true, |_| {});
     }
 
     // The no-op observer optimizes away in production. Benchmarks can evaluate
     // one-pass sampling against the actual rate pass without duplicating it.
-    pub(crate) fn update_rates_observed(&self, mut observe: impl FnMut(&TorrentState)) {
+    #[cfg(test)]
+    pub(crate) fn update_rates_observed(&self, observe: impl FnMut(&TorrentState)) {
+        self.update_rates_inner(false, observe);
+    }
+
+    fn update_rates_inner(&self, emit: bool, mut observe: impl FnMut(&TorrentState)) {
+        let subscribed = emit && self.bus().receiver_count() > 0;
+        let mut dirty = Vec::new();
         let mut total_ul = 0u64;
         let mut total_dl = 0u64;
         let mut active_peers = 0usize;
@@ -2660,20 +2657,28 @@ impl TorrentManager {
             if peers > 0 {
                 with_peers += 1;
             }
+            let before = (t.upload_rate.get(), t.download_rate.get());
             // Cold torrents (no peers, rate already 0) moved no bytes since the
             // last tick -> skip the EMA update so per-tick cost tracks the hot
             // set, not total N. One-tick under-report on wake is harmless.
-            if t.peers_connected.load(Ordering::Relaxed) == 0
-                && t.upload_rate.get() == 0
-                && t.download_rate.get() == 0
-            {
-                observe(t);
-                continue;
+            if peers > 0 || before != (0, 0) {
+                t.upload_rate.update(ul);
+                t.download_rate.update(dl);
             }
-            t.upload_rate.update(ul);
-            t.download_rate.update(dl);
-            if t.upload_rate.get() > 0 {
+            let after = (t.upload_rate.get(), t.download_rate.get());
+            if after.0 > 0 {
                 live.uploading.push(t.info_hash);
+            }
+            if emit {
+                let active = peers > 0
+                    || after != (0, 0)
+                    || matches!(state, "downloading" | "seed_only" | "checking_files");
+                if mu != 0 || md != 0 || before != after {
+                    t.mark_live_dirty();
+                }
+                if t.take_live_dirty(subscribed, active) {
+                    dirty.push(t.clone());
+                }
             }
             observe(t);
         }
@@ -2705,6 +2710,22 @@ impl TorrentManager {
             .store(uploading_count, Ordering::Relaxed);
         for (slot, n) in self.cached_status_counts.iter().zip(by_status) {
             slot.store(n, Ordering::Relaxed);
+        }
+        // Bound individual events, including a bulk stop or recheck. Materialize
+        // after releasing the catalogue shard guards.
+        for chunk in dirty.chunks(512) {
+            let torrents = chunk
+                .iter()
+                .filter(|t| {
+                    self.get(&t.info_hash)
+                        .is_some_and(|current| Arc::ptr_eq(&current, t))
+                })
+                .map(crate::session::stats_snapshot)
+                .collect::<Vec<_>>();
+            if !torrents.is_empty() {
+                self.bus()
+                    .publish(crate::rpc::events::Event::StatsSnapshot { torrents });
+            }
         }
     }
 
@@ -3167,6 +3188,7 @@ impl TorrentManager {
                 t.seed_only.store(before, Ordering::SeqCst);
                 return Err(e);
             }
+            t.mark_live_dirty();
         }
         Ok(t.is_seed_only())
     }
@@ -3556,21 +3578,15 @@ impl TorrentManager {
             }
         }
         if rd.paused {
-            state.is_paused.store(true, Ordering::Relaxed);
-            state
-                .status
-                .store(TorrentStatus::Stopped as u8, Ordering::Relaxed);
+            state.set_paused(true, Ordering::Relaxed);
+            state.set_status(TorrentStatus::Stopped as u8, Ordering::Relaxed);
         } else if rd.seed_mode
             || state.picker.get().is_none()
             || state.picker.get().unwrap().lock().unwrap().is_complete()
         {
-            state
-                .status
-                .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+            state.set_status(TorrentStatus::Seeding as u8, Ordering::Relaxed);
         } else {
-            state
-                .status
-                .store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+            state.set_status(TorrentStatus::Downloading as u8, Ordering::Relaxed);
         }
 
         let state = Arc::new(state);
@@ -4460,7 +4476,7 @@ impl TorrentManager {
             // they are now anyway -- unless it reads one file only and this
             // one is of the torrent. That one is called off as a stop would,
             // and this one takes its place: its verdict covers the file too.
-            if t.rechecking.swap(true, Ordering::SeqCst) {
+            if t.swap_rechecking(true, Ordering::SeqCst) {
                 let running = t.recheck_scope().unwrap_or_else(|| whole.clone());
                 if running != whole && scope.is_none() {
                     t.check_gen.fetch_add(1, Ordering::SeqCst);
@@ -4510,8 +4526,7 @@ impl TorrentManager {
         // recheck brings it back, that wait is not its own.
         let was_error = t.status.load(Ordering::Relaxed) == TorrentStatus::Error as u8;
         if !t.is_paused.load(Ordering::Relaxed) {
-            t.status
-                .store(TorrentStatus::Checking as u8, Ordering::Relaxed);
+            t.set_status(TorrentStatus::Checking as u8, Ordering::Relaxed);
         }
         let mgr = self.clone();
         let ih = *info_hash;
@@ -4551,7 +4566,7 @@ impl TorrentManager {
                     if t.check_gen.load(Ordering::SeqCst) != gen {
                         return;
                     }
-                    t.status.store(
+                    t.set_status(
                         if t.is_paused.load(Ordering::Relaxed) {
                             TorrentStatus::Stopped as u8
                         } else {
@@ -4560,7 +4575,7 @@ impl TorrentManager {
                         Ordering::Relaxed,
                     );
                     t.end_recheck_progress();
-                    t.rechecking.store(false, Ordering::SeqCst);
+                    t.set_rechecking(false, Ordering::SeqCst);
                     return;
                 }
             }
@@ -4592,7 +4607,7 @@ impl TorrentManager {
                 // The counter goes first: a reader seeing `rechecking` false
                 // must not find a figure left over from this check.
                 t.end_recheck_progress();
-                t.rechecking.store(false, Ordering::SeqCst);
+                t.set_rechecking(false, Ordering::SeqCst);
                 announce
             };
             if announce {
@@ -4701,7 +4716,7 @@ impl TorrentManager {
                     impl Drop for Counted {
                         fn drop(&mut self) {
                             if !TorrentManager::check_called_off(&self.0, self.1) {
-                                self.0.recheck_done.fetch_add(1, Ordering::Relaxed);
+                                self.0.record_recheck_read();
                                 self.0.mark_rechecked(self.2);
                             }
                         }
@@ -4806,11 +4821,9 @@ impl TorrentManager {
         let unreadable = unreadable.lock().unwrap().take();
         if let Some(why) = unreadable {
             if t.is_paused.load(Ordering::Relaxed) {
-                t.status
-                    .store(TorrentStatus::Stopped as u8, Ordering::Relaxed);
+                t.set_status(TorrentStatus::Stopped as u8, Ordering::Relaxed);
             } else {
-                t.status
-                    .store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+                t.set_status(TorrentStatus::Downloading as u8, Ordering::Relaxed);
                 t.mark_error(&format!(
                     "cannot read the data: {why}. Check the volume is mounted and readable, then recheck this torrent"
                 ));
@@ -4894,8 +4907,7 @@ impl TorrentManager {
 
         let complete = num_pieces > 0 && have >= num_pieces;
         if t.is_paused.load(Ordering::Relaxed) {
-            t.status
-                .store(TorrentStatus::Stopped as u8, Ordering::Relaxed);
+            t.set_status(TorrentStatus::Stopped as u8, Ordering::Relaxed);
         } else if complete {
             if t.completed_time.load(Ordering::Relaxed) == 0 {
                 let now = std::time::SystemTime::now()
@@ -4904,16 +4916,14 @@ impl TorrentManager {
                     .as_secs() as i64;
                 t.completed_time.store(now, Ordering::Relaxed);
             }
-            t.status
-                .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+            t.set_status(TorrentStatus::Seeding as u8, Ordering::Relaxed);
             // The recheck was the only reader; a seeder needs no hashes.
             t.release_piece_hashes();
             t.release_have_tx();
         } else {
             // Still incomplete: the download path is about to verify every
             // piece it pulls, so the table stays loaded.
-            t.status
-                .store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+            t.set_status(TorrentStatus::Downloading as u8, Ordering::Relaxed);
         }
 
         // Persist the verified bitfield so a restart does not re-check from
@@ -5934,13 +5944,13 @@ mod lifecycle_tests {
     #[tokio::test]
     async fn a_file_check_figure_is_over_its_own_pieces() {
         let (_mgr, root, _ih, t) = three_file_torrent("filecheck-figure").await;
-        t.rechecking.store(true, Ordering::SeqCst);
+        t.set_rechecking(true, Ordering::SeqCst);
         t.begin_recheck_progress_of(2..3);
         assert_eq!(crate::rpc::dispatch::checking_progress(&t), Some(0.0));
         t.recheck_done.store(1, Ordering::SeqCst);
         assert_eq!(crate::rpc::dispatch::checking_progress(&t), Some(1.0));
         t.end_recheck_progress();
-        t.rechecking.store(false, Ordering::SeqCst);
+        t.set_rechecking(false, Ordering::SeqCst);
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -5995,7 +6005,7 @@ mod lifecycle_tests {
         std::thread::sleep(std::time::Duration::from_millis(100));
         t.check_gen.fetch_add(1, Ordering::SeqCst);
         t.end_recheck_progress();
-        t.rechecking.store(false, Ordering::SeqCst);
+        t.set_rechecking(false, Ordering::SeqCst);
         drop(ending);
         asked.await.unwrap().expect("recheck asked");
 
@@ -6343,9 +6353,8 @@ mod lifecycle_tests {
         assert!(!check.is_finished(), "the verdict waits for the lock");
         // The stop, as `cancel_check` then `stop_torrent` make it.
         t.check_gen.fetch_add(1, Ordering::SeqCst);
-        t.is_paused.store(true, Ordering::Relaxed);
-        t.status
-            .store(TorrentStatus::Stopped as u8, Ordering::Relaxed);
+        t.set_paused(true, Ordering::Relaxed);
+        t.set_status(TorrentStatus::Stopped as u8, Ordering::Relaxed);
         drop(held);
         check.await.unwrap();
         assert_eq!(num_have(&t), 1, "the reads' verdict was not installed");
@@ -6673,7 +6682,7 @@ mod lifecycle_tests {
         mgr.stop_torrent(&ih).unwrap();
         // The window: verdict published for a paused torrent, `rechecking`
         // not yet let go.
-        t.rechecking.store(true, Ordering::SeqCst);
+        t.set_rechecking(true, Ordering::SeqCst);
         assert_eq!(
             t.status.load(Ordering::Relaxed),
             TorrentStatus::Stopped as u8
@@ -6685,7 +6694,7 @@ mod lifecycle_tests {
             TorrentStatus::Seeding as u8,
             "started by its verified bitfield"
         );
-        t.rechecking.store(false, Ordering::SeqCst);
+        t.set_rechecking(false, Ordering::SeqCst);
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -7040,11 +7049,11 @@ mod lifecycle_tests {
 
         // The pass itself counts the pieces it reads: run it on its own with
         // the flag up, and read the figure it leaves.
-        t.rechecking.store(true, Ordering::SeqCst);
+        t.set_rechecking(true, Ordering::SeqCst);
         let gen = t.check_gen.load(Ordering::SeqCst);
         mgr.run_recheck(ih, t.clone(), gen, 4).await;
         assert_eq!(field(&t), 1.0, "both pieces were read");
-        t.rechecking.store(false, Ordering::SeqCst);
+        t.set_rechecking(false, Ordering::SeqCst);
         assert!(field(&t).is_null());
         std::fs::remove_dir_all(&root).ok();
     }
@@ -7167,8 +7176,7 @@ mod lifecycle_tests {
                     started: true,
                     ..Default::default()
                 });
-            t.status
-                .store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+            t.set_status(TorrentStatus::Downloading as u8, Ordering::Relaxed);
 
             match cause {
                 "data_lost" => t.mark_data_lost("sync failed"),
@@ -7372,46 +7380,35 @@ mod lifecycle_tests {
         let (mgr, root) = manager("live-deltas");
         let ih = add(&mgr, &root, "live");
         let t = mgr.get(&ih).unwrap();
-        t.is_paused.store(false, Ordering::Relaxed);
-        t.status
-            .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+        t.set_paused(false, Ordering::Relaxed);
+        t.set_status(TorrentStatus::Seeding as u8, Ordering::Relaxed);
         t.peers_connected.store(1, Ordering::Relaxed);
-        t.upload_rate.update(0);
-        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
-        t.total_uploaded.store(1024, Ordering::Relaxed);
-        t.upload_rate.update(1024);
-        let events = mgr.bus().subscribe();
-        let emitter = crate::session::spawn_stats_emitter(mgr.clone());
-        let next = |mut events: tokio::sync::broadcast::Receiver<Event>| async move {
-            let event = tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
-                .await
-                .unwrap()
-                .unwrap();
-            let Event::StatsSnapshot { torrents } = event else {
+        mgr.update_rates();
+        let mut events = mgr.bus().subscribe();
+        let next = |events: &mut tokio::sync::broadcast::Receiver<Event>| {
+            let Event::StatsSnapshot { torrents } = events.try_recv().unwrap() else {
                 panic!("stats expected")
             };
-            (
-                events,
-                torrents
-                    .into_iter()
-                    .find(|r| r.info_hash == hex_encode(&ih))
-                    .unwrap(),
-            )
+            torrents
+                .into_iter()
+                .find(|r| r.info_hash == hex_encode(&ih))
+                .unwrap()
         };
-        let (rx, first) = next(events).await;
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        t.total_uploaded.store(1024, Ordering::Relaxed);
+        mgr.update_rates();
+        let first = next(&mut events);
         assert!(first.upload_rate > 0);
-        t.upload_rate.update(1024);
-        let (rx, stopped) = next(rx).await;
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        mgr.update_rates();
+        let stopped = next(&mut events);
         assert_eq!(stopped.total_uploaded, first.total_uploaded);
         assert_eq!(stopped.peers_connected, first.peers_connected);
         assert_eq!(stopped.upload_rate, 0, "rate-only changes must be emitted");
-        t.is_paused.store(true, Ordering::Relaxed);
-        let (_, paused) = next(rx).await;
-        assert_eq!(
-            paused.state, "paused",
-            "pause flags are not the raw status byte"
-        );
-        emitter.abort();
+        t.set_paused(true, Ordering::Relaxed);
+        mgr.update_rates();
+        assert_eq!(next(&mut events).state, "paused");
+        drop(events);
         drop(t);
         drop(mgr);
         std::fs::remove_dir_all(&root).ok();
@@ -7683,9 +7680,8 @@ mod manager_tests {
             "only the other torrent's"
         );
 
-        t.status
-            .store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
-        t.is_paused.store(false, Ordering::Relaxed);
+        t.set_status(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+        t.set_paused(false, Ordering::Relaxed);
         let mut dl =
             crate::peer::download::DownloadState::new(t.clone(), Arc::new(DiskManager::new(4)));
         dl.on_have_all();
@@ -9236,7 +9232,7 @@ mod manager_tests {
         let (mgr, root) = manager("rename-store-down");
         let ih = add(&mgr, "alpha");
         let t = mgr.get(&ih).unwrap();
-        t.is_paused.store(true, Ordering::Relaxed);
+        t.set_paused(true, Ordering::Relaxed);
         let from = t.meta.disk_rel(0).to_string_lossy().into_owned();
         let conn = rusqlite::Connection::open(root.join("state.db")).unwrap();
         conn.execute("DROP TABLE torrent_state", []).unwrap();
@@ -9404,8 +9400,7 @@ mod manager_tests {
             )
             .unwrap();
         let t = mgr.get(&ih).unwrap();
-        t.status
-            .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+        t.set_status(TorrentStatus::Seeding as u8, Ordering::Relaxed);
         (mgr, root, t)
     }
 
@@ -9546,8 +9541,7 @@ mod manager_tests {
             .unwrap();
         let t = mgr.get(&ih).unwrap();
         assert!(t.picker.get().is_some(), "a download, with a picker");
-        t.status
-            .store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+        t.set_status(TorrentStatus::Downloading as u8, Ordering::Relaxed);
         t.park_absent("test");
         mgr.incomplete.remove(&ih);
         let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));

@@ -554,8 +554,7 @@ async fn several_engines_and_a_check_in_progress_are_409() {
         .manager
         .get(&ih)
         .unwrap()
-        .rechecking
-        .store(true, std::sync::atomic::Ordering::SeqCst);
+        .set_rechecking(true, std::sync::atomic::Ordering::SeqCst);
     let (code, body) = call(
         &s,
         "POST",
@@ -569,8 +568,7 @@ async fn several_engines_and_a_check_in_progress_are_409() {
         .manager
         .get(&ih)
         .unwrap()
-        .rechecking
-        .store(false, std::sync::atomic::Ordering::SeqCst);
+        .set_rechecking(false, std::sync::atomic::Ordering::SeqCst);
 
     // The shim renames every copy: if the LAST one would refuse, the first
     // must not have been renamed already.
@@ -582,8 +580,7 @@ async fn several_engines_and_a_check_in_progress_are_409() {
     last.manager
         .get(&ih)
         .unwrap()
-        .rechecking
-        .store(true, std::sync::atomic::Ordering::SeqCst);
+        .set_rechecking(true, std::sync::atomic::Ordering::SeqCst);
     let (code, body) = call(
         &s,
         "POST",
@@ -600,8 +597,7 @@ async fn several_engines_and_a_check_in_progress_are_409() {
     last.manager
         .get(&ih)
         .unwrap()
-        .rechecking
-        .store(false, std::sync::atomic::Ordering::SeqCst);
+        .set_rechecking(false, std::sync::atomic::Ordering::SeqCst);
     let (code, body) = call(
         &s,
         "POST",

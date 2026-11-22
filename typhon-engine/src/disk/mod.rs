@@ -3302,7 +3302,7 @@ mod disk_tests {
         let chunks = content.chunks(4096).map(|c| c.to_vec()).collect();
         let f = fixture_in_pieces(tag, &content, 4096);
         // The fixture is added stopped; these are downloads under way.
-        f.torrent.status.store(
+        f.torrent.set_status(
             crate::torrent::meta::TorrentStatus::Downloading as u8,
             Ordering::Relaxed,
         );
@@ -3395,7 +3395,7 @@ mod disk_tests {
         for (i, c) in chunks.iter().enumerate() {
             download(&f, i as u32, c).await;
         }
-        f.torrent.status.store(
+        f.torrent.set_status(
             crate::torrent::meta::TorrentStatus::Seeding as u8,
             Ordering::Relaxed,
         );
@@ -3421,7 +3421,7 @@ mod disk_tests {
         for (i, c) in chunks.iter().enumerate() {
             download(&f, i as u32, c).await;
         }
-        f.torrent.status.store(
+        f.torrent.set_status(
             crate::torrent::meta::TorrentStatus::Seeding as u8,
             Ordering::Relaxed,
         );
@@ -3558,7 +3558,7 @@ mod disk_tests {
         for (i, c) in chunks.iter().enumerate() {
             download(&f, i as u32, c).await;
         }
-        f.torrent.status.store(
+        f.torrent.set_status(
             crate::torrent::meta::TorrentStatus::Seeding as u8,
             Ordering::Relaxed,
         );

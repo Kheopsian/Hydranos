@@ -775,9 +775,8 @@ mod worker_tests {
             live.clear();
             live.push(vec!["https://tracker.example/announce".to_string()]);
         }
-        t.status
-            .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
-        t.is_paused.store(false, Ordering::Relaxed);
+        t.set_status(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+        t.set_paused(false, Ordering::Relaxed);
         t.total_uploaded.store(ratio * SIZE, Ordering::Relaxed);
         t.seed_secs.store(seeded_secs, Ordering::Relaxed);
         t.seed_since.store(0, Ordering::Relaxed);
@@ -992,8 +991,7 @@ mod worker_tests {
             Some("0"),
         );
         let (dl, t_dl, _) = seed(&s, "downloading", 5, 0);
-        t_dl.status
-            .store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+        t_dl.set_status(TorrentStatus::Downloading as u8, Ordering::Relaxed);
         let (stopped, _, _) = seed(&s, "stopped", 5, 0);
         s.store
             .lock()

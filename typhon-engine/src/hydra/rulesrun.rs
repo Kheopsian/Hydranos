@@ -2898,7 +2898,7 @@ mod tests {
             (TorrentStatus::Seeding, false),
             (TorrentStatus::Error, true),
         ] {
-            t.status.store(status as u8, Relaxed);
+            t.set_status(status as u8, Relaxed);
             assert_eq!(
                 facts_now(&t, store_row()).torrent_error,
                 error,
@@ -2981,7 +2981,7 @@ mod tests {
         // Nothing was downloaded by this client: the counters do not enter.
         assert_eq!(facts_now(&t, store_row()).total_downloaded, 0.0);
 
-        t.status.store(TorrentStatus::Seeding as u8, Relaxed);
+        t.set_status(TorrentStatus::Seeding as u8, Relaxed);
         near(progress(&t), 100.0);
     }
 
@@ -3081,7 +3081,7 @@ mod tests {
 
         // What a person clicked, against what the engine is doing.
         let state = |status: TorrentStatus, stopped: bool| {
-            single.status.store(status as u8, Relaxed);
+            single.set_status(status as u8, Relaxed);
             let mut s = store_row();
             s.paused = stopped;
             let f = facts_now(&single, s);

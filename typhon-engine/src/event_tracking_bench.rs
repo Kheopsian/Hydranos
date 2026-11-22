@@ -563,9 +563,9 @@ fn event_tracking_can_notify_rate_decay_and_state_without_new_bytes() {
     let rows = rows(&manager);
     for name in STRATEGIES.iter().skip(2) {
         let tracker = dirty(name, rows.clone(), 4).unwrap();
-        rows[0].is_paused.store(true, Ordering::Relaxed);
+        rows[0].set_paused(true, Ordering::Relaxed);
         tracker.mark(0);
-        rows[1].rechecking.store(true, Ordering::Relaxed);
+        rows[1].set_rechecking(true, Ordering::Relaxed);
         tracker.mark(1);
         // A rate observer must issue this notification even if totals did not move.
         tracker.mark(2);
@@ -579,8 +579,8 @@ fn event_tracking_can_notify_rate_decay_and_state_without_new_bytes() {
         assert!(latest.iter().any(|r| r.state == "paused"));
         assert!(latest.iter().any(|r| r.state == "checking_files"));
         assert!(latest.iter().any(|r| r.upload_rate == 0));
-        rows[0].is_paused.store(false, Ordering::Relaxed);
-        rows[1].rechecking.store(false, Ordering::Relaxed);
+        rows[0].set_paused(false, Ordering::Relaxed);
+        rows[1].set_rechecking(false, Ordering::Relaxed);
     }
     drop(rows);
     drop(manager);
@@ -601,7 +601,7 @@ fn benchmark_event_tracking() {
     let enabled = AtomicBool::new(true);
     let mut emitter = StatsEmitter::default();
     let mut listener = Some(manager.bus().subscribe());
-    manager.update_rates();
+    manager.update_rates_observed(|_| {});
     if tracker.is_none() {
         emitter.collect(&manager);
     }
@@ -647,7 +647,7 @@ fn benchmark_event_tracking() {
                 rate_phase_ms = at.elapsed().as_secs_f64() * 1000.0;
                 snapshots = emitter.finish(&manager, changed);
             } else {
-                manager.update_rates();
+                manager.update_rates_observed(|_| {});
                 rate_phase_ms = at.elapsed().as_secs_f64() * 1000.0;
                 if let Some(tracker) = tracker.as_ref().filter(|_| w.active) {
                     batch = tracker.drain();

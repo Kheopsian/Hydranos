@@ -1669,7 +1669,7 @@ mod tests {
             let ih = typhon_engine::torrent::hex_decode(h).unwrap();
             let t = s.state.engines.get(e).unwrap().manager.get(&ih).unwrap();
             t.clear_error();
-            t.status.store(
+            t.set_status(
                 typhon_engine::torrent::meta::TorrentStatus::Seeding as u8,
                 Relaxed,
             );
@@ -1749,7 +1749,7 @@ mod tests {
         let vpn = s.state.engines.get("vpn7").unwrap();
         let ih = typhon_engine::torrent::hex_decode(&hashes[2]).unwrap();
         let t = vpn.manager.get(&ih).unwrap();
-        t.status.store(
+        t.set_status(
             typhon_engine::torrent::meta::TorrentStatus::Error as u8,
             Relaxed,
         );

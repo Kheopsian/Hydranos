@@ -19,8 +19,8 @@ pub(super) fn manager(tag: &str, n: usize) -> (Arc<TorrentManager>, std::path::P
         let mut meta = base.clone();
         meta.info_hash[..8].copy_from_slice(&(i as u64).to_be_bytes());
         let state = Arc::new(TorrentState::new(meta, root.join("data"), true));
-        state.is_paused.store(false, Ordering::Relaxed);
-        state.status.store(3, Ordering::Relaxed);
+        state.set_paused(false, Ordering::Relaxed);
+        state.set_status(3, Ordering::Relaxed);
         manager.insert_prebuilt(state);
     }
     (manager, root)
@@ -52,6 +52,268 @@ fn emitter_primes_cold_rows_without_sending_them_and_releases_idle_cache() {
     assert_eq!(emitter.last.len(), 3);
     drop(manager);
     std::fs::remove_dir_all(root).ok();
+}
+
+fn drain_rows(
+    receiver: &mut tokio::sync::broadcast::Receiver<crate::rpc::events::Event>,
+) -> Vec<crate::rpc::events::TorrentStatsMini> {
+    let mut rows = Vec::new();
+    loop {
+        match receiver.try_recv() {
+            Ok(crate::rpc::events::Event::StatsSnapshot { torrents }) => {
+                assert!(torrents.len() <= 512);
+                rows.extend(torrents);
+            }
+            Ok(_) => {}
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
+            Err(e) => panic!("unexpected stream error: {e}"),
+        }
+    }
+    rows
+}
+
+#[test]
+fn dirty_rows_cover_cold_changes_peers_checks_and_reconnects() {
+    let (manager, root) = manager("dirty-live", 3);
+    let row = manager.all()[0].clone();
+    let mut receiver = manager.bus().subscribe();
+    manager.update_rates();
+    assert!(
+        drain_rows(&mut receiver).is_empty(),
+        "no initial cold burst"
+    );
+    row.total_uploaded.fetch_add(10, Ordering::Relaxed);
+    manager.update_rates();
+    assert_eq!(drain_rows(&mut receiver)[0].total_uploaded, 10);
+    row.restore_lifetime(5, 3);
+    manager.update_rates();
+    let rows = drain_rows(&mut receiver);
+    assert_eq!((rows[0].total_uploaded, rows[0].total_downloaded), (5, 3));
+    row.set_paused(true, Ordering::Relaxed);
+    manager.update_rates();
+    assert_eq!(drain_rows(&mut receiver)[0].state, "paused");
+    row.set_paused(false, Ordering::Relaxed);
+    manager.update_rates();
+    drain_rows(&mut receiver);
+    let stats = Arc::new(crate::torrent::meta::PeerStats::new(
+        "127.0.0.1:12345".parse().unwrap(),
+        [0; 20],
+        String::new(),
+        false,
+        false,
+    ));
+    let guard = crate::torrent::meta::PeerGuard::new(row.clone(), stats);
+    guard.mark_interested(true);
+    manager.update_rates();
+    let rows = drain_rows(&mut receiver);
+    assert_eq!((rows[0].peers_connected, rows[0].peers_interested), (1, 1));
+    drop(guard);
+    manager.update_rates();
+    let rows = drain_rows(&mut receiver);
+    assert_eq!((rows[0].peers_connected, rows[0].peers_interested), (0, 0));
+    let proof = row.hold_for_proof();
+    let waiting = proof.waiting();
+    manager.update_rates();
+    let rows = drain_rows(&mut receiver);
+    assert_eq!(rows[0].state, "checking_files");
+    drop(waiting);
+    drop(proof);
+    manager.update_rates();
+    assert_eq!(drain_rows(&mut receiver)[0].state, "seeding");
+    row.begin_recheck_progress();
+    row.set_rechecking(true, Ordering::SeqCst);
+    let waiting = row.wait_for_check();
+    manager.update_rates();
+    assert!(drain_rows(&mut receiver)[0].check_queued);
+    drop(waiting);
+    row.record_recheck_read();
+    manager.update_rates();
+    let rows = drain_rows(&mut receiver);
+    assert_eq!(rows[0].checking_progress, Some(1.0));
+    assert!(!rows[0].check_queued);
+    row.end_recheck_progress();
+    row.set_rechecking(false, Ordering::SeqCst);
+    manager.update_rates();
+    assert_eq!(drain_rows(&mut receiver)[0].state, "seeding");
+    drop(receiver);
+    row.set_paused(true, Ordering::Relaxed);
+    manager.update_rates();
+    let mut receiver = manager.bus().subscribe();
+    manager.update_rates();
+    assert!(
+        drain_rows(&mut receiver).is_empty(),
+        "REST owns reconnect hydration"
+    );
+    row.set_paused(false, Ordering::Relaxed);
+    manager.update_rates();
+    assert_eq!(drain_rows(&mut receiver).len(), 1);
+    row.set_status(
+        crate::torrent::meta::TorrentStatus::Downloading as u8,
+        Ordering::Relaxed,
+    );
+    manager.update_rates();
+    assert_eq!(drain_rows(&mut receiver)[0].state, "downloading");
+    manager.update_rates();
+    assert!(
+        drain_rows(&mut receiver).is_empty(),
+        "idle downloads do not generate redundant snapshots"
+    );
+    manager.set_seed_only(&row.info_hash, true).unwrap();
+    manager.update_rates();
+    assert_eq!(drain_rows(&mut receiver)[0].state, "seed_only");
+    row.mark_error("test data unavailable");
+    manager.update_rates();
+    assert_eq!(drain_rows(&mut receiver)[0].state, "error");
+    drop(receiver);
+    drop(row);
+    drop(manager);
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn dirty_bulk_changes_are_batched_and_racing_marks_survive() {
+    let (manager, root) = manager("dirty-bulk", 1100);
+    let mut receiver = manager.bus().subscribe();
+    manager.update_rates();
+    assert!(drain_rows(&mut receiver).is_empty());
+    for row in manager.all() {
+        row.set_paused(true, Ordering::Relaxed);
+    }
+    manager.update_rates();
+    assert_eq!(drain_rows(&mut receiver).len(), 1100);
+    let row = manager.all()[0].clone();
+    assert!(!row.take_live_dirty(true, false));
+    row.mark_live_dirty();
+    assert!(row.take_live_dirty(true, false));
+    // A write after the clear must remain pending for the next delivery.
+    row.mark_live_dirty();
+    assert!(row.take_live_dirty(true, false));
+    assert!(!row.take_live_dirty(true, false));
+    drop(receiver);
+    drop(row);
+    drop(manager);
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn dirty_marks_preserve_the_final_update_during_concurrent_drains() {
+    let (manager, root) = manager("dirty-race", 1);
+    let row = manager.all()[0].clone();
+    row.take_live_dirty(false, false);
+    let writer_row = row.clone();
+    let writer = std::thread::spawn(move || {
+        for _ in 0..20_000 {
+            writer_row.total_uploaded.fetch_add(1, Ordering::Relaxed);
+            writer_row.mark_live_dirty();
+        }
+    });
+    let mut last = 0;
+    while !writer.is_finished() {
+        if row.take_live_dirty(true, false) {
+            last = row.total_uploaded.load(Ordering::Relaxed);
+        }
+        std::thread::yield_now();
+    }
+    writer.join().unwrap();
+    if row.take_live_dirty(true, false) {
+        last = row.total_uploaded.load(Ordering::Relaxed);
+    }
+    assert_eq!(
+        last, 20_000,
+        "the final mark must be observed or remain pending"
+    );
+    drop(row);
+    drop(manager);
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[tokio::test]
+async fn dirty_emitter_delivers_the_shared_rate_pass() {
+    let (manager, root) = manager("dirty-task", 1);
+    manager.update_rates();
+    let row = manager.all()[0].clone();
+    let mut receiver = manager.bus().subscribe();
+    row.set_paused(true, Ordering::Relaxed);
+    let task = spawn_stats_emitter(manager.clone());
+    let event = tokio::time::timeout(std::time::Duration::from_secs(5), receiver.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let crate::rpc::events::Event::StatsSnapshot { torrents } = event else {
+        panic!("expected shared rate-pass snapshot")
+    };
+    assert_eq!(torrents.len(), 1);
+    assert_eq!(torrents[0].state, "paused");
+    task.abort();
+    let _ = task.await;
+    drop(receiver);
+    drop(row);
+    drop(manager);
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+#[ignore]
+fn benchmark_dirty_rate_pass() {
+    bench::start();
+    let n = bench::count();
+    for mode in ["fingerprint", "dirty_flags"] {
+        let (manager, root) = manager(&format!("rate-{mode}"), n);
+        let mut receiver = manager.bus().subscribe();
+        let mut emitter = StatsEmitter::default();
+        let rss_before = bench::resident_bytes();
+        let tick = |emitter: &mut StatsEmitter| {
+            if mode == "fingerprint" {
+                manager.update_rates_observed(|_| {});
+                let torrents = emitter.collect(&manager);
+                if !torrents.is_empty() {
+                    manager
+                        .bus()
+                        .publish(crate::rpc::events::Event::StatsSnapshot { torrents });
+                }
+            } else {
+                manager.update_rates();
+            }
+        };
+        tick(&mut emitter);
+        assert!(drain_rows(&mut receiver).is_empty());
+        let rss_primed = bench::resident_bytes();
+        let hot: Vec<_> = manager.all().into_iter().take(100.min(n)).collect();
+        for changing in [false, true] {
+            let mut elapsed = 0.0;
+            let mut cpu = 0.0;
+            for _ in 0..20 {
+                if changing {
+                    for row in &hot {
+                        row.total_uploaded.fetch_add(16384, Ordering::Relaxed);
+                    }
+                }
+                let before_cpu = bench::cpu_ms();
+                let at = std::time::Instant::now();
+                tick(&mut emitter);
+                elapsed += at.elapsed().as_secs_f64() * 1000.0;
+                cpu += bench::cpu_ms() - before_cpu;
+                assert_eq!(
+                    drain_rows(&mut receiver).len(),
+                    if changing { hot.len() } else { 0 }
+                );
+            }
+            bench::emit(
+                "dirty_rate",
+                serde_json::json!({
+                    "catalogue":n,"mode":mode,"changing":changing,
+                    "tick_ms":elapsed/20.0,"cpu_ms":cpu/20.0,
+                    "rss_before":rss_before,"rss_primed":rss_primed,
+                    "fingerprint_entries":emitter.last.len(),
+                    "fingerprint_capacity":emitter.last.capacity(),
+                }),
+            );
+        }
+        drop(hot);
+        drop(receiver);
+        drop(manager);
+        std::fs::remove_dir_all(root).ok();
+    }
 }
 
 /// Opt-in synthetic measurement. Run with --ignored --nocapture --test-threads=1.

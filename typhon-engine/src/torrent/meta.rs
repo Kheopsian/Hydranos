@@ -62,12 +62,14 @@ pub struct CheckWait(Arc<TorrentState>);
 impl Drop for CheckWait {
     fn drop(&mut self) {
         self.0.check_waiting.fetch_sub(1, Ordering::SeqCst);
+        self.0.mark_live_dirty();
     }
 }
 
 impl Drop for ProofHold {
     fn drop(&mut self) {
         self.0.proof_holds.fetch_sub(1, Ordering::SeqCst);
+        self.0.mark_live_dirty();
     }
 }
 
@@ -681,6 +683,7 @@ impl PeerStats {
             return false;
         }
         torrent.peers_connected.fetch_sub(1, Ordering::Relaxed);
+        torrent.mark_live_dirty();
         self.evict_wake.notify_one();
         true
     }
@@ -700,6 +703,7 @@ impl PeerGuard {
         let addr = stats.addr;
         torrent.peers.insert(addr, stats.clone());
         torrent.peers_connected.fetch_add(1, Ordering::Relaxed);
+        torrent.mark_live_dirty();
         // Process-wide live connection count backing `max_connections`.
         // Maintained here rather than at the dial site so inbound sessions are
         // counted too, and so the decrement is RAII-guaranteed below.
@@ -728,6 +732,9 @@ impl PeerGuard {
                 .peers_interested
                 .fetch_sub(1, Ordering::Relaxed);
         }
+        if interested != prev {
+            self.torrent.mark_live_dirty();
+        }
     }
 }
 
@@ -746,6 +753,7 @@ impl Drop for PeerGuard {
                 .peers_interested
                 .fetch_sub(1, Ordering::Relaxed);
         }
+        self.torrent.mark_live_dirty();
     }
 }
 
@@ -1099,6 +1107,8 @@ pub struct TorrentState {
     pub seed_mode: bool,
 
     pub status: AtomicU8,
+    // Bit 0: changed; bit 1: sampled at least once. No per-torrent allocation.
+    live_dirty: AtomicU8,
     pub total_uploaded: AtomicU64,
     #[cfg(test)]
     pub(crate) bench_dirty: AtomicBool,
@@ -1448,6 +1458,7 @@ impl TorrentState {
         self.total_downloaded.store(down, Ordering::Relaxed);
         self.last_counted_up.store(up, Ordering::Relaxed);
         self.last_counted_down.store(down, Ordering::Relaxed);
+        self.mark_live_dirty();
     }
 
     /// Bytes moved since the last call, given the current totals. Each byte is
@@ -1907,6 +1918,7 @@ impl TorrentState {
             completed_time: AtomicI64::new(completed),
             seed_mode,
             status: AtomicU8::new(status),
+            live_dirty: AtomicU8::new(0),
             total_uploaded: AtomicU64::new(0),
             #[cfg(test)]
             bench_dirty: AtomicBool::new(false),
@@ -1971,6 +1983,49 @@ impl TorrentState {
         }
     }
 
+    /// Mark after publishing a state/peer change. Byte counters are sampled
+    /// in the existing rate pass instead of paying a notification per packet.
+    pub fn mark_live_dirty(&self) {
+        self.live_dirty.fetch_or(1, Ordering::Release);
+    }
+
+    /// Clear before reading a snapshot: a racing writer stays dirty for the
+    /// next tick. Initial cold rows belong to REST hydration, not an SSE burst.
+    pub(crate) fn take_live_dirty(&self, subscribed: bool, active: bool) -> bool {
+        if self.live_dirty.load(Ordering::Acquire) == 2 {
+            return false;
+        }
+        let bits = self.live_dirty.swap(2, Ordering::AcqRel);
+        subscribed && if bits & 2 == 0 { active } else { bits & 1 != 0 }
+    }
+
+    pub fn set_status(&self, value: u8, ordering: Ordering) {
+        self.status.store(value, ordering);
+        self.mark_live_dirty();
+    }
+
+    pub fn set_paused(&self, value: bool, ordering: Ordering) {
+        self.is_paused.store(value, ordering);
+        self.mark_live_dirty();
+    }
+
+    pub fn swap_paused(&self, value: bool, ordering: Ordering) -> bool {
+        let previous = self.is_paused.swap(value, ordering);
+        self.mark_live_dirty();
+        previous
+    }
+
+    pub fn set_rechecking(&self, value: bool, ordering: Ordering) {
+        self.rechecking.store(value, ordering);
+        self.mark_live_dirty();
+    }
+
+    pub fn swap_rechecking(&self, value: bool, ordering: Ordering) -> bool {
+        let previous = self.rechecking.swap(value, ordering);
+        self.mark_live_dirty();
+        previous
+    }
+
     /// Taken by a recheck from its last look at `check_gen` to the end of its
     /// verdict (pieces, status, the record written), and by a stop around
     /// what it changes. A stop that moved `check_gen` after that last look,
@@ -1988,6 +2043,7 @@ impl TorrentState {
         let gen = self.check_gen.load(Ordering::SeqCst);
         self.proof_gen.store(gen, Ordering::SeqCst);
         self.proof_holds.fetch_add(1, Ordering::SeqCst);
+        self.mark_live_dirty();
         ProofHold(self.clone(), gen)
     }
 
@@ -2002,12 +2058,14 @@ impl TorrentState {
         self.proof_gen
             .store(self.check_gen.load(Ordering::SeqCst), Ordering::SeqCst);
         self.proof_holds.fetch_add(1, Ordering::SeqCst);
+        self.mark_live_dirty();
     }
 
     /// A check of this torrent waits for its turn until the guard is dropped.
     /// Counted, not a flag: a recheck and a proof can wait at once.
     pub fn wait_for_check(self: &Arc<Self>) -> CheckWait {
         self.check_waiting.fetch_add(1, Ordering::SeqCst);
+        self.mark_live_dirty();
         CheckWait(self.clone())
     }
 
@@ -2036,6 +2094,7 @@ impl TorrentState {
             },
         );
         self.recheck_done.store(0, Ordering::SeqCst);
+        self.mark_live_dirty();
     }
 
     /// The pieces the check of this torrent reads, asked or running; `None`
@@ -2052,6 +2111,12 @@ impl TorrentState {
     pub fn end_recheck_progress(&self) {
         self.recheck_done.store(0, Ordering::SeqCst);
         RECHECK_SEEN.lock().remove(&self.seen_key());
+        self.mark_live_dirty();
+    }
+
+    pub fn record_recheck_read(&self) {
+        self.recheck_done.fetch_add(1, Ordering::Relaxed);
+        self.mark_live_dirty();
     }
 
     /// The running check has read `piece`, whatever its verdict.
@@ -2110,8 +2175,7 @@ impl TorrentState {
         if let Ok(mut g) = self.error_msg.lock() {
             *g = msg.to_string();
         }
-        self.status
-            .store(TorrentStatus::Error as u8, Ordering::Relaxed);
+        self.set_status(TorrentStatus::Error as u8, Ordering::Relaxed);
         self.serving_suspended.store(true, Ordering::Relaxed);
         tracing::warn!("torrent {:?} parked in error: {}", self.meta.name, msg);
     }
@@ -2130,8 +2194,7 @@ impl TorrentState {
         if let Ok(mut g) = self.error_msg.lock() {
             *g = msg.to_string();
         }
-        self.status
-            .store(TorrentStatus::Error as u8, Ordering::Relaxed);
+        self.set_status(TorrentStatus::Error as u8, Ordering::Relaxed);
         tracing::error!(torrent = %self.meta.name, "stopped fetching: {}", msg);
     }
 
@@ -2422,8 +2485,7 @@ impl TorrentState {
         self.set_files_absent(false);
         let cur = self.status.load(Ordering::Relaxed);
         if cur == TorrentStatus::Seeding as u8 || cur == TorrentStatus::Downloading as u8 {
-            self.status
-                .store(TorrentStatus::Error as u8, Ordering::Relaxed);
+            self.set_status(TorrentStatus::Error as u8, Ordering::Relaxed);
         }
         tracing::error!(torrent = %self.meta.name, "{}", msg);
     }
@@ -2511,8 +2573,7 @@ impl TorrentState {
         self.set_files_absent(true);
         let cur = self.status.load(Ordering::Relaxed);
         if cur == TorrentStatus::Seeding as u8 || cur == TorrentStatus::Downloading as u8 {
-            self.status
-                .store(TorrentStatus::Error as u8, Ordering::Relaxed);
+            self.set_status(TorrentStatus::Error as u8, Ordering::Relaxed);
         }
     }
 
@@ -2578,6 +2639,9 @@ impl TorrentState {
                 (cur == TorrentStatus::Error as u8).then_some(target as u8)
             })
             .is_ok();
+        if restored {
+            self.mark_live_dirty();
+        }
         // Pieces deleted meanwhile: retracted now, which parks the torrent
         // for a recheck, as a start with the disk mounted would have.
         if !self.apply_files_verdict(verdict) {
@@ -2632,8 +2696,7 @@ impl TorrentState {
         self.data_lost.store(true, Ordering::Relaxed);
         let cur = self.status.load(Ordering::Relaxed);
         if cur == TorrentStatus::Seeding as u8 || cur == TorrentStatus::Downloading as u8 {
-            self.status
-                .store(TorrentStatus::Error as u8, Ordering::Relaxed);
+            self.set_status(TorrentStatus::Error as u8, Ordering::Relaxed);
         }
     }
 
@@ -3293,9 +3356,7 @@ mod tests {
 
         std::fs::write(dir.join("some.bin"), vec![0u8; 4 * 16384]).unwrap();
         let again = seeded_under(dir.clone());
-        again
-            .status
-            .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+        again.set_status(TorrentStatus::Seeding as u8, Ordering::Relaxed);
         again.restore_data_lost(&saved);
         assert_eq!(
             again.status.load(Ordering::Relaxed),
@@ -3332,8 +3393,7 @@ mod tests {
             p.clear_have(2);
             p.clear_have(3);
         }
-        st.status
-            .store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+        st.set_status(TorrentStatus::Downloading as u8, Ordering::Relaxed);
         st.park_absent("test");
         std::fs::write(dir.join("some.bin"), vec![0u8; 2 * 16384]).unwrap();
         assert!(st.lift_absent_park());
@@ -3369,8 +3429,7 @@ mod tests {
     fn a_lifted_park_leaves_a_stopped_torrent_stopped() {
         let dir = scratch("lift-stopped");
         let st = seeded_under(dir.clone());
-        st.status
-            .store(TorrentStatus::Stopped as u8, Ordering::Relaxed);
+        st.set_status(TorrentStatus::Stopped as u8, Ordering::Relaxed);
         st.park_absent("test");
         std::fs::write(dir.join("some.bin"), vec![0u8; 4 * 16384]).unwrap();
         assert!(st.lift_absent_park());
@@ -3454,9 +3513,7 @@ mod tests {
         let saved = st.data_lost_msg();
 
         let again = seeded_under(dir.clone());
-        again
-            .status
-            .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+        again.set_status(TorrentStatus::Seeding as u8, Ordering::Relaxed);
         again.restore_data_lost(&saved);
         assert_eq!(
             again.status.load(Ordering::Relaxed),
@@ -3541,8 +3598,7 @@ mod tests {
             p.clear_have(0);
             p.clear_have(1);
         }
-        st.status
-            .store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+        st.set_status(TorrentStatus::Downloading as u8, Ordering::Relaxed);
         (dir, st)
     }
 
@@ -3660,8 +3716,7 @@ mod tests {
     #[test]
     fn a_stale_data_lost_park_does_not_stop_a_whole_seed() {
         let st = seeded_under(std::env::temp_dir());
-        st.status
-            .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+        st.set_status(TorrentStatus::Seeding as u8, Ordering::Relaxed);
         st.restore_data_lost("pieces held were found missing");
         assert_eq!(
             st.status.load(Ordering::Relaxed),
@@ -3749,8 +3804,7 @@ mod error_recovery_tests {
             PathBuf::from("/tmp"),
             false,
         ));
-        t.status
-            .store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+        t.set_status(TorrentStatus::Downloading as u8, Ordering::Relaxed);
         t
     }
 
@@ -3860,8 +3914,7 @@ mod announce_session_tests {
             2 * 16384,
             "the traffic counter is irrelevant"
         );
-        t.status
-            .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+        t.set_status(TorrentStatus::Seeding as u8, Ordering::Relaxed);
         assert_eq!(t.bytes_left(), 0, "a seed needs nothing");
     }
 

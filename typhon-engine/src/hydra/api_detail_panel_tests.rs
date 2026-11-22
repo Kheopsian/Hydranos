@@ -368,8 +368,7 @@ async fn fixture(
             .set_have(0);
     }
     if live {
-        t.status
-            .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+        t.set_status(TorrentStatus::Seeding as u8, Ordering::Relaxed);
         // Accumulated, with no open interval: a figure that does not tick
         // between the two reads.
         t.seed_secs.store(777, Ordering::Relaxed);

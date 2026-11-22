@@ -332,17 +332,7 @@ pub async fn start(
     // Rate tracking tick, once a second: the page pushes a status frame every
     // second, and a 2 s tick left every other frame repeating the last figure,
     // so the speeds on screen moved at half the rate of everything around them.
-    let tm_rate = mgr.clone();
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            tm_rate.update_rates();
-        }
-    });
-
-    // Push-based stats snapshot emitter (every 1s, delta-filtered).
-    // Replaces Go's `list_torrents` polling every 2s — cuts ~4-8% CPU spent
-    // on 13k-torrent JSON serialization (see crate::rpc::events docs).
+    // The rate pass also consumes dirty rows; no second catalogue scan.
     spawn_stats_emitter(mgr.clone());
 
     // Unseeded peers count (every 30s — O(N) scan too expensive for tight loop)
@@ -419,19 +409,20 @@ pub fn spawn_resume_sweeps(mgr: Arc<TorrentManager>, fast_secs: u64) {
 // Kept separate so the actual emitter can be exercised without opening sockets.
 pub(crate) fn spawn_stats_emitter(manager: Arc<TorrentManager>) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut emitter = StatsEmitter::default();
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            let torrents = emitter.collect(&manager);
-            if !torrents.is_empty() {
-                manager
-                    .bus()
-                    .publish(crate::rpc::events::Event::StatsSnapshot { torrents });
+            let manager = manager.clone();
+            // One in-flight pass per engine; a large catalogue must not
+            // occupy an async worker or accumulate queued rate ticks.
+            if let Err(error) = tokio::task::spawn_blocking(move || manager.update_rates()).await {
+                tracing::error!(%error, "rate and live-stats task failed");
+                return;
             }
         }
     })
 }
 
+#[cfg(test)]
 #[derive(Clone, Copy, PartialEq)]
 struct Stamp {
     bytes: (u64, u64),
@@ -441,12 +432,14 @@ struct Stamp {
     rates: (u64, u64),
 }
 
+#[cfg(test)]
 #[derive(Default)]
 struct StatsEmitter {
     last: std::collections::HashMap<[u8; 20], (Stamp, u64)>,
     tick: u64,
 }
 
+#[cfg(test)]
 impl StatsEmitter {
     fn begin(&mut self, manager: &TorrentManager) -> bool {
         if manager.bus().receiver_count() == 0 {
@@ -506,24 +499,7 @@ impl StatsEmitter {
     fn snapshot(
         t: Arc<crate::torrent::meta::TorrentState>,
     ) -> crate::rpc::events::TorrentStatsMini {
-        use std::sync::atomic::Ordering;
-        let core = crate::rpc::dispatch::torrent_core(&t);
-        let checking = crate::rpc::dispatch::checking_progress(&t);
-        crate::rpc::events::TorrentStatsMini {
-            info_hash: crate::torrent::hex_encode(&t.info_hash),
-            status: core.status_u8,
-            state: core.state,
-            total_done: core.total_done,
-            total_uploaded: t.total_uploaded.load(Ordering::Relaxed),
-            total_downloaded: t.total_downloaded.load(Ordering::Relaxed),
-            upload_rate: t.upload_rate.get(),
-            download_rate: t.download_rate.get(),
-            peers_connected: t.peers_connected.load(Ordering::Relaxed) as u32,
-            peers_interested: t.peers_interested.load(Ordering::Relaxed) as u32,
-            progress: core.progress as f32,
-            checking_progress: checking.map(|c| c as f32),
-            check_queued: checking.is_some() && t.waiting_for_check(),
-        }
+        stats_snapshot(&t)
     }
 
     fn finish(
@@ -548,6 +524,29 @@ impl StatsEmitter {
         let mut changed = Vec::new();
         manager.for_each(|t| self.observe(t, &mut changed));
         self.finish(manager, changed)
+    }
+}
+
+pub(crate) fn stats_snapshot(
+    t: &Arc<crate::torrent::meta::TorrentState>,
+) -> crate::rpc::events::TorrentStatsMini {
+    use std::sync::atomic::Ordering;
+    let core = crate::rpc::dispatch::torrent_core(t);
+    let checking = crate::rpc::dispatch::checking_progress(t);
+    crate::rpc::events::TorrentStatsMini {
+        info_hash: crate::torrent::hex_encode(&t.info_hash),
+        status: core.status_u8,
+        state: core.state,
+        total_done: core.total_done,
+        total_uploaded: t.total_uploaded.load(Ordering::Relaxed),
+        total_downloaded: t.total_downloaded.load(Ordering::Relaxed),
+        upload_rate: t.upload_rate.get(),
+        download_rate: t.download_rate.get(),
+        peers_connected: t.peers_connected.load(Ordering::Relaxed) as u32,
+        peers_interested: t.peers_interested.load(Ordering::Relaxed) as u32,
+        progress: core.progress as f32,
+        checking_progress: checking.map(|c| c as f32),
+        check_queued: checking.is_some() && t.waiting_for_check(),
     }
 }
 

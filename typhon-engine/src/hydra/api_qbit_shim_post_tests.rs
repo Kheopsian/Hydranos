@@ -369,8 +369,7 @@ async fn the_lsd_tracker_row_shows_the_real_state() {
     find_torrent(&s.state, &hash)
         .unwrap()
         .1
-        .is_paused
-        .store(false, std::sync::atomic::Ordering::Relaxed);
+        .set_paused(false, std::sync::atomic::Ordering::Relaxed);
     let from: std::net::SocketAddr = "192.168.0.7:6771".parse().unwrap();
     lsd.offer(
         &race.manager,

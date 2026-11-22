@@ -449,7 +449,7 @@ mod tests {
         spawn(s.engines.clone(), bench.clone());
         tokio::time::sleep(std::time::Duration::from_millis(1300)).await;
         let (done, d) = add_race(&s, "cd");
-        d.status.store(TorrentStatus::Seeding as u8, Relaxed);
+        d.set_status(TorrentStatus::Seeding as u8, Relaxed);
         peer(&d, 8);
         d.peers_connected.store(1, Relaxed);
         let (running, r) = add_race(&s, "dl");

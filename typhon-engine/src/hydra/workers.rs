@@ -2376,9 +2376,8 @@ mod queue_tests {
                     .add_torrent_bytes(&torrent_bytes(n), "/tmp", false, true)
                     .unwrap();
                 let t = mgr.get(&ih).unwrap();
-                t.status
-                    .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
-                t.is_paused.store(false, Ordering::Relaxed);
+                t.set_status(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+                t.set_paused(false, Ordering::Relaxed);
                 t
             })
             .collect()
@@ -2533,9 +2532,8 @@ mod queue_tests {
                     .add_torrent_bytes(&torrent_bytes(n), "/tmp", false, true)
                     .unwrap();
                 let t = mgr.get(&ih).unwrap();
-                t.status
-                    .store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
-                t.is_paused.store(true, Ordering::Relaxed);
+                t.set_status(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+                t.set_paused(true, Ordering::Relaxed);
                 t
             })
             .collect()
@@ -2565,8 +2563,7 @@ mod queue_tests {
                 );
                 for t in all {
                     if !t.is_paused.load(Ordering::Relaxed) {
-                        t.status
-                            .store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+                        t.set_status(TorrentStatus::Downloading as u8, Ordering::Relaxed);
                     }
                 }
                 all.iter()
@@ -2790,9 +2787,8 @@ mod decision_tests {
             live.clear();
             live.push(vec![tracker.to_string()]);
         }
-        t.status
-            .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
-        t.is_paused.store(false, Ordering::Relaxed);
+        t.set_status(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+        t.set_paused(false, Ordering::Relaxed);
         t.seed_secs.store(seeded_secs, Ordering::Relaxed);
         t.seed_since.store(0, Ordering::Relaxed);
         (hash, t, file)
@@ -3226,9 +3222,8 @@ mod decision_tests {
                     .add_torrent_bytes(&torrent_bytes(n), "/tmp", true, false)
                     .unwrap();
                 let t = mgr.get(&ih).unwrap();
-                t.status
-                    .store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
-                t.is_paused.store(true, Ordering::Relaxed);
+                t.set_status(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+                t.set_paused(true, Ordering::Relaxed);
                 t
             })
             .collect()
@@ -3357,10 +3352,7 @@ mod decision_tests {
             .add_torrent_bytes(&torrent_bytes("wb"), "/tmp", false, false)
             .unwrap();
         for ih in [&ih_a, &ih_b] {
-            mgr.get(ih)
-                .unwrap()
-                .is_paused
-                .store(false, Ordering::Relaxed);
+            mgr.get(ih).unwrap().set_paused(false, Ordering::Relaxed);
         }
         spawn_stagger_start(mgr.clone());
         for _ in 0..20 {
@@ -3408,8 +3400,7 @@ mod decision_tests {
             .unwrap();
         mgr.get(&ih)
             .unwrap()
-            .status
-            .store(TorrentStatus::Checking as u8, Ordering::Relaxed);
+            .set_status(TorrentStatus::Checking as u8, Ordering::Relaxed);
         spawn_verify_throttle(mgr.clone());
         after(0).await;
         after(5).await;
@@ -3423,8 +3414,7 @@ mod decision_tests {
         );
         mgr.get(&ih)
             .unwrap()
-            .status
-            .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+            .set_status(TorrentStatus::Seeding as u8, Ordering::Relaxed);
         after(10).await;
         assert_eq!(alive_tasks(), base);
     }
@@ -3442,8 +3432,7 @@ mod decision_tests {
             .unwrap();
         mgr.get(&ih)
             .unwrap()
-            .status
-            .store(TorrentStatus::Checking as u8, Ordering::Relaxed);
+            .set_status(TorrentStatus::Checking as u8, Ordering::Relaxed);
         let base = alive_tasks();
         let stop = typhon_engine::stop::Stop::new();
 
@@ -3883,7 +3872,7 @@ mod decision_tests {
         let ts = queued_downloads(&mgr, &["qa", "qb", "qc"]);
         let cache = Cache::default();
         for (t, n) in ts.iter().zip([9, 5, 1]) {
-            t.is_paused.store(false, Ordering::Relaxed);
+            t.set_paused(false, Ordering::Relaxed);
             seeders(&cache, t, n);
         }
         enforce_queue(
@@ -3943,9 +3932,7 @@ mod decision_tests {
         let s = st("dec-queue-err", "");
         let mgr = engine_manager(&s, "race");
         let ts = queued_downloads(&mgr, &["qg", "qh"]);
-        ts[0]
-            .status
-            .store(TorrentStatus::Error as u8, Ordering::Relaxed);
+        ts[0].set_status(TorrentStatus::Error as u8, Ordering::Relaxed);
         let cache = Cache::default();
         seeders(&cache, &ts[0], 1000);
         enforce_queue(
@@ -3975,7 +3962,7 @@ mod decision_tests {
         let s = st("dec-queue-total", "");
         let mgr = engine_manager(&s, "race");
         let dl = queued_downloads(&mgr, &["qi"]);
-        dl[0].is_paused.store(false, Ordering::Relaxed);
+        dl[0].set_paused(false, Ordering::Relaxed);
         let seeds: Vec<_> = ["qj", "qk"]
             .iter()
             .map(|n| {
@@ -3983,9 +3970,8 @@ mod decision_tests {
                     .add_torrent_bytes(&torrent_bytes(n), "/tmp", false, true)
                     .unwrap();
                 let t = mgr.get(&ih).unwrap();
-                t.status
-                    .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
-                t.is_paused.store(false, Ordering::Relaxed);
+                t.set_status(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+                t.set_paused(false, Ordering::Relaxed);
                 t
             })
             .collect();
@@ -4031,9 +4017,8 @@ mod decision_tests {
                     .add_torrent_bytes(&torrent_bytes(n), s.dir.to_str().unwrap(), false, true)
                     .unwrap();
                 let t = mgr.get(&ih).unwrap();
-                t.status
-                    .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
-                t.is_paused.store(false, Ordering::Relaxed);
+                t.set_status(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+                t.set_paused(false, Ordering::Relaxed);
                 t
             })
             .collect();
@@ -4081,8 +4066,7 @@ mod decision_tests {
             .add_torrent_bytes(&torrent_bytes("qo"), "/tmp", true, true)
             .unwrap();
         let t = mgr.get(&ih).unwrap();
-        t.status
-            .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+        t.set_status(TorrentStatus::Seeding as u8, Ordering::Relaxed);
         let mut parked: HashSet<InfoHash> = [ih].into();
         let forced: HashSet<String> = [typhon_engine::torrent::hex_encode(&ih)].into();
         enforce_queue(
@@ -4197,15 +4181,12 @@ mod decision_tests {
             .add_torrent_bytes(&torrent_bytes("hold"), "/tmp", true, true)
             .unwrap();
         let t = mgr.get(&ih).unwrap();
-        t.status
-            .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+        t.set_status(TorrentStatus::Seeding as u8, Ordering::Relaxed);
         assert!(holds_everything(&t), "seeding says so");
-        t.status
-            .store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+        t.set_status(TorrentStatus::Downloading as u8, Ordering::Relaxed);
         assert!(!holds_everything(&t), "downloading says not");
         // Added in seed mode: no picker, its data trusted whole.
-        t.status
-            .store(TorrentStatus::Stopped as u8, Ordering::Relaxed);
+        t.set_status(TorrentStatus::Stopped as u8, Ordering::Relaxed);
         assert!(t.picker.get().is_none());
         assert!(holds_everything(&t));
     }
@@ -4220,9 +4201,7 @@ mod decision_tests {
         let s = st("kill-queue-checked", "");
         let mgr = engine_manager(&s, "race");
         let ts = queued_downloads(&mgr, &["xa", "xb"]);
-        ts[0]
-            .status
-            .store(TorrentStatus::Checking as u8, Ordering::Relaxed);
+        ts[0].set_status(TorrentStatus::Checking as u8, Ordering::Relaxed);
         ts[0].total_downloaded.store(SIZE, Ordering::Relaxed);
         let cache = Cache::default();
         seeders(&cache, &ts[0], 50);
@@ -4260,14 +4239,11 @@ mod decision_tests {
             mgr.get(&ih).unwrap()
         };
         let (seed, checked) = (add("xc"), add("xd"));
-        seed.status
-            .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
-        checked
-            .status
-            .store(TorrentStatus::Checking as u8, Ordering::Relaxed);
+        seed.set_status(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+        checked.set_status(TorrentStatus::Checking as u8, Ordering::Relaxed);
         checked.total_downloaded.store(SIZE, Ordering::Relaxed);
         for t in [&seed, &checked] {
-            t.is_paused.store(false, Ordering::Relaxed);
+            t.set_paused(false, Ordering::Relaxed);
         }
         let mut parked = HashSet::new();
         enforce_queue(
@@ -4607,9 +4583,8 @@ mod decision_tests {
                 .unwrap();
         }
         for t in mgr.all() {
-            t.is_paused.store(false, Ordering::Relaxed);
-            t.status
-                .store(TorrentStatus::Stopped as u8, Ordering::Relaxed);
+            t.set_paused(false, Ordering::Relaxed);
+            t.set_status(TorrentStatus::Stopped as u8, Ordering::Relaxed);
         }
         let started = || {
             mgr.all()
@@ -4854,9 +4829,8 @@ mod decision_tests {
                     .add_torrent_bytes(&torrent_bytes(n), "/tmp", false, true)
                     .unwrap();
                 let t = mgr.get(&ih).unwrap();
-                t.status
-                    .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
-                t.is_paused.store(false, Ordering::Relaxed);
+                t.set_status(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+                t.set_paused(false, Ordering::Relaxed);
                 t
             })
             .collect()
@@ -5062,9 +5036,9 @@ mod decision_tests {
         }
         let mut all = mgr.all();
         all.sort_by_key(|t| t.meta.name.clone());
-        all[0].is_paused.store(true, Ordering::Relaxed);
+        all[0].set_paused(true, Ordering::Relaxed);
         for t in &all[1..] {
-            t.is_paused.store(false, Ordering::Relaxed);
+            t.set_paused(false, Ordering::Relaxed);
         }
         spawn_stagger_start(mgr.clone());
         for _ in 0..20 {

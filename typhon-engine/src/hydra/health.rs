@@ -515,8 +515,7 @@ mod scan_tests {
         let tb = torrent(&b, "same", 16384);
         let _other = torrent(&a, "only-a", 16384);
         for t in [&ta, &tb] {
-            t.status
-                .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+            t.set_status(TorrentStatus::Seeding as u8, Ordering::Relaxed);
         }
         let mut r = Report::default();
         scan_dual_seed_live(
@@ -537,8 +536,7 @@ mod scan_tests {
     fn the_pass_measures_efficiency_and_historical_redownloads() {
         let (m, root) = manager("efficiency");
         let t = torrent(&m, "eff", 16384);
-        t.status
-            .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+        t.set_status(TorrentStatus::Seeding as u8, Ordering::Relaxed);
         // 16 KiB kept for 60 MiB pulled: past 1.2x and past 50 MiB.
         t.total_downloaded.store(60 << 20, Ordering::Relaxed);
         let mut r = Report::default();
@@ -586,8 +584,7 @@ mod scan_tests {
     fn a_healthy_torrent_raises_nothing() {
         let (mgr, root) = manager("clean");
         let t = torrent(&mgr, "clean", 16384);
-        t.status
-            .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+        t.set_status(TorrentStatus::Seeding as u8, Ordering::Relaxed);
         *t.save_path.write() = std::path::PathBuf::from("/tmp");
 
         let mut r = Report::default();
@@ -606,9 +603,7 @@ mod scan_tests {
         // Past the ratio but far under the floor: a small torrent that fetched
         // itself three times is still noise.
         let small = torrent(&mgr, "small", 16384);
-        small
-            .status
-            .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+        small.set_status(TorrentStatus::Seeding as u8, Ordering::Relaxed);
         *small.save_path.write() = std::path::PathBuf::from("/tmp");
         small.total_downloaded.store(16384 * 3, Ordering::Relaxed);
         let mut r = Report::default();
@@ -621,8 +616,7 @@ mod scan_tests {
 
         // Past the floor AND the ratio: a real offender.
         let big = torrent(&mgr, "big", 16384);
-        big.status
-            .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+        big.set_status(TorrentStatus::Seeding as u8, Ordering::Relaxed);
         *big.save_path.write() = std::path::PathBuf::from("/tmp");
         big.total_downloaded.store(3 << 30, Ordering::Relaxed);
         let mut r2 = Report::default();
@@ -642,8 +636,7 @@ mod scan_tests {
     fn a_torrent_that_can_serve_nothing_is_reported() {
         let (mgr, root) = manager("enoent");
         let t = torrent(&mgr, "gone", 16384);
-        t.status
-            .store(TorrentStatus::Error as u8, Ordering::Relaxed);
+        t.set_status(TorrentStatus::Error as u8, Ordering::Relaxed);
         let mut r = Report::default();
         scan_engine("race", &[t], no_seeds, no_outage, &mut r);
         assert!(
@@ -661,8 +654,7 @@ mod scan_tests {
     fn an_active_torrent_whose_save_path_vanished_is_a_ghost() {
         let (mgr, root) = manager("ghost");
         let t = torrent(&mgr, "ghost", 16384);
-        t.status
-            .store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+        t.set_status(TorrentStatus::Downloading as u8, Ordering::Relaxed);
         *t.save_path.write() = std::path::PathBuf::from("/tmp/typhon-vanished-7c3a/sub");
         let mut r = Report::default();
         scan_engine("race", &[t], no_seeds, no_outage, &mut r);
@@ -680,8 +672,7 @@ mod scan_tests {
     fn a_stopped_torrent_with_no_path_is_not_a_ghost() {
         let (mgr, root) = manager("stopped");
         let t = torrent(&mgr, "stopped", 16384);
-        t.status
-            .store(TorrentStatus::Stopped as u8, Ordering::Relaxed);
+        t.set_status(TorrentStatus::Stopped as u8, Ordering::Relaxed);
         *t.save_path.write() = std::path::PathBuf::from("/tmp/typhon-vanished-7c3a/sub");
         let mut r = Report::default();
         scan_engine("race", &[t], no_seeds, no_outage, &mut r);
@@ -700,11 +691,10 @@ mod scan_tests {
     fn a_leecher_with_seeds_in_the_swarm_and_no_peer_is_starved() {
         let (mgr, root) = manager("starved");
         let t = torrent(&mgr, "starved", 16384);
-        t.status
-            .store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+        t.set_status(TorrentStatus::Downloading as u8, Ordering::Relaxed);
         *t.save_path.write() = std::path::PathBuf::from("/tmp");
         t.peers_connected.store(0, Ordering::Relaxed);
-        t.is_paused.store(false, Ordering::Relaxed);
+        t.set_paused(false, Ordering::Relaxed);
 
         let mut r = Report::default();
         scan_engine("race", std::slice::from_ref(&t), |_| 12, no_outage, &mut r);
@@ -722,7 +712,7 @@ mod scan_tests {
 
         // Paused on purpose: having no peer is the point, not a fault.
         t.peers_connected.store(0, Ordering::Relaxed);
-        t.is_paused.store(true, Ordering::Relaxed);
+        t.set_paused(true, Ordering::Relaxed);
         let mut r3 = Report::default();
         scan_engine("race", &[t], |_| 12, no_outage, &mut r3);
         assert!(
@@ -737,8 +727,7 @@ mod scan_tests {
     fn a_leecher_in_a_seedless_swarm_is_not_starved() {
         let (mgr, root) = manager("seedless");
         let t = torrent(&mgr, "seedless", 16384);
-        t.status
-            .store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+        t.set_status(TorrentStatus::Downloading as u8, Ordering::Relaxed);
         *t.save_path.write() = std::path::PathBuf::from("/tmp");
         let mut r = Report::default();
         scan_engine("race", &[t], no_seeds, no_outage, &mut r);
@@ -752,8 +741,7 @@ mod scan_tests {
     fn a_tracker_outage_is_reported_once_per_torrent() {
         let (mgr, root) = manager("outage");
         let t = torrent(&mgr, "outage", 16384);
-        t.status
-            .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+        t.set_status(TorrentStatus::Seeding as u8, Ordering::Relaxed);
         *t.save_path.write() = std::path::PathBuf::from("/tmp");
         let mut r = Report::default();
         scan_engine("race", &[t], no_seeds, |_| true, &mut r);
@@ -775,10 +763,8 @@ mod scan_tests {
             a.info_hash, b.info_hash,
             "the fixture builds the same torrent twice"
         );
-        a.status
-            .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
-        b.status
-            .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+        a.set_status(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+        b.set_status(TorrentStatus::Seeding as u8, Ordering::Relaxed);
 
         let mut r = Report::default();
         scan_dual_seed(
@@ -801,10 +787,8 @@ mod scan_tests {
         let (mgr_b, root_b) = manager("single-b");
         let a = torrent(&mgr_a, "shared", 16384);
         let b = torrent(&mgr_b, "shared", 16384);
-        a.status
-            .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
-        b.status
-            .store(TorrentStatus::Stopped as u8, Ordering::Relaxed);
+        a.set_status(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+        b.set_status(TorrentStatus::Stopped as u8, Ordering::Relaxed);
 
         let mut r = Report::default();
         scan_dual_seed(
@@ -829,8 +813,7 @@ mod scan_tests {
     fn the_counts_agree_with_the_anomalies_they_summarise() {
         let (mgr, root) = manager("counts");
         let t = torrent(&mgr, "broken", 16384);
-        t.status
-            .store(TorrentStatus::Error as u8, Ordering::Relaxed);
+        t.set_status(TorrentStatus::Error as u8, Ordering::Relaxed);
         let mut r = Report::default();
         scan_engine("race", &[t], no_seeds, no_outage, &mut r);
         let total: i64 = r.counts.values().sum();

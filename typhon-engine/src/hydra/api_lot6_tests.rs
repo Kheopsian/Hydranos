@@ -73,12 +73,11 @@ fn seed(
         live.clear();
         live.push(vec![TRACKER.to_string()]);
     }
-    t.status.store(
+    t.set_status(
         typhon_engine::torrent::meta::TorrentStatus::Seeding as u8,
         std::sync::atomic::Ordering::Relaxed,
     );
-    t.is_paused
-        .store(false, std::sync::atomic::Ordering::Relaxed);
+    t.set_paused(false, std::sync::atomic::Ordering::Relaxed);
     t.seed_secs
         .store(seeded_secs, std::sync::atomic::Ordering::Relaxed);
     t.seed_since.store(0, std::sync::atomic::Ordering::Relaxed);

@@ -3108,7 +3108,7 @@ mod tests {
         assert!(t.seed_mode && t.is_paused.load(SeqCst));
         // Vouched for, and not complete as far as its status says: the voucher
         // is what lets it through, not what it has.
-        t.status.store(
+        t.set_status(
             typhon_engine::torrent::meta::TorrentStatus::Downloading as u8,
             SeqCst,
         );
@@ -3138,7 +3138,7 @@ mod tests {
         let c = typhon_engine::torrent::hex_encode(&ihc);
         let tc = mgr.get(&ihc).unwrap();
         assert!(!tc.seed_mode);
-        tc.status.store(
+        tc.set_status(
             typhon_engine::torrent::meta::TorrentStatus::Seeding as u8,
             SeqCst,
         );

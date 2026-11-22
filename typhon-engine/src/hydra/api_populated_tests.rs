@@ -320,8 +320,8 @@ async fn the_tracker_pass_counts_only_seeding_torrents_in_seed_size() {
     let set = |t: &std::sync::Arc<typhon_engine::torrent::meta::TorrentState>,
                st: TorrentStatus,
                paused: bool| {
-        t.status.store(st as u8, Ordering::Relaxed);
-        t.is_paused.store(paused, Ordering::Relaxed);
+        t.set_status(st as u8, Ordering::Relaxed);
+        t.set_paused(paused, Ordering::Relaxed);
     };
     let hoard = s.state.engines.get("hoard").expect("hoard").manager.all();
     let race = s.state.engines.get("race").expect("race").manager.all();

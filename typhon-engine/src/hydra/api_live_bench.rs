@@ -25,8 +25,8 @@ async fn benchmark_live_pages() {
             std::env::temp_dir(),
             true,
         ));
-        t.is_paused.store(false, Ordering::Relaxed);
-        t.status.store(
+        t.set_paused(false, Ordering::Relaxed);
+        t.set_status(
             if i < 100 {
                 2
             } else if i < 200 {

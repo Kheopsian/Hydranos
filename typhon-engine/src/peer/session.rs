@@ -1360,8 +1360,7 @@ mod request_bounds_tests {
             std::path::PathBuf::from("/tmp"),
             true,
         ));
-        t.status
-            .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+        t.set_status(TorrentStatus::Seeding as u8, Ordering::Relaxed);
         let stats = PeerStats::new(
             "192.168.99.7:6881".parse().unwrap(),
             [1u8; 20],
@@ -1442,8 +1441,7 @@ mod request_bounds_tests {
             std::path::PathBuf::from("/tmp"),
             false,
         ));
-        t.status
-            .store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+        t.set_status(TorrentStatus::Downloading as u8, Ordering::Relaxed);
         t.picker.get().unwrap().lock().unwrap().set_have(0);
         t.seed_only.store(true, Ordering::Relaxed);
         assert!(ask(&t, &s, 0, 0, PIECE), "the piece it holds is served");

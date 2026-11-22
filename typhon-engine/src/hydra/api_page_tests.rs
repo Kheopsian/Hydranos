@@ -315,8 +315,8 @@ async fn indexed_active_pages_match_full_scan_and_drop_stale_candidates() {
         .into_iter()
         .find(|t| t.meta.name == "active")
         .unwrap();
-    active.is_paused.store(false, Ordering::Relaxed);
-    active.status.store(3, Ordering::Relaxed);
+    active.set_paused(false, Ordering::Relaxed);
+    active.set_status(3, Ordering::Relaxed);
     active.peers_connected.store(1, Ordering::Relaxed);
     manager.update_rates();
     tokio::time::sleep(std::time::Duration::from_millis(600)).await;
@@ -341,9 +341,9 @@ async fn indexed_active_pages_match_full_scan_and_drop_stale_candidates() {
             assert_eq!(scanned["facets"]["all"], 2);
         }
     }
-    active.is_paused.store(true, Ordering::Relaxed);
+    active.set_paused(true, Ordering::Relaxed);
     assert!(rows(&engine_page_value(&s.state, "hoard", "state=__active__").await).is_empty());
-    active.is_paused.store(false, Ordering::Relaxed);
+    active.set_paused(false, Ordering::Relaxed);
     manager.remove_torrent(&active.info_hash, true).unwrap();
     assert!(
         manager.uploading().unwrap().is_empty(),
@@ -363,18 +363,18 @@ async fn live_state_indexes_match_full_scans_across_transitions() {
     let all = manager.all();
     // These are synthetic states: add() cannot find their files on disk.
     for torrent in &all {
-        torrent.is_paused.store(false, Ordering::Relaxed);
-        torrent.status.store(3, Ordering::Relaxed);
+        torrent.set_paused(false, Ordering::Relaxed);
+        torrent.set_status(3, Ordering::Relaxed);
     }
     let down = all.iter().find(|t| t.meta.name == "down").unwrap();
     let check = all.iter().find(|t| t.meta.name == "check").unwrap();
     let error = all.iter().find(|t| t.meta.name == "error").unwrap();
-    down.is_paused.store(false, Ordering::Relaxed);
-    down.status.store(2, Ordering::Relaxed);
-    check.rechecking.store(true, Ordering::Relaxed);
-    error.status.store(4, Ordering::Relaxed);
+    down.set_paused(false, Ordering::Relaxed);
+    down.set_status(2, Ordering::Relaxed);
+    check.set_rechecking(true, Ordering::Relaxed);
+    error.set_status(4, Ordering::Relaxed);
     // A recheck of an errored torrent belongs to BOTH predicate families.
-    error.rechecking.store(true, Ordering::Relaxed);
+    error.set_rechecking(true, Ordering::Relaxed);
     manager.update_rates();
     assert!(
         manager.live_candidates_limited("downloading", 0).is_none(),
@@ -409,7 +409,7 @@ async fn live_state_indexes_match_full_scans_across_transitions() {
             assert_eq!(indexed["filtered"], scanned["filtered"], "{q}");
         }
     }
-    down.is_paused.store(true, Ordering::Relaxed);
+    down.set_paused(true, Ordering::Relaxed);
     assert!(
         rows(&engine_page_value(&s.state, "hoard", "state=downloading").await).is_empty(),
         "stale candidates are filtered immediately"
@@ -417,8 +417,8 @@ async fn live_state_indexes_match_full_scans_across_transitions() {
     manager.update_rates();
     assert!(manager.live_revision() > revision);
     assert!(manager.live_candidates("downloading").unwrap().is_empty());
-    check.rechecking.store(false, Ordering::Relaxed);
-    error.rechecking.store(false, Ordering::Relaxed);
+    check.set_rechecking(false, Ordering::Relaxed);
+    error.set_rechecking(false, Ordering::Relaxed);
     manager.update_rates();
     assert!(manager
         .live_candidates("checking_files")

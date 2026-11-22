@@ -588,7 +588,7 @@ async fn a_rechecked_torrent_is_checking_on_the_shim_and_comes_back_as_it_was() 
         let (paused_before, status_before) = (is_paused(), status());
         assert_eq!(paused_before, stopped, "{name}");
 
-        torrent.rechecking.store(true, SeqCst);
+        torrent.set_rechecking(true, SeqCst);
         let (_, b) = call(&s, "GET", "/api/v2/torrents/info", "").await;
         assert_eq!(state_of(&b), during, "{name}: while it is checked");
         assert_eq!(
@@ -602,7 +602,7 @@ async fn a_rechecked_torrent_is_checking_on_the_shim_and_comes_back_as_it_was() 
             "{name}: the engine's status is untouched"
         );
 
-        torrent.rechecking.store(false, SeqCst);
+        torrent.set_rechecking(false, SeqCst);
         let (_, b) = call(&s, "GET", "/api/v2/torrents/info", "").await;
         assert_eq!(state_of(&b), before, "{name}: back to what it was");
         assert_eq!(is_paused(), paused_before, "{name}");
@@ -640,13 +640,13 @@ async fn a_workflow_sees_a_rechecked_stopped_torrent_as_stopped() {
     };
     let before = state();
     assert_eq!(before, "stopped");
-    torrent.rechecking.store(true, SeqCst);
+    torrent.set_rechecking(true, SeqCst);
     assert_eq!(
         state(),
         before,
         "a recheck is not a change of state for a workflow"
     );
-    torrent.rechecking.store(false, SeqCst);
+    torrent.set_rechecking(false, SeqCst);
 }
 
 /// `setLocation` takes the native move's refusals.

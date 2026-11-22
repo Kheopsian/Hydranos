@@ -664,8 +664,7 @@ mod tests {
             .unwrap();
         mgr.get(&ih)
             .unwrap()
-            .status
-            .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+            .set_status(TorrentStatus::Seeding as u8, Ordering::Relaxed);
         ih
     }
 
@@ -975,7 +974,7 @@ mod tests {
         let (port, _search) = next_lookup(&mut opened).await;
         assert_eq!(port, Some(PORT));
 
-        torrent.is_paused.store(true, Ordering::Relaxed);
+        torrent.set_paused(true, Ordering::Relaxed);
         let (port, _held) = next_lookup_after(&mut opened, PORT_CHECK).await;
         assert_eq!(port, None, "a stopped torrent is still announced");
         let _ = std::fs::remove_dir_all(root);

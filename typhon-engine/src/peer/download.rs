@@ -742,6 +742,7 @@ async fn commit(
                 let mut p = picker.lock().unwrap();
                 p.set_have(index);
             }
+            torrent.mark_live_dirty();
             // Broadcast Have to all peers
             torrent.have_sender().send(index).ok();
 
@@ -754,9 +755,7 @@ async fn commit(
                     "[download] {} complete!",
                     crate::torrent::hex_encode(&torrent.info_hash)[..8].to_string()
                 );
-                torrent
-                    .status
-                    .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+                torrent.set_status(TorrentStatus::Seeding as u8, Ordering::Relaxed);
                 // BEP 3: a tracker only learns a download finished if we say
                 // so. Private trackers count snatches from this event.
                 torrent.pending_announce_event.fetch_or(
@@ -861,8 +860,7 @@ mod tests {
             PathBuf::from("/tmp"),
             false,
         ));
-        t.status
-            .store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+        t.set_status(TorrentStatus::Downloading as u8, Ordering::Relaxed);
         t
     }
 
@@ -1188,7 +1186,7 @@ mod tests {
         ready(&mut dl);
         assert!(!dl.get_requests().is_empty(), "running, it asks");
 
-        t.is_paused.store(true, Ordering::Relaxed);
+        t.set_paused(true, Ordering::Relaxed);
         assert!(
             dl.get_requests().is_empty(),
             "paused means paused, including for a session already open"
@@ -1206,8 +1204,7 @@ mod tests {
     #[test]
     fn a_torrent_that_is_not_downloading_asks_for_nothing() {
         let t = downloading(64, 2 * 1024 * 1024);
-        t.status
-            .store(TorrentStatus::Seeding as u8, Ordering::Relaxed);
+        t.set_status(TorrentStatus::Seeding as u8, Ordering::Relaxed);
         let mut dl = state(t);
         ready(&mut dl);
         assert!(dl.get_requests().is_empty());
@@ -1262,8 +1259,7 @@ mod tests {
             PathBuf::from("/tmp"),
             false,
         ));
-        t.status
-            .store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+        t.set_status(TorrentStatus::Downloading as u8, Ordering::Relaxed);
         let mut dl = state(t);
         ready(&mut dl);
 
@@ -1360,8 +1356,7 @@ mod endgame_tests {
             PathBuf::from("/tmp"),
             false,
         ));
-        t.status
-            .store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+        t.set_status(TorrentStatus::Downloading as u8, Ordering::Relaxed);
         let mut dl = DownloadState::new(t, Arc::new(DiskManager::new(100)));
         dl.on_have_all();
         dl.on_unchoke();
@@ -1402,8 +1397,7 @@ mod endgame_tests {
             PathBuf::from("/tmp"),
             false,
         ));
-        t.status
-            .store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+        t.set_status(TorrentStatus::Downloading as u8, Ordering::Relaxed);
         let mut dl = DownloadState::new(t, Arc::new(DiskManager::new(100)));
         dl.on_have_all();
         dl.on_unchoke();
@@ -1450,8 +1444,7 @@ mod disk_failure_tests {
             PathBuf::from("/tmp"),
             false,
         ));
-        t.status
-            .store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+        t.set_status(TorrentStatus::Downloading as u8, Ordering::Relaxed);
         t
     }
 
@@ -1574,8 +1567,7 @@ mod release_tests {
             PathBuf::from("/tmp"),
             false,
         ));
-        t.status
-            .store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+        t.set_status(TorrentStatus::Downloading as u8, Ordering::Relaxed);
         t
     }
 
@@ -1702,7 +1694,7 @@ mod release_tests {
         let t = torrent(64, PIECE);
         let mut a = peer(&t);
         a.get_requests();
-        t.is_paused.store(true, Ordering::Relaxed);
+        t.set_paused(true, Ordering::Relaxed);
         a.release_stalled(Instant::now() + PIECE_STALL_TIMEOUT + Duration::from_secs(1));
         assert_eq!(in_flight(&t), (0, 0));
     }
@@ -1881,8 +1873,7 @@ mod poison_tests {
             PathBuf::from("/nonexistent"),
             false,
         ));
-        t.status
-            .store(TorrentStatus::Downloading as u8, Ordering::Relaxed);
+        t.set_status(TorrentStatus::Downloading as u8, Ordering::Relaxed);
         let h = Sha1::digest(good());
         let mut blob = format!("d4:infod6:pieces{}:", num_pieces * 20).into_bytes();
         for _ in 0..num_pieces {
