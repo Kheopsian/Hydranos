@@ -496,7 +496,11 @@ async fn the_qbit_preview_refuses_an_empty_url_and_reports_an_unreachable_one() 
 #[tokio::test]
 async fn status_reports_disk_usage_only_once_counted() {
     let (s, _h) = populated("pop-diskusage");
-    let before = status_payload(&s.state);
+    let before = status_payload(&s.state).await;
+    assert_eq!(
+        before["engines"].as_array().unwrap().len(),
+        s.state.engines.engines().len()
+    );
     assert!(before["storage"]["data_bytes"].is_null(), "got {before}");
     let usage = crate::linkindex::DiskUsage {
         data_bytes: 5000,
@@ -505,7 +509,7 @@ async fn status_reports_disk_usage_only_once_counted() {
         torrents: 9,
     };
     s.state.engines.publish_catalogue_usage(usage, 1234);
-    let after = status_payload(&s.state);
+    let after = status_payload(&s.state).await;
     assert_eq!(after["storage"]["data_bytes"], 5000, "got {after}");
     assert_eq!(after["storage"]["shared_bytes"], 3000);
     assert_eq!(after["storage"]["measured_at"], 1234);

@@ -239,18 +239,18 @@ async function membershipRefreshesAreBounded() {
 }
 
 async function engineCardRequestsDoNotOverlap() {
-    let now = 10000, calls = 0, release;
+    let now = 100000, calls = 0, release;
     const refresh = new Function("env", `
         let _extraEnginesAt = 0, _extraEnginesBusy = false;
-        const Date = { now: () => env.now() }, console = { error: () => {} };
-        const _updateExtraEngines = env.request;
+        const Date = { now: () => env.now() }, console = { error: () => {} }, document = { hidden: false };
+        const _updateExtraEngines = env.request, _liveStreamFresh = () => false;
         ${fn("_maybeUpdateExtraEngines")}
         return _maybeUpdateExtraEngines;
     `)({ now: () => now, request: () => {
         calls++;
         return new Promise(r => { release = r; });
     } });
-    for (let i = 0; i < 10; i++) { refresh(); now += 3000; }
+    for (let i = 0; i < 10; i++) { refresh(); now += 30000; }
     assert.equal(calls, 1, "a stalled engines request must not accumulate another request every three seconds");
     release();
     await new Promise(r => setImmediate(r));

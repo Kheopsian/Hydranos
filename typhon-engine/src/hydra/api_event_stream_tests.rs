@@ -4,6 +4,64 @@ use futures::StreamExt;
 
 const KEY: &str = "0123456789abcdef0123456789abcdef";
 
+#[tokio::test(flavor = "current_thread")]
+async fn a_live_paused_row_does_not_block_the_runtime_on_the_store() {
+    let s = state_from(
+        "sse-store-wait",
+        &format!("[daemon]\napi_key = \"{KEY}\"\n"),
+    );
+    let resp = stream_events(
+        State(s.state.clone()),
+        RawQuery(Some("hydrate=0".into())),
+        keyed(KEY),
+    )
+    .await;
+    let mut body = resp.into_body().into_data_stream();
+    let mut statuses = 0;
+    while statuses < 2 {
+        let chunk = body.next().await.unwrap().unwrap();
+        statuses += String::from_utf8_lossy(&chunk)
+            .matches("\"status_snapshot\"")
+            .count();
+    }
+    let store = s.state.store.clone();
+    let (locked, ready) = std::sync::mpsc::channel();
+    let holder = std::thread::spawn(move || {
+        let _guard = store.lock().unwrap();
+        locked.send(()).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(600));
+    });
+    ready.recv().unwrap();
+    let started = std::time::Instant::now();
+    s.state.engines.engines()[0].manager.bus().publish(
+        typhon_engine::rpc::events::Event::StatsSnapshot {
+            torrents: vec![typhon_engine::rpc::events::TorrentStatsMini {
+                info_hash: "ab".repeat(20),
+                status: 0,
+                state: "stopped",
+                total_done: 0,
+                total_uploaded: 0,
+                total_downloaded: 0,
+                upload_rate: 0,
+                download_rate: 0,
+                peers_connected: 0,
+                peers_interested: 0,
+                progress: 0.0,
+                checking_progress: None,
+                check_queued: false,
+            }],
+        },
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    let elapsed = started.elapsed();
+    holder.join().unwrap();
+    drop(body);
+    assert!(
+        elapsed < std::time::Duration::from_millis(250),
+        "live row stalled async timers for {elapsed:?}"
+    );
+}
+
 /// ⭐ A page that stops reading the event stream does not make the
 /// engine's bus keep every event since for it: the relay goes on draining
 /// and drops the frames that page cannot take.

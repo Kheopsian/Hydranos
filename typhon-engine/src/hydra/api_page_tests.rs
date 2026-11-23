@@ -517,6 +517,9 @@ async fn a_filter_waiter_does_not_stall_health_or_engine_requests() {
         tokio::spawn(
             async move { get_drain_history(State(state), RawQuery(None), keyed(KEY)).await },
         );
+    let state = s.state.clone();
+    let status =
+        tokio::spawn(async move { get_status(State(state), RawQuery(None), keyed(KEY)).await });
     tokio::task::yield_now().await;
     let engines = get_engines(State(s.state.clone()), RawQuery(None), keyed(KEY)).await;
     let health = get_health(State(s.state.clone())).await;
@@ -526,6 +529,7 @@ async fn a_filter_waiter_does_not_stall_health_or_engine_requests() {
     assert_eq!(health.status(), StatusCode::OK);
     assert_eq!(page.await.unwrap()["total"], 1);
     assert_eq!(history.await.unwrap().status(), StatusCode::OK);
+    assert_eq!(status.await.unwrap().status(), StatusCode::OK);
     assert!(
         elapsed < std::time::Duration::from_millis(250),
         "filter store wait blocked unrelated routes for {elapsed:?}"

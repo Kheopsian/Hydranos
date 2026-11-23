@@ -30,28 +30,36 @@ const API_KEY = localStorage.getItem("hydra_api_key") || "";
 // a request body and in a header, never in an address. Resolves true when
 // this browser holds a live session afterwards.
 let _sessionReady = null;
+let _sessionPending = false;
 function ensureSession(force) {
     if (!API_KEY) return Promise.resolve(false);
-    if (_sessionReady && !force) return _sessionReady;
+    if (_sessionReady && (!force || _sessionPending)) return _sessionReady;
+    _sessionPending = true;
     _sessionReady = (async () => {
+        const controller = new AbortController();
+        const deadline = setTimeout(() => controller.abort(), 15000);
         try {
             // A session already live (a reload inside its hour) costs one
             // light request, not a new session per page load.
-            const live = await fetch("/api/provenance", { credentials: "same-origin" });
+            const live = await fetch("/api/provenance", { credentials: "same-origin", signal: controller.signal });
             if (live.ok) return true;
             // Only a key the daemon accepts is worth a login: a stale key
             // would otherwise count against this address's failed attempts.
-            const keyed = await fetch("/api/provenance", { headers: { "X-Api-Key": API_KEY } });
+            const keyed = await fetch("/api/provenance", { headers: { "X-Api-Key": API_KEY }, signal: controller.signal });
             if (!keyed.ok) return false;
             const res = await fetch("/api/v2/auth/login", {
                 method: "POST",
                 credentials: "same-origin",
+                signal: controller.signal,
                 headers: { "Content-Type": "application/x-www-form-urlencoded" },
                 body: "username=hydranos&password=" + encodeURIComponent(API_KEY),
             });
             return (await res.text()).trim() === "Ok.";
         } catch (_) {
             return false;
+        } finally {
+            clearTimeout(deadline);
+            _sessionPending = false;
         }
     })();
     return _sessionReady;
@@ -1004,35 +1012,95 @@ function maybeOfferImport() {
         .catch(() => { });
 }
 
-async function api(endpoint, options = {}) {
-    const headers = { "X-Api-Key": API_KEY, ...options.headers };
-    const res = await fetch(endpoint, { ...options, headers });
-    if (res.status === 401) {
-        promptLogin(t("Session invalid, please sign in again."));
-        throw new Error("API error: 401");
+const _apiReads = new Map();
+let _apiReadActive = 0;
+const _apiReadWaiters = [];
+
+function _acquireApiRead(signal, urgent) {
+    return new Promise((resolve, reject) => {
+        const abort = () => {
+            const index = _apiReadWaiters.indexOf(start);
+            if (index >= 0) _apiReadWaiters.splice(index, 1);
+            signal.removeEventListener("abort", abort);
+            reject(signal.reason);
+        };
+        const start = () => {
+            signal.removeEventListener("abort", abort);
+            if (signal.aborted) { abort(); return; }
+            _apiReadActive++;
+            resolve(() => {
+                _apiReadActive--;
+                _apiReadWaiters.shift()?.();
+            });
+        };
+        if (signal.aborted) { abort(); return; }
+        // Leave HTTP/1 connection slots for the event streams and user actions.
+        if (_apiReadActive < 3) start();
+        else {
+            if (urgent) _apiReadWaiters.unshift(start);
+            else _apiReadWaiters.push(start);
+            signal.addEventListener("abort", abort, { once: true });
+        }
+    });
+}
+
+function api(endpoint, options = {}) {
+    // Share only plain reads; caller-owned cancellation and mutations stay independent.
+    const shared = Object.keys(options).length === 0;
+    if (shared && _apiReads.has(endpoint)) return _apiReads.get(endpoint);
+    const request = _apiRequest(endpoint, options);
+    if (!shared) return request;
+    const pending = request.finally(() => { _apiReads.delete(endpoint); });
+    _apiReads.set(endpoint, pending);
+    return pending;
+}
+
+async function _apiRequest(endpoint, options) {
+    const read = !options.method || options.method.toUpperCase() === "GET";
+    const controller = read ? new AbortController() : null;
+    const abort = () => controller.abort();
+    if (controller && options.signal) {
+        if (options.signal.aborted) abort();
+        else options.signal.addEventListener("abort", abort, { once: true });
     }
-    if (!res.ok) {
-        // Surface what the daemon actually said. It writes careful messages --
-        // "port 16372 is already taken by engine hoard", "no interface named
-        // wg9 is up" -- and throwing only the status code discarded every one
-        // of them, leaving the operator with "API error: 409" and no idea
-        // which engine or which port.
-        let detail = "";
-        try {
-            const body = await res.text();
-            if (body) {
-                try {
-                    const j = JSON.parse(body);
-                    detail = j && typeof j.error === "string" ? j.error : "";
-                } catch (_) {
-                    // Not JSON: a proxy error page, say. Keep it short.
-                    detail = body.slice(0, 200);
+    // Include body decoding in the deadline, otherwise a stalled body holds the lane forever.
+    const timeout = controller ? setTimeout(abort, 30000) : null;
+    let release;
+    try {
+        if (controller) release = await _acquireApiRead(controller.signal, !!options.signal);
+        const headers = { "X-Api-Key": API_KEY, ...options.headers };
+        const res = await fetch(endpoint, { ...options, headers, ...(controller ? { signal: controller.signal } : {}) });
+        if (res.status === 401) {
+            promptLogin(t("Session invalid, please sign in again."));
+            throw new Error("API error: 401");
+        }
+        if (!res.ok) {
+            // Surface what the daemon actually said. It writes careful messages --
+            // "port 16372 is already taken by engine hoard", "no interface named
+            // wg9 is up" -- and throwing only the status code discarded every one
+            // of them, leaving the operator with "API error: 409" and no idea
+            // which engine or which port.
+            let detail = "";
+            try {
+                const body = await res.text();
+                if (body) {
+                    try {
+                        const j = JSON.parse(body);
+                        detail = j && typeof j.error === "string" ? j.error : "";
+                    } catch (_) {
+                        // Not JSON: a proxy error page, say. Keep it short.
+                        detail = body.slice(0, 200);
+                    }
                 }
-            }
-        } catch (_) { /* a body we cannot read must not hide the status */ }
-        throw new Error(detail ? `${detail} (${res.status})` : `API error: ${res.status}`);
+            } catch (_) { /* a body we cannot read must not hide the status */ }
+            throw new Error(detail ? `${detail} (${res.status})` : `API error: ${res.status}`);
+        }
+        return await res.json();
+    } finally {
+        if (release) release();
+        if (timeout !== null) clearTimeout(timeout);
+        if (controller && options.signal) options.signal.removeEventListener("abort", abort);
     }
-    return res.json();
 }
 
 // ─── Tabs ───────────────────────────────────────────────
@@ -1139,6 +1207,8 @@ function _activateTabNow(name) {
     document.querySelectorAll(".tab-content").forEach(c => c.classList.remove("active"));
     tab.classList.add("active");
     content.classList.add("active");
+    if (name !== "race") _cancelDetailRead("race");
+    if (name !== "hoard") _cancelDetailRead("hoard");
     _syncHoardDetailChrome();
     window.location.hash = name;
     if (name !== "logs") stopLogsTail();
@@ -1149,12 +1219,16 @@ function _activateTabNow(name) {
     // restores the tab from the URL without a click, and the watched folders
     // came up empty -- one Save away from erasing them all.
     if (name === "config") { updateSettings(); renderPersonalisation(); loadIpFilter(); loadWatch(); }
+    else if (name === "race") { _refreshUi("race", 1000, () => updateRaceTorrents(), true); _refreshUi("drain", 15000, loadRacePolicy, true); }
+    else if (name === "hoard") { _refreshUi("hoard", 1000, updateHoardStats, true); }
+    else if (name === "categories") { _refreshUi("categories", 15000, () => updateCategories(true), true); }
+    else if (name === "benchmark") { _refreshUi("benchmark", 10000, updateBenchmark, true); }
     else if (name === "add") { refreshCategoryOptions(); updateMagnets(); }
     else if (name === "changelog") loadChangelog();
     else if (name === "nodes") { updateNodes(); }
     else if (name === "workflows") { updateWorkflows(); }
     else if (name === "rss") { updateRss(); }
-    else if (name === "trackers") { updateTrackers(); loadTrackerStats(); }
+    else if (name === "trackers") { _refreshUi("trackers", 5000, () => Promise.all([updateTrackers(), loadTrackerStats()]), true); }
     else if (name === "logs") loadLogs();
     else if (name === "jobs") startJobsPolling();
     if (name !== "jobs") stopJobsPolling();
@@ -1382,6 +1456,7 @@ async function checkHealth() {
 // the legacy fetch path (updateOverview, used on tab change) and by the SSE
 // status_snapshot handler. Pure render, does no I/O.
 function _renderStatus(data) {
+        if (Array.isArray(data.engines)) _renderExtraEngines(data.engines);
         // Race stats
         if (data.race) {
             document.getElementById("race-count").textContent = fmtInt(data.race.torrents);
@@ -1417,7 +1492,6 @@ function _renderStatus(data) {
             const ovt = document.getElementById("ov-torrents-total");
             if (ovt) ovt.textContent = fmtInt((data.hoard.total_torrents || 0) + (data.race?.torrents || 0) + _extraTorrents);
         }
-        _maybeUpdateExtraEngines();
 
         // Seed size (tracker pass, 30 s) against the space it takes (link
         // scanner, up to a day old). Null until each has run once: "-", not 0.
@@ -1579,18 +1653,15 @@ async function updateRecords(force) {
 
 // ─── Extra engines on the Overview ──────────────────────
 //
-// The Race and Hoard cards are fed by /api/status, which only knows those two
-// engines by name. Every other engine (an `[[engine]]` block, one per tunnel)
-// gets a card of the same shape here, from /api/engines. Until 4.4 they had
-// none, and their torrents were missing from the overview's total.
+// All engines' cards follow the status stream; /api/engines is a disconnected fallback.
 let _extraTorrents = 0;
 let _extraEnginesAt = 0;
 let _extraEnginesBusy = false;
 function _maybeUpdateExtraEngines() {
-    if (_extraEnginesBusy || Date.now() - _extraEnginesAt < 3000) return;
+    if (document.hidden || _liveStreamFresh() || _extraEnginesBusy || Date.now() - _extraEnginesAt < 30000) return;
     _extraEnginesAt = Date.now();
     _extraEnginesBusy = true;
-    _updateExtraEngines()
+    return _updateExtraEngines()
         .catch(e => console.error("Failed to update engine cards:", e))
         .finally(() => { _extraEnginesBusy = false; });
 }
@@ -1599,6 +1670,12 @@ async function _updateExtraEngines() {
     if (!box) return;
     let list;
     try { list = await api("/api/engines"); } catch (_) { return; }
+    _renderExtraEngines(list);
+}
+
+function _renderExtraEngines(list) {
+    const box = document.getElementById("ov-extra-engines");
+    if (!box) return;
     const extra = (list || []).filter(e => e.id !== "race" && e.id !== "hoard" && e.stats);
     _extraTorrents = extra.reduce((n, e) => n + (e.stats.torrents || 0), 0);
     const ratio = s => {
@@ -1648,6 +1725,25 @@ let detailRefreshTimer = null;
 let selectedHoardTorrent = null;
 let selectedHoardTorrentAgent = "local";
 let hoardDetailTimer = null;
+const _detailReads = new Map();
+
+function _cancelDetailRead(mode) {
+    const pending = _detailReads.get(mode);
+    if (pending) { pending.controller.abort(); _detailReads.delete(mode); }
+}
+
+function _readTorrentDetail(mode, endpoint) {
+    const previous = _detailReads.get(mode);
+    if (previous?.endpoint === endpoint) return previous.request;
+    _cancelDetailRead(mode);
+    const controller = new AbortController();
+    const pending = { endpoint, controller };
+    pending.request = api(endpoint, { signal: controller.signal }).finally(() => {
+        if (_detailReads.get(mode) === pending) _detailReads.delete(mode);
+    });
+    _detailReads.set(mode, pending);
+    return pending.request;
+}
 
 // Race sort
 let _raceSortCol = localStorage.getItem("hydra_race_sort_col") || "added_time";
@@ -1716,7 +1812,6 @@ let _racePageBusy = false;
 let _raceMembershipDirty = true;
 
 async function updateRaceTorrents(force = true) {
-    loadRacePolicy();
     if (_racePageBusy) return;
     const interval = _raceMembershipDirty ? Math.max(1000, _raceFetchMs * 20)
         : Math.max(HOARD_REFRESH_MS, _raceFetchMs * 20);
@@ -1829,10 +1924,12 @@ async function showDetail(infoHash, agent) {
     await refreshDetail();
     // Folded or closed while that first fetch was out: no timer for a hidden panel.
     if (_hoardDetailCollapsed || selectedTorrent !== infoHash) return;
-    detailRefreshTimer = setInterval(refreshDetail, 3000);
+    if (detailRefreshTimer) clearInterval(detailRefreshTimer);
+    detailRefreshTimer = setInterval(() => _refreshUi("race-detail", 3000, refreshDetail), 1000);
 }
 
 function closeDetail() {
+    _cancelDetailRead("race");
     selectedTorrent = null;
     selectedTorrentAgent = "local";
     if (detailRefreshTimer) clearInterval(detailRefreshTimer);
@@ -2629,11 +2726,15 @@ function _detailPart(name, draw) {
 }
 
 async function refreshDetail() {
-    if (!selectedTorrent) return;
+    if (!selectedTorrent || document.hidden || _hoardDetailCollapsed
+        || !document.getElementById("tab-race")?.classList.contains("active")) return;
+    const hash = selectedTorrent, agent = selectedTorrentAgent;
     try {
         const q = selectedTorrentAgent && !_isLocalAgent(selectedTorrentAgent)
             ? `?agent=${encodeURIComponent(selectedTorrentAgent)}` : "";
-        const d = await api(`/api/race/torrents/${selectedTorrent}${q}`);
+        const d = await _readTorrentDetail("race", `/api/race/torrents/${hash}${q}`);
+        if (hash !== selectedTorrent || agent !== selectedTorrentAgent || document.hidden || _hoardDetailCollapsed
+            || !document.getElementById("tab-race")?.classList.contains("active")) return;
 
         _detailAddedTime = d.added_time || 0;
         document.getElementById("detail-name").textContent = incoName(d);
@@ -3859,10 +3960,12 @@ async function showHoardDetail(infoHash, agent) {
     document.getElementById("hoard-detail-panel").style.display = "block";
     await refreshHoardDetail();
     if (_hoardDetailCollapsed || selectedHoardTorrent !== infoHash) return;
-    hoardDetailTimer = setInterval(refreshHoardDetail, 3000);
+    if (hoardDetailTimer) clearInterval(hoardDetailTimer);
+    hoardDetailTimer = setInterval(() => _refreshUi("hoard-detail", 3000, refreshHoardDetail), 1000);
 }
 
 function closeHoardDetail() {
+    _cancelDetailRead("hoard");
     selectedHoardTorrent = null;
     selectedHoardTorrentAgent = "local";
     if (hoardDetailTimer) clearInterval(hoardDetailTimer);
@@ -5927,11 +6030,13 @@ async function _removeSelected(deleteFiles) {
 }
 
 async function refreshHoardDetail() {
-    if (!selectedHoardTorrent) return;
+    if (!selectedHoardTorrent || document.hidden || _hoardDetailCollapsed || !_hoardTabVisible()) return;
+    const hash = selectedHoardTorrent, agent = selectedHoardTorrentAgent;
     try {
         const q = selectedHoardTorrentAgent && !_isLocalAgent(selectedHoardTorrentAgent)
             ? `?agent=${encodeURIComponent(selectedHoardTorrentAgent)}` : "";
-        const d = await api(`/api/hoard/torrents/${selectedHoardTorrent}${q}`);
+        const d = await _readTorrentDetail("hoard", `/api/hoard/torrents/${hash}${q}`);
+        if (hash !== selectedHoardTorrent || agent !== selectedHoardTorrentAgent || document.hidden || _hoardDetailCollapsed || !_hoardTabVisible()) return;
 
         document.getElementById("h-detail-name").textContent = incoName(d);
         document.getElementById("h-detail-state").textContent = d.state === "checking_files" ? displayState(d).label : d.state;
@@ -7823,7 +7928,7 @@ async function loadRacePolicy() {
     const hists = await _rpFetchOpenHists();
     if (box.contains(document.activeElement)) return;
     box.innerHTML = _rpVols.map((v, i) => _rpVolCard(v, i, hists[v.id])).join("");
-    _rpLoadGraduations();
+    await _rpLoadGraduations();
 }
 // The drain history table for each open volume, keyed by volume id. One request
 // serves every card, filtered per volume (the list is capped at 50 rows).
@@ -8033,11 +8138,23 @@ async function updateUptime() {
 
 // ─── Polling loop ───────────────────────────────────────
 
-// Single-flighted: skips if a previous tick is still in-flight (avoids
-// stacking under bad wifi / slow API). Status + hoard stats now flow through
-// SSE (status_snapshot, hoard_stats_snapshot), this loop only handles the
-// per-tab heavy fetches and /health.
-let _polling = false;
+// Independent lanes keep a stalled chart or filter from freezing every refresh.
+const _uiRefreshes = new Map();
+
+async function _refreshUi(key, interval, load, force = false) {
+    if (document.hidden) return;
+    const previous = _uiRefreshes.get(key);
+    if (previous && (previous.busy || (!force && Date.now() < previous.next))) return;
+    const state = { busy: true, next: 0 };
+    _uiRefreshes.set(key, state);
+    const started = Date.now();
+    try { await load(); }
+    catch (e) { console.error("UI refresh failed:", key, e); }
+    finally {
+        state.busy = false;
+        state.next = Date.now() + Math.max(interval, (Date.now() - started) * 5);
+    }
+}
 // ─── IP filter ─────────────────────────────────────────
 
 async function loadIpFilter() {
@@ -8204,75 +8321,35 @@ async function removeMagnet(hash) {
 }
 
 async function poll() {
-    if (_polling || document.hidden) return;
-    _polling = true;
-    try {
-        const tasks = [checkHealth()];
-        if (!_liveStreamFresh()) tasks.push(updateOverview());
-        const activeTab = document.querySelector(".tab.active")?.dataset.tab;
-        if (activeTab === "race") tasks.push(updateRaceTorrents(false));
-        if (activeTab === "hoard") tasks.push(updateHoardStats());
-        if (activeTab === "categories") tasks.push(updateCategories());
-        if (activeTab === "benchmark") tasks.push(updateBenchmark());
-        if (activeTab === "trackers") tasks.push(updateTrackers(), loadTrackerStats());
-        if (activeTab === "add") tasks.push(updateMagnets());
-        await Promise.allSettled(tasks);
-    } finally {
-        _polling = false;
-    }
+    if (document.hidden) return;
+    const tasks = [
+        _refreshUi("health", 30000, checkHealth),
+        _refreshUi("records", 60000, updateRecords),
+        _refreshUi("engines", 30000, _maybeUpdateExtraEngines),
+        _refreshUi("badges", 30000, updateTabBadges),
+        _refreshUi("port-forward", 60000, fetchPortForward),
+    ];
+    if (document.getElementById("net-poly")) tasks.push(_refreshUi("network", 30000, updateNetPoly));
+    if (document.getElementById("header-exit-ip")) tasks.push(_refreshUi("public-ip", 120000, fetchPublicIp));
+    if (!_liveStreamFresh()) tasks.push(_refreshUi("overview", 2000, updateOverview));
+    const activeTab = document.querySelector(".tab.active")?.dataset.tab;
+    if (activeTab === "race") tasks.push(_refreshUi("race", 1000, () => updateRaceTorrents(false)), _refreshUi("drain", 15000, loadRacePolicy));
+    if (activeTab === "hoard") tasks.push(_refreshUi("hoard", 1000, updateHoardStats));
+    if (activeTab === "categories") tasks.push(_refreshUi("categories", 15000, updateCategories));
+    if (activeTab === "benchmark") tasks.push(_refreshUi("benchmark", 10000, updateBenchmark));
+    if (activeTab === "trackers") tasks.push(_refreshUi("trackers", 5000, () => Promise.all([updateTrackers(), loadTrackerStats()])));
+    if (activeTab === "add") tasks.push(_refreshUi("magnets", 3000, updateMagnets));
+    await Promise.allSettled(tasks);
 }
 
-// Tab change triggers immediate data fetch
-document.querySelectorAll(".tab").forEach(tab => {
-    tab.addEventListener("click", async () => {
-        const t = tab.dataset.tab;
-        if (t === "race") await updateRaceTorrents();
-        if (t === "hoard") await updateHoardStats();
-        if (t === "categories") await updateCategories(true);
-        if (t === "benchmark") await updateBenchmark();
-    });
-});
-
 // ─── Startup restore polling ─────────────────────────────────
+let _normalPollingStarted = false;
 function _startNormalPolling() {
-    // Records FIRST, and on its own. It used to be chained behind
-    // /api/status inside updateOverview(), so it only left the browser once
-    // that had resolved -- by which time poll() and the SSE stream had taken
-    // the connections, and it queued behind a stream that never ends. The
-    // answer is served from cache in about a millisecond; the wait was entirely
-    // in the ordering. It self-throttles to one call a minute, so the call
-    // updateOverview() still makes is a no-op.
-    updateRecords();
-    // Immediate header paint while SSE is establishing.
-    updateOverview();
-    // poll() already fetches what the active tab needs, categories included.
-    // Calling updateCategories() unconditionally on top of it made every page
-    // load pay for the category rollups even with the categories screen shut --
-    // and on a large library that is the longest request there is, so landing
-    // on Trackers left the tracker list and Add torrent waiting behind it on
-    // the store's single connection.
+    if (_normalPollingStarted) return;
+    _normalPollingStarted = true;
+    // Each refresh lane owns startup and subsequent polling.
     poll();
-    // Front-only drops the header stat, and with it the reason to ask a
-    // controller for an egress address it never announces from.
-    if (document.getElementById("net-poly")) {
-        updateNetPoly();
-        setInterval(updateNetPoly, 30 * 1000);
-    }
-    if (document.getElementById("header-exit-ip")) {
-        fetchPublicIp();
-        setInterval(fetchPublicIp, 2 * 60 * 1000);
-    }
-    fetchPortForward();
-    // The badge counts trackers needing attention, and its only caller used to
-    // be updateTrackers() -- which runs solely while the Trackers tab is open.
-    // Reloading anywhere else left the tab bare until you went and looked,
-    // which is the one moment an indicator is supposed to save you. It owns its
-    // own /api/announce/health call, so it does not need the tab's data; it is
-    // kept off the 1s poll because nothing here moves at that rate.
-    updateTabBadges();
-    setInterval(updateTabBadges, 30 * 1000);
     setInterval(poll, POLL_INTERVAL);
-    setInterval(fetchPortForward, 60 * 1000);
     setupHoardSSE();
 }
 
@@ -8513,10 +8590,10 @@ let _raceRenderScheduled = false;
 function _scheduleRaceRender() {
     if (!document.getElementById("tab-race")?.classList.contains("active") || _raceRenderScheduled) return;
     _raceRenderScheduled = true;
-    requestAnimationFrame(() => {
+    setTimeout(() => requestAnimationFrame(() => {
         _raceRenderScheduled = false;
-        if (!document.hidden) renderRaceTable();
-    });
+        if (!document.hidden && document.getElementById("tab-race")?.classList.contains("active")) renderRaceTable();
+    }), 250);
 }
 
 let _hoardRenderScheduled = false;
@@ -8534,11 +8611,11 @@ function _scheduleHoardRender() {
     if (!_hoardTabVisible()) { _hoardRenderDirty = true; return; }
     if (_hoardRenderScheduled) return;
     _hoardRenderScheduled = true;
-    requestAnimationFrame(() => {
+    setTimeout(() => requestAnimationFrame(() => {
         _hoardRenderScheduled = false;
-        if (document.hidden) return;
+        if (document.hidden || !_hoardTabVisible()) { _hoardRenderDirty = true; return; }
         try { renderHoardTable(); _hoardRenderDirty = false; } catch (_) {}
-    });
+    }), 250);
 }
 
 // Suspend SSE while tab is hidden, EventSource is not throttled by browser
@@ -8548,14 +8625,19 @@ function _scheduleHoardRender() {
 document.addEventListener("visibilitychange", () => {
     if (document.hidden) {
         if (_sseConn) { _sseConn.close(); _sseConn = null; }
+        _cancelDetailRead("race");
+        _cancelDetailRead("hoard");
+        if (_hoardPageAbort) _hoardPageAbort.abort();
+        stopLogsTail();
     } else {
         _syncCursor = 0; // REST refreshes membership; SSE resumes live figures.
         setupHoardSSE();
         _hoardFullFetchAt = 0;
         _hoardLiveDirty = true;
         _raceLastFetchAt = 0;
-        updateOverview();
-        if (typeof updateHoardStats === "function") updateHoardStats();
+        poll();
+        if (document.querySelector(".tab.active")?.dataset.tab === "logs"
+            && document.getElementById("logs-tail")?.checked) startLogsTail();
     }
 });
 
@@ -9572,7 +9654,7 @@ async function _updateRaceBadge() {
 async function updateTabBadges() {
     // Kept apart from the tracker badge below: one failing request must not
     // take the other badge down with it.
-    _updateRaceBadge();
+    const race = _updateRaceBadge();
     try {
         const h = await api("/api/announce/health");
         const b = (h && h.badges) || {};
@@ -9590,6 +9672,7 @@ async function updateTabBadges() {
         dot.className = "tab-badge " + (b.trackers_red ? "red" : "amber");
         dot.title = (b.trackers_red || 0) + " needing action, " + (b.trackers_amber || 0) + " throttled or unreachable";
     } catch (e) { /* the tab still works without its badge */ }
+    finally { await race; }
 }
 
 // Whether the hidden list is unfolded. A view choice about a view choice, so
@@ -11059,6 +11142,7 @@ function onLogsFilterChange() {
     loadLogs().then(() => { if (document.getElementById("logs-tail").checked) startLogsTail(); });
 }
 async function startLogsTail() {
+    if (document.hidden || !document.getElementById("tab-logs")?.classList.contains("active")) return;
     stopLogsTail();
     const qs = logsQuery();
     // Every line the tail sends is new: a period filter would only hide them.
@@ -11069,7 +11153,7 @@ async function startLogsTail() {
     // session was being opened.
     stopLogsTail();
     const box = document.getElementById("logs-tail");
-    if (box && !box.checked) return;
+    if (!box?.checked || document.hidden || !document.getElementById("tab-logs")?.classList.contains("active")) return;
     logsTailSource = new EventSource("/api/logs/stream?" + qs.toString());
     // The server names its events "log". `onmessage` only receives unnamed
     // ones, which is why Live never showed a line in 4.3.
@@ -11130,6 +11214,7 @@ function updateIssueLink() {
 let _startupPauseTimer = null;
 
 async function refreshStartupPause() {
+    if (document.hidden) return;
     const el = document.getElementById("startup-pause-banner");
     if (!el) return;
     let st;
@@ -11154,7 +11239,7 @@ async function refreshStartupPause() {
     el.style.display = "block";
     // Another browser tab, or the API, can release it: keep checking so this
     // banner cannot outlive the hold it describes.
-    if (!_startupPauseTimer) _startupPauseTimer = setInterval(refreshStartupPause, 10000);
+    if (!_startupPauseTimer) _startupPauseTimer = setInterval(() => _refreshUi("startup-pause", 10000, refreshStartupPause), 1000);
 }
 
 async function releaseStartupPause() {
@@ -11771,8 +11856,8 @@ async function netModeCheck() {
 let _jobsTimer = null;
 
 function startJobsPolling() {
-    loadJobs();
-    if (_jobsTimer === null) _jobsTimer = setInterval(loadJobs, 2000);
+    _refreshUi("jobs", 2000, loadJobs, true);
+    if (_jobsTimer === null) _jobsTimer = setInterval(() => _refreshUi("jobs", 2000, loadJobs), 1000);
 }
 
 function stopJobsPolling() {

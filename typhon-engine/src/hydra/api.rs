@@ -5027,10 +5027,7 @@ async fn get_baseline(
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
 
-    let (base_up, base_down) = {
-        let store = state.store.lock().unwrap();
-        store.counter("global")
-    };
+    let (base_up, base_down) = read_ui_store(&state, |store| store.counter("global")).await;
     let ((total_up, total_down), (session_up, session_down), _) = session_and_day(&state);
 
     Json(serde_json::json!({
@@ -5173,8 +5170,12 @@ async fn get_engines(
 ) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
+    Json(engine_payload(&state)).into_response()
+}
+
+fn engine_payload(state: &AppState) -> Vec<serde_json::Value> {
     let stats = crate::obs::engine_stats(&state.engines);
-    let out: Vec<serde_json::Value> = state
+    state
         .engines
         .engines()
         .iter()
@@ -5195,8 +5196,7 @@ async fn get_engines(
                 "stats": s,
             })
         })
-        .collect();
-    Json(out).into_response()
+        .collect()
 }
 
 /// What one engine holds, for the spread of a category on ANOTHER node (and
@@ -6860,12 +6860,9 @@ async fn get_qbit_import_events(
 /// One function, two consumers: the stream used to be able to drift from the
 /// endpoint it mirrors, and a UI reading both would then show two different
 /// truths depending on which one answered last.
-fn status_payload(state: &AppState) -> serde_json::Value {
+async fn status_payload(state: &AppState) -> serde_json::Value {
     let cfg = state.cfg();
-    let (base_up, base_down) = {
-        let store = state.store.lock().unwrap();
-        store.counter("global")
-    };
+    let (base_up, base_down) = read_ui_store(state, |store| store.counter("global")).await;
     // Three different things, and mixing them is what put a lifetime figure in
     // a field labelled "day": `total_*` is every byte the loaded torrents have
     // ever moved, `session_*` is since this process started, `day_*` since the
@@ -6936,6 +6933,7 @@ fn status_payload(state: &AppState) -> serde_json::Value {
     let disk = state.engines.catalogue_usage();
 
     serde_json::json!({
+        "engines": engine_payload(state),
         "baseline": {
             "global_downloaded": base_down + total_down,
             "global_uploaded": base_up + total_up,
@@ -7031,7 +7029,7 @@ async fn get_status(
 ) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    Json(status_payload(&state)).into_response()
+    Json(status_payload(&state).await).into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -7093,7 +7091,7 @@ async fn stream_events(
         // been available in under a hundred milliseconds.
         {
             let payload = serde_json::json!({
-                "data": status_payload(&state),
+                "data": status_payload(&state).await,
                 // "status_snapshot", not "status": the page dispatches on this
                 // exact string and silently ignores anything else, so the wrong
                 // name freezes every header counter after its first paint while
@@ -7235,6 +7233,7 @@ async fn stream_events(
             let agent = local_agent(&engine.id);
             let engine_id = engine.id.clone();
             let store = state.store.clone();
+            let metadata = state.page_refreshes.metadata.clone();
             tokio::spawn(async move {
                 // Never waits on the client. A page that stops reading (a dead
                 // socket not yet noticed) would hold this task, and the bus would
@@ -7245,23 +7244,35 @@ async fn stream_events(
                 // is lost. Stats are deltas and a removal is never repeated, so
                 // dropping either would leave the page wrong until a reload.
                 use typhon_engine::rpc::events::{Event, TorrentStatsMini};
-                let mut held_rows: std::collections::HashMap<String, TorrentStatsMini> = Default::default();
+                let mut held_rows: std::collections::BTreeMap<String, TorrentStatsMini> = Default::default();
                 let mut held_removed: std::collections::BTreeSet<String> = Default::default();
                 let stats = |rows: Vec<TorrentStatsMini>| {
-                    let facts = if rows.iter().any(|r| matches!(r.state, "paused" | "stopped" | "error")) {
-                        store.lock().unwrap().slim_facts_current(&engine_id).ok()
-                    } else { None };
-                    let rows: Vec<_> = rows.into_iter().map(|mut r| {
-                        let paused = facts.as_ref().and_then(|f| {
-                            typhon_engine::torrent::hex_decode(&r.info_hash).ok().map(|h| f.get(&h).user_paused)
-                        }).unwrap_or(false);
-                        r.state = crate::row::derive_state_static(r.state, paused);
-                        let ratio = crate::row::share_ratio(r.total_uploaded, r.total_downloaded, r.total_done);
-                        let mut row = serde_json::to_value(r).unwrap_or_default();
-                        row["ratio"] = serde_json::json!(ratio);
-                        row
-                    }).collect();
-                    serde_json::json!({"event": "stats_snapshot", "data": {"mode": mode, "agent": agent, "torrents": rows}})
+                    let store = store.clone();
+                    let metadata = metadata.clone();
+                    let engine_id = engine_id.clone();
+                    let mode = mode.clone();
+                    let agent = agent.clone();
+                    async move {
+                        let facts = if rows.iter().any(|r| matches!(r.state, "paused" | "stopped" | "error")) {
+                            // Preserve the incremental cache without waiting on its writer on an async worker.
+                            let permit = metadata.acquire_owned().await.expect("metadata gate is never closed");
+                            tokio::task::spawn_blocking(move || {
+                                let _permit = permit;
+                                store.lock().unwrap().slim_facts_current(&engine_id).ok()
+                            }).await.expect("live row metadata worker panicked")
+                        } else { None };
+                        let rows: Vec<_> = rows.into_iter().map(|mut r| {
+                            let paused = facts.as_ref().and_then(|f| {
+                                typhon_engine::torrent::hex_decode(&r.info_hash).ok().map(|h| f.get(&h).user_paused)
+                            }).unwrap_or(false);
+                            r.state = crate::row::derive_state_static(r.state, paused);
+                            let ratio = crate::row::share_ratio(r.total_uploaded, r.total_downloaded, r.total_done);
+                            let mut row = serde_json::to_value(r).unwrap_or_default();
+                            row["ratio"] = serde_json::json!(ratio);
+                            row
+                        }).collect();
+                        serde_json::json!({"event": "stats_snapshot", "data": {"mode": mode, "agent": agent, "torrents": rows}})
+                    }
                 };
                 let removed = |h: String| {
                     serde_json::json!({"event": "torrent_removed", "data": {"mode": mode, "agent": agent, "info_hash": h}})
@@ -7276,7 +7287,8 @@ async fn stream_events(
                             if let Some(h) = held_removed.pop_first() {
                                 permit.send(removed(h));
                             } else if !held_rows.is_empty() {
-                                permit.send(stats(held_rows.drain().map(|(_, r)| r).collect()));
+                                let rows = std::iter::from_fn(|| held_rows.pop_first().map(|(_, r)| r)).take(512).collect();
+                                permit.send(stats(rows).await);
                             } else {
                                 // Repair after buffered deltas, so an old frame
                                 // cannot overwrite the page's recovery fetch.
@@ -7294,7 +7306,7 @@ async fn stream_events(
                                     continue;
                                 }
                                 match tx.try_reserve() {
-                                    Ok(permit) => permit.send(stats(torrents)),
+                                    Ok(permit) => permit.send(stats(torrents).await),
                                     Err(tokio::sync::mpsc::error::TrySendError::Full(())) => {
                                         held_rows.extend(torrents.into_iter().map(|r| (r.info_hash.clone(), r)));
                                     }
@@ -7342,7 +7354,7 @@ async fn stream_events(
                 biased;
                 _ = status_tick.tick() => {
                     serde_json::json!({
-                        "data": status_payload(&state),
+                        "data": status_payload(&state).await,
                         "event": "status_snapshot",
                     })
                 }
