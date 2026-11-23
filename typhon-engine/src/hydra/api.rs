@@ -7004,9 +7004,17 @@ async fn status_payload(state: &AppState) -> serde_json::Value {
         )
     });
     let disk = state.engines.catalogue_usage();
+    let system = crate::benchsampler::latest_system();
 
     serde_json::json!({
         "engines": engine_payload(state),
+        "performance": {
+            "measured": system.measured,
+            "iowait_pct": crate::row::num_json(system.iowait_pct),
+            "arc_hit_rate_pct": crate::row::num_json(system.arc_hit_rate_pct),
+            "arc_miss_per_sec": crate::row::num_json(system.arc_miss_per_sec),
+            "arc_size_bytes": crate::row::num_json(system.arc_size_bytes),
+        },
         "baseline": {
             "global_downloaded": base_down + total_down,
             "global_uploaded": base_up + total_up,

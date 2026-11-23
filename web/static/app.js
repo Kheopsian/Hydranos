@@ -1455,7 +1455,10 @@ async function checkHealth() {
 // _renderStatus applies a /api/status payload to the DOM. Called both by
 // the legacy fetch path (updateOverview, used on tab change) and by the SSE
 // status_snapshot handler. Pure render, does no I/O.
+let _lastStatusSnapshot = null;
 function _renderStatus(data) {
+        _lastStatusSnapshot = data;
+        _renderBenchmarkLive(data);
         _applyHoardLiveCounts(data.hoard?.state_facets);
         if (Array.isArray(data.engines)) _renderExtraEngines(data.engines);
         // Race stats
@@ -7667,7 +7670,7 @@ document.querySelectorAll(".bm-range-btn").forEach(btn => {
 const _EXTRA_ENGINE_COLORS = ["#58a6ff", "#bc8cff", "#f778ba", "#39c5cf", "#d29922"];
 
 // Upload, download and peers for each engine beyond race and hoard, from
-// /api/benchmark/current's `engines`. The fixed cards above name race and
+// the live status snapshot's `engines`. The fixed cards above name race and
 // hoard; 4.3 showed nothing at all for an `[[engine]]` block.
 function _renderExtraBenchCards(engines) {
     const box = document.getElementById("bm-extra-engines");
@@ -7683,31 +7686,38 @@ function _renderExtraBenchCards(engines) {
     ).join("");
 }
 
+function _renderBenchmarkLive(data) {
+    if (!data || document.hidden || !document.getElementById("tab-benchmark")?.classList.contains("active")) return;
+    const set = (id, value) => { const el = document.getElementById(id); if (el) el.textContent = value; };
+    if (data.race) {
+        set("bm-race-upload", formatSpeed(data.race.total_upload_rate ?? 0));
+        set("bm-race-download", formatSpeed(data.race.total_download_rate ?? 0));
+        set("bm-race-peers", fmtInt(data.race.total_peers ?? 0));
+    }
+    if (data.hoard) set("bm-hoard-upload", formatSpeed(data.hoard.active_upload_rate ?? 0));
+    if (Array.isArray(data.engines)) _renderExtraBenchCards(data.engines.map(e => ({...e.stats, id:e.id})));
+    if (data.performance) {
+        const p = data.performance;
+        set("bm-iowait", p.measured ? (p.iowait_pct ?? 0).toFixed(1) + "%" : "-");
+        set("bm-arc-hit", p.measured ? (p.arc_hit_rate_pct ?? 0).toFixed(3) + "%" : "-");
+        set("bm-arc-miss", p.measured ? (p.arc_miss_per_sec ?? 0).toFixed(1) + "/s" : "-");
+        set("bm-arc-size", p.measured ? formatBytes(p.arc_size_bytes ?? 0) : "-");
+    }
+}
+
 async function updateBenchmark() {
+    _renderBenchmarkLive(_lastStatusSnapshot);
     try {
         const now = Date.now() / 1000;
         const start = now - _bmSpan;
 
-        const [cur, history, extraHistory] = await Promise.all([
-            api("/api/benchmark/current"),
+        const [history, extraHistory] = await Promise.all([
             api(`/api/benchmark/range?start=${start}&end=${now}`),
             // The engines beyond race and hoard, from their own table.
             api(`/api/benchmark/engines?start=${start}&end=${now}`).catch(() => ({})),
         ]);
 
         if (!_bmCharts) _initBmCharts();
-        _renderExtraBenchCards(cur.engines || []);
-
-        // Live cards
-        const totalUpload = (cur.race_upload_rate ?? 0) + (cur.hoard_upload_rate ?? 0);
-        document.getElementById("bm-race-upload").textContent   = formatSpeed(cur.race_upload_rate ?? 0);
-        document.getElementById("bm-race-download").textContent = formatSpeed(cur.race_download_rate ?? 0);
-        document.getElementById("bm-hoard-upload").textContent  = formatSpeed(cur.hoard_upload_rate ?? 0);
-        document.getElementById("bm-race-peers").textContent    = (cur.race_peers ?? 0).toFixed(0);
-        document.getElementById("bm-iowait").textContent        = (cur.iowait_pct ?? 0).toFixed(1) + "%";
-        document.getElementById("bm-arc-hit").textContent       = (cur.arc_hit_rate_pct ?? 0).toFixed(3) + "%";
-        document.getElementById("bm-arc-miss").textContent      = (cur.arc_miss_per_sec ?? 0).toFixed(1) + "/s";
-        document.getElementById("bm-arc-size").textContent      = formatBytes(cur.arc_size_bytes ?? 0);
 
         // Range hint
         document.getElementById("bm-range-hint").textContent =

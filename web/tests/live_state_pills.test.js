@@ -14,6 +14,8 @@ env.pills.set(".chip-state[data-state='__active__']", {innerHTML: "Actively Seed
 const view = new Function("env", `
     let _hoardFacets = {all: 5000, active: 10, state: {seeding: 4900}, category: {music: 300}};
     let _hoardLiveFacets = null;
+    let _lastStatusSnapshot = null;
+    const _renderBenchmarkLive = () => {};
     const _hoardCatInc = env.category, _hoardCatExc = [], _hoardTagInc = [], _hoardTagExc = [];
     const _hoardTrackerInc = [], _hoardTrackerExc = [], _hoardErrInc = [], _hoardErrExc = [];
     const _hoardTabVisible = () => true, _chipCount = (key, n) => String(n), t = x => x;

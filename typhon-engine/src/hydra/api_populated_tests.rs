@@ -497,6 +497,18 @@ async fn the_qbit_preview_refuses_an_empty_url_and_reports_an_unreachable_one() 
 async fn status_reports_disk_usage_only_once_counted() {
     let (s, _h) = populated("pop-diskusage");
     let before = status_payload(&s.state).await;
+    assert!(before["performance"]["measured"].is_boolean());
+    for metric in [
+        "iowait_pct",
+        "arc_hit_rate_pct",
+        "arc_miss_per_sec",
+        "arc_size_bytes",
+    ] {
+        assert!(
+            before["performance"][metric].is_number(),
+            "missing cached performance gauge {metric}"
+        );
+    }
     assert_eq!(
         before["engines"].as_array().unwrap().len(),
         s.state.engines.engines().len()
