@@ -13,7 +13,7 @@ function intervals(state, now = 10000) {
         const HOARD_REFRESH_MS = 20000, LIVE_REFRESH_MS = 1000;
         const _hoardStateFilter = s.filter, _hoardFacets = s.facets;
         const _hoardMembershipDirty = s.membership;
-        const _hoardFullFetchAt = s.fullAt, _hoardFullFetchMs = s.fullMs, _hoardLiveFetchMs = s.liveMs;
+        const _hoardFullFetchAt = s.fullAt, _hoardFullFetchMs = s.fullMs, _hoardLiveFetchMs = s.liveMs, _hoardRowFetchMs = s.rowMs || 0;
         const _sseConn = s.conn, _lastStatusEventAt = s.status, _lastHoardStatsEventAt = s.stats;
         ${fn("_liveStreamFresh")}
         ${fn("_hoardFullRefreshInterval")}
@@ -28,12 +28,13 @@ for (const filter of ["__active__", "downloading", "seed_only", "checking_files"
     assert.deepEqual(intervals({ ...state, filter }), { fast: true, interval: 1000 }, filter + " must use indexed membership");
 }
 assert.equal(intervals({ ...state, liveMs: 900 }).interval, 9000, "slow active queries back off");
-assert.equal(intervals({ ...state, filter: "" }).interval, 20000, "no whole-library scan every second");
-assert.equal(intervals({ ...state, filter: "", fullMs: 2000 }).interval, 40000, "slow full scans back off");
-assert.equal(intervals({ ...state, fullAt: 0 }, 30000).fast, false, "facets get a periodic full refresh");
+assert.equal(intervals({ ...state, filter: "" }).interval, 1000, "row-only queries have an independent live cadence");
+assert.equal(intervals({ ...state, filter: "", fullMs: 2000 }).interval, 1000, "slow facets do not throttle row updates");
+assert.equal(intervals({ ...state, filter: "", rowMs: 2000 }).interval, 40000, "slow row scans retain their work budget");
+assert.equal(intervals({ ...state, fullAt: 0 }, 30000).fast, true, "stale facets cannot disable indexed membership");
 assert.equal(intervals({ ...state, conn: null }).fast, true, "disconnected active views keep using the cheap index");
 assert.equal(intervals({ ...state, stats: 4000 }).fast, true, "silent active streams also have a cheap fallback");
-assert.equal(intervals({ ...state, membership: true }).fast, false, "adds and missed events repair membership");
+assert.equal(intervals({ ...state, membership: true, facets: null }).fast, true, "arrivals and cold facets retain the cheap index");
 const apply = new Function(`
     let _liveRowRevision = 0;
     const _STATUS_TO_STATE = { 0: "paused", 2: "downloading", 3: "seeding", 4: "error" };
@@ -106,13 +107,13 @@ async function requests() {
         let _hoardLiveDirty = true, _hoardMembershipDirty = false;
         let _hoardLastFetchAt = 0, _hoardFullFetchAt = 9000;
         let _hoardPageAbort = null;
-        let _hoardLiveFetchMs = 0, _hoardFullFetchMs = 0;
+        let _hoardLiveFetchMs = 0, _hoardFullFetchMs = 0, _hoardRowFetchMs = 0;
         const Date = { now: () => env.now() };
         const _hoardFastRefresh = () => env.fast();
         const _liveStreamFresh = () => true;
         const _hoardRefreshInterval = () => 1000;
         const _hoardPageQuery = facets => "facets=" + Number(facets);
-        const _fetchHoardPageInner = env.request;
+        const _fetchHoardPageInner = env.request, _refreshHoardFacets = () => {}, HOARD_REFRESH_MS = 20000;
         ${fn("fetchHoardPage")}
         return { fetchHoardPage, dirty: () => { _hoardLiveDirty = true; } };
     `)({ now: () => now, fast: () => fast, request: async qs => {
@@ -133,7 +134,7 @@ async function requests() {
     release(); await changed;
     assert.equal(calls.length, 2, "a delta requests fresh active membership");
     const forced = fetch.fetchHoardPage(true);
-    assert.equal(calls[2], "facets=1", "user actions refresh facets immediately");
+    assert.equal(calls[2], "facets=0", "manual row refreshes also avoid coupling to facets");
     release(); await forced;
 }
 async function pageCannotOverwriteLiveRows() {
@@ -249,8 +250,9 @@ async function membershipRefreshesAreBounded() {
     env.hidden = true; scheduler.schedule();
     env.hidden = false; env.visible = false; scheduler.schedule();
     env.visible = true; env.fast = false; scheduler.schedule();
-    assert.equal(env.timers.length, 0, "hidden and full-scan views keep their existing backstop");
-    env.fast = true; env.interval = 5000; env.now = 11100;
+    assert.equal(env.timers.length, 1, "non-indexed views also receive coalesced live membership updates");
+    env.now = 12000; await env.timers.shift().callback();
+    env.fast = true; env.interval = 5000; env.now = 12100;
     scheduler.schedule();
     assert.equal(env.timers[0].delay, 4900, "slow indexed requests retain adaptive backoff");
     await env.timers.shift().callback();
@@ -285,8 +287,8 @@ async function supersededPageRequestsAreCancelled() {
     const page = new Function("env", `
         let _selAll = null, _hoardPageBusy = 0, _hoardInFlightQuery = "", _hoardPageAbort = null;
         let _hoardLiveDirty = true, _hoardMembershipDirty = false;
-        let _hoardLastFetchAt = 0, _hoardFullFetchAt = 0, _hoardLiveFetchMs = 0, _hoardFullFetchMs = 0;
-        const _hoardFastRefresh = () => false, _hoardRefreshInterval = () => 0;
+        let _hoardLastFetchAt = 0, _hoardFullFetchAt = 0, _hoardLiveFetchMs = 0, _hoardFullFetchMs = 0, _hoardRowFetchMs = 0;
+        const _hoardFastRefresh = () => false, _hoardRefreshInterval = () => 0, _refreshHoardFacets = () => {};
         const _hoardPageQuery = () => "facets=1&state=" + env.query;
         const _fetchHoardPageInner = (qs, signal) => new Promise(resolve => {
             env.calls.push({ qs, signal, resolve });

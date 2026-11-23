@@ -3324,34 +3324,37 @@ const LIVE_REFRESH_MS = 1000;
 let _hoardFullFetchAt = 0;
 let _hoardFullFetchMs = 0;
 let _hoardLiveFetchMs = 0;
+let _hoardRowFetchMs = 0;
+let _hoardFacetAbort = null;
+let _hoardFacetQuery = "";
+let _hoardFacetDirty = true;
 let _hoardLiveDirty = true;
 let _hoardMembershipDirty = false;
 
 function _hoardFullRefreshInterval() {
     // Keep automatic catalogue scans below roughly 5% request duty time.
-    return Math.max(_hoardMembershipDirty ? 1000 : HOARD_REFRESH_MS, _hoardFullFetchMs * 20);
+    return Math.max(HOARD_REFRESH_MS, _hoardFullFetchMs * 20);
 }
 
 function _hoardFastRefresh() {
     return ["__active__", "downloading", "seed_only", "checking_files", "__check_reading__",
-        "__check_waiting__", "__error__", "error"].includes(_hoardStateFilter)
-        && !_hoardMembershipDirty && _hoardFacets && Date.now() - _hoardFullFetchAt < _hoardFullRefreshInterval();
+        "__check_waiting__", "__error__", "error"].includes(_hoardStateFilter);
 }
 
 function _hoardRefreshInterval() {
     return _hoardFastRefresh()
         ? Math.max(LIVE_REFRESH_MS, _hoardLiveFetchMs * 10)
-        : _hoardFullRefreshInterval();
+        : Math.max(LIVE_REFRESH_MS, _hoardRowFetchMs * 20);
 }
 let _hoardPageRefreshTimer = null;
 
 function _scheduleHoardPageRefresh() {
-    if (_hoardPageRefreshTimer !== null || document.hidden || !_hoardTabVisible() || !_hoardFastRefresh()) return;
+    if (_hoardPageRefreshTimer !== null || document.hidden || !_hoardTabVisible()) return;
     const delay = Math.max(_hoardPageBusy ? LIVE_REFRESH_MS : 0,
         _hoardRefreshInterval() - (Date.now() - _hoardLastFetchAt));
     _hoardPageRefreshTimer = setTimeout(async () => {
         _hoardPageRefreshTimer = null;
-        if (document.hidden || !_hoardTabVisible() || !_hoardFastRefresh()) return;
+        if (document.hidden || !_hoardTabVisible()) return;
         await fetchHoardPage();
         if (_hoardLiveDirty) _scheduleHoardPageRefresh();
     }, delay);
@@ -3395,8 +3398,8 @@ function _hoardFilterQuery() {
 }
 
 async function fetchHoardPage(force) {
-    const fast = !force && _hoardFastRefresh();
-    const qs = _hoardPageQuery(!fast) + (force ? "" : "&live=1");
+    const fast = _hoardFastRefresh();
+    const qs = _hoardPageQuery(false) + (force ? "" : "&live=1");
     // A Ctrl+A means the filter it was typed on. Once the filter changes, it
     // would silently mean a different set: drop it instead.
     if (_selAll && _selAll.filter !== _hoardFilterQuery()) {
@@ -3410,9 +3413,9 @@ async function fetchHoardPage(force) {
     if (_hoardPageBusy && !force) return;
     // Background refreshes are rate limited; anything the user did is not.
     if (!force) {
-        const last = fast ? _hoardLastFetchAt : _hoardFullFetchAt;
-        if (Date.now() - last < _hoardRefreshInterval()) return;
-        if (fast && !_hoardLiveDirty && _liveStreamFresh()) return;
+        if (Date.now() - _hoardLastFetchAt < _hoardRefreshInterval()) return;
+        if (!_hoardLiveDirty && !_hoardMembershipDirty && _liveStreamFresh()
+            && Date.now() - _hoardLastFetchAt < HOARD_REFRESH_MS) return;
     }
 
     // A new filter replaces the old browser request instead of occupying
@@ -3423,22 +3426,60 @@ async function fetchHoardPage(force) {
     _hoardPageBusy++;
     _hoardInFlightQuery = qs;
     _hoardLiveDirty = false;
-    if (!fast) _hoardMembershipDirty = false;
+    _hoardMembershipDirty = false;
     const started = Date.now();
     try {
-        const applied = await _fetchHoardPageInner(qs, controller.signal);
+        const page = _fetchHoardPageInner(qs, controller.signal);
+        _refreshHoardFacets(!!force);
+        const applied = await page;
         if (controller.signal.aborted) return;
         if (applied) {
             const elapsed = Date.now() - started;
             if (fast) _hoardLiveFetchMs = elapsed;
-            else { _hoardFullFetchMs = elapsed; _hoardFullFetchAt = Date.now(); }
-        } else { _hoardLiveDirty = true; if (!fast) _hoardMembershipDirty = true; }
+            else _hoardRowFetchMs = elapsed;
+        } else { _hoardLiveDirty = true; _hoardMembershipDirty = true; }
     } finally {
         _hoardPageBusy--;
         if (!_hoardPageBusy) _hoardInFlightQuery = "";
         if (_hoardPageAbort === controller) {
             _hoardPageAbort = null;
             _hoardLastFetchAt = Date.now();
+        }
+    }
+}
+
+async function _refreshHoardFacets(force = false) {
+    if (document.hidden || !_hoardTabVisible()) return;
+    const query = _hoardPageQuery(true);
+    if (_hoardFacetAbort && query === _hoardFacetQuery) return;
+    const interval = _hoardFacetDirty ? Math.max(1000, _hoardFullFetchMs * 20) : _hoardFullRefreshInterval();
+    if (!force && Date.now() - _hoardFullFetchAt < interval) return;
+    if (_hoardFacetAbort) _hoardFacetAbort.abort();
+    const controller = new AbortController();
+    _hoardFacetAbort = controller;
+    _hoardFacetQuery = query;
+    _hoardFacetDirty = false;
+    const q = new URLSearchParams(query);
+    q.set("limit", "1");
+    if (!force) q.set("live", "1");
+    const started = Date.now();
+    try {
+        const data = await api("/api/hoard/page?" + q.toString(), {signal: controller.signal});
+        if (controller.signal.aborted) return;
+        if (query !== _hoardPageQuery(true)) { _hoardFacetDirty = true; return; }
+        if (data?.facets) {
+            _hoardFacets = data.facets;
+            _renderHoardCounts();
+            _refreshHoardPins().then(() => { try { _renderHoardCounts(); } catch (_) {} });
+        } else _hoardFacetDirty = true;
+    } catch (_) {
+        if (!controller.signal.aborted) _hoardFacetDirty = true;
+    } finally {
+        if (_hoardFacetAbort === controller) {
+            _hoardFacetAbort = null;
+            _hoardFacetQuery = "";
+            _hoardFullFetchAt = Date.now();
+            _hoardFullFetchMs = Date.now() - started;
         }
     }
 }
@@ -3746,7 +3787,8 @@ function _hoardStateFacets() {
 
 function _applyHoardLiveCounts(facets) {
     _hoardLiveFacets = facets || null;
-    if (_hoardFacets && _hoardTabVisible()) _renderHoardStateCounts(_hoardStateFacets());
+    const counts = _hoardStateFacets();
+    if (counts && _hoardTabVisible()) _renderHoardStateCounts(counts);
 }
 
 function _renderHoardStateCounts(F) {
@@ -3923,7 +3965,9 @@ async function updateHoardStats() {
                 _renderHoardStatsHeader(stats);
                 _hoardStatsPainted = true;
             });
-        await Promise.all([fetchHoardPage(), header]);
+        const page = fetchHoardPage();
+        _refreshHoardFacets();
+        await Promise.all([page, header]);
     } catch (e) {
         console.error("Failed to update hoard stats:", e);
     }
@@ -8513,6 +8557,7 @@ function _openHoardSSE() {
         // Reconnects can miss removals and changes outside the loaded page.
         _hoardMembershipDirty = true;
         _hoardLiveDirty = true;
+        _hoardFacetDirty = true;
         _raceMembershipDirty = true;
         if (_hoardTabVisible()) fetchHoardPage();
     };
@@ -8544,8 +8589,14 @@ function _openHoardSSE() {
         // batches must never mutate a page that REST has already painted.
         if (type === "torrent_batch") return;
         if (type === "page_invalidated" || type === "torrent_added") {
-            if (data.mode === "race") _raceMembershipDirty = true;
-            if (data.mode === "hoard") { _hoardMembershipDirty = true; _hoardLiveDirty = true; }
+            if (data.mode === "race") {
+                _raceMembershipDirty = true;
+                if (document.getElementById("tab-race")?.classList.contains("active")) updateRaceTorrents(false);
+            }
+            if (data.mode === "hoard") {
+                _hoardMembershipDirty = true; _hoardLiveDirty = true; _hoardFacetDirty = true;
+                _scheduleHoardPageRefresh();
+            }
             return;
         }
         if (type === "stats_snapshot" && Array.isArray(data.torrents)) {
@@ -8564,6 +8615,8 @@ function _openHoardSSE() {
                 _hoardAllTorrents = _hoardAllTorrents.filter(keep);
                 _hoardMembershipDirty = true;
                 _hoardLiveDirty = true;
+                _hoardFacetDirty = true;
+                _scheduleHoardPageRefresh();
                 _scheduleHoardRender();
             } else if (data.mode === "race") {
                 _raceTorrents = _raceTorrents.filter(keep);
@@ -8678,6 +8731,7 @@ document.addEventListener("visibilitychange", () => {
         _cancelDetailRead("race");
         _cancelDetailRead("hoard");
         if (_hoardPageAbort) _hoardPageAbort.abort();
+        if (_hoardFacetAbort) _hoardFacetAbort.abort();
         stopLogsTail();
     } else {
         _syncCursor = 0; // REST refreshes membership; SSE resumes live figures.
