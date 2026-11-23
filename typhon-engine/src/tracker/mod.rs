@@ -1720,6 +1720,8 @@ mod socks_dial_tests {
         assert!(dial.await.unwrap());
     }
 
+    /// Only the Linux device-pin test below uses this.
+    #[cfg(target_os = "linux")]
     fn on_device(device: &str) -> crate::netpin::Egress {
         crate::netpin::Egress {
             device: device.into(),
