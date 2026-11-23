@@ -685,3 +685,57 @@ fn agent_ids_carry_the_local_prefix() {
     assert_eq!(local_agent("race"), "local-race");
     assert_eq!(local_agent("hoard"), "local-hoard");
 }
+
+/// Finished import jobs are not kept forever (#102): starting a new one keeps
+/// only the newest few, and only the newest keeps its retry kit.
+#[test]
+fn starting_an_import_prunes_old_finished_jobs_and_their_retry_kits() {
+    let st = state("k", "");
+    let kit = || crate::importer::RetryKit {
+        cands: Vec::new(),
+        creds: None,
+        choices: Default::default(),
+    };
+    let mut ids = Vec::new();
+    for _ in 0..6 {
+        let (id, p) = import_begin(&st).unwrap_or_else(|_| panic!("refused"));
+        *p.retry.lock().unwrap() = Some(kit());
+        p.finished.store(true, std::sync::atomic::Ordering::Relaxed);
+        ids.push(id);
+        // Ids are timestamps: two in the same tick would be one job.
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    let jobs = st.imports.lock().unwrap();
+    let mut kept: Vec<&String> = jobs.keys().collect();
+    kept.sort();
+    assert_eq!(
+        kept,
+        ids[ids.len() - IMPORTS_KEPT..].iter().collect::<Vec<_>>()
+    );
+    let with_kit: Vec<&String> = jobs
+        .iter()
+        .filter(|(_, p)| p.retry.lock().unwrap().is_some())
+        .map(|(id, _)| id)
+        .collect();
+    assert_eq!(
+        with_kit,
+        vec![ids.last().unwrap()],
+        "only the newest job can be retried"
+    );
+}
+
+/// A running job is never pruned, however old.
+#[test]
+fn pruning_imports_spares_a_running_job() {
+    let mut jobs = std::collections::HashMap::new();
+    for n in 0..5 {
+        let p = Arc::new(crate::importer::Progress::default());
+        if n > 0 {
+            p.finished.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        jobs.insert(format!("imp-{n:020}"), p);
+    }
+    prune_imports(&mut jobs);
+    assert_eq!(jobs.len(), IMPORTS_KEPT + 1);
+    assert!(jobs.contains_key(&format!("imp-{:020}", 0)));
+}

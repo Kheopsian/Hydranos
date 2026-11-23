@@ -1067,12 +1067,28 @@ function importWizard(opts) {
 }
 window.importFromQbit = () => importWizard({ fromSettings: true });
 
-// Offer the import once on a fresh instance (no recorded provenance yet).
+// Offer the import once on a fresh instance: no recorded provenance yet, and
+// no import job in this daemon's life. Provenance is only written when a job
+// ends having added something, so on its own it let the wizard pop up again
+// over a reload during an import, or after one where every torrent failed.
+function shouldOfferImport(prov, job, dismissed) {
+    if (dismissed || !prov || prov.present) return false;
+    // A status we could not read says nothing: offering then is the old behaviour.
+    return !(job && (job.running || job.job_id));
+}
+
 function maybeOfferImport() {
     if (!API_KEY) return;
-    fetch("/api/provenance", { headers: { "X-Api-Key": API_KEY } })
+    const headers = { "X-Api-Key": API_KEY };
+    const job = fetch("/api/import/qbit/status", { headers })
+        .then(r => r.ok ? r.json() : null)
+        .catch(() => null);
+    fetch("/api/provenance", { headers })
         .then(r => r.json())
-        .then(p => { _provenance = p; if (p && !p.present && !localStorage.getItem("hydra_import_dismissed")) importWizard(); })
+        .then(async p => {
+            _provenance = p;
+            if (shouldOfferImport(p, await job, localStorage.getItem("hydra_import_dismissed"))) importWizard();
+        })
         .catch(() => { });
 }
 
