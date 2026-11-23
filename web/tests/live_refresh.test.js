@@ -137,56 +137,77 @@ async function requests() {
     release(); await forced;
 }
 async function pageCannotOverwriteLiveRows() {
-    let now = 10000, release;
+    let now = 10000, release, flashes = 0, query = "facets=1&state=__active__";
     const page = new Function("env", `
-        let _hoardPageSeq = 0, _hoardPageApplied = 0, _liveRowRevision = 0;
+        let _hoardPageSeq = 0, _hoardPageApplied = 0, _liveRowRevision = 0, _hoardAppliedQuery = "";
         let _hoardAllTorrents = [{ agent: "local-hoard", info_hash: "same", upload_rate: 10 }];
         let _hoardAppliedSearch, _hoardServerTotal, _hoardServerFiltered, _hoardFacets;
         const _STATUS_TO_STATE = { 3: "seeding" }, LIVE_REFRESH_MS = 1000;
-        const Date = { now: env.now }, document = { getElementById: () => null };
-        const api = env.request, _hoardPageQuery = () => "facets=1";
+        const Date = { now: env.now }, document = { getElementById: () => ({ classList: { remove() {}, add: name => env.flash(name) } }) };
+        const api = env.request, _hoardPageQuery = () => env.query();
         const renderHoardTable = () => {}, _renderHoardCounts = () => {};
+        const HOARD_RENDER_LIMIT = 500, _hoardMatches = () => true;
         ${fn("_isLocalAgent")}
         ${fn("_liveRowMatches")}
         ${fn("_applyLiveRows")}
         ${src.includes("function _preserveLiveRows(") ? fn("_preserveLiveRows") : ""}
+        ${fn("_reconcileHoardRows")}
         ${fn("_fetchHoardPageInner")}
         return { fetch: _fetchHoardPageInner, rows: () => _hoardAllTorrents,
             delta: () => _applyLiveRows(_hoardAllTorrents, { agent: "local-hoard", torrents: [{
                 info_hash: "same", state: "seeding", upload_rate: 20, download_rate: 0,
                 total_uploaded: 200, total_downloaded: 100, peers_connected: 1, progress: 1, ratio: 2
             }] }) };
-    `)({ now: () => now, request: () => new Promise(r => { release = r; }) });
+    `)({ now: () => now, query: () => query, flash: name => { if (name === "fresh") flashes++; }, request: () => new Promise(r => { release = r; }) });
     const response = rate => ({ total: 1, filtered: 1, rows: [
         { agent: "local-hoard", info_hash: "same", upload_rate: rate, name: "fresh metadata" },
         { agent: "local-vpn", info_hash: "same", upload_rate: rate },
         { agent: "remote-hoard", info_hash: "same", upload_rate: rate }
     ] });
-    const pending = page.fetch("facets=1&live=1");
+    const pending = page.fetch("facets=1&state=__active__&live=1");
     page.delta();
     release(response(10)); await pending;
     assert.equal(page.rows()[0].upload_rate, 20, "REST must not overwrite SSE received during its request");
+    assert.equal(flashes, 0, "automatic full-facet refreshes must not flash the table");
     assert.equal(page.rows()[0].name, "fresh metadata");
     assert.equal(page.rows()[1].upload_rate, 10, "another engine must remain independent");
     assert.equal(page.rows()[2].upload_rate, 10, "remote rows must remain independent");
     now += 100;
-    const cached = page.fetch("facets=1&live=1");
+    const cached = page.fetch("facets=1&state=__active__&live=1");
     release(response(10)); await cached;
     assert.equal(page.rows()[0].upload_rate, 20, "a shared cached page must not roll back recent SSE");
-    const manual = page.fetch("facets=1");
+    const manual = page.fetch("facets=1&state=__active__");
     page.delta();
     release(response(30)); await manual;
     assert.equal(page.rows()[0].upload_rate, 30, "manual fresh responses supersede queued SSE");
+    assert.equal(flashes, 1, "manual refreshes keep their feedback");
     now += 10000;
-    const fallback = page.fetch("facets=1&live=1");
+    const fallback = page.fetch("facets=1&state=__active__&live=1");
     release(response(40)); await fallback;
     assert.equal(page.rows()[0].upload_rate, 40, "stale SSE must not override REST recovery");
     const controller = new AbortController();
-    const cancelled = page.fetch("facets=1&live=1", controller.signal);
+    const cancelled = page.fetch("facets=1&state=__active__&live=1", controller.signal);
     controller.abort();
     release(response(50));
     assert.equal(await cancelled, false);
     assert.equal(page.rows()[0].upload_rate, 40, "an already-resolved but cancelled response must not repaint the page");
+    const omitted = page.fetch("facets=1&state=__active__&live=1");
+    page.delta();
+    release({total: 3, filtered: 0, rows: []}); await omitted;
+    assert.equal(page.rows().length, 1, "a cached omission cannot erase a row with newer matching live data");
+    now += 2000;
+    const departed = page.fetch("facets=1&state=__active__&live=1");
+    release({total: 3, filtered: 0, rows: []}); await departed;
+    assert.equal(page.rows().length, 0, "a subsequent fresh membership response confirms the departure");
+
+    query += "&category=music";
+    const category = page.fetch(query);
+    release(response(40)); await category;
+    const categoryMissing = page.fetch(query + "&live=1");
+    page.delta();
+    release({total: 3, filtered: 0, rows: []}); await categoryMissing;
+    assert.equal(page.rows().length, 0, "fresh rates cannot prove that stale category metadata still matches");
+
 }
 
 function membershipEventsScheduleRefresh() {

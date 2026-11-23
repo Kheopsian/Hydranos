@@ -3204,9 +3204,8 @@ async function _applyTagOp(tags, op) {
         }
         renderHoardTable();
         _renderHoardCounts();
-    } else {
-        fetchHoardPage(true);
     }
+    fetchHoardPage(true);
 }
 
 function _toggleTagSelected(tag, add) {
@@ -3312,14 +3311,12 @@ let _hoardLiveFacets = null;
 let _hoardPageSeq = 0;
 // Highest sequence number whose answer has been rendered.
 let _hoardPageApplied = 0;
+let _hoardAppliedQuery = "";
 let _hoardPageBusy = 0;
 
 // Ask the server for the rows the current sort and filters select.
 //
-// The filtering and sorting happen next to the data; what comes back is already
-// the page to draw. renderHoardTable() still runs its own filter and sort over
-// those rows, which is a no-op on an already-filtered, already-sorted 500 -- it
-// is left in place so a stale page never renders rows that no longer match.
+// The server selects and ranks the page; SSE updates its figures in place.
 // Static pages use SSE row updates with a slower membership backstop.
 // Live state pages use engine indexes; whole-library facets refresh separately.
 const HOARD_REFRESH_MS = 20000;
@@ -3462,11 +3459,10 @@ async function _fetchHoardPageInner(qs, signal) {
     requested.set("facets", "1");
     requested.delete("live");
     if (!d || seq <= _hoardPageApplied || requested.toString() !== current.toString()) return false;
+    const sameQuery = requested.toString() === _hoardAppliedQuery;
+    _hoardAppliedQuery = requested.toString();
     _hoardPageApplied = seq;
-    // The search this page answers. renderHoardTable() refilters with THIS,
-    // not with what the box says now: the stats refresh redraws the table every
-    // second, and filtering the previous page with half a new word showed 41
-    // rows out of 500 while the real answer (85 000) was still on its way.
+    // Validate retained live rows against the accepted query, not partially typed search text.
     _hoardAppliedSearch = (new URLSearchParams(qs).get("search") || "").toLowerCase();
     _hoardServerTotal = d.total || 0;
     _hoardServerFiltered = d.filtered || 0;
@@ -3484,7 +3480,13 @@ async function _fetchHoardPageInner(qs, signal) {
     // Background pages are shared for one second. Keep recent SSE figures,
     // and any update that arrived while this request was in flight.
     if (background) _preserveLiveRows(rows, _hoardAllTorrents, liveRevision, started - LIVE_REFRESH_MS);
-    _hoardAllTorrents = rows;
+    // Live figures cannot prove category/tag/tracker/search membership or a top-page cutoff.
+    const liveQuery = ["__active__", "seeding", "downloading", "seed_only", "checking_files",
+        "__check_reading__", "__check_waiting__"].includes(requested.get("state"))
+        && [...requested.keys()].every(key => ["limit", "facets", "sort", "order", "state"].includes(key));
+    _hoardAllTorrents = _reconcileHoardRows(rows, _hoardAllTorrents, liveRevision,
+        started - LIVE_REFRESH_MS, background && sameQuery && liveQuery);
+    if (_hoardAllTorrents.length > rows.length) _hoardLiveDirty = true;
     // Chips and rows in the same frame. The chips used to follow a pins round
     // trip later, and the table jumped by their change in height 35 ms after
     // the rows had landed.
@@ -3495,7 +3497,7 @@ async function _fetchHoardPageInner(qs, signal) {
     if (tb) {
         tb.classList.remove("pending");
         // Background updates should not flash the whole table every second.
-        if (new URLSearchParams(qs).get("facets") === "1") {
+        if (!background) {
             tb.classList.remove("fresh"); void tb.offsetWidth; tb.classList.add("fresh");
         }
     }
@@ -3514,16 +3516,10 @@ function scheduleHoardPage(delay) {
 }
 
 function renderHoardTable() {
-    const search = _hoardAppliedSearch;
-
-    const filtered = _hoardAllTorrents.filter(t => _hoardMatches(t, search, null));
-
-    // Keep the filtered set around: only HOARD_RENDER_LIMIT rows are rendered,
-    // so Ctrl+A cannot read the selection universe off the DOM. Its consumers
-    // (_selectAllFiltered, the bulk-filter path) read it as a set and never as
-    // an order, which is what lets the sort below be a top-K.
+    // REST owns membership and rank. SSE changes figures, not which rows survive a paint.
+    const filtered = _hoardAllTorrents;
     _hoardFiltered = filtered;
-    const visible = _topKSorted(filtered, HOARD_RENDER_LIMIT, _hoardCmp(_hoardSortCol, _hoardSortAsc));
+    const visible = filtered.slice(0, HOARD_RENDER_LIMIT);
     const countEl = document.getElementById("hoard-filter-count");
     if (countEl) {
         // Counted by the server over the whole library. `filtered` here only
@@ -3549,10 +3545,55 @@ function renderHoardTable() {
         tbody.innerHTML = `<tr><td colspan="${_visibleCols("hoard-table").length}" class="empty">${msg}</td></tr>`;
         return;
     }
-    tbody.innerHTML = visible.map(t => {
-        return `<tr class="t-row clickable" data-hash="${esc(t.info_hash)}" data-mode="hoard" data-agent="${esc(t.agent || 'local')}" onclick="handleRowClick(event,this.dataset.hash,'hoard')" oncontextmenu="handleRowContextMenu(event,this.dataset.hash,'hoard')">${renderRowCells("hoard-table", t)}</tr>`;
-    }).join("");
+    _renderHoardRows(tbody, visible);
     _updateRowHighlights();
+}
+
+function _renderHoardRows(tbody, rows) {
+    const key = row => (row.agent || "local") + "|" + row.info_hash;
+    const existing = new Map([...tbody.children].filter(row => row.dataset.hash)
+        .map(row => [key({agent: row.dataset.agent, info_hash: row.dataset.hash}), row]));
+    rows.forEach((torrent, index) => {
+        let row = existing.get(key(torrent));
+        if (!row) {
+            row = document.createElement("tr");
+            row.className = "t-row clickable";
+            row.dataset.hash = torrent.info_hash;
+            row.dataset.agent = torrent.agent || "local";
+            row.dataset.mode = "hoard";
+            row.onclick = event => handleRowClick(event, row.dataset.hash, "hoard");
+            row.oncontextmenu = event => handleRowContextMenu(event, row.dataset.hash, "hoard");
+        }
+        const cells = _rowCellHtml("hoard-table", torrent);
+        if (!row.children.length) row.innerHTML = cells.join("");
+        else {
+            cells.forEach((html, i) => {
+                if (row._cellsHtml?.[i] === html) return;
+                const next = document.createElement("tr");
+                next.innerHTML = html;
+                const old = row.children[i];
+                if (old) row.replaceChild(next.firstElementChild, old);
+                else row.appendChild(next.firstElementChild);
+            });
+            while (row.children.length > cells.length) row.lastElementChild.remove();
+        }
+        row._cellsHtml = cells;
+        if (tbody.children[index] !== row) tbody.insertBefore(row, tbody.children[index] || null);
+    });
+    while (tbody.children.length > rows.length) tbody.lastElementChild.remove();
+}
+
+function _reconcileHoardRows(rows, previous, since, recentAfter, retainLive) {
+    if (!retainLive || rows.length >= HOARD_RENDER_LIMIT) return rows;
+    const key = row => (row.agent || "local") + "|" + row.info_hash;
+    const present = new Set(rows.map(key)), result = rows.slice();
+    previous.forEach((row, index) => {
+        if (result.length >= HOARD_RENDER_LIMIT || present.has(key(row))) return;
+        if (!(row._liveRevision > since || row._liveUpdatedAt >= recentAfter)) return;
+        if (!_hoardMatches(row, _hoardAppliedSearch, null)) return;
+        result.splice(Math.min(index, result.length), 0, row);
+    });
+    return result;
 }
 
 // The chips a facet family should draw: what the server counted, plus
@@ -4433,6 +4474,7 @@ async function _pinSelected(on) {
     await _refreshHoardPins();
     renderHoardTable();
     _renderHoardCounts();
+    fetchHoardPage(true);
 }
 
 // ── Selection actions ─────────────────────────────────────────────────────
@@ -5943,7 +5985,7 @@ async function _pauseSelected(paused) {
     // Rows repaint from what the daemon confirmed: a clean run marks the rows
     // in hand, anything else refetches rather than claim a state it may not have.
     if (explicit && !j.failed) _markLocallyStopped(hoard, paused);
-    else fetchHoardPage(true);
+    fetchHoardPage(true);
     updateHoardStats();
 }
 
@@ -5956,6 +5998,7 @@ async function _recheckSelected() {
     _hideCtxMenu();
     const j = await _runSelection("recheck", {}, t("Recheck"));
     if (!j) return;
+    fetchHoardPage(true);
     updateHoardStats();
 }
 
@@ -10884,6 +10927,10 @@ if (typeof window.matchMedia === "function") {
 
 // Row cells for a torrent in the current column order (used by the renderers).
 function renderRowCells(tableId, row) {
+    return _rowCellHtml(tableId, row).join("");
+}
+
+function _rowCellHtml(tableId, row) {
     // Each cell carries its column label. On a phone the table turns into one
     // card per torrent (see style.css) and the header is gone, so without this
     // a card would read "61.6%  2.8 MiB/s  0 B/s" with nothing saying which is
@@ -10892,7 +10939,7 @@ function renderRowCells(tableId, row) {
     return _visibleCols(tableId).map(c => {
         const html = c.render(row);
         return html.replace("<td", `<td data-label="${esc(t(c.label))}"`);
-    }).join("");
+    });
 }
 function renderTableHeader(tableId, sortCol, sortAsc) {
     const thead = document.querySelector("#" + tableId + " thead");
