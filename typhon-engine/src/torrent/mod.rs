@@ -131,12 +131,28 @@ pub struct StartupIssue {
 
 /// Candidate sets for live filters, refreshed by the existing rate pass.
 /// Cold seeds are not copied into an index: storage follows the working set.
+#[derive(Clone, Default, PartialEq)]
+pub struct LivePillCounts {
+    pub seeding: usize,
+    pub seed_only: usize,
+    pub downloading: usize,
+    pub checking: usize,
+    pub check_waiting: usize,
+    pub active: usize,
+    pub torrent_errors: usize,
+    pub halted: Vec<InfoHash>,
+    pub errors: Vec<InfoHash>,
+}
+
+const PILL_INTENT_LIMIT: usize = 4096;
+
 #[derive(Default, PartialEq)]
 struct LiveIndex {
     uploading: Vec<InfoHash>,
     downloading: Vec<InfoHash>,
     checking: Vec<InfoHash>,
     errors: Vec<InfoHash>,
+    pills: LivePillCounts,
 }
 
 /// The issues are listed up to this many per group (skipped rows, and every
@@ -1101,6 +1117,8 @@ impl TorrentManager {
             index.downloading.capacity(),
             index.checking.capacity(),
             index.errors.capacity(),
+            index.pills.halted.capacity(),
+            index.pills.errors.capacity(),
         ]
         .into_iter()
         .sum::<usize>()
@@ -1109,6 +1127,16 @@ impl TorrentManager {
 
     pub fn live_revision(&self) -> u64 {
         self.live_revision.load(Ordering::Relaxed)
+    }
+
+    pub fn live_pill_counts(&self) -> Option<LivePillCounts> {
+        if !self.live_index_ready() {
+            return None;
+        }
+        let index = self.live_index.read().unwrap();
+        let counts = &index.pills;
+        // Large halted sets keep the existing facet cadence instead of adding per-second work.
+        (counts.halted.len() + counts.errors.len() <= PILL_INTENT_LIMIT).then(|| counts.clone())
     }
 
     /// None before the first rate tick or for an unindexed filter. Candidates
@@ -2632,12 +2660,32 @@ impl TorrentManager {
                 t.rechecking.load(Ordering::Relaxed) || t.held_for_proof(),
             );
             match state {
+                "seeding" => live.pills.seeding += 1,
+                "seed_only" => live.pills.seed_only += 1,
+                "downloading" => live.pills.downloading += 1,
+                "checking_files" => {
+                    live.pills.checking += 1;
+                    live.pills.check_waiting += usize::from(t.waiting_for_check());
+                }
+                "error" => {
+                    if live.pills.errors.len() <= PILL_INTENT_LIMIT {
+                        live.pills.errors.push(t.info_hash);
+                    }
+                }
+                _ => {
+                    if live.pills.halted.len() <= PILL_INTENT_LIMIT {
+                        live.pills.halted.push(t.info_hash);
+                    }
+                }
+            }
+            match state {
                 "downloading" | "seed_only" => live.downloading.push(t.info_hash),
                 "checking_files" => live.checking.push(t.info_hash),
                 _ => {}
             }
             if s == meta::TorrentStatus::Error as usize {
                 live.errors.push(t.info_hash);
+                live.pills.torrent_errors += 1;
             }
             let ul = t.total_uploaded.load(Ordering::Relaxed);
             let dl = t.total_downloaded.load(Ordering::Relaxed);
@@ -2668,6 +2716,9 @@ impl TorrentManager {
             let after = (t.upload_rate.get(), t.download_rate.get());
             if after.0 > 0 {
                 live.uploading.push(t.info_hash);
+                if matches!(state, "seeding" | "seed_only") {
+                    live.pills.active += 1;
+                }
             }
             if emit {
                 let active = peers > 0

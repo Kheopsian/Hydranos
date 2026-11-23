@@ -6860,6 +6860,72 @@ async fn get_qbit_import_events(
 /// One function, two consumers: the stream used to be able to drift from the
 /// endpoint it mirrors, and a UI reading both would then show two different
 /// truths depending on which one answered last.
+async fn live_state_facets(state: &AppState) -> Option<serde_json::Value> {
+    let mut snapshots = Vec::new();
+    let mut intents = 0;
+    for engine in state.engines.engines().iter().filter(|e| e.role == "hoard") {
+        let counts = engine.manager.live_pill_counts()?;
+        intents += counts.halted.len() + counts.errors.len();
+        if intents > 4096 {
+            return None;
+        }
+        snapshots.push((engine.id.clone(), counts));
+    }
+    if snapshots.is_empty() {
+        return None;
+    }
+    let permit = state
+        .page_refreshes
+        .metadata
+        .clone()
+        .acquire_owned()
+        .await
+        .ok()?;
+    let store = state.store.clone();
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let mut store = store.lock().ok()?;
+        // A local snapshot cannot describe a page merged with remote nodes.
+        if store.nodes().ok()?.iter().any(|n| n.enabled) {
+            return None;
+        }
+        let mut states: std::collections::BTreeMap<&str, usize> = Default::default();
+        let (mut all, mut active, mut waiting, mut errors) = (0, 0, 0, 0);
+        for (id, counts) in snapshots {
+            for (name, count) in [
+                ("seeding", counts.seeding),
+                ("seed_only", counts.seed_only),
+                ("downloading", counts.downloading),
+                ("checking_files", counts.checking),
+            ] {
+                *states.entry(name).or_default() += count;
+                all += count;
+            }
+            active += counts.active;
+            waiting += counts.check_waiting;
+            errors += counts.torrent_errors;
+            if !counts.halted.is_empty() || !counts.errors.is_empty() {
+                let facts = store.slim_facts_current(&id).ok()?;
+                for (raw, hashes) in [("stopped", counts.halted), ("error", counts.errors)] {
+                    for hash in hashes {
+                        let name =
+                            crate::row::derive_state_static(raw, facts.get(&hash).user_paused);
+                        *states.entry(name).or_default() += 1;
+                        all += 1;
+                    }
+                }
+            }
+        }
+        Some(
+            serde_json::json!({"all": all, "active": active, "state": states,
+            "check_waiting": waiting, "torrent_error": errors}),
+        )
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
 async fn status_payload(state: &AppState) -> serde_json::Value {
     let cfg = state.cfg();
     let (base_up, base_down) = read_ui_store(state, |store| store.counter("global")).await;
@@ -6907,6 +6973,13 @@ async fn status_payload(state: &AppState) -> serde_json::Value {
         .unwrap_or(0);
 
     let hoard_live = live_stats(state, "hoard");
+    // Optional chip metadata must not hold up live header figures behind a busy writer.
+    let state_facets = tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        live_state_facets(state),
+    )
+    .await
+    .unwrap_or_default();
     let race_live = live_stats(state, "race");
     // Per engine, not the all-engines sum. The hoard block used to carry two
     // literal zeros and the race block the global total, so hoard looked idle
@@ -6945,6 +7018,7 @@ async fn status_payload(state: &AppState) -> serde_json::Value {
         "day_downloaded": day_down,
         "day_uploaded": day_up,
         "hoard": {
+            "state_facets": state_facets,
             "active_download_rate": hoard_live.download_rate,
             "active_peers": hoard_live.active_peers,
             "active_upload_rate": hoard_live.upload_rate,

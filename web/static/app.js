@@ -1456,6 +1456,7 @@ async function checkHealth() {
 // the legacy fetch path (updateOverview, used on tab change) and by the SSE
 // status_snapshot handler. Pure render, does no I/O.
 function _renderStatus(data) {
+        _applyHoardLiveCounts(data.hoard?.state_facets);
         if (Array.isArray(data.engines)) _renderExtraEngines(data.engines);
         // Race stats
         if (data.race) {
@@ -3307,6 +3308,7 @@ function _heapSiftDown(h, i, n, cmp) {
 let _hoardServerTotal = 0;
 let _hoardServerFiltered = 0;
 let _hoardFacets = null;
+let _hoardLiveFacets = null;
 let _hoardPageSeq = 0;
 // Highest sequence number whose answer has been rendered.
 let _hoardPageApplied = 0;
@@ -3693,8 +3695,43 @@ function resetHoardFilters() {
     fetchHoardPage(true);
 }
 
-// Recompute state/cat chip counts. Called only when the torrent list mutates
-// (30s backstop fetch, torrent_added/removed), not on each stats snapshot.
+// State counts follow SSE; category, tag and tracker facets retain their own refresh.
+function _hoardStateFacets() {
+    const narrowed = _hoardCatInc.length || _hoardCatExc.length || _hoardTagInc.length || _hoardTagExc.length
+        || _hoardTrackerInc.length || _hoardTrackerExc.length || _hoardErrInc.length || _hoardErrExc.length
+        || document.getElementById("hoard-search")?.value;
+    return !narrowed && _hoardLiveFacets ? { ..._hoardFacets, ..._hoardLiveFacets } : _hoardFacets;
+}
+
+function _applyHoardLiveCounts(facets) {
+    _hoardLiveFacets = facets || null;
+    if (_hoardFacets && _hoardTabVisible()) _renderHoardStateCounts(_hoardStateFacets());
+}
+
+function _renderHoardStateCounts(F) {
+    const states = F.state || {};
+    const set = (selector, label, key, count) => {
+        const el = document.querySelector(selector);
+        const html = `${t(label)} ${_chipCount(key, count)}`;
+        if (el && el.innerHTML !== html) el.innerHTML = html;
+    };
+    const state = (value, label, count) => set(`.chip-state[data-state='${value}']`, label, "state:" + value, count);
+    state("", "All", F.all || 0);
+    state("seeding", "Seeding", (states.seeding || 0) + (states.seed_only || 0));
+    state("__active__", "Actively Seeding", F.active || 0);
+    state("downloading", "Downloading", states.downloading || 0);
+    state("__pinned__", "Forced", F.pinned || 0);
+    state("stopped", "Stopped", states.stopped || 0);
+    state("queued", "Queued", states.queued || 0);
+    state("checking_files", "Checking", states.checking_files || 0);
+    state("__tracker_err__", "Tracker Error", F.tracker_error || 0);
+    state("__error__", "Error", F.torrent_error || 0);
+    const checking = states.checking_files || 0, waiting = Math.min(F.check_waiting || 0, checking);
+    set(".chip-check[data-check='']", "All", "check:", checking);
+    set(".chip-check[data-check='__check_reading__']", "Reading", "check:reading", checking - waiting);
+    set(".chip-check[data-check='__check_waiting__']", "Waiting", "check:waiting", waiting);
+}
+
 function _renderHoardCounts() {
     if (!_hoardAllTorrents) return;
     // Without server facets there is nothing honest to put on the chips.
@@ -3707,37 +3744,7 @@ function _renderHoardCounts() {
     // page size -- "All 500" on a 300k library, and category chips that appear
     // and vanish depending on which rows the sort happened to bring back.
     const F = _hoardFacets;
-    const stateCounts = F ? (F.state || {}) : {};
-    const nAll = F ? (F.all || 0) : 0;
-    const nActive = F ? (F.active || 0) : 0;
-    const nTrackerErr = F ? (F.tracker_error || 0) : 0;
-    const nTorrentErr = F ? (F.torrent_error || 0) : 0;
-    const nPinned = F ? (F.pinned || 0) : 0;
-    document.querySelector(".chip-state[data-state='']").innerHTML = `${t("All")} ${_chipCount("state:", nAll)}`;
-    // Seed only is a seeder that never downloads the rest: it still serves
-    // what it holds, so the Seeding chip covers it too.
-    const nSeeding = (stateCounts["seeding"] || 0) + (stateCounts["seed_only"] || 0);
-    document.querySelector(".chip-state[data-state='seeding']").innerHTML = `${t("Seeding")} ${_chipCount("state:seeding", nSeeding)}`;
-    document.querySelector(".chip-state[data-state='__active__']").innerHTML = `${t("Actively Seeding")} ${_chipCount("state:__active__", nActive)}`;
-    document.querySelector(".chip-state[data-state='downloading']").innerHTML = `${t("Downloading")} ${_chipCount("state:downloading", stateCounts["downloading"] || 0)}`;
-    document.querySelector(".chip-state[data-state='__pinned__']").innerHTML = `${t("Forced")} ${_chipCount("state:__pinned__", nPinned)}`;
-    // Stopped is the user's doing, Queued is a scheduler's. Both are halted,
-    // and telling them apart is the whole point of the two chips.
-    document.querySelector(".chip-state[data-state='stopped']").innerHTML = `${t("Stopped")} ${_chipCount("state:stopped", stateCounts["stopped"] || 0)}`;
-    document.querySelector(".chip-state[data-state='queued']").innerHTML = `${t("Queued")} ${_chipCount("state:queued", stateCounts["queued"] || 0)}`;
-    document.querySelector(".chip-state[data-state='checking_files']").innerHTML = `${t("Checking")} ${_chipCount("state:checking_files", stateCounts["checking_files"] || 0)}`;
-    {
-        // Counted by the server like the chip: the waiting ones of the whole
-        // library, not of this page.
-        const nChecking = stateCounts["checking_files"] || 0;
-        const nWaiting = Math.min(F.check_waiting || 0, nChecking);
-        const pill = v => document.querySelector(`.chip-check[data-check='${v}']`);
-        if (pill("")) pill("").innerHTML = `${t("All")} ${_chipCount("check:", nChecking)}`;
-        if (pill("__check_reading__")) pill("__check_reading__").innerHTML = `${t("Reading")} ${_chipCount("check:reading", nChecking - nWaiting)}`;
-        if (pill("__check_waiting__")) pill("__check_waiting__").innerHTML = `${t("Waiting")} ${_chipCount("check:waiting", nWaiting)}`;
-    }
-    document.querySelector(".chip-state[data-state='__tracker_err__']").innerHTML = `${t("Tracker Error")} ${_chipCount("state:__tracker_err__", nTrackerErr)}`;
-    document.querySelector(".chip-state[data-state='__error__']").innerHTML = `${t("Error")} ${_chipCount("state:__error__", nTorrentErr)}`;
+    _renderHoardStateCounts(_hoardStateFacets());
 
     const resetBtn = document.getElementById("hoard-reset-filters");
     if (resetBtn) {

@@ -462,6 +462,94 @@ async fn background_pages_share_work_but_selection_and_manual_requests_are_fresh
 }
 
 #[tokio::test]
+async fn live_state_pills_match_full_facets_without_another_catalogue_scan() {
+    use std::sync::atomic::Ordering;
+    let s = st("live-pill-counts");
+    let cases = [
+        ("seed", 3, false, false),
+        ("partial", 2, false, false),
+        ("down", 2, false, false),
+        ("check", 3, false, false),
+        ("stopped", 3, true, true),
+        ("queued", 3, true, false),
+        ("error", 4, false, false),
+        ("stopped_error", 4, false, true),
+    ];
+    for (name, _, _, _) in cases {
+        add(&s, "hoard", name);
+    }
+    let manager = &s.state.engines.get("hoard").unwrap().manager;
+    assert!(
+        live_state_facets(&s.state).await.is_none(),
+        "no speculative counts before the first rate pass"
+    );
+    for t in manager.all() {
+        let (_, status, paused, user_paused) = cases.iter().find(|c| c.0 == t.meta.name).unwrap();
+        t.set_status(*status, Ordering::Relaxed);
+        t.set_paused(*paused, Ordering::Relaxed);
+        if t.meta.name == "partial" {
+            manager.set_seed_only(&t.info_hash, true).unwrap();
+        }
+        if t.meta.name == "check" {
+            t.set_rechecking(true, Ordering::Relaxed);
+        }
+        if t.meta.name == "seed" || t.meta.name == "down" {
+            t.peers_connected.store(1, Ordering::Relaxed);
+        }
+        s.state
+            .store
+            .lock()
+            .unwrap()
+            .insert_torrent(
+                &typhon_engine::torrent::hex_encode(&t.info_hash),
+                "hoard",
+                &torrent_bytes(&t.meta.name),
+                "/tmp",
+                "",
+                0.0,
+                *user_paused,
+                "[]",
+            )
+            .unwrap();
+    }
+    manager.update_rates();
+    tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+    for t in manager.all() {
+        t.total_uploaded.store(1024, Ordering::Relaxed);
+    }
+    manager.update_rates();
+    let live = live_state_facets(&s.state).await.unwrap();
+    let page = engine_page_value(&s.state, "hoard", "facets=1").await;
+    let full = &page["facets"];
+    for key in ["all", "active", "check_waiting", "torrent_error"] {
+        assert_eq!(live[key], full[key], "{key}");
+    }
+    for state in [
+        "seeding",
+        "seed_only",
+        "downloading",
+        "checking_files",
+        "stopped",
+        "queued",
+        "error",
+    ] {
+        assert_eq!(
+            live["state"][state].as_u64().unwrap_or(0),
+            full["state"][state].as_u64().unwrap_or(0),
+            "{state}"
+        );
+    }
+    assert_eq!(
+        live["active"], 1,
+        "uploading downloads do not count as actively seeding"
+    );
+    assert_eq!(
+        live["state"]["stopped"], 2,
+        "stopped errors retain user intent"
+    );
+}
+
+#[tokio::test]
 async fn a_queued_full_scan_does_not_block_indexed_queries_or_async_timers() {
     let s = st("page-scan-gate");
     add(&s, "hoard", "one");
