@@ -14,7 +14,7 @@
 //! not exist yet lands in the default save path -- and moving it afterwards
 //! means copying the data it was supposed to already be sitting on.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -60,12 +60,15 @@ pub struct QbitTorrent {
     /// Comma-separated, as qBit sends it.
     #[serde(default)]
     pub tags: String,
+    /// Bytes of every file in the torrent, wanted or not.
+    #[serde(default)]
+    pub total_size: u64,
 }
 
 /// How far an import has got, as the wizard's progress screen reads it.
 ///
 /// `done` counts every torrent dealt with, whatever happened to it, so the bar
-/// reaches the end; the four outcomes say what that was.
+/// reaches the end; the five outcomes say what that was.
 #[derive(Default)]
 pub struct Progress {
     pub phase: std::sync::RwLock<String>,
@@ -75,6 +78,11 @@ pub struct Progress {
     pub seeded: AtomicUsize,
     /// Added incomplete (or with its data not found): checked, then resumed.
     pub downloading: AtomicUsize,
+    /// Added in a folder of its own: another torrent already holds files at
+    /// its path with other bytes (a repack under the same name). Not trusted,
+    /// left stopped; `isolations` says where each went.
+    pub isolated: AtomicUsize,
+    pub isolations: std::sync::Mutex<Vec<Isolation>>,
     /// Already in Hydranos.
     pub skipped: AtomicUsize,
     pub failed: AtomicUsize,
@@ -112,6 +120,14 @@ pub struct Failure {
     pub name: String,
     pub hash: String,
     pub error: String,
+}
+
+/// One torrent an import placed in a folder of its own.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Isolation {
+    pub name: String,
+    /// The folder it went to instead of the one the source client used.
+    pub save_path: String,
 }
 
 /// Everything a retry of the failed torrents needs.
@@ -152,6 +168,8 @@ impl Progress {
             "done": self.done.load(Ordering::Relaxed),
             "seeded": self.seeded.load(Ordering::Relaxed),
             "downloading": self.downloading.load(Ordering::Relaxed),
+            "isolated": self.isolated.load(Ordering::Relaxed),
+            "isolations": self.isolations.lock().unwrap().iter().take(FAILURES_SHOWN).collect::<Vec<_>>(),
             "skipped": self.skipped.load(Ordering::Relaxed),
             "failed": self.failed.load(Ordering::Relaxed),
             "not_attempted": self.not_attempted.load(Ordering::Relaxed),
@@ -633,6 +651,8 @@ pub struct Candidate {
     pub downloaded: u64,
     pub tags: Vec<String>,
     pub source: Source,
+    /// The torrent's total size in bytes; 0 when the source did not say.
+    pub size: u64,
 }
 
 impl Candidate {
@@ -660,6 +680,7 @@ impl Candidate {
                 .map(String::from)
                 .collect(),
             source: Source::Qbit(t.hash.clone()),
+            size: t.total_size,
         }
     }
 }
@@ -941,6 +962,10 @@ pub struct Preview {
     pub problems: Vec<String>,
     /// Torrents with no resume file, so no save path (Transmission): skipped.
     pub without_resume: usize,
+    /// Torrents at the same content path as an earlier one of another size:
+    /// a repack under the same name, not a cross-seed of the same bytes. Each
+    /// is added stopped in a folder of its own, its data not trusted.
+    pub likely_isolated: usize,
 }
 
 pub fn preview(cands: &[Candidate], exists: impl Fn(&Path) -> bool) -> Preview {
@@ -962,6 +987,7 @@ pub fn preview(cands: &[Candidate], exists: impl Fn(&Path) -> bool) -> Preview {
         .map(|(name, save_path)| CategoryPlan { name, save_path })
         .collect();
     p.path_prefixes = path_prefixes(cands.iter().map(|c| c.save_path.as_str()));
+    p.likely_isolated = likely_isolated(cands);
     // Spread over the whole list rather than its head: the head is usually
     // one folder, and one folder says nothing about the others.
     let step = (cands.len() / DATA_SAMPLE).max(1);
@@ -988,6 +1014,26 @@ pub fn preview(cands: &[Candidate], exists: impl Fn(&Path) -> bool) -> Preview {
         }
     }
     p
+}
+
+/// Candidates whose content path an earlier candidate (in import order)
+/// already takes at another size. The first one keeps the path; the others
+/// differ in bytes for sure, so the add isolates them. Same size is the usual
+/// cross-seed and is not counted: whether its bytes differ is only known from
+/// the torrent files, which the preview does not fetch. Every candidate, not a
+/// sample: it reads nothing from disk.
+fn likely_isolated(cands: &[Candidate]) -> usize {
+    let mut first: HashMap<&str, u64> = HashMap::new();
+    cands
+        .iter()
+        .filter(|c| c.size > 0)
+        .filter(|c| {
+            *first
+                .entry(c.content.trim_end_matches('/'))
+                .or_insert(c.size)
+                != c.size
+        })
+        .count()
 }
 
 /// What the wizard chose, applied to every torrent.
@@ -1037,11 +1083,18 @@ pub fn plan(c: &Candidate, choices: &Choices, data_present: bool) -> AddPlan {
     }
 }
 
-/// How one add ended, as the runner counts it.
+/// How one add ended, as the runner counts it: what the add did, which is
+/// not always what the plan asked.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Added {
     Seeded,
     Resumed,
+    /// Put in a folder of its own, at `save_path`, because files at the path
+    /// asked are another torrent's with other bytes. Its data is not trusted
+    /// there, whatever the plan said.
+    Isolated {
+        save_path: String,
+    },
     AlreadyThere,
 }
 
@@ -1185,17 +1238,30 @@ pub async fn run_job(
                 .unwrap_or_else(|e| (Err(e.to_string()), false))
             }
         };
-        if matches!(outcome, Ok(Added::Seeded) | Ok(Added::Resumed)) {
+        if matches!(
+            outcome,
+            Ok(Added::Seeded) | Ok(Added::Resumed) | Ok(Added::Isolated { .. })
+        ) {
             progress
                 .carried_uploaded
                 .fetch_add(retry_copy.uploaded, Ordering::Relaxed);
-            if stays_stopped || held_stopped {
+            let isolated = matches!(outcome, Ok(Added::Isolated { .. }));
+            if stays_stopped || held_stopped || isolated {
                 progress.stopped.fetch_add(1, Ordering::Relaxed);
             }
         }
         match outcome {
             Ok(Added::Seeded) => progress.seeded.fetch_add(1, Ordering::Relaxed),
             Ok(Added::Resumed) => progress.downloading.fetch_add(1, Ordering::Relaxed),
+            Ok(Added::Isolated { save_path }) => {
+                tracing::info!(name = %retry_copy.name, save_path = %save_path,
+                    "import: torrent placed in a folder of its own, files at its path have other bytes");
+                progress.isolations.lock().unwrap().push(Isolation {
+                    name: retry_copy.name.clone(),
+                    save_path,
+                });
+                progress.isolated.fetch_add(1, Ordering::Relaxed)
+            }
             Ok(Added::AlreadyThere) => progress.skipped.fetch_add(1, Ordering::Relaxed),
             Err(e) => {
                 tracing::warn!(name = %retry_copy.name, error = %e, "import: torrent not added");
@@ -1347,6 +1413,7 @@ mod tests {
             downloaded: 0,
             tags: vec![],
             source: Source::Qbit("aa".into()),
+            size: 0,
         }
     }
 
@@ -1742,6 +1809,7 @@ pub fn scan_transmission(
                 vec![]
             },
             source: Source::File(path),
+            size: meta.total_size,
         });
     }
     Ok(out)
@@ -2554,6 +2622,7 @@ mod qbit_session_tests {
             downloaded: 0,
             tags: Vec::new(),
             source: Source::File(path),
+            size: 0,
         }
     }
 
@@ -2829,6 +2898,71 @@ mod qbit_session_tests {
         assert_eq!(json["retryable"], true);
         assert_eq!(json["failures"][0]["name"], "missing");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A cross-seed whose files at that path have other bytes (#99) is
+    /// placed in a folder of its own, its data not trusted: the job counts it
+    /// as isolated and stopped, never as "complete, data found", and lists
+    /// where it went.
+    #[tokio::test]
+    async fn an_isolated_torrent_is_reported_isolated_not_seeded() {
+        let dir = std::env::temp_dir().join(format!("imp-isolated-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let t = dir.join("repack.torrent");
+        std::fs::write(&t, b"x").unwrap();
+        let progress = Arc::new(Progress::default());
+        let add: AddFn = Arc::new(|_| {
+            Ok(Added::Isolated {
+                save_path: "/dl/Show [abcdef12]".into(),
+            })
+        });
+        let cats: CategoryFn = Arc::new(|_| {});
+        let start = Choices {
+            path_map: BTreeMap::new(),
+            start_stopped: false,
+        };
+        run_job(
+            vec![file_cand("Show", t)],
+            None,
+            start,
+            progress.clone(),
+            cats,
+            add,
+        )
+        .await;
+
+        assert_eq!(progress.seeded.load(Ordering::Relaxed), 0);
+        assert_eq!(progress.isolated.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            progress.stopped.load(Ordering::Relaxed),
+            1,
+            "kept stopped though the wizard asked to start"
+        );
+        let json = progress.as_json();
+        assert_eq!(json["isolated"], 1);
+        assert_eq!(json["isolations"][0]["name"], "Show");
+        assert_eq!(json["isolations"][0]["save_path"], "/dl/Show [abcdef12]");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The preview flags the torrents a later add will isolate: the same
+    /// content path as an earlier one, at another size. The same size is the
+    /// usual cross-seed, and an unknown size says nothing.
+    #[test]
+    fn the_preview_flags_a_second_size_at_one_path() {
+        let cand = |content: &str, size: u64| Candidate {
+            content: content.into(),
+            size,
+            ..file_cand("x", PathBuf::new())
+        };
+        let cands = vec![
+            cand("/dl/Show", 1000),
+            cand("/dl/Show", 1000),
+            cand("/dl/Show/", 900),
+            cand("/dl/Show", 0),
+            cand("/dl/Other", 900),
+        ];
+        assert_eq!(preview(&cands, |_| false).likely_isolated, 1);
     }
 
     #[test]

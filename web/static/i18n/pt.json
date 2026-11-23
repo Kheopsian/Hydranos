@@ -1490,5 +1490,8 @@
   "value": "valor",
   "1 condition": "1 condição",
   "{n} conditions": "{n} condições",
-  "size unknown": "tamanho desconhecido"
+  "size unknown": "tamanho desconhecido",
+  "{n} torrents share their data path with an earlier one of another size (a repack under the same name): each is added stopped in a folder of its own, not trusted, and would download its data there.": "{n} torrents partilham o caminho dos dados com um anterior de outro tamanho (um repack com o mesmo nome): cada um é adicionado parado numa pasta própria, sem confiar nos dados, e descarregá-los-ia lá.",
+  "{n} isolated": "{n} isolados",
+  "{n} torrents share their path with another torrent whose files there have other bytes. They were added stopped, each in a folder of its own; starting one downloads what is not already there:": "{n} torrents partilham o caminho com outro torrent cujos ficheiros lá têm outros bytes. Foram adicionados parados, cada um numa pasta própria; iniciar um descarrega o que ainda não está lá:"
 }
