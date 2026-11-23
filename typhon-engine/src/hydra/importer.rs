@@ -136,12 +136,86 @@ pub struct Isolation {
 }
 
 /// Everything a retry of the failed torrents needs.
+///
+/// The candidates are what the source said when the failed job listed it. A
+/// qBittorrent retry lists it again ([`refresh`]) rather than trusting them:
+/// the user may have moved data or removed torrents since.
 #[derive(Debug, Clone)]
 pub struct RetryKit {
     pub cands: Vec<Candidate>,
     /// Set when the candidates come from qBittorrent.
     pub creds: Option<QbitCreds>,
     pub choices: Choices,
+}
+
+impl RetryKit {
+    /// The folders a retry offers to remap, each with where the failed job
+    /// mapped it: a failure is often a wrong mapping, and the retry is where
+    /// it gets fixed. The mapped folders are offered too, so a mapping that
+    /// covers a torrent moved since in qBittorrent is not lost with the rest.
+    pub fn paths(&self) -> Vec<(String, String)> {
+        let saved = self.cands.iter().map(|c| c.save_path.as_str());
+        path_prefixes(saved.chain(self.choices.path_map.keys().map(String::as_str)))
+            .into_iter()
+            .map(|p| {
+                let to = map_path(&p, &self.choices.path_map);
+                (p, to)
+            })
+            .collect()
+    }
+}
+
+/// What a retry may change. Absent: as the failed job had it.
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct RetryChoices {
+    /// Replaces the failed job's mapping whole.
+    #[serde(default)]
+    pub path_map: Option<BTreeMap<String, String>>,
+}
+
+impl RetryChoices {
+    /// The failed job's choices with this retry's changes on top.
+    pub fn apply(self, mut choices: Choices) -> Choices {
+        if let Some(map) = self.path_map {
+            choices.path_map = map;
+        }
+        choices
+    }
+}
+
+/// What a failure says for a torrent qBittorrent no longer holds.
+pub const GONE_FROM_QBIT: &str = "no longer in qBittorrent";
+
+/// The failed candidates as qBittorrent describes them now.
+///
+/// Each qBittorrent candidate is rebuilt from its current row in `rows` (the
+/// `torrents/info` listing): save path, category, state, progress and counters
+/// may all have changed since the failed job listed them. One with no row any
+/// more is not retried: it comes back as a failure saying it is gone, rather
+/// than as an export that fails with a bare 404. Other sources are kept as
+/// they are.
+pub fn refresh(cands: Vec<Candidate>, rows: &[QbitTorrent]) -> (Vec<Candidate>, Vec<Failure>) {
+    let now: std::collections::HashMap<String, &QbitTorrent> = rows
+        .iter()
+        .map(|r| (r.hash.to_ascii_lowercase(), r))
+        .collect();
+    let mut fresh = Vec::with_capacity(cands.len());
+    let mut gone = Vec::new();
+    for c in cands {
+        let Source::Qbit(hash) = &c.source else {
+            fresh.push(c);
+            continue;
+        };
+        match now.get(&hash.to_ascii_lowercase()) {
+            Some(row) => fresh.push(Candidate::from_qbit(row)),
+            None => gone.push(Failure {
+                name: c.name.clone(),
+                hash: hash.clone(),
+                error: GONE_FROM_QBIT.to_string(),
+            }),
+        }
+    }
+    (fresh, gone)
 }
 
 /// At most this many failures travel in a status frame: the count is exact,
@@ -166,7 +240,21 @@ impl Progress {
         !self.finished.load(Ordering::Relaxed)
     }
 
+    /// Count torrents that failed before the job ran, as a retry finds the
+    /// ones its source no longer holds. Done and failed, not retryable.
+    pub fn fail_before_start(&self, failures: Vec<Failure>) {
+        let n = failures.len();
+        for f in &failures {
+            tracing::warn!(name = %f.name, error = %f.error, "import: torrent not added");
+        }
+        self.failures.lock().unwrap().extend(failures);
+        self.total.fetch_add(n, Ordering::Relaxed);
+        self.done.fetch_add(n, Ordering::Relaxed);
+        self.failed.fetch_add(n, Ordering::Relaxed);
+    }
+
     pub fn as_json(&self) -> serde_json::Value {
+        let retry_paths = self.retry.lock().unwrap().as_ref().map(RetryKit::paths);
         serde_json::json!({
             "phase": self.phase.read().unwrap().clone(),
             "total": self.total.load(Ordering::Relaxed),
@@ -182,7 +270,13 @@ impl Progress {
             "last_ok": self.last_ok.read().unwrap().clone(),
             "stopped": self.stopped.load(Ordering::Relaxed),
             "failures": self.failures.lock().unwrap().iter().take(FAILURES_SHOWN).collect::<Vec<_>>(),
-            "retryable": self.retry.lock().unwrap().is_some(),
+            "retryable": retry_paths.is_some(),
+            // The mapping a retry starts from, for the wizard to offer.
+            "retry_paths": retry_paths
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(from, to)| serde_json::json!({"from": from, "to": to}))
+                .collect::<Vec<_>>(),
             "finished": self.finished.load(Ordering::Relaxed),
             "error": self.error.read().unwrap().clone(),
             "current": self.current.read().unwrap().clone(),
@@ -609,6 +703,8 @@ impl Qbit {
             let body = resp.text().await.unwrap_or_default();
             let body = trimmed_body(&body);
             let why = match (status, body.is_empty()) {
+                // qBittorrent's 404 here is an unknown hash: say what that means.
+                (404, _) => format!(": {GONE_FROM_QBIT}"),
                 (_, false) => format!(": {body}"),
                 (409, true) => " (no body; for a magnet this is no metadata yet)".to_string(),
                 (_, true) => String::new(),
@@ -1187,7 +1283,8 @@ pub async fn run_job(
     ensure_categories: CategoryFn,
     add: AddFn,
 ) {
-    progress.total.store(cands.len(), Ordering::Relaxed);
+    // Added to: a retry may have counted torrents before the job started.
+    progress.total.fetch_add(cands.len(), Ordering::Relaxed);
 
     progress.set_phase("categories");
     let cats: BTreeMap<String, String> = categories_needed(&cands)
@@ -2212,6 +2309,8 @@ mod qbit_session_tests {
                 ok
             }
             "down" => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+            // What qBittorrent answers for a hash it does not hold.
+            "gone" => (StatusCode::NOT_FOUND, "Not Found").into_response(),
             _ => ok,
         }
     }
@@ -2359,6 +2458,18 @@ mod qbit_session_tests {
             "capped: {}",
             long.message.len()
         );
+    }
+
+    #[tokio::test]
+    async fn a_404_says_the_torrent_is_no_longer_in_qbittorrent() {
+        let (f, q) = fake().await;
+        let err = q.export("gone").await.unwrap_err();
+        assert_eq!(
+            err.message, "export gone: http 404: no longer in qBittorrent",
+            "{err}"
+        );
+        assert!(!err.network, "an answer, not a network failure");
+        assert_eq!(calls(&f, "gone"), 1, "asking again changes nothing");
     }
 
     #[tokio::test]
@@ -3144,5 +3255,157 @@ mod qbit_session_tests {
         assert_eq!(export_retry(403), Retry::Relogin);
         assert_eq!(export_retry(409), Retry::Never);
         assert_eq!(export_retry(404), Retry::Never);
+    }
+
+    fn qrow(hash: &str, name: &str, save_path: &str) -> QbitTorrent {
+        QbitTorrent {
+            hash: hash.into(),
+            name: name.into(),
+            save_path: save_path.into(),
+            ..Default::default()
+        }
+    }
+
+    /// The retry acts on qBittorrent as it is now: a torrent moved, finished
+    /// and recategorised since the failed job is taken with its new row, one
+    /// removed is a failure that says so, and a file candidate is kept.
+    #[test]
+    fn a_retry_takes_each_torrent_as_qbittorrent_has_it_now() {
+        let old = vec![
+            Candidate::from_qbit(&QbitTorrent {
+                progress: 0.5,
+                state: "pausedDL".into(),
+                ..qrow("aa", "moved", "/old")
+            }),
+            Candidate::from_qbit(&qrow("bb", "deleted", "/old")),
+            file_cand("file", PathBuf::from("/t/x.torrent")),
+        ];
+        let now = QbitTorrent {
+            category: "films".into(),
+            progress: 1.0,
+            state: "uploading".into(),
+            uploaded: 9,
+            // qBittorrent's spelling of a hash is not ours to rely on.
+            ..qrow("AA", "moved", "/new")
+        };
+        let (fresh, gone) = refresh(old.clone(), std::slice::from_ref(&now));
+        assert_eq!(fresh, vec![Candidate::from_qbit(&now), old[2].clone()]);
+        assert_eq!(fresh[0].save_path, "/new");
+        assert!(fresh[0].complete && !fresh[0].stopped);
+        assert_eq!(gone.len(), 1);
+        assert_eq!(
+            (
+                gone[0].name.as_str(),
+                gone[0].hash.as_str(),
+                gone[0].error.as_str()
+            ),
+            ("deleted", "bb", GONE_FROM_QBIT)
+        );
+    }
+
+    #[test]
+    fn a_retry_replaces_the_mapping_only_when_it_brings_one() {
+        let choices = Choices {
+            path_map: [("/q".to_string(), "/data".to_string())].into(),
+            start_stopped: false,
+        };
+        let kept = RetryChoices::default().apply(choices.clone());
+        assert_eq!(kept.path_map, choices.path_map);
+        assert!(!kept.start_stopped);
+        let body: RetryChoices =
+            serde_json::from_str(r#"{"path_map":{"/q/films":"/mnt/films"}}"#).unwrap();
+        let new = body.apply(choices);
+        assert_eq!(
+            new.path_map,
+            [("/q/films".to_string(), "/mnt/films".to_string())].into()
+        );
+        assert!(!new.start_stopped, "the rest of the choices stay");
+    }
+
+    /// The status frame offers the failed torrents' folders, each with where
+    /// the failed job mapped it, for the retry to correct.
+    #[test]
+    fn the_retry_offers_the_failed_folders_with_their_mapping() {
+        let at = |save_path: &str| Candidate {
+            save_path: save_path.into(),
+            ..file_cand("x", PathBuf::new())
+        };
+        let kit = RetryKit {
+            cands: vec![at("/q/films"), at("/other")],
+            creds: None,
+            choices: Choices {
+                path_map: [
+                    ("/q".to_string(), "/data".to_string()),
+                    ("/unused".to_string(), "/mnt".to_string()),
+                ]
+                .into(),
+                start_stopped: true,
+            },
+        };
+        // `/q/films` folds into the mapped `/q`, which keeps its target.
+        assert_eq!(
+            kit.paths(),
+            vec![
+                ("/other".to_string(), "/other".to_string()),
+                ("/q".to_string(), "/data".to_string()),
+                ("/unused".to_string(), "/mnt".to_string()),
+            ]
+        );
+        let progress = Progress::default();
+        assert_eq!(progress.as_json()["retry_paths"], serde_json::json!([]));
+        *progress.retry.lock().unwrap() = Some(kit);
+        let json = progress.as_json();
+        assert_eq!(json["retryable"], true);
+        assert_eq!(
+            json["retry_paths"][1],
+            serde_json::json!({"from": "/q", "to": "/data"})
+        );
+    }
+
+    /// Torrents a retry found gone count in its totals and failures, and are
+    /// not offered for another retry: asking qBittorrent again cannot bring
+    /// them back.
+    #[tokio::test]
+    async fn torrents_gone_before_a_retry_count_but_are_not_retried_again() {
+        let (_f, q) = fake().await;
+        let progress = Arc::new(Progress::default());
+        progress.fail_before_start(vec![Failure {
+            name: "deleted".into(),
+            hash: "bb".into(),
+            error: GONE_FROM_QBIT.into(),
+        }]);
+        let add: AddFn = Arc::new(|_| Ok(Added::Seeded));
+        let cats: CategoryFn = Arc::new(|_| {});
+        let cands = vec![Candidate {
+            source: Source::Qbit("ok0".into()),
+            ..file_cand("still there", PathBuf::new())
+        }];
+        run_job(
+            cands,
+            Some(q),
+            Choices::default(),
+            progress.clone(),
+            cats,
+            add,
+        )
+        .await;
+        let json = progress.as_json();
+        assert_eq!(
+            (
+                &json["total"],
+                &json["done"],
+                &json["failed"],
+                &json["seeded"]
+            ),
+            (
+                &serde_json::json!(2),
+                &serde_json::json!(2),
+                &serde_json::json!(1),
+                &serde_json::json!(1)
+            ),
+            "{json}"
+        );
+        assert_eq!(json["failures"][0]["error"], GONE_FROM_QBIT);
+        assert_eq!(json["retryable"], false, "{json}");
     }
 }

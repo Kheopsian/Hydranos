@@ -15526,14 +15526,28 @@ async fn post_qbit_import_start(
 /// The kit is TAKEN from the old job, so the password lives no longer than
 /// one retry. Put back if the retry cannot start, so a typo in the network
 /// does not cost the list.
+///
+/// The body may carry a new `path_map`, replacing the failed job's: a wrong
+/// mapping is the usual reason to retry. A qBittorrent retry lists the library
+/// again and rebuilds each torrent from its current row, so what changed in
+/// qBittorrent since (moved data, a new category, a removed torrent) is
+/// what the retry acts on, not the failed job's snapshot.
 async fn post_import_retry(
     State(state): State<AppState>,
     RawQuery(query): RawQuery,
     headers: HeaderMap,
-    _body: String,
+    body: String,
 ) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
+    let changes: crate::importer::RetryChoices = if body.trim().is_empty() {
+        Default::default()
+    } else {
+        match serde_json::from_str(&body) {
+            Ok(c) => c,
+            Err(_) => return bad_request("invalid body: path_map"),
+        }
+    };
     let Some((prev_id, prev)) = latest_import(&state) else {
         return (
             StatusCode::NOT_FOUND,
@@ -15552,15 +15566,29 @@ async fn post_import_retry(
         return bad_request("the last import has nothing left to retry");
     };
     let put_back = |kit: crate::importer::RetryKit| *prev.retry.lock().unwrap() = Some(kit);
-    let qbit = match &kit.creds {
-        Some(creds) => match crate::importer::Qbit::login(creds).await {
-            Ok(q) => Some(q),
-            Err(e) => {
-                put_back(kit);
-                return bad_request(&e);
-            }
-        },
-        None => None,
+    let (qbit, rows) = match &kit.creds {
+        Some(creds) => {
+            let q = match crate::importer::Qbit::login(creds).await {
+                Ok(q) => q,
+                Err(e) => {
+                    put_back(kit);
+                    return bad_request(&e);
+                }
+            };
+            let rows = match q.torrents().await {
+                Ok(rows) => rows,
+                Err(e) => {
+                    put_back(kit);
+                    return (
+                        StatusCode::BAD_GATEWAY,
+                        Json(serde_json::json!({"error": e})),
+                    )
+                        .into_response();
+                }
+            };
+            (Some(q), Some(rows))
+        }
+        None => (None, None),
     };
     let (job_id, progress) = match import_begin(&state) {
         Ok(x) => x,
@@ -15570,20 +15598,29 @@ async fn post_import_retry(
         }
     };
     let n = kit.cands.len();
-    tracing::info!(job = %job_id, from = %prev_id, torrents = n, "import retry started");
     let client = if kit.creds.is_some() {
         "qBittorrent"
     } else {
         "Transmission"
     };
+    let choices = changes.apply(kit.choices);
+    let cands = match rows {
+        Some(rows) => {
+            let (fresh, gone) = crate::importer::refresh(kit.cands, &rows);
+            progress.fail_before_start(gone);
+            fresh
+        }
+        None => kit.cands,
+    };
+    tracing::info!(job = %job_id, from = %prev_id, torrents = n, still_there = cands.len(), "import retry started");
     tokio::spawn(import_and_record(
         state.clone(),
         client,
         progress.clone(),
         crate::importer::run_job(
-            kit.cands,
+            cands,
             qbit,
-            kit.choices,
+            choices,
             progress,
             import_categories(&state),
             import_add(&state),
