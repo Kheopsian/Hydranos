@@ -20,6 +20,8 @@ pub struct PageRefreshes {
     // One full scan at a time; indexed views retain a separate lane.
     pub scans: Arc<Semaphore>,
     pub indexed: Arc<Semaphore>,
+    // Brief metadata reads also need a bounded worker lane when SQLite stalls.
+    pub metadata: Arc<Semaphore>,
     pub computations: AtomicU64,
     pub hits: AtomicU64,
 }
@@ -30,6 +32,7 @@ impl Default for PageRefreshes {
             entries: Mutex::new(LruCache::new(NonZeroUsize::new(ENTRIES).unwrap())),
             scans: Arc::new(Semaphore::new(1)),
             indexed: Arc::new(Semaphore::new(4)),
+            metadata: Arc::new(Semaphore::new(1)),
             computations: AtomicU64::new(0),
             hits: AtomicU64::new(0),
         }

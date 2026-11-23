@@ -489,3 +489,45 @@ async fn a_queued_full_scan_does_not_block_indexed_queries_or_async_timers() {
     drop(held);
     assert_eq!(full.await.unwrap()["total"], 1);
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_filter_waiter_does_not_stall_health_or_engine_requests() {
+    let s = st("filter-store-wait");
+    add(&s, "hoard", "one");
+    s.state.store.refreshed().await;
+    let store = s.state.store.clone();
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let holder = std::thread::spawn(move || {
+        let _held = store.lock().unwrap();
+        held_tx.send(()).unwrap();
+        // A fixed release prevents a failing test from deadlocking the runtime.
+        std::thread::sleep(std::time::Duration::from_millis(600));
+    });
+    held_rx.recv().unwrap();
+    let state = s.state.clone();
+    let started = std::time::Instant::now();
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let page = tokio::spawn(async move {
+        entered_tx.send(()).unwrap();
+        fleet_page(&state, "hoard", "facets=1&state=seeding&limit=500").await
+    });
+    entered_rx.await.unwrap();
+    let state = s.state.clone();
+    let history =
+        tokio::spawn(
+            async move { get_drain_history(State(state), RawQuery(None), keyed(KEY)).await },
+        );
+    tokio::task::yield_now().await;
+    let engines = get_engines(State(s.state.clone()), RawQuery(None), keyed(KEY)).await;
+    let health = get_health(State(s.state.clone())).await;
+    let elapsed = started.elapsed();
+    holder.join().unwrap();
+    assert_eq!(engines.status(), StatusCode::OK);
+    assert_eq!(health.status(), StatusCode::OK);
+    assert_eq!(page.await.unwrap()["total"], 1);
+    assert_eq!(history.await.unwrap().status(), StatusCode::OK);
+    assert!(
+        elapsed < std::time::Duration::from_millis(250),
+        "filter store wait blocked unrelated routes for {elapsed:?}"
+    );
+}

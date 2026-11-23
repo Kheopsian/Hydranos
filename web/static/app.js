@@ -1585,10 +1585,14 @@ async function updateRecords(force) {
 // none, and their torrents were missing from the overview's total.
 let _extraTorrents = 0;
 let _extraEnginesAt = 0;
+let _extraEnginesBusy = false;
 function _maybeUpdateExtraEngines() {
-    if (Date.now() - _extraEnginesAt < 3000) return;
+    if (_extraEnginesBusy || Date.now() - _extraEnginesAt < 3000) return;
     _extraEnginesAt = Date.now();
-    _updateExtraEngines();
+    _extraEnginesBusy = true;
+    _updateExtraEngines()
+        .catch(e => console.error("Failed to update engine cards:", e))
+        .finally(() => { _extraEnginesBusy = false; });
 }
 async function _updateExtraEngines() {
     const box = document.getElementById("ov-extra-engines");
@@ -3254,6 +3258,7 @@ function _scheduleHoardPageRefresh() {
 }
 let _hoardInFlightQuery = "";
 let _hoardLastFetchAt = 0;
+let _hoardPageAbort = null;
 
 function _hoardPageQuery(facets = true) {
     const q = new URLSearchParams();
@@ -3310,13 +3315,19 @@ async function fetchHoardPage(force) {
         if (fast && !_hoardLiveDirty && _liveStreamFresh()) return;
     }
 
+    // A new filter replaces the old browser request instead of occupying
+    // another connection while an obsolete page is still waiting.
+    if (force && _hoardPageAbort) _hoardPageAbort.abort();
+    const controller = new AbortController();
+    _hoardPageAbort = controller;
     _hoardPageBusy++;
     _hoardInFlightQuery = qs;
     _hoardLiveDirty = false;
     if (!fast) _hoardMembershipDirty = false;
     const started = Date.now();
     try {
-        const applied = await _fetchHoardPageInner(qs);
+        const applied = await _fetchHoardPageInner(qs, controller.signal);
+        if (controller.signal.aborted) return;
         if (applied) {
             const elapsed = Date.now() - started;
             if (fast) _hoardLiveFetchMs = elapsed;
@@ -3325,15 +3336,19 @@ async function fetchHoardPage(force) {
     } finally {
         _hoardPageBusy--;
         if (!_hoardPageBusy) _hoardInFlightQuery = "";
-        _hoardLastFetchAt = Date.now();
+        if (_hoardPageAbort === controller) {
+            _hoardPageAbort = null;
+            _hoardLastFetchAt = Date.now();
+        }
     }
 }
 
-async function _fetchHoardPageInner(qs) {
+async function _fetchHoardPageInner(qs, signal) {
     const seq = ++_hoardPageSeq;
     const liveRevision = _liveRowRevision, started = Date.now();
     let d;
-    try { d = await api("/api/hoard/page?" + qs); } catch (e) { return; }
+    try { d = await api("/api/hoard/page?" + qs, { signal }); } catch (e) { return; }
+    if (signal?.aborted) return false;
     // Drop an answer only if a NEWER one has already been applied. Comparing
     // against the latest request INSTEAD starved the list completely: the
     // request takes about a second, poll() starts another before it lands, so

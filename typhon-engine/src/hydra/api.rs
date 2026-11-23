@@ -4614,6 +4614,29 @@ fn with_window(query: &str, offset: usize, limit: usize) -> String {
     parts.join("&")
 }
 
+// A busy store must not pin an async worker before a page reaches its scan gate.
+async fn read_ui_store<T, F>(state: &AppState, read: F) -> T
+where
+    T: Send + 'static,
+    F: FnOnce(&crate::store::Store) -> T + Send + 'static,
+{
+    let permit = state
+        .page_refreshes
+        .metadata
+        .clone()
+        .acquire_owned()
+        .await
+        .expect("metadata gate is never closed");
+    let store = state.store.clone();
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let store = store.read().unwrap_or_else(|e| e.into_inner());
+        read(&store)
+    })
+    .await
+    .expect("UI metadata worker panicked")
+}
+
 /// One engine's page across the whole fleet.
 ///
 /// With no nodes declared this is exactly the single-node path and costs
@@ -4623,13 +4646,12 @@ pub(crate) async fn fleet_page(
     engine_id: &str,
     query: &str,
 ) -> serde_json::Value {
-    let nodes: Vec<crate::store::Node> = {
-        let store = state.store.lock().unwrap();
-        store.nodes().unwrap_or_default()
-    }
-    .into_iter()
-    .filter(|n| n.enabled)
-    .collect();
+    let nodes: Vec<crate::store::Node> =
+        read_ui_store(state, |store| store.nodes().unwrap_or_default())
+            .await
+            .into_iter()
+            .filter(|n| n.enabled)
+            .collect();
 
     // `fields=hash` answers the SELECTION universe, not a page, and merging it
     // would mean pulling every matching hash off every node just to hand the
@@ -5520,13 +5542,7 @@ async fn get_drain_history(
 ) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    let rows = {
-        let store = match state.store.lock() {
-            Ok(s) => s,
-            Err(e) => e.into_inner(),
-        };
-        store.drain_history(50).unwrap_or_default()
-    };
+    let rows = read_ui_store(&state, |store| store.drain_history(50).unwrap_or_default()).await;
     Json(serde_json::Value::Array(rows)).into_response()
 }
 

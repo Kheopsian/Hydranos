@@ -105,6 +105,7 @@ async function requests() {
         let _selAll = null, _hoardPageBusy = 0, _hoardInFlightQuery = "";
         let _hoardLiveDirty = true, _hoardMembershipDirty = false;
         let _hoardLastFetchAt = 0, _hoardFullFetchAt = 9000;
+        let _hoardPageAbort = null;
         let _hoardLiveFetchMs = 0, _hoardFullFetchMs = 0;
         const Date = { now: () => env.now() };
         const _hoardFastRefresh = () => env.fast();
@@ -180,6 +181,12 @@ async function pageCannotOverwriteLiveRows() {
     const fallback = page.fetch("facets=1&live=1");
     release(response(40)); await fallback;
     assert.equal(page.rows()[0].upload_rate, 40, "stale SSE must not override REST recovery");
+    const controller = new AbortController();
+    const cancelled = page.fetch("facets=1&live=1", controller.signal);
+    controller.abort();
+    release(response(50));
+    assert.equal(await cancelled, false);
+    assert.equal(page.rows()[0].upload_rate, 40, "an already-resolved but cancelled response must not repaint the page");
 }
 
 function membershipEventsScheduleRefresh() {
@@ -231,5 +238,51 @@ async function membershipRefreshesAreBounded() {
     assert.equal(env.timers[0].delay, 1000, "a busy page cannot cause zero-delay timer spinning");
 }
 
-Promise.all([requests(), raceRequests(), pageCannotOverwriteLiveRows(), membershipRefreshesAreBounded(), Promise.resolve().then(membershipEventsScheduleRefresh)])
+async function engineCardRequestsDoNotOverlap() {
+    let now = 10000, calls = 0, release;
+    const refresh = new Function("env", `
+        let _extraEnginesAt = 0, _extraEnginesBusy = false;
+        const Date = { now: () => env.now() }, console = { error: () => {} };
+        const _updateExtraEngines = env.request;
+        ${fn("_maybeUpdateExtraEngines")}
+        return _maybeUpdateExtraEngines;
+    `)({ now: () => now, request: () => {
+        calls++;
+        return new Promise(r => { release = r; });
+    } });
+    for (let i = 0; i < 10; i++) { refresh(); now += 3000; }
+    assert.equal(calls, 1, "a stalled engines request must not accumulate another request every three seconds");
+    release();
+    await new Promise(r => setImmediate(r));
+    refresh();
+    assert.equal(calls, 2, "polling resumes after the in-flight request finishes");
+    release();
+}
+
+async function supersededPageRequestsAreCancelled() {
+    const env = { query: "first", calls: [] };
+    const page = new Function("env", `
+        let _selAll = null, _hoardPageBusy = 0, _hoardInFlightQuery = "", _hoardPageAbort = null;
+        let _hoardLiveDirty = true, _hoardMembershipDirty = false;
+        let _hoardLastFetchAt = 0, _hoardFullFetchAt = 0, _hoardLiveFetchMs = 0, _hoardFullFetchMs = 0;
+        const _hoardFastRefresh = () => false, _hoardRefreshInterval = () => 0;
+        const _hoardPageQuery = () => "facets=1&state=" + env.query;
+        const _fetchHoardPageInner = (qs, signal) => new Promise(resolve => {
+            env.calls.push({ qs, signal, resolve });
+            signal?.addEventListener("abort", () => resolve(false), { once: true });
+        });
+        ${fn("fetchHoardPage")}
+        return { fetch: fetchHoardPage, state: () => ({ busy: _hoardPageBusy, dirty: _hoardMembershipDirty }) };
+    `)(env);
+    const first = page.fetch(true);
+    env.query = "second";
+    const second = page.fetch(true);
+    assert.equal(env.calls[0].signal?.aborted, true, "changing pills must cancel the obsolete browser request");
+    await first;
+    assert.deepEqual(page.state(), { busy: 1, dirty: false }, "a cancelled request must not dirty the replacement page");
+    env.calls[1].resolve(true); await second;
+    assert.equal(page.state().busy, 0);
+}
+
+Promise.all([requests(), raceRequests(), pageCannotOverwriteLiveRows(), membershipRefreshesAreBounded(), engineCardRequestsDoNotOverlap(), supersededPageRequestsAreCancelled(), Promise.resolve().then(membershipEventsScheduleRefresh)])
     .then(() => console.log("live_refresh: ok")).catch(e => { console.error(e); process.exitCode = 1; });
