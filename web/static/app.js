@@ -1072,17 +1072,63 @@ function _pendingEdits() {
             if (_settingTier(orig.section, orig.key) !== "hot") needsRestart = true;
         } catch (e) {}
     }
-    if (_netState && _netOrig) {
-        const cur = netModeCollect();
-        if (cur && _stableJson({ mode: _netState.mode, fields: cur }) !== _netOrig) {
-            count++;
-            // The network mode rewrites the engines' listen and proxy keys,
-            // which only take effect on restart. A listen port alone is the
-            // exception: the daemon moves it on the running listener.
-            if (!_netOnlyPortsChanged(cur)) needsRestart = true;
-        }
+    if (_netModeDirty()) {
+        count++;
+        // The network mode rewrites the engines' listen and proxy keys,
+        // which only take effect on restart. A listen port alone is the
+        // exception: the daemon moves it on the running listener.
+        if (!_netOnlyPortsChanged(_netSnapshot().fields)) needsRestart = true;
+    }
+    const eg = _egressDirty();
+    if (eg) {
+        count++;
+        // The daemon's route applies at once; only which engines the kill
+        // switch blocks waits for a restart.
+        if (eg.needsRestart) needsRestart = true;
     }
     return { count: count, needsRestart: needsRestart };
+}
+
+// The network form as a save would send it: what the chosen mode owns, the
+// other modes' keys blank. Comparing the raw form instead made the page look
+// edited right after a save -- the save keeps only the owned keys, the form
+// reads a hidden gluetun engine back as "hoard" -- so the leave prompt fired
+// on a page that had nothing left to save.
+function _netSnapshot() {
+    const cur = netModeCollect();
+    if (!cur || !_netState) return null;
+    return { mode: _netState.mode, fields: _netOwnedFields(_netState.mode, cur) };
+}
+
+function _netModeDirty() {
+    if (!_netState || !_netOrig) return false;
+    const snap = _netSnapshot();
+    return !!snap && _stableJson(snap) !== _netOrig;
+}
+
+// Whether the daemon-traffic block differs from what was loaded, and whether
+// saving it needs a restart (the kill switch or an engine's "direct" box).
+// It has its own endpoint, and was left out of this check: an edit there was
+// lost on leaving with no prompt, and "Save and restart" never sent it.
+function _egressDirty() {
+    if (!_egress || !_egressOrig) return null;
+    const cur = netEgressCollect();
+    if (!cur || _stableJson(cur) === _egressOrig) return null;
+    let needsRestart = false;
+    try {
+        const orig = JSON.parse(_egressOrig);
+        needsRestart = _stableJson(orig.kill_switch) !== _stableJson(cur.kill_switch) ||
+            _stableJson(orig.allow_direct) !== _stableJson(cur.allow_direct);
+    } catch (e) { needsRestart = true; }
+    return { needsRestart: needsRestart };
+}
+
+// Saves whatever the Network tab holds unsaved. False when a save failed: its
+// error is on the page and leaving would hide it.
+async function _saveNetworkEdits() {
+    if (_netModeDirty() && !await netModeSave({ withEgress: false })) return false;
+    if (_egressDirty() && !await netEgressSave()) return false;
+    return true;
 }
 
 // Three ways out, all explicit: save and go, drop them and go, or stay. No
@@ -1106,6 +1152,9 @@ function _confirmLeaveSettings(count, onLeave) {
     ov.querySelector("#leave-discard").onclick = () => { close(); onLeave(); };
     ov.querySelector("#leave-save").onclick = async () => {
         close();
+        // The Network tab saves through its own endpoints: saveSettings only
+        // writes the generic fields, so a network edit was restarted away.
+        if (!await _saveNetworkEdits()) return;
         try { await saveSettings(); } catch (e) { return; }
         if (pending.needsRestart) {
             // Restarting reloads the page, so there is nothing to leave to: the
@@ -9357,6 +9406,7 @@ async function resetSettings() {
             const r = await api("/api/settings/reset", { method: "POST" });
             _settingsOrig = {};
             _netOrig = null;
+            _egressOrig = null;
             _setRestartBanner(esc(t("Settings reset. Backup saved as {path}", { path: r.backup })));
             await restartDaemon(true);
         } catch (e) {
@@ -11296,7 +11346,7 @@ async function netModeInit() {
         body.innerHTML = `<div class="result-msg error">${esc(t("Error: {msg}", { msg: e.message }))}</div>`;
         return;
     }
-    _netOrig = _stableJson({ mode: _netState.mode, fields: _netState.fields });
+    _netOrig = _stableJson({ mode: _netState.mode, fields: _netOwnedFields(_netState.mode, _netState.fields) });
     netModeRender();
 }
 
@@ -11429,6 +11479,8 @@ function netModeRender() {
 // tracker lists and webhooks leave the same way whatever the engines do.
 
 let _egress = null;
+// The block as loaded (`netEgressCollect`), for the unsaved-changes check.
+let _egressOrig = null;
 
 async function netEgressLoad() {
     const body = document.getElementById("net-egress-body");
@@ -11516,14 +11568,19 @@ function netEgressRender() {
         ${_netField("net-eg-user", "Username", "text", d.socks5_user, "Leave both credentials empty for an open proxy.")}
         ${_netField("net-eg-pass", "Password", "password", d.socks5_pass, "")}
         ${_netSelect("net-eg-iface", "Daemon interface", d.bind_interface, list, "The interface the daemon's requests (or its connection to the proxy) are bound to when they go direct or through [proxy]. Empty means the host's default route.")}
+        ${_netField("net-eg-bypass", "Bypass the VPN for", "text", (d.bypass || []).join(", "),
+            "Networks and hosts the daemon's own requests (RSS feeds, .torrent URLs, webhooks, tracker and IP filter lists) reach by the host's default route, outside the tunnel or the proxy, even with the kill switch armed. Comma separated: 192.168.1.0/24, 10.0.0.5, prowlarr. A name listed here is resolved by the host's own DNS; a name not listed never is. Redirects are followed only to destinations on this list.")}
         <details style="margin:.5em 0"><summary class="sr-desc">${t("What the kill switch does not cover")}</summary><ul class="sr-desc">${outside}</ul></details>
         <button class="btn-small" onclick="netEgressSave()">${t("Save daemon traffic")}</button>
         <div id="net-egress-result"></div>
     </div>`;
+    _egressOrig = _stableJson(netEgressCollect());
 }
 
-async function netEgressSave() {
-    const out = document.getElementById("net-egress-result");
+// The block's form as `POST /api/network/egress` takes it; null when the
+// block is not on the page.
+function netEgressCollect() {
+    if (!document.getElementById("net-eg-egress")) return null;
     const val = id => { const el = document.getElementById(id); return el ? el.value.trim() : ""; };
     const ks = val("net-eg-kill");
     const payload = {
@@ -11535,6 +11592,7 @@ async function netEgressSave() {
         bind_interface: val("net-eg-iface"),
         // null: follow the network mode (the key is removed).
         kill_switch: ks === "true" ? true : ks === "false" ? false : null,
+        bypass: val("net-eg-bypass").split(/[\s,]+/).filter(Boolean),
     };
     const direct = {};
     for (const e of ((_egress && _egress.engines) || [])) {
@@ -11542,6 +11600,14 @@ async function netEgressSave() {
         if (box) direct[e.engine] = !!box.checked;
     }
     if (Object.keys(direct).length) payload.allow_direct = direct;
+    return payload;
+}
+
+// True once saved.
+async function netEgressSave() {
+    const out = document.getElementById("net-egress-result");
+    const payload = netEgressCollect();
+    if (!payload) return true;
     try {
         _egress = await api("/api/network/egress", {
             method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
@@ -11555,8 +11621,10 @@ async function netEgressSave() {
             _setRestartBanner(t("Saved. Which engines the kill switch blocks changes at the next restart.") +
                 ` <button class="btn-small btn-danger" onclick="restartDaemon()" style="margin-left:8px">${t("Apply and restart")}</button>`);
         }
+        return true;
     } catch (e) {
         if (out) out.innerHTML = `<div class="result-msg error">${esc(t("Error: {msg}", { msg: e.message }))}</div>`;
+        return false;
     }
 }
 
@@ -11630,10 +11698,14 @@ function netModeCollectExtras() {
     });
 }
 
-async function netModeSave() {
+// True once saved. The daemon-traffic block sits above this button, so the
+// button saves it too when it was edited: it said "saved" while that block's
+// edit, which has its own small button, was quietly left behind.
+async function netModeSave(opts) {
+    const withEgress = !opts || opts.withEgress !== false;
     const out = document.getElementById("net-mode-result");
     const collected = netModeCollect();
-    if (!collected) return;
+    if (!collected) return true;
     // What the chosen mode owns, and nothing of the others: netModeCollect
     // keeps every value typed so far so that flicking between cards loses
     // nothing, and posting that whole set is how a SOCKS5 host used to
@@ -11667,7 +11739,10 @@ async function netModeSave() {
         out.innerHTML = extra;
     } catch (e) {
         out.innerHTML = `<div class="result-msg error">${esc(t("Error: {msg}", { msg: e.message }))}</div>`;
+        return false;
     }
+    if (withEgress && _egressDirty()) return await netEgressSave();
+    return true;
 }
 
 async function netModeCheck() {

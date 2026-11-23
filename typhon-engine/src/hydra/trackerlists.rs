@@ -109,7 +109,7 @@ pub(crate) fn fetch_via(
     // internet may not send the fetch on to an internal address, however the
     // name is written (`egress::blocking_client_resolving`).
     let guard = std::sync::Arc::new(typhon_engine::webseed::StartGuard::for_url(url));
-    let route = typhon_engine::egress::route();
+    let route = typhon_engine::egress::route_for(&typhon_engine::egress::route(), url);
     let client =
         typhon_engine::egress::blocking_client_resolving(&route, hosts, guard, is_internal)
             .map_err(|e| format!("tracker list {url}: {e}"))?;

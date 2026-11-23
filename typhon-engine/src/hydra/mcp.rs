@@ -1241,6 +1241,8 @@ pub(crate) async fn fetch_torrent_via(
     // out. One that began on an internal host may go anywhere; one that began
     // on a public host may not reach an internal address, however the name is
     // written, on the first request or on a redirect.
+    // An indexer listed in `[daemon] bypass` is reached outside the tunnel.
+    let route = &typhon_engine::egress::route_for(route, url);
     let guard = std::sync::Arc::new(typhon_engine::webseed::StartGuard::for_url(url));
     let client = typhon_engine::egress::client_resolving(route, hosts, guard, is_internal)?;
     let resp = client

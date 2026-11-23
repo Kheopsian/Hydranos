@@ -352,6 +352,16 @@ pub fn apply(cfg: &Config) {
     if typhon_engine::egress::set(p.daemon.route) {
         tracing::info!("egress: the daemon's own requests now go via {shown}");
     }
+    let (bypass, bad) = typhon_engine::egress::Bypass::parse(&cfg.daemon.bypass);
+    for b in &bad {
+        tracing::warn!("egress: [daemon] bypass entry ignored, {b}");
+    }
+    if typhon_engine::egress::set_bypass(bypass) {
+        tracing::info!(
+            "egress: the daemon's requests to {:?} go by the host's default route",
+            cfg.daemon.bypass
+        );
+    }
 }
 
 /// What is never covered, whatever the configuration. Said in full so nobody
@@ -407,6 +417,8 @@ pub fn report_of(cfg: &Config, p: &Plan, running_blocked: &dyn Fn(&str) -> Optio
             "socks5_user": cfg.proxy.socks5_user,
             "socks5_pass": crate::api::mask_secret(&cfg.proxy.socks5_pass),
             "bind_interface": cfg.daemon.bind_interface,
+            // Reached by the host's default route whatever the above says.
+            "bypass": cfg.daemon.bypass,
             "direct": route.is_direct() && route.refusal.is_empty(),
             "error": route.preflight().err().unwrap_or_default(),
         },
@@ -633,6 +645,39 @@ pub async fn post_egress(
         None
     };
     let iface = v.get("bind_interface").map(|_| txt("bind_interface"));
+    // A list, or one comma-separated string. Every entry must read, or
+    // nothing is written: a typo would otherwise send nothing where meant.
+    let bypass: Option<Vec<String>> = match v.get("bypass") {
+        None => None,
+        Some(Value::Null) => Some(Vec::new()),
+        Some(Value::String(s)) => Some(
+            s.split([',', ' ', '\n'])
+                .map(str::trim)
+                .filter(|e| !e.is_empty())
+                .map(String::from)
+                .collect(),
+        ),
+        Some(Value::Array(a)) => {
+            let mut out = Vec::new();
+            for e in a {
+                let Some(s) = e.as_str() else {
+                    return bad("bypass is a list of networks, addresses or host names".into());
+                };
+                let s = s.trim();
+                if !s.is_empty() {
+                    out.push(s.to_string());
+                }
+            }
+            Some(out)
+        }
+        Some(_) => return bad("bypass is a list of networks, addresses or host names".into()),
+    };
+    if let Some(list) = &bypass {
+        let (_, invalid) = typhon_engine::egress::Bypass::parse(list);
+        if !invalid.is_empty() {
+            return bad(format!("bypass: {}", invalid.join("; ")));
+        }
+    }
     // Absent: untouched. null or "auto": follow the mode.
     let kill: Option<Option<bool>> = match v.get("kill_switch") {
         None => None,
@@ -716,6 +761,20 @@ pub async fn post_egress(
                     &out,
                     "daemon",
                     &[("egress".to_string(), q(e))],
+                )?
+            }
+            None => {}
+        }
+        match &bypass {
+            Some(list) if list.is_empty() => {
+                out = crate::tomledit::delete_toml_key(&out, "daemon", "bypass")
+            }
+            Some(list) => {
+                let items: Vec<String> = list.iter().map(|e| q(e)).collect();
+                out = crate::tomledit::set_toml_table(
+                    &out,
+                    "daemon",
+                    &[("bypass".to_string(), format!("[{}]", items.join(", ")))],
                 )?
             }
             None => {}

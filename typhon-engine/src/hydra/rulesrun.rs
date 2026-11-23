@@ -1571,7 +1571,9 @@ pub fn webhook_payload(w: &Workflow, f: &Facts) -> serde_json::Value {
 pub fn send_webhook(url: &str, payload: &serde_json::Value) -> Result<(), String> {
     // The daemon's own way out, refused rather than sent direct when the
     // kill switch has none. The reason names no URL, for the same reason.
-    let client = typhon_engine::egress::blocking_client().map_err(|e| format!("webhook: {e}"))?;
+    // A target listed in `[daemon] bypass` (a Gotify on the LAN) goes direct.
+    let client =
+        typhon_engine::egress::blocking_client_to(url).map_err(|e| format!("webhook: {e}"))?;
     let mut last = String::new();
     for (attempt, wait) in [0u64, 2, 5].into_iter().enumerate() {
         if wait > 0 {

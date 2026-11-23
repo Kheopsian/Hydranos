@@ -31,6 +31,14 @@ create_torrent_folder = false
 # With the kill switch armed, a way out that is missing or unusable REFUSES the
 # request; it is never sent by the default route instead.
 # egress = "auto"
+# Destinations the daemon's own requests (RSS feeds, .torrent URLs, webhooks,
+# tracker and IP filter lists) reach by the host's default route, OUTSIDE the
+# tunnel or the proxy above, even with the kill switch armed: a feed or an
+# indexer on the LAN while everything else stays in the VPN. Networks, addresses
+# or host names, matched on the URL as written: a listed name is resolved by the
+# host's DNS, an unlisted one never is. Redirects are followed only to listed
+# destinations. The engines' own traffic is not affected.
+# bypass = ["192.168.1.0/24", "prowlarr"]
 # The daemon's own files readable by the daemon's user only: created 0600, and
 # existing ones brought back to 0600 at startup. Exactly: hydranos.log (and its
 # rotated .1 to .4), this file, hydra.db and bench.db, each with its -wal, -shm

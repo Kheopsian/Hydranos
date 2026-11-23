@@ -407,3 +407,59 @@ async fn the_egress_route_saves_the_kill_switch_and_reports_it() {
         .clone();
     assert_eq!(hoard["allow_direct"], true, "{d:#}");
 }
+
+/// `[daemon] bypass` is written by the route, read back from the file, left
+/// alone by a body that does not send it, removed by an empty list, and a
+/// list with one unreadable entry writes nothing.
+#[tokio::test]
+async fn the_egress_route_saves_the_bypass_list() {
+    let srv = serve("route-egress-bypass").await;
+    let c = reqwest::Client::new();
+    let url = format!("{}/api/network/egress", srv.url);
+    let post = |body: &'static str| c.post(&url).header("X-API-Key", KEY).body(body).send();
+    let saved: serde_json::Value = post(r#"{"bypass":["192.168.1.0/24","prowlarr"]}"#)
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        saved["daemon"]["bypass"],
+        serde_json::json!(["192.168.1.0/24", "prowlarr"]),
+        "{saved:#}"
+    );
+    let r = post(r#"{"bypass":["192.168.1.0/24","0.0.0.0/0"]}"#)
+        .await
+        .unwrap();
+    assert_eq!(r.status(), reqwest::StatusCode::BAD_REQUEST);
+    let r = post(r#"{"bypass":"10.0.0.0/33"}"#).await.unwrap();
+    assert_eq!(r.status(), reqwest::StatusCode::BAD_REQUEST);
+    let kept: serde_json::Value = post(r#"{"kill_switch":null}"#)
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        kept["daemon"]["bypass"],
+        serde_json::json!(["192.168.1.0/24", "prowlarr"]),
+        "untouched by a body without it, and by the refused ones"
+    );
+    let text: serde_json::Value = post(r#"{"bypass":"10.0.0.5, nas.lan"}"#)
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        text["daemon"]["bypass"],
+        serde_json::json!(["10.0.0.5", "nas.lan"])
+    );
+    let cleared: serde_json::Value = post(r#"{"bypass":[]}"#)
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(cleared["daemon"]["bypass"], serde_json::json!([]));
+}

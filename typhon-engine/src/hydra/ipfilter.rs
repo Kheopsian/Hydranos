@@ -117,8 +117,9 @@ fn decompress(bytes: Vec<u8>) -> Result<String, String> {
 
 pub(crate) async fn fetch(source: &str) -> Result<Vec<u8>, String> {
     if source.starts_with("http://") || source.starts_with("https://") {
-        // The daemon's own way out (`typhon_engine::egress`).
-        let client = typhon_engine::egress::client()?;
+        // The daemon's own way out (`typhon_engine::egress`), or the default
+        // route for a host listed in `[daemon] bypass`.
+        let client = typhon_engine::egress::client_to(source)?;
         let resp = client
             .get(source)
             .timeout(Duration::from_secs(120))
