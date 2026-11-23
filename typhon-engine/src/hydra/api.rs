@@ -15461,10 +15461,9 @@ pub(crate) fn record_provenance(
     }
 }
 
-/// Log in to qBittorrent and list its library: the shared first half of the
-/// preview and the start, so both refuse the same things the same way.
-// The error is an axum Response returned as it is; boxing it would touch every caller.
-/// What a qBittorrent import would do, before it does anything.
+/// What a qBittorrent import would do, before it does anything. The body is
+/// the start's: the wizard's path mapping, when it sends one, is applied to
+/// the data sample as the import will apply it.
 async fn post_qbit_import_preview(
     State(state): State<AppState>,
     RawQuery(query): RawQuery,
@@ -15477,10 +15476,12 @@ async fn post_qbit_import_preview(
         Ok(x) => x,
         Err(resp) => return resp,
     };
-    let preview =
-        tokio::task::spawn_blocking(move || crate::importer::preview(&cands, |p| p.exists()))
-            .await
-            .unwrap_or_default();
+    let choices: crate::importer::Choices = serde_json::from_str(&body).unwrap_or_default();
+    let preview = tokio::task::spawn_blocking(move || {
+        crate::importer::preview(&cands, &choices, |p| p.exists())
+    })
+    .await
+    .unwrap_or_default();
     Json(preview).into_response()
 }
 
@@ -15753,8 +15754,9 @@ async fn post_transmission_preview(
         Ok(s) => s,
         Err(resp) => return resp,
     };
+    let choices: crate::importer::Choices = serde_json::from_str(&body).unwrap_or_default();
     let preview = tokio::task::spawn_blocking(move || {
-        let mut p = crate::importer::preview(&scan.cands, |p| p.exists());
+        let mut p = crate::importer::preview(&scan.cands, &choices, |p| p.exists());
         p.problems = scan.problems;
         p.without_resume = scan.without_resume;
         p

@@ -805,7 +805,23 @@ function importWizard(opts) {
         box.querySelector("#qb-pass").addEventListener("keydown", e => { if (e.key === "Enter") box.querySelector("#qb-preview").click(); });
     }
 
+    // What the data sample found, worded for the line under the mapping.
+    function sampleLine(d) {
+        if (!d.data_checked) return { text: "", bad: false };
+        if (d.data_found === 0 && !d.data_elsewhere && !d.data_incomplete) return {
+            text: t("No data found for any of the {checked} torrents sampled. Nothing is reachable at these paths, so every torrent would restart from zero. Fix the mapping above.", { checked: d.data_checked }),
+            bad: true,
+        };
+        return {
+            text: t("Data found for {found} of {checked} torrents sampled.", { found: d.data_found, checked: d.data_checked })
+                + (d.data_elsewhere ? " " + t("{n} more have their data in a layout Hydranos does not reproduce (a renamed file, or files without their torrent's folder): those are added stopped, with a note saying where their data is.", { n: d.data_elsewhere }) : "")
+                + (d.data_incomplete ? " " + t("{n} more are downloads qBittorrent had not finished, in its incomplete folder or as .!qB files: those are added stopped, with a note saying how to move them or download them again.", { n: d.data_incomplete }) : ""),
+            bad: false,
+        };
+    }
+
     function stepReview(creds, d) {
+        const sample = sampleLine(d);
         const prefixes = d.path_prefixes || [];
         const rows = prefixes.map(p => `<div style="display:flex;gap:6px;align-items:center;margin-bottom:4px">
             <code style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(p)}">${esc(p)}</code>
@@ -819,11 +835,7 @@ function importWizard(opts) {
             <p class="modal-desc" style="margin-bottom:4px">${t("Path mapping (qBit path → what Hydranos sees). Fix these if Hydranos mounts the data elsewhere:")}</p>
             <div style="max-height:160px;overflow:auto;margin-bottom:8px;border:1px solid var(--border);border-radius:4px;padding:6px">${rows || `<i>${t("no paths detected")}</i>`}</div>
             <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
-                <p class="modal-desc" id="qb-data" style="margin:0;flex:1${d.data_checked && d.data_found === 0 && !d.data_elsewhere && !d.data_incomplete ? ";color:var(--accent-red);font-weight:600" : ""}">${!d.data_checked ? "" : (d.data_found === 0 && !d.data_elsewhere && !d.data_incomplete
-                    ? t("No data found for any of the {checked} torrents sampled. Nothing is reachable at these paths, so every torrent would restart from zero. Fix the mapping above.", { checked: d.data_checked })
-                    : t("Data found for {found} of {checked} torrents sampled.", { found: d.data_found, checked: d.data_checked })
-                      + (d.data_elsewhere ? " " + t("{n} more have their data in a layout Hydranos does not reproduce (a renamed file, or files without their torrent's folder): those are added stopped, with a note saying where their data is.", { n: d.data_elsewhere }) : "")
-                      + (d.data_incomplete ? " " + t("{n} more are downloads qBittorrent had not finished, in its incomplete folder or as .!qB files: those are added stopped, with a note saying how to move them or download them again.", { n: d.data_incomplete }) : ""))}</p>
+                <p class="modal-desc" id="qb-data" style="margin:0;flex:1${sample.bad ? ";color:var(--accent-red);font-weight:600" : ""}">${sample.text}</p>
                 <button id="qb-check" style="flex:0 0 auto;width:auto">${t("Re-check paths")}</button>
             </div>
             ${d.likely_isolated ? `<p class="modal-desc" style="color:var(--accent-yellow)">${t("{n} torrents share their data path with an earlier one of another size (a repack under the same name): each is added stopped in a folder of its own, not trusted, and would download its data there.", { n: d.likely_isolated })}</p>` : ""}
@@ -833,10 +845,19 @@ function importWizard(opts) {
                 <button id="qb-back">${t("Back")}</button>
                 <button class="btn-primary" id="qb-go">${t("Import {n} torrents", { n: d.total })}</button>
             </div>`;
+        // The mapping as the start sends it: only the rows the user changed.
+        const pathMap = () => {
+            const path_map = {};
+            box.querySelectorAll(".qb-map").forEach(inp => {
+                const f = inp.dataset.from, t = inp.value.trim();
+                if (t && t !== f) path_map[f] = t;
+            });
+            return path_map;
+        };
         box.querySelector("#qb-check").onclick = async () => {
-            // Checks the mapped folders only, not every payload: this runs while
-            // the user is still editing, and it must stay instant on a library
-            // the preview took a while to list.
+            // Two answers: each mapped folder gets its tick at once, then the
+            // data sample runs again through the mapping, as the import will
+            // read it. A folder that exists can still hold none of the data.
             const inputs = Array.from(box.querySelectorAll(".qb-map"));
             const info = box.querySelector("#qb-data");
             info.style.color = ""; info.style.fontWeight = "";
@@ -865,6 +886,21 @@ function importWizard(opts) {
                     info.style.color = "var(--accent-red)"; info.style.fontWeight = "600";
                     info.textContent = t("{bad} of {n} mapped folders are not reachable by Hydranos. Those torrents would restart from zero.", { bad: bad, n: inputs.length });
                 }
+                // Lists the library again, so it can take a while: the folder
+                // line above stands until the sample answers, and stays if it
+                // cannot.
+                const pres = await fetch("/api/import/qbit/preview", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json", "X-Api-Key": API_KEY },
+                    body: JSON.stringify(Object.assign({}, creds, { path_map: pathMap() })),
+                });
+                const pd = await pres.json().catch(() => ({}));
+                if (pres.ok && pd.data_checked) {
+                    const s = sampleLine(pd);
+                    info.style.color = s.bad ? "var(--accent-red)" : "";
+                    info.style.fontWeight = s.bad ? "600" : "";
+                    info.textContent = s.text;
+                }
             } catch (e) {
                 info.style.color = "var(--accent-red)";
                 info.textContent = t("Network error: {msg}", { msg: e.message });
@@ -874,11 +910,7 @@ function importWizard(opts) {
         // retyping it to fix one path mapping was the whole cost of "Back".
         box.querySelector("#qb-back").onclick = () => stepCreds({ url: creds.url, user: creds.username, pass: creds.password, insecure: creds.insecure });
         box.querySelector("#qb-go").onclick = async () => {
-            const path_map = {};
-            box.querySelectorAll(".qb-map").forEach(inp => {
-                const f = inp.dataset.from, t = inp.value.trim();
-                if (t && t !== f) path_map[f] = t;
-            });
+            const path_map = pathMap();
             const msg = box.querySelector("#qb-msg2");
             msg.style.color = ""; msg.textContent = t("Starting…");
             try {
