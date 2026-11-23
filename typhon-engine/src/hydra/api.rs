@@ -5119,8 +5119,14 @@ async fn get_engines(
 ) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
+    Json(engine_payload(&state)).into_response()
+}
+
+/// One card per engine, for `/api/engines` and for the status frame, so the
+/// Overview and the Performance cards follow the stream instead of polling.
+fn engine_payload(state: &AppState) -> Vec<serde_json::Value> {
     let stats = crate::obs::engine_stats(&state.engines);
-    let out: Vec<serde_json::Value> = state
+    state
         .engines
         .engines()
         .iter()
@@ -5141,8 +5147,7 @@ async fn get_engines(
                 "stats": s,
             })
         })
-        .collect();
-    Json(out).into_response()
+        .collect()
 }
 
 /// What one engine holds, for the spread of a category on ANOTHER node (and
@@ -6887,7 +6892,17 @@ fn status_payload(state: &AppState) -> serde_json::Value {
     });
     let disk = state.engines.catalogue_usage();
 
+    let system = crate::benchsampler::latest_system();
+
     serde_json::json!({
+        "engines": engine_payload(state),
+        "performance": {
+            "measured": system.measured,
+            "iowait_pct": crate::row::num_json(system.iowait_pct),
+            "arc_hit_rate_pct": crate::row::num_json(system.arc_hit_rate_pct),
+            "arc_miss_per_sec": crate::row::num_json(system.arc_miss_per_sec),
+            "arc_size_bytes": crate::row::num_json(system.arc_size_bytes),
+        },
         "baseline": {
             "global_downloaded": base_down + total_down,
             "global_uploaded": base_up + total_up,

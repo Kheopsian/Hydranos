@@ -1554,7 +1554,14 @@ function _renderStatus(data) {
             const ovt = document.getElementById("ov-torrents-total");
             if (ovt) ovt.textContent = fmtInt((data.hoard.total_torrents || 0) + (data.race?.torrents || 0) + _extraTorrents);
         }
-        _maybeUpdateExtraEngines();
+        // The stream carries every engine's card and the I/O gauges; polling
+        // /api/engines is only the fallback for a frame from an older daemon.
+        if (Array.isArray(data.engines)) {
+            _renderExtraEngines(data.engines);
+            _renderBenchmarkLive(data);
+        } else {
+            _maybeUpdateExtraEngines();
+        }
 
         // Seed size (tracker pass, 30 s) against the space it takes (link
         // scanner, up to a day old). Null until each has run once: "-", not 0.
@@ -1732,7 +1739,13 @@ async function _updateExtraEngines() {
     if (!box) return;
     let list;
     try { list = await api("/api/engines"); } catch (_) { return; }
-    const extra = (list || []).filter(e => e.id !== "race" && e.id !== "hoard" && e.stats);
+    _renderExtraEngines(list);
+}
+
+function _renderExtraEngines(list) {
+    const box = document.getElementById("ov-extra-engines");
+    if (!box) return;
+    const extra =(list || []).filter(e => e.id !== "race" && e.id !== "hoard" && e.stats);
     _extraTorrents = extra.reduce((n, e) => n + (e.stats.torrents || 0), 0);
     const ratio = s => {
         const up = s.session_uploaded || 0, down = s.session_downloaded || 0;
@@ -1856,6 +1869,55 @@ async function updateRaceTorrents() {
     }
 }
 
+// Live figures from the stream, patched into the rows already on screen. True
+// when at least one row moved.
+function _applyRaceStats(rows) {
+    if (!_raceTorrents || !_raceTorrents.length) return false;
+    const byHash = new Map();
+    for (const row of _raceTorrents) if (_isLocalAgent(row.agent)) byHash.set(row.info_hash, row);
+    let touched = 0;
+    for (const m of rows) {
+        const row = byHash.get(m.info_hash);
+        if (!row) continue;
+        if (m.checking_progress == null) row.state = _STATUS_TO_STATE[m.status] || row.state;
+        else row.state = "checking_files";
+        row.checking_progress = m.checking_progress ?? null;
+        row.check_queued = !!m.check_queued;
+        row.upload_rate = m.upload_rate;
+        row.download_rate = m.download_rate;
+        row.total_upload = m.total_uploaded;
+        row.total_download = m.total_downloaded;
+        row.num_peers = m.peers_connected;
+        if (typeof m.progress === "number") row.progress = m.progress;
+        touched++;
+    }
+    return touched > 0;
+}
+
+let _raceRenderScheduled = false;
+function _scheduleRaceRender() {
+    if (_raceRenderScheduled || document.hidden || !_raceTabVisible()) return;
+    _raceRenderScheduled = true;
+    requestAnimationFrame(() => {
+        _raceRenderScheduled = false;
+        if (!document.hidden && _raceTabVisible()) { try { renderRaceTable(); } catch (_) {} }
+    });
+}
+function _raceTabVisible() {
+    return !!document.getElementById("tab-race")?.classList.contains("active");
+}
+
+// An add or a removal changes which rows exist: one fetch, however many
+// events arrive in the same second.
+let _raceRefetchTimer = null;
+function _scheduleRaceRefetch() {
+    if (_raceRefetchTimer !== null) return;
+    _raceRefetchTimer = setTimeout(() => {
+        _raceRefetchTimer = null;
+        if (_raceTabVisible()) updateRaceTorrents();
+    }, 500);
+}
+
 // Split out of the fetch so the search box can re-render from the rows already
 // in hand. Race is served whole, so a keystroke is a filter, not a request --
 // unlike hoard, where the server decides which rows exist at all.
@@ -1908,9 +1970,7 @@ function renderRaceTable() {
     if (visible.length === 0) {
         tbody.innerHTML = `<tr><td colspan="${_visibleCols("race-table").length}" class="empty">${t("No match")}</td></tr>`;
     } else {
-        tbody.innerHTML = visible.map(t => {
-            return `<tr class="t-row clickable" data-hash="${esc(t.info_hash)}" data-mode="race" data-agent="${esc(t.agent || 'local')}" onclick="handleRowClick(event,this.dataset.hash,'race')" oncontextmenu="handleRowContextMenu(event,this.dataset.hash,'race')">${renderRowCells("race-table", t)}</tr>`;
-        }).join("");
+        _patchRows(tbody, visible, "race", "race-table");
     }
     _updateRowHighlights();
 
@@ -3486,9 +3546,7 @@ function renderHoardTable() {
         tbody.innerHTML = `<tr><td colspan="${_visibleCols("hoard-table").length}" class="empty">${msg}</td></tr>`;
         return;
     }
-    tbody.innerHTML = visible.map(t => {
-        return `<tr class="t-row clickable" data-hash="${esc(t.info_hash)}" data-mode="hoard" data-agent="${esc(t.agent || 'local')}" onclick="handleRowClick(event,this.dataset.hash,'hoard')" oncontextmenu="handleRowContextMenu(event,this.dataset.hash,'hoard')">${renderRowCells("hoard-table", t)}</tr>`;
-    }).join("");
+    _patchRows(tbody, visible, "hoard", "hoard-table");
     _updateRowHighlights();
 }
 
@@ -7536,6 +7594,27 @@ function _renderExtraBenchCards(engines) {
     ).join("");
 }
 
+// The live cards of the Performance tab, from the status frame the header
+// already follows. The range charts below keep their own slower refresh.
+function _renderBenchmarkLive(data) {
+    if (!data || document.hidden || !document.getElementById("tab-benchmark")?.classList.contains("active")) return;
+    const set = (id, value) => { const el = document.getElementById(id); if (el) el.textContent = value; };
+    if (data.race) {
+        set("bm-race-upload", formatSpeed(data.race.total_upload_rate ?? 0));
+        set("bm-race-download", formatSpeed(data.race.total_download_rate ?? 0));
+        set("bm-race-peers", fmtInt(data.race.total_peers ?? 0));
+    }
+    if (data.hoard) set("bm-hoard-upload", formatSpeed(data.hoard.active_upload_rate ?? 0));
+    if (Array.isArray(data.engines)) _renderExtraBenchCards(data.engines.map(e => ({ ...e.stats, id: e.id })));
+    const p = data.performance;
+    if (p) {
+        set("bm-iowait", p.measured ? (p.iowait_pct ?? 0).toFixed(1) + "%" : "-");
+        set("bm-arc-hit", p.measured ? (p.arc_hit_rate_pct ?? 0).toFixed(3) + "%" : "-");
+        set("bm-arc-miss", p.measured ? (p.arc_miss_per_sec ?? 0).toFixed(1) + "/s" : "-");
+        set("bm-arc-size", p.measured ? formatBytes(p.arc_size_bytes ?? 0) : "-");
+    }
+}
+
 async function updateBenchmark() {
     try {
         const now = Date.now() / 1000;
@@ -8089,7 +8168,6 @@ async function updateUptime() {
 // stacking under bad wifi / slow API). Status + hoard stats now flow through
 // SSE (status_snapshot, hoard_stats_snapshot), this loop only handles the
 // per-tab heavy fetches and /health.
-let _polling = false;
 // ─── IP filter ─────────────────────────────────────────
 
 async function loadIpFilter() {
@@ -8255,21 +8333,38 @@ async function removeMagnet(hash) {
     updateMagnets();
 }
 
-async function poll() {
-    if (_polling) return;
-    _polling = true;
-    try {
-        await checkHealth();
-        const activeTab = document.querySelector(".tab.active")?.dataset.tab;
-        if (activeTab === "race") await updateRaceTorrents();
-        if (activeTab === "hoard") await updateHoardStats();
-        if (activeTab === "categories") await updateCategories();
-        if (activeTab === "benchmark") await updateBenchmark();
-        if (activeTab === "trackers") { await updateTrackers(); loadTrackerStats(); }
-        if (activeTab === "add") await updateMagnets();
-    } finally {
-        _polling = false;
+// Independent lanes: a slow request on one screen no longer holds up the
+// others, and nothing is fetched faster than its figures move. The live
+// numbers themselves come down the stream; these are the backstops.
+const _lanes = new Map();
+async function _lane(key, interval, load) {
+    if (document.hidden) return;
+    const lane = _lanes.get(key);
+    if (lane && (lane.busy || Date.now() < lane.next)) return;
+    const state = { busy: true, next: 0 };
+    _lanes.set(key, state);
+    const started = Date.now();
+    try { await load(); }
+    catch (e) { console.error("refresh failed:", key, e); }
+    finally {
+        state.busy = false;
+        // Never more than about one request in five of the time spent waiting.
+        state.next = Date.now() + Math.max(interval, (Date.now() - started) * 5);
     }
+}
+
+async function poll() {
+    const streamed = _liveStreamFresh();
+    const activeTab = document.querySelector(".tab.active")?.dataset.tab;
+    const tasks = [_lane("health", 5000, checkHealth)];
+    // Race rows move over the stream; the list itself is only a backstop.
+    if (activeTab === "race") tasks.push(_lane("race", streamed ? 20000 : 1000, updateRaceTorrents));
+    if (activeTab === "hoard") tasks.push(_lane("hoard", 1000, updateHoardStats));
+    if (activeTab === "categories") tasks.push(_lane("categories", 5000, updateCategories));
+    if (activeTab === "benchmark") tasks.push(_lane("benchmark", 10000, updateBenchmark));
+    if (activeTab === "trackers") tasks.push(_lane("trackers", 5000, async () => { await updateTrackers(); loadTrackerStats(); }));
+    if (activeTab === "add") tasks.push(_lane("magnets", 3000, updateMagnets));
+    await Promise.allSettled(tasks);
 }
 
 // Tab change triggers immediate data fetch
@@ -8388,6 +8483,10 @@ _checkStartup();
 // (categories, session stats, tracker errors, etc.).
 const _STATUS_TO_STATE = { 0: "paused", 1: "checking_files", 2: "downloading", 3: "seeding" };
 let _sseConn = null;
+let _lastStatusEventAt = 0;
+function _liveStreamFresh() {
+    return !!_sseConn && _sseConn.readyState === 1 && Date.now() - _lastStatusEventAt < 5000;
+}
 let _syncCursor = 0; // last server_ts seen; echoed as ?since= for delta reconnects
 let _resyncing = false; // tab-return full re-hydration in progress
 let _resyncSeen = null;
@@ -8453,6 +8552,7 @@ function _openHoardSSE() {
             return;
         }
         if (type === "status_snapshot") {
+            _lastStatusEventAt = Date.now();
             if (data.server_ts) _syncCursor = data.server_ts;
             try { _renderStatus(data); } catch (_) {}
             return;
@@ -8515,6 +8615,16 @@ function _openHoardSSE() {
                 _refreshHoardPins().then(() => { try { _renderHoardCounts(); } catch (_) {} });
                 _scheduleHoardRender();
             }
+            return;
+        }
+        // Race rides the same stream. Its list is small and served whole, so an
+        // add or a removal asks for it again (coalesced) and figures patch in place.
+        if (data.mode === "race" && (type === "torrent_added" || type === "torrent_removed")) {
+            _scheduleRaceRefetch();
+            return;
+        }
+        if (type === "stats_snapshot" && data.mode === "race" && Array.isArray(data.torrents)) {
+            if (_applyRaceStats(data.torrents)) _scheduleRaceRender();
             return;
         }
         if (type === "torrent_added" && data.info_hash) {
@@ -10869,6 +10979,9 @@ if (typeof window.matchMedia === "function") {
 
 // Row cells for a torrent in the current column order (used by the renderers).
 function renderRowCells(tableId, row) {
+    return _rowCellHtml(tableId, row).join("");
+}
+function _rowCellHtml(tableId, row) {
     // Each cell carries its column label. On a phone the table turns into one
     // card per torrent (see style.css) and the header is gone, so without this
     // a card would read "61.6%  2.8 MiB/s  0 B/s" with nothing saying which is
@@ -10877,7 +10990,44 @@ function renderRowCells(tableId, row) {
     return _visibleCols(tableId).map(c => {
         const html = c.render(row);
         return html.replace("<td", `<td data-label="${esc(t(c.label))}"`);
-    }).join("");
+    });
+}
+
+// Draw the torrent rows into a tbody without throwing the old ones away: a row
+// is reused when its torrent is still listed, and only the cells whose markup
+// changed are replaced. A stream tick that moves a few figures then costs a few
+// cell swaps, not 500 rows of innerHTML, and a selected row, a link or a focus
+// survives it.
+function _patchRows(tbody, rows, mode, tableId) {
+    const key = (agent, hash) => (agent || "local") + "|" + hash;
+    const old = new Map();
+    for (const tr of tbody.children) if (tr.dataset && tr.dataset.hash) old.set(key(tr.dataset.agent, tr.dataset.hash), tr);
+    const wanted = new Set();
+    rows.forEach((torrent, index) => {
+        const k = key(torrent.agent, torrent.info_hash);
+        wanted.add(k);
+        let tr = old.get(k);
+        const cells = _rowCellHtml(tableId, torrent);
+        if (!tr) {
+            tr = document.createElement("tr");
+            tr.className = "t-row clickable";
+            tr.dataset.hash = torrent.info_hash;
+            tr.dataset.agent = torrent.agent || "local";
+            tr.dataset.mode = mode;
+            tr.onclick = ev => handleRowClick(ev, tr.dataset.hash, mode);
+            tr.oncontextmenu = ev => handleRowContextMenu(ev, tr.dataset.hash, mode);
+            tr.innerHTML = cells.join("");
+        } else if (tr._cells && tr._cells.length === cells.length) {
+            cells.forEach((html, i) => { if (tr._cells[i] !== html) tr.children[i].outerHTML = html; });
+        } else {
+            tr.innerHTML = cells.join("");
+        }
+        tr._cells = cells;
+        if (tbody.children[index] !== tr) tbody.insertBefore(tr, tbody.children[index] || null);
+    });
+    for (const [k, tr] of old) if (!wanted.has(k)) tr.remove();
+    // Anything left that is not a torrent row (a "no match" placeholder).
+    for (let i = tbody.children.length - 1; i >= rows.length; i--) tbody.children[i].remove();
 }
 function renderTableHeader(tableId, sortCol, sortAsc) {
     const thead = document.querySelector("#" + tableId + " thead");
