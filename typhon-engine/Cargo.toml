@@ -72,6 +72,10 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # Already in the tree through reqwest. The host a passkey is matched against
 # must be read by the same parser reqwest sends the request with.
 url = "2"
+# Already in the tree through reqwest, same version, no features of its own.
+# Named so the qBittorrent importer can tell a refused certificate apart from
+# a host that does not answer: reqwest only says "error sending request".
+rustls = { version = "0.23", default-features = false }
 num-bigint = "0.4"
 num-traits = "0.2"
 librqbit-utp = "0.7"
@@ -148,6 +152,12 @@ criterion = { version = "0.5", features = ["html_reports"] }
 # A paused clock (`start_paused`, `advance`) lets a test cross a 30 s or a 24 h
 # timer without waiting for it. Test builds only; adds no crate.
 tokio = { version = "1", features = ["test-util"] }
+# A stand-in qBittorrent behind a self-signed certificate. Already in the tree
+# through reqwest, with the same crypto (ring); adds no crate.
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+# A self-signed certificate made at test time, so no key sits in the source.
+# Pinned; ring only (already in the tree), no pem, no aws-lc-rs.
+rcgen = { version = "=0.13.2", default-features = false, features = ["ring"] }
 
 [[bench]]
 name = "rate_tracker"

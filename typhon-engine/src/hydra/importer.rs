@@ -31,6 +31,13 @@ pub struct QbitCreds {
     pub username: String,
     #[serde(default)]
     pub password: String,
+    /// Accept the WebUI's HTTPS certificate without checking it (`insecure`
+    /// in the body, "Trust this certificate" in the wizard). Off unless the
+    /// user ticks it, and it only reaches the client built for this import:
+    /// nothing else Hydranos connects to stops checking. Kept with the rest
+    /// of the credentials, so a retry of the failed ones connects the same way.
+    #[serde(default)]
+    pub insecure: bool,
 }
 
 /// One torrent as qBittorrent describes it (`/api/v2/torrents/info`).
@@ -252,6 +259,50 @@ fn error_chain(e: &(dyn std::error::Error + 'static)) -> String {
     out
 }
 
+/// The TLS error under a failed request, when the cause was the server's
+/// certificate.
+///
+/// rustls' error sits inside an `io::Error`, whose `source()` skips the error
+/// it wraps (and hyper wraps it in a second one), so each `io::Error` on the
+/// chain is opened with `get_ref` until something else comes out.
+fn refused_certificate<'a>(e: &'a (dyn std::error::Error + 'static)) -> Option<&'a rustls::Error> {
+    let mut cur = Some(e);
+    while let Some(err) = cur {
+        let mut inner = Some(err);
+        while let Some(x) = inner {
+            if let Some(t @ rustls::Error::InvalidCertificate(_)) =
+                x.downcast_ref::<rustls::Error>()
+            {
+                return Some(t);
+            }
+            inner = x
+                .downcast_ref::<std::io::Error>()
+                .and_then(|io| io.get_ref())
+                .map(|b| b as &(dyn std::error::Error + 'static));
+        }
+        cur = err.source();
+    }
+    None
+}
+
+/// Why the login request got no answer, said so the user can act on it.
+///
+/// A WebUI on HTTPS usually has a self-signed certificate, which is refused
+/// like any certificate no authority vouches for. reqwest's own text for that
+/// is "error sending request", the same as a host that is down; this one says
+/// it is the certificate, and the two ways past it.
+fn send_failure(base: &str, e: &reqwest::Error) -> String {
+    match refused_certificate(e) {
+        Some(tls) => format!(
+            "qBittorrent at {base} answered with an HTTPS certificate this system does not trust \
+             ({tls}). A self-signed certificate, the usual one on a qBittorrent WebUI, is refused \
+             this way. If this is your own qBittorrent, tick \"Trust this qBittorrent's \
+             certificate\" (\"insecure\": true) and try again, or use its http:// address."
+        ),
+        None => format!("cannot reach qBittorrent at {base}: {e}"),
+    }
+}
+
 /// Longest stretch of qBittorrent's own answer kept in an error.
 const BODY_SHOWN: usize = 200;
 
@@ -360,10 +411,15 @@ impl Qbit {
         } else {
             format!("http://{base}")
         };
-        let client = reqwest::Client::builder()
-            .timeout(timeout)
-            .build()
-            .map_err(|e| format!("http client: {e}"))?;
+        let mut builder = reqwest::Client::builder().timeout(timeout);
+        if creds.insecure {
+            // The user said to trust this WebUI's certificate (a self-signed
+            // one, as most are). Scoped to this client, which talks to that
+            // qBittorrent only.
+            tracing::warn!(url = %base, "qBittorrent import: certificate checks are off for this connection, as asked");
+            builder = builder.danger_accept_invalid_certs(true);
+        }
+        let client = builder.build().map_err(|e| format!("http client: {e}"))?;
         let cookie = Self::authenticate(&client, &base, creds)
             .await
             .map_err(|e| e.message)?;
@@ -441,7 +497,7 @@ impl Qbit {
             .send()
             .await
             .map_err(|e| LoginFailure {
-                message: format!("cannot reach qBittorrent at {base}: {e}"),
+                message: send_failure(base, &e),
                 refused: false,
             })?;
 
@@ -2157,6 +2213,108 @@ mod transmission_tests {
     }
 }
 
+/// A qBittorrent WebUI on HTTPS with a self-signed certificate, as most are.
+#[cfg(test)]
+pub mod self_signed_qbit {
+    use std::sync::Arc;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio_rustls::rustls;
+
+    /// Start one on a free local port and return its address. It logs anyone
+    /// in, says WebAPI 2.11.2 and lists one complete torrent, `behind tls`.
+    pub async fn start() -> std::net::SocketAddr {
+        use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+        // A throwaway certificate for `localhost` and `127.0.0.1`, signed by
+        // its own key and made for this run: no key sits in the source. Not a
+        // CA: a plain server certificate that no authority vouches for, which
+        // is what a WebUI is given.
+        let made = rcgen::generate_simple_self_signed(vec!["localhost".into(), "127.0.0.1".into()])
+            .unwrap();
+        let cert = CertificateDer::from(made.cert.der().to_vec());
+        let key = PrivateKeyDer::from(PrivatePkcs8KeyDer::from(made.key_pair.serialize_der()));
+        let config = rustls::ServerConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(vec![cert], key)
+        .unwrap();
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((tcp, _)) = listener.accept().await {
+                let acceptor = acceptor.clone();
+                tokio::spawn(async move {
+                    // A client that refuses the certificate stops here.
+                    let Ok(mut tls) = acceptor.accept(tcp).await else {
+                        return;
+                    };
+                    let Some(path) = read_request(&mut tls).await else {
+                        return;
+                    };
+                    let _ = tls.write_all(answer(&path).as_bytes()).await;
+                    let _ = tls.shutdown().await;
+                });
+            }
+        });
+        addr
+    }
+
+    /// The path of one HTTP/1.1 request, its body read and dropped: closing
+    /// with unread bytes would reset the connection under the answer.
+    async fn read_request<S: tokio::io::AsyncRead + Unpin>(s: &mut S) -> Option<String> {
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 4096];
+        let head_end = loop {
+            if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                break i + 4;
+            }
+            let n = s.read(&mut chunk).await.ok()?;
+            if n == 0 {
+                return None;
+            }
+            buf.extend_from_slice(&chunk[..n]);
+        };
+        let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
+        let length: usize = head
+            .lines()
+            .filter_map(|l| l.split_once(':'))
+            .find(|(k, _)| k.trim().eq_ignore_ascii_case("content-length"))
+            .and_then(|(_, v)| v.trim().parse().ok())
+            .unwrap_or(0);
+        let mut have = buf.len() - head_end;
+        while have < length {
+            let n = s.read(&mut chunk).await.ok()?;
+            if n == 0 {
+                break;
+            }
+            have += n;
+        }
+        let target = head.lines().next()?.split_whitespace().nth(1)?;
+        Some(target.split('?').next()?.to_string())
+    }
+
+    fn answer(path: &str) -> String {
+        let (status, extra, body) = match path {
+            // qBittorrent 5.x: a 204 with an empty body.
+            "/api/v2/auth/login" => ("204 No Content", "Set-Cookie: SID=tls; path=/\r\n", ""),
+            "/api/v2/app/webapiVersion" => ("200 OK", "", "2.11.2"),
+            "/api/v2/torrents/info" => (
+                "200 OK",
+                "Content-Type: application/json\r\n",
+                r#"[{"hash":"aa","name":"behind tls","save_path":"/nowhere","progress":1.0}]"#,
+            ),
+            _ => ("404 Not Found", "", ""),
+        };
+        format!(
+            "HTTP/1.1 {status}\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+}
+
 /// The import against a fake qBittorrent: what happens when it misbehaves.
 #[cfg(test)]
 mod qbit_session_tests {
@@ -2240,6 +2398,7 @@ mod qbit_session_tests {
             url: format!("http://{addr}"),
             username: "u".into(),
             password: "p".into(),
+            insecure: false,
         };
         let mut q = Qbit::login(&creds).await.expect("login");
         q.backoff = std::time::Duration::from_millis(1);
@@ -2424,6 +2583,7 @@ mod qbit_session_tests {
             url: format!("http://{addr}"),
             username: "u".into(),
             password: "p".into(),
+            insecure: false,
         };
         // The client gives up on any request after 150 ms; the listing alone
         // is allowed far longer.
@@ -2433,6 +2593,84 @@ mod qbit_session_tests {
         let list = q.torrents().await.expect("the listing arrives and decodes");
         let names: Vec<_> = list.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(names, ["big one", "two"]);
+    }
+
+    fn https_creds(addr: std::net::SocketAddr, insecure: bool) -> QbitCreds {
+        QbitCreds {
+            url: format!("https://{addr}"),
+            username: "u".into(),
+            password: "p".into(),
+            insecure,
+        }
+    }
+
+    /// Issue #94: the wizard said "error sending request" for a self-signed
+    /// WebUI, the same words as for a host that is down.
+    #[tokio::test]
+    async fn a_self_signed_webui_is_refused_by_default_with_an_error_that_names_the_certificate() {
+        let addr = super::self_signed_qbit::start().await;
+        let err = Qbit::login(&https_creds(addr, false))
+            .await
+            .err()
+            .expect("an untrusted certificate is never accepted by default");
+        assert!(
+            err.contains("certificate this system does not trust"),
+            "{err}"
+        );
+        // rustls' own reason travels too.
+        assert!(err.contains("UnknownIssuer"), "{err}");
+        // And the way past it.
+        assert!(
+            err.contains("Trust this qBittorrent's certificate"),
+            "{err}"
+        );
+        assert!(!err.contains("cannot reach"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_self_signed_webui_is_imported_from_when_the_user_trusts_its_certificate() {
+        let addr = super::self_signed_qbit::start().await;
+        let q = Qbit::login(&https_creds(addr, true))
+            .await
+            .expect("the certificate is trusted for this import");
+        let list = q
+            .torrents()
+            .await
+            .expect("the listing comes over the same client");
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].name, "behind tls");
+        // A retry of the failed ones logs in from these, so it connects the
+        // same way without asking again.
+        assert!(q.creds().insecure);
+        // Trusting it for one import trusts it for nothing else.
+        let err = Qbit::login(&https_creds(addr, false)).await.err();
+        assert!(err.is_some_and(|e| e.contains("does not trust")));
+    }
+
+    /// A host that does not answer keeps its own words: only a refused
+    /// certificate is called one.
+    #[tokio::test]
+    async fn an_unreachable_https_webui_is_not_called_a_certificate_problem() {
+        let creds = QbitCreds {
+            url: "https://127.0.0.1:1".into(),
+            username: "u".into(),
+            password: "p".into(),
+            insecure: false,
+        };
+        let err = Qbit::login(&creds).await.err().unwrap();
+        assert!(
+            err.starts_with("cannot reach qBittorrent at https://127.0.0.1:1"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn the_certificate_is_checked_unless_the_body_says_insecure() {
+        let plain: QbitCreds = serde_json::from_str(r#"{"url":"https://q:8080"}"#).unwrap();
+        assert!(!plain.insecure);
+        let trusted: QbitCreds =
+            serde_json::from_str(r#"{"url":"https://q:8080","insecure":true}"#).unwrap();
+        assert!(trusted.insecure);
     }
 
     #[test]
@@ -2470,6 +2708,7 @@ mod qbit_session_tests {
             url: format!("http://{addr}"),
             username: "u".into(),
             password: "p".into(),
+            insecure: false,
         };
         Qbit::login(&creds).await.expect("login")
     }

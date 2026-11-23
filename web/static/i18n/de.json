@@ -1496,5 +1496,7 @@
   "size unknown": "Größe unbekannt",
   "{n} torrents share their data path with an earlier one of another size (a repack under the same name): each is added stopped in a folder of its own, not trusted, and would download its data there.": "{n} Torrents teilen ihren Datenpfad mit einem früheren anderer Größe (ein Repack unter demselben Namen): Jeder wird gestoppt in einem eigenen Ordner hinzugefügt, ohne Vertrauen, und würde seine Daten dort herunterladen.",
   "{n} isolated": "{n} isoliert",
-  "{n} torrents share their path with another torrent whose files there have other bytes. They were added stopped, each in a folder of its own; starting one downloads what is not already there:": "{n} Torrents teilen ihren Pfad mit einem anderen Torrent, dessen Dateien dort andere Bytes haben. Sie wurden gestoppt hinzugefügt, jeder in einem eigenen Ordner; wird einer gestartet, lädt er herunter, was dort noch fehlt:"
+  "{n} torrents share their path with another torrent whose files there have other bytes. They were added stopped, each in a folder of its own; starting one downloads what is not already there:": "{n} Torrents teilen ihren Pfad mit einem anderen Torrent, dessen Dateien dort andere Bytes haben. Sie wurden gestoppt hinzugefügt, jeder in einem eigenen Ordner; wird einer gestartet, lädt er herunter, was dort noch fehlt:",
+  "Trust this qBittorrent's certificate (self-signed HTTPS)": "Dem Zertifikat dieses qBittorrent vertrauen (selbstsigniertes HTTPS)",
+  "For a WebUI on https:// with a self-signed certificate. Hydranos then accepts the certificate without checking it, for this import only.": "Für eine WebUI unter https:// mit selbstsigniertem Zertifikat. Hydranos akzeptiert das Zertifikat dann ohne Prüfung, nur für diesen Import."
 }
