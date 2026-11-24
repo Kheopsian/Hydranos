@@ -13523,29 +13523,11 @@ function _rssConditions() {
     return g && g.rows.length ? g : null;
 }
 
-// Min / max size: "" = no limit, else a size the server reads ("1.5 GB").
-function _rssSizeInput(id, bytes) {
-    const [n, u] = bytes > 0 ? _rssSplitNum("size", String(bytes)) : ["", "MB"];
-    document.getElementById(id).value = n;
-    document.getElementById(id + "-u").value = u === "GB" ? "GB" : "MB";
-}
-
-function _rssSizeValue(id) {
-    const n = parseFloat(document.getElementById(id).value);
-    return n > 0 ? n + " " + document.getElementById(id + "-u").value : 0;
-}
-
-// "3 conditions, 1 GB to 8 GB" for the rules table.
+// "3 conditions" for the rules table.
 function _rssRuleSummary(r) {
     const count = g => (g.rows || []).reduce((n, x) => n + (Array.isArray(x.rows) ? count(x) : 1), 0);
-    const parts = [];
     const n = r.conditions ? count(r.conditions) : 0;
-    if (n) parts.push(n === 1 ? t("1 condition") : t("{n} conditions", { n: n }));
-    const lo = r.minSize || 0, hi = r.maxSize || 0;
-    if (lo && hi) parts.push(t("{min} to {max}", { min: formatBytes(lo), max: formatBytes(hi) }));
-    else if (lo) parts.push(t("at least {min}", { min: formatBytes(lo) }));
-    else if (hi) parts.push(t("at most {max}", { max: formatBytes(hi) }));
-    return parts.join(", ");
+    return !n ? "" : n === 1 ? t("1 condition") : t("{n} conditions", { n: n });
 }
 
 async function _rssShowRuleForm(r) {
@@ -13562,8 +13544,6 @@ async function _rssShowRuleForm(r) {
     c("rss-rule-regex", r && r.useRegex);
     c("rss-rule-smart", r && r.smartFilter);
     c("rss-rule-paused", r && r.addPaused);
-    _rssSizeInput("rss-rule-minsize", r ? r.minSize || 0 : 0);
-    _rssSizeInput("rss-rule-maxsize", r ? r.maxSize || 0 : 0);
     const conds = document.getElementById("rss-rule-conds");
     conds.innerHTML = "";
     conds.appendChild(_rssCondGroup(r && r.conditions, true));
@@ -13591,7 +13571,7 @@ function rssHideRuleForm() {
     _rssEditingRule = null;
 }
 
-// qBittorrent's rule document, plus conditions / minSize / maxSize. lastMatch and previouslyMatchedEpisodes are
+// qBittorrent's rule document, plus conditions. lastMatch and previouslyMatchedEpisodes are
 // left out on purpose: the server keeps the stored ones.
 function _rssCollectRule() {
     const old = ((_rssState && _rssState.rules) || []).find(r => r.name === _rssEditingRule);
@@ -13608,9 +13588,8 @@ function _rssCollectRule() {
         assignedCategory: document.getElementById("rss-rule-category").value,
         savePath: document.getElementById("rss-rule-savepath").value.trim(),
         addPaused: document.getElementById("rss-rule-paused").checked,
-        // Hydranos's own keys: a qBittorrent client ignores them.
-        minSize: _rssSizeValue("rss-rule-minsize"),
-        maxSize: _rssSizeValue("rss-rule-maxsize"),
+        // Hydranos's own key, always sent (null clears it): a qBittorrent
+        // client ignores it, and a save from one keeps the stored tree.
         conditions: _rssConditions(),
     };
 }

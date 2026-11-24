@@ -1474,9 +1474,6 @@
   "Link": "Link",
   "Age": "Leeftijd",
   "Conditions": "Voorwaarden",
-  "Min size": "Min. grootte",
-  "Max size": "Max. grootte",
-  "optional": "optioneel",
   "Optional, on top of the fields above: pick articles by title, category, author, description, link, size or age, in groups that can nest. When the feed gives no size, the article passes the size tests, and a .torrent is checked on its real size once fetched.": "Optioneel, naast de velden hierboven: kies artikelen op titel, categorie, auteur, beschrijving, link, grootte of leeftijd, in groepen die in elkaar passen. Geeft de feed geen grootte, dan slaagt het artikel voor de groottetests, en een .torrent wordt na het ophalen op zijn echte grootte gecontroleerd.",
   "All of these": "Alle van deze",
   "Any of these": "Een van deze",
@@ -1495,8 +1492,5 @@
   "value": "waarde",
   "1 condition": "1 voorwaarde",
   "{n} conditions": "{n} voorwaarden",
-  "{min} to {max}": "{min} tot {max}",
-  "at least {min}": "minstens {min}",
-  "at most {max}": "hoogstens {max}",
   "size unknown": "grootte onbekend"
 }

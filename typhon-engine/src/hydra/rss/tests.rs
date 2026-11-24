@@ -1034,16 +1034,16 @@ async fn a_rule_saved_without_tags_keeps_them() {
 }
 
 /// A qBittorrent client sends back only qBittorrent's keys: its edit of a
-/// rule, through `setRule`, must not drop Hydranos's conditions and size
-/// limits. The RSS tab sends them as null / 0 to clear them.
+/// rule, through `setRule`, must not drop Hydranos's conditions. The RSS tab
+/// sends them as null to clear them.
 #[tokio::test]
-async fn a_qbittorrent_client_editing_a_rule_keeps_its_conditions_and_sizes() {
+async fn a_qbittorrent_client_editing_a_rule_keeps_its_conditions() {
     let s = st("rss-extras-kept", "");
     let feed = "http://127.0.0.1:9/rss";
     put_rule(
         &s,
         "x",
-        &json!({"affectedFeeds": [feed], "minSize": "1 GB", "maxSize": "8 GB",
+        &json!({"affectedFeeds": [feed],
                 "conditions": {"rows": [{"field": "category", "op": "is", "value": "TV"}]}}),
     )
     .unwrap();
@@ -1059,23 +1059,17 @@ async fn a_qbittorrent_client_editing_a_rule_keeps_its_conditions_and_sizes() {
     let (_, body) = call(&s, "GET", "/api/v2/rss/rules", "").await;
     let v: Value = serde_json::from_str(&body).unwrap();
     assert_eq!(v["x"]["mustContain"], "show", "the client's edit applied");
-    assert_eq!(v["x"]["minSize"], 1 << 30);
-    assert_eq!(v["x"]["maxSize"], 8u64 << 30);
     assert_eq!(v["x"]["conditions"]["rows"][0]["value"], "TV");
 
     // What the RSS tab sends when everything was removed in the form.
     put_rule(
         &s,
         "x",
-        &json!({"affectedFeeds": [feed], "minSize": 0, "maxSize": 0, "conditions": null}),
+        &json!({"affectedFeeds": [feed], "conditions": null}),
     )
     .unwrap();
     let r = load_rules(&s).into_iter().find(|r| r.name == "x").unwrap();
-    assert_eq!(
-        (r.conditions.is_none(), r.min_size, r.max_size),
-        (true, 0, 0),
-        "null / 0 clear them"
-    );
+    assert!(r.conditions.is_none(), "null clears them");
 }
 
 /// A link is judged by its first characters without cutting a character in two:
@@ -1293,7 +1287,7 @@ async fn a_size_range_takes_only_what_is_inside_it() {
         ]),
     );
     let f = add_feed(&s, &fake.url("/rss"), "S", None).unwrap();
-    put_rule(&s, "sized", &json!({"affectedFeeds": [fake.url("/rss")], "assignedCategory": "books", "minSize": "1 MB", "maxSize": "8 MB"})).unwrap();
+    put_rule(&s, "sized", &json!({"affectedFeeds": [fake.url("/rss")], "assignedCategory": "books", "conditions": {"rows": [{"field": "size", "op": "between", "value": "1 MB", "value2": "8 MB"}]}})).unwrap();
     refresh_feed(&s, f.id).await.unwrap();
     assert_eq!(count(&s, "hoard"), 1);
     assert_eq!(fake.hits("/fit.torrent"), 1);
@@ -1321,7 +1315,7 @@ async fn a_torrent_without_a_feed_size_is_judged_on_its_real_size() {
         ]),
     );
     let f = add_feed(&s, &fake.url("/rss"), "S", None).unwrap();
-    put_rule(&s, "sized", &json!({"affectedFeeds": [fake.url("/rss")], "assignedCategory": "books", "minSize": "1 MB", "maxSize": "8 MB"})).unwrap();
+    put_rule(&s, "sized", &json!({"affectedFeeds": [fake.url("/rss")], "assignedCategory": "books", "conditions": {"rows": [{"field": "size", "op": "between", "value": "1 MB", "value2": "8 MB"}]}})).unwrap();
     refresh_feed(&s, f.id).await.unwrap();
     assert_eq!(count(&s, "hoard"), 1, "only the one in range");
     let t = s
@@ -1333,14 +1327,14 @@ async fn a_torrent_without_a_feed_size_is_judged_on_its_real_size() {
         .unwrap();
     assert_eq!(
         t.outcome,
-        "refused: size 20 MB outside the rule (1 MB\u{2013}8 MB)"
+        "refused: size 20 MB does not fit the rule's conditions"
     );
     assert_eq!(run_rules(&s, None).await, 0);
     assert_eq!(fake.hits("/big.torrent"), 1, "not fetched again");
     let act = s.store.lock().unwrap().workflow_activity(10).unwrap();
     assert!(act
         .iter()
-        .any(|a| a.outcome == "failed" && a.detail.contains("outside the rule")));
+        .any(|a| a.outcome == "failed" && a.detail.contains("does not fit")));
 }
 
 /// A magnet with no size cannot be judged before it is added: taken.
@@ -1352,7 +1346,7 @@ async fn a_magnet_without_a_size_is_taken() {
     let magnet = format!("magnet:?xt=urn:btih:{hash}&dn=Book");
     fake.serve("/rss", 200, feed_sized(&[("m", "Book", &magnet, "", 0)]));
     let f = add_feed(&s, &fake.url("/rss"), "M", None).unwrap();
-    put_rule(&s, "m", &json!({"affectedFeeds": [fake.url("/rss")], "assignedCategory": "books", "maxSize": "8 MB"})).unwrap();
+    put_rule(&s, "m", &json!({"affectedFeeds": [fake.url("/rss")], "assignedCategory": "books", "conditions": {"rows": [{"field": "size", "op": "lt", "value": "8 MB"}]}})).unwrap();
     refresh_feed(&s, f.id).await.unwrap();
     assert_eq!(s.store.lock().unwrap().magnets().unwrap().len(), 1);
 }
@@ -1424,7 +1418,7 @@ async fn the_preview_marks_a_match_whose_size_is_unknown() {
     let url = fake.url("/rss");
     let f = add_feed(&s, &url, "P", None).unwrap();
     refresh_feed(&s, f.id).await.unwrap();
-    let draft = json!({"affectedFeeds": [url], "maxSize": "8 MB"});
+    let draft = json!({"affectedFeeds": [url], "conditions": {"rows": [{"field": "size", "op": "lt", "value": "8 MB"}]}});
     let (code, body) = call(&s, "POST", "/api/rss/preview", &draft.to_string()).await;
     assert_eq!(code, StatusCode::OK, "{body}");
     let v: Value = serde_json::from_str(&body).unwrap();

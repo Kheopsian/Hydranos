@@ -885,7 +885,7 @@ pub fn load_rules(state: &AppState) -> Vec<Rule> {
 /// `lastMatch` / `previouslyMatchedEpisodes` keeps the stored ones: an
 /// editor that does not show them must not reset `ignoreDays` and the smart
 /// filter by saving. The same holds for tags and for Hydranos's
-/// `conditions` / `minSize` / `maxSize`, which no qBittorrent client sends.
+/// `conditions`, which no qBittorrent client sends.
 pub fn put_rule(state: &AppState, name: &str, def: &Value) -> Result<Rule, Refusal> {
     let name = name.trim();
     if name.is_empty() {
@@ -919,19 +919,12 @@ pub fn put_rule(state: &AppState, name: &str, def: &Value) -> Result<Rule, Refus
         {
             rule.tags = old.tags;
         }
-        // Hydranos's own keys. A qBittorrent client sends back only the keys
-        // it knows, so a rule it edits would lose them; the RSS tab always
-        // sends all three (null / 0 to clear).
+        // Hydranos's own key. A qBittorrent client sends back only the keys
+        // it knows, so a rule it edits would lose it; the RSS tab always
+        // sends it (null to clear).
         if def.get("conditions").is_none() {
             rule.conditions = old.conditions;
         }
-        if def.get("minSize").is_none() {
-            rule.min_size = old.min_size;
-        }
-        if def.get("maxSize").is_none() {
-            rule.max_size = old.max_size;
-        }
-        rule.check().map_err(Refusal::Bad)?;
     }
     store
         .rss_rule_put(name, &rule.to_json().to_string())

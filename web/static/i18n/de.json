@@ -1474,9 +1474,6 @@
   "Link": "Link",
   "Age": "Alter",
   "Conditions": "Bedingungen",
-  "Min size": "Mindestgröße",
-  "Max size": "Höchstgröße",
-  "optional": "optional",
   "Optional, on top of the fields above: pick articles by title, category, author, description, link, size or age, in groups that can nest. When the feed gives no size, the article passes the size tests, and a .torrent is checked on its real size once fetched.": "Optional, zusätzlich zu den Feldern oben: Artikel nach Titel, Kategorie, Autor, Beschreibung, Link, Größe oder Alter auswählen, in verschachtelbaren Gruppen. Nennt der Feed keine Größe, besteht der Artikel die Größentests, und eine .torrent-Datei wird nach dem Abruf anhand ihrer tatsächlichen Größe geprüft.",
   "All of these": "Alle dieser Bedingungen",
   "Any of these": "Eine dieser Bedingungen",
@@ -1495,8 +1492,5 @@
   "value": "Wert",
   "1 condition": "1 Bedingung",
   "{n} conditions": "{n} Bedingungen",
-  "{min} to {max}": "{min} bis {max}",
-  "at least {min}": "mindestens {min}",
-  "at most {max}": "höchstens {max}",
   "size unknown": "Größe unbekannt"
 }

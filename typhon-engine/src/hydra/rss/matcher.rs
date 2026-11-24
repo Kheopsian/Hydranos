@@ -27,8 +27,8 @@
 //! - `ignoreDays`: an article dated less than that many days after the rule's
 //!   last match is not taken.
 //!
-//! Three keys are Hydranos's own, written only when set and ignored by a
-//! qBittorrent client; a rule without them behaves as above:
+//! One key is Hydranos's own, written only when set and ignored by a
+//! qBittorrent client; a rule without it behaves as above:
 //! - `conditions`: a nested AND/OR tree over the article's fields (title,
 //!   category, author, description, link, size, age). A group is
 //!   `{"match": "all"|"any", "rows": [...]}`, a row is
@@ -37,9 +37,9 @@
 //!   case ignored) and `regex` / `not_regex`; `size` and `age` (hours) take
 //!   `gt`, `lt` and `between` (inclusive). Sizes read `700 MB`, `1.5 GiB` or
 //!   bytes; KB/MB/GB and KiB/MiB/GiB are all 1024-based, as the client shows
-//!   sizes. At most 8 levels and 100 nodes; an empty group is dropped.
-//! - `minSize` / `maxSize`: bytes, 0 = no limit, inclusive; the same as a
-//!   `size between` row ANDed onto the tree.
+//!   sizes. At most 8 levels and 100 nodes; an empty group is dropped. A
+//!   size range is a `size between` row: there are no separate min / max
+//!   size fields, so a range can be combined with OR like any other test.
 //!
 //! A feed that does not give a size leaves a size test *unknown*, not failed:
 //! the logic is three-valued (AND/OR as in SQL), an unknown result is let
@@ -75,9 +75,6 @@ pub struct Rule {
     pub add_paused: Option<bool>,
     /// Hydranos: the condition tree, `None` = no condition.
     pub conditions: Option<Cond>,
-    /// Hydranos: bytes, 0 = no limit.
-    pub min_size: i64,
-    pub max_size: i64,
 }
 
 /// Deepest nesting and most nodes a condition tree may have: a rule is read
@@ -528,24 +525,6 @@ fn human(n: i64) -> String {
     format!("{} {unit}", s.strip_suffix(".0").unwrap_or(&s))
 }
 
-/// `minSize` / `maxSize`: bytes, or text like `1 GB`; absent = 0.
-fn size_limit(obj: &serde_json::Map<String, Value>, k: &str) -> Result<i64, String> {
-    let n = match obj.get(k) {
-        None | Some(Value::Null) => return Ok(0),
-        Some(Value::Number(n)) => n
-            .as_i64()
-            .or_else(|| n.as_f64().map(|f| f as i64))
-            .unwrap_or(0),
-        Some(Value::String(s)) if s.trim().is_empty() => 0,
-        Some(Value::String(s)) => parse_size(s).map_err(|e| format!("{k}: {e}"))?,
-        Some(other) => return Err(format!("{k} must be a size, not {other}")),
-    };
-    if n < 0 {
-        return Err(format!("{k} must not be negative"));
-    }
-    Ok(n)
-}
-
 impl Rule {
     /// From a qBittorrent rule document. Unknown fields are ignored; a field
     /// of the wrong type is a refusal, not a silent default.
@@ -636,8 +615,6 @@ impl Rule {
                 None | Some(Value::Null) => None,
                 Some(c) => Cond::from_json(c, 1, &mut 0)?,
             },
-            min_size: size_limit(obj, "minSize")?,
-            max_size: size_limit(obj, "maxSize")?,
         };
         r.check()?;
         Ok(r)
@@ -662,9 +639,6 @@ impl Rule {
         }
         if let Some(c) = &self.conditions {
             c.validate(1, &mut 0)?;
-        }
-        if self.min_size > 0 && self.max_size > 0 && self.max_size < self.min_size {
-            return Err("maxSize is smaller than minSize".into());
         }
         Ok(())
     }
@@ -695,16 +669,10 @@ impl Rule {
                 "skip_checking": false,
             },
         });
-        // Hydranos's own keys: absent unless set, so a rule that does not use
-        // them is the document qBittorrent writes.
+        // Hydranos's own key: absent unless set, so a rule that does not use
+        // it is the document qBittorrent writes.
         if let Some(c) = &self.conditions {
             doc["conditions"] = c.to_json();
-        }
-        if self.min_size > 0 {
-            doc["minSize"] = json!(self.min_size);
-        }
-        if self.max_size > 0 {
-            doc["maxSize"] = json!(self.max_size);
         }
         doc
     }
@@ -712,24 +680,11 @@ impl Rule {
     /// Whether the rule judges the size, so an article without one is
     /// "unknown" for it.
     pub fn uses_size(&self) -> bool {
-        self.min_size > 0
-            || self.max_size > 0
-            || self.conditions.as_ref().is_some_and(Cond::uses_size)
+        self.conditions.as_ref().is_some_and(Cond::uses_size)
     }
 
-    /// The tree and the size limits together; the limits are one more row.
     fn conditions_for(&self, v: &ArticleView) -> Tri {
-        let mut r = self.conditions.as_ref().map_or(Tri::Yes, |c| c.eval(v));
-        if r != Tri::No && (self.min_size > 0 || self.max_size > 0) {
-            r = r.and(match v.size {
-                None => Tri::Unknown,
-                Some(s) if s >= self.min_size && (self.max_size <= 0 || s <= self.max_size) => {
-                    Tri::Yes
-                }
-                Some(_) => Tri::No,
-            });
-        }
-        r
+        self.conditions.as_ref().map_or(Tri::Yes, |c| c.eval(v))
     }
 
     /// The article's real size, known once its torrent is fetched: `Err`
@@ -742,17 +697,10 @@ impl Rule {
         if self.conditions_for(&v) != Tri::No {
             return Ok(());
         }
-        let range = match (self.min_size > 0, self.max_size > 0) {
-            (true, true) => format!("{}\u{2013}{}", human(self.min_size), human(self.max_size)),
-            (true, false) => format!("at least {}", human(self.min_size)),
-            (false, true) => format!("at most {}", human(self.max_size)),
-            (false, false) => String::new(),
-        };
-        Err(if range.is_empty() {
-            format!("size {} does not fit the rule's conditions", human(size))
-        } else {
-            format!("size {} outside the rule ({range})", human(size))
-        })
+        Err(format!(
+            "size {} does not fit the rule's conditions",
+            human(size)
+        ))
     }
 
     /// Whether the title passes the rule's text and episode tests.
@@ -764,7 +712,7 @@ impl Rule {
     }
 
     /// qBittorrent's `matches`: the title, `ignoreDays` and the smart filter,
-    /// then Hydranos's conditions and size limits. What `matchingArticles`
+    /// then Hydranos's conditions. What `matchingArticles`
     /// lists; `enabled` and the feeds are `decide`'s.
     ///
     /// `ignoreDays` is qBittorrent's test: an article dated less than that
@@ -1274,9 +1222,12 @@ mod tests {
     }
 
     #[test]
-    fn size_limits_are_a_size_test_and_decide_says_when_to_recheck() {
+    fn a_size_range_is_inclusive_and_decide_says_when_to_recheck() {
         let r = rule(json!({
-            "affectedFeeds": ["f"], "minSize": "1 GB", "maxSize": 8 * GB,
+            "affectedFeeds": ["f"],
+            "conditions": {"rows": [
+                {"field": "size", "op": "between", "value": "1 GB", "value2": "8 GB"},
+            ]},
         }));
         let ok = |size| r.decide("f", &art("t", "", size));
         assert_eq!(ok(Some(GB)).map(|v| v.recheck), Ok(false), "inclusive");
@@ -1291,13 +1242,17 @@ mod tests {
         let msg = r
             .check_size(&art("t", "", None), 12 * GB + 3 * GB / 10)
             .unwrap_err();
-        assert_eq!(msg, "size 12.3 GB outside the rule (1 GB\u{2013}8 GB)");
+        assert_eq!(msg, "size 12.3 GB does not fit the rule's conditions");
         assert!(r.check_size(&art("t", "", None), 2 * GB).is_ok());
-        let min = rule(json!({"minSize": GB}));
-        assert!(min
-            .check_size(&art("t", "", None), GB / 2)
-            .unwrap_err()
-            .contains("at least 1 GB"));
+        // With OR, a size out of range can still be taken on another test.
+        let or = rule(
+            json!({"affectedFeeds": ["f"], "conditions": {"match": "any", "rows": [
+                {"field": "size", "op": "lt", "value": "1 GB"},
+                row("title", "contains", "remux"),
+            ]}}),
+        );
+        assert!(or.check_size(&art("Film.REMUX", "", None), 40 * GB).is_ok());
+        assert!(or.check_size(&art("Film", "", None), 40 * GB).is_err());
     }
 
     #[test]
@@ -1339,9 +1294,6 @@ mod tests {
         assert!(bad(json!("title is x")), "not an object");
         assert!(bad(json!({"match": "most", "rows": []})));
         assert!(bad(json!({"rows": "none"})));
-        assert!(Rule::from_json("r", &json!({"minSize": "5 GB", "maxSize": "1 GB"})).is_err());
-        assert!(Rule::from_json("r", &json!({"minSize": -1})).is_err());
-        assert!(Rule::from_json("r", &json!({"maxSize": true})).is_err());
 
         // Eight levels are allowed, nine are not.
         let nest = |n: usize| {
@@ -1390,16 +1342,13 @@ mod tests {
     }
 
     #[test]
-    fn the_new_keys_round_trip_and_are_absent_when_unset() {
+    fn the_conditions_round_trip_and_are_absent_when_unset() {
         let plain = rule(json!({"mustContain": "x", "affectedFeeds": ["u"]}));
         let doc = plain.to_json();
-        for k in ["conditions", "minSize", "maxSize"] {
-            assert!(doc.get(k).is_none(), "{k} is written only when set");
-        }
+        assert!(doc.get("conditions").is_none(), "written only when set");
         assert_eq!(Rule::from_json("r", &doc).unwrap(), plain);
 
         let full = rule(json!({
-            "minSize": "1 GB", "maxSize": 8 * GB,
             "conditions": {"match": "any", "rows": [
                 row("category", "is", "TV"),
                 {"match": "all", "rows": [
@@ -1409,8 +1358,6 @@ mod tests {
             ]},
         }));
         let doc = full.to_json();
-        assert_eq!(doc["minSize"], json!(GB));
-        assert_eq!(doc["maxSize"], json!(8 * GB));
         assert_eq!(doc["conditions"]["match"], "any");
         assert_eq!(doc["conditions"]["rows"][1]["rows"][0]["value"], "700 MB");
         assert_eq!(Rule::from_json("r", &doc).unwrap(), full);
@@ -1424,10 +1371,7 @@ mod tests {
             "enabled": true, "mustContain": "show", "useRegex": false,
             "affectedFeeds": ["f"], "assignedCategory": "tv",
         }));
-        assert_eq!(
-            (r.conditions.is_none(), r.min_size, r.max_size),
-            (true, 0, 0)
-        );
+        assert!(r.conditions.is_none());
         let v = r.decide("f", &art("The Show", "Whatever", None)).unwrap();
         assert!(!v.recheck, "no size test, so an unknown size is no matter");
     }
