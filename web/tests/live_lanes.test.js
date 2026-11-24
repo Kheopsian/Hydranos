@@ -19,6 +19,7 @@ function grab(name, kind = "function") {
         const _STATUS_TO_STATE = { 0: "paused", 1: "checking_files", 2: "downloading", 3: "seeding" };
         const _isLocalAgent = a => !a || a === "local";
         let _raceTorrents = rows;
+        ${grab("_stateOf")}
         ${grab("_applyRaceStats")}
         return _applyRaceStats;`);
     const rows = [
@@ -43,6 +44,23 @@ function grab(name, kind = "function") {
     assert.strictEqual(rows[0].state, "checking_files");
     assert.strictEqual(rows[0].check_queued, true);
     assert.strictEqual(apply([{ info_hash: "zz", status: 3 }]), false, "nothing on screen moved");
+}
+
+// The stream says a status, never a state: a seed-only row runs as "downloading"
+// in the engine, a stopped or queued one reads "paused". Neither may rename the
+// row, or it falls out of the list it was filtered into.
+{
+    const stateOf = new Function(`
+        const _STATUS_TO_STATE = { 0: "paused", 1: "checking_files", 2: "downloading", 3: "seeding" };
+        ${grab("_stateOf")}
+        return _stateOf;`)();
+    assert.strictEqual(stateOf({ state: "seed_only" }, 2), "seed_only");
+    assert.strictEqual(stateOf({ state: "seed_only" }, 3), "seed_only");
+    assert.strictEqual(stateOf({ state: "stopped" }, 0), "stopped");
+    assert.strictEqual(stateOf({ state: "queued" }, 0), "queued");
+    assert.strictEqual(stateOf({ state: "downloading" }, 3), "seeding", "a real change is followed");
+    assert.strictEqual(stateOf({ state: "seeding" }, 2), "downloading");
+    assert.strictEqual(stateOf({ state: "error" }, 4), "error", "an unmapped status keeps the row's state");
 }
 
 // ── A stalled lane does not hold up the others ──────────────────────────────

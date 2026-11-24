@@ -1879,7 +1879,7 @@ function _applyRaceStats(rows) {
     for (const m of rows) {
         const row = byHash.get(m.info_hash);
         if (!row) continue;
-        if (m.checking_progress == null) row.state = _STATUS_TO_STATE[m.status] || row.state;
+        if (m.checking_progress == null) row.state = _stateOf(row, m.status);
         else row.state = "checking_files";
         row.checking_progress = m.checking_progress ?? null;
         row.check_queued = !!m.check_queued;
@@ -8554,6 +8554,18 @@ _checkStartup();
 // The periodic poll keeps running at POLL_INTERVAL for everything else
 // (categories, session stats, tracker errors, etc.).
 const _STATUS_TO_STATE = { 0: "paused", 1: "checking_files", 2: "downloading", 3: "seeding" };
+// The engine's status is coarser than a row's state: a seed-only torrent runs
+// as "downloading" in the engine, and a stopped or queued one is "paused". The
+// stream says the status only, so it may not overwrite what the row already
+// knows. It did, and every seed-only row turned "downloading" within a second
+// of a click on Actively Seeding and fell out of the list.
+function _stateOf(row, status) {
+    const s = _STATUS_TO_STATE[status];
+    if (!s) return row.state;
+    if (row.state === "seed_only" && (status === 2 || status === 3)) return row.state;
+    if ((row.state === "stopped" || row.state === "queued") && status === 0) return row.state;
+    return s;
+}
 let _sseConn = null;
 let _lastStatusEventAt = 0;
 function _liveStreamFresh() {
@@ -8749,7 +8761,7 @@ function _openHoardSSE() {
                 // The stream says how far a check has got (null when none
                 // runs), so the row follows it without a refetch.
                 if (m.checking_progress == null) {
-                    t.state = _STATUS_TO_STATE[m.status] || t.state;
+                    t.state = _stateOf(t, m.status);
                 } else {
                     t.state = "checking_files";
                 }
