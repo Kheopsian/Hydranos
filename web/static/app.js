@@ -1324,7 +1324,7 @@ window.addEventListener("DOMContentLoaded", () => {
         else if (_hashTab === "categories") await updateCategories(true);
         else if (_hashTab === "nodes") { await updateNodes(); }
         else if (_hashTab === "trackers") { await updateTrackers(); loadTrackerStats(); }
-        else if (_hashTab === "benchmark") await updateBenchmark();
+        else if (_hashTab === "benchmark") await updateBenchmark(true);
         else if (_hashTab === "jobs") startJobsPolling();
     });
 });
@@ -7357,11 +7357,14 @@ function _updateDualChart(chart, history, key1, key2) {
     chart.data.labels = history.map(p => _bmLabel(p.ts));
     chart.data.datasets[0].data = history.map(p => p[key1] ?? 0);
     chart.data.datasets[1].data = history.map(p => p[key2] ?? 0);
+    _setPeaks(chart, 2, [[0, key1], [1, key2]], history);
     chart.update("none");
 }
 
 function _initBmCharts() {
     Chart.defaults.color = "#7a90a8";
+    // The peak traces (see _setPeaks) are the same series as the line above them.
+    Chart.defaults.plugins.legend.labels.filter = item => !String(item.text).startsWith("↑");
     _bmCharts = {
         // Debit, donc formatSpeed : il suit le reglage Vitesses (octets/s ou bits/s).
         // formatBytes ne connait que le reglage Tailles et rendait toujours des KiB/s.
@@ -7561,6 +7564,7 @@ function _initBmCharts() {
 function _updateChart(chart, history, key) {
     chart.data.labels = history.map(p => _bmLabel(p.ts));
     chart.data.datasets[0].data = history.map(p => p[key] ?? 0);
+    _setPeaks(chart, 1, [[0, key]], history);
     chart.update("none");
 }
 
@@ -7570,7 +7574,7 @@ document.querySelectorAll(".bm-range-btn").forEach(btn => {
         document.querySelectorAll(".bm-range-btn").forEach(b => b.classList.remove("active"));
         btn.classList.add("active");
         _bmSpan = parseInt(btn.dataset.span);
-        updateBenchmark();
+        updateBenchmark(true);
     });
 });
 
@@ -7615,31 +7619,81 @@ function _renderBenchmarkLive(data) {
     }
 }
 
-async function updateBenchmark() {
+// One point per pixel the graphs are wide: more could not be told apart, fewer
+// would blur a burst. A window that already fits (15 min, an hour) stays raw.
+function _bmPoints() {
+    const w = document.getElementById("chart-upload")?.parentElement?.clientWidth || 1000;
+    return Math.min(2500, Math.max(600, Math.round(w)));
+}
+
+// A bucket's mean says how busy it was, its peak says whether it spiked. The
+// peak is drawn under each line as a faint trace of the same colour, from the
+// `<key>_max` the server adds to a folded window (a raw window has none, and
+// the traces go away). Their legend entries are hidden by the chart defaults.
+function _setPeaks(chart, primary, pairs, history) {
+    chart.data.datasets.length = primary;
+    const folded = history.length > 0 && (pairs[0][1] + "_max") in history[0];
+    if (folded) {
+        for (const [i, key] of pairs) {
+            const base = chart.data.datasets[i];
+            chart.data.datasets.push({
+                label: "↑ " + (base.label ?? "peak"), data: history.map(p => p[key + "_max"] ?? 0),
+                borderColor: base.borderColor + "55", backgroundColor: "transparent",
+                borderWidth: 1, pointRadius: 0, pointHitRadius: 0, pointHoverRadius: 0,
+                tension: 0, fill: false, isPeak: true,
+            });
+        }
+    }
+}
+
+function _renderBenchmarkCards(cur) {
+    _renderExtraBenchCards(cur.engines || []);
+    document.getElementById("bm-race-upload").textContent   = formatSpeed(cur.race_upload_rate ?? 0);
+    document.getElementById("bm-race-download").textContent = formatSpeed(cur.race_download_rate ?? 0);
+    document.getElementById("bm-hoard-upload").textContent  = formatSpeed(cur.hoard_upload_rate ?? 0);
+    document.getElementById("bm-race-peers").textContent    = (cur.race_peers ?? 0).toFixed(0);
+    document.getElementById("bm-iowait").textContent        = (cur.iowait_pct ?? 0).toFixed(1) + "%";
+    document.getElementById("bm-arc-hit").textContent       = (cur.arc_hit_rate_pct ?? 0).toFixed(3) + "%";
+    document.getElementById("bm-arc-miss").textContent      = (cur.arc_miss_per_sec ?? 0).toFixed(1) + "/s";
+    document.getElementById("bm-arc-size").textContent      = formatBytes(cur.arc_size_bytes ?? 0);
+}
+
+// The charts hold about 300 points whatever the span, so a point is
+// span / 300 seconds wide: the history is asked for again every span / 60
+// (15 min -> 15 s, 1 h -> 1 min), within 15 s and 5 min. The live cards above
+// them follow every tick.
+let _bmHistoryAt = 0;
+function _bmHistoryEvery() {
+    return Math.min(300000, Math.max(15000, (_bmSpan / 60) * 1000));
+}
+
+// `force` is a click: a tab opened or a range chosen draws the charts now.
+async function updateBenchmark(force) {
     try {
         const now = Date.now() / 1000;
         const start = now - _bmSpan;
+        const due = force === true || !_bmCharts || Date.now() - _bmHistoryAt >= _bmHistoryEvery();
 
-        const [cur, history, extraHistory] = await Promise.all([
+        if (!due) {
+            // The cards follow the status stream; asking is the fallback for a
+            // stream that is down.
+            if (!_liveStreamFresh()) _renderBenchmarkCards(await api("/api/benchmark/current"));
+            return;
+        }
+        _bmHistoryAt = Date.now();
+        const points = _bmPoints();
+        const [cur, history, extraHistory, recent] = await Promise.all([
             api("/api/benchmark/current"),
-            api(`/api/benchmark/range?start=${start}&end=${now}`),
+            api(`/api/benchmark/range?start=${start}&end=${now}&points=${points}`),
             // The engines beyond race and hoard, from their own table.
-            api(`/api/benchmark/engines?start=${start}&end=${now}`).catch(() => ({})),
+            api(`/api/benchmark/engines?start=${start}&end=${now}&points=${points}`).catch(() => ({})),
+            // The announce card speaks of the last minute: the raw samples of
+            // the last five, whatever the span the charts show.
+            api(`/api/benchmark/range?start=${now - 300}&end=${now}&bucket=5`).catch(() => []),
         ]);
 
         if (!_bmCharts) _initBmCharts();
-        _renderExtraBenchCards(cur.engines || []);
-
-        // Live cards
-        const totalUpload = (cur.race_upload_rate ?? 0) + (cur.hoard_upload_rate ?? 0);
-        document.getElementById("bm-race-upload").textContent   = formatSpeed(cur.race_upload_rate ?? 0);
-        document.getElementById("bm-race-download").textContent = formatSpeed(cur.race_download_rate ?? 0);
-        document.getElementById("bm-hoard-upload").textContent  = formatSpeed(cur.hoard_upload_rate ?? 0);
-        document.getElementById("bm-race-peers").textContent    = (cur.race_peers ?? 0).toFixed(0);
-        document.getElementById("bm-iowait").textContent        = (cur.iowait_pct ?? 0).toFixed(1) + "%";
-        document.getElementById("bm-arc-hit").textContent       = (cur.arc_hit_rate_pct ?? 0).toFixed(3) + "%";
-        document.getElementById("bm-arc-miss").textContent      = (cur.arc_miss_per_sec ?? 0).toFixed(1) + "/s";
-        document.getElementById("bm-arc-size").textContent      = formatBytes(cur.arc_size_bytes ?? 0);
+        _renderBenchmarkCards(cur);
 
         // Range hint
         document.getElementById("bm-range-hint").textContent =
@@ -7656,7 +7710,7 @@ async function updateBenchmark() {
         // averages them into buckets of max(5 s, span / 300); the same bucket
         // here puts each history point on its engine row.
         const _extraIds = Object.keys(extraHistory || {}).sort();
-        const _bucket = Math.max(5, (now - start) / 300);
+        const _bucket = Math.max(5, (now - start) / points);
         const _extraAt = {};
         _extraIds.forEach(id => {
             const m = new Map();
@@ -7674,6 +7728,8 @@ async function updateBenchmark() {
                     pointRadius: 0, pointHitRadius: 10, pointHoverRadius: 4, tension: 0.3, fill: false, spanGaps: true,
                 });
             });
+            // The extra engines sit after the two series; the peaks go after them.
+            _setPeaks(c, c.data.datasets.length, [[0, "race_upload_rate"], [1, "hoard_upload_rate"]], history);
             c.update("none");
         }
 
@@ -7724,6 +7780,7 @@ async function updateBenchmark() {
             c.data.datasets[1].data = history.map(p => p.hoard_uploading ?? 0);
             c.data.datasets[2].data = history.map(p => p.race_peers ?? 0);
             c.data.datasets[3].data = history.map(p => p.hoard_peers ?? 0);
+            _setPeaks(c, 4, [[0, "race_uploading"], [1, "hoard_uploading"], [2, "race_peers"], [3, "hoard_peers"]], history);
             c.update("none");
         }
         // Announce rate: 5-minute averages against the rate the schedule needs.
@@ -7739,7 +7796,7 @@ async function updateBenchmark() {
             c.data.datasets[5].data = history.map(p => p.hoard_announce_rate ?? 0);
             c.update("none");
         }
-        _renderAnnounceFigures(history);
+        _renderAnnounceFigures(recent && recent.length ? recent : history);
         // Race Events, 20 stacked bars (added, completed, first_upload)
         {
             const N = 20;
@@ -8374,7 +8431,7 @@ document.querySelectorAll(".tab").forEach(tab => {
         if (t === "race") await updateRaceTorrents();
         if (t === "hoard") await updateHoardStats();
         if (t === "categories") await updateCategories(true);
-        if (t === "benchmark") await updateBenchmark();
+        if (t === "benchmark") await updateBenchmark(true);
     });
 });
 
