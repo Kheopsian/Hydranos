@@ -5074,34 +5074,7 @@ async fn get_hoard_stats(
 ) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    let cfg = state.cfg();
-
-    let torrents = state
-        .engines
-        .get("hoard")
-        .map(|e| e.manager.len() as i64)
-        .unwrap_or(0);
-
-    let live = live_stats(&state, "hoard");
-
-    Json(serde_json::json!({
-        "active_download_rate": live.download_rate,
-        "active_peers": live.active_peers,
-        "active_upload_rate": live.upload_rate,
-        "engine": "hoard",
-        "listen_port": cfg.hoard.listen_port,
-        "running": true,
-        "session_downloaded": 0,
-        "session_uploaded": 0,
-        "stagger_complete": true,
-        "swarm_leechers": swarm_leechers_total(&state),
-        "torrents_announced": announced_count(&state, "hoard"),
-        "torrents_uploading": live.torrents_uploading,
-        "torrents_with_peers": live.torrents_with_peers,
-        "total_torrents": torrents,
-        "unseeded_peers": live.unseeded_peers,
-    }))
-    .into_response()
+    Json(hoard_stats_value(&state)).into_response()
 }
 
 /// Hot engines added at runtime. The two built-in engines are NOT listed here:
@@ -6957,7 +6930,9 @@ fn status_payload(state: &AppState) -> serde_json::Value {
             "engine": "hoard", "listen_port": cfg.hoard.listen_port,
             "running": true,
             "seed_size": seeded.map(|s| s.0),
+            "avg_share": crate::benchsampler::latest_share("hoard"),
             "session_downloaded": hoard_session.1, "session_uploaded": hoard_session.0,
+            "session_ratio": crate::row::num_json(if hoard_session.1 > 0 { hoard_session.0 as f64 / hoard_session.1 as f64 } else { 0.0 }),
             "stagger_complete": true,
             "swarm_leechers": swarm_leechers_total(state),
             "torrents_announced": announced_count(state, "hoard"),
@@ -6969,12 +6944,14 @@ fn status_payload(state: &AppState) -> serde_json::Value {
         "race": {
             "active_downloads": downloading,
             "active_seeds": seeds,
+            "avg_share": crate::benchsampler::latest_share("race"),
             "seed_size": seeded.map(|s| s.1),
             "session_downloaded": race_session.1,
             "session_grabbed": 0,
             "session_ratio": crate::row::num_json(ratio),
             "session_uploaded": session_up,
             "torrents": race_torrents,
+            "torrents_announced": announced_count(state, "race"),
             "torrents_with_peers": race_live.torrents_with_peers,
             "total_download_rate": race_live.download_rate,
             "total_peers": race_live.active_peers,
@@ -7108,31 +7085,9 @@ async fn stream_events(
                 axum::response::sse::Event::default()
                     .data(serde_json::to_string(&payload).unwrap_or_default()),
             );
-            let live = live_stats(&state, "hoard");
-            let cfg = state.cfg();
             let hoard = serde_json::json!({
                 "event": "hoard_stats_snapshot",
-                "data": {
-                    "active_download_rate": live.download_rate,
-                    "active_peers": live.active_peers,
-                    "active_upload_rate": live.upload_rate,
-                    "engine": "hoard",
-                    "listen_port": cfg.hoard.listen_port,
-                    "running": true,
-                    "session_downloaded": 0,
-                    "session_uploaded": 0,
-                    "stagger_complete": true,
-                    "swarm_leechers": swarm_leechers_total(&state),
-                    "torrents_announced": announced_count(&state, "hoard"),
-                    "torrents_uploading": live.torrents_uploading,
-                    "torrents_with_peers": live.torrents_with_peers,
-                    "total_torrents": state
-                        .engines
-                        .get("hoard")
-                        .map(|e| e.manager.len() as i64)
-                        .unwrap_or(0),
-                    "unseeded_peers": live.unseeded_peers,
-                },
+                "data": hoard_stats_value(&state),
             });
             yield Ok::<_, std::convert::Infallible>(
                 axum::response::sse::Event::default()
@@ -7422,31 +7377,9 @@ async fn stream_events(
             );
             // The hoard header reads its own frame, not the status one.
             if is_status {
-                let live = live_stats(&state, "hoard");
-                let cfg = state.cfg();
                 let hoard = serde_json::json!({
                     "event": "hoard_stats_snapshot",
-                    "data": {
-                        "active_download_rate": live.download_rate,
-                        "active_peers": live.active_peers,
-                        "active_upload_rate": live.upload_rate,
-                        "engine": "hoard",
-                        "listen_port": cfg.hoard.listen_port,
-                        "running": true,
-                        "session_downloaded": 0,
-                        "session_uploaded": 0,
-                        "stagger_complete": true,
-                        "swarm_leechers": swarm_leechers_total(&state),
-                        "torrents_announced": announced_count(&state, "hoard"),
-                        "torrents_uploading": live.torrents_uploading,
-                        "torrents_with_peers": live.torrents_with_peers,
-                        "total_torrents": state
-                            .engines
-                            .get("hoard")
-                            .map(|e| e.manager.len() as i64)
-                            .unwrap_or(0),
-                        "unseeded_peers": live.unseeded_peers,
-                    },
+                    "data": hoard_stats_value(&state),
                 });
                 yield Ok::<_, std::convert::Infallible>(
                     axum::response::sse::Event::default()
@@ -7647,6 +7580,39 @@ async fn get_bench_current(
         "ts": now,
     }))
     .into_response()
+}
+
+/// The Hoard strip's figures, one definition for the route, the stream's first
+/// frame and its live loop.
+fn hoard_stats_value(state: &AppState) -> serde_json::Value {
+    let live = live_stats(state, "hoard");
+    let cfg = state.cfg();
+    let (up, down) = engine_session(state, "hoard");
+    serde_json::json!({
+        "active_download_rate": live.download_rate,
+        "active_peers": live.active_peers,
+        "active_upload_rate": live.upload_rate,
+        // The mean of ratio over the other seeds, from the 30 s tracker pass;
+        // null before it has run or when no torrent qualifies.
+        "avg_share": crate::benchsampler::latest_share("hoard"),
+        "engine": "hoard",
+        "listen_port": cfg.hoard.listen_port,
+        "running": true,
+        "session_downloaded": down,
+        "session_ratio": crate::row::num_json(if down > 0 { up as f64 / down as f64 } else { 0.0 }),
+        "session_uploaded": up,
+        "stagger_complete": true,
+        "swarm_leechers": swarm_leechers_total(state),
+        "torrents_announced": announced_count(state, "hoard"),
+        "torrents_uploading": live.torrents_uploading,
+        "torrents_with_peers": live.torrents_with_peers,
+        "total_torrents": state
+            .engines
+            .get("hoard")
+            .map(|e| e.manager.len() as i64)
+            .unwrap_or(0),
+        "unseeded_peers": live.unseeded_peers,
+    })
 }
 
 /// The daemon's own read cache, as counters since start plus what it holds.

@@ -1528,12 +1528,14 @@ function _renderStatus(data) {
             document.getElementById("race-peers").textContent = fmtInt(data.race.total_peers);
             document.getElementById("race-ov-ratio").textContent = (data.race.session_ratio || 0).toFixed(2);
 
-            // Race tab stats bar
-            document.getElementById("race-active-dl").textContent = fmtInt(data.race.active_downloads || 0);
-            document.getElementById("race-active-seeds").textContent = fmtInt(data.race.active_seeds || 0);
-            document.getElementById("race-current-ul").textContent = formatSpeed(data.race.total_upload_rate);
-            document.getElementById("race-session-ratio").textContent = (data.race.session_ratio || 0).toFixed(2);
-            document.getElementById("race-session-grabbed").textContent = fmtInt(data.race.session_grabbed || 0);
+            // Race tab strip: the same cells, in the same order, as Hoard's.
+            _paintEngineStrip("race", {
+                total: data.race.torrents, uploading: data.race.active_seeds,
+                downloading: data.race.active_downloads, upload_rate: data.race.total_upload_rate,
+                ratio: data.race.session_ratio, peers: data.race.total_peers, swarm: 0,
+                with_peers: data.race.torrents_with_peers, announced: data.race.torrents_announced,
+                avg_share: data.race.avg_share,
+            });
 
             // Header speeds (Option 2 : Gbps)
             const _raceUlRateCurrent = data.race.total_upload_rate || 0; window._lastRaceUlRate = _raceUlRateCurrent; window._lastRaceDlRate = data.race.total_download_rate || 0; const hydraUl = _raceUlRateCurrent + (data.hoard?.active_upload_rate || 0);
@@ -1960,9 +1962,8 @@ function renderRaceTable() {
         return (a.info_hash || "").localeCompare(b.info_hash || "");
     });
 
-    // Filter the RENDER only. The stats below describe the race tier as a
-    // whole, so computing them over the filtered set would make Avg Share move
-    // with whatever is typed in the search box.
+    // Filter the RENDER only: the strip above describes the engine as a whole,
+    // and comes from the server, so a search never moves it.
     const query = (document.getElementById("race-search")?.value || "").trim().toLowerCase();
     const visible = query ? sorted.filter(t => _searchMatches(t, query)) : sorted;
     if (raceCount) raceCount.textContent = query ? `${fmtInt(visible.length)} / ${fmtInt(torrents.length)}` : "";
@@ -1973,15 +1974,6 @@ function renderRaceTable() {
         _patchRows(tbody, visible, "race", "race-table");
     }
     _updateRowHighlights();
-
-    // Avg Share = ratio / (swarm_seeds - 1) for completed torrents with seeds > 1
-    const completed = torrents.filter(t => t.progress >= 1.0 && t.swarm_seeds > 1 && t.ratio > 0);
-    if (completed.length > 0) {
-        const avgShare = completed.reduce((sum, t) => sum + t.ratio / (t.swarm_seeds - 1), 0) / completed.length;
-        document.getElementById("race-avg-share").textContent = (avgShare * 100).toFixed(1) + "%";
-    } else {
-        document.getElementById("race-avg-share").textContent = "-";
-    }
 }
 
 async function showDetail(infoHash, agent) {
@@ -3838,43 +3830,53 @@ function _renderHoardCounts() {
     });
 }
 
-// Render the hoard header bars + summary text from a /api/hoard/stats payload.
+// Paint the Hoard strip from a /api/hoard/stats payload.
 // Called by SSE hoard_stats_snapshot and the legacy fetch path.
 function _renderHoardStatsHeader(data) {
     if (!data) return;
-    const total = data.total_torrents || 1;
-        // The bar is gone; the numbers below carry the same two figures.
-        const announced = data.torrents_announced ?? data.total_torrents;
-        const annPct = data.total_torrents ? Math.round(announced / data.total_torrents * 100) : 100;
-        const annText = annPct >= 100 ? t("all announced") : t("{done}/{total} announced ({pct}%)", { done: fmtInt(announced), total: fmtInt(data.total_torrents), pct: annPct });
+        _paintEngineStrip("hoard", {
+            total: data.total_torrents, uploading: data.torrents_uploading,
+            downloading: _libFacets?.state?.downloading ?? null,
+            upload_rate: data.active_upload_rate, ratio: data.session_ratio,
+            peers: data.unseeded_peers ?? data.active_peers ?? 0, swarm: data.swarm_leechers || 0,
+            with_peers: data.torrents_with_peers, announced: data.torrents_announced ?? data.total_torrents,
+            avg_share: data.avg_share,
+        });
+}
 
-        // Peer efficiency: connected peers vs available swarm leechers
-        const swarm = data.swarm_leechers || 0;
-        const peers = data.unseeded_peers ?? data.active_peers ?? 0;
-        let peerText = t("{n} peers", { n: fmtInt(peers) });
-        if (swarm > 0) {
-            const peerPct = (peers / swarm * 100).toFixed(1);
-            peerText = t("{n}/{swarm} peers ({pct}%)", { n: fmtInt(peers), swarm: formatCount(swarm), pct: peerPct });
-        }
-
-    // One figure per cell of the strip, as Race shows its own. The share of
-    // the swarm and the announce count go in a small line and the tooltip:
-    // the big figure stays a number that can be compared across polls.
-    const set = (id, html, title) => {
-        const el = document.getElementById(id);
+// The strip of figures at the top of Race and Hoard: the same cells in the same
+// order, fed from one shape. One figure per cell; the share of the swarm and
+// the announce count go in a small line and the tooltip, so the big figure
+// stays a number that can be compared across polls. A figure the server does
+// not know yet is a dash, never a zero.
+let _libFacets = null;   // the whole library's chips, pushed by facets_snapshot
+function _paintEngineStrip(pfx, d) {
+    const set = (cell, html, title) => {
+        const el = document.getElementById(pfx + "-st-" + cell);
         if (!el) return;
         el.innerHTML = html;
         el.parentElement.title = title || "";
     };
-    set("hoard-st-total", fmtInt(data.total_torrents));
-    set("hoard-st-up", fmtInt(data.torrents_uploading));
-    set("hoard-st-withpeers", fmtInt(data.torrents_with_peers));
-    set("hoard-st-peers",
-        fmtInt(peers) + (swarm > 0 ? ` <small>/ ${esc(formatCount(swarm))}</small>` : ""),
-        peerText);
-    set("hoard-st-ann",
-        annPct + "&nbsp;%" + (annPct < 100 ? ` <small>${fmtInt(announced)} / ${fmtInt(data.total_torrents)}</small>` : ""),
-        annText);
+    const num = v => (v == null ? "-" : fmtInt(v));
+    set("total", num(d.total));
+    set("up", num(d.uploading));
+    set("down", num(d.downloading));
+    set("ul", d.upload_rate == null ? "-" : formatSpeed(d.upload_rate));
+    set("ratio", d.ratio == null ? "-" : Number(d.ratio).toFixed(2), t("Uploaded / downloaded since the daemon started"));
+    const swarm = d.swarm || 0, peers = d.peers ?? 0;
+    let peerText = t("{n} peers", { n: fmtInt(peers) });
+    if (swarm > 0) {
+        peerText = t("{n}/{swarm} peers ({pct}%)", { n: fmtInt(peers), swarm: formatCount(swarm), pct: (peers / swarm * 100).toFixed(1) });
+    }
+    set("peers", d.peers == null ? "-" : fmtInt(peers) + (swarm > 0 ? ` <small>/ ${esc(formatCount(swarm))}</small>` : ""), peerText);
+    set("withpeers", num(d.with_peers), t("Torrents with at least one connected peer"));
+    const total = d.total || 0, announced = d.announced ?? total;
+    const annPct = total ? Math.round(announced / total * 100) : 100;
+    set("ann",
+        annPct + "&nbsp;%" + (annPct < 100 ? ` <small>${fmtInt(announced)} / ${fmtInt(total)}</small>` : ""),
+        annPct >= 100 ? t("all announced") : t("{done}/{total} announced ({pct}%)", { done: fmtInt(announced), total: fmtInt(total), pct: annPct }));
+    set("share", d.avg_share == null ? "-" : (d.avg_share * 100).toFixed(1) + "&nbsp;%",
+        t("Our ratio spread over the other seeds in the swarm, averaged over the seeding torrents"));
 }
 
 // Called on tab activation, hash change, or page load. Live updates flow
@@ -8943,6 +8945,7 @@ function _applyActiveChanged(d) {
 // and come with the page.
 const _HOARD_STATE_FACETS = ["all", "active", "tracker_error", "torrent_error", "pinned", "check_waiting", "state"];
 function _applyFacets(f) {
+    if (f) _libFacets = f;
     if (!f || !_hoardFacets || !_hoardOnlyStateFilter()) return;
     if (_hoardStateFilter === "") _hoardFacets = f;
     else for (const k of _HOARD_STATE_FACETS) if (k in f) _hoardFacets[k] = f[k];

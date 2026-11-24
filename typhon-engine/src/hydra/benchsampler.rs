@@ -115,6 +115,32 @@ pub fn latest_trackers() -> Option<Vec<TrackerRow>> {
     LATEST_TRACKERS.lock().ok().and_then(|g| g.clone())
 }
 
+/// How much of its swarm's demand each engine's seeders take, per engine id:
+/// for every torrent seeding with a ratio above zero in a swarm of more than
+/// one seed, its ratio divided by the seeds that are not us; the mean of those.
+/// Kept by the tracker pass (30 s) because it reads every torrent and its
+/// swarm count, which the once-a-second frames cannot afford.
+static LATEST_SHARE: std::sync::Mutex<Option<std::collections::HashMap<String, f64>>> =
+    std::sync::Mutex::new(None);
+
+/// One seeding torrent's share: its ratio spread over the seeds that are not us.
+/// `None` when there is no ratio yet or no other seed to compare against.
+fn share_of(uploaded: u64, size: u64, swarm_seeds: i64) -> Option<f64> {
+    if uploaded == 0 || size == 0 || swarm_seeds <= 1 {
+        return None;
+    }
+    Some((uploaded as f64 / size as f64) / (swarm_seeds - 1) as f64)
+}
+
+/// The engine's average share, or `None` before the first pass or when no
+/// torrent qualifies (the card then shows a dash, not a zero).
+pub fn latest_share(engine_id: &str) -> Option<f64> {
+    LATEST_SHARE
+        .lock()
+        .ok()
+        .and_then(|g| g.as_ref().and_then(|m| m.get(engine_id).copied()))
+}
+
 /// Per-tracker figures across every loaded torrent, plus the stored baseline.
 ///
 /// The stored counters are what each tracker accounted for before the running
@@ -150,7 +176,16 @@ pub fn tracker_totals(
     for engine in engines.engines() {
         let mut live: std::collections::HashMap<String, TrackerRow> =
             std::collections::HashMap::new();
+        let (mut share_sum, mut share_n) = (0.0f64, 0u64);
         for torrent in engine.manager.all().iter() {
+            if seeding_size(torrent) > 0 {
+                let seeds = engine.announce_cache.swarm_seeds(&torrent.info_hash);
+                let ul = torrent.total_uploaded.load(Ordering::Relaxed);
+                if let Some(share) = share_of(ul, torrent.meta.total_size, seeds) {
+                    share_sum += share;
+                    share_n += 1;
+                }
+            }
             let trackers = torrent.live_trackers.read();
             // The host baked into the torrent, NOT a result of announcing:
             // live_trackers is filled when the torrent is built. So a torrent
@@ -176,6 +211,14 @@ pub fn tracker_totals(
             row.active += (peers > 0) as i64;
             row.seed_size += seeding_size(torrent);
             row.torrents += 1;
+        }
+        if let Ok(mut g) = LATEST_SHARE.lock() {
+            let m = g.get_or_insert_with(Default::default);
+            if share_n > 0 {
+                m.insert(engine.id.clone(), share_sum / share_n as f64);
+            } else {
+                m.remove(&engine.id);
+            }
         }
         for (host, part) in live {
             let row = rows
@@ -1039,6 +1082,18 @@ mod tests {
             (0.0..=100.0).contains(&iowait),
             "a share of the CPU time: {iowait}"
         );
+    }
+
+    /// Average share counts only a torrent with a ratio in a swarm that has
+    /// another seed; its ratio is divided by the seeds that are not us.
+    #[test]
+    fn a_share_needs_a_ratio_and_another_seed() {
+        // Ratio 2 over 4 other seeds (5 in the swarm): half a copy each.
+        assert_eq!(share_of(2_000, 1_000, 5), Some(0.5));
+        assert_eq!(share_of(0, 1_000, 5), None, "nothing uploaded yet");
+        assert_eq!(share_of(2_000, 1_000, 1), None, "alone in the swarm");
+        assert_eq!(share_of(2_000, 1_000, 0), None, "no tracker answer");
+        assert_eq!(share_of(2_000, 0, 5), None, "no size, no ratio");
     }
 
     /// The rates of the loaded torrents are summed per tracker, then per

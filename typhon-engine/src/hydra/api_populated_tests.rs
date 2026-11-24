@@ -910,3 +910,41 @@ async fn the_performance_frames_carry_the_read_cache_and_whether_zfs_is_there() 
         "hits moved: {later}"
     );
 }
+
+/// Race and Hoard publish the same strip of figures: the hoard route, its
+/// stream frame and the status all carry the ratio and the average share, and
+/// Race carries the announce count Hoard always had.
+#[tokio::test]
+async fn race_and_hoard_publish_the_same_strip() {
+    let (s, _h) = populated("pop-strip");
+    let status = status_payload(&s.state);
+    for engine in ["race", "hoard"] {
+        let e = &status[engine];
+        assert!(e["session_ratio"].is_number(), "{engine} ratio: {e}");
+        assert!(
+            e.get("avg_share").is_some(),
+            "{engine} carries its average share (null until the tracker pass): {e}"
+        );
+        assert!(
+            e["torrents_announced"].is_number(),
+            "{engine} announced: {e}"
+        );
+        assert!(
+            e["torrents_with_peers"].is_number(),
+            "{engine} with peers: {e}"
+        );
+    }
+    let hoard = hoard_stats_value(&s.state);
+    for key in [
+        "total_torrents",
+        "torrents_uploading",
+        "active_upload_rate",
+        "session_ratio",
+        "active_peers",
+        "torrents_with_peers",
+        "torrents_announced",
+    ] {
+        assert!(hoard[key].is_number(), "hoard.{key}: {hoard}");
+    }
+    assert!(hoard.get("avg_share").is_some(), "{hoard}");
+}
