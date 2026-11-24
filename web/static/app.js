@@ -7211,11 +7211,14 @@ function _updateDualChart(chart, history, key1, key2) {
     chart.data.labels = history.map(p => _bmLabel(p.ts));
     chart.data.datasets[0].data = history.map(p => p[key1] ?? 0);
     chart.data.datasets[1].data = history.map(p => p[key2] ?? 0);
+    _setPeaks(chart, 2, [[0, key1], [1, key2]], history);
     chart.update("none");
 }
 
 function _initBmCharts() {
     Chart.defaults.color = "#7a90a8";
+    // The peak traces (see _setPeaks) are the same series as the line above them.
+    Chart.defaults.plugins.legend.labels.filter = item => !String(item.text).startsWith("↑");
     _bmCharts = {
         // Debit, donc formatSpeed : il suit le reglage Vitesses (octets/s ou bits/s).
         // formatBytes ne connait que le reglage Tailles et rendait toujours des KiB/s.
@@ -7415,6 +7418,7 @@ function _initBmCharts() {
 function _updateChart(chart, history, key) {
     chart.data.labels = history.map(p => _bmLabel(p.ts));
     chart.data.datasets[0].data = history.map(p => p[key] ?? 0);
+    _setPeaks(chart, 1, [[0, key]], history);
     chart.update("none");
 }
 
@@ -7446,6 +7450,33 @@ function _renderExtraBenchCards(engines) {
         card(t("Download {id}", { id: e.id }), formatSpeed(e.download_rate || 0)) +
         card(t("Peers {id}", { id: e.id }), fmtInt(e.peers || 0))
     ).join("");
+}
+
+// One point per pixel the graphs are wide: more could not be told apart, fewer
+// would blur a burst. A window that already fits (15 min, an hour) stays raw.
+function _bmPoints() {
+    const w = document.getElementById("chart-upload")?.parentElement?.clientWidth || 1000;
+    return Math.min(2500, Math.max(600, Math.round(w)));
+}
+
+// A bucket's mean says how busy it was, its peak says whether it spiked. The
+// peak is drawn under each line as a faint trace of the same colour, from the
+// `<key>_max` the server adds to a folded window (a raw window has none, and
+// the traces go away). Their legend entries are hidden by the chart defaults.
+function _setPeaks(chart, primary, pairs, history) {
+    chart.data.datasets.length = primary;
+    const folded = history.length > 0 && (pairs[0][1] + "_max") in history[0];
+    if (folded) {
+        for (const [i, key] of pairs) {
+            const base = chart.data.datasets[i];
+            chart.data.datasets.push({
+                label: "↑ " + (base.label ?? "peak"), data: history.map(p => p[key + "_max"] ?? 0),
+                borderColor: base.borderColor + "55", backgroundColor: "transparent",
+                borderWidth: 1, pointRadius: 0, pointHitRadius: 0, pointHoverRadius: 0,
+                tension: 0, fill: false, isPeak: true,
+            });
+        }
+    }
 }
 
 function _renderBenchmarkCards(cur) {
@@ -7482,11 +7513,12 @@ async function updateBenchmark(force) {
             return;
         }
         _bmHistoryAt = Date.now();
+        const points = _bmPoints();
         const [cur, history, extraHistory, recent] = await Promise.all([
             api("/api/benchmark/current"),
-            api(`/api/benchmark/range?start=${start}&end=${now}`),
+            api(`/api/benchmark/range?start=${start}&end=${now}&points=${points}`),
             // The engines beyond race and hoard, from their own table.
-            api(`/api/benchmark/engines?start=${start}&end=${now}`).catch(() => ({})),
+            api(`/api/benchmark/engines?start=${start}&end=${now}&points=${points}`).catch(() => ({})),
             // The announce card speaks of the last minute: the raw samples of
             // the last five, whatever the span the charts show.
             api(`/api/benchmark/range?start=${now - 300}&end=${now}&bucket=5`).catch(() => []),
@@ -7510,7 +7542,7 @@ async function updateBenchmark(force) {
         // averages them into buckets of max(5 s, span / 300); the same bucket
         // here puts each history point on its engine row.
         const _extraIds = Object.keys(extraHistory || {}).sort();
-        const _bucket = Math.max(5, (now - start) / 300);
+        const _bucket = Math.max(5, (now - start) / points);
         const _extraAt = {};
         _extraIds.forEach(id => {
             const m = new Map();
@@ -7528,6 +7560,8 @@ async function updateBenchmark(force) {
                     pointRadius: 0, pointHitRadius: 10, pointHoverRadius: 4, tension: 0.3, fill: false, spanGaps: true,
                 });
             });
+            // The extra engines sit after the two series; the peaks go after them.
+            _setPeaks(c, c.data.datasets.length, [[0, "race_upload_rate"], [1, "hoard_upload_rate"]], history);
             c.update("none");
         }
 
@@ -7578,6 +7612,7 @@ async function updateBenchmark(force) {
             c.data.datasets[1].data = history.map(p => p.hoard_uploading ?? 0);
             c.data.datasets[2].data = history.map(p => p.race_peers ?? 0);
             c.data.datasets[3].data = history.map(p => p.hoard_peers ?? 0);
+            _setPeaks(c, 4, [[0, "race_uploading"], [1, "hoard_uploading"], [2, "race_peers"], [3, "hoard_peers"]], history);
             c.update("none");
         }
         // Announce rate: 5-minute averages against the rate the schedule needs.

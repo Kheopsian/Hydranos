@@ -6432,12 +6432,13 @@ async fn get_bench_range(
         return Json(serde_json::json!([])).into_response();
     };
     let (start, end) = range_params(&query);
-    // About 300 points whatever the window, like the engines' rows beside it
-    // (the page matches the two by this same bucket). A caller that wants the
-    // raw 5 s samples of a short window asks for `bucket=5`.
+    // The page says how many points its graphs can draw; the window is folded
+    // to that, and a window that already fits stays raw. The engines' rows
+    // beside it use the same bucket, which is how the page lines them up.
+    // `bucket=5` asks for the raw 5 s samples of a window.
     let bucket = query_param(&query, "bucket")
         .and_then(|v| v.parse::<f64>().ok())
-        .unwrap_or(((end - start) / 300.0).max(5.0))
+        .unwrap_or_else(|| bench_bucket(&query, start, end))
         .max(5.0);
     // A month of history is a scan of hundreds of thousands of rows: off the
     // async workers, and the bench database's lock is let go as soon as it is read.
@@ -6475,7 +6476,7 @@ async fn get_bench_engines_range(
     };
     let (start, end) = range_params(&query);
     // 5 s is the sampling interval: a finer bucket would only repeat rows.
-    let bucket = ((end - start) / 300.0).max(5.0);
+    let bucket = bench_bucket(&query, start, end);
     let db = bench.lock().unwrap_or_else(|e| e.into_inner());
     match db.engine_samples_in_range(start, end, bucket) {
         Ok(rows) => Json(rows).into_response(),
@@ -6532,6 +6533,19 @@ async fn get_tracker_stats_range(
 /// Unparseable values land on a default 24h window rather than an error: the
 /// graph asks for a picture, and an empty one because a parameter was malformed
 /// is indistinguishable from a node that recorded nothing.
+/// Points a graph is sent when the page does not say.
+const BENCH_POINTS: f64 = 1500.0;
+
+/// The bucket, in seconds, that folds `start..end` to the `points` the page
+/// asked for (100 to 4 000), never finer than the 5 s sampling interval.
+fn bench_bucket(query: &str, start: f64, end: f64) -> f64 {
+    let points = query_param(query, "points")
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(BENCH_POINTS)
+        .clamp(100.0, 4_000.0);
+    ((end - start) / points).max(5.0)
+}
+
 fn range_params(query: &str) -> (f64, f64) {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

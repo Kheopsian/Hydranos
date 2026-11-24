@@ -200,3 +200,20 @@ async fn a_fresh_install_has_no_declared_nodes() {
             .unwrap_or(false);
     assert!(empty, "got {body}");
 }
+
+/// The graphs are sent as many points as the page can draw, not a fixed few
+/// hundred: a short window stays raw, a long one is folded to the ask.
+#[test]
+fn bench_bucket_follows_the_points_the_page_asks_for() {
+    let day = 86_400.0;
+    // 15 minutes of 5 s samples is 180 points: raw, whatever the default.
+    assert_eq!(bench_bucket("", 0.0, 900.0), 5.0);
+    assert_eq!(bench_bucket("points=1000", 0.0, 900.0), 5.0);
+    // A day to 1 000 points is 86 s; a month to the same is 43 min.
+    assert!((bench_bucket("points=1000", 0.0, day) - 86.4).abs() < 1e-9);
+    assert!((bench_bucket("points=1000", 0.0, 30.0 * day) - 2_592.0).abs() < 1e-9);
+    // Without an ask the default is used, and a silly ask is held to 100..4000.
+    assert!((bench_bucket("", 0.0, day) - day / 1_500.0).abs() < 1e-9);
+    assert!((bench_bucket("points=1", 0.0, day) - day / 100.0).abs() < 1e-9);
+    assert!((bench_bucket("points=999999", 0.0, 30.0 * day) - 30.0 * day / 4_000.0).abs() < 1e-9);
+}
