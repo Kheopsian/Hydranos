@@ -907,6 +907,7 @@ function importWizard(opts) {
             <p class="modal-desc" id="qb-pause" style="display:none;color:var(--accent-red)"></p>
             <div id="qb-isolated" style="display:none;max-height:160px;overflow:auto;margin-bottom:8px;border:1px solid var(--border);border-radius:4px;padding:6px;font-size:12px"></div>
             <div id="qb-fails" style="display:none;max-height:160px;overflow:auto;margin-bottom:8px;border:1px solid var(--border);border-radius:4px;padding:6px;font-size:12px"></div>
+            <div id="qb-retry-map" style="display:none"></div>
             <p class="modal-desc" id="qb-retry-msg" style="min-height:1em"></p>
             <div class="modal-actions">
                 <button id="qb-retry" style="display:none">${t("Retry failed")}</button>
@@ -919,7 +920,8 @@ function importWizard(opts) {
             stats = box.querySelector("#qb-stats"), cur = box.querySelector("#qb-cur"),
             doneBtn = box.querySelector("#qb-done"), note = box.querySelector("#qb-note"),
             fails = box.querySelector("#qb-fails"), isolatedBox = box.querySelector("#qb-isolated"), retryBtn = box.querySelector("#qb-retry"),
-            retryMsg = box.querySelector("#qb-retry-msg"), pauseMsg = box.querySelector("#qb-pause");
+            retryMsg = box.querySelector("#qb-retry-msg"), pauseMsg = box.querySelector("#qb-pause"),
+            retryMap = box.querySelector("#qb-retry-map");
         const labels = { connect: t("Connecting…"), categories: t("Creating categories…"), torrents: t("Importing torrents…"), done: t("Done"), paused: t("Paused"), error: t("Error") };
         es.onmessage = (ev) => {
             let d; try { d = JSON.parse(ev.data); } catch (e) { return; }
@@ -988,10 +990,32 @@ function importWizard(opts) {
                     retryBtn.textContent = d.not_attempted
                         ? t("Retry the {n} failed or not attempted", { n: d.failed + d.not_attempted })
                         : t("Retry the {n} failed", { n: d.failed });
+                    // The failed job's mapping, editable: a wrong path is the
+                    // usual reason to retry, and the retry takes the new one.
+                    const maps = d.retry_paths || [];
+                    if (maps.length) {
+                        retryMap.style.display = "";
+                        retryMap.innerHTML = `<p class="modal-desc" style="margin-bottom:4px">${t("Path mapping for the retry (source path → what Hydranos sees):")}</p>
+                            <div style="max-height:160px;overflow:auto;margin-bottom:8px;border:1px solid var(--border);border-radius:4px;padding:6px">${maps.map(m => `<div style="display:flex;gap:6px;align-items:center;margin-bottom:4px">
+                                <code style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(m.from)}">${esc(m.from)}</code>
+                                <span>→</span>
+                                <input type="text" class="qb-rmap" data-from="${esc(m.from)}" value="${esc(m.to)}" style="flex:1">
+                            </div>`).join("")}</div>`;
+                    }
                     retryBtn.onclick = async () => {
                         retryMsg.style.color = ""; retryMsg.textContent = t("Starting…");
+                        const path_map = {};
+                        retryMap.querySelectorAll(".qb-rmap").forEach(inp => {
+                            const f = inp.dataset.from, to = inp.value.trim();
+                            if (to && to !== f) path_map[f] = to;
+                        });
                         try {
-                            const res = await fetch("/api/import/retry", { method: "POST", headers: { "X-Api-Key": API_KEY } });
+                            const res = await fetch("/api/import/retry", {
+                                method: "POST",
+                                headers: { "Content-Type": "application/json", "X-Api-Key": API_KEY },
+                                // No rows: nothing to remap, keep the failed job's mapping.
+                                body: maps.length ? JSON.stringify({ path_map }) : "",
+                            });
                             const r = await res.json().catch(() => ({}));
                             if (!res.ok) { retryMsg.style.color = "var(--accent-red)"; retryMsg.textContent = r.error || t("Start failed ({status})", { status: res.status }); return; }
                             stepProgress();

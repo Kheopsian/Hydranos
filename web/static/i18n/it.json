@@ -990,6 +990,7 @@
   "Retry failed": "Riprova i non riusciti",
   "Retry the {n} failed": "Riprova i {n} non riusciti",
   "Retry the {n} failed or not attempted": "Riprova i {n} non riusciti o non tentati",
+  "Path mapping for the retry (source path → what Hydranos sees):": "Mappatura dei percorsi per il nuovo tentativo (percorso di origine → ciò che vede Hydranos):",
   "Paused": "In pausa",
   "Import paused": "Importazione in pausa",
   "Likely trigger: qBittorrent first stopped answering at \"{name}\", after exporting others. Look at that torrent in qBittorrent.": "Causa probabile: qBittorrent ha smesso di rispondere per la prima volta su «{name}», dopo averne esportati altri. Controlla quel torrent in qBittorrent.",

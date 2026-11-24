@@ -460,6 +460,111 @@ async fn a_transmission_folder_is_imported_into_the_hoard_and_not_twice() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A qBittorrent retry acts on qBittorrent as it is now and on the mapping
+/// it is given: the torrent the failed job saw under `/old` has moved to
+/// `/new` since, and the retry brings a mapping for `/new`; the one removed
+/// from qBittorrent fails as gone, not as a bare 404 export.
+#[tokio::test]
+async fn a_qbit_retry_lists_the_library_again_and_takes_a_new_mapping() {
+    use axum::response::IntoResponse;
+    async fn login() -> axum::response::Response {
+        ([("set-cookie", "SID=1; HttpOnly")], "Ok.").into_response()
+    }
+    async fn info() -> axum::response::Response {
+        axum::Json(serde_json::json!([
+            {"hash": "h1", "name": "alpha", "save_path": "/new", "progress": 0.0, "state": "pausedDL"}
+        ]))
+        .into_response()
+    }
+    async fn export(
+        axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+    ) -> axum::response::Response {
+        match q.get("hash").map(String::as_str) {
+            Some("h1") => torrent_bytes("alpha").into_response(),
+            _ => (StatusCode::NOT_FOUND, "Not Found").into_response(),
+        }
+    }
+    let app = axum::Router::new()
+        .route("/api/v2/auth/login", axum::routing::post(login))
+        .route("/api/v2/torrents/info", axum::routing::get(info))
+        .route("/api/v2/torrents/export", axum::routing::get(export));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let s = st("imp-qb-retry");
+    let data = std::env::temp_dir().join(format!("imp-qb-retry-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data);
+    std::fs::create_dir_all(&data).unwrap();
+    // The failed job, as it was left: its snapshot, its mapping, its kit.
+    let snapshot = |hash: &str, name: &str| {
+        crate::importer::Candidate::from_qbit(&crate::importer::QbitTorrent {
+            hash: hash.into(),
+            name: name.into(),
+            save_path: "/old".into(),
+            ..Default::default()
+        })
+    };
+    let failed = Arc::new(crate::importer::Progress::default());
+    *failed.retry.lock().unwrap() = Some(crate::importer::RetryKit {
+        cands: vec![snapshot("h1", "alpha"), snapshot("h2", "removed")],
+        creds: Some(crate::importer::QbitCreds {
+            url: format!("http://{addr}"),
+            username: "u".into(),
+            password: "p".into(),
+        }),
+        choices: crate::importer::Choices::default(),
+    });
+    failed
+        .finished
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    s.state
+        .imports
+        .lock()
+        .unwrap()
+        .insert("imp-0".into(), failed.clone());
+
+    let body = serde_json::json!({"path_map": {"/new": data}}).to_string();
+    let resp =
+        super::post_import_retry(State(s.state.clone()), RawQuery(None), keyed(KEY), body).await;
+    assert!(
+        resp.status().is_success(),
+        "retry answered {:?}",
+        resp.status()
+    );
+    assert!(failed.retry.lock().unwrap().is_none(), "the kit was taken");
+    let mut status = serde_json::Value::Null;
+    for _ in 0..500 {
+        let (id, p) = latest_import(&s.state).expect("a job");
+        if id != "imp-0" && !p.running() {
+            status = p.as_json();
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(status["phase"], "done", "got {status}");
+    assert_eq!(
+        (status["total"].as_u64(), status["failed"].as_u64()),
+        (Some(2), Some(1)),
+        "got {status}"
+    );
+    assert_eq!(status["failures"][0]["name"], "removed", "got {status}");
+    assert_eq!(
+        status["failures"][0]["error"],
+        crate::importer::GONE_FROM_QBIT,
+        "got {status}"
+    );
+    assert_eq!(status["retryable"], false, "nothing left worth retrying");
+    let hoard = s.state.engines.get("hoard").expect("hoard").manager.all();
+    assert_eq!(hoard.len(), 1);
+    assert_eq!(
+        *hoard[0].save_path.read(),
+        data,
+        "the current save path, through the new mapping"
+    );
+    let _ = std::fs::remove_dir_all(&data);
+}
+
 /// The qBittorrent preview answers the URL problem only when there is one.
 #[tokio::test]
 async fn the_qbit_preview_refuses_an_empty_url_and_reports_an_unreachable_one() {
