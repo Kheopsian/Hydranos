@@ -7673,10 +7673,9 @@ function _renderBenchmarkCards(cur) {
     document.getElementById("bm-arc-size").textContent      = formatBytes(cur.arc_size_bytes ?? 0);
 }
 
-// The charts hold about 300 points whatever the span, so a point is
-// span / 300 seconds wide: the history is asked for again every span / 60
-// (15 min -> 15 s, 1 h -> 1 min), within 15 s and 5 min. The live cards above
-// them follow every tick.
+// The charts are asked for again every span / 60 (15 min -> 15 s, 1 h ->
+// 1 min), within 15 s and 5 min. The live cards above them follow the status
+// stream, about once a second, and never wait for the charts.
 let _bmHistoryAt = 0;
 function _bmHistoryEvery() {
     return Math.min(300000, Math.max(15000, (_bmSpan / 60) * 1000));
