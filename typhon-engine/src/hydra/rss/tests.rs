@@ -1033,6 +1033,51 @@ async fn a_rule_saved_without_tags_keeps_them() {
     );
 }
 
+/// A qBittorrent client sends back only qBittorrent's keys: its edit of a
+/// rule, through `setRule`, must not drop Hydranos's conditions and size
+/// limits. The RSS tab sends them as null / 0 to clear them.
+#[tokio::test]
+async fn a_qbittorrent_client_editing_a_rule_keeps_its_conditions_and_sizes() {
+    let s = st("rss-extras-kept", "");
+    let feed = "http://127.0.0.1:9/rss";
+    put_rule(
+        &s,
+        "x",
+        &json!({"affectedFeeds": [feed], "minSize": "1 GB", "maxSize": "8 GB",
+                "conditions": {"rows": [{"field": "category", "op": "is", "value": "TV"}]}}),
+    )
+    .unwrap();
+    let def = json!({"enabled": true, "mustContain": "show", "affectedFeeds": [feed]});
+    let (code, msg) = call(
+        &s,
+        "POST",
+        "/api/v2/rss/setRule",
+        &format!("ruleName=x&ruleDef={}", enc(&def.to_string())),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK, "{msg}");
+    let (_, body) = call(&s, "GET", "/api/v2/rss/rules", "").await;
+    let v: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["x"]["mustContain"], "show", "the client's edit applied");
+    assert_eq!(v["x"]["minSize"], 1 << 30);
+    assert_eq!(v["x"]["maxSize"], 8u64 << 30);
+    assert_eq!(v["x"]["conditions"]["rows"][0]["value"], "TV");
+
+    // What the RSS tab sends when everything was removed in the form.
+    put_rule(
+        &s,
+        "x",
+        &json!({"affectedFeeds": [feed], "minSize": 0, "maxSize": 0, "conditions": null}),
+    )
+    .unwrap();
+    let r = load_rules(&s).into_iter().find(|r| r.name == "x").unwrap();
+    assert_eq!(
+        (r.conditions.is_none(), r.min_size, r.max_size),
+        (true, 0, 0),
+        "null / 0 clear them"
+    );
+}
+
 /// A link is judged by its first characters without cutting a character in two:
 /// "magnet:" is 7 bytes and "magnet:?" is 8, and a non-ASCII character can
 /// straddle either offset.
