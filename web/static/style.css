@@ -4619,6 +4619,19 @@ tbody > tr:only-child:hover > td[colspan] { background: transparent; }
     box-shadow: inset 3px 0 0 var(--accent);
 }
 
+/* The RSS rule's condition tree: groups of rows, each group a thin frame. */
+.rss-size-input { display: inline-flex; gap: 6px; align-items: center; }
+.rss-size-input input { width: 90px; }
+.rss-cond-group { display: grid; gap: 8px; padding: 10px; margin: 6px 0; border: 1px solid var(--border); border-radius: var(--radius-sm); }
+.rss-cond-group .rss-cond-group { margin: 0; background: rgba(255, 255, 255, 0.02); }
+.rss-cg-head, .rss-cond-row, .rss-cr-vals { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.rss-cg-rows { display: grid; gap: 8px; }
+.rss-cr-vals { flex: 1; min-width: 200px; }
+.rss-cr-v { min-width: 120px; flex: 1; }
+/* Inputs are full width everywhere else; here they sit on one line. */
+.rss-cg-head select, .rss-cond-row select, .rss-size-input select { width: auto; flex: 0 0 auto; }
+.rss-cond-row button, .rss-cg-head button { flex: 0 0 auto; }
+
 /* ── Config ─────────────────────────────────────────────────────────────── */
 
 /* Six cards, one long page: a row of shortcuts under the title. Not pinned:

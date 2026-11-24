@@ -1103,7 +1103,17 @@ async fn a_spread_category_downloads_by_the_exit_of_the_chosen_target() {
         ..Default::default()
     };
 
-    let res = add_article(&s, &Exits::new(&s), &article, "dead-first", &dir, "", true).await;
+    let res = add_article(
+        &s,
+        &Exits::new(&s),
+        &article,
+        "dead-first",
+        &dir,
+        "",
+        true,
+        None,
+    )
+    .await;
     assert!(
         matches!(res, Err(AddError::Transient(_))),
         "the dead exit fails the fetch"
@@ -1111,7 +1121,17 @@ async fn a_spread_category_downloads_by_the_exit_of_the_chosen_target() {
     assert_eq!(fake.hits("/a.torrent"), 0, "never sent around vpn1's proxy");
     assert_eq!(count(&s, "race") + count(&s, "vpn1") + count(&s, "vpn2"), 0);
 
-    let res = add_article(&s, &Exits::new(&s), &article, "ok-first", &dir, "", true).await;
+    let res = add_article(
+        &s,
+        &Exits::new(&s),
+        &article,
+        "ok-first",
+        &dir,
+        "",
+        true,
+        None,
+    )
+    .await;
     assert!(
         res.is_ok(),
         "{:?}",
@@ -1159,7 +1179,7 @@ async fn a_spread_category_does_not_add_an_article_an_engine_already_holds() {
         torrent_url: fake.url("/a.torrent"),
         ..Default::default()
     };
-    let res = add_article(&s, &Exits::new(&s), &article, "c", &dir, "", true).await;
+    let res = add_article(&s, &Exits::new(&s), &article, "c", &dir, "", true, None).await;
     assert!(
         matches!(res, Ok(Added { already: true, .. })),
         "{:?}",
@@ -1171,4 +1191,204 @@ async fn a_spread_category_does_not_add_an_article_an_engine_already_holds() {
         (1, 0, 0),
         "no second copy"
     );
+}
+
+/// A torrent of `len` bytes in 1 MiB pieces.
+fn torrent_sized(name: &str, len: usize) -> Vec<u8> {
+    let pieces = len.div_ceil(1 << 20);
+    let info = format!(
+        "d6:lengthi{len}e4:name{}:{name}12:piece lengthi1048576e6:pieces{}:{}e",
+        name.len(),
+        pieces * 20,
+        "N".repeat(pieces * 20)
+    );
+    let announce = "https://tracker.example/announce";
+    format!("d8:announce{}:{announce}4:info{info}e", announce.len()).into_bytes()
+}
+
+/// An RSS 2.0 document: (guid, title, link, category, size) per item; a size
+/// of 0 is a feed that does not say.
+fn feed_sized(items: &[(&str, &str, &str, &str, u64)]) -> String {
+    let mut s = String::from(
+        "<?xml version=\"1.0\"?><rss version=\"2.0\"><channel><title>Fake tracker</title>",
+    );
+    for (guid, title, link, category, size) in items {
+        let link = link.replace('&', "&amp;");
+        s.push_str(&format!(
+            "<item><title>{title}</title><guid>{guid}</guid><category>{category}</category>\
+             <enclosure url=\"{link}\" type=\"application/x-bittorrent\" length=\"{size}\"/></item>"
+        ));
+    }
+    s.push_str("</channel></rss>");
+    s
+}
+
+const MB: u64 = 1 << 20;
+
+/// A rule with a size range takes only the articles inside it, and what it
+/// leaves is not even fetched.
+#[tokio::test]
+async fn a_size_range_takes_only_what_is_inside_it() {
+    let s = st("rss-size-range", "");
+    let fake = Fake::start().await;
+    for n in ["small", "fit", "huge"] {
+        fake.serve(
+            &format!("/{n}.torrent"),
+            200,
+            torrent_sized(n, (2 * MB) as usize),
+        );
+    }
+    fake.serve(
+        "/rss",
+        200,
+        feed_sized(&[
+            ("a", "Small", &fake.url("/small.torrent"), "", MB / 2),
+            ("b", "Fit", &fake.url("/fit.torrent"), "", 2 * MB),
+            ("c", "Huge", &fake.url("/huge.torrent"), "", 20 * MB),
+        ]),
+    );
+    let f = add_feed(&s, &fake.url("/rss"), "S", None).unwrap();
+    put_rule(&s, "sized", &json!({"affectedFeeds": [fake.url("/rss")], "assignedCategory": "books", "minSize": "1 MB", "maxSize": "8 MB"})).unwrap();
+    refresh_feed(&s, f.id).await.unwrap();
+    assert_eq!(count(&s, "hoard"), 1);
+    assert_eq!(fake.hits("/fit.torrent"), 1);
+    assert_eq!(fake.hits("/small.torrent") + fake.hits("/huge.torrent"), 0);
+}
+
+/// The feed gives no size: the `.torrent` is fetched, judged on its real
+/// length, and an out-of-range one is refused and never fetched again.
+#[tokio::test]
+async fn a_torrent_without_a_feed_size_is_judged_on_its_real_size() {
+    let s = st("rss-size-recheck", "");
+    let fake = Fake::start().await;
+    fake.serve(
+        "/big.torrent",
+        200,
+        torrent_sized("big", (20 * MB) as usize),
+    );
+    fake.serve("/ok.torrent", 200, torrent_sized("ok", (2 * MB) as usize));
+    fake.serve(
+        "/rss",
+        200,
+        feed_sized(&[
+            ("big", "Big", &fake.url("/big.torrent"), "", 0),
+            ("ok", "Ok", &fake.url("/ok.torrent"), "", 0),
+        ]),
+    );
+    let f = add_feed(&s, &fake.url("/rss"), "S", None).unwrap();
+    put_rule(&s, "sized", &json!({"affectedFeeds": [fake.url("/rss")], "assignedCategory": "books", "minSize": "1 MB", "maxSize": "8 MB"})).unwrap();
+    refresh_feed(&s, f.id).await.unwrap();
+    assert_eq!(count(&s, "hoard"), 1, "only the one in range");
+    let t = s
+        .store
+        .lock()
+        .unwrap()
+        .rss_taken(&["big"])
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        t.outcome,
+        "refused: size 20 MB outside the rule (1 MB\u{2013}8 MB)"
+    );
+    assert_eq!(run_rules(&s, None).await, 0);
+    assert_eq!(fake.hits("/big.torrent"), 1, "not fetched again");
+    let act = s.store.lock().unwrap().workflow_activity(10).unwrap();
+    assert!(act
+        .iter()
+        .any(|a| a.outcome == "failed" && a.detail.contains("outside the rule")));
+}
+
+/// A magnet with no size cannot be judged before it is added: taken.
+#[tokio::test]
+async fn a_magnet_without_a_size_is_taken() {
+    let s = st("rss-size-magnet", "");
+    let fake = Fake::start().await;
+    let hash = "c9e15763f722f23e98a29decdfae341b98d53056";
+    let magnet = format!("magnet:?xt=urn:btih:{hash}&dn=Book");
+    fake.serve("/rss", 200, feed_sized(&[("m", "Book", &magnet, "", 0)]));
+    let f = add_feed(&s, &fake.url("/rss"), "M", None).unwrap();
+    put_rule(&s, "m", &json!({"affectedFeeds": [fake.url("/rss")], "assignedCategory": "books", "maxSize": "8 MB"})).unwrap();
+    refresh_feed(&s, f.id).await.unwrap();
+    assert_eq!(s.store.lock().unwrap().magnets().unwrap().len(), 1);
+}
+
+/// A nested group across category and title.
+#[tokio::test]
+async fn a_nested_group_picks_by_category_and_title() {
+    let s = st("rss-conditions", "");
+    let fake = Fake::start().await;
+    let mut items = Vec::new();
+    for (n, title, cat) in [
+        ("tv1080", "Show 1080p", "TV"),
+        ("tv720", "Show 720p", "TV"),
+        ("film1080", "Film 1080p", "Movies"),
+        ("tv2160", "Show 2160p", "TV"),
+    ] {
+        fake.serve(
+            &format!("/{n}.torrent"),
+            200,
+            torrent_bytes(&format!("{n}.mkv")),
+        );
+        items.push((n, title, fake.url(&format!("/{n}.torrent")), cat));
+    }
+    let items: Vec<_> = items
+        .iter()
+        .map(|(n, t, u, c)| (*n, *t, u.as_str(), *c, 0))
+        .collect();
+    fake.serve("/rss", 200, feed_sized(&items));
+    let f = add_feed(&s, &fake.url("/rss"), "C", None).unwrap();
+    put_rule(
+        &s,
+        "tv",
+        &json!({"affectedFeeds": [fake.url("/rss")], "assignedCategory": "books",
+        "conditions": {"match": "all", "rows": [
+            {"field": "category", "op": "is", "value": "TV"},
+            {"match": "any", "rows": [
+                {"field": "title", "op": "contains", "value": "1080p"},
+                {"field": "title", "op": "contains", "value": "2160p"},
+            ]},
+        ]}}),
+    )
+    .unwrap();
+    refresh_feed(&s, f.id).await.unwrap();
+    assert_eq!(count(&s, "hoard"), 2);
+    assert_eq!(
+        fake.hits("/tv1080.torrent") + fake.hits("/tv2160.torrent"),
+        2
+    );
+    assert_eq!(
+        fake.hits("/tv720.torrent") + fake.hits("/film1080.torrent"),
+        0
+    );
+}
+
+/// The preview lists an article of unknown size as a match, and says so.
+#[tokio::test]
+async fn the_preview_marks_a_match_whose_size_is_unknown() {
+    let s = st("rss-preview-size", "");
+    let fake = Fake::start().await;
+    fake.serve(
+        "/rss",
+        200,
+        feed_sized(&[
+            ("a", "Known", &fake.url("/a.torrent"), "", 2 * MB),
+            ("b", "Unknown", &fake.url("/b.torrent"), "", 0),
+            ("c", "Too big", &fake.url("/c.torrent"), "", 20 * MB),
+        ]),
+    );
+    let url = fake.url("/rss");
+    let f = add_feed(&s, &url, "P", None).unwrap();
+    refresh_feed(&s, f.id).await.unwrap();
+    let draft = json!({"affectedFeeds": [url], "maxSize": "8 MB"});
+    let (code, body) = call(&s, "POST", "/api/rss/preview", &draft.to_string()).await;
+    assert_eq!(code, StatusCode::OK, "{body}");
+    let v: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["count"], 2);
+    let arts = v["feeds"][0]["articles"].as_array().unwrap();
+    let unknown: Vec<_> = arts
+        .iter()
+        .filter(|a| a["size_unknown"] == true)
+        .map(|a| a["title"].as_str().unwrap())
+        .collect();
+    assert_eq!(unknown, ["Unknown"]);
 }

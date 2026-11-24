@@ -1080,12 +1080,23 @@
                             <input type="text" id="rss-rule-savepath" autocomplete="off">
                         </div>
                         <div class="form-group">
+                            <label>Min size <span class="sr-desc">optional</span></label>
+                            <span class="rss-size-input"><input type="number" id="rss-rule-minsize" min="0" step="any" autocomplete="off"><select id="rss-rule-minsize-u"><option>MB</option><option>GB</option></select></span>
+                        </div>
+                        <div class="form-group">
+                            <label>Max size <span class="sr-desc">optional</span></label>
+                            <span class="rss-size-input"><input type="number" id="rss-rule-maxsize" min="0" step="any" autocomplete="off"><select id="rss-rule-maxsize-u"><option>MB</option><option>GB</option></select></span>
+                        </div>
+                        <div class="form-group">
                             <label><input type="checkbox" id="rss-rule-enabled" checked> Enabled</label>
                             <label><input type="checkbox" id="rss-rule-regex"> Use regular expressions</label>
                             <label><input type="checkbox" id="rss-rule-smart"> Smart episode filter</label>
                             <label><input type="checkbox" id="rss-rule-paused"> Add paused</label>
                         </div>
                     </div>
+                    <h3 class="form-subhead">Conditions</h3>
+                    <p class="sr-desc">Optional, on top of the fields above: pick articles by title, category, author, description, link, size or age, in groups that can nest. When the feed gives no size, the article passes the size tests, and a .torrent is checked on its real size once fetched.</p>
+                    <div id="rss-rule-conds"></div>
                     <h3 class="form-subhead">Feeds</h3>
                     <div id="rss-rule-feeds"></div>
                     <div class="cat-form-actions">
