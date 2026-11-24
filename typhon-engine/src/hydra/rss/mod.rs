@@ -45,7 +45,7 @@ use serde_json::Value;
 
 use crate::api::AppState;
 use crate::store::{RssArticleRow, RssFeedRow, RssTaken};
-use matcher::Rule;
+use matcher::{ArticleView, Rule};
 use typhon_engine::egress::Route;
 
 /// qBittorrent's item path separator: `Folder\Feed`.
@@ -884,7 +884,8 @@ pub fn load_rules(state: &AppState) -> Vec<Rule> {
 /// Create or replace a rule (qBittorrent's `setRule`). A document without
 /// `lastMatch` / `previouslyMatchedEpisodes` keeps the stored ones: an
 /// editor that does not show them must not reset `ignoreDays` and the smart
-/// filter by saving.
+/// filter by saving. The same holds for tags and for Hydranos's
+/// `conditions`, which no qBittorrent client sends.
 pub fn put_rule(state: &AppState, name: &str, def: &Value) -> Result<Rule, Refusal> {
     let name = name.trim();
     if name.is_empty() {
@@ -917,6 +918,12 @@ pub fn put_rule(state: &AppState, name: &str, def: &Value) -> Result<Rule, Refus
             .is_none()
         {
             rule.tags = old.tags;
+        }
+        // Hydranos's own key. A qBittorrent client sends back only the keys
+        // it knows, so a rule it edits would lose it; the RSS tab always
+        // sends it (null to clear).
+        if def.get("conditions").is_none() {
+            rule.conditions = old.conditions;
         }
     }
     store
@@ -1000,6 +1007,7 @@ pub fn matching(
         return Vec::new();
     };
     let feeds = store.rss_feeds().unwrap_or_default();
+    let now = crate::store::now_secs();
     let mut out = Vec::new();
     for f in feeds
         .into_iter()
@@ -1009,7 +1017,8 @@ pub fn matching(
             .rss_articles(f.id)
             .unwrap_or_default()
             .into_iter()
-            .filter(|a| rule.matches_article(&a.title, a.date).is_ok())
+            // An unknown size counts as matching: it is judged on the torrent.
+            .filter(|a| rule.matches_article(&ArticleView::from_row(a, now)).is_ok())
             .map(|a| {
                 let taken = store.rss_taken(&[&a.guid, &a.torrent_url]).ok().flatten();
                 (a, taken)
@@ -1063,6 +1072,12 @@ impl AddError {
 /// Add one article by the API's own add: a magnet through the magnet queue,
 /// a `.torrent` fetched by the target engine's way out, then placed by its
 /// category like any other add.
+///
+/// `size_check`: the rule that took the article while its size was unknown.
+/// A `.torrent` is judged again on its real size once it is parsed, and
+/// refused (final, so it is not fetched again) if the rule does not take
+/// that size. A magnet has no size before it is added and is not checked.
+#[allow(clippy::too_many_arguments)]
 pub async fn add_article(
     state: &AppState,
     exits: &Exits,
@@ -1071,6 +1086,7 @@ pub async fn add_article(
     save_path: &str,
     tags: &str,
     paused: bool,
+    size_check: Option<&Rule>,
 ) -> Result<Added, AddError> {
     let url = a.torrent_url.trim().to_string();
     let hide = |e: String| {
@@ -1147,6 +1163,11 @@ pub async fn add_article(
         )));
     }
     let meta = typhon_engine::torrent::metainfo::parse_torrent_bytes(&bytes).ok();
+    if let (Some(rule), Some(m)) = (size_check, &meta) {
+        let view = ArticleView::from_row(a, crate::store::now_secs());
+        rule.check_size(&view, i64::try_from(m.total_size).unwrap_or(i64::MAX))
+            .map_err(AddError::Refused)?;
+    }
     let hash = meta
         .as_ref()
         .map(|m| typhon_engine::torrent::hex_encode(&m.info_hash))
@@ -1270,7 +1291,7 @@ pub async fn download(
         .and_then(|arts| arts.into_iter().find(|a| a.guid == guid))
         .ok_or_else(|| AddError::Refused(format!("no article {guid:?} in feed {feed_id}")))?;
     let exits = Exits::new(state);
-    let res = add_article(state, &exits, &a, category, save_path, "", paused).await;
+    let res = add_article(state, &exits, &a, category, save_path, "", paused, None).await;
     record(state, "(manual)", &a, &res);
     res
 }
@@ -1295,6 +1316,7 @@ pub async fn run_rules(state: &AppState, only: Option<i64>) -> usize {
         .filter(|f| only.is_none_or(|id| f.id == id))
         .collect();
     let exits = Exits::new(state);
+    let now = crate::store::now_secs();
     let mut added = 0;
     for f in &feeds {
         let arts = state
@@ -1312,13 +1334,15 @@ pub async fn run_rules(state: &AppState, only: Option<i64>) -> usize {
             if taken.is_some() {
                 continue;
             }
-            let Some((i, episode)) = rules
+            let view = ArticleView::from_row(a, now);
+            let Some((i, verdict)) = rules
                 .iter()
                 .enumerate()
-                .find_map(|(i, r)| r.decide(&f.url, &a.title, a.date).ok().map(|k| (i, k)))
+                .find_map(|(i, r)| r.decide(&f.url, &view).ok().map(|k| (i, k)))
             else {
                 continue;
             };
+            let episode = verdict.episode;
             let r = rules[i].clone();
             let tags = r.tags.join(",");
             let res = add_article(
@@ -1329,6 +1353,7 @@ pub async fn run_rules(state: &AppState, only: Option<i64>) -> usize {
                 &r.save_path,
                 &tags,
                 r.add_paused.unwrap_or(false),
+                verdict.recheck.then_some(&r),
             )
             .await;
             record(state, &r.name, a, &res);

@@ -26,6 +26,26 @@
 //!   taken again, unless the new title says REPACK or PROPER.
 //! - `ignoreDays`: an article dated less than that many days after the rule's
 //!   last match is not taken.
+//!
+//! One key is Hydranos's own, written only when set and ignored by a
+//! qBittorrent client; a rule without it behaves as above:
+//! - `conditions`: a nested AND/OR tree over the article's fields (title,
+//!   category, author, description, link, size, age). A group is
+//!   `{"match": "all"|"any", "rows": [...]}`, a row is
+//!   `{"field", "op", "value", "value2"}`. Text ops are `contains` /
+//!   `not_contains` (the `mustContain` syntax), `is` / `is_not` (whole text,
+//!   case ignored) and `regex` / `not_regex`; `size` and `age` (hours) take
+//!   `gt`, `lt` and `between` (inclusive). Sizes read `700 MB`, `1.5 GiB` or
+//!   bytes; KB/MB/GB and KiB/MiB/GiB are all 1024-based, as the client shows
+//!   sizes. At most 8 levels and 100 nodes; an empty group is dropped. A
+//!   size range is a `size between` row: there are no separate min / max
+//!   size fields, so a range can be combined with OR like any other test.
+//!
+//! A feed that does not give a size leaves a size test *unknown*, not failed:
+//! the logic is three-valued (AND/OR as in SQL), an unknown result is let
+//! through, and a `.torrent` is judged again on its real size once fetched
+//! (refused, and not fetched again, when it is out of range). A magnet has
+//! no size before it is added, so it is taken.
 
 use regex::{Regex, RegexBuilder};
 use serde_json::{json, Value};
@@ -53,6 +73,456 @@ pub struct Rule {
     pub tags: Vec<String>,
     /// `None`: the client's default (not paused).
     pub add_paused: Option<bool>,
+    /// Hydranos: the condition tree, `None` = no condition.
+    pub conditions: Option<Cond>,
+}
+
+/// Deepest nesting and most nodes a condition tree may have: a rule is read
+/// at every pass, and the editor draws all of it.
+const MAX_DEPTH: usize = 8;
+const MAX_NODES: usize = 100;
+
+/// What a row looks at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Field {
+    Title,
+    Category,
+    Author,
+    Description,
+    Link,
+    /// Bytes.
+    Size,
+    /// Hours since the article's date.
+    Age,
+}
+
+impl Field {
+    fn name(self) -> &'static str {
+        match self {
+            Field::Title => "title",
+            Field::Category => "category",
+            Field::Author => "author",
+            Field::Description => "description",
+            Field::Link => "link",
+            Field::Size => "size",
+            Field::Age => "age",
+        }
+    }
+    fn parse(s: &str) -> Option<Field> {
+        Some(match s {
+            "title" => Field::Title,
+            "category" => Field::Category,
+            "author" => Field::Author,
+            "description" => Field::Description,
+            "link" => Field::Link,
+            "size" => Field::Size,
+            "age" => Field::Age,
+            _ => return None,
+        })
+    }
+    fn numeric(self) -> bool {
+        matches!(self, Field::Size | Field::Age)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Op {
+    Contains,
+    NotContains,
+    Is,
+    IsNot,
+    Regex,
+    NotRegex,
+    Gt,
+    Lt,
+    Between,
+}
+
+impl Op {
+    fn name(self) -> &'static str {
+        match self {
+            Op::Contains => "contains",
+            Op::NotContains => "not_contains",
+            Op::Is => "is",
+            Op::IsNot => "is_not",
+            Op::Regex => "regex",
+            Op::NotRegex => "not_regex",
+            Op::Gt => "gt",
+            Op::Lt => "lt",
+            Op::Between => "between",
+        }
+    }
+    fn parse(s: &str) -> Option<Op> {
+        Some(match s {
+            "contains" => Op::Contains,
+            "not_contains" => Op::NotContains,
+            "is" => Op::Is,
+            "is_not" => Op::IsNot,
+            "regex" => Op::Regex,
+            "not_regex" => Op::NotRegex,
+            "gt" => Op::Gt,
+            "lt" => Op::Lt,
+            "between" => Op::Between,
+            _ => return None,
+        })
+    }
+    fn numeric(self) -> bool {
+        matches!(self, Op::Gt | Op::Lt | Op::Between)
+    }
+}
+
+/// One row of the tree.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Test {
+    pub field: Field,
+    pub op: Op,
+    /// As written (`1.5 GB`), so the editor gets back what it sent.
+    pub value: String,
+    /// Only `between` reads it.
+    pub value2: String,
+    /// `value` / `value2` in bytes or seconds, read once at load.
+    n1: i64,
+    n2: i64,
+}
+
+/// A node of the condition tree.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Cond {
+    /// `any`: one row is enough; otherwise all of them. Never empty.
+    Group {
+        any: bool,
+        rows: Vec<Cond>,
+    },
+    Test(Test),
+}
+
+/// What a condition says of an article. `Unknown` is a size the feed did
+/// not give: neither a pass nor a failure until the torrent is fetched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tri {
+    Yes,
+    No,
+    Unknown,
+}
+
+impl Tri {
+    fn and(self, o: Tri) -> Tri {
+        match (self, o) {
+            (Tri::No, _) | (_, Tri::No) => Tri::No,
+            (Tri::Unknown, _) | (_, Tri::Unknown) => Tri::Unknown,
+            _ => Tri::Yes,
+        }
+    }
+    fn or(self, o: Tri) -> Tri {
+        match (self, o) {
+            (Tri::Yes, _) | (_, Tri::Yes) => Tri::Yes,
+            (Tri::Unknown, _) | (_, Tri::Unknown) => Tri::Unknown,
+            _ => Tri::No,
+        }
+    }
+}
+
+/// The fields of one article a rule can test.
+#[derive(Debug, Clone, Copy)]
+pub struct ArticleView<'a> {
+    pub title: &'a str,
+    pub category: &'a str,
+    pub author: &'a str,
+    pub description: &'a str,
+    pub link: &'a str,
+    /// `None` when the feed gives none (a stored 0).
+    pub size: Option<i64>,
+    pub date: i64,
+    /// Unix seconds, for `age`.
+    pub now: i64,
+}
+
+impl<'a> ArticleView<'a> {
+    pub fn from_row(a: &'a crate::store::RssArticleRow, now: i64) -> Self {
+        ArticleView {
+            title: &a.title,
+            category: &a.category,
+            author: &a.author,
+            description: &a.description,
+            link: &a.link,
+            size: (a.size > 0).then_some(a.size),
+            date: a.date,
+            now,
+        }
+    }
+}
+
+/// What `decide` says for an article that passes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Verdict {
+    /// The smart filter's key, empty when the title has none.
+    pub episode: String,
+    /// The size was unknown and mattered: judge again on the fetched torrent.
+    pub recheck: bool,
+}
+
+impl Test {
+    fn eval(&self, v: &ArticleView) -> Tri {
+        let yes = |b: bool| if b { Tri::Yes } else { Tri::No };
+        let text = match self.field {
+            Field::Title => v.title,
+            Field::Category => v.category,
+            Field::Author => v.author,
+            Field::Description => v.description,
+            Field::Link => v.link,
+            Field::Size | Field::Age => {
+                let x = if self.field == Field::Size {
+                    match v.size {
+                        Some(s) => s,
+                        None => return Tri::Unknown,
+                    }
+                } else if v.date > 0 {
+                    v.now - v.date
+                } else {
+                    return Tri::Unknown;
+                };
+                return yes(match self.op {
+                    Op::Gt => x > self.n1,
+                    Op::Lt => x < self.n1,
+                    _ => x >= self.n1 && x <= self.n2,
+                });
+            }
+        };
+        yes(match self.op {
+            Op::Contains => must_contain(false, &self.value, text),
+            Op::NotContains => !must_not_contain(false, &self.value, text),
+            Op::Is => text.trim().to_lowercase() == self.value.trim().to_lowercase(),
+            Op::IsNot => text.trim().to_lowercase() != self.value.trim().to_lowercase(),
+            Op::Regex => regex_ci(&self.value).is_ok_and(|r| r.is_match(text)),
+            Op::NotRegex => regex_ci(&self.value).is_ok_and(|r| !r.is_match(text)),
+            // Refused at load: a number op on a text field.
+            Op::Gt | Op::Lt | Op::Between => false,
+        })
+    }
+}
+
+impl Cond {
+    pub fn eval(&self, v: &ArticleView) -> Tri {
+        match self {
+            Cond::Test(t) => t.eval(v),
+            Cond::Group { any, rows } => {
+                let decided = if *any { Tri::Yes } else { Tri::No };
+                let mut acc = if *any { Tri::No } else { Tri::Yes };
+                for r in rows {
+                    let x = r.eval(v);
+                    acc = if *any { acc.or(x) } else { acc.and(x) };
+                    // Nothing later can change a decided group.
+                    if acc == decided {
+                        break;
+                    }
+                }
+                acc
+            }
+        }
+    }
+
+    fn uses_size(&self) -> bool {
+        match self {
+            Cond::Test(t) => t.field == Field::Size,
+            Cond::Group { rows, .. } => rows.iter().any(Cond::uses_size),
+        }
+    }
+
+    /// Depth and node count, and what a loaded row already guarantees for a
+    /// rule built by hand: regexes that compile, a `between` that is ordered.
+    fn validate(&self, depth: usize, nodes: &mut usize) -> Result<(), String> {
+        *nodes += 1;
+        if *nodes > MAX_NODES {
+            return Err(format!("conditions: more than {MAX_NODES} rows and groups"));
+        }
+        match self {
+            Cond::Group { rows, .. } => {
+                if depth > MAX_DEPTH {
+                    return Err(format!(
+                        "conditions: groups nested more than {MAX_DEPTH} deep"
+                    ));
+                }
+                rows.iter().try_for_each(|r| r.validate(depth + 1, nodes))
+            }
+            Cond::Test(t) => {
+                if t.field.numeric() != t.op.numeric() {
+                    return Err(format!(
+                        "conditions: {} cannot be tested with {}",
+                        t.field.name(),
+                        t.op.name()
+                    ));
+                }
+                if matches!(t.op, Op::Regex | Op::NotRegex) {
+                    regex_ci(&t.value).map_err(|e| {
+                        format!(
+                            "conditions: {:?} is not a valid regular expression: {e}",
+                            t.value
+                        )
+                    })?;
+                }
+                if t.op == Op::Between && t.n2 < t.n1 {
+                    return Err(format!(
+                        "conditions: {} between {:?} and {:?}: the second value is smaller",
+                        t.field.name(),
+                        t.value,
+                        t.value2
+                    ));
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// `None` for an empty group, which is dropped.
+    fn from_json(v: &Value, depth: usize, nodes: &mut usize) -> Result<Option<Cond>, String> {
+        *nodes += 1;
+        if *nodes > MAX_NODES {
+            return Err(format!("conditions: more than {MAX_NODES} rows and groups"));
+        }
+        let o = v
+            .as_object()
+            .ok_or_else(|| format!("conditions: a row must be an object, not {v}"))?;
+        let text = |k: &str| -> Result<Option<String>, String> {
+            match o.get(k) {
+                None | Some(Value::Null) => Ok(None),
+                Some(Value::String(s)) => Ok(Some(s.clone())),
+                Some(Value::Number(n)) => Ok(Some(n.to_string())),
+                Some(other) => Err(format!(
+                    "conditions: {k} must be text or a number, not {other}"
+                )),
+            }
+        };
+        if let Some(rows) = o.get("rows") {
+            if depth > MAX_DEPTH {
+                return Err(format!(
+                    "conditions: groups nested more than {MAX_DEPTH} deep"
+                ));
+            }
+            let any = match text("match")?.map(|m| m.to_ascii_lowercase()).as_deref() {
+                None | Some("all") | Some("and") => false,
+                Some("any") | Some("or") => true,
+                Some(other) => {
+                    return Err(format!(
+                        "conditions: match must be all or any, not {other:?}"
+                    ))
+                }
+            };
+            let rows = rows
+                .as_array()
+                .ok_or_else(|| format!("conditions: rows must be a list, not {rows}"))?;
+            let mut out = Vec::new();
+            for r in rows {
+                out.extend(Cond::from_json(r, depth + 1, nodes)?);
+            }
+            return Ok((!out.is_empty()).then_some(Cond::Group { any, rows: out }));
+        }
+        let f = text("field")?.unwrap_or_default();
+        let field = Field::parse(&f).ok_or_else(|| {
+            format!(
+                "conditions: field {f:?} is not title, category, author, description, \
+                 link, size or age"
+            )
+        })?;
+        let p = text("op")?.unwrap_or_default();
+        let op = Op::parse(&p).ok_or_else(|| format!("conditions: op {p:?} is not understood"))?;
+        let value = text("value")?.unwrap_or_default();
+        let value2 = text("value2")?.unwrap_or_default();
+        let (mut n1, mut n2) = (0, 0);
+        if field.numeric() && op.numeric() {
+            let num = |s: &str| {
+                if field == Field::Size {
+                    parse_size(s)
+                } else {
+                    parse_hours(s)
+                }
+                .map_err(|e| format!("conditions: {} {e}", field.name()))
+            };
+            n1 = num(&value)?;
+            if op == Op::Between {
+                n2 = num(&value2)?;
+            }
+        }
+        let t = Cond::Test(Test {
+            field,
+            op,
+            value,
+            value2,
+            n1,
+            n2,
+        });
+        t.validate(depth, &mut 0)?;
+        Ok(Some(t))
+    }
+
+    fn to_json(&self) -> Value {
+        match self {
+            Cond::Group { any, rows } => json!({
+                "match": if *any { "any" } else { "all" },
+                "rows": rows.iter().map(Cond::to_json).collect::<Vec<_>>(),
+            }),
+            Cond::Test(t) if t.op == Op::Between => json!({
+                "field": t.field.name(), "op": t.op.name(), "value": t.value, "value2": t.value2,
+            }),
+            Cond::Test(t) => json!({"field": t.field.name(), "op": t.op.name(), "value": t.value}),
+        }
+    }
+}
+
+/// `700 MB`, `1.5 GiB`, `2048`: bytes. 1024-based whatever the spelling.
+pub fn parse_size(s: &str) -> Result<i64, String> {
+    let t = s.trim();
+    let split = t
+        .find(|c: char| !(c.is_ascii_digit() || c == '.' || c == ','))
+        .unwrap_or(t.len());
+    let (num, unit) = t.split_at(split);
+    let n: f64 = num
+        .replace(',', ".")
+        .parse()
+        .map_err(|_| format!("size {s:?} is not a number with a unit, like 700 MB or 1.5 GiB"))?;
+    let mult: f64 = match unit.trim().to_ascii_lowercase().as_str() {
+        "" | "b" => 1.0,
+        "k" | "kb" | "kib" => 1024.0,
+        "m" | "mb" | "mib" => 1048576.0,
+        "g" | "gb" | "gib" => 1073741824.0,
+        "t" | "tb" | "tib" => 1099511627776.0,
+        u => return Err(format!("size {s:?}: unit {u:?} is not B, KB, MB, GB or TB")),
+    };
+    let v = n * mult;
+    if !v.is_finite() || v > 9.0e15 {
+        return Err(format!("size {s:?} is out of range"));
+    }
+    Ok(v.round() as i64)
+}
+
+/// `12`, `12h`, `2d`: hours (a plain number is hours), as seconds.
+fn parse_hours(s: &str) -> Result<i64, String> {
+    let t = s.trim().to_ascii_lowercase();
+    let (num, mult) = match t.strip_suffix('d') {
+        Some(n) => (n, 86400.0),
+        None => (t.strip_suffix('h').unwrap_or(&t), 3600.0),
+    };
+    let n: f64 = num
+        .trim()
+        .replace(',', ".")
+        .parse()
+        .map_err(|_| format!("age {s:?} is not a number of hours (12, 12h or 2d)"))?;
+    if !n.is_finite() || !(0.0..=1.0e9).contains(&n) {
+        return Err(format!("age {s:?} is out of range"));
+    }
+    Ok((n * mult).round() as i64)
+}
+
+/// `12.3 GB`, `700 MB`, `1 GB`.
+fn human(n: i64) -> String {
+    let (div, unit) = match n {
+        n if n >= 1 << 40 => (1099511627776.0, "TB"),
+        n if n >= 1 << 30 => (1073741824.0, "GB"),
+        n if n >= 1 << 20 => (1048576.0, "MB"),
+        n if n >= 1 << 10 => (1024.0, "KB"),
+        _ => (1.0, "B"),
+    };
+    let s = format!("{:.1}", n as f64 / div);
+    format!("{} {unit}", s.strip_suffix(".0").unwrap_or(&s))
 }
 
 impl Rule {
@@ -141,6 +611,10 @@ impl Rule {
                 })
                 .unwrap_or_default(),
             add_paused: tp_b("stopped").or_else(|| tp_b("paused")).or(add_paused),
+            conditions: match obj.get("conditions") {
+                None | Some(Value::Null) => None,
+                Some(c) => Cond::from_json(c, 1, &mut 0)?,
+            },
         };
         r.check()?;
         Ok(r)
@@ -163,12 +637,15 @@ impl Rule {
         if !self.episode_filter.is_empty() {
             episode_ranges(&self.episode_filter)?;
         }
+        if let Some(c) = &self.conditions {
+            c.validate(1, &mut 0)?;
+        }
         Ok(())
     }
 
     /// qBittorrent's document, both spellings of the add options included.
     pub fn to_json(&self) -> Value {
-        json!({
+        let mut doc = json!({
             "enabled": self.enabled,
             "priority": self.priority,
             "useRegex": self.use_regex,
@@ -191,7 +668,39 @@ impl Rule {
                 "stopped": self.add_paused,
                 "skip_checking": false,
             },
-        })
+        });
+        // Hydranos's own key: absent unless set, so a rule that does not use
+        // it is the document qBittorrent writes.
+        if let Some(c) = &self.conditions {
+            doc["conditions"] = c.to_json();
+        }
+        doc
+    }
+
+    /// Whether the rule judges the size, so an article without one is
+    /// "unknown" for it.
+    pub fn uses_size(&self) -> bool {
+        self.conditions.as_ref().is_some_and(Cond::uses_size)
+    }
+
+    fn conditions_for(&self, v: &ArticleView) -> Tri {
+        self.conditions.as_ref().map_or(Tri::Yes, |c| c.eval(v))
+    }
+
+    /// The article's real size, known once its torrent is fetched: `Err`
+    /// says why the rule does not take it.
+    pub fn check_size(&self, v: &ArticleView, size: i64) -> Result<(), String> {
+        let v = ArticleView {
+            size: Some(size),
+            ..*v
+        };
+        if self.conditions_for(&v) != Tri::No {
+            return Ok(());
+        }
+        Err(format!(
+            "size {} does not fit the rule's conditions",
+            human(size)
+        ))
     }
 
     /// Whether the title passes the rule's text and episode tests.
@@ -203,19 +712,20 @@ impl Rule {
     }
 
     /// qBittorrent's `matches`: the title, `ignoreDays` and the smart filter,
-    /// for an article dated `date`. What `matchingArticles` lists; `enabled`
-    /// and the feeds are `decide`'s.
+    /// then Hydranos's conditions. What `matchingArticles`
+    /// lists; `enabled` and the feeds are `decide`'s.
     ///
     /// `ignoreDays` is qBittorrent's test: an article dated less than that
     /// many days after the rule's last match is not taken, so a rule that
     /// matched stays quiet for the period, and older articles never wake it.
-    pub fn matches_article(&self, title: &str, date: i64) -> Result<String, &'static str> {
+    pub fn matches_article(&self, v: &ArticleView) -> Result<Verdict, &'static str> {
+        let title = v.title;
         if !self.matches_title(title) {
             return Err("title does not match");
         }
         if self.ignore_days > 0
             && self.last_match > 0
-            && date < self.last_match + self.ignore_days * 86400
+            && v.date < self.last_match + self.ignore_days * 86400
         {
             return Err("ignoreDays: dated less than that many days after the last match");
         }
@@ -227,20 +737,28 @@ impl Rule {
         {
             return Err("smart filter: episode already taken");
         }
-        Ok(key)
+        let recheck = match self.conditions_for(v) {
+            Tri::No => return Err("conditions: the article does not satisfy them"),
+            Tri::Unknown => true,
+            Tri::Yes => false,
+        };
+        Ok(Verdict {
+            episode: key,
+            recheck,
+        })
     }
 
     /// The whole decision for one article of the feed at `feed_url`: why
-    /// not, or `Ok` with the episode key the smart filter records (empty when
-    /// the title has none).
-    pub fn decide(&self, feed_url: &str, title: &str, date: i64) -> Result<String, &'static str> {
+    /// not, or the verdict (the episode key the smart filter records, and
+    /// whether the size is yet to be checked).
+    pub fn decide(&self, feed_url: &str, v: &ArticleView) -> Result<Verdict, &'static str> {
         if !self.enabled {
             return Err("rule disabled");
         }
         if !self.affected_feeds.iter().any(|u| u == feed_url) {
             return Err("feed not in the rule");
         }
-        self.matches_article(title, date)
+        self.matches_article(v)
     }
 }
 
@@ -443,6 +961,19 @@ mod tests {
         Rule::from_json("r", &v).unwrap()
     }
 
+    fn view(title: &str, date: i64) -> ArticleView<'_> {
+        ArticleView {
+            title,
+            category: "",
+            author: "",
+            description: "",
+            link: "",
+            size: None,
+            date,
+            now: date,
+        }
+    }
+
     #[test]
     fn words_are_and_bars_are_or_and_case_is_ignored() {
         let r = rule(json!({"mustContain": "show 1080p|other 720p"}));
@@ -534,33 +1065,37 @@ mod tests {
         let mut r =
             rule(json!({"mustContain": "show", "affectedFeeds": ["http://f"], "ignoreDays": 2}));
         assert_eq!(
-            r.decide("http://f", "Show.S01E01", now),
+            r.decide("http://f", &view("Show.S01E01", now))
+                .map(|v| v.episode),
             Ok("S01E01".to_string())
         );
         assert!(
-            r.decide("http://other", "Show.S01E01", now).is_err(),
+            r.decide("http://other", &view("Show.S01E01", now)).is_err(),
             "feed not in the rule"
         );
         r.last_match = now - 86400;
         assert!(
-            r.decide("http://f", "Show.S01E02", now).is_err(),
+            r.decide("http://f", &view("Show.S01E02", now)).is_err(),
             "matched a day ago"
         );
         r.last_match = now - 3 * 86400;
-        assert!(r.decide("http://f", "Show.S01E02", now).is_ok());
+        assert!(r.decide("http://f", &view("Show.S01E02", now)).is_ok());
 
         let mut s = rule(
             json!({"mustContain": "show", "affectedFeeds": ["http://f"], "smartFilter": true}),
         );
         s.previously_matched.push("S01E01".into());
-        assert!(s.decide("http://f", "Show.S01E01.720p", now).is_err());
+        assert!(s
+            .decide("http://f", &view("Show.S01E01.720p", now))
+            .is_err());
         assert!(
-            s.decide("http://f", "Show.S01E01.REPACK", now).is_ok(),
+            s.decide("http://f", &view("Show.S01E01.REPACK", now))
+                .is_ok(),
             "a repack is taken"
         );
-        assert!(s.decide("http://f", "Show.S01E02", now).is_ok());
+        assert!(s.decide("http://f", &view("Show.S01E02", now)).is_ok());
         s.enabled = false;
-        assert!(s.decide("http://f", "Show.S01E02", now).is_err());
+        assert!(s.decide("http://f", &view("Show.S01E02", now)).is_err());
     }
 
     #[test]
@@ -590,5 +1125,254 @@ mod tests {
             "a wrong type is refused"
         );
         assert!(Rule::from_json("r", &json!([1])).is_err());
+    }
+
+    const NOW: i64 = 1_800_000_000;
+    const GB: i64 = 1 << 30;
+
+    fn art<'a>(title: &'a str, category: &'a str, size: Option<i64>) -> ArticleView<'a> {
+        ArticleView {
+            title,
+            category,
+            author: "Ann Author",
+            description: "A long <b>description</b>",
+            link: "https://tracker.example/view/1",
+            size,
+            date: NOW - 2 * 3600,
+            now: NOW,
+        }
+    }
+
+    fn cond(v: Value) -> Cond {
+        rule(json!({ "conditions": v })).conditions.unwrap()
+    }
+
+    fn row(field: &str, op: &str, value: &str) -> Value {
+        json!({"field": field, "op": op, "value": value})
+    }
+
+    #[test]
+    fn every_text_field_and_op_is_tested() {
+        let a = art("The.Show.S01E01.1080p", "TV", Some(GB));
+        let t = |f: &str, op: &str, v: &str| cond(row(f, op, v)).eval(&a);
+        assert_eq!(t("title", "contains", "show 1080p|nothing"), Tri::Yes);
+        assert_eq!(t("title", "contains", "720p"), Tri::No);
+        assert_eq!(t("title", "not_contains", "720p|cam"), Tri::Yes);
+        assert_eq!(t("title", "not_contains", "1080p"), Tri::No);
+        assert_eq!(t("category", "is", "tv"), Tri::Yes, "case is ignored");
+        assert_eq!(t("category", "is", "T"), Tri::No, "the whole text");
+        assert_eq!(t("category", "is_not", "Movies"), Tri::Yes);
+        assert_eq!(t("category", "is_not", "TV"), Tri::No);
+        assert_eq!(t("author", "contains", "author ann"), Tri::Yes);
+        assert_eq!(t("description", "regex", r"<b>desc\w+</b>"), Tri::Yes);
+        assert_eq!(t("description", "not_regex", "zzz"), Tri::Yes);
+        assert_eq!(t("link", "contains", "tracker.example/view/*"), Tri::Yes);
+        assert_eq!(t("link", "not_regex", r"/view/\d"), Tri::No);
+    }
+
+    #[test]
+    fn size_and_age_take_numbers() {
+        let a = art("t", "", Some(2 * GB));
+        let t = |f: &str, op: &str, v: &str, v2: &str| {
+            cond(json!({"field": f, "op": op, "value": v, "value2": v2})).eval(&a)
+        };
+        assert_eq!(t("size", "gt", "1 GB", ""), Tri::Yes);
+        assert_eq!(t("size", "gt", "2 GiB", ""), Tri::No, "gt is strict");
+        assert_eq!(t("size", "lt", "3 GB", ""), Tri::Yes);
+        assert_eq!(
+            t("size", "between", "2 GB", "2048 MB"),
+            Tri::Yes,
+            "inclusive"
+        );
+        assert_eq!(t("size", "between", "3 GB", "4 GB"), Tri::No);
+        // Dated two hours before `now`.
+        assert_eq!(t("age", "lt", "3", ""), Tri::Yes);
+        assert_eq!(t("age", "gt", "2h", ""), Tri::No);
+        assert_eq!(t("age", "between", "1", "1d"), Tri::Yes);
+    }
+
+    #[test]
+    fn groups_nest_and_combine() {
+        let tree = cond(json!({"match": "all", "rows": [
+            row("category", "is", "TV"),
+            {"match": "any", "rows": [row("title", "contains", "2160p"), row("title", "contains", "1080p")]},
+        ]}));
+        assert_eq!(tree.eval(&art("Show 1080p", "TV", None)), Tri::Yes);
+        assert_eq!(tree.eval(&art("Show 720p", "TV", None)), Tri::No);
+        assert_eq!(tree.eval(&art("Show 1080p", "Movies", None)), Tri::No);
+    }
+
+    #[test]
+    fn an_unknown_size_is_three_valued() {
+        let big = row("size", "gt", "1 GB");
+        let tv = row("category", "is", "TV");
+        let all = |a: &Value, b: &Value| cond(json!({"match": "all", "rows": [a, b]}));
+        let any = |a: &Value, b: &Value| cond(json!({"match": "any", "rows": [a, b]}));
+        let unknown = art("t", "TV", None);
+        let movie = art("t", "Movies", None);
+        assert_eq!(cond(big.clone()).eval(&unknown), Tri::Unknown);
+        assert_eq!(all(&tv, &big).eval(&unknown), Tri::Unknown);
+        assert_eq!(all(&tv, &big).eval(&movie), Tri::No, "a failure decides");
+        assert_eq!(any(&tv, &big).eval(&unknown), Tri::Yes, "a pass decides");
+        assert_eq!(any(&tv, &big).eval(&movie), Tri::Unknown);
+        assert_eq!(
+            any(&tv, &big).eval(&art("t", "Movies", Some(2 * GB))),
+            Tri::Yes
+        );
+    }
+
+    #[test]
+    fn a_size_range_is_inclusive_and_decide_says_when_to_recheck() {
+        let r = rule(json!({
+            "affectedFeeds": ["f"],
+            "conditions": {"rows": [
+                {"field": "size", "op": "between", "value": "1 GB", "value2": "8 GB"},
+            ]},
+        }));
+        let ok = |size| r.decide("f", &art("t", "", size));
+        assert_eq!(ok(Some(GB)).map(|v| v.recheck), Ok(false), "inclusive");
+        assert_eq!(ok(Some(8 * GB)).map(|v| v.recheck), Ok(false));
+        assert!(ok(Some(GB - 1)).is_err());
+        assert!(ok(Some(8 * GB + 1)).is_err());
+        assert_eq!(
+            ok(None).map(|v| v.recheck),
+            Ok(true),
+            "unknown is let through"
+        );
+        let msg = r
+            .check_size(&art("t", "", None), 12 * GB + 3 * GB / 10)
+            .unwrap_err();
+        assert_eq!(msg, "size 12.3 GB does not fit the rule's conditions");
+        assert!(r.check_size(&art("t", "", None), 2 * GB).is_ok());
+        // With OR, a size out of range can still be taken on another test.
+        let or = rule(
+            json!({"affectedFeeds": ["f"], "conditions": {"match": "any", "rows": [
+                {"field": "size", "op": "lt", "value": "1 GB"},
+                row("title", "contains", "remux"),
+            ]}}),
+        );
+        assert!(or.check_size(&art("Film.REMUX", "", None), 40 * GB).is_ok());
+        assert!(or.check_size(&art("Film", "", None), 40 * GB).is_err());
+    }
+
+    #[test]
+    fn the_conditions_reject_with_a_reason() {
+        let r = rule(
+            json!({"affectedFeeds": ["f"], "conditions": {"rows": [row("category", "is", "TV")]}}),
+        );
+        let why = r.decide("f", &art("t", "Movies", None)).unwrap_err();
+        assert!(why.starts_with("conditions"), "{why}");
+        assert!(r.decide("f", &art("t", "tv", None)).is_ok());
+    }
+
+    #[test]
+    fn sizes_read_in_every_spelling() {
+        assert_eq!(parse_size("700 MB"), Ok(700 << 20));
+        assert_eq!(parse_size("1.5 GiB"), Ok(3 * GB / 2));
+        assert_eq!(parse_size("1,5gb"), Ok(3 * GB / 2));
+        assert_eq!(parse_size("2048"), Ok(2048));
+        assert_eq!(parse_size(" 3 tb "), Ok(3 << 40));
+        assert!(parse_size("big").is_err());
+        assert!(parse_size("5 parsecs").is_err());
+        assert!(parse_size("").is_err());
+    }
+
+    #[test]
+    fn a_bad_condition_is_refused_at_save() {
+        let bad = |c: Value| Rule::from_json("r", &json!({ "conditions": c })).is_err();
+        assert!(bad(row("title", "regex", "(unclosed")));
+        assert!(bad(row("size", "gt", "lots")));
+        assert!(bad(row("size", "between", "")));
+        assert!(
+            bad(json!({"field": "size", "op": "between", "value": "5 GB", "value2": "1 GB"})),
+            "reversed"
+        );
+        assert!(bad(row("size", "contains", "1")), "a text op on a number");
+        assert!(bad(row("title", "gt", "1")), "a number op on text");
+        assert!(bad(row("colour", "is", "red")));
+        assert!(bad(row("title", "sounds_like", "red")));
+        assert!(bad(json!("title is x")), "not an object");
+        assert!(bad(json!({"match": "most", "rows": []})));
+        assert!(bad(json!({"rows": "none"})));
+
+        // Eight levels are allowed, nine are not.
+        let nest = |n: usize| {
+            let mut c = row("title", "contains", "x");
+            for _ in 0..n {
+                c = json!({"match": "all", "rows": [c]});
+            }
+            c
+        };
+        assert!(!bad(nest(8)));
+        assert!(bad(nest(9)));
+        let rows = |n: usize| {
+            (0..n)
+                .map(|_| row("title", "contains", "x"))
+                .collect::<Vec<_>>()
+        };
+        assert!(
+            bad(json!({ "rows": rows(100) })),
+            "101 nodes with the group"
+        );
+        assert!(!bad(json!({ "rows": rows(99) })));
+        // A rule built by hand is checked the same.
+        let r = Rule {
+            conditions: Some(Cond::Group {
+                any: false,
+                rows: vec![Cond::Test(Test {
+                    field: Field::Title,
+                    op: Op::Regex,
+                    value: "(".into(),
+                    value2: String::new(),
+                    n1: 0,
+                    n2: 0,
+                })],
+            }),
+            ..Rule::default()
+        };
+        assert!(r.check().is_err());
+    }
+
+    #[test]
+    fn empty_groups_are_dropped() {
+        let r = rule(json!({"conditions": {"match": "any", "rows": [{"rows": []}]}}));
+        assert_eq!(r.conditions, None);
+        let r = rule(json!({"conditions": {"rows": [{"rows": []}, row("title", "is", "x")]}}));
+        assert!(matches!(&r.conditions, Some(Cond::Group { rows, .. }) if rows.len() == 1));
+    }
+
+    #[test]
+    fn the_conditions_round_trip_and_are_absent_when_unset() {
+        let plain = rule(json!({"mustContain": "x", "affectedFeeds": ["u"]}));
+        let doc = plain.to_json();
+        assert!(doc.get("conditions").is_none(), "written only when set");
+        assert_eq!(Rule::from_json("r", &doc).unwrap(), plain);
+
+        let full = rule(json!({
+            "conditions": {"match": "any", "rows": [
+                row("category", "is", "TV"),
+                {"match": "all", "rows": [
+                    {"field": "size", "op": "between", "value": "700 MB", "value2": "1.5 GiB"},
+                    row("age", "lt", "12"),
+                ]},
+            ]},
+        }));
+        let doc = full.to_json();
+        assert_eq!(doc["conditions"]["match"], "any");
+        assert_eq!(doc["conditions"]["rows"][1]["rows"][0]["value"], "700 MB");
+        assert_eq!(Rule::from_json("r", &doc).unwrap(), full);
+        assert!(full.uses_size());
+        assert!(!plain.uses_size());
+    }
+
+    #[test]
+    fn a_qbittorrent_document_is_read_as_before() {
+        let r = rule(json!({
+            "enabled": true, "mustContain": "show", "useRegex": false,
+            "affectedFeeds": ["f"], "assignedCategory": "tv",
+        }));
+        assert!(r.conditions.is_none());
+        let v = r.decide("f", &art("The Show", "Whatever", None)).unwrap();
+        assert!(!v.recheck, "no size test, so an unknown size is no matter");
     }
 }

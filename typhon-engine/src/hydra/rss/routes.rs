@@ -514,6 +514,7 @@ async fn rename_rule(
 
 fn matching_json(state: &AppState, rule: &Rule) -> Value {
     let found = super::matching(state, rule);
+    let sized = rule.uses_size();
     let count: usize = found.iter().map(|(_, a)| a.len()).sum();
     let would: usize = found
         .iter()
@@ -527,7 +528,15 @@ fn matching_json(state: &AppState, rule: &Rule) -> Value {
             "id": f.id,
             "path": f.path,
             "name": super::name_of(&f.path),
-            "articles": arts.iter().map(|(a, t)| article_json(a, t)).collect::<Vec<_>>(),
+            "articles": arts.iter().map(|(a, t)| {
+                let mut j = article_json(a, t);
+                // The rule judges the size and the feed gives none: it matches
+                // for now, and is judged again on the torrent.
+                if sized && a.size <= 0 {
+                    j["size_unknown"] = json!(true);
+                }
+                j
+            }).collect::<Vec<_>>(),
         })).collect::<Vec<_>>(),
     })
 }

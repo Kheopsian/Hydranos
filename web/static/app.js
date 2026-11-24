@@ -13333,7 +13333,7 @@ function _rssRenderRules(rules) {
     body.innerHTML = rules.map((r, i) => `<tr>
         <td><input type="checkbox" ${r.enabled ? "checked" : ""} data-i="${Number(i)}" onchange="rssToggleRule(Number(this.dataset.i), this.checked)"></td>
         <td><strong>${esc(r.name)}</strong></td>
-        <td>${esc(r.mustContain || "")}${r.mustNotContain ? `<div class="sr-desc">${esc(t("not: {x}", { x: r.mustNotContain }))}</div>` : ""}</td>
+        <td>${esc(r.mustContain || "")}${r.mustNotContain ? `<div class="sr-desc">${esc(t("not: {x}", { x: r.mustNotContain }))}</div>` : ""}${_rssRuleSummary(r) ? `<div class="sr-desc">${esc(_rssRuleSummary(r))}</div>` : ""}</td>
         <td>${esc(r.assignedCategory || t("- none -"))}</td>
         <td>${esc((r.affectedFeeds || []).map(feedName).join(", "))}</td>
         <td>${esc(r.lastMatch ? new Date(r.lastMatch).toLocaleString() : t("never"))}</td>
@@ -13342,6 +13342,192 @@ function _rssRenderRules(rules) {
             <button class="btn-small" data-i="${Number(i)}" onclick="rssDeleteRule(Number(this.dataset.i))">${esc(t("Delete"))}</button>
         </td>
     </tr>`).join("");
+}
+
+// The conditions editor: a tree of groups (all of / any of) and rows
+// (field, operator, value). Built with the DOM API and read back from it, so
+// a value never goes through innerHTML.
+const _RSS_FIELDS = [
+    ["title", "Title", "text"], ["category", "Category", "text"], ["author", "Author", "text"],
+    ["description", "Description", "text"], ["link", "Link", "text"],
+    ["size", "Size", "size"], ["age", "Age", "age"],
+];
+const _RSS_TEXT_OPS = [
+    ["contains", "contains"], ["not_contains", "does not contain"], ["is", "is"], ["is_not", "is not"],
+    ["regex", "matches regex"], ["not_regex", "does not match regex"],
+];
+const _RSS_NUM_OPS = [["gt", "greater than"], ["lt", "less than"], ["between", "between"]];
+const _RSS_SIZE_UNITS = { b: 1, kb: 1024, kib: 1024, mb: 1048576, mib: 1048576, gb: 1073741824, gib: 1073741824, tb: 1099511627776, tib: 1099511627776 };
+
+function _rssEl(tag, cls, text) {
+    const el = document.createElement(tag);
+    if (cls) el.className = cls;
+    if (text != null) el.textContent = text;
+    return el;
+}
+
+function _rssSelect(cls, options, value) {
+    const sel = _rssEl("select", cls);
+    options.forEach(([v, label]) => {
+        const o = _rssEl("option", "", t(label));
+        o.value = v;
+        sel.appendChild(o);
+    });
+    if (value != null) sel.value = value;
+    return sel;
+}
+
+// "1.5 GiB" / "700 MB" / 2048 (bytes) -> [number, "MB"|"GB"|...]; "12h" / "2d" for ages.
+function _rssSplitNum(kind, raw) {
+    const s = String(raw == null ? "" : raw).trim();
+    if (kind === "age") {
+        const m = /^([\d.,]+)\s*([hd]?)$/i.exec(s);
+        return m ? [m[1], m[2].toLowerCase() === "d" ? "d" : "h"] : [s, "h"];
+    }
+    const m = /^([\d.,]+)\s*([a-z]*)$/i.exec(s);
+    if (!m) return [s, "MB"];
+    const mult = _RSS_SIZE_UNITS[m[2].toLowerCase() || "b"];
+    if (!mult) return [s, "MB"];
+    const bytes = parseFloat(m[1].replace(",", ".")) * mult;
+    if (m[2] && mult >= 1048576) return [m[1], m[2].toUpperCase().replace("IB", "B")];
+    // Plain bytes or KB: the nearest unit of the two the form offers.
+    const gb = bytes >= 1073741824 && bytes % 1073741824 === 0;
+    return [String(Math.round(bytes / (gb ? 1073741824 : 1048576) * 100) / 100), gb ? "GB" : "MB"];
+}
+
+function _rssValueSlot(kind, cls, raw) {
+    if (kind === "text") {
+        const inp = _rssEl("input", "rss-cr-v " + cls);
+        inp.type = "text";
+        inp.autocomplete = "off";
+        inp.placeholder = t("value");
+        inp.value = raw || "";
+        return inp;
+    }
+    const [n, u] = _rssSplitNum(kind, raw);
+    const wrap = _rssEl("span", "rss-size-input " + cls);
+    const inp = _rssEl("input", "rss-cr-n");
+    inp.type = "number";
+    inp.min = "0";
+    inp.step = "any";
+    inp.value = n;
+    wrap.appendChild(inp);
+    const units = kind === "age" ? [["h", "hours"], ["d", "days"]] : [["MB", "MB"], ["GB", "GB"], ["TB", "TB"]];
+    const sel = _rssSelect("rss-cr-u", units, u);
+    if (kind !== "age") Array.from(sel.options).forEach(o => { o.textContent = o.value; });
+    wrap.appendChild(sel);
+    return wrap;
+}
+
+function _rssSlotValue(kind, slot) {
+    if (kind === "text") return slot.value;
+    const n = slot.querySelector(".rss-cr-n").value.trim();
+    if (n === "") return "";
+    const u = slot.querySelector(".rss-cr-u").value;
+    return kind === "age" ? n + u : n + " " + u;
+}
+
+function _rssCondRow(r) {
+    r = r || {};
+    const row = _rssEl("div", "rss-cond-row");
+    const field = _rssSelect("rss-cr-field", _RSS_FIELDS.map(f => [f[0], f[1]]), r.field || "title");
+    const op = _rssEl("select", "rss-cr-op");
+    const vals = _rssEl("span", "rss-cr-vals");
+    const kindOf = () => (_RSS_FIELDS.find(f => f[0] === field.value) || _RSS_FIELDS[0])[2];
+    const fill = (opValue, v1, v2) => {
+        const kind = kindOf();
+        const ops = kind === "text" ? _RSS_TEXT_OPS : _RSS_NUM_OPS;
+        op.innerHTML = "";
+        ops.forEach(([v, label]) => {
+            const o = _rssEl("option", "", t(label));
+            o.value = v;
+            op.appendChild(o);
+        });
+        op.value = ops.some(o => o[0] === opValue) ? opValue : ops[0][0];
+        vals.innerHTML = "";
+        vals.appendChild(_rssValueSlot(kind, "rss-cr-1", v1));
+        if (op.value === "between") {
+            vals.appendChild(_rssEl("span", "sr-desc", t("and")));
+            vals.appendChild(_rssValueSlot(kind, "rss-cr-2", v2));
+        }
+    };
+    fill(r.op, r.value, r.value2);
+    field.addEventListener("change", () => fill("", "", ""));
+    op.addEventListener("change", () => {
+        const kind = kindOf();
+        const first = vals.querySelector(".rss-cr-1");
+        fill(op.value, first ? _rssSlotValue(kind, first) : "", "");
+    });
+    const rm = _rssEl("button", "btn-small", "×");
+    rm.type = "button";
+    rm.title = t("Remove");
+    rm.addEventListener("click", () => row.remove());
+    row.append(field, op, vals, rm);
+    return row;
+}
+
+function _rssCondGroup(g, root) {
+    g = g || {};
+    const box = _rssEl("div", "rss-cond-group");
+    const head = _rssEl("div", "rss-cg-head");
+    const match = _rssSelect("rss-cg-match", [["all", "All of these"], ["any", "Any of these"]],
+        g.match === "any" || g.match === "or" ? "any" : "all");
+    const rows = _rssEl("div", "rss-cg-rows");
+    const addRow = _rssEl("button", "btn-small", t("+ condition"));
+    addRow.type = "button";
+    addRow.addEventListener("click", () => rows.appendChild(_rssCondRow()));
+    const addGroup = _rssEl("button", "btn-small", t("+ group"));
+    addGroup.type = "button";
+    addGroup.addEventListener("click", () => rows.appendChild(_rssCondGroup({}, false)));
+    head.append(match, addRow, addGroup);
+    if (!root) {
+        const rm = _rssEl("button", "btn-small", "×");
+        rm.type = "button";
+        rm.title = t("Remove");
+        rm.addEventListener("click", () => box.remove());
+        head.appendChild(rm);
+    }
+    (g.rows || []).forEach(x => rows.appendChild(Array.isArray(x.rows) ? _rssCondGroup(x, false) : _rssCondRow(x)));
+    box.append(head, rows);
+    return box;
+}
+
+function _rssCondCollect(box) {
+    const rows = [];
+    Array.from(box.querySelector(":scope > .rss-cg-rows").children).forEach(el => {
+        if (el.classList.contains("rss-cond-group")) {
+            const g = _rssCondCollect(el);
+            if (g.rows.length) rows.push(g);
+            return;
+        }
+        const field = el.querySelector(".rss-cr-field").value;
+        const kind = (_RSS_FIELDS.find(f => f[0] === field) || _RSS_FIELDS[0])[2];
+        const op = el.querySelector(".rss-cr-op").value;
+        const s1 = el.querySelector(".rss-cr-1");
+        const s2 = el.querySelector(".rss-cr-2");
+        const value = s1 ? _rssSlotValue(kind, s1) : "";
+        const value2 = s2 ? _rssSlotValue(kind, s2) : "";
+        // An empty row says nothing; the server would refuse it, and nobody
+        // means "contains nothing".
+        if (value === "" || (op === "between" && value2 === "")) return;
+        const out = { field: field, op: op, value: value };
+        if (op === "between") out.value2 = value2;
+        rows.push(out);
+    });
+    return { match: box.querySelector(":scope > .rss-cg-head .rss-cg-match").value, rows: rows };
+}
+
+function _rssConditions() {
+    const root = document.querySelector("#rss-rule-conds > .rss-cond-group");
+    const g = root ? _rssCondCollect(root) : null;
+    return g && g.rows.length ? g : null;
+}
+
+// "3 conditions" for the rules table.
+function _rssRuleSummary(r) {
+    const count = g => (g.rows || []).reduce((n, x) => n + (Array.isArray(x.rows) ? count(x) : 1), 0);
+    const n = r.conditions ? count(r.conditions) : 0;
+    return !n ? "" : n === 1 ? t("1 condition") : t("{n} conditions", { n: n });
 }
 
 async function _rssShowRuleForm(r) {
@@ -13358,6 +13544,9 @@ async function _rssShowRuleForm(r) {
     c("rss-rule-regex", r && r.useRegex);
     c("rss-rule-smart", r && r.smartFilter);
     c("rss-rule-paused", r && r.addPaused);
+    const conds = document.getElementById("rss-rule-conds");
+    conds.innerHTML = "";
+    conds.appendChild(_rssCondGroup(r && r.conditions, true));
     await _rssFillCategories(document.getElementById("rss-rule-category"), r ? r.assignedCategory || "" : "");
     const chosen = new Set(r ? r.affectedFeeds || [] : []);
     const feeds = (_rssState && _rssState.feeds) || [];
@@ -13382,7 +13571,7 @@ function rssHideRuleForm() {
     _rssEditingRule = null;
 }
 
-// qBittorrent's rule document. lastMatch and previouslyMatchedEpisodes are
+// qBittorrent's rule document, plus conditions. lastMatch and previouslyMatchedEpisodes are
 // left out on purpose: the server keeps the stored ones.
 function _rssCollectRule() {
     const old = ((_rssState && _rssState.rules) || []).find(r => r.name === _rssEditingRule);
@@ -13399,6 +13588,9 @@ function _rssCollectRule() {
         assignedCategory: document.getElementById("rss-rule-category").value,
         savePath: document.getElementById("rss-rule-savepath").value.trim(),
         addPaused: document.getElementById("rss-rule-paused").checked,
+        // Hydranos's own key, always sent (null clears it): a qBittorrent
+        // client ignores it, and a save from one keeps the stored tree.
+        conditions: _rssConditions(),
     };
 }
 
@@ -13417,7 +13609,7 @@ async function rssPreviewRule() {
         box.innerHTML = (d.feeds || []).filter(f => f.articles.length).map(f => `
             <h4 style="margin:12px 0 4px">${esc(f.path)}</h4>
             <ul style="margin:0; padding-left:18px">${f.articles.slice(0, 50).map(a =>
-                `<li>${esc(a.title)}${a.taken ? ` <span class="sr-desc">(${esc(t("taken by {rule}", { rule: a.taken.rule }))})</span>` : a.read ? ` <span class="sr-desc">(${esc(t("read"))})</span>` : ""}</li>`).join("")}
+                `<li>${esc(a.title)}${a.size_unknown ? ` <span class="sr-desc">(${esc(t("size unknown"))})</span>` : ""}${a.taken ? ` <span class="sr-desc">(${esc(t("taken by {rule}", { rule: a.taken.rule }))})</span>` : a.read ? ` <span class="sr-desc">(${esc(t("read"))})</span>` : ""}</li>`).join("")}
             </ul>`).join("");
     } catch (e) {
         box.innerHTML = "";
