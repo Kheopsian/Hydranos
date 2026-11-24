@@ -512,6 +512,7 @@ async fn a_qbit_retry_lists_the_library_again_and_takes_a_new_mapping() {
             url: format!("http://{addr}"),
             username: "u".into(),
             password: "p".into(),
+            insecure: false,
         }),
         choices: crate::importer::Choices::default(),
     });
