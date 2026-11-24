@@ -773,7 +773,8 @@ function importWizard(opts) {
             <p class="modal-desc">${t("Point Hydranos at your qBittorrent WebUI. Hydranos seeds the data already on disk (completed torrents skip the hash-check), so nothing is re-downloaded.")}</p>
             <input type="text" id="qb-url" placeholder="http://qbittorrent:8080" style="width:100%;margin-bottom:8px" value="${esc(prefill && prefill.url || "")}">
             <input type="text" id="qb-user" placeholder="${t("Username")}" autocomplete="off" style="width:100%;margin-bottom:8px" value="${esc(prefill && prefill.user || "admin")}">
-            <input type="password" id="qb-pass" placeholder="${t("Password")}" autocomplete="off" style="width:100%" value="${esc(prefill && prefill.pass || "")}">
+            <input type="password" id="qb-pass" placeholder="${t("Password")}" autocomplete="off" style="width:100%;margin-bottom:8px" value="${esc(prefill && prefill.pass || "")}">
+            <label style="display:block" title="${t("For a WebUI on https:// with a self-signed certificate. Hydranos then accepts the certificate without checking it, for this import only.")}"><input type="checkbox" id="qb-insecure"${prefill && prefill.insecure ? " checked" : ""}> ${t("Trust this qBittorrent's certificate (self-signed HTTPS)")}</label>
             <p class="modal-desc" id="qb-msg" style="min-height:1em"></p>
             <div class="modal-actions">
                 <button id="qb-skip" class="btn-small">${t("Back")}</button>
@@ -786,6 +787,7 @@ function importWizard(opts) {
                 url: box.querySelector("#qb-url").value.trim(),
                 username: box.querySelector("#qb-user").value,
                 password: box.querySelector("#qb-pass").value,
+                insecure: box.querySelector("#qb-insecure").checked,
             };
             if (!creds.url) { msg.textContent = t("Enter the qBittorrent URL."); return; }
             msg.style.color = ""; msg.textContent = t("Connecting…");
@@ -870,7 +872,7 @@ function importWizard(opts) {
         };
         // The password comes back too: it only ever lived in this page, and
         // retyping it to fix one path mapping was the whole cost of "Back".
-        box.querySelector("#qb-back").onclick = () => stepCreds({ url: creds.url, user: creds.username, pass: creds.password });
+        box.querySelector("#qb-back").onclick = () => stepCreds({ url: creds.url, user: creds.username, pass: creds.password, insecure: creds.insecure });
         box.querySelector("#qb-go").onclick = async () => {
             const path_map = {};
             box.querySelectorAll(".qb-map").forEach(inp => {

@@ -596,6 +596,40 @@ async fn the_qbit_preview_refuses_an_empty_url_and_reports_an_unreachable_one() 
     );
 }
 
+/// A WebUI with a self-signed certificate: the preview says it is the
+/// certificate, and goes through once the body sets `insecure` (issue #94).
+#[tokio::test]
+async fn the_qbit_preview_names_an_untrusted_certificate_and_takes_insecure_to_trust_it() {
+    let s = st("imp-qb-tls");
+    let addr = crate::importer::self_signed_qbit::start().await;
+    let refused = super::post_qbit_import_preview(
+        State(s.state.clone()),
+        RawQuery(None),
+        keyed(KEY),
+        format!(r#"{{"url":"https://{addr}","username":"a","password":"b"}}"#),
+    )
+    .await;
+    assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+    let body = body_json(refused).await;
+    let msg = body["error"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("certificate this system does not trust"),
+        "got {body}"
+    );
+    assert!(msg.contains("\"insecure\": true"), "got {body}");
+
+    let trusted = super::post_qbit_import_preview(
+        State(s.state.clone()),
+        RawQuery(None),
+        keyed(KEY),
+        format!(r#"{{"url":"https://{addr}","username":"a","password":"b","insecure":true}}"#),
+    )
+    .await;
+    assert_eq!(trusted.status(), StatusCode::OK);
+    let body = body_json(trusted).await;
+    assert_eq!(body["total"], 1, "got {body}");
+}
+
 /// The overview's space on disk is `null` until the link scanner has
 /// counted, never a zero, then the count with its time.
 #[tokio::test]
