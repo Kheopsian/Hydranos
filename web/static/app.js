@@ -8809,9 +8809,6 @@ function _openHoardSSE() {
 // crossed the line the page was filtered on, ask for the page again now rather
 // than at the next poll. Coalesced, and never more than one a second: a burst
 // of crossings is one request.
-function _hoardWantsState(m) {
-    return _STATUS_TO_STATE[m.status];
-}
 let _hoardEdgeMemo;   // the page's worst row, found once per stream frame
 // The stream carries neither name, category, tracker nor tags, so a match
 // against the state alone says nothing once any other filter is on: every
@@ -8831,8 +8828,12 @@ function _hoardJoins(m) {
     // all the time (every seeder whose counters move), and asking each time
     // would walk the library every second; the poll covers that case.
     if (s && _hoardAllTorrents.length < HOARD_RENDER_LIMIT && _hoardOnlyStateFilter()) {
+        // The engine's status is all a frame says, and it cannot tell a seed-only
+        // torrent (status 2) from a downloading one, nor a stopped row from a
+        // queued one (status 0). Only what it can tell counts as a join; the
+        // rest arrives with the poll.
         if (s === "seeding") return m.status === 3 && m.checking_progress == null ? 1 : 0;
-        if (s[0] !== "_") return (m.checking_progress == null ? _hoardWantsState(m) === s : s === "checking_files") ? 1 : 0;
+        if (s === "checking_files") return m.checking_progress != null ? 1 : 0;
     }
     // Sorted on a rate: a torrent faster than the slowest row on a full page
     // belongs on it.
@@ -8852,11 +8853,16 @@ function _hoardJoins(m) {
     }
     return 0;
 }
+// Judged on the state the row would have after the frame, not on the raw
+// status: a sending seed-only row (status 2) is still seeding, and a stopped
+// or queued one (status 0) is still what it was.
 function _hoardLeaves(row, m) {
     const s = _hoardStateFilter;
-    if (s === "seeding") return m.status !== 3;
-    if (s && s[0] !== "_" && m.checking_progress == null) return _hoardWantsState(m) !== s;
-    return false;
+    if (!s || s[0] === "_") return false;
+    if (m.checking_progress != null) return s !== "checking_files";
+    const now = _stateOf(row, m.status);
+    if (s === "seeding") return now !== "seeding" && now !== "seed_only";
+    return now !== s;
 }
 // The engine says who serves, with a hold of a few seconds so a trickle does
 // not make a torrent blink. The Actively Seeding list and its chip follow it

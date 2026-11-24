@@ -5,7 +5,9 @@ const fs = require("fs");
 const path = require("path");
 const assert = require("assert");
 const src = fs.readFileSync(path.join(__dirname, "..", "static", "app.js"), "utf8");
-const from = src.indexOf("function _hoardWantsState(");
+const from = src.indexOf("let _hoardEdgeMemo;");
+const sFrom = src.indexOf("function _stateOf(");
+const sTo = src.indexOf("\n}\n", sFrom) + 3;
 const to = src.indexOf("let _hoardMembershipTimer");
 assert.ok(from > 0 && to > from, "membership helpers not found in app.js");
 const make = (state, sort, rows, other = {}) => new Function("st", "sort", "rows", "other", `
@@ -15,6 +17,7 @@ const make = (state, sort, rows, other = {}) => new Function("st", "sort", "rows
     const _STATUS_TO_STATE = { 0: "paused", 1: "checking_files", 2: "downloading", 3: "seeding" };
     const HOARD_RENDER_LIMIT = 2;
     let _hoardStateFilter = st, _hoardSortCol = sort, _hoardSortAsc = false, _hoardAllTorrents = rows;
+    ${src.slice(sFrom, sTo)}
     ${src.slice(from, to)}
     return { _hoardJoins, _hoardLeaves };`)(state, sort, rows, other);
 
@@ -29,8 +32,29 @@ assert.ok(!h._hoardJoins({ status: 3, checking_progress: null }),
     "on a full page an off-page seeder is every frame, not a crossing");
 
 h = make("downloading", "added_time", []);
-assert.ok(h._hoardJoins({ status: 2, checking_progress: null }));
-assert.ok(h._hoardLeaves({}, { status: 3, checking_progress: null }));
+assert.ok(h._hoardLeaves({ state: "downloading" }, { status: 3, checking_progress: null }), "a finished download leaves Downloading");
+assert.ok(!h._hoardLeaves({ state: "downloading" }, { status: 2, checking_progress: null }));
+
+// The frame carries a status, not a state. A sending seed-only torrent runs as
+// status 2, and a stopped or queued one reads 0: neither may count as a
+// crossing, on the page or off it, or the page is asked for every second.
+h = make("seeding", "added_time", [{}]);
+assert.ok(!h._hoardLeaves({ state: "seed_only" }, { status: 2, checking_progress: null }), "seed-only sending stays in Seeding");
+assert.ok(!h._hoardLeaves({ state: "seeding" }, { status: 3, checking_progress: null }));
+assert.ok(h._hoardLeaves({ state: "seeding" }, { status: 2, checking_progress: null }), "a seeder that began downloading leaves");
+h = make("downloading", "added_time", [{}]);
+assert.ok(!h._hoardJoins({ status: 2, checking_progress: null }), "off the page, status 2 could be seed-only");
+assert.ok(h._hoardLeaves({ state: "seed_only" }, { status: 3, checking_progress: null }) === true,
+    "a seed-only row is not in Downloading, whatever its status says");
+for (const st of ["stopped", "queued"]) {
+    h = make(st, "added_time", [{}]);
+    assert.ok(!h._hoardLeaves({ state: st }, { status: 0, checking_progress: null }), st + " row at status 0 stays");
+    assert.ok(!h._hoardJoins({ status: 0, checking_progress: null }), "status 0 is no join for " + st);
+}
+h = make("checking_files", "added_time", [{}]);
+assert.strictEqual(h._hoardJoins({ status: 1, checking_progress: 0.2 }), 1, "a started check joins Checking");
+assert.ok(h._hoardLeaves({ state: "checking_files" }, { status: 3, checking_progress: null }), "a finished check leaves");
+assert.ok(!h._hoardLeaves({ state: "checking_files" }, { status: 1, checking_progress: 0.5 }));
 
 h = make("", "upload_rate", [{ upload_rate: 10 }, { upload_rate: 50 }]);
 assert.ok(h._hoardJoins({ upload_rate: 99 }), "faster than the slowest row of a full page");
