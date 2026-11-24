@@ -3399,7 +3399,18 @@ let _hoardPageBusy = false;
 // Row figures move over SSE (stats_snapshot) and adds/removes arrive as their
 // own events, so re-running a 300k scan on every poll bought nothing and kept
 // the server scanning continuously.
-const HOARD_REFRESH_MS = 20000;
+// A list whose membership or order follows numbers that move every second
+// (a state filter, or a sort on a rate) is asked for again quickly, so rows
+// enter and leave when they should instead of up to 20 s late. Any other list
+// only changes through add/remove events, so it can wait.
+const HOARD_REFRESH_MS = 5000;
+const HOARD_REFRESH_LIVE_MS = 1500;
+const _HOARD_LIVE_SORTS = new Set(["upload_rate", "download_rate", "num_peers", "ratio",
+    "total_upload", "total_download", "progress", "eta", "state", "uploaded", "downloaded"]);
+function _hoardRefreshMs() {
+    return (_hoardStateFilter || _HOARD_LIVE_SORTS.has(_hoardSortCol))
+        ? HOARD_REFRESH_LIVE_MS : HOARD_REFRESH_MS;
+}
 let _hoardInFlightQuery = "";
 let _hoardLastFetchAt = 0;
 
@@ -3451,7 +3462,7 @@ async function fetchHoardPage(force) {
     if (_hoardPageBusy && qs === _hoardInFlightQuery) return;
     if (_hoardPageBusy && !force) return;
     // Background refreshes are rate limited; anything the user did is not.
-    if (!force && Date.now() - _hoardLastFetchAt < HOARD_REFRESH_MS) return;
+    if (!force && Date.now() - _hoardLastFetchAt < _hoardRefreshMs()) return;
 
     _hoardPageBusy = true;
     _hoardInFlightQuery = qs;
@@ -3483,6 +3494,10 @@ async function _fetchHoardPageInner(qs) {
     _hoardServerFiltered = d.filtered || 0;
     if (d.facets) _hoardFacets = d.facets;
     const rows = Array.isArray(d.rows) ? d.rows : [];
+    // The server chose these rows for the current filter. Between pages the
+    // figures move over SSE; a row must not leave on its own because its rate
+    // touched 0 for a tick, it leaves with the next page.
+    for (const r of rows) r._pg = true;
     _hoardAllTorrents = rows;
     _hydMap = null;
     // Chips and rows in the same frame. The chips used to follow a pins round
@@ -4412,7 +4427,7 @@ function _hoardMatches(t, search, skip) {
         // Seed only serves what it holds, so it counts as seeding here too,
         // matching the server's filter and the chip count.
         const seeding = t.state === "seeding" || t.state === "seed_only";
-        if (s === "__active__") { if (!(seeding && t.upload_rate > 0)) return false; }
+        if (s === "__active__") { if (!t._pg && !(seeding && t.upload_rate > 0)) return false; }
         else if (s === "seeding") { if (!seeding) return false; }
         else if (s === "__tracker_err__") { if (!t.tracker_error) return false; }
         else if (s === "__error__") { if (!t.torrent_error) return false; }
@@ -8709,9 +8724,17 @@ function _openHoardSSE() {
                 byHash.set(row.info_hash, row);
             }
             let touched = 0;
+            let membership = false;
+            _hoardEdgeMemo = undefined;
             for (const m of data.torrents) {
                 const t = byHash.get(m.info_hash);
-                if (!t) continue;
+                if (!t) {
+                    // A torrent this page does not hold has just started to
+                    // match what the page was asked for.
+                    if (!membership && _hoardJoins(m)) membership = true;
+                    continue;
+                }
+                if (!membership && _hoardLeaves(t, m)) membership = true;
                 // A row under a check keeps saying so: the engine's status of a
                 // stopped torrent being checked is still "stopped".
                 // The stream says how far a check has got (null when none
@@ -8735,6 +8758,7 @@ function _openHoardSSE() {
                 touched++;
             }
             if (touched > 0) _scheduleHoardRender();
+            if (membership) _scheduleHoardMembership();
         } else if (type === "torrent_removed" && data.info_hash) {
             // Same stream, same trap: removing the race copy must not drop
             // the hoard row of the same hash.
@@ -8758,6 +8782,56 @@ function _openHoardSSE() {
             }, 3000);
         }
     };
+}
+
+// Who is on the page follows the numbers, so when the stream says a torrent
+// crossed the line the page was filtered on, ask for the page again now rather
+// than at the next poll. Coalesced, and never more than one a second: a burst
+// of crossings is one request.
+function _hoardWantsState(m) {
+    return _STATUS_TO_STATE[m.status];
+}
+let _hoardEdgeMemo;   // the page's worst row, found once per stream frame
+function _hoardJoins(m) {
+    const s = _hoardStateFilter;
+    if (s === "__active__") return m.status === 3 && m.upload_rate > 0;
+    if (s === "seeding") return m.status === 3 && m.checking_progress == null;
+    if (s && s[0] !== "_") return m.checking_progress == null ? _hoardWantsState(m) === s : s === "checking_files";
+    // Sorted on a rate: a torrent faster than the slowest row on a full page
+    // belongs on it.
+    if ((_hoardSortCol === "upload_rate" || _hoardSortCol === "download_rate")
+            && _hoardAllTorrents.length >= HOARD_RENDER_LIMIT) {
+        const key = _hoardSortCol;
+        const v = m[key] || 0;
+        if (_hoardEdgeMemo === undefined) {
+            let edge = null;
+            for (const r of _hoardAllTorrents) {
+                const x = r[key] || 0;
+                if (edge === null || (_hoardSortAsc ? x > edge : x < edge)) edge = x;
+            }
+            _hoardEdgeMemo = edge;
+        }
+        return _hoardSortAsc ? v < _hoardEdgeMemo : v > _hoardEdgeMemo;
+    }
+    return false;
+}
+function _hoardLeaves(row, m) {
+    const s = _hoardStateFilter;
+    if (s === "__active__") return !(m.status === 3 && m.upload_rate > 0);
+    if (s === "seeding") return m.status !== 3;
+    if (s && s[0] !== "_" && m.checking_progress == null) return _hoardWantsState(m) !== s;
+    return false;
+}
+let _hoardMembershipTimer = null;
+let _hoardMembershipAt = 0;
+function _scheduleHoardMembership() {
+    if (_hoardMembershipTimer || !_hoardTabVisible()) return;
+    const wait = Math.max(150, 1000 - (Date.now() - _hoardMembershipAt));
+    _hoardMembershipTimer = setTimeout(() => {
+        _hoardMembershipTimer = null;
+        _hoardMembershipAt = Date.now();
+        fetchHoardPage(true);
+    }, wait);
 }
 
 let _hoardRenderScheduled = false;
