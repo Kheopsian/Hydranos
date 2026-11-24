@@ -15314,12 +15314,35 @@ fn import_begin(state: &AppState) -> Result<(String, Arc<crate::importer::Progre
     let id = format!("imp-{nanos:020}");
     let progress = Arc::new(crate::importer::Progress::default());
     progress.set_phase("connect");
-    state
-        .imports
-        .lock()
-        .unwrap()
-        .insert(id.clone(), progress.clone());
+    let mut jobs = state.imports.lock().unwrap();
+    jobs.insert(id.clone(), progress.clone());
+    prune_imports(&mut jobs);
     Ok((id, progress))
+}
+
+/// How many import jobs are kept, the newest included. Only the newest is
+/// ever read (status, events, retry); the few before it are there for a
+/// debugger, not for the UI.
+const IMPORTS_KEPT: usize = 3;
+
+/// Drop the finished jobs beyond the newest `IMPORTS_KEPT`, and the retry kit
+/// of every job but the newest: a retry only ever takes the newest job's kit,
+/// so an older one is a qBittorrent password nothing can use. Without this,
+/// every job and its kit stayed in memory for the life of the process.
+fn prune_imports(jobs: &mut std::collections::HashMap<String, Arc<crate::importer::Progress>>) {
+    // Ids are `imp-<nanos>`: newest first is the reverse order.
+    let mut ids: Vec<String> = jobs.keys().cloned().collect();
+    ids.sort_unstable_by(|a, b| b.cmp(a));
+    for (rank, id) in ids.iter().enumerate().skip(1) {
+        let job = &jobs[id];
+        if job.running() {
+            continue;
+        }
+        job.retry.lock().unwrap().take();
+        if rank >= IMPORTS_KEPT {
+            jobs.remove(id);
+        }
+    }
 }
 
 /// The engine that receives an imported library: the hoard. A takeover is a
