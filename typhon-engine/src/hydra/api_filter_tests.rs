@@ -302,3 +302,34 @@ async fn adding_the_same_torrent_twice_to_one_engine_is_refused() {
     );
     assert_eq!(race.manager.count(), 1);
 }
+
+/// Actively Seeding is the engine's own set (who uploaded within the hold), not
+/// the rate of the last second: the list, its count and its chip all read it,
+/// so a trickle does not make a row blink and the three cannot disagree.
+#[tokio::test]
+async fn actively_seeding_follows_the_engines_hold_not_the_last_second() {
+    let s = st("f-active-hold");
+    let manager = s.engines.get("race").expect("engine").manager.clone();
+    let (ih, _) = manager
+        .add_torrent_bytes(&torrent_bytes("alpha"), "/tmp", false, false)
+        .expect("added");
+    // A seeder, whatever its files: the filter counts seeding states only.
+    manager.set_seed_only(&ih, true).expect("seed only");
+    let now = std::time::Instant::now();
+    let at = |n: u64| now + std::time::Duration::from_secs(n);
+
+    // Its rate is zero, yet it uploaded two seconds ago: still active.
+    manager.refresh_active(&[ih], now);
+    manager.refresh_active(&[], at(2));
+    let v = engine_page_value(&s.state, "race", "state=__active__&facets=1").await;
+    assert_eq!(v["filtered"], serde_json::json!(1), "inside the hold: {v}");
+    assert_eq!(v["facets"]["active"], serde_json::json!(1), "the chip agrees: {v}");
+    assert_eq!(rows(&v).len(), 1, "and so do the rows: {v}");
+
+    // Past the hold it leaves, in the list and in the chip at once.
+    manager.refresh_active(&[], at(7));
+    let v = engine_page_value(&s.state, "race", "state=__active__&facets=1").await;
+    assert_eq!(v["filtered"], serde_json::json!(0), "past the hold: {v}");
+    assert_eq!(v["facets"]["active"], serde_json::json!(0), "{v}");
+    assert!(rows(&v).is_empty(), "{v}");
+}

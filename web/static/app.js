@@ -8633,6 +8633,10 @@ function _openHoardSSE() {
             try { _renderHoardStatsHeader(data); _hoardStatsPainted = true; } catch (_) {}
             return;
         }
+        if (type === "facets_snapshot") {
+            if (data.mode === "hoard") _applyFacets(data.facets);
+            return;
+        }
         if (type === "active_changed") {
             if (data.mode === "hoard") _applyActiveChanged(data);
             return;
@@ -8846,14 +8850,10 @@ function _hoardLeaves(row, m) {
 // not make a torrent blink. The Actively Seeding list and its chip follow it
 // directly: no request, and the chip, the count and the rows are one figure.
 function _applyActiveChanged(d) {
-    const count = Number(d.count) || 0;
-    const plain = _hoardOnlyStateFilter();
-    // The chip counts the whole library only while nothing else narrows it.
-    if (plain && _hoardFacets) {
-        _hoardFacets.active = count;
-        try { _renderHoardCounts(); } catch (_) {}
-    }
-    if (_hoardStateFilter !== "__active__" || !plain || _hoardPageApplied === 0) return;
+    // The chip and the count come with facets_snapshot, summed over every
+    // engine of the role and every node. This event is one engine's: it only
+    // moves rows.
+    if (_hoardStateFilter !== "__active__" || !_hoardOnlyStateFilter() || _hoardPageApplied === 0) return;
     const gone = new Set((d.removed || []).filter(h => h));
     const rows = new Map();
     for (const r of (d.added || [])) {
@@ -8871,9 +8871,35 @@ function _applyActiveChanged(d) {
     }
     for (const r of rows.values()) next.push(r);
     _hoardAllTorrents = next;
-    _hoardServerFiltered = count;
     // More serving than a page holds: the page decides which rows lead.
-    if (count > HOARD_RENDER_LIMIT) _scheduleHoardMembership(HOARD_REFRESH_LIVE_MS);
+    if (next.length > HOARD_RENDER_LIMIT) _scheduleHoardMembership(HOARD_REFRESH_LIVE_MS);
+    _scheduleHoardRender();
+}
+
+// The chips, counted by the server for the whole library and pushed when a
+// figure moves. State chips ignore the state filter, so they are right under
+// any filter that is only a state; the other families are counted with the
+// state applied, so they are taken only when no state is chosen either. With a
+// search, a category or a tracker on, the numbers belong to that narrower list
+// and come with the page.
+const _HOARD_STATE_FACETS = ["all", "active", "tracker_error", "torrent_error", "pinned", "check_waiting", "state"];
+function _applyFacets(f) {
+    if (!f || !_hoardFacets || !_hoardOnlyStateFilter()) return;
+    if (_hoardStateFilter === "") _hoardFacets = f;
+    else for (const k of _HOARD_STATE_FACETS) if (k in f) _hoardFacets[k] = f[k];
+    // The count beside the search box says how many the filter keeps.
+    const st = _hoardStateFilter;
+    const byState = f.state || {};
+    const kept = st === "" ? f.all
+        : st === "__active__" ? f.active
+        : st === "seeding" ? (byState.seeding || 0) + (byState.seed_only || 0)
+        : st === "__tracker_err__" ? f.tracker_error
+        : st === "__error__" ? f.torrent_error
+        : st === "__pinned__" ? f.pinned
+        : st[0] !== "_" ? (byState[st] || 0) : null;
+    if (kept != null) _hoardServerFiltered = kept;
+    if (f.all != null) _hoardServerTotal = f.all;
+    try { _renderHoardCounts(); } catch (_) {}
     _scheduleHoardRender();
 }
 

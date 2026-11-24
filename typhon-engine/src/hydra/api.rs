@@ -3863,7 +3863,6 @@ pub(crate) async fn engine_page_value(
             let core = typhon_engine::rpc::dispatch::torrent_core(t);
             let f = facts.get(&t.info_hash);
             let row_state = crate::row::derive_state_static(core.state, f.user_paused);
-            let upload_rate = t.upload_rate.get() as i64;
 
             let tracker_id: u16 = {
                 let trackers = t.live_trackers.read();
@@ -7339,6 +7338,47 @@ async fn stream_events(
                             Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
                             Err(_) => return,
                         },
+                    }
+                }
+            });
+        }
+        // The chips of the list, counted once for the library and pushed when a
+        // figure moves. The page used to learn them by asking for a page, so
+        // they trailed the rows by a poll. Counted by the page's own function
+        // (limit 1, no filter): one definition of every chip, fleet included.
+        // Kept off the status tick so a slow count never holds the header,
+        // and spaced by what it costs: never under a second, and at least ten
+        // times the time it took, so a very large library is not walked
+        // continuously.
+        if state.engines.get("hoard").is_some() {
+            let state = state.clone();
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                let mut last = String::new();
+                let mut wait = std::time::Duration::from_secs(1);
+                loop {
+                    tokio::time::sleep(wait).await;
+                    if tx.is_closed() {
+                        return;
+                    }
+                    let started = std::time::Instant::now();
+                    let page = fleet_page(&state, "hoard", "limit=1&facets=1").await;
+                    wait = (started.elapsed() * 10).max(std::time::Duration::from_secs(1));
+                    let Some(facets) = page.get("facets").filter(|f| !f.is_null()) else {
+                        continue;
+                    };
+                    let text = facets.to_string();
+                    if text == last {
+                        continue;
+                    }
+                    let frame = serde_json::json!({
+                        "event": "facets_snapshot",
+                        "data": {"mode": "hoard", "facets": facets},
+                    });
+                    // A frame the page cannot take is dropped and sent again
+                    // next round: it is a whole figure, not a delta.
+                    if tx.try_send(frame).is_ok() {
+                        last = text;
                     }
                 }
             });

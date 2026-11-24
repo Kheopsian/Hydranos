@@ -132,3 +132,111 @@ async fn a_page_that_reads_again_gets_every_removal_and_the_latest_figures() {
     assert!(saw_removal, "the removal reached the page");
     assert!(saw_last, "the latest figures reached the page");
 }
+
+async fn read_until(
+    body: &mut (impl futures::Stream<Item = Result<axum::body::Bytes, axum::Error>> + Unpin),
+    wanted: &[&str],
+    secs: u64,
+) -> String {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(secs);
+    let mut text = String::new();
+    while !wanted.iter().all(|w| text.contains(w)) && tokio::time::Instant::now() < deadline {
+        let Ok(Some(Ok(chunk))) = tokio::time::timeout_at(deadline, body.next()).await else {
+            break;
+        };
+        text.push_str(&String::from_utf8_lossy(&chunk));
+    }
+    text
+}
+
+/// ⭐ Who started to serve reaches the page with its row, and who stopped as a
+/// hash, so the Actively Seeding list needs no request to follow.
+#[tokio::test]
+async fn the_page_is_told_who_started_and_who_stopped_serving() {
+    let s = state_from("sse-active", &format!("[daemon]
+api_key = \"{KEY}\"
+"));
+    let engine = s.state.engines.get("hoard").expect("hoard engine");
+    let (ih, _) = engine
+        .manager
+        .add_torrent_bytes(&sse_torrent("served"), "/tmp", true, true)
+        .expect("added");
+    let hash = typhon_engine::torrent::hex_encode(&ih);
+    let resp = stream_events(
+        State(s.state.clone()),
+        RawQuery(Some("hydrate=0".into())),
+        keyed(KEY),
+    )
+    .await;
+    let mut body = resp.into_body().into_data_stream();
+    // The first status frame leaves before the relays exist; the second is
+    // sent by the live loop, after they are subscribed.
+    read_until(&mut body, &["\"status_snapshot\""], 5).await;
+    read_until(&mut body, &["\"status_snapshot\""], 5).await;
+
+    let gone = "cd".repeat(20);
+    engine
+        .manager
+        .bus()
+        .publish(typhon_engine::rpc::events::Event::ActiveChanged {
+            added: vec![hash.clone()],
+            removed: vec![gone.clone()],
+            count: 1,
+        });
+    let text = read_until(&mut body, &["active_changed", &gone], 5).await;
+    assert!(text.contains("active_changed"), "no event in: {text}");
+    assert!(text.contains(&gone), "the removal is named: {text}");
+    assert!(
+        text.contains(&format!("\"info_hash\":\"{hash}\"")),
+        "the joiner comes with its row: {text}"
+    );
+    assert!(text.contains("\"state\":\""), "a built row, with a state: {text}");
+}
+
+/// ⭐ The chips of the list are pushed, counted by the page's own function, so
+/// they move with the rows instead of a poll later.
+#[tokio::test]
+async fn the_chips_are_pushed_and_move_when_a_figure_moves() {
+    let s = state_from("sse-facets", &format!("[daemon]
+api_key = \"{KEY}\"
+"));
+    let engine = s.state.engines.get("hoard").expect("hoard engine");
+    engine
+        .manager
+        .add_torrent_bytes(&sse_torrent("first"), "/tmp", true, true)
+        .expect("added");
+    let resp = stream_events(
+        State(s.state.clone()),
+        RawQuery(Some("hydrate=0".into())),
+        keyed(KEY),
+    )
+    .await;
+    let mut body = resp.into_body().into_data_stream();
+    let text = read_until(&mut body, &["facets_snapshot"], 6).await;
+    assert!(text.contains("facets_snapshot"), "no chips pushed: {text}");
+    assert!(text.contains("\"all\":1"), "one torrent counted: {text}");
+
+    engine
+        .manager
+        .add_torrent_bytes(&sse_torrent("second"), "/tmp", true, true)
+        .expect("added");
+    let text = read_until(&mut body, &["\"all\":2"], 8).await;
+    assert!(text.contains("\"all\":2"), "the new count is pushed: {text}");
+}
+
+fn sse_torrent(name: &str) -> Vec<u8> {
+    let mut info = Vec::new();
+    info.extend_from_slice(format!("d6:lengthi16384e4:name{}:{name}", name.len()).as_bytes());
+    info.extend_from_slice(b"12:piece lengthi16384e6:pieces20:");
+    let mut piece = [0xABu8; 20];
+    piece[0] = name.as_bytes()[0];
+    piece[1] = name.len() as u8;
+    piece[2] = name.as_bytes()[name.len() - 1];
+    info.extend_from_slice(&piece);
+    info.push(b'e');
+    let mut out = Vec::new();
+    out.extend_from_slice(b"d8:announce32:https://tracker.example/announce4:info");
+    out.extend_from_slice(&info);
+    out.push(b'e');
+    out
+}

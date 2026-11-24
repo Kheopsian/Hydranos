@@ -2605,7 +2605,8 @@ impl TorrentManager {
     }
 
     /// Fold this tick's uploaders into the active set and say what changed.
-    fn refresh_active(&self, uploaders: &[InfoHash], now: std::time::Instant) {
+    /// Public so a test can drive the clock; `update_rates` is the one caller.
+    pub fn refresh_active(&self, uploaders: &[InfoHash], now: std::time::Instant) {
         let (added, removed, count, snapshot) = {
             let mut a = self.active.lock().unwrap();
             let mut added = Vec::new();
