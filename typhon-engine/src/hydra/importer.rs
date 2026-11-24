@@ -846,8 +846,20 @@ impl Candidate {
     }
 }
 
+/// `name` inside `dir`, written the way `dir` is: `C:\dl` gives `C:\dl\name`
+/// and `/dl` gives `/dl/name`, whatever this node runs on. `dir` is a path in
+/// the source client's view, which may be another platform's.
 fn join(dir: &str, name: &str) -> String {
-    Path::new(dir).join(name).to_string_lossy().into_owned()
+    if dir.is_empty() {
+        return name.to_string();
+    }
+    // qBittorrent on Windows may report `C:/dl`: keep its `/` then.
+    let sep = if windows_style(dir) && (dir.contains('\\') || !dir.contains('/')) {
+        '\\'
+    } else {
+        '/'
+    };
+    format!("{}{sep}{name}", dir.trim_end_matches(separators(dir)))
 }
 
 /// A category the import creates, and where it points.
@@ -980,6 +992,63 @@ fn prefix_len(p: &str, dir: &str) -> Option<usize> {
         .then_some(dir.len())
 }
 
+/// Whether `p` starts at a root (`/data`, `\\server`), and its components,
+/// split on its own separators (see [`separators`]). Empty and `.`
+/// components are dropped, so `/data//films/` and `/data/films` are alike.
+fn components(p: &str) -> (bool, Vec<&str>) {
+    let seps = separators(p);
+    let parts = p
+        .split(seps)
+        .filter(|c| !c.is_empty() && *c != ".")
+        .collect();
+    (p.starts_with(seps), parts)
+}
+
+/// One component against another: case is ignored between Windows-style
+/// paths, as in [`under`].
+fn same_component(a: &str, b: &str, windows: bool) -> bool {
+    a == b || (windows && a.to_lowercase() == b.to_lowercase())
+}
+
+/// `p` is `dir` or inside it, compared component by component on the rules
+/// of the paths themselves, not of this node. An empty `dir` holds anything.
+fn within(p: &str, dir: &str) -> bool {
+    let windows = windows_style(p) && windows_style(dir);
+    let (p_root, p_parts) = components(p);
+    let (d_root, d_parts) = components(dir);
+    if d_parts.is_empty() && !d_root {
+        return true;
+    }
+    p_root == d_root
+        && d_parts.len() <= p_parts.len()
+        && d_parts
+            .iter()
+            .zip(&p_parts)
+            .all(|(d, c)| same_component(c, d, windows))
+}
+
+/// `a` and `b` name the same place (see [`within`]).
+fn same_path(a: &str, b: &str) -> bool {
+    within(a, b) && within(b, a)
+}
+
+/// The folder holding `p`'s last component and that component, split on
+/// `p`'s own separators. None when `p` is a bare name.
+fn split_last(p: &str) -> Option<(&str, &str)> {
+    let seps = separators(p);
+    let trimmed = p.trim_end_matches(seps);
+    let i = trimmed.rfind(seps)?;
+    let last = &trimmed[i + 1..];
+    let dir = trimmed[..i].trim_end_matches(seps);
+    // A root keeps its separator: the folder of `/x` is `/`, of `C:\x` `C:\`.
+    let dir = if dir.is_empty() || (windows_style(dir) && dir.len() == 2) {
+        &trimmed[..=i]
+    } else {
+        dir
+    };
+    Some((dir, last))
+}
+
 /// Rewrite a source-side path to what Hydranos sees, by the longest mapped
 /// folder it is under. Unmapped paths come back unchanged. The part below the
 /// folder takes the separator of the folder it is mapped to: `C:\dl\films\x`
@@ -1024,8 +1093,10 @@ pub enum Placement {
 /// file's for a single-file torrent; `multi_file` as the info dict says;
 /// `lone_file` the path (`name/...`) of a folder torrent's only file.
 ///
-/// Paths are compared by component, so a doubled or trailing `/` does not
-/// make the same place look like another one (nor, on Windows, a `\`).
+/// Paths are compared by component, on the separators and case rules of the
+/// paths themselves rather than of this node: a doubled or trailing `/` does
+/// not make the same place look like another one, nor, in a Windows-style
+/// path, a `\` or a capital.
 pub fn placement(
     save_path: &str,
     content: &str,
@@ -1033,29 +1104,23 @@ pub fn placement(
     multi_file: bool,
     lone_file: Option<&str>,
 ) -> Placement {
-    let path = Path::new(content);
-    if content.is_empty() || path == Path::new(save_path).join(name) {
+    if content.is_empty() || same_path(content, &join(save_path, name)) {
         return Placement::AsNamed;
     }
     // qBittorrent names the file, not the folder, of a torrent whose `files`
     // list has one entry (`save/Pack/Movie.mkv`). That file exactly: renamed,
     // it is not where Hydranos will look for it.
-    if lone_file.is_some_and(|f| path == Path::new(save_path).join(f)) {
+    if lone_file.is_some_and(|f| same_path(content, &join(save_path, f))) {
         return Placement::AsNamed;
     }
     // A folder of its own inside the save path, not any folder: one outside
     // it (qBittorrent's folder for incomplete torrents) would become the
     // torrent's home, and nothing would move it once complete.
-    if !multi_file
-        && path
-            .file_name()
-            .is_some_and(|f| f.to_string_lossy() == name)
-    {
-        if let Some(dir) = path
-            .parent()
-            .filter(|d| !d.as_os_str().is_empty() && d.starts_with(save_path))
-        {
-            return Placement::In(dir.to_string_lossy().into_owned());
+    if !multi_file {
+        if let Some((dir, file)) = split_last(content) {
+            if same_component(file, name, windows_style(content)) && within(dir, save_path) {
+                return Placement::In(dir.to_string());
+            }
         }
     }
     Placement::Elsewhere
@@ -1705,14 +1770,10 @@ mod tests {
         assert!(!got.complete);
         assert!(got.stopped);
         assert_eq!(got.incomplete_dir, "/downloads/incomplete");
-        // Joined with this platform's separator: `\` on Windows.
         assert_eq!(
-            got.content,
-            join("/downloads/films", "Film"),
+            got.content, "/downloads/films/Film",
             "no content_path: save_path/name"
         );
-        #[cfg(unix)]
-        assert_eq!(got.content, "/downloads/films/Film");
         assert_eq!(got.tags, vec!["a", "b"]);
         assert_eq!(got.source, Source::Qbit("ab".into()));
         let done = Candidate::from_qbit(&QbitTorrent {
@@ -1721,6 +1782,101 @@ mod tests {
             ..t
         });
         assert!(done.complete && !done.stopped);
+    }
+
+    #[test]
+    fn a_pre_4_2_content_path_is_joined_on_the_source_separator() {
+        // qBittorrent before 4.2 has no content_path: save_path/name is built
+        // here, on the separator of the client's path, not of this node.
+        let cand = |save_path: &str| {
+            Candidate::from_qbit(&QbitTorrent {
+                name: "Film".into(),
+                save_path: save_path.into(),
+                ..Default::default()
+            })
+            .content
+        };
+        assert_eq!(cand(r"C:\dl"), r"C:\dl\Film");
+        assert_eq!(cand(r"C:\dl\"), r"C:\dl\Film");
+        assert_eq!(cand("C:/dl/"), "C:/dl/Film");
+        assert_eq!(cand(r"\\nas\share"), r"\\nas\share\Film");
+        assert_eq!(cand("/dl"), "/dl/Film");
+        assert_eq!(cand("/dl/"), "/dl/Film");
+    }
+
+    #[test]
+    fn placement_reads_a_windows_path_the_windows_way() {
+        let multi = |save: &str, content: &str| placement(save, content, "Film", true, None);
+        assert_eq!(multi(r"C:\dl", r"C:\dl\Film"), Placement::AsNamed);
+        assert_eq!(multi(r"C:\dl\", "c:/DL/Film/"), Placement::AsNamed);
+        assert_eq!(multi(r"C:\dl", r"C:\dl\Other"), Placement::Elsewhere);
+        assert_eq!(
+            placement(
+                r"C:\dl",
+                r"C:\dl\Pack\Movie.mkv",
+                "Pack",
+                false,
+                Some("Pack/Movie.mkv")
+            ),
+            Placement::AsNamed
+        );
+        assert_eq!(
+            placement(r"C:\dl", r"C:\dl\Movie\Movie.mkv", "Movie.mkv", false, None),
+            Placement::In(r"C:\dl\Movie".into())
+        );
+        assert_eq!(
+            placement(r"C:\dl", r"D:\tmp\Movie.mkv", "Movie.mkv", false, None),
+            Placement::Elsewhere,
+            "a folder outside the save path is not the torrent's own"
+        );
+    }
+
+    #[test]
+    fn an_incomplete_folder_is_read_the_windows_way_for_a_windows_source() {
+        // Compared on the source's rules, whatever this node is: `\` and `/`
+        // alike, case ignored, a sibling folder not taken for it.
+        let inc = r"D:\Incomplete";
+        assert!(in_incomplete_dir(r"d:/incomplete/Film", r"D:\Done", inc));
+        assert!(in_incomplete_dir(
+            r"D:\Incomplete\Film\a.mkv",
+            r"D:\Done",
+            inc
+        ));
+        assert!(!in_incomplete_dir(r"D:\Incomplete2\Film", r"D:\Done", inc));
+        assert!(!in_incomplete_dir(r"D:\Done\Film", r"D:\Done", inc));
+        // A save path inside that folder says nothing about being unfinished.
+        assert!(!in_incomplete_dir(
+            r"D:\Incomplete\Film",
+            r"D:\Incomplete\Show",
+            inc
+        ));
+        // A POSIX folder keeps its case.
+        assert!(!in_incomplete_dir(
+            "/data/Incomplete/x",
+            "/data/done",
+            "/data/incomplete"
+        ));
+    }
+
+    #[test]
+    fn placement_reads_a_posix_path_the_posix_way() {
+        let multi = |save: &str, content: &str| placement(save, content, "Film", true, None);
+        assert_eq!(multi("/dl", "/dl/Film"), Placement::AsNamed);
+        assert_eq!(multi("/dl/", "/dl//Film/"), Placement::AsNamed);
+        assert_eq!(
+            multi("/dl", "/DL/Film"),
+            Placement::Elsewhere,
+            "case counts"
+        );
+        assert_eq!(
+            placement("/dl", "/dl/Movie/Movie.mkv", "Movie.mkv", false, None),
+            Placement::In("/dl/Movie".into())
+        );
+        // `\` is part of a POSIX file name, not a folder separator.
+        assert_eq!(
+            placement("/dl", r"/dl/Pack\Movie.mkv", "Movie.mkv", false, None),
+            Placement::Elsewhere
+        );
     }
 
     #[test]
@@ -2244,7 +2400,6 @@ mod transmission_tests {
             (a.name.as_str(), a.category.as_str(), a.save_path.as_str()),
             ("Alpha", "films", "/data/films")
         );
-        // Joined with this platform's separator: `\` on Windows.
         assert_eq!(a.content, join("/data/films", "Alpha"));
         #[cfg(unix)]
         assert_eq!(a.content, "/data/films/Alpha");
