@@ -7461,12 +7461,12 @@ function _renderBenchmarkCards(cur) {
 }
 
 // The charts hold about 300 points whatever the span, so a point is
-// span / 300 seconds wide and nothing moves faster than that: ask again once a
-// point's worth of time has gone by, within 10 s and 5 min. The live cards
-// above them follow every tick.
+// span / 300 seconds wide: the history is asked for again every span / 60
+// (15 min -> 15 s, 1 h -> 1 min), within 15 s and 5 min. The live cards above
+// them follow every tick.
 let _bmHistoryAt = 0;
 function _bmHistoryEvery() {
-    return Math.min(300000, Math.max(10000, (_bmSpan / 300) * 1000));
+    return Math.min(300000, Math.max(15000, (_bmSpan / 60) * 1000));
 }
 
 // `force` is a click: a tab opened or a range chosen draws the charts now.
