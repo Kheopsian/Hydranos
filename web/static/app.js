@@ -3402,9 +3402,10 @@ let _hoardPageBusy = false;
 // A list whose membership or order follows numbers that move every second
 // (a state filter, or a sort on a rate) is asked for again quickly, so rows
 // enter and leave when they should instead of up to 20 s late. Any other list
-// only changes through add/remove events, so it can wait.
-const HOARD_REFRESH_MS = 5000;
-const HOARD_REFRESH_LIVE_MS = 1500;
+// only changes through add/remove events, so it can wait. The stream asks for
+// a page sooner when a torrent crosses the line (_hoardJoins/_hoardLeaves).
+const HOARD_REFRESH_MS = 20000;
+const HOARD_REFRESH_LIVE_MS = 5000;
 const _HOARD_LIVE_SORTS = new Set(["upload_rate", "download_rate", "num_peers", "ratio",
     "total_upload", "total_download", "progress", "eta", "state", "uploaded", "downloaded"]);
 function _hoardRefreshMs() {
@@ -8793,9 +8794,15 @@ function _hoardWantsState(m) {
 let _hoardEdgeMemo;   // the page's worst row, found once per stream frame
 function _hoardJoins(m) {
     const s = _hoardStateFilter;
-    if (s === "__active__") return m.status === 3 && m.upload_rate > 0;
-    if (s === "seeding") return m.status === 3 && m.checking_progress == null;
-    if (s && s[0] !== "_") return m.checking_progress == null ? _hoardWantsState(m) === s : s === "checking_files";
+    // Only while the page holds the whole filtered set is a match that is not
+    // on it a newcomer. On a full page the stream carries matching torrents
+    // all the time (every seeder whose counters move), and asking each time
+    // would walk the library every second; the poll covers that case.
+    if (s && _hoardAllTorrents.length < HOARD_RENDER_LIMIT) {
+        if (s === "__active__") return m.status === 3 && m.upload_rate > 0;
+        if (s === "seeding") return m.status === 3 && m.checking_progress == null;
+        if (s[0] !== "_") return m.checking_progress == null ? _hoardWantsState(m) === s : s === "checking_files";
+    }
     // Sorted on a rate: a torrent faster than the slowest row on a full page
     // belongs on it.
     if ((_hoardSortCol === "upload_rate" || _hoardSortCol === "download_rate")

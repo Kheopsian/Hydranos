@@ -21,6 +21,13 @@ assert.ok(!h._hoardJoins({ status: 3, upload_rate: 0 }));
 assert.ok(h._hoardLeaves({}, { status: 3, upload_rate: 0 }), "a seeder gone idle leaves Active");
 assert.ok(!h._hoardLeaves({}, { status: 3, upload_rate: 9 }));
 
+h = make("seeding", "added_time", [{}, {}]);   // full page (limit 2)
+assert.ok(!h._hoardJoins({ status: 3, checking_progress: null }),
+    "on a full page an off-page seeder is every frame, not a crossing");
+h = make("__active__", "added_time", [{}, {}]);
+assert.ok(!h._hoardJoins({ status: 3, upload_rate: 5 }));
+assert.ok(h._hoardLeaves({}, { status: 3, upload_rate: 0 }), "a row on the page leaving still counts");
+
 h = make("downloading", "added_time", []);
 assert.ok(h._hoardJoins({ status: 2, checking_progress: null }));
 assert.ok(h._hoardLeaves({}, { status: 3, checking_progress: null }));
