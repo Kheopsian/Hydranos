@@ -1095,7 +1095,7 @@ pub fn plan_placed(
     multi_file: bool,
     lone_file: Option<&str>,
 ) -> (AddPlan, Option<String>) {
-    let content = map_path(&c.content, &choices.path_map);
+    let content = content_seen(c, choices);
     let whole = exists(Path::new(&content));
     // A single file qBittorrent is still writing: only `file.mkv.!qB` exists.
     let partial = !whole && exists(Path::new(&format!("{content}{QBIT_PART}")));
@@ -1111,7 +1111,7 @@ pub fn plan_placed(
     };
     // Before the placement: an incomplete folder inside the save path would
     // otherwise be taken for the torrent's own folder and become its home.
-    let incomplete = map_path(&c.incomplete_dir, &choices.path_map);
+    let incomplete = incomplete_seen(c, choices);
     if (whole || partial) && in_incomplete_dir(&content, &p.save_path, &incomplete) {
         return unfinished(p);
     }
@@ -1172,7 +1172,10 @@ pub struct Preview {
     pub likely_isolated: usize,
 }
 
-pub fn preview(cands: &[Candidate], exists: impl Fn(&Path) -> bool) -> Preview {
+/// The preview goes through the wizard's `choices` as the import does: the
+/// same mapped save path, content path and category folders, so what it
+/// counts as found is what the import will find.
+pub fn preview(cands: &[Candidate], choices: &Choices, exists: impl Fn(&Path) -> bool) -> Preview {
     let mut p = Preview {
         total: cands.len(),
         ..Default::default()
@@ -1186,19 +1189,22 @@ pub fn preview(cands: &[Candidate], exists: impl Fn(&Path) -> bool) -> Preview {
         p.stopped += c.stopped as usize;
         p.carried_uploaded_bytes += c.uploaded;
     }
-    p.categories = categories_needed(cands)
+    p.categories = categories_planned(cands, choices)
         .into_iter()
         .map(|(name, save_path)| CategoryPlan { name, save_path })
         .collect();
+    // The source's own folders: the left side of the mapping the wizard edits.
     p.path_prefixes = path_prefixes(cands.iter().map(|c| c.save_path.as_str()));
-    p.likely_isolated = likely_isolated(cands);
+    p.likely_isolated = likely_isolated(cands, choices);
     // Spread over the whole list rather than its head: the head is usually
     // one folder, and one folder says nothing about the others.
     let step = (cands.len() / DATA_SAMPLE).max(1);
     for c in cands.iter().step_by(step).take(DATA_SAMPLE) {
         p.data_checked += 1;
-        let whole = exists(Path::new(&c.content));
-        let partial = !whole && exists(Path::new(&format!("{}{QBIT_PART}", c.content)));
+        let save_path = plan(c, choices, false).save_path;
+        let content = content_seen(c, choices);
+        let whole = exists(Path::new(&content));
+        let partial = !whole && exists(Path::new(&format!("{content}{QBIT_PART}")));
         if !whole && !partial {
             continue;
         }
@@ -1208,13 +1214,14 @@ pub fn preview(cands: &[Candidate], exists: impl Fn(&Path) -> bool) -> Preview {
         // counts as found. The add decides on the torrent's own name and
         // files; a lone file renamed in the source client only shows there.
         let at_or_under = under(
-            c.content.trim_end_matches('/'),
-            join(&c.save_path, &c.name).trim_end_matches('/'),
+            content.trim_end_matches('/'),
+            join(&save_path, &c.name).trim_end_matches('/'),
         );
         let elsewhere = !at_or_under
-            && placement(&c.save_path, &c.content, &c.name, false, None) == Placement::Elsewhere;
+            && placement(&save_path, &content, &c.name, false, None) == Placement::Elsewhere;
         // In the add's order: the incomplete folder first.
-        if in_incomplete_dir(&c.content, &c.save_path, &c.incomplete_dir) || (partial && elsewhere)
+        if in_incomplete_dir(&content, &save_path, &incomplete_seen(c, choices))
+            || (partial && elsewhere)
         {
             p.data_incomplete += 1;
         } else if partial {
@@ -1235,14 +1242,14 @@ pub fn preview(cands: &[Candidate], exists: impl Fn(&Path) -> bool) -> Preview {
 /// cross-seed and is not counted: whether its bytes differ is only known from
 /// the torrent files, which the preview does not fetch. Every candidate, not a
 /// sample: it reads nothing from disk.
-fn likely_isolated(cands: &[Candidate]) -> usize {
-    let mut first: HashMap<&str, u64> = HashMap::new();
+fn likely_isolated(cands: &[Candidate], choices: &Choices) -> usize {
+    let mut first: HashMap<String, u64> = HashMap::new();
     cands
         .iter()
         .filter(|c| c.size > 0)
         .filter(|c| {
             *first
-                .entry(c.content.trim_end_matches('/'))
+                .entry(content_seen(c, choices).trim_end_matches('/').to_string())
                 .or_insert(c.size)
                 != c.size
         })
@@ -1296,6 +1303,25 @@ pub fn plan(c: &Candidate, choices: &Choices, data_present: bool) -> AddPlan {
     }
 }
 
+/// Where Hydranos sees a torrent's data: the source client's content path
+/// through the wizard's mapping. The preview and the import both ask here.
+pub fn content_seen(c: &Candidate, choices: &Choices) -> String {
+    map_path(&c.content, &choices.path_map)
+}
+
+/// The source's incomplete folder as Hydranos sees it, through the same mapping.
+pub fn incomplete_seen(c: &Candidate, choices: &Choices) -> String {
+    map_path(&c.incomplete_dir, &choices.path_map)
+}
+
+/// The categories an import creates, with their folders as Hydranos sees them.
+pub fn categories_planned(cands: &[Candidate], choices: &Choices) -> BTreeMap<String, String> {
+    categories_needed(cands)
+        .into_iter()
+        .map(|(name, path)| (name, map_path(&path, &choices.path_map)))
+        .collect()
+}
+
 /// How one add ended, as the runner counts it: what the add did, which is
 /// not always what the plan asked.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1343,10 +1369,7 @@ pub async fn run_job(
     progress.total.fetch_add(cands.len(), Ordering::Relaxed);
 
     progress.set_phase("categories");
-    let cats: BTreeMap<String, String> = categories_needed(&cands)
-        .into_iter()
-        .map(|(name, path)| (name, map_path(&path, &choices.path_map)))
-        .collect();
+    let cats = categories_planned(&cands, &choices);
     {
         let ensure = ensure_categories.clone();
         let cats = cats.clone();
@@ -1433,7 +1456,7 @@ pub async fn run_job(
                                 )
                             }
                             Err(_) => {
-                                let content = map_path(&c.content, &choices.path_map);
+                                let content = content_seen(&c, &choices);
                                 (plan(&c, &choices, Path::new(&content).exists()), None)
                             }
                         };
@@ -1861,7 +1884,7 @@ mod tests {
         rows[0].complete = false;
         rows[1].stopped = true;
         rows[2].uploaded = 100;
-        let p = preview(&rows, |path| path.starts_with("/d/1"));
+        let p = preview(&rows, &Choices::default(), |path| path.starts_with("/d/1"));
         assert_eq!(
             (p.total, p.completed, p.incomplete, p.stopped),
             (10, 9, 1, 1)
@@ -1875,6 +1898,29 @@ mod tests {
             }]
         );
         assert_eq!((p.data_checked, p.data_found), (10, 1));
+    }
+
+    /// qBittorrent in Docker sees `/downloads`, Hydranos the same data at
+    /// `/data`: the preview samples through the wizard's mapping, as the
+    /// import does, instead of finding nothing at the source's paths (#92).
+    #[test]
+    fn the_preview_samples_the_data_through_the_path_mapping() {
+        let rows: Vec<Candidate> = (0..4)
+            .map(|i| c("Films", &format!("/downloads/films/{i}")))
+            .collect();
+        let at_data = |path: &Path| path.starts_with("/data");
+        let unmapped = preview(&rows, &Choices::default(), at_data);
+        assert_eq!((unmapped.data_checked, unmapped.data_found), (4, 0));
+
+        let body = r#"{"url":"x","path_map":{"/downloads":"/data"}}"#;
+        let choices: Choices = serde_json::from_str(body).unwrap();
+        let p = preview(&rows, &choices, at_data);
+        assert_eq!((p.data_checked, p.data_found, p.data_elsewhere), (4, 4, 0));
+        // The categories are created where Hydranos sees them; the wizard's
+        // left column stays the source's folders.
+        assert_eq!(p.categories[0].save_path, "/data/films/0");
+        assert_eq!(p.path_prefixes, unmapped.path_prefixes);
+        assert!(p.path_prefixes.iter().all(|x| x.starts_with("/downloads")));
     }
 }
 
@@ -3180,7 +3226,7 @@ mod qbit_session_tests {
         let plans = plans_for(vec![c.clone()], start).await;
         assert_eq!(plans[0].save_path, save.to_string_lossy());
         assert!(!plans[0].paused && plans[0].seed_mode, "{:?}", plans[0]);
-        let p = preview(&[c], |_| true);
+        let p = preview(&[c], &Choices::default(), |_| true);
         assert_eq!((p.data_found, p.data_elsewhere), (1, 0));
         std::fs::remove_dir_all(dir).ok();
     }
@@ -3201,7 +3247,7 @@ mod qbit_session_tests {
             cand("Movie.mkv", "/dl/Movie/Movie.mkv"),
             cand("Show.mkv", "/dl/renamed.mkv"),
         ];
-        let p = preview(&cands, |_| true);
+        let p = preview(&cands, &Choices::default(), |_| true);
         assert_eq!(p.data_checked, 3);
         assert_eq!(p.data_found, 2);
     }
@@ -3303,7 +3349,7 @@ mod qbit_session_tests {
             assert!(note.contains(".!qB"), "{note}");
             assert!(note.contains(&*save.join(name).to_string_lossy()), "{note}");
         }
-        let p = preview(&[pack], |path| path.exists());
+        let p = preview(&[pack], &Choices::default(), |path| path.exists());
         assert_eq!(
             (p.data_incomplete, p.data_elsewhere, p.data_found),
             (1, 0, 0)
@@ -3337,12 +3383,59 @@ mod qbit_session_tests {
         let note = note.as_deref().expect("a note");
         assert!(note.contains(&c.content), "{note}");
         assert!(note.contains("download it again"), "{note}");
-        let p = preview(&[c], |path| path.exists());
+        let p = preview(&[c], &Choices::default(), |path| path.exists());
         assert_eq!(
             (p.data_incomplete, p.data_elsewhere, p.data_found),
             (1, 0, 0)
         );
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// The incomplete folder is checked at the mapped path too: qBittorrent in
+    /// Docker keeps it at `/downloads/incomplete`, Hydranos sees `/data/...`.
+    /// Unmapped, the preview finds nothing there; mapped, it counts the torrent
+    /// as not finished, as the import will hold it (#92, #150).
+    #[test]
+    fn the_preview_maps_the_incomplete_folder_and_the_isolation_check() {
+        let mut inc = file_cand("x", PathBuf::new());
+        inc.save_path = "/downloads/films".into();
+        inc.complete = false;
+        inc.content = "/downloads/incomplete/x".into();
+        inc.incomplete_dir = "/downloads/incomplete".into();
+        let at_data = |path: &Path| path.starts_with("/data/incomplete");
+        let unmapped = preview(&[inc.clone()], &Choices::default(), at_data);
+        assert_eq!(
+            (
+                unmapped.data_incomplete,
+                unmapped.data_elsewhere,
+                unmapped.data_found
+            ),
+            (0, 0, 0)
+        );
+        let body = r#"{"path_map":{"/downloads":"/data"}}"#;
+        let choices: Choices = serde_json::from_str(body).unwrap();
+        let p = preview(&[inc], &choices, at_data);
+        assert_eq!(
+            (p.data_incomplete, p.data_elsewhere, p.data_found),
+            (1, 0, 0)
+        );
+
+        // Two source folders mapped onto one are the same path to Hydranos.
+        let mut a = file_cand("x", PathBuf::new());
+        a.save_path = "/a".into();
+        a.content = "/a/x".into();
+        a.size = 10;
+        let mut b = file_cand("x", PathBuf::new());
+        b.save_path = "/b".into();
+        b.content = "/b/x".into();
+        b.size = 20;
+        assert_eq!(
+            preview(&[a.clone(), b.clone()], &Choices::default(), |_| false).likely_isolated,
+            0
+        );
+        let body = r#"{"path_map":{"/a":"/data","/b":"/data"}}"#;
+        let choices: Choices = serde_json::from_str(body).unwrap();
+        assert_eq!(preview(&[a, b], &choices, |_| false).likely_isolated, 1);
     }
 
     /// The torrent says why it came in stopped, and where its data is.
@@ -3375,7 +3468,7 @@ mod qbit_session_tests {
             "counted stopped"
         );
         assert_eq!(
-            preview(&[c], |_| true).data_elsewhere,
+            preview(&[c], &Choices::default(), |_| true).data_elsewhere,
             1,
             "and announced as such before the import"
         );
@@ -3484,7 +3577,10 @@ mod qbit_session_tests {
             cand("/dl/Show", 0),
             cand("/dl/Other", 900),
         ];
-        assert_eq!(preview(&cands, |_| false).likely_isolated, 1);
+        assert_eq!(
+            preview(&cands, &Choices::default(), |_| false).likely_isolated,
+            1
+        );
     }
 
     #[test]
