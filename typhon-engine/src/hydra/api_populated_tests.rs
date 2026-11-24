@@ -624,3 +624,107 @@ async fn a_torrent_with_no_store_row_can_still_be_removed() {
         "and now the engine does not"
     );
 }
+
+/// A multi-file torrent of `name/` over `files`, with real piece hashes.
+fn torrent_over(name: &str, files: &[(&str, &[u8])], piece_len: usize) -> Vec<u8> {
+    use sha1::{Digest, Sha1};
+    let stream: Vec<u8> = files.iter().flat_map(|(_, d)| d.iter().copied()).collect();
+    let pieces: Vec<u8> = stream
+        .chunks(piece_len)
+        .flat_map(|c| Sha1::digest(c).to_vec())
+        .collect();
+    let mut v = b"d4:infod5:filesl".to_vec();
+    for (path, data) in files {
+        v.extend_from_slice(
+            format!("d6:lengthi{}e4:pathl{}:{path}ee", data.len(), path.len()).as_bytes(),
+        );
+    }
+    v.extend_from_slice(
+        format!(
+            "e4:name{}:{name}12:piece lengthi{piece_len}e6:pieces{}:",
+            name.len(),
+            pieces.len()
+        )
+        .as_bytes(),
+    );
+    v.extend_from_slice(&pieces);
+    v.extend_from_slice(b"ee");
+    v
+}
+
+/// #99: two torrents qBittorrent kept at one path under one name, both
+/// complete there, the second a repack (other size, other bytes). The import
+/// asks to trust both and start them. The first is seeded; the second is
+/// isolated -- never added over the first one's file -- and comes back as
+/// such, stopped, with a note, instead of "complete, data found" and a
+/// download of the whole payload in a folder nobody chose.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_imported_cross_seed_with_other_bytes_is_isolated_stopped_and_said_so() {
+    use crate::importer::{AddPlan, AddRequest, Added};
+    use std::sync::atomic::Ordering::Relaxed;
+    let s = st("imp-isolate");
+    let dir = s.dir.join("tv");
+    std::fs::create_dir_all(dir.join("Pack")).unwrap();
+    let first: Vec<u8> = (0..40_000u32).map(|i| (i % 241) as u8).collect();
+    let repack: Vec<u8> = (0..30_000u32).map(|i| (i % 239) as u8).collect();
+    let on_disk = dir.join("Pack").join("E01.mkv");
+    std::fs::write(&on_disk, &first).unwrap();
+
+    let add = super::import_add(&s.state);
+    let req = |bytes: Vec<u8>| AddRequest {
+        bytes,
+        category: String::new(),
+        tags: String::new(),
+        plan: AddPlan {
+            save_path: dir.to_string_lossy().into_owned(),
+            paused: false,
+            seed_mode: true,
+        },
+        uploaded: 0,
+        downloaded: 0,
+        note: None,
+    };
+    assert_eq!(
+        add(req(torrent_over("Pack", &[("E01.mkv", &first)], 16384))),
+        Ok(Added::Seeded)
+    );
+    let b = torrent_over("Pack", &[("E01.mkv", &repack)], 16384);
+    let meta = typhon_engine::torrent::metainfo::parse_torrent_bytes(&b).unwrap();
+    let hash = typhon_engine::torrent::hex_encode(&meta.info_hash);
+    let own = dir.join(format!("Pack [{}]", &hash[..8]));
+    assert_eq!(
+        add(req(b)),
+        Ok(Added::Isolated {
+            save_path: own.to_string_lossy().into_owned()
+        }),
+        "reported as what the add did, not as the plan's seed"
+    );
+
+    let t = s
+        .state
+        .engines
+        .get(&super::import_engine(&s.state))
+        .unwrap()
+        .manager
+        .get(&meta.info_hash)
+        .expect("added");
+    assert!(
+        t.is_paused.load(Relaxed),
+        "an isolated import starts nothing"
+    );
+    assert!(
+        t.error_msg.lock().unwrap().contains("other bytes"),
+        "no note saying why: {:?}",
+        t.error_msg.lock().unwrap()
+    );
+    assert_eq!(*t.save_path.read(), own);
+    assert_eq!(
+        std::fs::read(&on_disk).unwrap(),
+        first,
+        "the first torrent's file was touched"
+    );
+    assert!(
+        !own.join("Pack").join("E01.mkv").exists(),
+        "a file of another size was linked in"
+    );
+}

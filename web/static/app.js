@@ -734,6 +734,7 @@ function importWizard(opts) {
             <p class="modal-desc">${t("Categories to create: {list}, all as <b>hoard</b>.", { list: (d.categories || []).map(c => esc(c.name)).join(", ") || "-" })}</p>
             ${probs ? `<p class="modal-desc" style="color:var(--accent-red)">${t("{n} file(s) unreadable, they will be skipped.", { n: probs })}</p>` : ""}
             ${d.without_resume ? `<p class="modal-desc">${t("{n} torrent(s) have no resume file: no save path, they will be skipped.", { n: d.without_resume })}</p>` : ""}
+            ${d.likely_isolated ? `<p class="modal-desc" style="color:var(--accent-yellow)">${t("{n} torrents share their data path with an earlier one of another size (a repack under the same name): each is added stopped in a folder of its own, not trusted, and would download its data there.", { n: d.likely_isolated })}</p>` : ""}
             <p class="modal-desc" style="margin-bottom:4px">${t("Path mapping (Transmission path → what Hydranos sees):")}</p>
             <div style="max-height:150px;overflow:auto;margin-bottom:8px;border:1px solid var(--border);border-radius:4px;padding:6px">${rows || `<i>${t("no paths detected")}</i>`}</div>
             <label style="display:block;margin-bottom:6px"><input type="checkbox" id="tr-stopped" checked> ${t("Import everything stopped, no announce until you start them")}</label>
@@ -822,6 +823,7 @@ function importWizard(opts) {
                       + (d.data_elsewhere ? " " + t("{n} more have their data in a layout Hydranos does not reproduce (a renamed file, or files without their torrent's folder): those are added stopped, with a note saying where their data is.", { n: d.data_elsewhere }) : ""))}</p>
                 <button id="qb-check" style="flex:0 0 auto;width:auto">${t("Re-check paths")}</button>
             </div>
+            ${d.likely_isolated ? `<p class="modal-desc" style="color:var(--accent-yellow)">${t("{n} torrents share their data path with an earlier one of another size (a repack under the same name): each is added stopped in a folder of its own, not trusted, and would download its data there.", { n: d.likely_isolated })}</p>` : ""}
             <label style="display:block;margin-bottom:6px"><input type="checkbox" id="qb-stopped" checked> ${t("Import everything stopped, no announce until you start them")}</label>
             <p class="modal-desc" id="qb-msg2" style="min-height:1em"></p>
             <div class="modal-actions">
@@ -902,6 +904,7 @@ function importWizard(opts) {
             <p class="modal-desc" id="qb-cur" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;opacity:.7"></p>
             <p class="modal-desc" id="qb-note"></p>
             <p class="modal-desc" id="qb-pause" style="display:none;color:var(--accent-red)"></p>
+            <div id="qb-isolated" style="display:none;max-height:160px;overflow:auto;margin-bottom:8px;border:1px solid var(--border);border-radius:4px;padding:6px;font-size:12px"></div>
             <div id="qb-fails" style="display:none;max-height:160px;overflow:auto;margin-bottom:8px;border:1px solid var(--border);border-radius:4px;padding:6px;font-size:12px"></div>
             <p class="modal-desc" id="qb-retry-msg" style="min-height:1em"></p>
             <div class="modal-actions">
@@ -914,7 +917,7 @@ function importWizard(opts) {
             phase = box.querySelector("#qb-phase"), bar = box.querySelector("#qb-bar"),
             stats = box.querySelector("#qb-stats"), cur = box.querySelector("#qb-cur"),
             doneBtn = box.querySelector("#qb-done"), note = box.querySelector("#qb-note"),
-            fails = box.querySelector("#qb-fails"), retryBtn = box.querySelector("#qb-retry"),
+            fails = box.querySelector("#qb-fails"), isolatedBox = box.querySelector("#qb-isolated"), retryBtn = box.querySelector("#qb-retry"),
             retryMsg = box.querySelector("#qb-retry-msg"), pauseMsg = box.querySelector("#qb-pause");
         const labels = { connect: t("Connecting…"), categories: t("Creating categories…"), torrents: t("Importing torrents…"), done: t("Done"), paused: t("Paused"), error: t("Error") };
         es.onmessage = (ev) => {
@@ -926,6 +929,7 @@ function importWizard(opts) {
             // been added stopped, as the wizard's default asks.
             stats.textContent = t("{done}/{total} · {complete} complete, data found · {check} to check or download · {failed} failed", {
                 done: d.done, total: d.total, complete: d.seeded, check: d.downloading, failed: d.failed })
+                + (d.isolated ? " · " + t("{n} isolated", { n: d.isolated }) : "")
                 + (d.skipped ? " · " + t("{n} skipped", { n: d.skipped }) : "")
                 + (d.stopped ? " · " + t("{n} added stopped", { n: d.stopped }) : "");
             cur.textContent = d.current ? t("last: {name}", { name: d.current }) : "";
@@ -962,6 +966,15 @@ function importWizard(opts) {
                 }
                 if (d.stopped) {
                     note.textContent = t("{n} torrents were added stopped, as chosen: nothing announces until you start them from the list.", { n: d.stopped });
+                }
+                // Cross-seeds whose files at that path had other bytes: in a
+                // folder of their own, stopped, their data not trusted.
+                const iso = d.isolations || [];
+                if (iso.length) {
+                    isolatedBox.style.display = "";
+                    isolatedBox.innerHTML = `<div>${t("{n} torrents share their path with another torrent whose files there have other bytes. They were added stopped, each in a folder of its own; starting one downloads what is not already there:", { n: d.isolated })}</div>`
+                        + iso.map(i => `<div><b>${esc(i.name)}</b>: <code>${esc(i.save_path)}</code></div>`).join("")
+                        + (d.isolated > iso.length ? `<div><i>${t("…and {n} more, in the log.", { n: d.isolated - iso.length })}</i></div>` : "");
                 }
                 const list = d.failures || [];
                 if (list.length) {

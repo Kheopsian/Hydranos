@@ -2870,6 +2870,52 @@ pub(crate) fn add_torrent_bytes_as(
     seed_mode: bool,
     engine_override: &str,
 ) -> Result<(String, String), String> {
+    place_torrent_bytes(
+        state,
+        bytes,
+        category,
+        save_path_override,
+        tags,
+        paused,
+        seed_mode,
+        engine_override,
+        false,
+    )
+    .map(|p| (p.hash, p.name))
+}
+
+/// Where an add put a torrent, and on what terms: what the caller asked is
+/// not always what it got.
+#[derive(Debug)]
+pub(crate) struct Placed {
+    pub hash: String,
+    pub name: String,
+    /// Isolated by the path claim: the folder of its own it went to, instead
+    /// of the save path asked, because another torrent holds files there with
+    /// other bytes.
+    pub isolated_in: Option<String>,
+    /// skip_checking as the engine got it: dropped when the torrent was
+    /// isolated, since its own folder starts empty.
+    pub seed_mode: bool,
+}
+
+/// `add_torrent_bytes_as`, saying where the torrent went. `stop_if_isolated`
+/// keeps an isolated torrent stopped once its proof is done, whatever
+/// `paused` asked: the import's, where a torrent the source called complete
+/// must not start downloading again in a folder nobody chose.
+// Every argument is a distinct input the caller already holds; a parameter struct would only move the list.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn place_torrent_bytes(
+    state: &AppState,
+    bytes: &[u8],
+    category: &str,
+    save_path_override: &str,
+    tags: &str,
+    paused: bool,
+    seed_mode: bool,
+    engine_override: &str,
+    stop_if_isolated: bool,
+) -> Result<Placed, String> {
     let meta = typhon_engine::torrent::metainfo::parse_torrent_bytes(bytes)
         .map_err(|e| format!("torrent file did not parse: {e}"))?;
     let hash = typhon_engine::torrent::hex_encode(&meta.info_hash);
@@ -2915,14 +2961,15 @@ pub(crate) fn add_torrent_bytes_as(
         cfg.dedup.path_collision,
     )?;
     let save_path = claim.save_path.clone();
+    let isolated = claim.isolate_from.is_some();
     // Held paused until `pathclaim::finish` has proven what it shares; the
     // store says paused too, so the queue does not start it meanwhile.
-    let paused_asked = paused;
+    let paused_asked = paused || (stop_if_isolated && isolated);
     let paused = paused || claim.hold;
     // skip_checking vouches for data at the path it was given. Isolated, the
     // torrent starts from an empty folder: trusting it complete would seed
     // nothing under a seed's flag.
-    let seed_mode = seed_mode && claim.isolate_from.is_none();
+    let seed_mode = seed_mode && !isolated;
 
     // The metainfo goes into the store BEFORE the engine is told, and that
     // order is not cosmetic: the engine reads its piece hashes from the store,
@@ -3027,7 +3074,12 @@ pub(crate) fn add_torrent_bytes_as(
         tracing::info!(engine = %engine_id, category = %category, hash = %hash,
             linked_from = %linked_from, "torrent added, seeded from data already held");
     }
-    Ok((hash, name))
+    Ok(Placed {
+        hash,
+        name,
+        isolated_in: isolated.then_some(save_path),
+        seed_mode,
+    })
 }
 
 /// Link an incoming torrent onto payload we already hold, if we hold it.
@@ -15323,7 +15375,10 @@ fn import_add(state: &AppState) -> crate::importer::AddFn {
         }
         // Quiet: an imported library is not a stream of new arrivals, and an
         // "on add" webhook firing once per torrent of it would be a flood.
-        add_torrent_bytes_as(
+        // Isolated (a cross-seed whose files at that path have other bytes,
+        // a repack under the same name): kept stopped, since its own folder
+        // would download what the import promised to find on disk.
+        let placed = place_torrent_bytes(
             &state,
             &r.bytes,
             &r.category,
@@ -15332,7 +15387,15 @@ fn import_add(state: &AppState) -> crate::importer::AddFn {
             r.plan.paused,
             r.plan.seed_mode,
             &engine_id,
+            true,
         )?;
+        let note = placed.isolated_in.as_ref().map(|dir| {
+            format!(
+                "imported stopped: another torrent already holds files under {} with other bytes, so this one was placed in {dir}. Its files that verify there are linked in; starting it downloads the rest",
+                r.plan.save_path
+            )
+        });
+        let note = note.or_else(|| r.note.clone());
         let added = state
             .engines
             .get(&engine_id)
@@ -15345,14 +15408,16 @@ fn import_add(state: &AppState) -> crate::importer::AddFn {
             }
             // Why it came in stopped, where its row shows a fault. In memory:
             // a restart forgets it, the torrent stays stopped.
-            if let Some(note) = &r.note {
+            if let Some(note) = &note {
                 t.set_recheck_note(note);
             }
         }
-        Ok(if r.plan.seed_mode {
-            Added::Seeded
-        } else {
-            Added::Resumed
+        // What the engine got, not what was asked: an isolated torrent lost
+        // its skip_checking and is not "complete, data found".
+        Ok(match placed.isolated_in {
+            Some(save_path) => Added::Isolated { save_path },
+            None if placed.seed_mode => Added::Seeded,
+            None => Added::Resumed,
         })
     })
 }
@@ -15378,8 +15443,9 @@ pub(crate) fn record_provenance(
     progress: &crate::importer::Progress,
 ) {
     use std::sync::atomic::Ordering;
-    let added =
-        progress.seeded.load(Ordering::Relaxed) + progress.downloading.load(Ordering::Relaxed);
+    let added = progress.seeded.load(Ordering::Relaxed)
+        + progress.downloading.load(Ordering::Relaxed)
+        + progress.isolated.load(Ordering::Relaxed);
     let carried = progress.carried_uploaded.load(Ordering::Relaxed);
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
