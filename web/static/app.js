@@ -1534,7 +1534,7 @@ function _renderStatus(data) {
                 downloading: data.race.active_downloads, upload_rate: data.race.total_upload_rate,
                 ratio: data.race.session_ratio, peers: data.race.total_peers, swarm: 0,
                 with_peers: data.race.torrents_with_peers, announced: data.race.torrents_announced,
-                avg_share: data.race.avg_share,
+                avg_share: data.race.avg_share, grabbed: data.race.session_grabbed,
             });
 
             // Header speeds (Option 2 : Gbps)
@@ -3840,7 +3840,7 @@ function _renderHoardStatsHeader(data) {
             upload_rate: data.active_upload_rate, ratio: data.session_ratio,
             peers: data.unseeded_peers ?? data.active_peers ?? 0, swarm: data.swarm_leechers || 0,
             with_peers: data.torrents_with_peers, announced: data.torrents_announced ?? data.total_torrents,
-            avg_share: data.avg_share,
+            avg_share: data.avg_share, grabbed: data.session_grabbed,
         });
 }
 
@@ -3875,6 +3875,7 @@ function _paintEngineStrip(pfx, d) {
     set("ann",
         annPct + "&nbsp;%" + (annPct < 100 ? ` <small>${fmtInt(announced)} / ${fmtInt(total)}</small>` : ""),
         annPct >= 100 ? t("all announced") : t("{done}/{total} announced ({pct}%)", { done: fmtInt(announced), total: fmtInt(total), pct: annPct }));
+    set("grabbed", num(d.grabbed), t("Torrents added since the daemon started"));
     set("share", d.avg_share == null ? "-" : (d.avg_share * 100).toFixed(1) + "&nbsp;%",
         t("Our ratio spread over the other seeds in the swarm, averaged over the seeding torrents"));
 }

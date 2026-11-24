@@ -1574,5 +1574,6 @@
   "Upload speed": "Débit d'envoi",
   "Uploaded / downloaded since the daemon started": "Envoyé / téléchargé depuis le démarrage du démon",
   "Torrents with at least one connected peer": "Torrents avec au moins un pair connecté",
-  "Our ratio spread over the other seeds in the swarm, averaged over the seeding torrents": "Notre ratio réparti sur les autres seeds du swarm, en moyenne sur les torrents en partage"
+  "Our ratio spread over the other seeds in the swarm, averaged over the seeding torrents": "Notre ratio réparti sur les autres seeds du swarm, en moyenne sur les torrents en partage",
+  "Torrents added since the daemon started": "Torrents ajoutés depuis le démarrage du démon"
 }

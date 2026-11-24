@@ -933,6 +933,7 @@ async fn race_and_hoard_publish_the_same_strip() {
             e["torrents_with_peers"].is_number(),
             "{engine} with peers: {e}"
         );
+        assert!(e["session_grabbed"].is_number(), "{engine} grabbed: {e}");
     }
     let hoard = hoard_stats_value(&s.state);
     for key in [
@@ -943,6 +944,7 @@ async fn race_and_hoard_publish_the_same_strip() {
         "active_peers",
         "torrents_with_peers",
         "torrents_announced",
+        "session_grabbed",
     ] {
         assert!(hoard[key].is_number(), "hoard.{key}: {hoard}");
     }

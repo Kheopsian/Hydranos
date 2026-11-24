@@ -13,7 +13,7 @@ const cells = pfx => {
     assert.ok(block, pfx + " strip not found");
     return [...block[1].matchAll(/id="[a-z]+-st-([a-z]+)"/g)].map(m => m[1]);
 };
-const order = ["total", "up", "down", "ul", "ratio", "peers", "withpeers", "ann", "share"];
+const order = ["total", "up", "down", "ul", "ratio", "peers", "withpeers", "ann", "grabbed", "share"];
 assert.deepStrictEqual(cells("race"), order);
 assert.deepStrictEqual(cells("hoard"), order);
 
@@ -35,7 +35,7 @@ function paint(pfx, d) {
 }
 
 let e = paint("hoard", { total: 51184, uploading: 7, downloading: 21, upload_rate: 5000, ratio: 0.8123,
-    peers: 475, swarm: 628, with_peers: 600, announced: 16762, avg_share: 0.0421 });
+    peers: 475, swarm: 628, with_peers: 600, announced: 16762, avg_share: 0.0421, grabbed: 12 });
 assert.strictEqual(e["hoard-st-total"].innerHTML, "51184");
 assert.strictEqual(e["hoard-st-up"].innerHTML, "7");
 assert.strictEqual(e["hoard-st-down"].innerHTML, "21");
@@ -45,6 +45,7 @@ assert.ok(e["hoard-st-peers"].innerHTML.startsWith("475 <small>/ 628"));
 assert.strictEqual(e["hoard-st-withpeers"].innerHTML, "600");
 assert.ok(e["hoard-st-ann"].innerHTML.startsWith("33&nbsp;%"), "33 % announced");
 assert.strictEqual(e["hoard-st-share"].innerHTML, "4.2&nbsp;%");
+assert.strictEqual(e["hoard-st-grabbed"].innerHTML, "12");
 
 // What the server does not know yet is a dash, never a zero.
 e = paint("race", { total: 10, uploading: 0, downloading: null, upload_rate: 0, ratio: null,
@@ -52,6 +53,7 @@ e = paint("race", { total: 10, uploading: 0, downloading: null, upload_rate: 0, 
 assert.strictEqual(e["race-st-down"].innerHTML, "-");
 assert.strictEqual(e["race-st-ratio"].innerHTML, "-");
 assert.strictEqual(e["race-st-share"].innerHTML, "-");
+assert.strictEqual(e["race-st-grabbed"].innerHTML, "-");
 assert.strictEqual(e["race-st-up"].innerHTML, "0", "a real zero stays a zero");
 assert.strictEqual(e["race-st-ann"].innerHTML, "100&nbsp;%");
 assert.strictEqual(e["race-st-peers"].innerHTML, "3");

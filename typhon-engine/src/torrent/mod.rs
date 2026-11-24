@@ -168,6 +168,11 @@ pub struct TorrentManager {
     /// torrent that serves in bursts: the filter, its chip and the rows
     /// disagreed with one another every other tick.
     active: std::sync::Mutex<ActiveSet>,
+    /// Torrents added to this engine since the daemon started: what the Race
+    /// strip calls Grabbed. Only a fresh add counts; startup restores its
+    /// records through its own loader, and an adoption from another engine is
+    /// a move, not a grab.
+    added_session: std::sync::atomic::AtomicU64,
     active_view: std::sync::RwLock<Arc<std::collections::HashSet<InfoHash>>>,
     /// Torrents per `TorrentStatus`, indexed by its discriminant, plus the
     /// paused ones at `STATUS_PAUSED`. Counted by the same walk, so /metrics
@@ -701,6 +706,7 @@ impl TorrentManager {
             cached_torrents_with_peers: std::sync::atomic::AtomicUsize::new(0),
             cached_torrents_uploading: std::sync::atomic::AtomicUsize::new(0),
             active: Default::default(),
+            added_session: std::sync::atomic::AtomicU64::new(0),
             active_view: Default::default(),
             cached_status_counts: Default::default(),
             restore_total: std::sync::atomic::AtomicUsize::new(0),
@@ -1336,6 +1342,7 @@ impl TorrentManager {
             self.incomplete.insert(ih);
         }
         self.insert_counted(ih, state_arc.clone());
+        self.added_session.fetch_add(1, Ordering::Relaxed);
         // Track in DHT (no-op for private torrents, see dht::track_torrent).
         self.track_in_dht(state_arc);
         // Push event to subscribers (Go hydra cache). Silent if no subscribers.
@@ -2643,6 +2650,11 @@ impl TorrentManager {
                 count,
             });
         }
+    }
+
+    /// Torrents added since the daemon started.
+    pub fn added_this_session(&self) -> u64 {
+        self.added_session.load(Ordering::Relaxed)
     }
 
     /// Who uploaded within `ACTIVE_HOLD`: one `Arc` clone, no walk.
@@ -8099,6 +8111,17 @@ mod manager_tests {
         let counts = mgr.tracker_host_counts();
         assert!(counts.contains_key("a.example"), "got {counts:?}");
         assert!(counts.contains_key("b.example"), "got {counts:?}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Grabbed counts the adds of this run, one each, and nothing else.
+    #[test]
+    fn grabbed_counts_each_fresh_add_of_this_run() {
+        let (mgr, root) = manager("grabbed");
+        assert_eq!(mgr.added_this_session(), 0);
+        add(&mgr, "alpha");
+        add(&mgr, "bravo");
+        assert_eq!(mgr.added_this_session(), 2);
         let _ = std::fs::remove_dir_all(root);
     }
 
