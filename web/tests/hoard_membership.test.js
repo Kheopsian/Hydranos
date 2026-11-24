@@ -18,18 +18,15 @@ const make = (state, sort, rows, other = {}) => new Function("st", "sort", "rows
     ${src.slice(from, to)}
     return { _hoardJoins, _hoardLeaves };`)(state, sort, rows, other);
 
+// Actively Seeding follows the engine's own list (active_changed), not the
+// rate of a frame, so the stats stream never decides who joins or leaves it.
 let h = make("__active__", "added_time", []);
-assert.ok(h._hoardJoins({ status: 3, upload_rate: 5 }), "a seeder that starts uploading joins Active");
-assert.ok(!h._hoardJoins({ status: 3, upload_rate: 0 }));
-assert.ok(h._hoardLeaves({}, { status: 3, upload_rate: 0 }), "a seeder gone idle leaves Active");
-assert.ok(!h._hoardLeaves({}, { status: 3, upload_rate: 9 }));
+assert.ok(!h._hoardJoins({ status: 3, upload_rate: 5 }));
+assert.ok(!h._hoardLeaves({}, { status: 3, upload_rate: 0 }), "an idle second does not drop a row");
 
 h = make("seeding", "added_time", [{}, {}]);   // full page (limit 2)
 assert.ok(!h._hoardJoins({ status: 3, checking_progress: null }),
     "on a full page an off-page seeder is every frame, not a crossing");
-h = make("__active__", "added_time", [{}, {}]);
-assert.ok(!h._hoardJoins({ status: 3, upload_rate: 5 }));
-assert.ok(h._hoardLeaves({}, { status: 3, upload_rate: 0 }), "a row on the page leaving still counts");
 
 h = make("downloading", "added_time", []);
 assert.ok(h._hoardJoins({ status: 2, checking_progress: null }));
@@ -44,11 +41,11 @@ assert.ok(!h._hoardJoins({ status: 3, upload_rate: 99 }), "no live filter, nothi
 // A state filter next to a search, category or tracker: the stream cannot say
 // whether an off-page torrent matches those, so it never counts as a join.
 for (const other of [{ search: "x" }, { cat: ["tv"] }, { tracker: ["t"] }]) {
-    h = make("__active__", "added_time", [{}], other);
-    assert.ok(!h._hoardJoins({ status: 3, upload_rate: 5 }), "no join with " + JSON.stringify(other));
+    h = make("seeding", "added_time", [{}], other);
+    assert.ok(!h._hoardJoins({ status: 3, checking_progress: null }), "no join with " + JSON.stringify(other));
 }
-h = make("__active__", "added_time", [{}]);
-assert.strictEqual(h._hoardJoins({ status: 3, upload_rate: 5 }), 1);
+h = make("seeding", "added_time", [{}]);
+assert.strictEqual(h._hoardJoins({ status: 3, checking_progress: null }), 1);
 
 // A rate sort reports its own kind (2), which the stream handler spaces out by
 // the poll interval instead of one second.

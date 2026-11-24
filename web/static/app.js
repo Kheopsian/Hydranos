@@ -4428,7 +4428,7 @@ function _hoardMatches(t, search, skip) {
         // Seed only serves what it holds, so it counts as seeding here too,
         // matching the server's filter and the chip count.
         const seeding = t.state === "seeding" || t.state === "seed_only";
-        if (s === "__active__") { if (!t._pg && !(seeding && t.upload_rate > 0)) return false; }
+        if (s === "__active__") { if (!(seeding && (t._pg || t.upload_rate > 0))) return false; }
         else if (s === "seeding") { if (!seeding) return false; }
         else if (s === "__tracker_err__") { if (!t.tracker_error) return false; }
         else if (s === "__error__") { if (!t.torrent_error) return false; }
@@ -8633,6 +8633,10 @@ function _openHoardSSE() {
             try { _renderHoardStatsHeader(data); _hoardStatsPainted = true; } catch (_) {}
             return;
         }
+        if (type === "active_changed") {
+            if (data.mode === "hoard") _applyActiveChanged(data);
+            return;
+        }
         if (type === "torrent_batch") {
             // Progressive hydration of the hoard list (replaces the ~76MB REST
             // fetch). Race keeps its own on-view fetch (small list), so ignore it.
@@ -8811,7 +8815,6 @@ function _hoardJoins(m) {
     // all the time (every seeder whose counters move), and asking each time
     // would walk the library every second; the poll covers that case.
     if (s && _hoardAllTorrents.length < HOARD_RENDER_LIMIT && _hoardOnlyStateFilter()) {
-        if (s === "__active__") return m.status === 3 && m.upload_rate > 0 ? 1 : 0;
         if (s === "seeding") return m.status === 3 && m.checking_progress == null ? 1 : 0;
         if (s[0] !== "_") return (m.checking_progress == null ? _hoardWantsState(m) === s : s === "checking_files") ? 1 : 0;
     }
@@ -8835,11 +8838,45 @@ function _hoardJoins(m) {
 }
 function _hoardLeaves(row, m) {
     const s = _hoardStateFilter;
-    if (s === "__active__") return !(m.status === 3 && m.upload_rate > 0);
     if (s === "seeding") return m.status !== 3;
     if (s && s[0] !== "_" && m.checking_progress == null) return _hoardWantsState(m) !== s;
     return false;
 }
+// The engine says who serves, with a hold of a few seconds so a trickle does
+// not make a torrent blink. The Actively Seeding list and its chip follow it
+// directly: no request, and the chip, the count and the rows are one figure.
+function _applyActiveChanged(d) {
+    const count = Number(d.count) || 0;
+    const plain = _hoardOnlyStateFilter();
+    // The chip counts the whole library only while nothing else narrows it.
+    if (plain && _hoardFacets) {
+        _hoardFacets.active = count;
+        try { _renderHoardCounts(); } catch (_) {}
+    }
+    if (_hoardStateFilter !== "__active__" || !plain || _hoardPageApplied === 0) return;
+    const gone = new Set((d.removed || []).filter(h => h));
+    const rows = new Map();
+    for (const r of (d.added || [])) {
+        if (r && r.info_hash && (r.state === "seeding" || r.state === "seed_only")) {
+            r._pg = true;
+            rows.set(r.info_hash, r);
+        }
+    }
+    const next = [];
+    for (const t of _hoardAllTorrents) {
+        const local = _isLocalAgent(t.agent);
+        if (local && gone.has(t.info_hash)) continue;
+        if (local && rows.has(t.info_hash)) continue;   // replaced below
+        next.push(t);
+    }
+    for (const r of rows.values()) next.push(r);
+    _hoardAllTorrents = next;
+    _hoardServerFiltered = count;
+    // More serving than a page holds: the page decides which rows lead.
+    if (count > HOARD_RENDER_LIMIT) _scheduleHoardMembership(HOARD_REFRESH_LIVE_MS);
+    _scheduleHoardRender();
+}
+
 let _hoardMembershipTimer = null;
 let _hoardMembershipAt = 0;
 function _scheduleHoardMembership(gap) {

@@ -3794,6 +3794,9 @@ pub(crate) async fn engine_page_value(
 
     let torrents = engine.manager.all();
     let total = torrents.len();
+    // Who uploaded within the hold, kept by the engine. The filter, its chip
+    // and the stream's active list all read this one set, so they agree.
+    let active = engine.manager.active_set();
     // The hardlink columns read a summary the link scanner (or a workflow
     // pass) already computed, cf `linkindex::Summary`: one `Arc` clone here,
     // one hash lookup per row below, and only when the sort asks for it or the
@@ -3939,7 +3942,8 @@ pub(crate) async fn engine_page_value(
                 "__check_reading__" => row_state == "checking_files" && !check_waiting,
                 "__check_waiting__" => check_waiting,
                 "__active__" => {
-                    (row_state == "seeding" || row_state == "seed_only") && upload_rate > 0
+                    (row_state == "seeding" || row_state == "seed_only")
+                        && active.contains(&t.info_hash)
                 }
                 "__tracker_err__" => tracker_error,
                 "__error__" => torrent_error,
@@ -3967,7 +3971,9 @@ pub(crate) async fn engine_page_value(
                 if m_search && m_cat && m_tag && m_tracker && m_errclass {
                     n_all += 1;
                     *f_state.entry(row_state).or_insert(0) += 1;
-                    if (row_state == "seeding" || row_state == "seed_only") && upload_rate > 0 {
+                    if (row_state == "seeding" || row_state == "seed_only")
+                        && active.contains(&t.info_hash)
+                    {
                         n_active += 1;
                     }
                     if tracker_error {
@@ -7227,6 +7233,9 @@ async fn stream_events(
             let mut bus = engine.manager.bus().subscribe();
             let tx = tx.clone();
             let mode = engine.role.clone();
+            let state = state.clone();
+            let manager = engine.manager.clone();
+            let engine_id = engine.id.clone();
             tokio::spawn(async move {
                 // Never waits on the client. A page that stops reading (a dead
                 // socket not yet noticed) would hold this task, and the bus would
@@ -7245,12 +7254,32 @@ async fn stream_events(
                 let removed = |h: String| {
                     serde_json::json!({"event": "torrent_removed", "data": {"mode": mode, "info_hash": h}})
                 };
+                // Who is serving changed. Folded like the rest while the page
+                // cannot take it: a hash added then dropped before it was sent
+                // cancels out, and the last count wins.
+                let mut held_active: Option<(
+                    std::collections::HashMap<String, serde_json::Value>,
+                    std::collections::BTreeSet<String>,
+                    usize,
+                )> = None;
+                let active_frame = |added: Vec<serde_json::Value>, gone: Vec<String>, count: usize| {
+                    serde_json::json!({"event": "active_changed",
+                        "data": {"mode": mode, "added": added, "removed": gone, "count": count}})
+                };
                 loop {
-                    let holding = !held_rows.is_empty() || !held_removed.is_empty();
+                    let holding = !held_rows.is_empty()
+                        || !held_removed.is_empty()
+                        || held_active.is_some();
                     tokio::select! {
                         permit = tx.reserve(), if holding => {
                             let Ok(permit) = permit else { return };
-                            if let Some(h) = held_removed.pop_first() {
+                            if let Some((add, gone, count)) = held_active.take() {
+                                permit.send(active_frame(
+                                    add.into_values().collect(),
+                                    gone.into_iter().collect(),
+                                    count,
+                                ));
+                            } else if let Some(h) = held_removed.pop_first() {
                                 permit.send(removed(h));
                             } else {
                                 permit.send(stats(held_rows.drain().map(|(_, r)| r).collect()));
@@ -7272,6 +7301,22 @@ async fn stream_events(
                                     }
                                     Err(tokio::sync::mpsc::error::TrySendError::Closed(())) => return,
                                 }
+                            }
+                            Ok(Event::ActiveChanged { added, removed: gone, count }) => {
+                                let rows = active_rows(&state, &manager, &engine_id, &added);
+                                let (mut add, mut away, _) = held_active.take().unwrap_or_default();
+                                for r in rows {
+                                    if let Some(h) = r.get("info_hash").and_then(|v| v.as_str()) {
+                                        away.remove(h);
+                                        add.insert(h.to_string(), r);
+                                    }
+                                }
+                                for h in gone {
+                                    if add.remove(&h).is_none() {
+                                        away.insert(h);
+                                    }
+                                }
+                                held_active = Some((add, away, count));
                             }
                             Ok(Event::TorrentRemoved { info_hash }) => {
                                 held_rows.remove(&info_hash);
@@ -7368,6 +7413,33 @@ async fn stream_events(
     axum::response::Sse::new(stream)
         .keep_alive(axum::response::sse::KeepAlive::default())
         .into_response()
+}
+
+/// The rows of torrents that just began to serve, built like the page's.
+fn active_rows(
+    state: &AppState,
+    manager: &std::sync::Arc<typhon_engine::torrent::TorrentManager>,
+    engine_id: &str,
+    hashes: &[String],
+) -> Vec<serde_json::Value> {
+    if hashes.is_empty() {
+        return Vec::new();
+    }
+    let agent = local_agent(engine_id);
+    let facts = {
+        let store = state.store.read().unwrap();
+        store.facts_for_hashes(hashes, engine_id).unwrap_or_default()
+    };
+    let empty = crate::row::StoreFacts::default();
+    hashes
+        .iter()
+        .filter_map(|h| {
+            let ih = typhon_engine::torrent::hex_decode(h).ok()?;
+            let t = manager.get(&ih)?;
+            let raw = typhon_engine::rpc::dispatch::torrent_to_json(&t);
+            Some(crate::row::build(&raw, facts.get(h).unwrap_or(&empty), &agent))
+        })
+        .collect()
 }
 
 /// The Logs tab's live feed.
