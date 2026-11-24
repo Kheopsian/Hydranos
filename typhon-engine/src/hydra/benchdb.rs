@@ -151,6 +151,14 @@ pub const BENCH_COLUMNS: &str = "ts, race_upload_rate, race_download_rate, race_
      race_announce_in_flight, hoard_announce_in_flight, \
      hoard_download_rate, extra_upload_rate, extra_download_rate, extra_peers, extra_uploading";
 
+/// Columns that only grow: a bucket keeps the last word, not the mean.
+const CUMULATIVE_COLUMNS: &[&str] = &[
+    "hoard_session_uploaded",
+    "race_session_uploaded",
+    "global_uploaded",
+    "global_downloaded",
+];
+
 /// Columns added to `bench_samples` after databases already existed in the
 /// field. `CREATE TABLE IF NOT EXISTS` does not touch a table that is there,
 /// so an existing bench.db would lack them and every insert naming them would
@@ -711,6 +719,51 @@ impl BenchDb {
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(rusqlite::params![start, end], |row| {
+            let mut out = serde_json::Map::new();
+            for (i, name) in cols.iter().enumerate() {
+                let v: f64 = row.get(i).unwrap_or(0.0);
+                out.insert((*name).to_string(), crate::row::num_json(v));
+            }
+            Ok(serde_json::Value::Object(out))
+        })?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    /// The samples between two instants averaged into buckets of `bucket`
+    /// seconds, oldest first, each stamped at its bucket's start.
+    ///
+    /// A month of 5 s samples is 500 000 rows of about fifty columns: the whole
+    /// of it was sent to the page, which drew a few hundred pixels from it. A
+    /// bucket of at most 5 s is the raw rows. Gauges and rates are averaged;
+    /// the counters that only ever grow take the bucket's maximum.
+    pub fn samples_bucketed(
+        &self,
+        start: f64,
+        end: f64,
+        bucket: f64,
+    ) -> anyhow::Result<Vec<serde_json::Value>> {
+        if bucket <= 5.0 {
+            return self.samples_in_range(start, end);
+        }
+        let cols: Vec<&str> = BENCH_COLUMNS.split(',').map(|c| c.trim()).collect();
+        let picks: Vec<String> = cols
+            .iter()
+            .skip(1)
+            .map(|c| {
+                let agg = if CUMULATIVE_COLUMNS.contains(c) {
+                    "MAX"
+                } else {
+                    "AVG"
+                };
+                format!("{agg}({c})")
+            })
+            .collect();
+        let sql = format!(
+            "SELECT CAST(ts / ?3 AS INTEGER) * ?3 AS b, {} FROM bench_samples               WHERE ts >= ?1 AND ts <= ?2 GROUP BY b ORDER BY b",
+            picks.join(", ")
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params![start, end, bucket], |row| {
             let mut out = serde_json::Map::new();
             for (i, name) in cols.iter().enumerate() {
                 let v: f64 = row.get(i).unwrap_or(0.0);
@@ -1392,6 +1445,36 @@ mod tests {
             .unwrap()["value"]
             .clone();
         assert_eq!(peers, 6.0, "race_peers + hoard_peers + extra_peers");
+    }
+
+    /// A long window comes back as buckets, not as every sample: rates are
+    /// averaged, counters keep their maximum, and a short window is untouched.
+    #[test]
+    fn a_long_window_is_bucketed_and_a_short_one_is_raw() {
+        let db = BenchDb::open_in_memory().unwrap();
+        // 1 200 samples, 5 s apart: 6 000 s.
+        for i in 0..1_200 {
+            db.record_sample(&serde_json::json!({
+                "ts": 1_000.0 + i as f64 * 5.0,
+                "race_upload_rate": if i % 2 == 0 { 100.0 } else { 300.0 },
+                "global_uploaded": i as f64,
+            }))
+            .unwrap();
+        }
+        let raw = db.samples_bucketed(1_000.0, 7_000.0, 5.0).unwrap();
+        assert_eq!(raw.len(), 1_200, "a 5 s bucket is the raw rows");
+        let b = db.samples_bucketed(1_000.0, 7_000.0, 60.0).unwrap();
+        assert!(b.len() <= 101, "6 000 s in 60 s buckets: {}", b.len());
+        assert!(b.len() >= 100);
+        assert_eq!(b[1]["race_upload_rate"], 200.0, "rates are averaged");
+        // Bucket 1 (1 020..1 080 s) holds samples 4..16, so its counter ends at 15.
+        let last_in_first = b[0]["global_uploaded"].as_f64().unwrap();
+        assert!(last_in_first >= 3.0, "counters keep the bucket maximum");
+        let ts: Vec<f64> = b.iter().map(|r| r["ts"].as_f64().unwrap()).collect();
+        assert!(
+            ts.windows(2).all(|w| w[1] - w[0] == 60.0),
+            "stamped at the bucket start"
+        );
     }
 
     /// A rate no line carried is cleared to NULL in place. The minute it sat in

@@ -1236,7 +1236,7 @@ window.addEventListener("DOMContentLoaded", () => {
         else if (_hashTab === "categories") await updateCategories(true);
         else if (_hashTab === "nodes") { await updateNodes(); }
         else if (_hashTab === "trackers") { await updateTrackers(); loadTrackerStats(); }
-        else if (_hashTab === "benchmark") await updateBenchmark();
+        else if (_hashTab === "benchmark") await updateBenchmark(true);
         else if (_hashTab === "jobs") startJobsPolling();
     });
 });
@@ -7424,7 +7424,7 @@ document.querySelectorAll(".bm-range-btn").forEach(btn => {
         document.querySelectorAll(".bm-range-btn").forEach(b => b.classList.remove("active"));
         btn.classList.add("active");
         _bmSpan = parseInt(btn.dataset.span);
-        updateBenchmark();
+        updateBenchmark(true);
     });
 });
 
@@ -7448,31 +7448,52 @@ function _renderExtraBenchCards(engines) {
     ).join("");
 }
 
-async function updateBenchmark() {
+function _renderBenchmarkCards(cur) {
+    _renderExtraBenchCards(cur.engines || []);
+    document.getElementById("bm-race-upload").textContent   = formatSpeed(cur.race_upload_rate ?? 0);
+    document.getElementById("bm-race-download").textContent = formatSpeed(cur.race_download_rate ?? 0);
+    document.getElementById("bm-hoard-upload").textContent  = formatSpeed(cur.hoard_upload_rate ?? 0);
+    document.getElementById("bm-race-peers").textContent    = (cur.race_peers ?? 0).toFixed(0);
+    document.getElementById("bm-iowait").textContent        = (cur.iowait_pct ?? 0).toFixed(1) + "%";
+    document.getElementById("bm-arc-hit").textContent       = (cur.arc_hit_rate_pct ?? 0).toFixed(3) + "%";
+    document.getElementById("bm-arc-miss").textContent      = (cur.arc_miss_per_sec ?? 0).toFixed(1) + "/s";
+    document.getElementById("bm-arc-size").textContent      = formatBytes(cur.arc_size_bytes ?? 0);
+}
+
+// The charts hold about 300 points whatever the span, so a point is
+// span / 300 seconds wide and nothing moves faster than that: ask again once a
+// point's worth of time has gone by, within 10 s and 5 min. The live cards
+// above them follow every tick.
+let _bmHistoryAt = 0;
+function _bmHistoryEvery() {
+    return Math.min(300000, Math.max(10000, (_bmSpan / 300) * 1000));
+}
+
+// `force` is a click: a tab opened or a range chosen draws the charts now.
+async function updateBenchmark(force) {
     try {
         const now = Date.now() / 1000;
         const start = now - _bmSpan;
+        const due = force === true || !_bmCharts || Date.now() - _bmHistoryAt >= _bmHistoryEvery();
 
-        const [cur, history, extraHistory] = await Promise.all([
+        if (!due) {
+            const cur = await api("/api/benchmark/current");
+            _renderBenchmarkCards(cur);
+            return;
+        }
+        _bmHistoryAt = Date.now();
+        const [cur, history, extraHistory, recent] = await Promise.all([
             api("/api/benchmark/current"),
             api(`/api/benchmark/range?start=${start}&end=${now}`),
             // The engines beyond race and hoard, from their own table.
             api(`/api/benchmark/engines?start=${start}&end=${now}`).catch(() => ({})),
+            // The announce card speaks of the last minute: the raw samples of
+            // the last five, whatever the span the charts show.
+            api(`/api/benchmark/range?start=${now - 300}&end=${now}&bucket=5`).catch(() => []),
         ]);
 
         if (!_bmCharts) _initBmCharts();
-        _renderExtraBenchCards(cur.engines || []);
-
-        // Live cards
-        const totalUpload = (cur.race_upload_rate ?? 0) + (cur.hoard_upload_rate ?? 0);
-        document.getElementById("bm-race-upload").textContent   = formatSpeed(cur.race_upload_rate ?? 0);
-        document.getElementById("bm-race-download").textContent = formatSpeed(cur.race_download_rate ?? 0);
-        document.getElementById("bm-hoard-upload").textContent  = formatSpeed(cur.hoard_upload_rate ?? 0);
-        document.getElementById("bm-race-peers").textContent    = (cur.race_peers ?? 0).toFixed(0);
-        document.getElementById("bm-iowait").textContent        = (cur.iowait_pct ?? 0).toFixed(1) + "%";
-        document.getElementById("bm-arc-hit").textContent       = (cur.arc_hit_rate_pct ?? 0).toFixed(3) + "%";
-        document.getElementById("bm-arc-miss").textContent      = (cur.arc_miss_per_sec ?? 0).toFixed(1) + "/s";
-        document.getElementById("bm-arc-size").textContent      = formatBytes(cur.arc_size_bytes ?? 0);
+        _renderBenchmarkCards(cur);
 
         // Range hint
         document.getElementById("bm-range-hint").textContent =
@@ -7572,7 +7593,7 @@ async function updateBenchmark() {
             c.data.datasets[5].data = history.map(p => p.hoard_announce_rate ?? 0);
             c.update("none");
         }
-        _renderAnnounceFigures(history);
+        _renderAnnounceFigures(recent && recent.length ? recent : history);
         // Race Events, 20 stacked bars (added, completed, first_upload)
         {
             const N = 20;
@@ -8191,7 +8212,7 @@ document.querySelectorAll(".tab").forEach(tab => {
         if (t === "race") await updateRaceTorrents();
         if (t === "hoard") await updateHoardStats();
         if (t === "categories") await updateCategories(true);
-        if (t === "benchmark") await updateBenchmark();
+        if (t === "benchmark") await updateBenchmark(true);
     });
 });
 

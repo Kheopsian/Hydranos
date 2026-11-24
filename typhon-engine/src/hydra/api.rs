@@ -6431,15 +6431,30 @@ async fn get_bench_range(
     let Some(bench) = state.bench.as_ref() else {
         return Json(serde_json::json!([])).into_response();
     };
-    let db = match bench.lock() {
-        Ok(db) => db,
-        Err(e) => e.into_inner(),
-    };
     let (start, end) = range_params(&query);
-    match db.samples_in_range(start, end) {
-        Ok(rows) => Json(rows).into_response(),
-        Err(e) => {
+    // About 300 points whatever the window, like the engines' rows beside it
+    // (the page matches the two by this same bucket). A caller that wants the
+    // raw 5 s samples of a short window asks for `bucket=5`.
+    let bucket = query_param(&query, "bucket")
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(((end - start) / 300.0).max(5.0))
+        .max(5.0);
+    // A month of history is a scan of hundreds of thousands of rows: off the
+    // async workers, and the bench database's lock is let go as soon as it is read.
+    let bench = bench.clone();
+    let rows = tokio::task::spawn_blocking(move || {
+        let db = bench.lock().unwrap_or_else(|e| e.into_inner());
+        db.samples_bucketed(start, end, bucket)
+    })
+    .await;
+    match rows {
+        Ok(Ok(rows)) => Json(rows).into_response(),
+        Ok(Err(e)) => {
             tracing::warn!("bench range query failed: {e}");
+            Json(serde_json::json!([])).into_response()
+        }
+        Err(e) => {
+            tracing::warn!("bench range task failed: {e}");
             Json(serde_json::json!([])).into_response()
         }
     }
