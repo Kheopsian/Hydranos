@@ -296,7 +296,10 @@ pub(crate) async fn fetch_via(
     // by its Docker name); what it answers is not: a fetch that began on a
     // public host is not sent on to an internal address, however the name is
     // written (`egress::client_resolving`, as for the MCP's torrent URLs).
-    // The route (proxy, bound interface) is the one given.
+    // The route (proxy, bound interface) is the one given, unless the feed's
+    // host is listed in `[daemon] bypass`: a feed on the LAN cannot be reached
+    // through a tunnel, so it is fetched by the host's default route.
+    let route = &typhon_engine::egress::route_for(route, url);
     let guard = std::sync::Arc::new(typhon_engine::webseed::StartGuard::for_url(url));
     let client = typhon_engine::egress::client_resolving(route, hosts, guard, is_internal)?;
     let mut resp = client

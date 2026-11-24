@@ -19,6 +19,10 @@
 //! The route is process-wide and replaced whenever the configuration is: the
 //! clients built from it are cached by generation, so a change takes effect
 //! at the next request without a restart.
+//!
+//! `[daemon] bypass` is the one exception, chosen per request from its URL
+//! (`route_for`, `client_to`): a listed LAN destination is reached by the
+//! default route, since a socket bound to a tunnel cannot reach the LAN.
 
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
@@ -35,6 +39,11 @@ pub struct Route {
     /// tunnel nobody was given, an engine that is blocked): every request is
     /// refused with this reason. Empty = no refusal.
     pub refusal: String,
+    /// The default route taken because `[daemon] bypass` lists the target
+    /// (`route_for`): redirects are followed only to destinations it lists,
+    /// so a LAN host cannot send a request on to the internet outside the
+    /// tunnel.
+    pub bypassed: bool,
 }
 
 /// The refusal when the kill switch is on and nothing says where to go.
@@ -77,7 +86,15 @@ impl Route {
             proxy,
             interface: interface.trim().to_string(),
             kill_switch,
-            refusal: String::new(),
+            ..Route::default()
+        }
+    }
+
+    /// The host's default route for a destination `[daemon] bypass` lists.
+    pub fn bypassed() -> Route {
+        Route {
+            bypassed: true,
+            ..Route::default()
         }
     }
 
@@ -245,10 +262,8 @@ pub fn resolve(
     };
     let direct = |kind: &'static str, via: &str| {
         let r = Route {
-            proxy: String::new(),
             interface: proxy.interface.clone(),
-            kill_switch: false,
-            refusal: String::new(),
+            ..Route::default()
         };
         let via = if r.interface.is_empty() {
             via.to_string()
@@ -451,6 +466,201 @@ pub fn route() -> Arc<Route> {
         .clone()
 }
 
+/// `[daemon] bypass`: the destinations the daemon's own requests reach by the
+/// host's default route instead of the tunnel or the proxy.
+///
+/// The way to fetch a feed on the LAN while the rest stays in the VPN: a
+/// request bound to a tunnel device cannot reach the LAN at all, and a route
+/// to the default gateway added on the host does not help a socket bound to
+/// another device. So the choice is made here, per request, from the URL.
+///
+/// Matched on the URL's host as written, never on what a name resolves to:
+/// an address or a network matches an address in the URL, a name matches the
+/// same name. A name that is not listed is therefore never looked up outside
+/// the tunnel, so the list leaks no DNS query for the public hosts.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Bypass {
+    nets: Vec<(std::net::IpAddr, u8)>,
+    names: Vec<String>,
+}
+
+impl Bypass {
+    /// The list as written; the entries that are neither a network, an
+    /// address nor a host name are returned apart, with why.
+    pub fn parse(list: &[String]) -> (Bypass, Vec<String>) {
+        let mut b = Bypass::default();
+        let mut bad = Vec::new();
+        for raw in list {
+            let e = raw.trim();
+            if e.is_empty() {
+                continue;
+            }
+            match parse_entry(e) {
+                Ok(Entry::Net(ip, len)) => b.nets.push((ip, len)),
+                Ok(Entry::Name(n)) => b.names.push(n),
+                Err(why) => bad.push(format!("{e:?}: {why}")),
+            }
+        }
+        (b, bad)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.nets.is_empty() && self.names.is_empty()
+    }
+
+    /// Whether the host of `url` is listed.
+    pub fn covers_url(&self, url: &str) -> bool {
+        if self.is_empty() {
+            return false;
+        }
+        match reqwest::Url::parse(url) {
+            Ok(u) => self.covers(&u),
+            Err(_) => false,
+        }
+    }
+
+    fn covers(&self, u: &reqwest::Url) -> bool {
+        match u.host() {
+            Some(url::Host::Ipv4(ip)) => self.covers_ip(ip.into()),
+            Some(url::Host::Ipv6(ip)) => self.covers_ip(ip.into()),
+            Some(url::Host::Domain(d)) => {
+                let d = d.trim_end_matches('.').to_ascii_lowercase();
+                self.names.contains(&d)
+            }
+            None => false,
+        }
+    }
+
+    fn covers_ip(&self, ip: std::net::IpAddr) -> bool {
+        // An IPv4 address written as IPv6 (::ffff:a.b.c.d) is the same host.
+        let ip = match ip {
+            std::net::IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(ip, std::net::IpAddr::V4),
+            v4 => v4,
+        };
+        self.nets.iter().any(|(net, len)| in_net(ip, *net, *len))
+    }
+}
+
+enum Entry {
+    Net(std::net::IpAddr, u8),
+    Name(String),
+}
+
+fn parse_entry(e: &str) -> Result<Entry, String> {
+    if let Some((addr, len)) = e.split_once('/') {
+        let ip: std::net::IpAddr = addr
+            .trim()
+            .parse()
+            .map_err(|_| "not a network (address/length)".to_string())?;
+        let max = if ip.is_ipv4() { 32 } else { 128 };
+        let len: u8 = len
+            .trim()
+            .parse()
+            .ok()
+            .filter(|l| *l <= max)
+            .ok_or_else(|| format!("the prefix length is 0 to {max}"))?;
+        if len == 0 {
+            // 0.0.0.0/0 is everything: that is egress = "direct", said plainly.
+            return Err(
+                "a /0 sends everything outside the tunnel; set the daemon's requests to Direct instead"
+                    .into(),
+            );
+        }
+        return Ok(Entry::Net(ip, len));
+    }
+    let bare = e.trim_start_matches('[').trim_end_matches(']');
+    if let Ok(ip) = bare.parse::<std::net::IpAddr>() {
+        let len = if ip.is_ipv4() { 32 } else { 128 };
+        return Ok(Entry::Net(ip, len));
+    }
+    let name = e.trim_end_matches('.').to_ascii_lowercase();
+    let label_ok = |l: &str| {
+        !l.is_empty()
+            && l.len() <= 63
+            && l.bytes()
+                .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+            && !l.starts_with('-')
+    };
+    if name.len() <= 253 && name.split('.').all(label_ok) {
+        Ok(Entry::Name(name))
+    } else {
+        Err("not a network, an address or a host name".into())
+    }
+}
+
+/// `ip` is inside `net`/`len` (same family only).
+fn in_net(ip: std::net::IpAddr, net: std::net::IpAddr, len: u8) -> bool {
+    match (ip, net) {
+        (std::net::IpAddr::V4(a), std::net::IpAddr::V4(n)) => {
+            let mask = u32::MAX.checked_shl(32 - len as u32).unwrap_or(0);
+            u32::from(a) & mask == u32::from(n) & mask
+        }
+        (std::net::IpAddr::V6(a), std::net::IpAddr::V6(n)) => {
+            let mask = u128::MAX.checked_shl(128 - len as u32).unwrap_or(0);
+            u128::from(a) & mask == u128::from(n) & mask
+        }
+        _ => false,
+    }
+}
+
+fn bypass_current() -> &'static RwLock<Arc<Bypass>> {
+    static B: OnceLock<RwLock<Arc<Bypass>>> = OnceLock::new();
+    B.get_or_init(|| RwLock::new(Arc::new(Bypass::default())))
+}
+
+/// Install the bypass list. True when it differs from the one in force.
+pub fn set_bypass(b: Bypass) -> bool {
+    let mut cur = bypass_current().write().unwrap_or_else(|p| p.into_inner());
+    if **cur == b {
+        return false;
+    }
+    *cur = Arc::new(b);
+    true
+}
+
+/// The bypass list in force.
+pub fn bypass() -> Arc<Bypass> {
+    bypass_current()
+        .read()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone()
+}
+
+/// The route a request to `url` takes: the host's default route when
+/// `[daemon] bypass` lists its host, `route` otherwise.
+pub fn route_for(route: &Route, url: &str) -> Route {
+    route_for_with(&bypass(), route, url)
+}
+
+fn route_for_with(b: &Bypass, route: &Route, url: &str) -> Route {
+    if b.covers_url(url) {
+        Route::bypassed()
+    } else {
+        route.clone()
+    }
+}
+
+/// The redirect policy of a bypassed request: only to listed destinations,
+/// over http(s), ten hops at most. A LAN host answering with a redirect to
+/// the internet would otherwise carry the request out by the default route.
+fn bypass_redirects(b: Arc<Bypass>) -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(move |attempt| {
+        if attempt.previous().len() >= 10 {
+            return attempt.error("too many redirects");
+        }
+        let to = attempt.url();
+        if !matches!(to.scheme(), "http" | "https") {
+            return attempt.error("redirect to a scheme other than http(s)");
+        }
+        if !b.covers(to) {
+            return attempt.error(
+                "redirect away from a [daemon] bypass destination: it would leave outside the tunnel",
+            );
+        }
+        attempt.follow()
+    })
+}
+
 /// The same settings on reqwest's async and blocking builders, which share
 /// method names but no trait.
 macro_rules! apply_route {
@@ -484,6 +694,11 @@ macro_rules! apply_route {
             if route.proxy.is_empty() {
                 b = b.dns_resolver(crate::tunneldns::Resolver::new(&route.interface));
             }
+        }
+        // Last, so it replaces the caller's own policy: outside the tunnel,
+        // only the listed destinations are followed.
+        if route.bypassed {
+            b = b.redirect(bypass_redirects(bypass()));
         }
         b
     }};
@@ -669,6 +884,24 @@ pub fn client() -> Result<reqwest::Client, String> {
     let c = client_for(&route)?;
     *slot = Some((generation, c.clone()));
     Ok(c)
+}
+
+/// The daemon's async client for a request to `url`: [`client`], or one on
+/// the host's default route when `[daemon] bypass` lists the URL's host.
+pub fn client_to(url: &str) -> Result<reqwest::Client, String> {
+    if bypass().covers_url(url) {
+        return client_for(&Route::bypassed());
+    }
+    client()
+}
+
+/// The blocking twin of [`client_to`]. ⚠ Only from a blocking thread, as
+/// [`blocking_client`].
+pub fn blocking_client_to(url: &str) -> Result<reqwest::blocking::Client, String> {
+    if bypass().covers_url(url) {
+        return blocking_client_for(&Route::bypassed());
+    }
+    blocking_client()
 }
 
 /// The daemon's blocking client, on the route in force.
@@ -900,6 +1133,136 @@ mod tests {
             tunnel_device("a-very-long-engine-two")
         );
         assert_eq!(tunnel_device("a b"), tunnel_device("a b"), "stable");
+    }
+
+    fn list(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn the_bypass_list_reads_networks_addresses_and_names() {
+        let (b, bad) = Bypass::parse(&list(&[
+            "192.168.1.0/24",
+            " 10.0.0.5 ",
+            "fd00::/8",
+            "[fe80::1]",
+            "Prowlarr",
+            "nas.lan.",
+            "",
+        ]));
+        assert!(bad.is_empty(), "{bad:?}");
+        assert!(b.covers_url("http://192.168.1.20:9696/api"));
+        assert!(!b.covers_url("http://192.168.2.20/"), "outside the /24");
+        assert!(b.covers_url("https://10.0.0.5/feed"));
+        assert!(
+            !b.covers_url("https://10.0.0.6/feed"),
+            "an address is a /32"
+        );
+        assert!(b.covers_url("http://[fd12::3]/rss"));
+        assert!(b.covers_url("http://[fe80::1]:80/"));
+        assert!(
+            b.covers_url("http://prowlarr:9696/1/api?t=search"),
+            "names ignore case"
+        );
+        assert!(b.covers_url("http://NAS.lan/x"));
+        assert!(
+            !b.covers_url("http://nas.lan.evil.com/x"),
+            "the whole name, not a prefix"
+        );
+        assert!(!b.covers_url("http://tracker.example/rss"));
+        assert!(
+            b.covers_url("http://[::ffff:192.168.1.9]/"),
+            "an IPv4 address written as IPv6 is the same host"
+        );
+    }
+
+    #[test]
+    fn a_name_matches_by_name_never_by_what_it_resolves_to() {
+        // Only the URL is read: nothing is looked up to decide, so a public
+        // name is never resolved outside the tunnel to find out.
+        let (b, _) = Bypass::parse(&list(&["127.0.0.0/8"]));
+        assert!(!b.covers_url("http://localhost/"));
+        assert!(b.covers_url("http://127.0.0.1/"));
+    }
+
+    #[test]
+    fn the_bypass_list_refuses_what_it_cannot_read() {
+        for e in [
+            "0.0.0.0/0",
+            "::/0",
+            "10.0.0.0/33",
+            "10.0.0.0/x",
+            "300.1.1.1/8",
+            "a b",
+            "-x",
+            "http://x/",
+        ] {
+            let (b, bad) = Bypass::parse(&list(&[e]));
+            assert_eq!(bad.len(), 1, "{e:?} must be refused");
+            assert!(b.is_empty(), "{e:?}");
+        }
+    }
+
+    #[test]
+    fn a_listed_host_takes_the_default_route_and_nothing_else_does() {
+        let (b, _) = Bypass::parse(&list(&["192.168.0.0/16"]));
+        let tunnel = Route {
+            interface: "wg-race".into(),
+            kill_switch: true,
+            ..Route::default()
+        };
+        let lan = route_for_with(&b, &tunnel, "http://192.168.1.10/feed");
+        assert!(
+            lan.is_direct() && lan.bypassed && !lan.kill_switch,
+            "{lan:?}"
+        );
+        assert!(
+            lan.preflight().is_ok(),
+            "the kill switch does not refuse it"
+        );
+        assert_eq!(
+            route_for_with(&b, &tunnel, "https://tracker.example/rss"),
+            tunnel
+        );
+        assert_eq!(
+            route_for_with(&Bypass::default(), &tunnel, "http://192.168.1.10/"),
+            tunnel,
+            "an empty list changes nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_bypassed_request_follows_no_redirect_off_the_list() {
+        // A LAN host answering with a redirect to a host not on the list:
+        // followed, it would leave by the default route outside the tunnel.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut s, _)) = listener.accept().await {
+                let mut buf = [0u8; 1024];
+                let _ = s.read(&mut buf).await;
+                let _ = s
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 302 Found\r\nLocation: http://localhost:{port}/next\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        )
+                        .as_bytes(),
+                    )
+                    .await;
+            }
+        });
+        let (b, _) = Bypass::parse(&list(&["127.0.0.1"]));
+        let client = reqwest::Client::builder()
+            .redirect(bypass_redirects(Arc::new(b)))
+            .build()
+            .unwrap();
+        let e = client
+            .get(format!("http://127.0.0.1:{port}/feed"))
+            .send()
+            .await
+            .unwrap_err();
+        assert!(e.is_redirect(), "{e:?}");
+        assert!(format!("{e:?}").contains("bypass"), "{e:?}");
     }
 
     #[test]

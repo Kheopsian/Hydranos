@@ -1537,5 +1537,7 @@
   "Click to include, right-click to exclude": "Clic pour inclure, clic droit pour exclure",
   "Uncategorized": "Sans catégorie",
   "No tracker": "Sans tracker",
-  "Untagged": "Sans tag"
+  "Untagged": "Sans tag",
+  "Bypass the VPN for": "Contourner le VPN pour",
+  "Networks and hosts the daemon's own requests (RSS feeds, .torrent URLs, webhooks, tracker and IP filter lists) reach by the host's default route, outside the tunnel or the proxy, even with the kill switch armed. Comma separated: 192.168.1.0/24, 10.0.0.5, prowlarr. A name listed here is resolved by the host's own DNS; a name not listed never is. Redirects are followed only to destinations on this list.": "Réseaux et hôtes que les requêtes du démon lui-même (flux RSS, URL .torrent, webhooks, listes de trackers et de filtrage IP) joignent par la route par défaut de l'hôte, hors du tunnel ou du proxy, même avec le kill switch armé. Séparés par des virgules : 192.168.1.0/24, 10.0.0.5, prowlarr. Un nom listé ici est résolu par le DNS de l'hôte ; un nom absent de la liste ne l'est jamais. Les redirections ne sont suivies que vers des destinations de cette liste."
 }
