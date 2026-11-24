@@ -47,6 +47,11 @@ pub struct QbitTorrent {
     /// older than 4.2, where `save_path`/`name` is the same thing.
     #[serde(default)]
     pub content_path: String,
+    /// The torrent's folder while it downloads: qBittorrent's incomplete
+    /// folder, where it keeps the data until it is complete and moves it to
+    /// `save_path`. Empty when that folder is not used.
+    #[serde(default)]
+    pub download_path: String,
     #[serde(default)]
     pub progress: f64,
     /// `pausedUP`, `stoppedDL`, `uploading`... Only the paused/stopped family
@@ -644,6 +649,9 @@ pub struct Candidate {
     /// The torrent's file or folder, in the source client's view: what the
     /// data check looks for.
     pub content: String,
+    /// The source client's folder for torrents still downloading (qBittorrent's
+    /// `download_path`), in its view. Empty: none.
+    pub incomplete_dir: String,
     pub complete: bool,
     /// Stopped in the source client. Stays stopped here.
     pub stopped: bool,
@@ -667,6 +675,7 @@ impl Candidate {
             category: t.category.clone(),
             save_path: t.save_path.clone(),
             content,
+            incomplete_dir: t.download_path.clone(),
             // qBit reports 1 exactly when every wanted piece is there.
             complete: t.progress >= 1.0,
             stopped: t.state.starts_with("paused") || t.state.starts_with("stopped"),
@@ -900,32 +909,71 @@ pub fn placement(
     Placement::Elsewhere
 }
 
+/// The ending qBittorrent gives the files of a torrent it has not finished
+/// (its "Append .!qB extension to incomplete files" option).
+const QBIT_PART: &str = ".!qB";
+
+/// `content` is in the source client's folder for unfinished torrents
+/// (`incomplete`), which is not where the torrent is saved once complete.
+/// All three in the same view: mapped, or all as the source gives them.
+///
+/// A save path inside that folder would make every torrent look unfinished:
+/// then the folder says nothing.
+fn in_incomplete_dir(content: &str, save_path: &str, incomplete: &str) -> bool {
+    !incomplete.is_empty() && under(content, incomplete) && !under(save_path, incomplete)
+}
+
 /// How one candidate is added once its torrent file is read, and the note it
-/// carries when its data is not where Hydranos will look.
+/// carries when its data is not where Hydranos will look. `exists` says
+/// whether a path, as Hydranos sees it, is on disk.
 ///
 /// Elsewhere is added stopped and untrusted whatever the wizard chose: trusted,
 /// it would sit in error over files it cannot find; checked and started, it
 /// would download the whole payload a second time next to the copy it has.
+///
+/// So is a torrent qBittorrent had not finished, kept in its incomplete folder
+/// and often under names ending in `.!qB`: Hydranos never renames nor moves
+/// the operator's files, and a note saying "put the data there" could not be
+/// followed without knowing about the ending.
 pub fn plan_placed(
     c: &Candidate,
     choices: &Choices,
-    content_present: bool,
+    exists: impl Fn(&Path) -> bool,
     name: &str,
     multi_file: bool,
     lone_file: Option<&str>,
 ) -> (AddPlan, Option<String>) {
-    let mut p = plan(c, choices, content_present);
     let content = map_path(&c.content, &choices.path_map);
+    let whole = exists(Path::new(&content));
+    // A single file qBittorrent is still writing: only `file.mkv.!qB` exists.
+    let partial = !whole && exists(Path::new(&format!("{content}{QBIT_PART}")));
+    let mut p = plan(c, choices, whole);
+    let unfinished = |mut p: AddPlan| {
+        p.paused = true;
+        p.seed_mode = false;
+        let note = format!(
+            "imported stopped: qBittorrent had not finished this torrent and keeps it in its incomplete folder, at {content}. Move it to {}, take the {QBIT_PART} ending off its file names if they have it, then recheck it; or start it to download it again from scratch",
+            join(&p.save_path, name)
+        );
+        (p, Some(note))
+    };
+    // Before the placement: an incomplete folder inside the save path would
+    // otherwise be taken for the torrent's own folder and become its home.
+    let incomplete = map_path(&c.incomplete_dir, &choices.path_map);
+    if (whole || partial) && in_incomplete_dir(&content, &p.save_path, &incomplete) {
+        return unfinished(p);
+    }
     match placement(&p.save_path, &content, name, multi_file, lone_file) {
         Placement::AsNamed => (p, None),
         Placement::In(dir) => {
             p.save_path = dir;
             (p, None)
         }
+        Placement::Elsewhere if partial => unfinished(p),
         // Nothing there either: there is no copy to protect, and a note
         // pointing at it would send the operator looking for nothing. Added
         // as it was, which fetches it, as the source client would have.
-        Placement::Elsewhere if !content_present => (p, None),
+        Placement::Elsewhere if !whole => (p, None),
         Placement::Elsewhere => {
             p.paused = true;
             p.seed_mode = false;
@@ -958,6 +1006,10 @@ pub struct Preview {
     /// Sampled torrents whose data exists, but in a layout the import does not
     /// reproduce: they go in stopped, with a note saying where it is.
     pub data_elsewhere: usize,
+    /// Sampled torrents qBittorrent had not finished, kept in its incomplete
+    /// folder or as `.!qB` files: they go in stopped, with a note saying how
+    /// to move them or download them again. Not counted in `data_elsewhere`.
+    pub data_incomplete: usize,
     /// Files that could not be read (Transmission): skipped.
     pub problems: Vec<String>,
     /// Torrents with no resume file, so no save path (Transmission): skipped.
@@ -993,7 +1045,9 @@ pub fn preview(cands: &[Candidate], exists: impl Fn(&Path) -> bool) -> Preview {
     let step = (cands.len() / DATA_SAMPLE).max(1);
     for c in cands.iter().step_by(step).take(DATA_SAMPLE) {
         p.data_checked += 1;
-        if !exists(Path::new(&c.content)) {
+        let whole = exists(Path::new(&c.content));
+        let partial = !whole && exists(Path::new(&format!("{}{QBIT_PART}", c.content)));
+        if !whole && !partial {
             continue;
         }
         // The torrent file is not read yet, so its layout is guessed from the
@@ -1005,9 +1059,16 @@ pub fn preview(cands: &[Candidate], exists: impl Fn(&Path) -> bool) -> Preview {
             c.content.trim_end_matches('/'),
             join(&c.save_path, &c.name).trim_end_matches('/'),
         );
-        if !at_or_under
-            && placement(&c.save_path, &c.content, &c.name, false, None) == Placement::Elsewhere
+        let elsewhere = !at_or_under
+            && placement(&c.save_path, &c.content, &c.name, false, None) == Placement::Elsewhere;
+        // In the add's order: the incomplete folder first.
+        if in_incomplete_dir(&c.content, &c.save_path, &c.incomplete_dir) || (partial && elsewhere)
         {
+            p.data_incomplete += 1;
+        } else if partial {
+            // A `.!qB` file where Hydranos looks: the add does not count on it.
+            continue;
+        } else if elsewhere {
             p.data_elsewhere += 1;
         } else {
             p.data_found += 1;
@@ -1202,8 +1263,6 @@ pub async fn run_job(
                 let add = add.clone();
                 let choices = choices.clone();
                 tokio::task::spawn_blocking(move || {
-                    let content = map_path(&c.content, &choices.path_map);
-                    let present = Path::new(&content).exists();
                     // The torrent's own name and layout, not the source's
                     // display name. Unreadable: the add refuses it anyway.
                     let (plan, note) =
@@ -1214,13 +1273,16 @@ pub async fn run_job(
                                 plan_placed(
                                     &c,
                                     &choices,
-                                    present,
+                                    |p| p.exists(),
                                     &meta.name,
                                     meta.multi_file,
                                     lone.as_deref(),
                                 )
                             }
-                            Err(_) => (plan(&c, &choices, present), None),
+                            Err(_) => {
+                                let content = map_path(&c.content, &choices.path_map);
+                                (plan(&c, &choices, Path::new(&content).exists()), None)
+                            }
                         };
                     let held = note.is_some();
                     let added = add(AddRequest {
@@ -1407,6 +1469,7 @@ mod tests {
             category: category.into(),
             save_path: save_path.into(),
             content: join(save_path, "x"),
+            incomplete_dir: String::new(),
             complete: true,
             stopped: false,
             uploaded: 0,
@@ -1459,11 +1522,13 @@ mod tests {
             state: "pausedDL".into(),
             uploaded: 7,
             tags: "a, b,,".into(),
+            download_path: "/downloads/incomplete".into(),
             ..Default::default()
         };
         let got = Candidate::from_qbit(&t);
         assert!(!got.complete);
         assert!(got.stopped);
+        assert_eq!(got.incomplete_dir, "/downloads/incomplete");
         // Joined with this platform's separator: `\` on Windows.
         assert_eq!(
             got.content,
@@ -1796,6 +1861,7 @@ pub fn scan_transmission(
         };
         out.cands.push(Candidate {
             content: join(&f.destination, &meta.name),
+            incomplete_dir: String::new(),
             name: meta.name.clone(),
             category,
             save_path: f.destination.clone(),
@@ -2616,6 +2682,7 @@ mod qbit_session_tests {
             category: String::new(),
             save_path: "/nowhere".into(),
             content: "/nowhere".into(),
+            incomplete_dir: String::new(),
             complete: true,
             stopped: false,
             uploaded: 0,
@@ -2719,9 +2786,11 @@ mod qbit_session_tests {
         lone.save_path = save.to_string_lossy().into_owned();
         lone.content = save.join("Solo/renamed.mkv").to_string_lossy().into_owned();
         // A single file in a folder outside the save path (qBittorrent's
-        // folder for incomplete torrents): not made the torrent's home.
+        // folder for incomplete torrents), as qBittorrent writes it until it
+        // is complete: only `Temp.mkv.!qB` is there. Not made the torrent's
+        // home, and not downloaded again next to it either.
         std::fs::create_dir_all(dir.join("incomplete")).unwrap();
-        std::fs::write(dir.join("incomplete/Temp.mkv"), b"x").unwrap();
+        std::fs::write(dir.join("incomplete/Temp.mkv.!qB"), b"x").unwrap();
         let mut temp = file_cand("Temp.mkv", torrent_file(&dir, "Temp.mkv", &[]));
         temp.save_path = save.to_string_lossy().into_owned();
         temp.content = dir
@@ -2820,6 +2889,109 @@ mod qbit_session_tests {
         let (plan, note) = seen.lock().unwrap()[0].clone();
         assert!(!plan.paused && !plan.seed_mode, "{plan:?}");
         assert_eq!(note, None);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// Every plan and note, in order.
+    async fn added_with_notes(
+        cands: Vec<Candidate>,
+        choices: Choices,
+    ) -> Vec<(AddPlan, Option<String>)> {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = seen.clone();
+        let add: AddFn = Arc::new(move |r| {
+            log.lock().unwrap().push((r.plan.clone(), r.note.clone()));
+            Ok(Added::Resumed)
+        });
+        let cats: CategoryFn = Arc::new(|_| {});
+        run_job(
+            cands,
+            None,
+            choices,
+            Arc::new(Progress::default()),
+            cats,
+            add,
+        )
+        .await;
+        let out = seen.lock().unwrap().clone();
+        out
+    }
+
+    /// A torrent qBittorrent had not finished sits in its incomplete folder
+    /// (`download_path`), here one inside the save path. It is held stopped
+    /// and untrusted, at the save path, with a note the operator can follow:
+    /// the generic "put the data there" said nothing of the folder nor of the
+    /// `.!qB` ending, and a single file was taken in as living in that folder.
+    #[tokio::test]
+    async fn a_torrent_in_the_incomplete_folder_is_held_with_a_note_that_can_be_followed() {
+        let dir = std::env::temp_dir().join(format!("imp-incomplete-{}", std::process::id()));
+        let save = dir.join("dl");
+        let incomplete = save.join(".incomplete");
+        std::fs::create_dir_all(incomplete.join("Pack")).unwrap();
+        std::fs::write(incomplete.join("Pack/a.!qB"), b"x").unwrap();
+        std::fs::write(incomplete.join("Movie.mkv"), b"x").unwrap();
+        let in_progress = |name: &str, files: &[&str]| {
+            let mut c = file_cand(name, torrent_file(&dir, name, files));
+            c.save_path = save.to_string_lossy().into_owned();
+            c.content = incomplete.join(name).to_string_lossy().into_owned();
+            c.incomplete_dir = incomplete.to_string_lossy().into_owned();
+            c
+        };
+        let pack = in_progress("Pack", &["a", "b"]);
+        let movie = in_progress("Movie.mkv", &[]);
+        let start = Choices {
+            path_map: BTreeMap::new(),
+            start_stopped: false,
+        };
+        let got = added_with_notes(vec![pack.clone(), movie], start).await;
+        assert_eq!(got.len(), 2);
+        for ((plan, note), name) in got.iter().zip(["Pack", "Movie.mkv"]) {
+            assert!(plan.paused && !plan.seed_mode, "{plan:?}");
+            assert_eq!(plan.save_path, save.to_string_lossy(), "not its home");
+            let note = note.as_deref().expect("a note");
+            assert!(note.contains("incomplete folder"), "{note}");
+            assert!(note.contains(".!qB"), "{note}");
+            assert!(note.contains(&*save.join(name).to_string_lossy()), "{note}");
+        }
+        let p = preview(&[pack], |path| path.exists());
+        assert_eq!(
+            (p.data_incomplete, p.data_elsewhere, p.data_found),
+            (1, 0, 0)
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// A single file qBittorrent is still writing exists only as `file.!qB`:
+    /// its content path names a file that is not there. It was added with no
+    /// note and downloaded again next to the partial copy.
+    #[tokio::test]
+    async fn a_single_file_present_only_as_a_part_file_is_held_with_a_note() {
+        let dir = std::env::temp_dir().join(format!("imp-partfile-{}", std::process::id()));
+        let save = dir.join("dl");
+        let incomplete = dir.join("incomplete");
+        std::fs::create_dir_all(&save).unwrap();
+        std::fs::create_dir_all(&incomplete).unwrap();
+        std::fs::write(incomplete.join("Show.mkv.!qB"), b"x").unwrap();
+        let mut c = file_cand("Show.mkv", torrent_file(&dir, "Show.mkv", &[]));
+        c.complete = false;
+        c.save_path = save.to_string_lossy().into_owned();
+        c.content = incomplete.join("Show.mkv").to_string_lossy().into_owned();
+        c.incomplete_dir = incomplete.to_string_lossy().into_owned();
+        let start = Choices {
+            path_map: BTreeMap::new(),
+            start_stopped: false,
+        };
+        let got = added_with_notes(vec![c.clone()], start).await;
+        let (plan, note) = &got[0];
+        assert!(plan.paused && !plan.seed_mode, "{plan:?}");
+        let note = note.as_deref().expect("a note");
+        assert!(note.contains(&c.content), "{note}");
+        assert!(note.contains("download it again"), "{note}");
+        let p = preview(&[c], |path| path.exists());
+        assert_eq!(
+            (p.data_incomplete, p.data_elsewhere, p.data_found),
+            (1, 0, 0)
+        );
         std::fs::remove_dir_all(dir).ok();
     }
 

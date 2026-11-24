@@ -817,10 +817,11 @@ function importWizard(opts) {
             <p class="modal-desc" style="margin-bottom:4px">${t("Path mapping (qBit path → what Hydranos sees). Fix these if Hydranos mounts the data elsewhere:")}</p>
             <div style="max-height:160px;overflow:auto;margin-bottom:8px;border:1px solid var(--border);border-radius:4px;padding:6px">${rows || `<i>${t("no paths detected")}</i>`}</div>
             <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
-                <p class="modal-desc" id="qb-data" style="margin:0;flex:1${d.data_checked && d.data_found === 0 && !d.data_elsewhere ? ";color:var(--accent-red);font-weight:600" : ""}">${!d.data_checked ? "" : (d.data_found === 0 && !d.data_elsewhere
+                <p class="modal-desc" id="qb-data" style="margin:0;flex:1${d.data_checked && d.data_found === 0 && !d.data_elsewhere && !d.data_incomplete ? ";color:var(--accent-red);font-weight:600" : ""}">${!d.data_checked ? "" : (d.data_found === 0 && !d.data_elsewhere && !d.data_incomplete
                     ? t("No data found for any of the {checked} torrents sampled. Nothing is reachable at these paths, so every torrent would restart from zero. Fix the mapping above.", { checked: d.data_checked })
                     : t("Data found for {found} of {checked} torrents sampled.", { found: d.data_found, checked: d.data_checked })
-                      + (d.data_elsewhere ? " " + t("{n} more have their data in a layout Hydranos does not reproduce (a renamed file, or files without their torrent's folder): those are added stopped, with a note saying where their data is.", { n: d.data_elsewhere }) : ""))}</p>
+                      + (d.data_elsewhere ? " " + t("{n} more have their data in a layout Hydranos does not reproduce (a renamed file, or files without their torrent's folder): those are added stopped, with a note saying where their data is.", { n: d.data_elsewhere }) : "")
+                      + (d.data_incomplete ? " " + t("{n} more are downloads qBittorrent had not finished, in its incomplete folder or as .!qB files: those are added stopped, with a note saying how to move them or download them again.", { n: d.data_incomplete }) : ""))}</p>
                 <button id="qb-check" style="flex:0 0 auto;width:auto">${t("Re-check paths")}</button>
             </div>
             ${d.likely_isolated ? `<p class="modal-desc" style="color:var(--accent-yellow)">${t("{n} torrents share their data path with an earlier one of another size (a repack under the same name): each is added stopped in a folder of its own, not trusted, and would download its data there.", { n: d.likely_isolated })}</p>` : ""}
