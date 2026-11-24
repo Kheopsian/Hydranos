@@ -7471,7 +7471,9 @@ fn active_rows(
     let agent = local_agent(engine_id);
     let facts = {
         let store = state.store.read().unwrap();
-        store.facts_for_hashes(hashes, engine_id).unwrap_or_default()
+        store
+            .facts_for_hashes(hashes, engine_id)
+            .unwrap_or_default()
     };
     let empty = crate::row::StoreFacts::default();
     hashes
@@ -7480,7 +7482,11 @@ fn active_rows(
             let ih = typhon_engine::torrent::hex_decode(h).ok()?;
             let t = manager.get(&ih)?;
             let raw = typhon_engine::rpc::dispatch::torrent_to_json(&t);
-            Some(crate::row::build(&raw, facts.get(h).unwrap_or(&empty), &agent))
+            Some(crate::row::build(
+                &raw,
+                facts.get(h).unwrap_or(&empty),
+                &agent,
+            ))
         })
         .collect()
 }

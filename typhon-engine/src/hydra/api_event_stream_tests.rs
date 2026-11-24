@@ -153,9 +153,14 @@ async fn read_until(
 /// hash, so the Actively Seeding list needs no request to follow.
 #[tokio::test]
 async fn the_page_is_told_who_started_and_who_stopped_serving() {
-    let s = state_from("sse-active", &format!("[daemon]
+    let s = state_from(
+        "sse-active",
+        &format!(
+            "[daemon]
 api_key = \"{KEY}\"
-"));
+"
+        ),
+    );
     let engine = s.state.engines.get("hoard").expect("hoard engine");
     let (ih, _) = engine
         .manager
@@ -186,21 +191,32 @@ api_key = \"{KEY}\"
     let text = read_until(&mut body, &["active_changed", &gone], 5).await;
     assert!(text.contains("active_changed"), "no event in: {text}");
     assert!(text.contains(&gone), "the removal is named: {text}");
-    assert!(text.contains("\"agent\":\"local-hoard\""), "from which engine: {text}");
+    assert!(
+        text.contains("\"agent\":\"local-hoard\""),
+        "from which engine: {text}"
+    );
     assert!(
         text.contains(&format!("\"info_hash\":\"{hash}\"")),
         "the joiner comes with its row: {text}"
     );
-    assert!(text.contains("\"state\":\""), "a built row, with a state: {text}");
+    assert!(
+        text.contains("\"state\":\""),
+        "a built row, with a state: {text}"
+    );
 }
 
 /// ⭐ The chips of the list are pushed, counted by the page's own function, so
 /// they move with the rows instead of a poll later.
 #[tokio::test]
 async fn the_chips_are_pushed_and_move_when_a_figure_moves() {
-    let s = state_from("sse-facets", &format!("[daemon]
+    let s = state_from(
+        "sse-facets",
+        &format!(
+            "[daemon]
 api_key = \"{KEY}\"
-"));
+"
+        ),
+    );
     let engine = s.state.engines.get("hoard").expect("hoard engine");
     engine
         .manager
@@ -222,7 +238,10 @@ api_key = \"{KEY}\"
         .add_torrent_bytes(&sse_torrent("second"), "/tmp", true, true)
         .expect("added");
     let text = read_until(&mut body, &["\"all\":2"], 8).await;
-    assert!(text.contains("\"all\":2"), "the new count is pushed: {text}");
+    assert!(
+        text.contains("\"all\":2"),
+        "the new count is pushed: {text}"
+    );
 }
 
 fn sse_torrent(name: &str) -> Vec<u8> {

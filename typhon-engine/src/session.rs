@@ -350,7 +350,8 @@ pub async fn start(
         // The last stamp is the tick the torrent was last seen on: a removed
         // torrent stops being seen, and its entry goes at the next purge
         // instead of staying for the life of the process.
-        let mut last: HashMap<[u8; 20], (u64, u64, u8, usize, usize, u64, u64, bool)> = HashMap::new();
+        let mut last: HashMap<[u8; 20], (u64, u64, u8, usize, usize, u64, u64, bool)> =
+            HashMap::new();
         let mut tick: u64 = 0;
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;

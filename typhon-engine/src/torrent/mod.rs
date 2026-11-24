@@ -2626,7 +2626,12 @@ impl TorrentManager {
             let snapshot = if added.is_empty() && removed.is_empty() {
                 None
             } else {
-                Some(Arc::new(a.last.keys().copied().collect::<std::collections::HashSet<_>>()))
+                Some(Arc::new(
+                    a.last
+                        .keys()
+                        .copied()
+                        .collect::<std::collections::HashSet<_>>(),
+                ))
             };
             (added, removed, a.last.len(), snapshot)
         };
@@ -8112,7 +8117,11 @@ mod manager_tests {
         mgr.refresh_active(&[a, b], secs(0));
         assert!(mgr.active_set().contains(&a) && mgr.active_set().contains(&b));
         match rx.try_recv() {
-            Ok(Event::ActiveChanged { added, removed, count }) => {
+            Ok(Event::ActiveChanged {
+                added,
+                removed,
+                count,
+            }) => {
                 assert_eq!((added.len(), removed.len(), count), (2, 0, 2));
             }
             other => panic!("expected the two joins, got {other:?}"),
@@ -8126,7 +8135,11 @@ mod manager_tests {
         mgr.refresh_active(&[a], secs(6));
         assert!(mgr.active_set().contains(&a) && !mgr.active_set().contains(&b));
         match rx.try_recv() {
-            Ok(Event::ActiveChanged { added, removed, count }) => {
+            Ok(Event::ActiveChanged {
+                added,
+                removed,
+                count,
+            }) => {
                 assert_eq!((added.len(), removed, count), (0, vec![hex_encode(&b)], 1));
             }
             other => panic!("expected bravo's leave, got {other:?}"),

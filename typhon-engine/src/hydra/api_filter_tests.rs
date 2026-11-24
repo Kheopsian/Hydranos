@@ -323,7 +323,11 @@ async fn actively_seeding_follows_the_engines_hold_not_the_last_second() {
     manager.refresh_active(&[], at(2));
     let v = engine_page_value(&s.state, "race", "state=__active__&facets=1").await;
     assert_eq!(v["filtered"], serde_json::json!(1), "inside the hold: {v}");
-    assert_eq!(v["facets"]["active"], serde_json::json!(1), "the chip agrees: {v}");
+    assert_eq!(
+        v["facets"]["active"],
+        serde_json::json!(1),
+        "the chip agrees: {v}"
+    );
     assert_eq!(rows(&v).len(), 1, "and so do the rows: {v}");
 
     // Past the hold it leaves, in the list and in the chip at once.
