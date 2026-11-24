@@ -8724,17 +8724,18 @@ function _openHoardSSE() {
                 byHash.set(row.info_hash, row);
             }
             let touched = 0;
-            let membership = false;
+            let gap = Infinity;   // the soonest the page may be asked for again
             _hoardEdgeMemo = undefined;
             for (const m of data.torrents) {
                 const t = byHash.get(m.info_hash);
                 if (!t) {
                     // A torrent this page does not hold has just started to
                     // match what the page was asked for.
-                    if (!membership && _hoardJoins(m)) membership = true;
+                    const j = _hoardJoins(m);
+                    if (j) gap = Math.min(gap, j === 2 ? HOARD_REFRESH_LIVE_MS : 1000);
                     continue;
                 }
-                if (!membership && _hoardLeaves(t, m)) membership = true;
+                if (_hoardLeaves(t, m)) gap = Math.min(gap, 1000);
                 // A row under a check keeps saying so: the engine's status of a
                 // stopped torrent being checked is still "stopped".
                 // The stream says how far a check has got (null when none
@@ -8758,7 +8759,7 @@ function _openHoardSSE() {
                 touched++;
             }
             if (touched > 0) _scheduleHoardRender();
-            if (membership) _scheduleHoardMembership();
+            if (gap < Infinity) _scheduleHoardMembership(gap);
         } else if (type === "torrent_removed" && data.info_hash) {
             // Same stream, same trap: removing the race copy must not drop
             // the hoard row of the same hash.
@@ -8792,16 +8793,27 @@ function _hoardWantsState(m) {
     return _STATUS_TO_STATE[m.status];
 }
 let _hoardEdgeMemo;   // the page's worst row, found once per stream frame
+// The stream carries neither name, category, tracker nor tags, so a match
+// against the state alone says nothing once any other filter is on: every
+// moving off-page torrent would look like a newcomer.
+function _hoardOnlyStateFilter() {
+    return !document.getElementById("hoard-search")?.value
+        && !_hoardCatInc.length && !_hoardCatExc.length
+        && !_hoardTagInc.length && !_hoardTagExc.length
+        && !_hoardTrackerInc.length && !_hoardTrackerExc.length
+        && !_hoardErrInc.length && !_hoardErrExc.length;
+}
+// 0: no, 1: joined the state filter, 2: beat the slowest row of a rate sort.
 function _hoardJoins(m) {
     const s = _hoardStateFilter;
     // Only while the page holds the whole filtered set is a match that is not
     // on it a newcomer. On a full page the stream carries matching torrents
     // all the time (every seeder whose counters move), and asking each time
     // would walk the library every second; the poll covers that case.
-    if (s && _hoardAllTorrents.length < HOARD_RENDER_LIMIT) {
-        if (s === "__active__") return m.status === 3 && m.upload_rate > 0;
-        if (s === "seeding") return m.status === 3 && m.checking_progress == null;
-        if (s[0] !== "_") return m.checking_progress == null ? _hoardWantsState(m) === s : s === "checking_files";
+    if (s && _hoardAllTorrents.length < HOARD_RENDER_LIMIT && _hoardOnlyStateFilter()) {
+        if (s === "__active__") return m.status === 3 && m.upload_rate > 0 ? 1 : 0;
+        if (s === "seeding") return m.status === 3 && m.checking_progress == null ? 1 : 0;
+        if (s[0] !== "_") return (m.checking_progress == null ? _hoardWantsState(m) === s : s === "checking_files") ? 1 : 0;
     }
     // Sorted on a rate: a torrent faster than the slowest row on a full page
     // belongs on it.
@@ -8817,9 +8829,9 @@ function _hoardJoins(m) {
             }
             _hoardEdgeMemo = edge;
         }
-        return _hoardSortAsc ? v < _hoardEdgeMemo : v > _hoardEdgeMemo;
+        return (_hoardSortAsc ? v < _hoardEdgeMemo : v > _hoardEdgeMemo) ? 2 : 0;
     }
-    return false;
+    return 0;
 }
 function _hoardLeaves(row, m) {
     const s = _hoardStateFilter;
@@ -8830,9 +8842,9 @@ function _hoardLeaves(row, m) {
 }
 let _hoardMembershipTimer = null;
 let _hoardMembershipAt = 0;
-function _scheduleHoardMembership() {
+function _scheduleHoardMembership(gap) {
     if (_hoardMembershipTimer || !_hoardTabVisible()) return;
-    const wait = Math.max(150, 1000 - (Date.now() - _hoardMembershipAt));
+    const wait = Math.max(150, gap - (Date.now() - _hoardMembershipAt));
     _hoardMembershipTimer = setTimeout(() => {
         _hoardMembershipTimer = null;
         _hoardMembershipAt = Date.now();
