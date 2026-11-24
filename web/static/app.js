@@ -7628,11 +7628,49 @@ function _renderBenchmarkLive(data) {
     if (Array.isArray(data.engines)) _renderExtraBenchCards(data.engines.map(e => ({ ...e.stats, id: e.id })));
     const p = data.performance;
     if (p) {
-        set("bm-iowait", p.measured ? (p.iowait_pct ?? 0).toFixed(1) + "%" : "-");
+        _showZfsOnly(p.zfs);
+        // IOWait needs /proc/stat, not ZFS. A daemon that does not say (older)
+        // is read as before: shown once the sampler has measured.
+        const io = p.has_iowait ?? p.measured;
+        set("bm-iowait", io ? (p.iowait_pct ?? 0).toFixed(1) + "%" : "-");
         set("bm-arc-hit", p.measured ? (p.arc_hit_rate_pct ?? 0).toFixed(3) + "%" : "-");
         set("bm-arc-miss", p.measured ? (p.arc_miss_per_sec ?? 0).toFixed(1) + "/s" : "-");
         set("bm-arc-size", p.measured ? formatBytes(p.arc_size_bytes ?? 0) : "-");
+        _renderReadCache(p.read_cache);
     }
+}
+
+// The ARC cards and chart belong to a ZFS host: elsewhere there is nothing to
+// read and a row of zeros looks like a cache that is not working. Only an
+// explicit `false` hides them, so a daemon that does not say keeps them.
+function _showZfsOnly(zfs) {
+    const hide = zfs === false;
+    document.querySelectorAll("#tab-benchmark [data-zfs-only]").forEach(el => {
+        el.style.display = hide ? "none" : "";
+    });
+}
+
+// The daemon's own read cache. It sends counters since start; a rate is the
+// difference between two frames, so a busy minute moves it and the history
+// since boot does not.
+let _rcPrev = null;
+function _renderReadCache(rc, now = Date.now()) {
+    if (!rc) return;
+    const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
+    set("bm-rc-size", formatBytes(rc.bytes ?? 0) + " / " + formatBytes(rc.budget_bytes ?? 0));
+    const prev = _rcPrev;
+    _rcPrev = { t: now, hits: rc.hits ?? 0, reads: rc.reads ?? 0,
+                issued: rc.prefetch_issued ?? 0, wasted: rc.prefetch_wasted ?? 0 };
+    if (!prev || now <= prev.t) return;       // the first frame has nothing to difference
+    const dt = (now - prev.t) / 1000;
+    const dh = Math.max(0, _rcPrev.hits - prev.hits);
+    const dr = Math.max(0, _rcPrev.reads - prev.reads);
+    const di = Math.max(0, _rcPrev.issued - prev.issued);
+    const dw = Math.max(0, _rcPrev.wasted - prev.wasted);
+    // No request in the interval: say nothing new rather than 0 % or 100 %.
+    if (dh + dr > 0) set("bm-rc-hit", (dh / (dh + dr) * 100).toFixed(1) + "%");
+    set("bm-rc-reads", (dr / dt).toFixed(1) + "/s");
+    if (di > 0) set("bm-rc-waste", Math.min(100, dw / di * 100).toFixed(0) + "%");
 }
 
 // One point per pixel the graphs are wide: more could not be told apart, fewer
@@ -7664,6 +7702,8 @@ function _setPeaks(chart, primary, pairs, history) {
 
 function _renderBenchmarkCards(cur) {
     _renderExtraBenchCards(cur.engines || []);
+    _showZfsOnly(cur.zfs);
+    _renderReadCache(cur.read_cache);
     document.getElementById("bm-race-upload").textContent   = formatSpeed(cur.race_upload_rate ?? 0);
     document.getElementById("bm-race-download").textContent = formatSpeed(cur.race_download_rate ?? 0);
     document.getElementById("bm-hoard-upload").textContent  = formatSpeed(cur.hoard_upload_rate ?? 0);

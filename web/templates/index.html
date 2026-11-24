@@ -1411,17 +1411,35 @@
                     <span class="bm-metric-label">IOWait</span>
                     <span class="bm-metric-value" id="bm-iowait">--</span>
                 </div>
-                <div class="bm-metric-card">
+                <div class="bm-metric-card" data-zfs-only>
                     <span class="bm-metric-label">ARC Hit Rate</span>
                     <span class="bm-metric-value" id="bm-arc-hit">--</span>
                 </div>
-                <div class="bm-metric-card">
+                <div class="bm-metric-card" data-zfs-only>
                     <span class="bm-metric-label">ARC Miss/s</span>
                     <span class="bm-metric-value" id="bm-arc-miss">--</span>
                 </div>
-                <div class="bm-metric-card">
+                <div class="bm-metric-card" data-zfs-only>
                     <span class="bm-metric-label">ARC Size</span>
                     <span class="bm-metric-value" id="bm-arc-size">--</span>
+                </div>
+                <!-- The daemon's own read cache: on every host, ZFS or not. Rates
+                     come from two frames' counters (see _renderReadCache). -->
+                <div class="bm-metric-card" title="Peer requests answered from memory instead of the disk">
+                    <span class="bm-metric-label">Read Cache Hit Rate</span>
+                    <span class="bm-metric-value" id="bm-rc-hit">--</span>
+                </div>
+                <div class="bm-metric-card" title="Slices read from disk because the cache did not hold them">
+                    <span class="bm-metric-label">Read Cache Reads/s</span>
+                    <span class="bm-metric-value" id="bm-rc-reads">--</span>
+                </div>
+                <div class="bm-metric-card" title="Bytes held now / budget ([daemon] read_cache_mb)">
+                    <span class="bm-metric-label">Read Cache Size</span>
+                    <span class="bm-metric-value" id="bm-rc-size">--</span>
+                </div>
+                <div class="bm-metric-card" title="Slices read ahead that left the cache unused: a disk read for nothing">
+                    <span class="bm-metric-label">Read-ahead Wasted</span>
+                    <span class="bm-metric-value" id="bm-rc-waste">--</span>
                 </div>
             </div>
 
@@ -1493,7 +1511,7 @@
                     <div class="bm-chart-title">IOWait %</div>
                     <div class="bm-chart-wrap"><canvas id="chart-iowait"></canvas></div>
                 </div>
-                <div class="bm-chart-container">
+                <div class="bm-chart-container" data-zfs-only>
                     <div class="bm-chart-title">ARC Miss / sec</div>
                     <div class="bm-chart-wrap"><canvas id="chart-arc-miss"></canvas></div>
                 </div>

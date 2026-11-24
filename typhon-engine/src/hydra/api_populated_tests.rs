@@ -868,3 +868,45 @@ async fn an_imported_cross_seed_with_other_bytes_is_isolated_stopped_and_said_so
         "a file of another size was linked in"
     );
 }
+
+/// The Performance cards need the daemon's read cache and whether the host has
+/// a ZFS ARC to read: the page hides the ARC cards off ZFS and differences the
+/// cache's counters between two frames. Both frames carry them, so the stream
+/// and the fallback poll draw the same cards.
+#[tokio::test]
+async fn the_performance_frames_carry_the_read_cache_and_whether_zfs_is_there() {
+    let (s, _h) = populated("pop-readcache");
+    let perf = status_payload(&s.state)["performance"].clone();
+    assert!(
+        perf["zfs"].is_boolean(),
+        "the host either has ZFS or not: {perf}"
+    );
+    assert!(perf["has_iowait"].is_boolean(), "{perf}");
+    let rc = &perf["read_cache"];
+    for key in [
+        "hits",
+        "reads",
+        "joined",
+        "bypass",
+        "prefetch_issued",
+        "prefetch_hit",
+        "prefetch_wasted",
+        "bytes",
+        "budget_bytes",
+    ] {
+        assert!(rc[key].is_number(), "read_cache.{key} is a counter: {rc}");
+    }
+    assert!(
+        rc["budget_bytes"].as_u64().unwrap() > 0,
+        "the cache has a budget: {rc}"
+    );
+    // Counters grow; a figure read twice never goes backwards.
+    typhon_engine::disk::readcache::HIT.fetch_add(5, std::sync::atomic::Ordering::Relaxed);
+    let later = status_payload(&s.state)["performance"]["read_cache"]["hits"]
+        .as_u64()
+        .unwrap();
+    assert!(
+        later >= rc["hits"].as_u64().unwrap() + 5,
+        "hits moved: {later}"
+    );
+}

@@ -32,6 +32,11 @@ type Previous = std::collections::HashMap<String, (u64, u64, f64)>;
 #[derive(Debug, Clone, Copy, Default)]
 pub struct System {
     pub measured: bool,
+    /// The host has a ZFS ARC to read (`/proc/spl/kstat/zfs/arcstats`). The ARC
+    /// cards and chart are only meaningful then, and are hidden otherwise.
+    pub zfs: bool,
+    /// The host has the CPU counters iowait is read from (`/proc/stat`).
+    pub has_iowait: bool,
     pub iowait_pct: f64,
     pub arc_size_bytes: f64,
     pub arc_hit_rate_pct: f64,
@@ -50,6 +55,8 @@ struct SystemPrev {
 
 static LATEST_SYSTEM: std::sync::Mutex<System> = std::sync::Mutex::new(System {
     measured: false,
+    zfs: false,
+    has_iowait: false,
     iowait_pct: 0.0,
     arc_size_bytes: 0.0,
     arc_hit_rate_pct: 0.0,
@@ -441,8 +448,10 @@ fn sample_once(
     let mut sys = System::default();
     if let Ok(stat) = std::fs::read_to_string("/proc/stat") {
         sys.iowait_pct = iowait_pct(&stat, &mut system.cpu);
+        sys.has_iowait = true;
     }
     if let Ok(arc) = std::fs::read_to_string("/proc/spl/kstat/zfs/arcstats") {
+        sys.zfs = true;
         arc_interval(&arc, ts, &mut system.arc, &mut sys);
     }
     if let Ok(mut g) = LATEST_SYSTEM.lock() {

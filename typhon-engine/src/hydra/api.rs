@@ -6932,6 +6932,9 @@ fn status_payload(state: &AppState) -> serde_json::Value {
         "engines": engine_payload(state),
         "performance": {
             "measured": system.measured,
+            "zfs": system.zfs,
+            "has_iowait": system.has_iowait,
+            "read_cache": read_cache_json(),
             "iowait_pct": crate::row::num_json(system.iowait_pct),
             "arc_hit_rate_pct": crate::row::num_json(system.arc_hit_rate_pct),
             "arc_miss_per_sec": crate::row::num_json(system.arc_miss_per_sec),
@@ -7599,6 +7602,9 @@ async fn get_bench_current(
     let sys = crate::benchsampler::latest_system();
 
     Json(serde_json::json!({
+        "zfs": sys.zfs,
+        "has_iowait": sys.has_iowait,
+        "read_cache": read_cache_json(),
         "arc_demand_hit_rate_pct": crate::row::num_json(if sys.measured { sys.arc_demand_hit_rate_pct } else { arc.demand_hit_rate_pct }),
         // Over the sampler's last interval: the figures above are ratios since
         // the pool was imported, which a busy minute cannot move.
@@ -7641,6 +7647,26 @@ async fn get_bench_current(
         "ts": now,
     }))
     .into_response()
+}
+
+/// The daemon's own read cache, as counters since start plus what it holds.
+/// Cumulative on purpose: the page differences two frames for a rate, so no
+/// state is kept here and any number of pages can read it.
+fn read_cache_json() -> serde_json::Value {
+    use std::sync::atomic::Ordering::Relaxed;
+    use typhon_engine::disk::readcache as rc;
+    let cache = typhon_engine::disk::ReadCache::process();
+    serde_json::json!({
+        "hits": rc::HIT.load(Relaxed),
+        "reads": rc::MISS.load(Relaxed),
+        "joined": rc::JOINED.load(Relaxed),
+        "bypass": rc::BYPASS.load(Relaxed),
+        "prefetch_issued": rc::PREFETCH_ISSUED.load(Relaxed),
+        "prefetch_hit": rc::PREFETCH_HIT.load(Relaxed),
+        "prefetch_wasted": rc::PREFETCH_WASTED.load(Relaxed),
+        "bytes": cache.bytes(),
+        "budget_bytes": cache.budget(),
+    })
 }
 
 /// The host's ZFS ARC figures, read from kstat.
