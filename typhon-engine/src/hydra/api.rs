@@ -7261,9 +7261,12 @@ async fn stream_events(
                     std::collections::BTreeSet<String>,
                     usize,
                 )> = None;
+                // Named by the engine's agent: two engines of one role can hold
+                // the same hash, and one stopping must not drop the other's row.
+                let agent = local_agent(&engine_id);
                 let active_frame = |added: Vec<serde_json::Value>, gone: Vec<String>, count: usize| {
                     serde_json::json!({"event": "active_changed",
-                        "data": {"mode": mode, "added": added, "removed": gone, "count": count}})
+                        "data": {"mode": mode, "agent": agent, "added": added, "removed": gone, "count": count}})
                 };
                 loop {
                     let holding = !held_rows.is_empty()

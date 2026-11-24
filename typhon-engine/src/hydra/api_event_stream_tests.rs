@@ -186,6 +186,7 @@ api_key = \"{KEY}\"
     let text = read_until(&mut body, &["active_changed", &gone], 5).await;
     assert!(text.contains("active_changed"), "no event in: {text}");
     assert!(text.contains(&gone), "the removal is named: {text}");
+    assert!(text.contains("\"agent\":\"local-hoard\""), "from which engine: {text}");
     assert!(
         text.contains(&format!("\"info_hash\":\"{hash}\"")),
         "the joiner comes with its row: {text}"

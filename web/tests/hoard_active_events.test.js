@@ -24,11 +24,11 @@ function env(filter, rows, extra = {}) {
         ${src.slice(from, to)}
         return { apply: _applyActiveChanged, facets: _applyFacets, state: () => ({ rows: _hoardAllTorrents, f: _hoardServerFiltered, total: _hoardServerTotal, facets: _hoardFacets, painted }) };`)(filter, rows, extra);
 }
-const row = (h, state = "seeding") => ({ info_hash: h, agent: "local", state });
+const row = (h, state = "seeding", agent = "local-hoard") => ({ info_hash: h, agent, state });
 
 // A join adds the row, a leave drops it, the chip and the count follow.
 let e = env("__active__", [row("aa"), row("bb")]);
-e.apply({ count: 2, added: [row("cc")], removed: ["aa"] });
+e.apply({ agent: "local-hoard", count: 2, added: [row("cc")], removed: ["aa"] });
 let s = e.state();
 assert.deepStrictEqual(s.rows.map(r => r.info_hash).sort(), ["bb", "cc"]);
 assert.ok(s.rows.find(r => r.info_hash === "cc")._pg, "an added row is held like a page row");
@@ -37,20 +37,23 @@ assert.strictEqual(s.painted.asked, 0, "no request for a plain active list");
 
 // A row that is not a seeder never enters the Active list.
 e = env("__active__", []);
-e.apply({ count: 1, added: [row("dd", "downloading")], removed: [] });
+e.apply({ agent: "local-hoard", count: 1, added: [row("dd", "downloading")], removed: [] });
 assert.strictEqual(e.state().rows.length, 0);
 
-// A remote node's copy of the same hash is not touched.
-e = env("__active__", [{ info_hash: "aa", agent: "node-2", state: "seeding" }]);
-e.apply({ count: 0, added: [], removed: ["aa"] });
-assert.strictEqual(e.state().rows.length, 1);
+// A remote node's copy of the same hash is not touched, and neither is the
+// copy another engine of the same role holds.
+e = env("__active__", [row("aa", "seeding", "node-2"), row("aa", "seeding", "local-vpn1")]);
+e.apply({ agent: "local-hoard", count: 0, added: [], removed: ["aa"] });
+assert.strictEqual(e.state().rows.length, 2);
+e.apply({ agent: "local-vpn1", count: 0, added: [], removed: ["aa"] });
+assert.deepStrictEqual(e.state().rows.map(r => r.agent), ["node-2"], "only the engine that stopped loses its row");
 
 // Another filter on top, or another view: the rows are left to the page.
 e = env("__active__", [row("aa")], { narrowed: true });
-e.apply({ count: 9, added: [row("zz")], removed: ["aa"] });
+e.apply({ agent: "local-hoard", count: 9, added: [row("zz")], removed: ["aa"] });
 assert.strictEqual(e.state().rows.length, 1);
 e = env("", [row("aa")]);
-e.apply({ count: 4, added: [row("zz")], removed: [] });
+e.apply({ agent: "local-hoard", count: 4, added: [row("zz")], removed: [] });
 assert.strictEqual(e.state().rows.length, 1, "rows of another view are not touched");
 
 // The chips are the server's counts, pushed. Under a state filter only the

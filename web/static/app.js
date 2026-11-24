@@ -8862,11 +8862,12 @@ function _applyActiveChanged(d) {
             rows.set(r.info_hash, r);
         }
     }
+    // Of the engine that said it: another engine of the role may hold the same
+    // hash and still be serving it.
     const next = [];
     for (const t of _hoardAllTorrents) {
-        const local = _isLocalAgent(t.agent);
-        if (local && gone.has(t.info_hash)) continue;
-        if (local && rows.has(t.info_hash)) continue;   // replaced below
+        if (t.agent === d.agent && gone.has(t.info_hash)) continue;
+        if (t.agent === d.agent && rows.has(t.info_hash)) continue;   // replaced below
         next.push(t);
     }
     for (const r of rows.values()) next.push(r);
