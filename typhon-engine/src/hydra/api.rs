@@ -15419,6 +15419,30 @@ fn import_add(state: &AppState) -> crate::importer::AddFn {
             )
         });
         let note = note.or_else(|| r.note.clone());
+        // The source's speed caps, download order and share limits. Written
+        // after the add, never part of it: a failure is logged and the
+        // torrent stays added.
+        let hash = typhon_engine::torrent::hex_encode(&meta.info_hash);
+        let s = &r.settings;
+        apply_add_options(
+            &state,
+            &hash,
+            s.up_cap,
+            s.dl_cap,
+            s.sequential,
+            s.first_last,
+        );
+        if s.ratio.is_some() || s.seeding_minutes.is_some() || s.inactive_minutes.is_some() {
+            if let Err(e) = crate::sharelimits::set_torrent_limits(
+                &state,
+                std::slice::from_ref(&hash),
+                s.ratio,
+                s.seeding_minutes,
+                s.inactive_minutes,
+            ) {
+                tracing::warn!(hash = %hash, "import: share limits not stored: {e}");
+            }
+        }
         let added = state
             .engines
             .get(&engine_id)

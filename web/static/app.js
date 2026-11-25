@@ -823,6 +823,20 @@ function importWizard(opts) {
     function stepReview(creds, d) {
         const sample = sampleLine(d);
         const prefixes = d.path_prefixes || [];
+        // What each torrent's own settings do: carried, and left behind.
+        const carried = [];
+        if (d.limits_carried) carried.push(t("share or speed limits on {n} torrents", { n: d.limits_carried }));
+        if (d.caps_carried) carried.push(t("speed caps on {n} torrents", { n: d.caps_carried }));
+        if (d.order_carried) carried.push(t("sequential or first/last piece download on {n} torrents", { n: d.order_carried }));
+        const leftLabels = {
+            force_start: n => t("force start ({n})", { n }),
+            super_seeding: n => t("super seeding ({n})", { n }),
+            auto_tmm: n => t("automatic torrent management ({n})", { n }),
+            queue_position: n => t("queue position ({n})", { n }),
+        };
+        const left = (d.not_carried || []).map(x => leftLabels[x.what] ? leftLabels[x.what](x.count) : "");
+        const settingsNote = (carried.length ? `<p class="modal-desc">${t("Carried over: {list}.", { list: carried.join(", ") })}</p>` : "")
+            + (left.length ? `<p class="modal-desc" style="color:var(--accent-yellow)">${t("Not carried over: {list}.", { list: left.filter(Boolean).join(", ") })}</p>` : "");
         const rows = prefixes.map(p => `<div style="display:flex;gap:6px;align-items:center;margin-bottom:4px">
             <code style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(p)}">${esc(p)}</code>
             <span>→</span>
@@ -832,6 +846,7 @@ function importWizard(opts) {
         box.innerHTML = `<h3>${t("Import preview")}</h3>
             <p class="modal-desc">${t("<b>{total}</b> torrents · <b>{complete}</b> complete (seed-mode) · <b>{partial}</b> partial (verify + resume) · carried upload <b>{carried}</b>", { total: d.total, complete: d.completed, partial: d.incomplete, carried: formatBytes(d.carried_uploaded_bytes) })}</p>
             <p class="modal-desc">${t("Categories: {list}, all imported as <b>hoard</b>.", { list: (d.categories || []).map(c => esc(c.name)).join(", ") || "-" })}</p>
+            ${settingsNote}
             <p class="modal-desc" style="margin-bottom:4px">${t("Path mapping (qBit path → what Hydranos sees). Fix these if Hydranos mounts the data elsewhere:")}</p>
             <div style="max-height:160px;overflow:auto;margin-bottom:8px;border:1px solid var(--border);border-radius:4px;padding:6px">${rows || `<i>${t("no paths detected")}</i>`}</div>
             <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">

@@ -40,8 +40,18 @@ pub struct QbitCreds {
     pub insecure: bool,
 }
 
+/// qBittorrent's "follow the global limit" for the share limits, and what a
+/// row without the field means (older qBit has no inactive limit).
+fn follow() -> i64 {
+    -2
+}
+
+fn follow_ratio() -> f64 {
+    -2.0
+}
+
 /// One torrent as qBittorrent describes it (`/api/v2/torrents/info`).
-#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize)]
 pub struct QbitTorrent {
     pub hash: String,
     #[serde(default)]
@@ -75,6 +85,63 @@ pub struct QbitTorrent {
     /// Bytes of every file in the torrent, wanted or not.
     #[serde(default)]
     pub total_size: u64,
+    /// -2 follows the global limit, -1 none, else the ratio.
+    #[serde(default = "follow_ratio")]
+    pub ratio_limit: f64,
+    /// Minutes, -2 / -1 as above.
+    #[serde(default = "follow")]
+    pub seeding_time_limit: i64,
+    /// Minutes, -2 / -1 as above. qBittorrent 4.6 and later only.
+    #[serde(default = "follow")]
+    pub inactive_seeding_time_limit: i64,
+    /// Bytes per second; 0 or -1: none. -2 for a row without the field.
+    #[serde(default = "follow")]
+    pub up_limit: i64,
+    #[serde(default = "follow")]
+    pub dl_limit: i64,
+    #[serde(default)]
+    pub seq_dl: bool,
+    #[serde(default)]
+    pub f_l_piece_prio: bool,
+    #[serde(default)]
+    pub force_start: bool,
+    #[serde(default)]
+    pub super_seeding: bool,
+    #[serde(default)]
+    pub auto_tmm: bool,
+    /// Queue position, 1 first; 0 or negative when queueing is off.
+    #[serde(default)]
+    pub priority: i64,
+}
+
+impl Default for QbitTorrent {
+    fn default() -> Self {
+        Self {
+            hash: String::new(),
+            name: String::new(),
+            category: String::new(),
+            save_path: String::new(),
+            content_path: String::new(),
+            download_path: String::new(),
+            progress: 0.0,
+            state: String::new(),
+            uploaded: 0,
+            downloaded: 0,
+            tags: String::new(),
+            total_size: 0,
+            ratio_limit: follow_ratio(),
+            seeding_time_limit: follow(),
+            inactive_seeding_time_limit: follow(),
+            up_limit: follow(),
+            dl_limit: follow(),
+            seq_dl: false,
+            f_l_piece_prio: false,
+            force_start: false,
+            super_seeding: false,
+            auto_tmm: false,
+            priority: 0,
+        }
+    }
 }
 
 /// How far an import has got, as the wizard's progress screen reads it.
@@ -850,6 +917,75 @@ pub struct Candidate {
     pub source: Source,
     /// The torrent's total size in bytes; 0 when the source did not say.
     pub size: u64,
+    /// What the source client set on this torrent besides where it is.
+    pub settings: Settings,
+}
+
+/// The per-torrent settings an import carries over, and the ones it counts
+/// as left behind. Everything `None` / false: the engine's own behaviour.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Settings {
+    /// Share ratio at which seeding stops. `None`: follow the engine's.
+    /// `Some(-1.0)`: no limit, whatever the engine says.
+    pub ratio: Option<f64>,
+    /// Minutes of seeding. Same `None` / `Some(-1)` meaning.
+    pub seeding_minutes: Option<i64>,
+    /// Minutes without upload. Same meaning.
+    pub inactive_minutes: Option<i64>,
+    /// Bytes per second; `None`: no cap.
+    pub up_cap: Option<u64>,
+    pub dl_cap: Option<u64>,
+    pub sequential: bool,
+    pub first_last: bool,
+    // Not carried; kept only so the preview can say how many torrents had them.
+    pub force_start: bool,
+    pub super_seeding: bool,
+    pub auto_tmm: bool,
+    /// The source's queue position (1 first); 0 when it had none.
+    pub queue_position: i64,
+}
+
+impl Settings {
+    fn from_qbit(t: &QbitTorrent) -> Self {
+        // qBit: -2 follows the global limit, -1 is no limit. A 0 ratio or 0
+        // minutes would stop the seed the moment it is checked, which is
+        // never what an imported library should do, so 0 reads as no limit.
+        let ratio = if !t.ratio_limit.is_finite() || t.ratio_limit < -1.5 {
+            None
+        } else if t.ratio_limit <= 0.0 {
+            Some(-1.0)
+        } else {
+            Some(t.ratio_limit)
+        };
+        let minutes = |v: i64| match v {
+            v if v <= -2 => None,
+            v if v <= 0 => Some(-1),
+            v => Some(v),
+        };
+        // 0 and -1 are both "no cap" in qBit's listing.
+        let cap = |v: i64| u64::try_from(v).ok().filter(|&n| n > 0);
+        Self {
+            ratio,
+            seeding_minutes: minutes(t.seeding_time_limit),
+            inactive_minutes: minutes(t.inactive_seeding_time_limit),
+            up_cap: cap(t.up_limit),
+            dl_cap: cap(t.dl_limit),
+            sequential: t.seq_dl,
+            first_last: t.f_l_piece_prio,
+            force_start: t.force_start,
+            super_seeding: t.super_seeding,
+            auto_tmm: t.auto_tmm,
+            queue_position: t.priority.max(0),
+        }
+    }
+
+    fn has_limits(&self) -> bool {
+        self.ratio.is_some()
+            || self.seeding_minutes.is_some()
+            || self.inactive_minutes.is_some()
+            || self.up_cap.is_some()
+            || self.dl_cap.is_some()
+    }
 }
 
 impl Candidate {
@@ -879,6 +1015,7 @@ impl Candidate {
                 .collect(),
             source: Source::Qbit(t.hash.clone()),
             size: t.total_size,
+            settings: Settings::from_qbit(t),
         }
     }
 }
@@ -1311,6 +1448,21 @@ pub struct Preview {
     /// a repack under the same name, not a cross-seed of the same bytes. Each
     /// is added stopped in a folder of its own, its data not trusted.
     pub likely_isolated: usize,
+    /// Torrents with a share limit or a speed cap that comes along.
+    pub limits_carried: usize,
+    /// Of those, the ones with an upload or download cap.
+    pub caps_carried: usize,
+    /// Torrents with sequential or first-and-last-piece download.
+    pub order_carried: usize,
+    /// What the source set that the import does not carry, with how many
+    /// torrents had it. Only what is non-zero.
+    pub not_carried: Vec<NotCarried>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct NotCarried {
+    pub what: String,
+    pub count: usize,
 }
 
 /// The preview goes through the wizard's `choices` as the import does: the
@@ -1339,6 +1491,24 @@ pub fn preview_listed(
         }
         p.stopped += c.stopped as usize;
         p.carried_uploaded_bytes += c.uploaded;
+        let st = &c.settings;
+        p.limits_carried += st.has_limits() as usize;
+        p.caps_carried += (st.up_cap.is_some() || st.dl_cap.is_some()) as usize;
+        p.order_carried += (st.sequential || st.first_last) as usize;
+    }
+    let count = |f: &dyn Fn(&Settings) -> bool| cands.iter().filter(|c| f(&c.settings)).count();
+    for (what, n) in [
+        ("force_start", count(&|s| s.force_start)),
+        ("super_seeding", count(&|s| s.super_seeding)),
+        ("auto_tmm", count(&|s| s.auto_tmm)),
+        ("queue_position", count(&|s| s.queue_position > 0)),
+    ] {
+        if n > 0 {
+            p.not_carried.push(NotCarried {
+                what: what.into(),
+                count: n,
+            });
+        }
     }
     p.categories = categories_planned(cands, listed, choices)
         .into_iter()
@@ -1510,6 +1680,8 @@ pub struct AddRequest {
     pub downloaded: u64,
     /// Shown on the torrent once added: why it came in stopped.
     pub note: Option<String>,
+    /// Share limits, speed caps and download order, set once it is added.
+    pub settings: Settings,
 }
 
 pub type AddFn = Arc<dyn Fn(AddRequest) -> Result<Added, String> + Send + Sync>;
@@ -1654,6 +1826,7 @@ pub async fn run_job_listed(
                         uploaded: c.uploaded,
                         downloaded: c.downloaded,
                         note,
+                        settings: c.settings.clone(),
                     });
                     (added, held)
                 })
@@ -1838,6 +2011,7 @@ mod tests {
             tags: vec![],
             source: Source::Qbit("aa".into()),
             size: 0,
+            settings: Default::default(),
         }
     }
 
@@ -1984,6 +2158,102 @@ mod tests {
             ..t
         });
         assert!(done.complete && !done.stopped);
+    }
+
+    fn qrow_json(json: &str) -> QbitTorrent {
+        serde_json::from_str(json).unwrap()
+    }
+
+    #[test]
+    fn from_qbit_carries_share_and_speed_limits_and_order() {
+        let t = qrow_json(
+            r#"{"hash":"ab","ratio_limit":2.5,"seeding_time_limit":120,
+                "inactive_seeding_time_limit":30,"up_limit":1048576,"dl_limit":2048,
+                "seq_dl":true,"f_l_piece_prio":true,"force_start":true,
+                "super_seeding":true,"auto_tmm":true,"priority":4}"#,
+        );
+        let s = Candidate::from_qbit(&t).settings;
+        assert_eq!(s.ratio, Some(2.5));
+        assert_eq!(s.seeding_minutes, Some(120));
+        assert_eq!(s.inactive_minutes, Some(30));
+        assert_eq!(s.up_cap, Some(1_048_576));
+        assert_eq!(s.dl_cap, Some(2048));
+        assert!(s.sequential && s.first_last);
+        assert!(s.force_start && s.super_seeding && s.auto_tmm);
+        assert_eq!(s.queue_position, 4);
+        // -1 is an explicit "no limit"; 0 would stop the seed at once, so it
+        // reads as no limit too.
+        let none = Candidate::from_qbit(&qrow_json(
+            r#"{"hash":"ab","ratio_limit":-1,"seeding_time_limit":-1,"inactive_seeding_time_limit":0}"#,
+        ))
+        .settings;
+        assert_eq!(none.ratio, Some(-1.0));
+        assert_eq!(none.seeding_minutes, Some(-1));
+        assert_eq!(none.inactive_minutes, Some(-1));
+        let zero = Candidate::from_qbit(&qrow_json(r#"{"hash":"ab","ratio_limit":0}"#)).settings;
+        assert_eq!(zero.ratio, Some(-1.0));
+    }
+
+    #[test]
+    fn a_listing_without_the_new_fields_follows_the_engine() {
+        let s = Candidate::from_qbit(&qrow_json(r#"{"hash":"ab","name":"old"}"#)).settings;
+        assert_eq!(s, Settings::default());
+        let t = qrow_json(r#"{"hash":"ab"}"#);
+        assert_eq!(t.ratio_limit, -2.0);
+        assert_eq!(t.seeding_time_limit, -2);
+        assert_eq!(t.inactive_seeding_time_limit, -2);
+        assert_eq!(QbitTorrent::default().ratio_limit, -2.0);
+        assert_eq!(s.queue_position, 0);
+    }
+
+    #[test]
+    fn zero_or_negative_speed_limit_is_no_cap() {
+        for v in [0, -1] {
+            let s = Candidate::from_qbit(&qrow_json(&format!(
+                r#"{{"hash":"ab","up_limit":{v},"dl_limit":{v}}}"#
+            )))
+            .settings;
+            assert_eq!((s.up_cap, s.dl_cap), (None, None), "limit {v}");
+        }
+    }
+
+    #[test]
+    fn preview_counts_what_is_carried_and_names_what_is_not() {
+        let rows = [
+            r#"{"hash":"a","ratio_limit":2,"up_limit":100,"seq_dl":true,"priority":1}"#,
+            r#"{"hash":"b","seeding_time_limit":60,"force_start":true,"priority":2}"#,
+            r#"{"hash":"c","f_l_piece_prio":true,"auto_tmm":true,"super_seeding":true}"#,
+            r#"{"hash":"d","priority":0}"#,
+        ];
+        let cands: Vec<Candidate> = rows
+            .iter()
+            .map(|r| Candidate::from_qbit(&qrow_json(r)))
+            .collect();
+        let p = preview_listed(&cands, &BTreeMap::new(), &Choices::default(), |_| false);
+        assert_eq!(p.limits_carried, 2);
+        assert_eq!(p.caps_carried, 1);
+        assert_eq!(p.order_carried, 2);
+        let named: Vec<(&str, usize)> = p
+            .not_carried
+            .iter()
+            .map(|n| (n.what.as_str(), n.count))
+            .collect();
+        assert_eq!(
+            named,
+            [
+                ("force_start", 1),
+                ("super_seeding", 1),
+                ("auto_tmm", 1),
+                ("queue_position", 2)
+            ]
+        );
+        let clean = preview_listed(
+            &[Candidate::from_qbit(&qrow_json(r#"{"hash":"z"}"#))],
+            &BTreeMap::new(),
+            &Choices::default(),
+            |_| false,
+        );
+        assert!(clean.not_carried.is_empty());
     }
 
     #[test]
@@ -2433,6 +2703,7 @@ pub fn scan_transmission(
             },
             source: Source::File(path),
             size: meta.total_size,
+            settings: Default::default(),
         });
     }
     Ok(out)
@@ -3081,7 +3352,7 @@ mod qbit_session_tests {
             }
             tokio::time::sleep(std::time::Duration::from_millis(400)).await;
             let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
-            enc.write_all(br#"[{"hash":"aa","name":"big one"},{"hash":"bb","name":"two"}]"#)
+            enc.write_all(br#"[{"hash":"aa","name":"big one","ratio_limit":2.0,"seeding_time_limit":60,"inactive_seeding_time_limit":30,"up_limit":1000,"dl_limit":0,"priority":1,"force_start":false,"seq_dl":true,"f_l_piece_prio":false,"super_seeding":false,"auto_tmm":false},{"hash":"bb","name":"two"}]"#)
                 .unwrap();
             let gz = enc.finish().unwrap();
             ([("content-encoding", "gzip")], gz).into_response()
@@ -3107,6 +3378,13 @@ mod qbit_session_tests {
         let list = q.torrents().await.expect("the listing arrives and decodes");
         let names: Vec<_> = list.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(names, ["big one", "two"]);
+        assert_eq!(list[0].ratio_limit, 2.0);
+        assert_eq!(list[0].up_limit, 1000);
+        assert!(list[0].seq_dl);
+        assert_eq!(
+            list[1].ratio_limit, -2.0,
+            "a row without the fields follows"
+        );
     }
 
     fn https_creds(addr: std::net::SocketAddr, insecure: bool) -> QbitCreds {
@@ -3534,6 +3812,7 @@ mod qbit_session_tests {
             tags: Vec::new(),
             source: Source::File(path),
             size: 0,
+            settings: Default::default(),
         }
     }
 

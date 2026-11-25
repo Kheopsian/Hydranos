@@ -1497,5 +1497,14 @@
   "{n} isolated": "{n} isolados",
   "{n} torrents share their path with another torrent whose files there have other bytes. They were added stopped, each in a folder of its own; starting one downloads what is not already there:": "{n} torrents partilham o caminho com outro torrent cujos ficheiros lá têm outros bytes. Foram adicionados parados, cada um numa pasta própria; iniciar um descarrega o que ainda não está lá:",
   "Trust this qBittorrent's certificate (self-signed HTTPS)": "Confiar no certificado deste qBittorrent (HTTPS autoassinado)",
-  "For a WebUI on https:// with a self-signed certificate. Hydranos then accepts the certificate without checking it, for this import only.": "Para uma WebUI em https:// com um certificado autoassinado. O Hydranos aceita então o certificado sem o verificar, apenas para esta importação."
+  "For a WebUI on https:// with a self-signed certificate. Hydranos then accepts the certificate without checking it, for this import only.": "Para uma WebUI em https:// com um certificado autoassinado. O Hydranos aceita então o certificado sem o verificar, apenas para esta importação.",
+  "share or speed limits on {n} torrents": "limites de partilha ou de velocidade em {n} torrents",
+  "speed caps on {n} torrents": "limites de velocidade em {n} torrents",
+  "sequential or first/last piece download on {n} torrents": "transferência sequencial ou primeiras/últimas partes primeiro em {n} torrents",
+  "Carried over: {list}.": "Mantido: {list}.",
+  "Not carried over: {list}.": "Não mantido: {list}.",
+  "force start ({n})": "início forçado ({n})",
+  "super seeding ({n})": "super seeding ({n})",
+  "automatic torrent management ({n})": "gestão automática de torrents ({n})",
+  "queue position ({n})": "posição na fila ({n})"
 }
