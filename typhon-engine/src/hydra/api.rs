@@ -7013,6 +7013,8 @@ fn status_payload(state: &AppState) -> serde_json::Value {
             "session_downloaded": hoard_session.1, "session_uploaded": hoard_session.0,
             "session_grabbed": state.engines.get("hoard").map(|e| e.manager.added_this_session()).unwrap_or(0),
             "session_ratio": crate::row::num_json(if hoard_session.1 > 0 { hoard_session.0 as f64 / hoard_session.1 as f64 } else { 0.0 }),
+            // Lifetime, over what the engine holds: see `latest_ratio`.
+            "ratio": crate::benchsampler::latest_ratio("hoard"),
             "stagger_complete": true,
             "swarm_leechers": swarm_leechers_total(state),
             "torrents_announced": announced_count(state, "hoard"),
@@ -7029,6 +7031,7 @@ fn status_payload(state: &AppState) -> serde_json::Value {
             "session_downloaded": race_session.1,
             "session_grabbed": state.engines.get("race").map(|e| e.manager.added_this_session()).unwrap_or(0),
             "session_ratio": crate::row::num_json(ratio),
+            "ratio": crate::benchsampler::latest_ratio("race"),
             "session_uploaded": session_up,
             "torrents": race_torrents,
             "torrents_announced": announced_count(state, "race"),
@@ -7682,6 +7685,9 @@ fn hoard_stats_value(state: &AppState) -> serde_json::Value {
             .map(|e| e.manager.added_this_session())
             .unwrap_or(0),
         "session_ratio": crate::row::num_json(if down > 0 { up as f64 / down as f64 } else { 0.0 }),
+        // What the strip shows: lifetime, over what the engine holds. The
+        // session one divided Hoard's upload by the little it downloaded.
+        "ratio": crate::benchsampler::latest_ratio("hoard"),
         "session_uploaded": up,
         "stagger_complete": true,
         "swarm_leechers": swarm_leechers_total(state),

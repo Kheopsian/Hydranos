@@ -1526,13 +1526,13 @@ function _renderStatus(data) {
             document.getElementById("race-upload").textContent = formatSpeed(data.race.total_upload_rate);
             document.getElementById("race-download").textContent = formatSpeed(data.race.total_download_rate);
             document.getElementById("race-peers").textContent = fmtInt(data.race.total_peers);
-            document.getElementById("race-ov-ratio").textContent = (data.race.session_ratio || 0).toFixed(2);
+            document.getElementById("race-ov-ratio").textContent = data.race.ratio == null ? "-" : data.race.ratio.toFixed(2);
 
             // Race tab strip: the same cells, in the same order, as Hoard's.
             _paintEngineStrip("race", {
                 total: data.race.torrents, uploading: data.race.active_seeds,
                 downloading: data.race.active_downloads, upload_rate: data.race.total_upload_rate,
-                ratio: data.race.session_ratio, peers: data.race.total_peers, swarm: 0,
+                ratio: data.race.ratio, peers: data.race.total_peers, swarm: 0,
                 with_peers: data.race.torrents_with_peers, announced: data.race.torrents_announced,
                 avg_share: data.race.avg_share, grabbed: data.race.session_grabbed,
             });
@@ -3837,7 +3837,7 @@ function _renderHoardStatsHeader(data) {
         _paintEngineStrip("hoard", {
             total: data.total_torrents, uploading: data.torrents_uploading,
             downloading: _libFacets?.state?.downloading ?? null,
-            upload_rate: data.active_upload_rate, ratio: data.session_ratio,
+            upload_rate: data.active_upload_rate, ratio: data.ratio,
             peers: data.unseeded_peers ?? data.active_peers ?? 0, swarm: data.swarm_leechers || 0,
             with_peers: data.torrents_with_peers, announced: data.torrents_announced ?? data.total_torrents,
             avg_share: data.avg_share, grabbed: data.session_grabbed,
@@ -3862,7 +3862,7 @@ function _paintEngineStrip(pfx, d) {
     set("up", num(d.uploading));
     set("down", num(d.downloading));
     set("ul", d.upload_rate == null ? "-" : formatSpeed(d.upload_rate));
-    set("ratio", d.ratio == null ? "-" : Number(d.ratio).toFixed(2), t("Uploaded / downloaded since the daemon started"));
+    set("ratio", d.ratio == null ? "-" : Number(d.ratio).toFixed(2), t("Uploaded / downloaded over the torrents held, since they were added"));
     const swarm = d.swarm || 0, peers = d.peers ?? 0;
     let peerText = t("{n} peers", { n: fmtInt(peers) });
     if (swarm > 0) {

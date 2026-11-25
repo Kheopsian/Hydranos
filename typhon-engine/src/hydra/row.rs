@@ -155,17 +155,26 @@ pub fn share_ratio(uploaded: u64, downloaded: u64, total_done: u64) -> f64 {
 /// be held, and what is held is never more than `total_size` -- so above that
 /// line the answer is uploaded / downloaded without asking.
 pub fn torrent_ratio(t: &std::sync::Arc<typhon_engine::torrent::meta::TorrentState>) -> f64 {
+    let (up, base) = ratio_parts(t);
+    if base > 0 {
+        up as f64 / base as f64
+    } else {
+        0.0
+    }
+}
+
+/// The two halves of `torrent_ratio`: what was uploaded, and what it is
+/// measured against (the bytes downloaded, or the bytes held when almost
+/// nothing was downloaded). Summed over an engine, they give the engine's
+/// ratio by the same rule as each row's.
+pub fn ratio_parts(t: &std::sync::Arc<typhon_engine::torrent::meta::TorrentState>) -> (u64, u64) {
     use std::sync::atomic::Ordering;
     let up = t.total_uploaded.load(Ordering::Relaxed);
     let down = t.total_downloaded.load(Ordering::Relaxed);
     if (down as f64) >= t.meta.total_size as f64 * 0.01 {
-        return share_ratio(up, down, 0);
+        return (up, down);
     }
-    share_ratio(
-        up,
-        down,
-        typhon_engine::rpc::dispatch::torrent_core(t).total_done,
-    )
+    (up, typhon_engine::rpc::dispatch::torrent_core(t).total_done)
 }
 
 /// Project one engine torrent, plus what the store knows, into an API row.
