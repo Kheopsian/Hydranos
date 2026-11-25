@@ -1510,7 +1510,7 @@ mod per_engine_dial_tests {
         let limiter = engine(0.001);
         let t = torrent_of(&limiter, 34);
         let s = PeerStats::new(
-            "93.184.216.1:51000".parse().unwrap(),
+            "203.0.113.1:51000".parse().unwrap(),
             [7; 20],
             "test".into(),
             false,
@@ -1519,7 +1519,7 @@ mod per_engine_dial_tests {
         s.listen_port.store(6881, AtomicOrdering::Relaxed);
         t.peers.insert(s.addr, Arc::new(s));
         let before = DIAL_SKIPPED_CONNECTED.load(AtomicOrdering::Relaxed);
-        enqueue_dial("93.184.216.1:6881".parse().unwrap(), t.clone());
+        enqueue_dial("203.0.113.1:6881".parse().unwrap(), t.clone());
         until(10, "the listen port to be skipped", || {
             DIAL_SKIPPED_CONNECTED.load(AtomicOrdering::Relaxed) > before
         })
