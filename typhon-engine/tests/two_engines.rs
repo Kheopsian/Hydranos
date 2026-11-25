@@ -1001,6 +1001,7 @@ async fn a_download_survives_a_choke_in_the_middle_of_multi_block_pieces() {
         false,
         None,
         0,
+        false, // we did not dial
     ));
 
     let mut peer = framed(theirs);

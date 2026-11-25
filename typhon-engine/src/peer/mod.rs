@@ -7,6 +7,7 @@ pub mod holepunch;
 pub mod message;
 pub mod metadata;
 pub mod peerclient;
+pub mod priority;
 pub mod proxy_protocol;
 #[cfg(test)]
 mod rebind_tests;
@@ -1427,6 +1428,7 @@ async fn handle_incoming(
         lt_ext,
         utp_socket,
         advertised,
+        false,
     )
     .await;
 }
@@ -2241,7 +2243,7 @@ mod paused_inbound_tests {
                 crate::wire::codec::BtCodec::new(),
             );
             super::session::run(
-                framed, addr, t, disk, [7u8; 20], [9u8; 20], false, false, false, None, 0,
+                framed, addr, t, disk, [7u8; 20], [9u8; 20], false, false, false, None, 0, false,
             )
             .await;
         });
@@ -2270,6 +2272,58 @@ mod paused_inbound_tests {
             t.peers_connected.load(std::sync::atomic::Ordering::Relaxed),
             0
         );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A second connection to a peer we hold ends before it registers, quietly:
+    /// the one we hold stays, and the new socket is closed.
+    #[tokio::test]
+    async fn a_losing_duplicate_session_ends_at_once_and_leaves_the_other() {
+        use crate::torrent::meta::{PeerGuard, PeerStats, TorrentState};
+        let (mgr, disk, root) = manager("dup-session");
+        let (ih, _) = mgr
+            .add_torrent_bytes(
+                &torrent_bytes(),
+                root.join("data").to_str().unwrap(),
+                false,
+                false,
+            )
+            .unwrap();
+        let t: Arc<TorrentState> = mgr.get(&ih).unwrap();
+        // The peer [1; 20] is held through a connection we opened. We are
+        // [9; 20], the greater id: the outbound one is the one to keep.
+        let held = Arc::new(
+            PeerStats::new(
+                "127.0.0.1:6881".parse().unwrap(),
+                [1; 20],
+                "held".into(),
+                false,
+                false,
+            )
+            .with_connection(true, [9; 20]),
+        );
+        let _guard = PeerGuard::new(t.clone(), held.clone());
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let at = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (s, addr) = listener.accept().await.unwrap();
+            let framed = tokio_util::codec::Framed::new(
+                crate::crypto::stream::CryptoStream::plain(super::PeerTransport::Tcp(s)),
+                crate::wire::codec::BtCodec::new(),
+            );
+            super::session::run(
+                framed, addr, t, disk, [9u8; 20], [1u8; 20], false, false, false, None, 0, false,
+            )
+            .await;
+        });
+        let _c = tokio::net::TcpStream::connect(at).await.unwrap();
+        let ended = tokio::time::timeout(std::time::Duration::from_secs(5), server).await;
+        assert!(ended.is_ok(), "the duplicate session kept running");
+        let t = mgr.get(&ih).unwrap();
+        assert_eq!(t.peers.len(), 1);
+        assert!(!held.closing.load(std::sync::atomic::Ordering::Relaxed));
 
         let _ = std::fs::remove_dir_all(&root);
     }

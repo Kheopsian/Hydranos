@@ -273,7 +273,9 @@ impl Drop for DialInflightGuard {
 /// return peers we already hold, and each one used to cost a slot of
 /// `max_dials_per_sec` only for `dial_peer` to drop it.
 fn dial_is_redundant(addr: std::net::SocketAddr, torrent: &TorrentState, traced: bool) -> bool {
-    if torrent.peers.contains_key(&addr) {
+    // Also a peer that dialled us: it sits under an ephemeral port, and its
+    // listen port is where this dial would go.
+    if torrent.peers.contains_key(&addr) || torrent.peers.has_listen_addr(&addr) {
         DIAL_SKIPPED_CONNECTED.fetch_add(1, AtomicOrdering::Relaxed);
         if traced {
             info!("[dialtrace] {} SKIPPED already connected", addr);
@@ -333,6 +335,35 @@ pub static DIAL_QUEUE_FULL: AtomicU64 = AtomicU64::new(0);
 /// with its torrent, until memory runs out. A dropped peer is handed back by
 /// the next announce.
 pub const DIAL_QUEUE_CAP: usize = 4096;
+
+/// Most dials the consumer takes off the queue at once to put in BEP 40 order.
+const DIAL_BATCH: usize = 256;
+
+/// Only a dial that failed is remembered. A session that ran and ended, a
+/// duplicate dropped at its start included, is not the peer's fault.
+fn records_backoff(outcome: DialOutcome) -> bool {
+    outcome == DialOutcome::Failed
+}
+
+/// Sort a batch of queued dials, best BEP 40 priority first (stable, so the
+/// order of arrival breaks ties). Needs our own address; with none known, the
+/// batch keeps its order. The address is the first self IP we were told, on
+/// the port we announce.
+fn order_by_priority(
+    batch: &mut [(std::net::SocketAddr, Arc<TorrentState>, DialAsk)],
+    port: u16,
+    limiter: &dial_limiter::DialLimiter,
+) {
+    if batch.len() < 2 {
+        return;
+    }
+    let Some(ip) = SELF_IPS.read().unwrap().first().copied() else {
+        return;
+    };
+    let ours = std::net::SocketAddr::new(ip, port);
+    limiter.turnover().set_our_addr(Some(ours));
+    batch.sort_by_cached_key(|(addr, _, _)| crate::peer::priority::peer_priority(ours, *addr));
+}
 
 /// Single-torrent dial trace, armed with `TYPHON_DIAL_TRACE_IH=<40 hex chars>`.
 /// The global counters run at several hundred dials/s, which drowns the ~40
@@ -598,55 +629,69 @@ pub fn start_announce_loop(
             );
         }
         tokio::spawn(async move {
-            while let Some((addr, t, ask)) = dial_rx.recv().await {
-                // Startup pause: drop rather than queue. The peer is not lost
-                // -- the next announce hands it back -- whereas queueing a
-                // paused hoard's worth of peers would grow without bound and
-                // then release the very burst the pause exists to prevent.
-                if limiter.dials_paused() {
-                    limiter.note_skipped_paused();
-                    continue;
-                }
-                // Ceiling on live connections. Checked before pacing so a
-                // saturated engine sheds work instead of accumulating delay.
-                if limiter.conn_cap_reached() {
-                    limiter.note_skipped_conn_cap();
-                    continue;
-                }
-                // Peers that would be dropped by `dial_peer` anyway, and peers
-                // that failed a moment ago, must not cost a pacing slot.
-                let traced = is_traced(&t.info_hash);
-                if dial_is_redundant(addr, &t, traced) {
-                    continue;
-                }
-                let key = (t.info_hash, addr);
-                if ask == DialAsk::Discovered
-                    && backoff.is_backing_off(&key, std::time::Instant::now())
-                {
-                    DIAL_SKIPPED_BACKOFF.fetch_add(1, AtomicOrdering::Relaxed);
-                    if traced {
-                        info!("[dialtrace] {} SKIPPED backoff (failed recently)", addr);
+            while let Some(first) = dial_rx.recv().await {
+                // Whatever else is already waiting goes in the same batch, so
+                // the best peers of an announce are dialled first (BEP 40).
+                // Pacing is unchanged: the batch is walked in order, one slot
+                // per dial.
+                let mut batch = vec![first];
+                while batch.len() < DIAL_BATCH {
+                    match dial_rx.try_recv() {
+                        Ok(next) => batch.push(next),
+                        Err(_) => break,
                     }
-                    continue;
                 }
-                pacer.acquire(&limiter).await;
-                let d = disk_c.clone();
-                // Read per dial: a listen-port rebind replaces the socket,
-                // and the next dial must leave from the new port.
-                let u = utp_c.get();
-                let b = pick_binding_for_dial(&bindings_c, addr);
-                // The port peers are told to call back on (BEP 10 `p`) and the
-                // one a self-dial carries: read now, from the manager. The
-                // binding's copy is the port of the first bind -- stale after
-                // a rebind, and never the public port behind a translating NAT.
-                let port = mgr_c.announced_port(b.addr.port());
-                let backoff = backoff.clone();
-                tokio::spawn(async move {
-                    let outcome = dial_peer(addr, t, d, b.peer_id, u, port, &b.egress).await;
-                    if outcome == DialOutcome::Failed {
-                        backoff.record_failure(key, std::time::Instant::now());
+                order_by_priority(&mut batch, mgr_c.announced_port(0), &limiter);
+                for (addr, t, ask) in batch {
+                    // Startup pause: drop rather than queue. The peer is not lost
+                    // -- the next announce hands it back -- whereas queueing a
+                    // paused hoard's worth of peers would grow without bound and
+                    // then release the very burst the pause exists to prevent.
+                    if limiter.dials_paused() {
+                        limiter.note_skipped_paused();
+                        continue;
                     }
-                });
+                    // Ceiling on live connections. Checked before pacing so a
+                    // saturated engine sheds work instead of accumulating delay.
+                    if limiter.conn_cap_reached() {
+                        limiter.note_skipped_conn_cap();
+                        continue;
+                    }
+                    // Peers that would be dropped by `dial_peer` anyway, and peers
+                    // that failed a moment ago, must not cost a pacing slot.
+                    let traced = is_traced(&t.info_hash);
+                    if dial_is_redundant(addr, &t, traced) {
+                        continue;
+                    }
+                    let key = (t.info_hash, addr);
+                    if ask == DialAsk::Discovered
+                        && backoff.is_backing_off(&key, std::time::Instant::now())
+                    {
+                        DIAL_SKIPPED_BACKOFF.fetch_add(1, AtomicOrdering::Relaxed);
+                        if traced {
+                            info!("[dialtrace] {} SKIPPED backoff (failed recently)", addr);
+                        }
+                        continue;
+                    }
+                    pacer.acquire(&limiter).await;
+                    let d = disk_c.clone();
+                    // Read per dial: a listen-port rebind replaces the socket,
+                    // and the next dial must leave from the new port.
+                    let u = utp_c.get();
+                    let b = pick_binding_for_dial(&bindings_c, addr);
+                    // The port peers are told to call back on (BEP 10 `p`) and the
+                    // one a self-dial carries: read now, from the manager. The
+                    // binding's copy is the port of the first bind -- stale after
+                    // a rebind, and never the public port behind a translating NAT.
+                    let port = mgr_c.announced_port(b.addr.port());
+                    let backoff = backoff.clone();
+                    tokio::spawn(async move {
+                        let outcome = dial_peer(addr, t, d, b.peer_id, u, port, &b.egress).await;
+                        if records_backoff(outcome) {
+                            backoff.record_failure(key, std::time::Instant::now());
+                        }
+                    });
+                }
             }
         });
     }
@@ -1089,7 +1134,7 @@ pub async fn dial_peer(
     // Skip if we're already connected to this peer on this torrent. The dial
     // queue checked this before pacing, but a session may have come up while
     // the dial waited, and other callers come straight here.
-    if torrent.peers.contains_key(&addr) {
+    if torrent.peers.contains_key(&addr) || torrent.peers.has_listen_addr(&addr) {
         DIAL_SKIPPED_CONNECTED.fetch_add(1, AtomicOrdering::Relaxed);
         if traced {
             info!("[dialtrace] {} SKIPPED already connected", addr);
@@ -1154,6 +1199,7 @@ pub async fn dial_peer(
         lt_ext,
         utp_socket,
         listen_port,
+        true,
     )
     .await;
     DialOutcome::SessionEnded
@@ -1455,6 +1501,39 @@ mod per_engine_dial_tests {
         })
         .await;
         assert_eq!(limiter.delayed(), 0, "a connected peer waited on the pacer");
+    }
+
+    /// A peer that dialled us sits under an ephemeral port; its listen port
+    /// is where a dial would go, and would only make the duplicate again.
+    #[tokio::test]
+    async fn a_dial_to_a_connected_peers_listen_port_does_not_spend_a_pacing_slot() {
+        let limiter = engine(0.001);
+        let t = torrent_of(&limiter, 34);
+        let s = PeerStats::new(
+            "93.184.216.1:51000".parse().unwrap(),
+            [7; 20],
+            "test".into(),
+            false,
+            false,
+        );
+        s.listen_port.store(6881, AtomicOrdering::Relaxed);
+        t.peers.insert(s.addr, Arc::new(s));
+        let before = DIAL_SKIPPED_CONNECTED.load(AtomicOrdering::Relaxed);
+        enqueue_dial("93.184.216.1:6881".parse().unwrap(), t.clone());
+        until(10, "the listen port to be skipped", || {
+            DIAL_SKIPPED_CONNECTED.load(AtomicOrdering::Relaxed) > before
+        })
+        .await;
+        assert_eq!(limiter.delayed(), 0, "a connected peer waited on the pacer");
+    }
+
+    /// A duplicate dropped at the start of its session ends the dial as a
+    /// session that ran, never as a failure, so nothing is backed off.
+    #[test]
+    fn only_a_failed_dial_is_backed_off() {
+        assert!(records_backoff(DialOutcome::Failed));
+        assert!(!records_backoff(DialOutcome::SessionEnded));
+        assert!(!records_backoff(DialOutcome::Skipped));
     }
 
     /// The same for a peer whose dial is already in flight.

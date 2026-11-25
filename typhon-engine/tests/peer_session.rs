@@ -90,6 +90,7 @@ fn start(
         false, // no BEP 10: this is about the BEP 3 opening
         None,  // no uTP socket
         0,     // listen port unknown, which disables the extension handshake
+        false, // we did not dial
     ));
     framed(theirs)
 }
@@ -274,6 +275,7 @@ fn start_extended(
         true, // BEP 10 negotiated
         None,
         16171, // a listen port: the extension handshake is on
+        false, // we did not dial
     ));
     framed(theirs)
 }
@@ -444,6 +446,7 @@ fn start_extended_at(
         true,
         None,
         16171,
+        false, // we did not dial
     ));
     framed(theirs)
 }
