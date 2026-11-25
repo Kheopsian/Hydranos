@@ -144,6 +144,22 @@ fn serve_metadata_block(torrent: &Arc<TorrentState>, piece: u32) -> Vec<u8> {
     extension::build_metadata_data(piece, total, &dict[offset..end])
 }
 
+/// What a peer's extension handshake says about it, published on its stats
+/// rather than kept in this task alone: another peer's task has to know
+/// whether this one can be introduced to anybody. Overwrites on every
+/// handshake, so a later `upload_only` of 0 clears the flag.
+fn record_ext_handshake(stats: &PeerStats, parsed: &extension::ExtHandshake) {
+    stats
+        .supports_holepunch
+        .store(parsed.ut_holepunch_id.is_some(), Ordering::Relaxed);
+    stats
+        .listen_port
+        .store(parsed.listen_port.unwrap_or(0), Ordering::Relaxed);
+    stats
+        .upload_only
+        .store(parsed.upload_only, Ordering::Relaxed);
+}
+
 /// Whether a session that has sent `served` metadata blocks may be sent one more.
 ///
 /// A peer resolving a magnet asks for each block once; a few retries are
@@ -978,18 +994,7 @@ pub async fn run(
                                         &payload,
                                         torrent.policy(),
                                     ) {
-                                        // Published on the stats rather than kept
-                                        // in this task alone: another peer's task
-                                        // has to know whether this one can be
-                                        // introduced to anybody.
-                                        stats.supports_holepunch.store(
-                                            parsed.ut_holepunch_id.is_some(),
-                                            Ordering::Relaxed,
-                                        );
-                                        stats.listen_port.store(
-                                            parsed.listen_port.unwrap_or(0),
-                                            Ordering::Relaxed,
-                                        );
+                                        record_ext_handshake(&stats, &parsed);
                                         if let Some(ext) = peer_ext.as_mut() {
                                             ext.ut_pex_id = parsed.ut_pex_id;
                                             ext.ut_metadata_id = parsed.ut_metadata_id;
@@ -1338,6 +1343,31 @@ mod metadata_serve_tests {
             our_ext_handshake(&private, true, 6881, false).is_none(),
             "private torrents send no extension handshake"
         );
+    }
+
+    #[test]
+    fn bep21_a_peers_upload_only_is_recorded_and_cleared() {
+        let policy = extension::PeerPolicy::default();
+        let stats = PeerStats::new(
+            "127.0.0.1:6881".parse().unwrap(),
+            [1u8; 20],
+            "test".into(),
+            false,
+            false,
+        );
+        let apply = |payload: &[u8]| {
+            let parsed = extension::parse_extension_handshake_full(payload, &policy).unwrap();
+            record_ext_handshake(&stats, &parsed);
+            stats.upload_only.load(Ordering::Relaxed)
+        };
+        assert!(
+            !stats.upload_only.load(Ordering::Relaxed),
+            "unknown at first"
+        );
+        assert!(apply(b"d1:md11:ut_metadatai3ee11:upload_onlyi1ee"));
+        assert!(!apply(b"d1:md11:ut_metadatai3ee11:upload_onlyi0ee"));
+        assert!(apply(b"d1:md11:ut_metadatai3ee11:upload_onlyi1ee"));
+        assert!(!apply(b"d1:md11:ut_metadatai3eee"));
     }
 
     #[test]
