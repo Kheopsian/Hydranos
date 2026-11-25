@@ -229,8 +229,23 @@ api_key = \"{KEY}\"
     )
     .await;
     let mut body = resp.into_body().into_data_stream();
+    // A second tab on the same daemon: it listens, it does not count again.
+    let other = stream_events(
+        State(s.state.clone()),
+        RawQuery(Some("hydrate=0".into())),
+        keyed(KEY),
+    )
+    .await;
+    let mut other_body = other.into_body().into_data_stream();
+    // A page shows Hoard: that is what starts the one shared count.
+    chips_wanted(&s.state);
     let text = read_until(&mut body, &["facets_snapshot"], 6).await;
     assert!(text.contains("facets_snapshot"), "no chips pushed: {text}");
+    let text = read_until(&mut other_body, &["facets_snapshot"], 6).await;
+    assert!(
+        text.contains("\"all\":1"),
+        "the second tab hears it too: {text}"
+    );
     assert!(text.contains("\"all\":1"), "one torrent counted: {text}");
 
     engine
@@ -241,6 +256,35 @@ api_key = \"{KEY}\"
     assert!(
         text.contains("\"all\":2"),
         "the new count is pushed: {text}"
+    );
+}
+
+/// ⭐ Nobody counts the library for a page that is not looking at Hoard: with
+/// connected streams and no page asking, no chips are computed.
+#[tokio::test]
+async fn nothing_is_counted_while_no_page_shows_hoard() {
+    let s = state_from(
+        "sse-facets-idle",
+        &format!("[daemon]\napi_key = \"{KEY}\"\n"),
+    );
+    let resp = stream_events(
+        State(s.state.clone()),
+        RawQuery(Some("hydrate=0".into())),
+        keyed(KEY),
+    )
+    .await;
+    let mut body = resp.into_body().into_data_stream();
+    let text = read_until(&mut body, &["facets_snapshot"], 3).await;
+    assert!(
+        !text.contains("facets_snapshot"),
+        "counted for nobody: {text}"
+    );
+    assert!(
+        !s.state
+            .chips
+            .running
+            .load(std::sync::atomic::Ordering::Relaxed),
+        "the shared count is not running"
     );
 }
 

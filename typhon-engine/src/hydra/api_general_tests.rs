@@ -123,6 +123,7 @@ fn state_with(key: &str, password_hash: &str, in_query: bool) -> AppState {
         bench: None,
         sessions: Default::default(),
         spread: Default::default(),
+        chips: Default::default(),
     }
 }
 

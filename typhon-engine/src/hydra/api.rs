@@ -293,6 +293,83 @@ pub struct AppState {
     /// What the engines and nodes a category spreads over measured a moment
     /// ago (`spread`).
     pub spread: Arc<crate::spread::SpreadCache>,
+    /// The Hoard chips, counted once for every connected page.
+    pub chips: Arc<ChipFeed>,
+}
+
+/// The library-wide chips, counted by ONE loop and handed to every stream.
+///
+/// Each stream used to run its own count, and a count walks the whole library
+/// (remote nodes included) under the store lock: N open tabs were N continuous
+/// scans. Now there is one, it runs only while a page is looking at Hoard, and
+/// the streams just listen.
+pub struct ChipFeed {
+    latest: tokio::sync::watch::Sender<Option<serde_json::Value>>,
+    /// Unix seconds of the last time a page showed Hoard.
+    seen: std::sync::atomic::AtomicI64,
+    running: std::sync::atomic::AtomicBool,
+}
+
+impl Default for ChipFeed {
+    fn default() -> Self {
+        Self {
+            latest: tokio::sync::watch::channel(None).0,
+            seen: Default::default(),
+            running: Default::default(),
+        }
+    }
+}
+
+/// A page that has not asked for Hoard in this long is not looking at it.
+const CHIPS_IDLE_SECS: i64 = 60;
+
+impl ChipFeed {
+    pub fn listen(&self) -> tokio::sync::watch::Receiver<Option<serde_json::Value>> {
+        self.latest.subscribe()
+    }
+}
+
+/// A page is showing Hoard: start the shared count if it is not running.
+pub(crate) fn chips_wanted(state: &AppState) {
+    use std::sync::atomic::Ordering;
+    state.chips.seen.store(now_secs(), Ordering::Relaxed);
+    if state.chips.running.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let state = state.clone();
+    tokio::spawn(async move {
+        let mut wait = std::time::Duration::from_secs(1);
+        loop {
+            tokio::time::sleep(wait).await;
+            let idle = now_secs() - state.chips.seen.load(Ordering::Relaxed);
+            if idle > CHIPS_IDLE_SECS || state.chips.latest.receiver_count() == 0 {
+                state.chips.running.store(false, Ordering::Release);
+                // A page may have asked between the check and the store.
+                let again = now_secs() - state.chips.seen.load(Ordering::Relaxed)
+                    <= CHIPS_IDLE_SECS
+                    && state.chips.latest.receiver_count() > 0;
+                if again && !state.chips.running.swap(true, Ordering::AcqRel) {
+                    continue;
+                }
+                return;
+            }
+            let started = std::time::Instant::now();
+            let page = fleet_page(&state, "hoard", "limit=1&facets=1").await;
+            // Never under a second, and at least ten times what it cost.
+            wait = (started.elapsed() * 10).max(std::time::Duration::from_secs(1));
+            let Some(facets) = page.get("facets").filter(|f| !f.is_null()) else {
+                continue;
+            };
+            state.chips.latest.send_if_modified(|cur| {
+                if cur.as_ref() == Some(facets) {
+                    false
+                } else {
+                    *cur = Some(facets.clone());
+                    true
+                }
+            });
+        }
+    });
 }
 
 impl AppState {
@@ -4838,6 +4915,8 @@ async fn get_hoard_page(
 ) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
+    // Someone is looking at Hoard: keep the shared chip count alive.
+    chips_wanted(&state);
     get_engine_page(&state, "hoard", &query).await
 }
 
@@ -7273,9 +7352,12 @@ async fn stream_events(
                                     }
                                 }
                                 for h in gone {
-                                    if add.remove(&h).is_none() {
-                                        away.insert(h);
-                                    }
+                                    // Always named: a hash that stopped, restarted
+                                    // and stopped again was added here a moment
+                                    // ago, and the page still holds the first
+                                    // row. Removing an unknown row is a no-op.
+                                    add.remove(&h);
+                                    away.insert(h);
                                 }
                                 held_active = Some((add, away, count));
                             }
@@ -7313,34 +7395,28 @@ async fn stream_events(
         // times the time it took, so a very large library is not walked
         // continuously.
         if state.engines.get("hoard").is_some() {
-            let state = state.clone();
+            // Only listens: the count itself is one loop for every page (see
+            // `ChipFeed`), started by a page asking for Hoard.
+            let mut chips = state.chips.listen();
             let tx = tx.clone();
             tokio::spawn(async move {
-                let mut last = String::new();
-                let mut wait = std::time::Duration::from_secs(1);
                 loop {
-                    tokio::time::sleep(wait).await;
-                    if tx.is_closed() {
-                        return;
+                    let facets = chips.borrow_and_update().clone();
+                    if let Some(facets) = facets {
+                        let frame = serde_json::json!({
+                            "event": "facets_snapshot",
+                            "data": {"mode": "hoard", "facets": facets},
+                        });
+                        // A whole figure, not a delta: a page that cannot take
+                        // it now gets the next one.
+                        if tx.is_closed() {
+                            return;
+                        }
+                        let _ = tx.try_send(frame);
                     }
-                    let started = std::time::Instant::now();
-                    let page = fleet_page(&state, "hoard", "limit=1&facets=1").await;
-                    wait = (started.elapsed() * 10).max(std::time::Duration::from_secs(1));
-                    let Some(facets) = page.get("facets").filter(|f| !f.is_null()) else {
-                        continue;
-                    };
-                    let text = facets.to_string();
-                    if text == last {
-                        continue;
-                    }
-                    let frame = serde_json::json!({
-                        "event": "facets_snapshot",
-                        "data": {"mode": "hoard", "facets": facets},
-                    });
-                    // A frame the page cannot take is dropped and sent again
-                    // next round: it is a whole figure, not a delta.
-                    if tx.try_send(frame).is_ok() {
-                        last = text;
+                    tokio::select! {
+                        changed = chips.changed() => if changed.is_err() { return },
+                        _ = tx.closed() => return,
                     }
                 }
             });
@@ -18436,6 +18512,7 @@ pub(crate) mod testing {
             bench: None,
             sessions: Default::default(),
             spread: Default::default(),
+            chips: Default::default(),
         };
         TestState { state, dir }
     }
