@@ -2271,7 +2271,14 @@ pub(super) async fn qbit_delete(
 #[allow(clippy::result_large_err)]
 pub(super) async fn qbit_library(
     body: &str,
-) -> Result<(crate::importer::Qbit, Vec<crate::importer::Candidate>), Response> {
+) -> Result<
+    (
+        crate::importer::Qbit,
+        Vec<crate::importer::Candidate>,
+        std::collections::BTreeMap<String, String>,
+    ),
+    Response,
+> {
     let creds = serde_json::from_str::<crate::importer::QbitCreds>(body)
         .map_err(|_| bad_request("invalid body: url, username, password"))?;
     if creds.url.trim().is_empty() {
@@ -2290,11 +2297,13 @@ pub(super) async fn qbit_library(
         )
             .into_response()
     })?;
+    let listed = qbit.categories().await;
     Ok((
         qbit,
         list.iter()
             .map(crate::importer::Candidate::from_qbit)
             .collect(),
+        listed,
     ))
 }
 
