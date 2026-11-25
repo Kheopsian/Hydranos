@@ -940,11 +940,17 @@ pub fn categories_needed(
         if c.category.is_empty() || c.save_path.is_empty() {
             continue;
         }
+        // An empty listed path means "<default>/<name>" in qBittorrent but the
+        // default root in Hydranos, so a category with torrents takes their
+        // real path instead of writing the root in. A listed category with
+        // no torrents keeps the empty path.
         // First one wins: qBittorrent allows a per-torrent path override, and
         // taking the last would let one stray torrent redefine the category
         // for every other torrent in it.
-        out.entry(c.category.clone())
-            .or_insert_with(|| c.save_path.clone());
+        let slot = out.entry(c.category.clone()).or_default();
+        if slot.is_empty() {
+            *slot = c.save_path.clone();
+        }
     }
     out
 }
@@ -1866,9 +1872,15 @@ mod tests {
     }
 
     #[test]
-    fn a_listed_empty_save_path_stays_empty() {
+    fn a_listed_empty_save_path_takes_its_torrents_path() {
         let rows = vec![c("Films", "/data/films")];
         let cats = categories_needed(&rows, &listed(&[("Films", "")]));
+        assert_eq!(cats.get("Films").map(String::as_str), Some("/data/films"));
+    }
+
+    #[test]
+    fn a_listed_empty_save_path_stays_empty_without_torrents() {
+        let cats = categories_needed(&[], &listed(&[("Films", "")]));
         assert_eq!(cats.get("Films").map(String::as_str), Some(""));
     }
 
