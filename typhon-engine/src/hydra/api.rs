@@ -15495,13 +15495,13 @@ async fn post_qbit_import_preview(
 ) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    let (_, cands) = match qbit_library(&body).await {
+    let (_, cands, listed) = match qbit_library(&body).await {
         Ok(x) => x,
         Err(resp) => return resp,
     };
     let choices: crate::importer::Choices = serde_json::from_str(&body).unwrap_or_default();
     let preview = tokio::task::spawn_blocking(move || {
-        crate::importer::preview(&cands, &choices, |p| p.exists())
+        crate::importer::preview_listed(&cands, &listed, &choices, |p| p.exists())
     })
     .await
     .unwrap_or_default();
@@ -15518,7 +15518,7 @@ async fn post_qbit_import_start(
     guard!(state, headers, query);
     // Logged in and listed BEFORE the job exists: a wrong password is an
     // answer to this request, not an error frame on a progress screen.
-    let (qbit, cands) = match qbit_library(&body).await {
+    let (qbit, cands, listed) = match qbit_library(&body).await {
         Ok(x) => x,
         Err(resp) => return resp,
     };
@@ -15532,8 +15532,9 @@ async fn post_qbit_import_start(
         state.clone(),
         "qBittorrent",
         progress.clone(),
-        crate::importer::run_job(
+        crate::importer::run_job_listed(
             cands,
+            listed,
             Some(qbit),
             choices,
             progress,
@@ -15590,7 +15591,7 @@ async fn post_import_retry(
         return bad_request("the last import has nothing left to retry");
     };
     let put_back = |kit: crate::importer::RetryKit| *prev.retry.lock().unwrap() = Some(kit);
-    let (qbit, rows) = match &kit.creds {
+    let (qbit, rows, listed) = match &kit.creds {
         Some(creds) => {
             let q = match crate::importer::Qbit::login(creds).await {
                 Ok(q) => q,
@@ -15610,9 +15611,10 @@ async fn post_import_retry(
                         .into_response();
                 }
             };
-            (Some(q), Some(rows))
+            let listed = q.categories().await;
+            (Some(q), Some(rows), listed)
         }
-        None => (None, None),
+        None => (None, None, std::collections::BTreeMap::new()),
     };
     let (job_id, progress) = match import_begin(&state) {
         Ok(x) => x,
@@ -15641,8 +15643,9 @@ async fn post_import_retry(
         state.clone(),
         client,
         progress.clone(),
-        crate::importer::run_job(
+        crate::importer::run_job_listed(
             cands,
+            listed,
             qbit,
             choices,
             progress,

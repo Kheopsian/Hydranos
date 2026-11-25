@@ -636,6 +636,43 @@ impl Qbit {
         }
     }
 
+    /// Its category list, name to save path. Never fails: the list only adds
+    /// categories without torrents and the listed paths, so any error logs a
+    /// warning and gives an empty map, and the import goes on from the torrents.
+    pub async fn categories(&self) -> BTreeMap<String, String> {
+        let resp = match self.get("/api/v2/torrents/categories").send().await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!("qBittorrent category list: {e}");
+                return BTreeMap::new();
+            }
+        };
+        let status = resp.status().as_u16();
+        if !(200..300).contains(&status) {
+            tracing::warn!("qBittorrent category list: http {status}");
+            return BTreeMap::new();
+        }
+        // A loose value, not a struct: newer versions add fields of other types.
+        let parsed = resp.json::<BTreeMap<String, serde_json::Value>>().await;
+        match parsed {
+            Ok(m) => m
+                .into_iter()
+                .map(|(name, v)| {
+                    let path = v
+                        .get("savePath")
+                        .and_then(|p| p.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    (name, path)
+                })
+                .collect(),
+            Err(e) => {
+                tracing::warn!("qBittorrent category list: {e}");
+                BTreeMap::new()
+            }
+        }
+    }
+
     /// Every torrent it holds.
     ///
     /// One request under `list_timeout`, which covers the body too. The
@@ -874,8 +911,31 @@ pub struct CategoryPlan {
 /// Built before anything is added. A torrent added to a category that does not
 /// exist yet goes to the default path, and putting it right afterwards means
 /// moving the data it should already have been sitting on.
-pub fn categories_needed(cands: &[Candidate]) -> BTreeMap<String, String> {
+///
+/// `listed` is the source's own category list (name to save path). A listed
+/// category is created even with no torrent in it, and its listed path wins
+/// over a torrent's. An empty listed path stays empty: qBittorrent means
+/// `<default>/<name>` by it and Hydranos means its default root, and the
+/// default is never written into it. A relative listed path is resolved by
+/// qBittorrent against its own default folder, which is not known here, so it
+/// counts as unlisted and the torrents' path is used.
+pub fn categories_needed(
+    cands: &[Candidate],
+    listed: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
+    for (name, path) in listed {
+        if name.is_empty() {
+            continue;
+        }
+        if !path.is_empty() && !is_absolute_path(path) {
+            tracing::warn!(
+                "qBittorrent category {name:?} has a relative save path {path:?}; using its torrents' path instead"
+            );
+            continue;
+        }
+        out.insert(name.clone(), path.clone());
+    }
     for c in cands {
         if c.category.is_empty() || c.save_path.is_empty() {
             continue;
@@ -887,6 +947,16 @@ pub fn categories_needed(cands: &[Candidate]) -> BTreeMap<String, String> {
             .or_insert_with(|| c.save_path.clone());
     }
     out
+}
+
+/// Whether a path from the source is absolute on either kind of system: a
+/// leading slash or backslash, or a drive letter (`C:`, `C:\`, `C:/`).
+fn is_absolute_path(p: &str) -> bool {
+    if p.starts_with('/') || p.starts_with('\\') {
+        return true;
+    }
+    let b = p.as_bytes();
+    b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':'
 }
 
 /// At most this many folders are offered for mapping: past that the list is
@@ -1241,6 +1311,16 @@ pub struct Preview {
 /// same mapped save path, content path and category folders, so what it
 /// counts as found is what the import will find.
 pub fn preview(cands: &[Candidate], choices: &Choices, exists: impl Fn(&Path) -> bool) -> Preview {
+    preview_listed(cands, &BTreeMap::new(), choices, exists)
+}
+
+/// `preview` with the source's own category list, the same one the job uses.
+pub fn preview_listed(
+    cands: &[Candidate],
+    listed: &BTreeMap<String, String>,
+    choices: &Choices,
+    exists: impl Fn(&Path) -> bool,
+) -> Preview {
     let mut p = Preview {
         total: cands.len(),
         ..Default::default()
@@ -1254,7 +1334,7 @@ pub fn preview(cands: &[Candidate], choices: &Choices, exists: impl Fn(&Path) ->
         p.stopped += c.stopped as usize;
         p.carried_uploaded_bytes += c.uploaded;
     }
-    p.categories = categories_planned(cands, choices)
+    p.categories = categories_planned(cands, listed, choices)
         .into_iter()
         .map(|(name, save_path)| CategoryPlan { name, save_path })
         .collect();
@@ -1380,10 +1460,22 @@ pub fn incomplete_seen(c: &Candidate, choices: &Choices) -> String {
 }
 
 /// The categories an import creates, with their folders as Hydranos sees them.
-pub fn categories_planned(cands: &[Candidate], choices: &Choices) -> BTreeMap<String, String> {
-    categories_needed(cands)
+pub fn categories_planned(
+    cands: &[Candidate],
+    listed: &BTreeMap<String, String>,
+    choices: &Choices,
+) -> BTreeMap<String, String> {
+    categories_needed(cands, listed)
         .into_iter()
-        .map(|(name, path)| (name, map_path(&path, &choices.path_map)))
+        .map(|(name, path)| {
+            // An empty path stays empty: mapping must not turn it into a root.
+            let mapped = if path.is_empty() {
+                path
+            } else {
+                map_path(&path, &choices.path_map)
+            };
+            (name, mapped)
+        })
         .collect()
 }
 
@@ -1430,11 +1522,33 @@ pub async fn run_job(
     ensure_categories: CategoryFn,
     add: AddFn,
 ) {
+    run_job_listed(
+        cands,
+        BTreeMap::new(),
+        qbit,
+        choices,
+        progress,
+        ensure_categories,
+        add,
+    )
+    .await
+}
+
+/// `run_job` with the source's own category list.
+pub async fn run_job_listed(
+    cands: Vec<Candidate>,
+    listed: BTreeMap<String, String>,
+    qbit: Option<Qbit>,
+    choices: Choices,
+    progress: Arc<Progress>,
+    ensure_categories: CategoryFn,
+    add: AddFn,
+) {
     // Added to: a retry may have counted torrents before the job started.
     progress.total.fetch_add(cands.len(), Ordering::Relaxed);
 
     progress.set_phase("categories");
-    let cats = categories_planned(&cands, &choices);
+    let cats = categories_planned(&cands, &listed, &choices);
     {
         let ensure = ensure_categories.clone();
         let cats = cats.clone();
@@ -1727,14 +1841,92 @@ mod tests {
         // one stray torrent redefine where every other torrent of that
         // category is supposed to live.
         let rows = vec![c("Films", "/data/films"), c("Films", "/tmp/oneoff")];
-        let cats = categories_needed(&rows);
+        let cats = categories_needed(&rows, &BTreeMap::new());
         assert_eq!(cats.get("Films").map(String::as_str), Some("/data/films"));
     }
 
     #[test]
     fn a_torrent_without_a_category_needs_none_created() {
         let rows = vec![c("", "/data/loose"), c("Books", "")];
-        assert!(categories_needed(&rows).is_empty());
+        assert!(categories_needed(&rows, &BTreeMap::new()).is_empty());
+    }
+
+    fn listed(items: &[(&str, &str)]) -> BTreeMap<String, String> {
+        items
+            .iter()
+            .map(|(n, p)| (n.to_string(), p.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn a_listed_save_path_beats_the_torrents() {
+        let rows = vec![c("Films", "/data/films-old")];
+        let cats = categories_needed(&rows, &listed(&[("Films", "/data/films")]));
+        assert_eq!(cats.get("Films").map(String::as_str), Some("/data/films"));
+    }
+
+    #[test]
+    fn a_listed_empty_save_path_stays_empty() {
+        let rows = vec![c("Films", "/data/films")];
+        let cats = categories_needed(&rows, &listed(&[("Films", "")]));
+        assert_eq!(cats.get("Films").map(String::as_str), Some(""));
+    }
+
+    #[test]
+    fn a_listed_category_without_torrents_is_created() {
+        let cats = categories_needed(&[], &listed(&[("Empty", "/data/empty")]));
+        assert_eq!(cats.get("Empty").map(String::as_str), Some("/data/empty"));
+    }
+
+    #[test]
+    fn a_nested_category_keeps_its_full_name() {
+        let cats = categories_needed(&[], &listed(&[("tv/anime", "/data/anime")]));
+        assert_eq!(
+            cats.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["tv/anime"]
+        );
+    }
+
+    #[test]
+    fn a_relative_listed_path_falls_back_to_the_torrents() {
+        let rows = vec![c("Films", "/data/films")];
+        let cats = categories_needed(&rows, &listed(&[("Films", "films"), ("Solo", "solo")]));
+        assert_eq!(cats.get("Films").map(String::as_str), Some("/data/films"));
+        assert!(
+            !cats.contains_key("Solo"),
+            "no torrent path to fall back on"
+        );
+        for abs in ["/a", "\\\\nas\\share", "C:", "C:\\a", "C:/a"] {
+            assert!(is_absolute_path(abs), "{abs}");
+        }
+        for rel in ["a/b", "films", "..\\a"] {
+            assert!(!is_absolute_path(rel), "{rel}");
+        }
+    }
+
+    #[test]
+    fn an_unlisted_category_with_an_empty_torrent_path_is_skipped() {
+        let rows = vec![c("Books", "")];
+        assert!(categories_needed(&rows, &listed(&[("Other", "/o")]))
+            .get("Books")
+            .is_none());
+    }
+
+    #[test]
+    fn the_preview_lists_the_categories_the_job_creates() {
+        let rows = vec![c("Films", "/data/films"), c("Loose", "/data/loose")];
+        let l = listed(&[("Films", "/mnt/films"), ("Empty", "")]);
+        let choices = Choices::default();
+        let p = preview_listed(&rows, &l, &choices, |_| true);
+        let planned: BTreeMap<String, String> = p
+            .categories
+            .into_iter()
+            .map(|c| (c.name, c.save_path))
+            .collect();
+        assert_eq!(planned, categories_planned(&rows, &l, &choices));
+        assert_eq!(planned.len(), 3);
+        assert_eq!(planned["Films"], "/mnt/films");
+        assert_eq!(planned["Empty"], "");
     }
 
     #[test]
@@ -3044,6 +3236,97 @@ mod qbit_session_tests {
             .await
             .unwrap_err();
         assert!(err.contains("older than 4.5"), "{err}");
+    }
+
+    /// A qBittorrent that logs in and answers its category list with `reply`
+    /// (a status and a body).
+    async fn qbit_with_categories(status: u16, body: &'static str) -> Qbit {
+        let app = axum::Router::new()
+            .route(
+                "/api/v2/auth/login",
+                axum::routing::post(|| async { "Ok." }),
+            )
+            .route(
+                "/api/v2/torrents/categories",
+                axum::routing::get(move || async move {
+                    (StatusCode::from_u16(status).unwrap(), body).into_response()
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let creds = QbitCreds {
+            url: format!("http://{addr}"),
+            username: "u".into(),
+            password: "p".into(),
+            insecure: false,
+        };
+        Qbit::login(&creds).await.expect("login")
+    }
+
+    #[tokio::test]
+    async fn the_category_list_is_read_with_nested_names_and_extra_fields() {
+        let q = qbit_with_categories(
+            200,
+            r#"{"tv/anime":{"name":"tv/anime","savePath":"/data/anime","download_path":false},
+                "Empty":{"name":"Empty","savePath":"","download_path":null}}"#,
+        )
+        .await;
+        let got = q.categories().await;
+        assert_eq!(got.len(), 2);
+        assert_eq!(got["tv/anime"], "/data/anime");
+        assert_eq!(got["Empty"], "");
+    }
+
+    #[tokio::test]
+    async fn a_failing_category_list_gives_an_empty_map() {
+        assert!(qbit_with_categories(404, "Not Found")
+            .await
+            .categories()
+            .await
+            .is_empty());
+        assert!(qbit_with_categories(500, "x")
+            .await
+            .categories()
+            .await
+            .is_empty());
+        assert!(qbit_with_categories(200, "not json")
+            .await
+            .categories()
+            .await
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_job_creates_a_listed_category_with_no_torrent_and_survives_a_404() {
+        for (status, body, expect) in [
+            (
+                200,
+                r#"{"Empty":{"name":"Empty","savePath":"/data/empty"}}"#,
+                Some("/data/empty"),
+            ),
+            (404, "Not Found", None),
+        ] {
+            let q = qbit_with_categories(status, body).await;
+            let listed = q.categories().await;
+            let seen = Arc::new(std::sync::Mutex::new(BTreeMap::new()));
+            let s = seen.clone();
+            let cats: CategoryFn = Arc::new(move |m| *s.lock().unwrap() = m.clone());
+            let add: AddFn = Arc::new(|_| Ok(Added::Seeded));
+            let progress = Arc::new(Progress::default());
+            run_job_listed(
+                vec![],
+                listed,
+                None,
+                Choices::default(),
+                progress,
+                cats,
+                add,
+            )
+            .await;
+            let got = seen.lock().unwrap().get("Empty").cloned();
+            assert_eq!(got.as_deref(), expect);
+        }
     }
 
     #[tokio::test]
