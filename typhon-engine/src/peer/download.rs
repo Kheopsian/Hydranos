@@ -1173,6 +1173,25 @@ mod tests {
         );
     }
 
+    /// A partial seed (BEP 21 upload_only) is still a source for the pieces it
+    /// has; nothing about it being upload-only changes what we ask of it.
+    #[test]
+    fn a_partial_seed_is_still_a_source_for_what_it_has() {
+        let mut dl = state(downloading(16, 16384));
+        dl.on_bitfield(&[0xFF, 0x00]);
+        dl.on_unchoke();
+        assert!(dl.should_be_interested());
+        let reqs = dl.get_requests();
+        assert!(!reqs.is_empty());
+        assert!(
+            reqs.iter().all(|(piece, _, _)| *piece < 8),
+            "only what it has: {reqs:?}"
+        );
+        let mut dl = state(downloading(16, 16384));
+        dl.on_bitfield(&[0x00, 0x00]);
+        assert!(!dl.should_be_interested());
+    }
+
     // -----------------------------------------------------------------------
     // Requests
     // -----------------------------------------------------------------------

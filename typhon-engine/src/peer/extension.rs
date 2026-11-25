@@ -185,6 +185,19 @@ pub fn build_extension_handshake(
     metadata_size: Option<usize>,
     policy: &PeerPolicy,
 ) -> Vec<u8> {
+    build_extension_handshake_with(listen_port, metadata_size, policy, false)
+}
+
+/// As `build_extension_handshake`, plus BEP 21's `upload_only: 1` when we are
+/// a partial seed: we hold part of the torrent, will never fetch the rest, and
+/// want peers to know they should not wait on us for pieces. The key is left
+/// out otherwise, so a complete seed or a leecher sends the same bytes as before.
+pub fn build_extension_handshake_with(
+    listen_port: u16,
+    metadata_size: Option<usize>,
+    policy: &PeerPolicy,
+    upload_only: bool,
+) -> Vec<u8> {
     let mut m = BTreeMap::new();
     // Left out entirely when PEX is off, rather than advertised and ignored.
     if policy.pex() {
@@ -218,6 +231,9 @@ pub fn build_extension_handshake(
         Bencode::Bytes(crate::config::user_agent().into_bytes()),
     );
     root.insert(b"reqq".to_vec(), Bencode::Int(250));
+    if upload_only {
+        root.insert(b"upload_only".to_vec(), Bencode::Int(1));
+    }
 
     Bencode::Dict(root).to_vec()
 }
@@ -239,6 +255,9 @@ pub struct ExtHandshake {
     /// The port they listen on (BEP 10 `p`). For a peer that dialled us, the
     /// only way to know where somebody else could reach it.
     pub listen_port: Option<u16>,
+    /// BEP 21: the peer is a partial seed that will not download the rest.
+    /// Only a non-zero integer counts; anything else is "no".
+    pub upload_only: bool,
 }
 
 /// Parse a peer's extension handshake. Absent or zero ids mean "not offered":
@@ -277,6 +296,10 @@ pub fn parse_extension_handshake_full(payload: &[u8], policy: &PeerPolicy) -> Op
             .and_then(|v| v.as_int())
             .and_then(|n| u16::try_from(n).ok())
             .filter(|p| *p != 0),
+        upload_only: bv
+            .dict_get(b"upload_only")
+            .and_then(|v| v.as_int())
+            .is_some_and(|n| n != 0),
     })
 }
 
@@ -1012,6 +1035,46 @@ mod protocol_tests {
         assert!(
             !hs.windows(6).any(|w| w == b"ut_pex"),
             "PEX off means the key is absent, not advertised and ignored"
+        );
+    }
+
+    /// BEP 21: a partial seed says so with `upload_only: 1`, and a peer that
+    /// says so is read as upload-only. The key is absent otherwise, so ordinary
+    /// handshakes are byte-for-byte what they were.
+    #[test]
+    fn bep21_a_partial_seed_says_upload_only_and_nobody_else_does() {
+        let on = PeerPolicy::default();
+
+        let partial = build_extension_handshake_with(16171, None, &on, true);
+        assert!(partial.windows(11).any(|w| w == b"upload_only"));
+        let parsed = parse_extension_handshake_full(&partial, &on).expect("parses");
+        assert!(parsed.upload_only, "a peer's upload_only is read");
+
+        let ordinary = build_extension_handshake(16171, None, &on);
+        assert!(!ordinary.windows(11).any(|w| w == b"upload_only"));
+        assert!(
+            !parse_extension_handshake_full(&ordinary, &on)
+                .unwrap()
+                .upload_only
+        );
+    }
+
+    /// BEP 21 is read leniently: zero, a non-integer, or a missing key all mean
+    /// the peer is not upload-only.
+    #[test]
+    fn bep21_zero_or_junk_upload_only_is_read_as_no() {
+        let on = PeerPolicy::default();
+        let zero = b"d1:md11:ut_metadatai3ee11:upload_onlyi0ee".to_vec();
+        assert!(
+            !parse_extension_handshake_full(&zero, &on)
+                .unwrap()
+                .upload_only
+        );
+        let junk = b"d1:md11:ut_metadatai3ee11:upload_only3:yese".to_vec();
+        assert!(
+            !parse_extension_handshake_full(&junk, &on)
+                .unwrap()
+                .upload_only
         );
     }
 

@@ -573,6 +573,10 @@ pub struct PeerStats {
     /// handshake. Introducing two peers where one cannot read the message
     /// leaves the other waiting on a connection nobody was asked to make.
     pub supports_holepunch: AtomicBool,
+    /// Set when the peer's BEP 10 handshake carries `upload_only` non-zero
+    /// (BEP 21): it is a partial seed, so it will not download from us.
+    /// Recorded only; nothing acts on it.
+    pub upload_only: AtomicBool,
     /// The port this peer listens on, from its extension handshake (BEP 10
     /// `p`); 0 while unknown. `addr` is where the connection came from, which
     /// for a peer that dialled us is a port nobody else can reach it on, so
@@ -632,6 +636,7 @@ impl PeerStats {
             dl_rate: RateTracker::new(),
             ul_rate: RateTracker::new(),
             supports_holepunch: AtomicBool::new(false),
+            upload_only: AtomicBool::new(false),
             listen_port: std::sync::atomic::AtomicU16::new(0),
             punch_outbox: std::sync::Mutex::new(Vec::new()),
             punch_wake: tokio::sync::Notify::new(),
