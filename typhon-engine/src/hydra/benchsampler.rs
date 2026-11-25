@@ -123,22 +123,26 @@ pub fn latest_trackers() -> Option<Vec<TrackerRow>> {
 static LATEST_SHARE: std::sync::Mutex<Option<std::collections::HashMap<String, f64>>> =
     std::sync::Mutex::new(None);
 
-/// Each engine's ratio over the torrents it holds: everything they uploaded
-/// over everything they downloaded (or hold, for a torrent that came in
-/// without downloading -- a move from Race, an import, a cross-seed). The
-/// same rule as each row's ratio, summed. Lifetime figures, so a torrent moved
-/// from Race brings its history; a ratio of bytes moved since this process
-/// started divided Hoard's upload by the few bytes it downloaded itself.
+/// Each engine's all-time ratio: everything it ever uploaded over everything
+/// it ever downloaded, from the per-tracker counters (the stored history plus
+/// the live torrents) -- the same counters the header's global ratio is made
+/// of, so the engines add up to it.
+///
+/// Not the sum of the torrents' own counters: history carried over from 3.x
+/// lives in these counters and not on each torrent, and summing the torrents
+/// showed Hoard at 0.12 while it had uploaded 1.2 TB. Nor bytes moved since
+/// this process started: that divided Hoard's upload by the few bytes it
+/// downloaded itself.
 static LATEST_RATIO: std::sync::Mutex<Option<std::collections::HashMap<String, (u64, u64)>>> =
     std::sync::Mutex::new(None);
 
-/// The engine's ratio, or `None` before the first pass or with nothing held.
+/// The engine's ratio, or `None` before the first pass or with nothing downloaded.
 pub fn latest_ratio(engine_id: &str) -> Option<f64> {
     latest_ratio_parts(engine_id).and_then(|(up, base)| engine_ratio(up, base))
 }
 
-/// The two sums behind `latest_ratio`: uploaded, and what it is measured
-/// against. Shown with the ratio so a small one can be checked by eye.
+/// The two sums behind `latest_ratio`: uploaded and downloaded, all time.
+/// Shown with the ratio so it can be checked by eye.
 pub fn latest_ratio_parts(engine_id: &str) -> Option<(u64, u64)> {
     LATEST_RATIO
         .lock()
@@ -205,11 +209,7 @@ pub fn tracker_totals(
         let mut live: std::collections::HashMap<String, TrackerRow> =
             std::collections::HashMap::new();
         let (mut share_sum, mut share_n) = (0.0f64, 0u64);
-        let (mut ratio_up, mut ratio_base) = (0u64, 0u64);
         for torrent in engine.manager.all().iter() {
-            let (up, base) = crate::row::ratio_parts(torrent);
-            ratio_up = ratio_up.saturating_add(up);
-            ratio_base = ratio_base.saturating_add(base);
             if seeding_size(torrent) > 0 {
                 let seeds = engine.announce_cache.swarm_seeds(&torrent.info_hash);
                 let ul = torrent.total_uploaded.load(Ordering::Relaxed);
@@ -244,14 +244,6 @@ pub fn tracker_totals(
             row.seed_size += seeding_size(torrent);
             row.torrents += 1;
         }
-        if let Ok(mut g) = LATEST_RATIO.lock() {
-            let m = g.get_or_insert_with(Default::default);
-            if ratio_base > 0 {
-                m.insert(engine.id.clone(), (ratio_up, ratio_base));
-            } else {
-                m.remove(&engine.id);
-            }
-        }
         if let Ok(mut g) = LATEST_SHARE.lock() {
             let m = g.get_or_insert_with(Default::default);
             if share_n > 0 {
@@ -279,7 +271,22 @@ pub fn tracker_totals(
         }
     }
 
-    rows.into_values().map(|r| TrackerRow { ts, ..r }).collect()
+    let rows: Vec<TrackerRow> = rows.into_values().map(|r| TrackerRow { ts, ..r }).collect();
+    if let Ok(mut g) = LATEST_RATIO.lock() {
+        *g = Some(engine_sums(&rows));
+    }
+    rows
+}
+
+/// Uploaded and downloaded per engine, summed over its tracker rows.
+fn engine_sums(rows: &[TrackerRow]) -> std::collections::HashMap<String, (u64, u64)> {
+    let mut out: std::collections::HashMap<String, (u64, u64)> = Default::default();
+    for r in rows {
+        let e = out.entry(r.engine.clone()).or_default();
+        e.0 = e.0.saturating_add(r.cum_uploaded.max(0) as u64);
+        e.1 = e.1.saturating_add(r.cum_downloaded.max(0) as u64);
+    }
+    out
 }
 
 /// What one torrent adds to its tracker's seed size: all of it while it
@@ -1133,33 +1140,30 @@ mod tests {
         assert_eq!(engine_ratio(3_000, 0), None, "nothing held: a dash");
     }
 
-    /// A torrent that came into Hoard without downloading (a move, an import)
-    /// is measured against what it holds, so the engine ratio stays the sum
-    /// of the rows' rule instead of uploads over a few stray bytes.
+    /// The engine ratio counts the stored history, not only the torrents'
+    /// own counters: Hoard's upload carried over from 3.x lives in the
+    /// per-tracker counters, and a ratio without it read 0.12 for 1.2 TB sent.
     #[test]
-    fn the_engine_ratio_is_the_rows_rule_summed() {
+    fn the_engine_ratio_counts_the_stored_history() {
         use std::sync::atomic::Ordering::Relaxed;
         let s = state_from("bs-ratio", "");
-        let a = add(&s, "hoard", "ra", Some("https://tk-r.example/announce"));
-        let b = add(&s, "hoard", "rb", Some("https://tk-r.example/announce"));
-        let size = a.meta.total_size;
-        // a: downloaded it all, uploaded twice; b: downloaded it all, uploaded none.
-        a.total_downloaded.store(size, Relaxed);
-        a.total_uploaded.store(size * 2, Relaxed);
-        b.total_downloaded.store(b.meta.total_size, Relaxed);
-        // Summed exactly as the tracker pass does (its result is a process-wide
-        // figure other tests also write, so it is not read back here).
-        let (up, base) = [&a, &b]
-            .iter()
-            .map(|t| crate::row::ratio_parts(t))
-            .fold((0, 0), |(u, d), (x, y)| (u + x, d + y));
-        let want = (size * 2) as f64 / (size + b.meta.total_size) as f64;
-        assert_eq!(engine_ratio(up, base), Some(want));
-        // A torrent moved in with nothing downloaded still counts what it holds,
-        // not zero: uploads over a few stray bytes were the astronomic figure.
-        b.total_downloaded.store(0, Relaxed);
-        let (_, held) = crate::row::ratio_parts(&b);
-        assert!(held <= b.meta.total_size, "measured against what it holds");
+        s.store
+            .lock()
+            .unwrap()
+            .set_counter(&tracker_key("hoard", "tk-r.example"), 1_000, 400)
+            .unwrap();
+        let h = add(&s, "hoard", "ra", Some("https://tk-r.example/announce"));
+        h.total_uploaded.store(200, Relaxed);
+        h.total_downloaded.store(100, Relaxed);
+        let r = add(&s, "race", "rb", Some("https://tk-r.example/announce"));
+        r.total_uploaded.store(50, Relaxed);
+        r.total_downloaded.store(500, Relaxed);
+        // Summed from this pass's own rows: the published figure is process-wide
+        // and other tests write it too.
+        let sums = engine_sums(&tracker_totals(&s.engines, &s.store, 1));
+        assert_eq!(sums["hoard"], (1_200, 500), "history plus the live torrent");
+        assert_eq!(sums["race"], (50, 500));
+        assert_eq!(engine_ratio(1_200, 500), Some(2.4));
     }
 
     #[test]

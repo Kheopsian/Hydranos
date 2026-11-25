@@ -3867,9 +3867,9 @@ function _paintEngineStrip(pfx, d) {
     set("ul", d.upload_rate == null ? "-" : formatSpeed(d.upload_rate));
     const ratioText = _fmtRatio(d.ratio);
     const ratioTitle = d.ratio_uploaded != null && d.ratio_base != null
-        ? t("{up} uploaded over {base} downloaded or held, all time, by the torrents this engine holds",
+        ? t("{up} uploaded over {base} downloaded, all time, by this engine",
             { up: formatBytes(d.ratio_uploaded), base: formatBytes(d.ratio_base) })
-        : t("Uploaded / downloaded over the torrents held, since they were added");
+        : t("Uploaded / downloaded, all time, by this engine");
     set("ratio", ratioText, ratioTitle);
     const swarm = d.swarm || 0, peers = d.peers ?? 0;
     let peerText = t("{n} peers", { n: fmtInt(peers) });
