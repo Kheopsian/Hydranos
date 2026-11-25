@@ -1907,9 +1907,7 @@ mod tests {
     #[test]
     fn an_unlisted_category_with_an_empty_torrent_path_is_skipped() {
         let rows = vec![c("Books", "")];
-        assert!(categories_needed(&rows, &listed(&[("Other", "/o")]))
-            .get("Books")
-            .is_none());
+        assert!(!categories_needed(&rows, &listed(&[("Other", "/o")])).contains_key("Books"));
     }
 
     #[test]
