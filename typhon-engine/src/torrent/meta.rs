@@ -528,6 +528,11 @@ pub struct PeerStats {
     pub connected_at: std::time::SystemTime,
     pub is_encrypted: bool,
     pub fast_ext: bool,
+    /// We dialled this connection. `false` for one that came in, and for the
+    /// many test peers that never say.
+    pub outbound: bool,
+    /// The peer ID we sent on this connection.
+    pub local_id: [u8; 20],
     // Hot-path atomics — written by the owning peer task only
     pub total_uploaded: AtomicU64,
     pub total_downloaded: AtomicU64,
@@ -620,6 +625,8 @@ impl PeerStats {
             connected_at: std::time::SystemTime::now(),
             is_encrypted,
             fast_ext,
+            outbound: false,
+            local_id: [0; 20],
             total_uploaded: AtomicU64::new(0),
             total_downloaded: AtomicU64::new(0),
             num_pieces_have: AtomicU32::new(0),
@@ -643,6 +650,14 @@ impl PeerStats {
             closing: AtomicBool::new(false),
             evict_wake: tokio::sync::Notify::new(),
         }
+    }
+
+    /// Say how this connection came about: whether we dialled it, and the
+    /// peer ID we sent on it. Both feed `PeerRegistry::insert_unless_duplicate`.
+    pub fn with_connection(mut self, outbound: bool, local_id: [u8; 20]) -> Self {
+        self.outbound = outbound;
+        self.local_id = local_id;
+        self
     }
 
     /// Where another peer could reach this one, if it told us (see
@@ -696,14 +711,27 @@ impl PeerStats {
 pub struct PeerGuard {
     torrent: Arc<TorrentState>,
     stats: Arc<PeerStats>,
-    addr: std::net::SocketAddr,
     was_interested: std::sync::atomic::AtomicBool,
 }
 
 impl PeerGuard {
     pub fn new(torrent: Arc<TorrentState>, stats: Arc<PeerStats>) -> Self {
-        let addr = stats.addr;
-        torrent.peers.insert(addr, stats.clone());
+        torrent.peers.insert(stats.addr, stats.clone());
+        Self::counted(torrent, stats)
+    }
+
+    /// Like `new`, but a second connection to a peer we already hold (same
+    /// IP, same peer ID) is not registered: `None`, and the caller ends the
+    /// session. See `PeerRegistry::insert_unless_duplicate`.
+    pub fn try_new(torrent: Arc<TorrentState>, stats: Arc<PeerStats>) -> Option<Self> {
+        if !torrent.peers.insert_unless_duplicate(&torrent, &stats) {
+            return None;
+        }
+        Some(Self::counted(torrent, stats))
+    }
+
+    /// The rest of registering, once `stats` is in `torrent.peers`.
+    fn counted(torrent: Arc<TorrentState>, stats: Arc<PeerStats>) -> Self {
         torrent.peers_connected.fetch_add(1, Ordering::Relaxed);
         // Process-wide live connection count backing `max_connections`.
         // Maintained here rather than at the dial site so inbound sessions are
@@ -717,7 +745,6 @@ impl PeerGuard {
         Self {
             torrent,
             stats,
-            addr,
             was_interested: std::sync::atomic::AtomicBool::new(false),
         }
     }
@@ -738,7 +765,7 @@ impl PeerGuard {
 
 impl Drop for PeerGuard {
     fn drop(&mut self) {
-        self.torrent.peers.remove(&self.addr);
+        self.torrent.peers.remove_stats(&self.stats);
         // An evicted session was counted out of `peers_connected` by
         // `PeerStats::evict`. Any other is counted out here, and marked
         // closing so no eviction picks it afterwards.
@@ -778,6 +805,25 @@ pub struct PeerRegistry(RwLock<Option<Box<PeerMap>>>);
 
 type PeerMap = std::collections::HashMap<std::net::SocketAddr, Arc<PeerStats>>;
 
+/// Connections dropped because the peer was already connected under another
+/// port (see `PeerRegistry::insert_unless_duplicate`).
+pub static DUP_DROPPED: AtomicU64 = AtomicU64::new(0);
+
+/// Does `new` replace `existing`, two connections to the same peer?
+fn new_connection_wins(existing: &PeerStats, new: &PeerStats) -> bool {
+    // Connected to ourselves: no connection of the pair is worth keeping.
+    if new.local_id == new.peer_id {
+        return false;
+    }
+    let wanted = |c: &PeerStats| c.outbound == (c.local_id > c.peer_id);
+    match (wanted(new), wanted(existing)) {
+        (true, false) => true,
+        (false, true) => false,
+        // Same direction, or IDs that tie: see `insert_unless_duplicate`.
+        _ => !new.outbound && !existing.outbound,
+    }
+}
+
 impl PeerRegistry {
     /// Register `stats` under `addr`. Replaces (and returns) a peer already
     /// registered there.
@@ -790,6 +836,97 @@ impl PeerRegistry {
             .write()
             .get_or_insert_with(Box::default)
             .insert(addr, stats)
+    }
+
+    /// Register `stats`, unless it is a second connection to a peer already
+    /// here: same IP and same peer ID (the port differs, as one side of a
+    /// connection is always an ephemeral port). Returns whether it was
+    /// registered; on `false` the caller must end the session, with no ban
+    /// and no dial backoff, since the peer did nothing wrong.
+    ///
+    /// Both ends must keep the same TCP connection, so the survivor is a
+    /// function of the two peer IDs alone (BEP 40 priority is not used: it
+    /// depends on addresses the two ends see differently). With `L` the ID we
+    /// sent on a connection and `R` the one we got, the connection survives
+    /// iff `outbound == (L > R)`. The side with the greater ID keeps the
+    /// connection it opened, the other the one it accepted: the same one.
+    ///
+    /// Two connections in the same direction cannot be told apart by that
+    /// rule. Two outbound: the existing one stays, since our dial skip lets
+    /// only a racing second dial reach here. Two inbound: the new one wins,
+    /// as the old one is more likely a half-dead socket the peer has already
+    /// replaced.
+    ///
+    /// The scan and the insert share one write lock, so two sessions of the
+    /// same peer cannot both miss each other. Entries already closing are not
+    /// duplicates of anything. IPs must be equal: a peer ID is free to forge,
+    /// and must not let one host evict a session of another.
+    pub fn insert_unless_duplicate(&self, torrent: &TorrentState, stats: &Arc<PeerStats>) -> bool {
+        let mut g = self.0.write();
+        let map = g.get_or_insert_with(Box::default);
+        let dup = map
+            .values()
+            .find(|e| {
+                e.peer_id == stats.peer_id
+                    && e.addr.ip() == stats.addr.ip()
+                    && e.addr != stats.addr
+                    && !e.closing.load(Ordering::Relaxed)
+            })
+            .cloned();
+        if let Some(existing) = dup {
+            if !new_connection_wins(&existing, stats) {
+                DUP_DROPPED.fetch_add(1, Ordering::Relaxed);
+                return false;
+            }
+            if existing.evict(torrent) {
+                DUP_DROPPED.fetch_add(1, Ordering::Relaxed);
+            }
+            // Out of the map now, not when its session notices: the map must
+            // never show one peer twice.
+            map.remove(&existing.addr);
+        }
+        g.get_or_insert_with(Box::default)
+            .insert(stats.addr, stats.clone());
+        true
+    }
+
+    /// A peer connected under this peer ID, on any port.
+    pub fn by_peer_id(&self, id: &[u8; 20]) -> Option<Arc<PeerStats>> {
+        self.0
+            .read()
+            .as_ref()?
+            .values()
+            .find(|p| &p.peer_id == id && !p.closing.load(Ordering::Relaxed))
+            .cloned()
+    }
+
+    /// Whether some peer here listens on `addr` (see `PeerStats::listen_addr`).
+    /// A peer that dialled us sits under an ephemeral port in the map, and
+    /// dialling its listen port would only make the duplicate again.
+    pub fn has_listen_addr(&self, addr: &std::net::SocketAddr) -> bool {
+        self.0.read().as_ref().is_some_and(|m| {
+            m.values().any(|p| {
+                p.listen_addr().as_ref() == Some(addr) && !p.closing.load(Ordering::Relaxed)
+            })
+        })
+    }
+
+    /// Unregister `stats`, if it is still the one registered under its
+    /// address (a replaced duplicate's session must not remove its successor).
+    pub fn remove_stats(&self, stats: &Arc<PeerStats>) {
+        let mut g = self.0.write();
+        let Some(map) = g.as_mut() else {
+            return;
+        };
+        if map
+            .get(&stats.addr)
+            .is_some_and(|cur| Arc::ptr_eq(cur, stats))
+        {
+            map.remove(&stats.addr);
+        }
+        if map.is_empty() {
+            *g = None;
+        }
     }
 
     /// Unregister `addr`. The map is freed with its last peer.
@@ -4094,5 +4231,189 @@ mod announce_session_tests {
         drop(writer);
         drop(book);
         assert_eq!(reader.join().unwrap(), "");
+    }
+
+    // ----- one connection per peer (#162) -----
+
+    fn conn(addr: &str, remote: u8, local: u8, outbound: bool, label: &str) -> Arc<PeerStats> {
+        Arc::new(
+            PeerStats::new(
+                addr.parse().unwrap(),
+                [remote; 20],
+                label.into(),
+                false,
+                false,
+            )
+            .with_connection(outbound, [local; 20]),
+        )
+    }
+
+    fn torrent_arc(_tag: &str) -> Arc<TorrentState> {
+        let meta = TorrentMeta {
+            info_hash: [1u8; 20],
+            name: "t".into(),
+            num_pieces: 1,
+            piece_length: 16384,
+            total_size: 16384,
+            files: Vec::new(),
+            trackers: Vec::new(),
+            url_list: Vec::new(),
+            private: false,
+            multi_file: false,
+            info_dict_len: 0,
+            v2: false,
+            renames: Default::default(),
+        };
+        Arc::new(TorrentState::new(
+            meta,
+            std::path::PathBuf::from("/tmp"),
+            true,
+        ))
+    }
+
+    /// Register `sessions` in order the way two sessions of one torrent do,
+    /// returning the labels left in the registry and the guards.
+    fn register(
+        t: &Arc<TorrentState>,
+        sessions: &[Arc<PeerStats>],
+    ) -> (Vec<String>, Vec<PeerGuard>) {
+        let guards: Vec<_> = sessions
+            .iter()
+            .filter_map(|s| PeerGuard::try_new(t.clone(), s.clone()))
+            .collect();
+        let mut left: Vec<String> = t
+            .peers
+            .snapshot()
+            .iter()
+            .map(|p| p.client.clone())
+            .collect();
+        left.sort();
+        (left, guards)
+    }
+
+    // KEY TEST: #162
+    /// A and B each opened a connection to the other (C1 by A, C2 by B). Each
+    /// end sees one as outbound and one as inbound, in either order, and both
+    /// must keep the very same connection, whichever id is the greater.
+    #[test]
+    fn both_ends_keep_the_same_connection() {
+        for (a_id, b_id) in [(9u8, 3u8), (3, 9)] {
+            for a_sees_c1_first in [true, false] {
+                for b_sees_c1_first in [true, false] {
+                    // At A: C1 is outbound, C2 inbound (from B's ephemeral port).
+                    let ta = torrent_arc("dup-a");
+                    let c1_at_a = conn("10.1.1.2:6881", b_id, a_id, true, "C1");
+                    let c2_at_a = conn("10.1.1.2:40000", b_id, a_id, false, "C2");
+                    let order_a = if a_sees_c1_first {
+                        [c1_at_a, c2_at_a]
+                    } else {
+                        [c2_at_a, c1_at_a]
+                    };
+                    let (left_a, _ga) = register(&ta, &order_a);
+                    assert_eq!(left_a.len(), 1, "A holds the peer twice");
+                    assert_eq!(ta.peers_connected.load(Ordering::Relaxed), 1);
+
+                    // At B: C1 is inbound (from A's ephemeral port), C2 outbound.
+                    let tb = torrent_arc("dup-b");
+                    let c1_at_b = conn("10.1.1.1:40001", a_id, b_id, false, "C1");
+                    let c2_at_b = conn("10.1.1.1:6881", a_id, b_id, true, "C2");
+                    let order_b = if b_sees_c1_first {
+                        [c1_at_b, c2_at_b]
+                    } else {
+                        [c2_at_b, c1_at_b]
+                    };
+                    let (left_b, _gb) = register(&tb, &order_b);
+                    assert_eq!(left_b.len(), 1, "B holds the peer twice");
+
+                    assert_eq!(
+                        left_a, left_b,
+                        "ends kept different connections: ids {a_id}/{b_id},                          A first C1 {a_sees_c1_first}, B first C1 {b_sees_c1_first}"
+                    );
+                    // The greater id keeps the connection it opened.
+                    let expected = if a_id > b_id { "C1" } else { "C2" };
+                    assert_eq!(left_a, [expected]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_losing_session_is_asked_to_close_and_counted_out() {
+        let t = torrent_arc("dup-evict");
+        let inbound = conn("10.1.1.2:40000", 3, 9, false, "in");
+        let outbound = conn("10.1.1.2:6881", 3, 9, true, "out");
+        let before = DUP_DROPPED.load(Ordering::Relaxed);
+        let (left, _g) = register(&t, &[inbound.clone(), outbound.clone()]);
+        // 9 > 3: the outbound one stays.
+        assert_eq!(left, ["out"]);
+        assert!(inbound.closing.load(Ordering::Relaxed));
+        assert!(!outbound.closing.load(Ordering::Relaxed));
+        assert_eq!(t.peers_connected.load(Ordering::Relaxed), 1);
+        assert!(DUP_DROPPED.load(Ordering::Relaxed) > before);
+    }
+
+    /// Two dials racing to one peer: the one already here stays. Two inbound:
+    /// the new one replaces it.
+    #[test]
+    fn same_direction_duplicates_fall_back_to_a_fixed_choice() {
+        let t = torrent_arc("dup-out");
+        let (left, _g) = register(
+            &t,
+            &[
+                conn("10.1.1.2:6881", 3, 9, true, "first"),
+                conn("10.1.1.2:6882", 3, 9, true, "second"),
+            ],
+        );
+        assert_eq!(left, ["first"], "two outbound: the existing one stays");
+
+        let t = torrent_arc("dup-in");
+        let (left, _g) = register(
+            &t,
+            &[
+                conn("10.1.1.2:40000", 3, 9, false, "old"),
+                conn("10.1.1.2:40001", 3, 9, false, "new"),
+            ],
+        );
+        assert_eq!(left, ["new"], "two inbound: the new one wins");
+    }
+
+    /// A peer ID is free to forge: it must not push out a session of another IP.
+    #[test]
+    fn the_same_peer_id_from_another_ip_is_not_a_duplicate() {
+        let t = torrent_arc("dup-spoof");
+        let (left, _g) = register(
+            &t,
+            &[
+                conn("10.1.1.2:6881", 3, 9, true, "victim"),
+                conn("10.9.9.9:40000", 3, 9, false, "other"),
+            ],
+        );
+        assert_eq!(left, ["other", "victim"]);
+    }
+
+    #[test]
+    fn a_session_connected_to_itself_is_dropped() {
+        let t = torrent_arc("dup-self");
+        let (left, _g) = register(
+            &t,
+            &[
+                conn("10.1.1.2:6881", 5, 5, true, "out"),
+                conn("10.1.1.2:40000", 5, 5, false, "in"),
+            ],
+        );
+        assert_eq!(left, ["out"]);
+    }
+
+    #[test]
+    fn by_peer_id_finds_a_peer_under_another_port() {
+        let t = torrent_arc("byid");
+        let s = conn("10.1.1.2:40000", 3, 9, false, "in");
+        let _g = PeerGuard::new(t.clone(), s.clone());
+        let found = t.peers.by_peer_id(&[3; 20]).expect("not found by id");
+        assert_eq!(found.addr.port(), 40000);
+        assert!(t.peers.by_peer_id(&[4; 20]).is_none());
+        s.listen_port.store(6881, Ordering::Relaxed);
+        assert!(t.peers.has_listen_addr(&"10.1.1.2:6881".parse().unwrap()));
+        assert!(!t.peers.has_listen_addr(&"10.1.1.2:6882".parse().unwrap()));
     }
 }

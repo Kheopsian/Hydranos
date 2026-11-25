@@ -403,13 +403,14 @@ pub async fn run(
     addr: SocketAddr,
     torrent: Arc<TorrentState>,
     disk: Arc<DiskManager>,
-    _peer_id: [u8; 20],
+    peer_id: [u8; 20],
     remote_peer_id: [u8; 20],
     is_encrypted: bool,
     fast_ext: bool,
     lt_ext: bool,
     _utp_socket: Option<Arc<UtpSocketUdp>>,
     listen_port: u16,
+    outbound: bool,
 ) {
     let client = choking::client_from_peer_id(&remote_peer_id);
     tracing::debug!("[peer-debug] {} SESSION-START remote_peer_id={:02x?} client={:?} encrypted={} fast_ext={} lt_ext={}", addr, remote_peer_id, client, is_encrypted, fast_ext, lt_ext);
@@ -422,16 +423,21 @@ pub async fn run(
         tracing::debug!("[peer-debug] {} EARLY-RETURN banned on this torrent", addr);
         return;
     }
-    let stats = Arc::new(PeerStats::new(
-        addr,
-        remote_peer_id,
-        client,
-        is_encrypted,
-        fast_ext,
-    ));
+    let stats = Arc::new(
+        PeerStats::new(addr, remote_peer_id, client, is_encrypted, fast_ext)
+            .with_connection(outbound, peer_id),
+    );
     // RAII: inserts into torrent.peers and bumps peers_connected;
-    // removes + decrements on drop (panic-safe).
-    let guard = PeerGuard::new(torrent.clone(), stats.clone());
+    // removes + decrements on drop (panic-safe). A second connection to a
+    // peer we already hold ends here: no ban, and no dial backoff, as the
+    // caller sees a session that ended, not a dial that failed.
+    let Some(guard) = PeerGuard::try_new(torrent.clone(), stats.clone()) else {
+        tracing::debug!(
+            "[peer-debug] {} EARLY-RETURN duplicate of a connected peer",
+            addr
+        );
+        return;
+    };
 
     // What we are about to say we hold must be backed by the files.
     torrent.verify_files_once().await;

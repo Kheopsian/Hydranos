@@ -55,6 +55,9 @@ impl Default for Line {
     }
 }
 
+/// An idle session that may go, and its BEP 40 rank (higher is worse).
+type Candidate = (Arc<PeerStats>, Arc<TorrentState>, u32);
+
 struct Entry {
     stats: Weak<PeerStats>,
     torrent: Weak<TorrentState>,
@@ -68,9 +71,18 @@ struct Entry {
 #[derive(Default)]
 pub struct Turnover {
     line: Mutex<Line>,
+    /// Our address as peers see it, once the dial loop has learned it. Only
+    /// used to rank eviction candidates (BEP 40).
+    ours: Mutex<Option<std::net::SocketAddr>>,
 }
 
 impl Turnover {
+    pub fn set_our_addr(&self, addr: Option<std::net::SocketAddr>) {
+        if let Ok(mut g) = self.ours.lock() {
+            *g = addr;
+        }
+    }
+
     /// Put a new session at the back of the line.
     ///
     /// Ended sessions are not taken out when they end: a `VecDeque` has no
@@ -106,9 +118,20 @@ impl Turnover {
     /// at may go, and the new peer has to be refused.
     #[must_use]
     pub fn evict_one(&self, now: Instant) -> bool {
+        let ours = self.ours.lock().ok().and_then(|g| *g);
+        self.evict_ranked(now, ours)
+    }
+
+    fn evict_ranked(&self, now: Instant, ours: Option<std::net::SocketAddr>) -> bool {
         let Ok(mut line) = self.line.lock() else {
             return false;
         };
+        // Among the idle sessions looked at, the one BEP 40 ranks lowest goes
+        // (the highest number: see `peer::priority`), so the peers a swarm
+        // would pick for us are the ones that stay. Priority is measured from
+        // our own address; when nothing has learned it yet, the first idle
+        // one goes, as before.
+        let mut scanned: Vec<(Entry, Option<Candidate>)> = Vec::new();
         for _ in 0..SCAN.min(line.queue.len()) {
             let Some(mut e) = line.queue.pop_front() else {
                 break;
@@ -129,12 +152,41 @@ impl Turnover {
                 && now.saturating_duration_since(e.seen) >= IDLE_FOR;
             // Evicted sessions already left this count (`PeerStats::evict`).
             let staying = torrent.peers_connected.load(Ordering::Relaxed);
-            if idle && staying > FLOOR_PER_TORRENT && stats.evict(&torrent) {
-                return true;
+            if !(idle && staying > FLOOR_PER_TORRENT) {
+                scanned.push((e, None));
+                continue;
             }
-            line.queue.push_back(e);
+            let Some(ours) = ours else {
+                if stats.evict(&torrent) {
+                    line.queue.extend(scanned.into_iter().map(|(e, _)| e));
+                    return true;
+                }
+                scanned.push((e, None));
+                continue;
+            };
+            let rank = crate::peer::priority::peer_priority(ours, stats.addr);
+            scanned.push((e, Some((stats, torrent, rank))));
         }
-        false
+        // Worst first.
+        let mut order: Vec<usize> = (0..scanned.len())
+            .filter(|&i| scanned[i].1.is_some())
+            .collect();
+        order.sort_by_key(|&i| std::cmp::Reverse(scanned[i].1.as_ref().map(|c| c.2)));
+        let mut evicted = None;
+        for i in order {
+            if let Some((stats, torrent, _)) = &scanned[i].1 {
+                if stats.evict(torrent) {
+                    evicted = Some(i);
+                    break;
+                }
+            }
+        }
+        for (i, (e, _)) in scanned.into_iter().enumerate() {
+            if Some(i) != evicted {
+                line.queue.push_back(e);
+            }
+        }
+        evicted.is_some()
     }
 
     /// Sessions in the line, ended ones included.
@@ -381,5 +433,31 @@ mod tests {
         // The busy ones went to the back: the next handshake reaches the idle.
         assert!(line.evict_one(t0 + IDLE_FOR));
         assert_eq!(closing(&idle), [true, false, false, false]);
+    }
+
+    /// With our address known, the idle session BEP 40 ranks lowest goes, not
+    /// the oldest.
+    #[test]
+    fn the_lowest_priority_idle_session_goes_first() {
+        let line = Turnover::default();
+        let t0 = Instant::now();
+        let (_t, s) = swarm(&line, 4, t0);
+        let ours: std::net::SocketAddr = "198.51.100.7:6881".parse().unwrap();
+        let rank = |p: &Arc<PeerStats>| crate::peer::priority::peer_priority(ours, p.addr);
+        let worst = (0..4).max_by_key(|&i| rank(&s[i])).unwrap();
+
+        assert!(line.evict_ranked(t0 + IDLE_FOR, Some(ours)));
+        let mut want = [false; 4];
+        want[worst] = true;
+        assert_eq!(closing(&s), want);
+
+        // A busy one is never the pick, however low it ranks.
+        let next = (0..4)
+            .filter(|&i| i != worst)
+            .max_by_key(|&i| rank(&s[i]))
+            .unwrap();
+        s[next].interested.store(true, Ordering::Relaxed);
+        assert!(line.evict_ranked(t0 + IDLE_FOR, Some(ours)));
+        assert!(!s[next].closing.load(Ordering::Relaxed));
     }
 }
