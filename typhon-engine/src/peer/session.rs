@@ -169,6 +169,35 @@ struct ServedDicts {
     bytes: usize,
 }
 
+/// Our BEP 10 extension handshake payload, or `None` when we send none
+/// (extensions off, a private torrent per BEP 27, or no listen port).
+fn our_ext_handshake(
+    torrent: &TorrentState,
+    lt_ext: bool,
+    listen_port: u16,
+    is_seeding: bool,
+) -> Option<Vec<u8>> {
+    if !(lt_ext && torrent.meta.allows_peer_discovery() && listen_port != 0) {
+        return None;
+    }
+    // Advertise the info dict size so peers know they can fetch it from us.
+    let meta_size = if torrent.meta.info_dict_len > 0 {
+        Some(torrent.meta.info_dict_len as usize)
+    } else {
+        None
+    };
+    // BEP 21: a seed-only torrent that is not yet complete tells the swarm
+    // it will not fetch the rest. Public torrents only: private ones return
+    // above, so they never send a handshake at all.
+    let upload_only = torrent.is_seed_only() && !is_seeding;
+    Some(extension::build_extension_handshake_with(
+        listen_port,
+        meta_size,
+        torrent.policy(),
+        upload_only,
+    ))
+}
+
 fn served_dicts() -> &'static parking_lot::Mutex<ServedDicts> {
     static DICTS: std::sync::OnceLock<parking_lot::Mutex<ServedDicts>> = std::sync::OnceLock::new();
     DICTS.get_or_init(|| {
@@ -416,26 +445,17 @@ pub async fn run(
     }
 
     // BEP 10 extension handshake (skip on private trackers — BEP 27).
-    let mut peer_ext = if lt_ext && torrent.meta.allows_peer_discovery() && listen_port != 0 {
-        // Advertise the info dict size so peers know they can fetch it from us.
-        let meta_size = if torrent.meta.info_dict_len > 0 {
-            Some(torrent.meta.info_dict_len as usize)
+    let mut peer_ext =
+        if let Some(payload) = our_ext_handshake(&torrent, lt_ext, listen_port, is_seeding) {
+            let payload = Bytes::from(payload);
+            framed
+                .send(Message::Extended { ext_id: 0, payload })
+                .await
+                .ok();
+            Some(PeerExt::new())
         } else {
             None
         };
-        let payload = Bytes::from(extension::build_extension_handshake(
-            listen_port,
-            meta_size,
-            torrent.policy(),
-        ));
-        framed
-            .send(Message::Extended { ext_id: 0, payload })
-            .await
-            .ok();
-        Some(PeerExt::new())
-    } else {
-        None
-    };
 
     let mut dl = DownloadState::new(torrent.clone(), disk.clone());
     dl.set_addr(addr.ip());
@@ -1291,6 +1311,33 @@ mod metadata_serve_tests {
 
     fn kind(reply: &[u8]) -> i64 {
         extension::parse_metadata_message(reply).unwrap().msg_type
+    }
+
+    fn has_upload_only(payload: &[u8]) -> bool {
+        payload
+            .windows(b"11:upload_onlyi1e".len())
+            .any(|w| w == b"11:upload_onlyi1e")
+    }
+
+    #[test]
+    fn bep21_upload_only_gating() {
+        let (public, _) = served("p.bin", false);
+        public.seed_only.store(true, Ordering::Relaxed);
+        let p = our_ext_handshake(&public, true, 6881, false).unwrap();
+        assert!(has_upload_only(&p), "seed-only and incomplete: advertised");
+        let p = our_ext_handshake(&public, true, 6881, true).unwrap();
+        assert!(!has_upload_only(&p), "already seeding: not advertised");
+
+        public.seed_only.store(false, Ordering::Relaxed);
+        let p = our_ext_handshake(&public, true, 6881, false).unwrap();
+        assert!(!has_upload_only(&p), "not seed-only: not advertised");
+
+        let (private, _) = served("q.bin", true);
+        private.seed_only.store(true, Ordering::Relaxed);
+        assert!(
+            our_ext_handshake(&private, true, 6881, false).is_none(),
+            "private torrents send no extension handshake"
+        );
     }
 
     #[test]
