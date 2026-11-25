@@ -17,17 +17,18 @@ const order = ["total", "up", "down", "ul", "ratio", "peers", "withpeers", "ann"
 assert.deepStrictEqual(cells("race"), order);
 assert.deepStrictEqual(cells("hoard"), order);
 
-const from = src.indexOf("function _paintEngineStrip(");
-const to = src.indexOf("\n}\n", from) + 3;
+const from = src.indexOf("function _fmtRatio(");
+const to = src.indexOf("\n}\n", src.indexOf("function _paintEngineStrip(")) + 3;
 assert.ok(from > 0 && to > from);
 function paint(pfx, d) {
     const els = {};
     new Function("els", "d", "pfx", `
         const fmtInt = n => String(n);
         const formatSpeed = n => n + " B/s";
+        const formatBytes = n => n + " B";
         const formatCount = n => String(n);
         const esc = x => x;
-        const t = (k, v) => v ? k.replace(/\{(\w+)\}/g, (_, n) => v[n]) : k;
+        const t = (k, v) => Object.keys(v || {}).reduce((out, n) => out.split("{" + n + "}").join(v[n]), k);
         const document = { getElementById: id => (els[id] = els[id] || { innerHTML: "", parentElement: { title: "" } }) };
         ${src.slice(from, to)}
         _paintEngineStrip(pfx, d);`)(els, d, pfx);
@@ -58,3 +59,13 @@ assert.strictEqual(e["race-st-up"].innerHTML, "0", "a real zero stays a zero");
 assert.strictEqual(e["race-st-ann"].innerHTML, "100&nbsp;%");
 assert.strictEqual(e["race-st-peers"].innerHTML, "3");
 console.log("engine_strip: ok");
+
+// All-time ratios are often small: under 0.01 they keep two significant digits.
+e = paint("hoard", { total: 1, ratio: 0.0042, ratio_uploaded: 42, ratio_base: 10000 });
+assert.strictEqual(e["hoard-st-ratio"].innerHTML, "0.0042");
+assert.ok(e["hoard-st-ratio"].parentElement.title.includes("42 B"), "the sums are in the tooltip: " + e["hoard-st-ratio"].parentElement.title);
+e = paint("hoard", { total: 1, ratio: 0.1158 });
+assert.strictEqual(e["hoard-st-ratio"].innerHTML, "0.12");
+e = paint("hoard", { total: 1, ratio: 0 });
+assert.strictEqual(e["hoard-st-ratio"].innerHTML, "0.00", "a real zero stays a zero");
+console.log("engine_strip ratio: ok");

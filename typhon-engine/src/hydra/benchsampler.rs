@@ -129,11 +129,17 @@ static LATEST_SHARE: std::sync::Mutex<Option<std::collections::HashMap<String, f
 /// same rule as each row's ratio, summed. Lifetime figures, so a torrent moved
 /// from Race brings its history; a ratio of bytes moved since this process
 /// started divided Hoard's upload by the few bytes it downloaded itself.
-static LATEST_RATIO: std::sync::Mutex<Option<std::collections::HashMap<String, f64>>> =
+static LATEST_RATIO: std::sync::Mutex<Option<std::collections::HashMap<String, (u64, u64)>>> =
     std::sync::Mutex::new(None);
 
 /// The engine's ratio, or `None` before the first pass or with nothing held.
 pub fn latest_ratio(engine_id: &str) -> Option<f64> {
+    latest_ratio_parts(engine_id).and_then(|(up, base)| engine_ratio(up, base))
+}
+
+/// The two sums behind `latest_ratio`: uploaded, and what it is measured
+/// against. Shown with the ratio so a small one can be checked by eye.
+pub fn latest_ratio_parts(engine_id: &str) -> Option<(u64, u64)> {
     LATEST_RATIO
         .lock()
         .ok()
@@ -240,10 +246,11 @@ pub fn tracker_totals(
         }
         if let Ok(mut g) = LATEST_RATIO.lock() {
             let m = g.get_or_insert_with(Default::default);
-            match engine_ratio(ratio_up, ratio_base) {
-                Some(r) => m.insert(engine.id.clone(), r),
-                None => m.remove(&engine.id),
-            };
+            if ratio_base > 0 {
+                m.insert(engine.id.clone(), (ratio_up, ratio_base));
+            } else {
+                m.remove(&engine.id);
+            }
         }
         if let Ok(mut g) = LATEST_SHARE.lock() {
             let m = g.get_or_insert_with(Default::default);

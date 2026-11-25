@@ -5202,6 +5202,8 @@ fn engine_payload(state: &AppState) -> Vec<serde_json::Value> {
                 // Live figures, so the Overview can draw a card for every
                 // engine and not only the two it knew by name.
                 "stats": s,
+                // All time, over the torrents it holds (`latest_ratio`).
+                "ratio": crate::benchsampler::latest_ratio(&e.id),
             })
         })
         .collect()
@@ -7015,6 +7017,8 @@ fn status_payload(state: &AppState) -> serde_json::Value {
             "session_ratio": crate::row::num_json(if hoard_session.1 > 0 { hoard_session.0 as f64 / hoard_session.1 as f64 } else { 0.0 }),
             // Lifetime, over what the engine holds: see `latest_ratio`.
             "ratio": crate::benchsampler::latest_ratio("hoard"),
+            "ratio_uploaded": crate::benchsampler::latest_ratio_parts("hoard").map(|p| p.0),
+            "ratio_base": crate::benchsampler::latest_ratio_parts("hoard").map(|p| p.1),
             "stagger_complete": true,
             "swarm_leechers": swarm_leechers_total(state),
             "torrents_announced": announced_count(state, "hoard"),
@@ -7032,6 +7036,8 @@ fn status_payload(state: &AppState) -> serde_json::Value {
             "session_grabbed": state.engines.get("race").map(|e| e.manager.added_this_session()).unwrap_or(0),
             "session_ratio": crate::row::num_json(ratio),
             "ratio": crate::benchsampler::latest_ratio("race"),
+            "ratio_uploaded": crate::benchsampler::latest_ratio_parts("race").map(|p| p.0),
+            "ratio_base": crate::benchsampler::latest_ratio_parts("race").map(|p| p.1),
             "session_uploaded": session_up,
             "torrents": race_torrents,
             "torrents_announced": announced_count(state, "race"),
@@ -7688,6 +7694,8 @@ fn hoard_stats_value(state: &AppState) -> serde_json::Value {
         // What the strip shows: lifetime, over what the engine holds. The
         // session one divided Hoard's upload by the little it downloaded.
         "ratio": crate::benchsampler::latest_ratio("hoard"),
+        "ratio_uploaded": crate::benchsampler::latest_ratio_parts("hoard").map(|p| p.0),
+        "ratio_base": crate::benchsampler::latest_ratio_parts("hoard").map(|p| p.1),
         "session_uploaded": up,
         "stagger_complete": true,
         "swarm_leechers": swarm_leechers_total(state),

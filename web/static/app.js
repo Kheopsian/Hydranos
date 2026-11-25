@@ -1526,13 +1526,13 @@ function _renderStatus(data) {
             document.getElementById("race-upload").textContent = formatSpeed(data.race.total_upload_rate);
             document.getElementById("race-download").textContent = formatSpeed(data.race.total_download_rate);
             document.getElementById("race-peers").textContent = fmtInt(data.race.total_peers);
-            document.getElementById("race-ov-ratio").textContent = data.race.ratio == null ? "-" : data.race.ratio.toFixed(2);
+            document.getElementById("race-ov-ratio").textContent = _fmtRatio(data.race.ratio);
 
             // Race tab strip: the same cells, in the same order, as Hoard's.
             _paintEngineStrip("race", {
                 total: data.race.torrents, uploading: data.race.active_seeds,
                 downloading: data.race.active_downloads, upload_rate: data.race.total_upload_rate,
-                ratio: data.race.ratio, peers: data.race.total_peers, swarm: 0,
+                ratio: data.race.ratio, ratio_uploaded: data.race.ratio_uploaded, ratio_base: data.race.ratio_base, peers: data.race.total_peers, swarm: 0,
                 with_peers: data.race.torrents_with_peers, announced: data.race.torrents_announced,
                 avg_share: data.race.avg_share, grabbed: data.race.session_grabbed,
             });
@@ -1551,8 +1551,7 @@ function _renderStatus(data) {
             document.getElementById("hoard-connections").textContent = fmtInt(data.hoard.active_peers);
             document.getElementById("hoard-upload").textContent = formatSpeed(data.hoard.active_upload_rate);
             document.getElementById("hoard-download").textContent = formatSpeed(data.hoard.active_download_rate);
-            const hSU = data.hoard.session_uploaded || 0, hSD = data.hoard.session_downloaded || 0;
-            document.getElementById("hoard-ov-ratio").textContent = (hSD > 0 ? hSU / hSD : 0).toFixed(2);
+            document.getElementById("hoard-ov-ratio").textContent = _fmtRatio(data.hoard.ratio);
             const ovt = document.getElementById("ov-torrents-total");
             if (ovt) ovt.textContent = fmtInt((data.hoard.total_torrents || 0) + (data.race?.torrents || 0) + _extraTorrents);
         }
@@ -1749,10 +1748,6 @@ function _renderExtraEngines(list) {
     if (!box) return;
     const extra =(list || []).filter(e => e.id !== "race" && e.id !== "hoard" && e.stats);
     _extraTorrents = extra.reduce((n, e) => n + (e.stats.torrents || 0), 0);
-    const ratio = s => {
-        const up = s.session_uploaded || 0, down = s.session_downloaded || 0;
-        return down > 0 ? (up / down).toFixed(2) : (up > 0 ? "∞" : "0.00");
-    };
     const row = (label, value, hi) =>
         `<div class="metric"><span>${esc(label)}</span><span${hi ? ' class="hi"' : ""}>${value}</span></div>`;
     box.innerHTML = extra.map(e => {
@@ -1767,7 +1762,7 @@ function _renderExtraEngines(list) {
                 ${row(t("Download"), formatSpeed(s.download_rate))}
                 ${row(t("Peers"), fmtInt(s.peers))}
                 ${row(t("Seeding"), s.seed_size == null ? "-" : formatBytes(s.seed_size))}
-                ${row(t("Session ratio"), ratio(s))}
+                ${row(t("Ratio"), _fmtRatio(e.ratio))}
             </div>
         </div>`;
     }).join("");
@@ -3837,7 +3832,7 @@ function _renderHoardStatsHeader(data) {
         _paintEngineStrip("hoard", {
             total: data.total_torrents, uploading: data.torrents_uploading,
             downloading: _libFacets?.state?.downloading ?? null,
-            upload_rate: data.active_upload_rate, ratio: data.ratio,
+            upload_rate: data.active_upload_rate, ratio: data.ratio, ratio_uploaded: data.ratio_uploaded, ratio_base: data.ratio_base,
             peers: data.unseeded_peers ?? data.active_peers ?? 0, swarm: data.swarm_leechers || 0,
             with_peers: data.torrents_with_peers, announced: data.torrents_announced ?? data.total_torrents,
             avg_share: data.avg_share, grabbed: data.session_grabbed,
@@ -3850,6 +3845,14 @@ function _renderHoardStatsHeader(data) {
 // stays a number that can be compared across polls. A figure the server does
 // not know yet is a dash, never a zero.
 let _libFacets = null;   // the whole library's chips, pushed by facets_snapshot
+// An engine's all-time ratio: a dash before the first count, two decimals,
+// and two significant digits under 0.01 so a real ratio never reads 0.00.
+function _fmtRatio(v) {
+    if (v == null) return "-";
+    const r = Number(v);
+    return r === 0 || r >= 0.01 ? r.toFixed(2) : r.toPrecision(2);
+}
+
 function _paintEngineStrip(pfx, d) {
     const set = (cell, html, title) => {
         const el = document.getElementById(pfx + "-st-" + cell);
@@ -3862,7 +3865,12 @@ function _paintEngineStrip(pfx, d) {
     set("up", num(d.uploading));
     set("down", num(d.downloading));
     set("ul", d.upload_rate == null ? "-" : formatSpeed(d.upload_rate));
-    set("ratio", d.ratio == null ? "-" : Number(d.ratio).toFixed(2), t("Uploaded / downloaded over the torrents held, since they were added"));
+    const ratioText = _fmtRatio(d.ratio);
+    const ratioTitle = d.ratio_uploaded != null && d.ratio_base != null
+        ? t("{up} uploaded over {base} downloaded or held, all time, by the torrents this engine holds",
+            { up: formatBytes(d.ratio_uploaded), base: formatBytes(d.ratio_base) })
+        : t("Uploaded / downloaded over the torrents held, since they were added");
+    set("ratio", ratioText, ratioTitle);
     const swarm = d.swarm || 0, peers = d.peers ?? 0;
     let peerText = t("{n} peers", { n: fmtInt(peers) });
     if (swarm > 0) {
