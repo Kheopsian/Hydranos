@@ -800,17 +800,43 @@ mod tests {
     #[test]
     fn a_name_or_path_that_leaves_the_save_root_has_no_location() {
         for bad in [
-            "/etc/planted", "../climbed", "a/../../b", "..", "", ".", "a/./b", "a//b", "a\0b",
+            "/etc/planted",
+            "../climbed",
+            "a/../../b",
+            "..",
+            "",
+            ".",
+            "a/./b",
+            "a//b",
+            "a\0b",
             // Windows spellings, refused on every OS by string logic alone.
-            "..\\x", "a\\..\\..\\b", "C:\\x", "c:/x", "c:x", "C:", "\\x", "\\\\srv\\share\\x",
-            "//srv/share/x", "a\\\\b", "X: The Movie", "A:B",
+            "..\\x",
+            "a\\..\\..\\b",
+            "C:\\x",
+            "c:/x",
+            "c:x",
+            "C:",
+            "\\x",
+            "\\\\srv\\share\\x",
+            "//srv/share/x",
+            "a\\\\b",
+            "X: The Movie",
+            "A:B",
         ] {
             let l = layout(&single(bad, 10, 1)).unwrap();
             assert!(l.on_disk("/save", 0).is_none(), "single {bad:?}");
             let l = layout(&multi(bad, &[("f", 10)])).unwrap();
             assert!(l.on_disk("/save", 0).is_none(), "root {bad:?}");
         }
-        for bad in ["/etc/passwd", "..", "a/../../x", "..\\x", "C:\\x", "\\\\srv\\share", "\\x"] {
+        for bad in [
+            "/etc/passwd",
+            "..",
+            "a/../../x",
+            "..\\x",
+            "C:\\x",
+            "\\\\srv\\share",
+            "\\x",
+        ] {
             let l = layout(&multi("ok", &[(bad, 10)])).unwrap();
             assert!(l.on_disk("/save", 0).is_none(), "file {bad:?}");
         }
@@ -825,8 +851,14 @@ mod tests {
         for good in ["a", "a b.mkv", "Re:Zero", "a..b", "dir/f.txt"] {
             let l = layout(&single(good, 10, 1)).unwrap();
             let resolved = l.on_disk("/save", 0).expect(good);
-            assert!(resolved.starts_with(root), "{good:?} resolved to {resolved:?}");
-            assert!(resolved.as_path() != root, "{good:?} resolved to the root itself");
+            assert!(
+                resolved.starts_with(root),
+                "{good:?} resolved to {resolved:?}"
+            );
+            assert!(
+                resolved.as_path() != root,
+                "{good:?} resolved to the root itself"
+            );
         }
     }
 
