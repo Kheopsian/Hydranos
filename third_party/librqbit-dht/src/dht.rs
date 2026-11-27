@@ -302,7 +302,7 @@ impl RecursiveRequest<RecursiveRequestCallbacksFindNodes> {
             tokio::select! {
                 biased;
 
-                r = node_rx.recv() => {
+                r = node_rx.recv(), if futs.len() < MAX_INFLIGHT_REQUESTS => {
                     let (id, addr, depth) = r.unwrap();
                     futs.push(request_one(id, addr, depth))
                 },
