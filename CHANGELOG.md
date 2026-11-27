@@ -21,7 +21,7 @@ decided when the release is cut, by looking at what went in: whoever tags it
 renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 `HYDRANOS_VERSION` in the same commit.
 
-## Unreleased -- one look for every tab
+## v4.10.1 -- one look for every tab, a complete French interface, and hardened defaults for the log and enrolled nodes
 
 ### Added
 
@@ -37,6 +37,13 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 - The Config tab has a row of shortcuts to its six cards (Account, IP filter, Watched folders, Personalisation, Duplicate data, Advanced settings).
 - The advanced settings have one Save button, held at the bottom of the screen, instead of one under each tab: it saves every changed setting, whichever tab it is in. A search shows its results grouped under the name of the tab each one belongs to (General, Session Race, Network...), where it used to repeat each tab's note and Save button between the groups. The Network tab keeps its own "Save this mode", and Import has no Save.
 
+### Security
+
+- Hardening: the log file (`hydranos.log`), which carries the first-run setup code, is now created owner-only (0600) by default, whether or not `private_files` is on. Anything that reads the log as another uid (a log collector, a container host, another application) must be given access explicitly, for example by running as the same user or adjusting the file's group and mode after startup. A log left at another mode by an earlier run keeps that mode until `private_files` is turned on.
+- Hardening: a node marked `[daemon] enrolled = true` no longer offers first-run setup: it draws no setup code and `/api/setup` answers 409 instead of creating an account and returning the API key. Access model of such a node: it is managed by its controller through its API key; to open its own web UI, the operator sets a password on the host with `hydranos reset-password <password>`.
+- Enrolment closes first-run setup on the node: `install.sh` now writes `enrolled = true` under `[daemon]` when it enrols a node (added once, also to an existing config; no password is set). The node's own web UI is reached with `hydranos reset-password <password>` on the host if needed.
+- Upgrade note: nodes enrolled before this version do not have the flag, so their first-run setup stays available after the update. For such a node, either add `enrolled = true` under `[daemon]` in its config, or set a password with `hydranos reset-password <password>`.
+
 ### Fixed
 
 - qBittorrent import: a cross-seed whose files at that path have other bytes than an earlier torrent's (a repack under the same name) was put in a folder of its own, as it should, but counted as "complete, data found" and, with "import stopped" unticked, started downloading its whole payload there. It is added stopped now, with a note on the torrent, and the import's final report lists each one and its folder. The preview counts the torrents at the same path as an earlier one of another size, which is when this happens. The progress frame carries `isolated` and `isolations`, the preview `likely_isolated`. (#99)
@@ -51,13 +58,6 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 - qBittorrent import: "Retry the failed" replayed the failed job's snapshot, however old, with its path mapping. It now lists qBittorrent again and takes each torrent as it is there now (save path, category, state, counters), and the progress screen shows the mapping so a wrong path can be fixed before retrying (`POST /api/import/retry` takes an optional `path_map`). A torrent removed from qBittorrent since is reported as "no longer in qBittorrent" instead of "http 404", and is not offered for another retry.
 - The import wizard no longer offers itself again on a page reload during an import, or after an import in which every torrent failed: the offer now also looks for an import job, not only for a recorded provenance (which is written only once a job has added something). Finished import jobs are no longer kept in memory for the life of the daemon: the newest three are kept, and only the newest keeps what "Retry failed" needs (its qBittorrent password included).
 - Import from a qBittorrent older than 4.2 run on another platform than Hydranos (a Windows client imported by Linux Hydranos, or the other way): the data path was built with Hydranos' own separator (`C:\dl/Name`), so torrents whose data sat where expected were flagged as a different layout and imported stopped. The path now takes the client's own separator, and the layout check reads it on the client's rules.
-
-### Security
-
-- Hardening: the log file (`hydranos.log`), which carries the first-run setup code, is now created owner-only (0600) by default, whether or not `private_files` is on. Anything that reads the log as another uid (a log collector, a container host, another application) must be given access explicitly, for example by running as the same user or adjusting the file's group and mode after startup. A log left at another mode by an earlier run keeps that mode until `private_files` is turned on.
-- Hardening: a node marked `[daemon] enrolled = true` no longer offers first-run setup: it draws no setup code and `/api/setup` answers 409 instead of creating an account and returning the API key. Access model of such a node: it is managed by its controller through its API key; to open its own web UI, the operator sets a password on the host with `hydranos reset-password <password>`.
-- Enrolment closes first-run setup on the node: `install.sh` now writes `enrolled = true` under `[daemon]` when it enrols a node (added once, also to an existing config; no password is set). The node's own web UI is reached with `hydranos reset-password <password>` on the host if needed.
-- Upgrade note: nodes enrolled before this version do not have the flag, so their first-run setup stays available after the update. For such a node, either add `enrolled = true` under `[daemon]` in its config, or set a password with `hydranos reset-password <password>`.
 
 ## v4.10.0 -- batches of adds sent straight to hoard, less memory per torrent, and rechecks that no longer fight over the same disk
 
