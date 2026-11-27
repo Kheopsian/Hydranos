@@ -194,6 +194,7 @@ api_host = "$LISTEN"
 api_port = $PORT
 api_key = "$API_KEY"
 data_dir = "$CONFIG_DATA_DIR"
+enrolled = true
 
 [race]
 listen_port = 16371
@@ -209,6 +210,23 @@ else
     # operator out of a node they already had.
     API_KEY=$(grep -m1 '^api_key' "$CONFIG" | cut -d'"' -f2)
     echo "==> keeping the existing config and key"
+    # An enrolled node is driven by its controller: mark it so its first-run
+    # setup is closed. Added once, in [daemon]; no password is set.
+    if ! grep -q '^enrolled[[:space:]]*=' "$CONFIG"; then
+        old_umask=$(umask)
+        umask 077
+        if grep -q '^\[daemon\]' "$CONFIG"; then
+            awk '{print} /^\[daemon\]/ && !d {print "enrolled = true"; d=1}' "$CONFIG" > "$CONFIG.new"
+        else
+            { cat "$CONFIG"; printf '\n[daemon]\nenrolled = true\n'; } > "$CONFIG.new"
+        fi
+        # The file replaces the original: give it the original's owner (the
+        # daemon may run as another user than this script) and mode.
+        chown --reference="$CONFIG" "$CONFIG.new" 2>/dev/null || true
+        chmod --reference="$CONFIG" "$CONFIG.new" 2>/dev/null || true
+        mv "$CONFIG.new" "$CONFIG"
+        umask "$old_umask"
+    fi
 fi
 # Every mode, an older config included: the system and docker installs used to
 # leave it at the umask's 0644.
