@@ -388,7 +388,10 @@ async fn serve_block(
                     tokio::time::timeout(write_deadline, framed.flush()).await,
                     Ok(Ok(()))
                 ) {
-                    tracing::debug!("[peer-debug] {} BREAK flush-before-sendfile failed or stalled", addr);
+                    tracing::debug!(
+                        "[peer-debug] {} BREAK flush-before-sendfile failed or stalled",
+                        addr
+                    );
                     return false;
                 }
                 let served = match framed.get_ref().plain_tcp() {

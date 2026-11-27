@@ -51,7 +51,10 @@ impl tracing::Subscriber for FindNodeSpans {
     }
     fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
         let id = NEXT.fetch_add(1, Ordering::Relaxed);
-        REFS.lock().unwrap().get_or_insert_with(HashMap::new).insert(id, 1);
+        REFS.lock()
+            .unwrap()
+            .get_or_insert_with(HashMap::new)
+            .insert(id, 1);
         LIVE.fetch_add(1, Ordering::Relaxed);
         TOTAL.fetch_add(1, Ordering::Relaxed);
         tracing::span::Id::from_u64(id)
@@ -112,7 +115,8 @@ fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
 impl Fake {
     fn start(nodes_per_reply: usize) -> Arc<Fake> {
         let sock = UdpSocket::bind("127.0.0.1:0").unwrap();
-        sock.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
+        sock.set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
         let me = Arc::new(Fake {
             addr: sock.local_addr().unwrap(),
             nodes_per_reply,
@@ -155,7 +159,9 @@ impl Fake {
             let tid = &q[t + 5..t + 7];
             let mut nodes = Vec::new();
             if is_find {
-                let Some(p) = find(q, b"6:target20:") else { continue };
+                let Some(p) = find(q, b"6:target20:") else {
+                    continue;
+                };
                 let target = &q[p + 11..p + 31];
                 for _ in 0..self.nodes_per_reply {
                     let mut id = [0u8; 20];
@@ -172,7 +178,8 @@ impl Fake {
                     nodes.extend_from_slice(&[127, 0, 0, 1]);
                     nodes.extend_from_slice(&port);
                 }
-                self.nodes_sent.fetch_add(self.nodes_per_reply as u64, Ordering::Relaxed);
+                self.nodes_sent
+                    .fetch_add(self.nodes_per_reply as u64, Ordering::Relaxed);
             }
             let mut r = b"d1:rd2:id20:".to_vec();
             r.extend_from_slice(&[0xEE; 20]);
@@ -181,7 +188,8 @@ impl Fake {
             r.extend_from_slice(b"e1:t2:");
             r.extend_from_slice(tid);
             r.extend_from_slice(b"1:y1:re");
-            self.biggest_reply.fetch_max(r.len() as u64, Ordering::Relaxed);
+            self.biggest_reply
+                .fetch_max(r.len() as u64, Ordering::Relaxed);
             if sock.send_to(&r, from).is_ok() {
                 self.replies.fetch_add(1, Ordering::Relaxed);
             }

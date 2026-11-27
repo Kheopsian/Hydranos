@@ -260,7 +260,11 @@ mod tests {
         ON.store(false, Ordering::Relaxed);
         let log = d.join("hydranos.log");
         log_open_options().open(&log).unwrap();
-        assert_eq!(mode(&log), 0o600, "the log must not be group/other readable");
+        assert_eq!(
+            mode(&log),
+            0o600,
+            "the log must not be group/other readable"
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 }

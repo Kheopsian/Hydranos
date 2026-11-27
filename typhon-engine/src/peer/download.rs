@@ -1789,7 +1789,12 @@ mod release_tests {
         let mem = Arc::new(crate::torrent::piece_picker::PieceMem::default());
         mem.set_budget(40 * PIECE as u64);
         let attach = |t: &Arc<TorrentState>| {
-            t.picker.get().unwrap().lock().unwrap().attach_mem(mem.clone())
+            t.picker
+                .get()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .attach_mem(mem.clone())
         };
         let ta = torrent(128, PIECE);
         attach(&ta);
@@ -1814,7 +1819,10 @@ mod release_tests {
         let t = torrent(200, PIECE);
         let mut a = peer(&t);
         let held = drain_with_refused_blocks(&mut a, &t);
-        assert!(held <= MAX_STARTED_PIECES, "one session holds {held} of 200 pieces");
+        assert!(
+            held <= MAX_STARTED_PIECES,
+            "one session holds {held} of 200 pieces"
+        );
         assert!(held > 0);
     }
 

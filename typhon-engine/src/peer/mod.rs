@@ -3011,10 +3011,8 @@ mod stalled_writer_tests {
         let (step, rounds) = pace.unwrap_or((0, 0));
         let paced = step > 0;
         const STALLED: usize = 4;
-        let root = std::env::temp_dir().join(format!(
-            "stalled-writer-{}-{trickle}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("stalled-writer-{}-{trickle}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let (data, resume) = (root.join("data"), root.join("resume"));
         std::fs::create_dir_all(&data).unwrap();
@@ -3033,7 +3031,10 @@ mod stalled_writer_tests {
             .add_torrent_bytes(&torrent_bytes(), data.to_str().unwrap(), false, true)
             .unwrap();
         let t = mgr.get(&ih).unwrap();
-        assert_eq!(t.status.load(Ordering::Relaxed), TorrentStatus::Seeding as u8);
+        assert_eq!(
+            t.status.load(Ordering::Relaxed),
+            TorrentStatus::Seeding as u8
+        );
         let limiter = mgr.limiter().clone();
         let idle = t.policy().idle_timeout();
 
@@ -3103,7 +3104,10 @@ mod stalled_writer_tests {
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        assert!(addrs.iter().all(|a| registered(&t, a)), "fixture: registered");
+        assert!(
+            addrs.iter().all(|a| registered(&t, a)),
+            "fixture: registered"
+        );
         // Let the uploads run into the full socket buffers.
         tokio::time::sleep(Duration::from_secs(4)).await;
         assert_eq!(limiter.live_connections(), STALLED, "fixture: slots held");
@@ -3121,7 +3125,11 @@ mod stalled_writer_tests {
                 tokio::time::sleep(Duration::from_millis(400)).await;
             }
         } else {
-            let by = if trickle { Duration::from_secs(90) } else { idle * 2 };
+            let by = if trickle {
+                Duration::from_secs(90)
+            } else {
+                idle * 2
+            };
             tokio::time::pause();
             tokio::time::advance(by).await;
             tokio::time::resume();
@@ -3145,7 +3153,10 @@ mod stalled_writer_tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         let left = addrs.iter().filter(|a| registered(&t, a)).count();
-        assert_eq!(left, 0, "{left}/{STALLED} slow sessions are still registered");
+        assert_eq!(
+            left, 0,
+            "{left}/{STALLED} slow sessions are still registered"
+        );
         assert_eq!(limiter.live_connections(), 0, "their slots are freed");
         for h in held {
             h.abort();

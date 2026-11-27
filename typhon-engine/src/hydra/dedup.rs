@@ -776,7 +776,11 @@ mod tests {
         let forged = with_comment(&real, &comment);
         assert_eq!(pieces(&forged), pieces(&real), "pieces come from info only");
         assert_eq!(content_key(&forged), content_key(&real));
-        assert_eq!(layout(&forged).unwrap().name, "b", "name comes from info only");
+        assert_eq!(
+            layout(&forged).unwrap().name,
+            "b",
+            "name comes from info only"
+        );
         assert!(!same_content(&forged, &single("c", 100, 9)));
     }
 
@@ -806,7 +810,10 @@ mod tests {
         std::fs::write(lib.join("victim.bin"), [1u8; 100]).unwrap();
         let have = layout(&single("victim.bin", 100, 1)).unwrap();
         let outside = td.join("planted.bin");
-        for name in [outside.to_string_lossy().into_owned(), "../planted.bin".to_string()] {
+        for name in [
+            outside.to_string_lossy().into_owned(),
+            "../planted.bin".to_string(),
+        ] {
             let want = layout(&single(&name, 100, 1)).unwrap();
             let r = plan(&have, &lib.to_string_lossy(), &want, &dl.to_string_lossy());
             assert!(r.is_err(), "{name:?} must be refused");

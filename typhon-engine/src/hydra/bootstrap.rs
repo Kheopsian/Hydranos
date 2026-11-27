@@ -606,13 +606,15 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::CONFLICT);
         let out = crate::api::testing::body_json(resp).await;
         assert!(out.get("api_key").is_none(), "no key in the answer: {out}");
-        assert!(s.state.cfg().auth.password_hash.is_empty(), "no account created");
+        assert!(
+            s.state.cfg().auth.password_hash.is_empty(),
+            "no account created"
+        );
     }
 
     #[test]
     fn an_enrolled_node_draws_no_setup_code() {
-        let cfg: crate::config::Config =
-            toml::from_str("[daemon]\nenrolled = true\n").unwrap();
+        let cfg: crate::config::Config = toml::from_str("[daemon]\nenrolled = true\n").unwrap();
         // Another test may have set a code: start from none.
         *SETUP_CODE.lock().unwrap_or_else(|e| e.into_inner()) = None;
         announce_setup_code(&cfg);
