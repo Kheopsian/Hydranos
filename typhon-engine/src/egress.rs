@@ -1211,7 +1211,7 @@ mod tests {
             kill_switch: true,
             ..Route::default()
         };
-        let lan = route_for_with(&b, &tunnel, "http://192.168.1.10/feed");
+        let lan = route_for_with(&b, &tunnel, "http://192.168.254.254/feed");
         assert!(
             lan.is_direct() && lan.bypassed && !lan.kill_switch,
             "{lan:?}"
@@ -1225,7 +1225,7 @@ mod tests {
             tunnel
         );
         assert_eq!(
-            route_for_with(&Bypass::default(), &tunnel, "http://192.168.1.10/"),
+            route_for_with(&Bypass::default(), &tunnel, "http://192.168.254.254/"),
             tunnel,
             "an empty list changes nothing"
         );
