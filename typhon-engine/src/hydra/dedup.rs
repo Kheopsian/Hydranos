@@ -32,26 +32,69 @@
 
 use std::path::{Path, PathBuf};
 
-/// A bencode string value read straight out of the raw torrent bytes.
-///
-/// Parsing the whole dict to reach two fields would cost an allocation per
-/// torrent on a path that runs 300k times at boot. The key is matched with its
-/// bencode length prefix (`6:pieces`), which is why `12:piece length` cannot
-/// collide with it.
-fn bfield<'a>(blob: &'a [u8], key: &[u8]) -> Option<&'a [u8]> {
-    let mut needle = Vec::with_capacity(key.len() + 4);
-    needle.extend_from_slice(key.len().to_string().as_bytes());
-    needle.push(b':');
-    needle.extend_from_slice(key);
+/// One bencode value starting at `at`: the index just past it. A structural
+/// walk (strings are skipped by their length prefix, never searched), so bytes
+/// inside a string can never be mistaken for keys. Depth-bounded.
+fn skip_value(b: &[u8], at: usize, depth: u32) -> Option<usize> {
+    if depth > 64 {
+        return None;
+    }
+    match *b.get(at)? {
+        b'i' => Some(b[at..].iter().position(|&c| c == b'e')? + at + 1),
+        b'l' | b'd' => {
+            let mut i = at + 1;
+            while *b.get(i)? != b'e' {
+                i = skip_value(b, i, depth + 1)?;
+            }
+            Some(i + 1)
+        }
+        b'0'..=b'9' => str_at(b, at).map(|(_, end)| end),
+        _ => None,
+    }
+}
 
-    let at = blob
-        .windows(needle.len())
-        .position(|w| w == needle.as_slice())?;
-    let rest = &blob[at + needle.len()..];
-    let colon = rest.iter().position(|&b| b == b':')?;
-    let len: usize = std::str::from_utf8(&rest[..colon]).ok()?.parse().ok()?;
+/// The `<len>:<bytes>` string at `at`, with the index just past it.
+fn str_at(b: &[u8], at: usize) -> Option<(&[u8], usize)> {
+    let colon = b.get(at..)?.iter().position(|&c| c == b':')? + at;
+    let len: usize = std::str::from_utf8(&b[at..colon]).ok()?.parse().ok()?;
     let from = colon + 1;
-    rest.get(from..from + len)
+    let end = from.checked_add(len)?;
+    Some((b.get(from..end)?, end))
+}
+
+/// The raw bytes of the value stored under `key` at the TOP LEVEL of the
+/// bencode dictionary `dict` (which must start with `d`).
+fn dict_get<'a>(dict: &'a [u8], key: &[u8]) -> Option<&'a [u8]> {
+    if dict.first() != Some(&b'd') {
+        return None;
+    }
+    let mut i = 1;
+    while *dict.get(i)? != b'e' {
+        let (k, after_key) = str_at(dict, i)?;
+        let end = skip_value(dict, after_key, 0)?;
+        if k == key {
+            return Some(&dict[after_key..end]);
+        }
+        i = end;
+    }
+    None
+}
+
+/// The `info` dictionary of a torrent, found by structure: a lookalike key
+/// inside any other string (a comment, say) is not the info dict.
+fn info_dict(torrent: &[u8]) -> Option<&[u8]> {
+    dict_get(torrent, b"info").filter(|v| v.first() == Some(&b'd'))
+}
+
+/// A bencode string value of the info dict.
+fn bfield<'a>(blob: &'a [u8], key: &[u8]) -> Option<&'a [u8]> {
+    let v = dict_get(info_dict(blob)?, key)?;
+    str_at(v, 0).map(|(s, _)| s)
+}
+
+fn int_of(v: &[u8]) -> Option<u64> {
+    let inner = v.strip_prefix(b"i")?.strip_suffix(b"e")?;
+    std::str::from_utf8(inner).ok()?.parse().ok()
 }
 
 /// The raw `pieces` blob: the concatenated SHA-1 of every piece.
@@ -119,11 +162,19 @@ impl Layout {
         self.files.iter().map(|f| f.len).sum()
     }
 
-    /// Where file `i` lives under `save_path`.
+    /// Where file `i` lives under `save_path`, or None when the torrent names
+    /// a place outside it: every component of the name and of the file path
+    /// must be a plain name (not empty, `.`, `..`, absolute, or holding a NUL).
     pub fn on_disk(&self, save_path: &str, i: usize) -> Option<PathBuf> {
         let f = self.files.get(i)?;
         let base = Path::new(save_path);
+        if !plain_rel(&self.name) {
+            return None;
+        }
         Some(if self.multi_file {
+            if !plain_rel(&f.rel) {
+                return None;
+            }
             base.join(&self.name).join(&f.rel)
         } else {
             base.join(&self.name)
@@ -131,18 +182,27 @@ impl Layout {
     }
 }
 
+/// A relative path made only of ordinary components.
+fn plain_rel(rel: &str) -> bool {
+    !rel.is_empty()
+        && !rel.contains('\0')
+        && rel
+            .split('/')
+            .all(|c| !c.is_empty() && c != "." && c != "..")
+}
+
 /// Read the file list out of raw torrent bytes.
 ///
-/// A hand-rolled walk of the `info` dict rather than a full bencode parse: the
-/// engine already has a parser, but it lives behind `TorrentMeta` and pulling
-/// a whole meta in to read two fields is what makes a boot-time pass slow.
+/// A structural walk of the `info` dict only (never a substring search of the
+/// whole blob), so it reads what the validated metainfo says and nothing an
+/// outer field could impersonate.
 pub fn layout(torrent_bytes: &[u8]) -> Option<Layout> {
+    let info = info_dict(torrent_bytes)?;
     let name = String::from_utf8_lossy(bfield(torrent_bytes, b"name")?).into_owned();
 
     // Single-file torrents have `length` in the info dict and no `files` key.
-    let files_at = find_key(torrent_bytes, b"5:filesl");
-    let Some(mut cursor) = files_at else {
-        let len = find_int(torrent_bytes, b"6:lengthi")?;
+    let Some(files_v) = dict_get(info, b"files") else {
+        let len = int_of(dict_get(info, b"length")?)?;
         return Some(Layout {
             name,
             multi_file: false,
@@ -152,22 +212,32 @@ pub fn layout(torrent_bytes: &[u8]) -> Option<Layout> {
             }],
         });
     };
+    if files_v.first() != Some(&b'l') {
+        return None;
+    }
 
     let mut files = Vec::new();
-    // Each entry is a dict holding `length` and `path` (a list of components).
-    while let Some(next) = find_from(torrent_bytes, cursor, b"6:lengthi") {
-        let Some(len) = read_int_at(torrent_bytes, next + b"6:lengthi".len()) else {
-            break;
-        };
-        let Some(path_at) = find_from(torrent_bytes, next, b"4:pathl") else {
-            break;
-        };
-        let (comps, end) = read_string_list(torrent_bytes, path_at + b"4:pathl".len())?;
+    let mut i = 1;
+    while *files_v.get(i)? != b'e' {
+        let end = skip_value(files_v, i, 0)?;
+        let entry = &files_v[i..end];
+        let len = int_of(dict_get(entry, b"length")?)?;
+        let path = dict_get(entry, b"path")?;
+        if path.first() != Some(&b'l') {
+            return None;
+        }
+        let mut comps = Vec::new();
+        let mut j = 1;
+        while *path.get(j)? != b'e' {
+            let (c, next) = str_at(path, j)?;
+            comps.push(String::from_utf8_lossy(c).into_owned());
+            j = next;
+        }
         files.push(Entry {
             rel: comps.join("/"),
             len,
         });
-        cursor = end;
+        i = end;
     }
 
     if files.is_empty() {
@@ -178,47 +248,6 @@ pub fn layout(torrent_bytes: &[u8]) -> Option<Layout> {
         multi_file: true,
         files,
     })
-}
-
-fn find_key(blob: &[u8], needle: &[u8]) -> Option<usize> {
-    find_from(blob, 0, needle)
-}
-
-fn find_from(blob: &[u8], from: usize, needle: &[u8]) -> Option<usize> {
-    if from >= blob.len() {
-        return None;
-    }
-    blob[from..]
-        .windows(needle.len())
-        .position(|w| w == needle)
-        .map(|p| p + from)
-}
-
-fn find_int(blob: &[u8], needle: &[u8]) -> Option<u64> {
-    let at = find_key(blob, needle)?;
-    read_int_at(blob, at + needle.len())
-}
-
-fn read_int_at(blob: &[u8], at: usize) -> Option<u64> {
-    let end = blob[at..].iter().position(|&b| b == b'e')? + at;
-    std::str::from_utf8(&blob[at..end]).ok()?.parse().ok()
-}
-
-/// Read `<len>:<bytes>` items until the list's `e`.
-fn read_string_list(blob: &[u8], mut at: usize) -> Option<(Vec<String>, usize)> {
-    let mut out = Vec::new();
-    loop {
-        match blob.get(at)? {
-            b'e' => return Some((out, at + 1)),
-            _ => {
-                let colon = blob[at..].iter().position(|&b| b == b':')? + at;
-                let len: usize = std::str::from_utf8(&blob[at..colon]).ok()?.parse().ok()?;
-                let from = colon + 1;
-                out.push(String::from_utf8_lossy(blob.get(from..from + len)?).into_owned());
-                at = from + len;
-            }
-        }
-    }
 }
 
 /// A torrent we already hold whose payload is the incoming one's payload.
@@ -722,5 +751,67 @@ mod tests {
         assert!(same_content(&a, &b));
         assert!(!same_content(&a, &c));
         assert!(!same_content(&a, b"not a torrent"));
+    }
+
+    /// An outer string that carries `name`/`pieces` lookalikes, in front of `info`.
+    fn with_comment(torrent: &[u8], comment: &[u8]) -> Vec<u8> {
+        assert!(torrent.starts_with(b"d4:info"));
+        let mut v = format!("d7:comment{}:", comment.len()).into_bytes();
+        v.extend_from_slice(comment);
+        v.extend_from_slice(&torrent[1..]);
+        v
+    }
+
+    fn bstr(key: &str, val: &[u8]) -> Vec<u8> {
+        let mut v = format!("{}:{key}{}:", key.len(), val.len()).into_bytes();
+        v.extend_from_slice(val);
+        v
+    }
+
+    #[test]
+    fn lookalike_fields_outside_the_info_dict_are_not_read() {
+        let real = single("b", 100, 1);
+        let mut comment = bstr("name", b"/etc/planted");
+        comment.extend(bstr("pieces", &[9u8; 20]));
+        let forged = with_comment(&real, &comment);
+        assert_eq!(pieces(&forged), pieces(&real), "pieces come from info only");
+        assert_eq!(content_key(&forged), content_key(&real));
+        assert_eq!(layout(&forged).unwrap().name, "b", "name comes from info only");
+        assert!(!same_content(&forged, &single("c", 100, 9)));
+    }
+
+    #[test]
+    fn a_name_or_path_that_leaves_the_save_root_has_no_location() {
+        for bad in ["/etc/planted", "../climbed", "a/../../b", "..", ""] {
+            let l = layout(&single(bad, 10, 1)).unwrap();
+            assert!(l.on_disk("/save", 0).is_none(), "single {bad:?}");
+            let l = layout(&multi(bad, &[("f", 10)])).unwrap();
+            assert!(l.on_disk("/save", 0).is_none(), "root {bad:?}");
+        }
+        for bad in ["/etc/passwd", "..", "a/../../x"] {
+            let l = layout(&multi("ok", &[(bad, 10)])).unwrap();
+            assert!(l.on_disk("/save", 0).is_none(), "file {bad:?}");
+        }
+        let l = layout(&multi("ok", &[("sub/f", 10)])).unwrap();
+        assert_eq!(l.on_disk("/save", 0), Some(PathBuf::from("/save/ok/sub/f")));
+    }
+
+    #[test]
+    fn a_plan_never_links_to_or_from_outside_the_save_root() {
+        let td = std::env::temp_dir().join(format!("dedup-confine-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&td);
+        let (lib, dl) = (td.join("lib"), td.join("dl"));
+        std::fs::create_dir_all(&lib).unwrap();
+        std::fs::create_dir_all(&dl).unwrap();
+        std::fs::write(lib.join("victim.bin"), [1u8; 100]).unwrap();
+        let have = layout(&single("victim.bin", 100, 1)).unwrap();
+        let outside = td.join("planted.bin");
+        for name in [outside.to_string_lossy().into_owned(), "../planted.bin".to_string()] {
+            let want = layout(&single(&name, 100, 1)).unwrap();
+            let r = plan(&have, &lib.to_string_lossy(), &want, &dl.to_string_lossy());
+            assert!(r.is_err(), "{name:?} must be refused");
+        }
+        assert!(!outside.exists());
+        let _ = std::fs::remove_dir_all(&td);
     }
 }
