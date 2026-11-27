@@ -616,7 +616,7 @@
   "Restart Hydranos now to apply the race drain settings?": "Reiniciar o Hydranos agora para aplicar as definições de esvaziamento race?",
   "Restart Hydranos to apply the changes? (~40s)": "Reiniciar o Hydranos para aplicar as alterações? (~40 s)",
   "Restart Hydranos to finish.": "Reinicie o Hydranos para concluir.",
-  "Restart the Hydranos daemon now? (running torrents resume on boot)": "Reiniciar agora o daemon do Hydranos? (os torrents em execução retomam no arranque)",
+  "Restart the Hydranos daemon now? (running torrents resume on boot)": "Reiniciar agora o daemon do Hydranos? (os torrents em execução são retomados no arranque)",
   "Restarting, reconnect in ~40s.": "A reiniciar, volte a ligar em ~40 s.",
   "Restarting… the page will reload in a few seconds.": "A reiniciar… a página recarrega dentro de segundos.",
   "Restore": "Restaurar",
