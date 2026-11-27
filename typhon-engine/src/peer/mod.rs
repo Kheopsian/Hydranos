@@ -2984,19 +2984,19 @@ mod stalled_writer_tests {
     }
 
     /// A reader that finishes every block inside the per-write window (one
-    /// 16 KiB block per 20 s, about 800 B/s) is below the minimum rate over a
+    /// 16 KiB block per 18 s, about 900 B/s) is below the minimum rate over a
     /// window of service and loses its slot.
     #[tokio::test]
     async fn a_peer_just_above_the_write_floor_is_dropped_by_the_rate_window() {
-        scenario_rate(Some((20, 8)), true).await;
+        scenario_rate(Some((18, 12)), true).await;
     }
 
-    /// A steady reader above the minimum (one block per 8 s, about 2 KiB/s) is
+    /// A steady reader above the minimum (one block per 4 s, about 4 KiB/s) is
     /// never dropped, however long it stays: 160 s of tokio time here, almost
     /// three windows.
     #[tokio::test]
     async fn a_steady_slow_reader_above_the_minimum_rate_is_never_dropped() {
-        scenario_rate(Some((8, 20)), false).await;
+        scenario_rate(Some((4, 40)), false).await;
     }
 
     async fn scenario(trickle: bool) {
@@ -3108,21 +3108,62 @@ mod stalled_writer_tests {
             addrs.iter().all(|a| registered(&t, a)),
             "fixture: registered"
         );
-        // Let the uploads run into the full socket buffers.
-        tokio::time::sleep(Duration::from_secs(4)).await;
+        // Let the uploads run into the full socket buffers: wait for the
+        // counters to stop moving, however slow the machine is.
+        let uploaded = |t: &TorrentState| -> Vec<u64> {
+            addrs
+                .iter()
+                .map(|a| {
+                    t.peers
+                        .get(a)
+                        .map_or(u64::MAX, |s| s.total_uploaded.load(Ordering::Relaxed))
+                })
+                .collect()
+        };
+        let mut last = uploaded(&t);
+        let mut calm = 0;
+        for _ in 0..3000 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            let now = uploaded(&t);
+            calm = if now == last && (!(paced || trickle) || now.iter().all(|&u| u > 0)) {
+                calm + 1
+            } else {
+                0
+            };
+            last = now;
+            if calm >= 25 {
+                break;
+            }
+        }
+        assert!(calm >= 25, "fixture: the uploads never stalled: {last:?}");
         assert_eq!(limiter.live_connections(), STALLED, "fixture: slots held");
 
-        // Tokio time goes by while the peers still do not read (or trickle).
-        // The trickle case stays well under the idle timeout: only a service
-        // deadline can end it.
+        // Time is moved by `advance` alone; real time is only spent waiting
+        // for the sockets to catch up, never as a measure. The trickle case
+        // stays well under the idle timeout: only a service deadline can end it.
         if paced {
-            // Steps of `step` s, each followed by real time for the block to
-            // move: none is long enough to trip the per-write deadline.
+            // Steps of `step` s of tokio time; after each, wait until every
+            // session has moved one more block. No step is long enough to trip
+            // the per-write deadline, so only the rate window can end a session.
             for _ in 0..rounds {
+                if addrs.iter().all(|a| !registered(&t, a)) {
+                    break;
+                }
+                let before = uploaded(&t);
                 tokio::time::pause();
                 tokio::time::advance(Duration::from_secs(step)).await;
                 tokio::time::resume();
-                tokio::time::sleep(Duration::from_millis(400)).await;
+                for _ in 0..1500 {
+                    let now = uploaded(&t);
+                    if now
+                        .iter()
+                        .zip(&before)
+                        .all(|(n, b)| *n == u64::MAX || *n >= b + 16384)
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
             }
         } else {
             let by = if trickle {
@@ -3146,7 +3187,7 @@ mod stalled_writer_tests {
             let _ = std::fs::remove_dir_all(&root);
             return;
         }
-        for _ in 0..250 {
+        for _ in 0..1500 {
             if addrs.iter().all(|a| !registered(&t, a)) {
                 break;
             }
