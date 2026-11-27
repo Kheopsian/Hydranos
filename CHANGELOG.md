@@ -52,6 +52,10 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 - The import wizard no longer offers itself again on a page reload during an import, or after an import in which every torrent failed: the offer now also looks for an import job, not only for a recorded provenance (which is written only once a job has added something). Finished import jobs are no longer kept in memory for the life of the daemon: the newest three are kept, and only the newest keeps what "Retry failed" needs (its qBittorrent password included).
 - Import from a qBittorrent older than 4.2 run on another platform than Hydranos (a Windows client imported by Linux Hydranos, or the other way): the data path was built with Hydranos' own separator (`C:\dl/Name`), so torrents whose data sat where expected were flagged as a different layout and imported stopped. The path now takes the client's own separator, and the layout check reads it on the client's rules.
 
+### Security
+
+- Hardening: the log file (`hydranos.log`), which carries the first-run setup code, is now created owner-only (0600) by default, whether or not `private_files` is on. Anything that reads the log as another uid (a log collector, a container host, another application) must be given access explicitly, for example by running as the same user or adjusting the file's group and mode after startup. A log left at another mode by an earlier run keeps that mode until `private_files` is turned on.
+
 ## v4.10.0 -- batches of adds sent straight to hoard, less memory per torrent, and rechecks that no longer fight over the same disk
 
 ### Added

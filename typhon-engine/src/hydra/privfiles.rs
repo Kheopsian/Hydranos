@@ -77,12 +77,13 @@ pub fn precreate(path: &Path) {
     let _ = path;
 }
 
-/// `OpenOptions` for the log: 0600 at creation when the option is on.
+/// `OpenOptions` for the log: always 0600 at creation (it carries the
+/// first-run setup code), whatever `private_files` says.
 pub fn log_open_options() -> std::fs::OpenOptions {
     let mut o = std::fs::OpenOptions::new();
     o.create(true).append(true);
     #[cfg(unix)]
-    if enabled() {
+    {
         use std::os::unix::fs::OpenOptionsExt;
         o.mode(0o600);
     }
@@ -247,6 +248,19 @@ mod tests {
         }
         drop(store);
         drop(bench_db);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// The log carries the first-run setup code: it is created owner-only
+    /// whatever the option says.
+    #[test]
+    fn the_log_is_created_0600_even_when_the_option_is_off() {
+        let _g = flag_lock();
+        let d = dir("logdefault");
+        ON.store(false, Ordering::Relaxed);
+        let log = d.join("hydranos.log");
+        log_open_options().open(&log).unwrap();
+        assert_eq!(mode(&log), 0o600, "the log must not be group/other readable");
         let _ = std::fs::remove_dir_all(&d);
     }
 }
