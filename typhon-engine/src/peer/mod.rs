@@ -2899,3 +2899,257 @@ mod listener_pin_tests {
         live.cancel.cancel();
     }
 }
+
+#[cfg(test)]
+mod stalled_writer_tests {
+    use super::tcp_accept_loop;
+    use crate::torrent::meta::{TorrentState, TorrentStatus};
+    use crate::torrent::TorrentManager;
+    use std::net::SocketAddr;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
+
+    const PIECE: u32 = 16384;
+    static PEER_SEQ: AtomicU64 = AtomicU64::new(1);
+
+    fn torrent_bytes() -> Vec<u8> {
+        let mut info = Vec::new();
+        info.extend_from_slice(b"d5:filesl");
+        info.extend_from_slice(b"d6:lengthi8192e4:pathl5:a.binee");
+        info.extend_from_slice(b"d6:lengthi57344e4:pathl5:b.binee");
+        info.extend_from_slice(b"e4:name5:audit12:piece lengthi16384e6:pieces80:");
+        info.extend_from_slice(&[0x5Au8; 80]);
+        info.push(b'e');
+        let mut out = b"d4:info".to_vec();
+        out.extend_from_slice(&info);
+        out.push(b'e');
+        out
+    }
+
+    async fn dial(from: &str, to: SocketAddr) -> TcpStream {
+        let s = tokio::net::TcpSocket::new_v4().unwrap();
+        s.set_recv_buffer_size(4096).unwrap();
+        s.bind(format!("{from}:0").parse().unwrap()).unwrap();
+        s.connect(to).await.unwrap()
+    }
+
+    async fn handshake(c: &mut TcpStream, ih: [u8; 20]) -> bool {
+        let mut hs = vec![19u8];
+        hs.extend_from_slice(b"BitTorrent protocol");
+        hs.extend_from_slice(&[0u8; 8]);
+        hs.extend_from_slice(&ih);
+        let mut pid = [0x66u8; 20];
+        pid[1..9].copy_from_slice(&PEER_SEQ.fetch_add(1, Ordering::Relaxed).to_be_bytes());
+        hs.extend_from_slice(&pid);
+        if c.write_all(&hs).await.is_err() {
+            return false;
+        }
+        let mut got = [0u8; 68];
+        matches!(
+            tokio::time::timeout(Duration::from_secs(5), c.read_exact(&mut got)).await,
+            Ok(Ok(_))
+        ) && got[0] == 19
+            && got[28..48] == ih
+    }
+
+    fn request(index: u32) -> [u8; 17] {
+        let mut m = [0u8; 17];
+        m[3] = 13;
+        m[4] = 6;
+        m[5..9].copy_from_slice(&index.to_be_bytes());
+        m[13..17].copy_from_slice(&PIECE.to_be_bytes());
+        m
+    }
+
+    fn registered(t: &TorrentState, a: &SocketAddr) -> bool {
+        t.peers.get(a).is_some()
+    }
+
+    /// A peer that asks for pieces and then stops reading must not keep its
+    /// session (and its connection slot) for ever.
+    #[tokio::test]
+    async fn a_peer_that_stops_reading_is_dropped_and_its_slot_freed() {
+        scenario(false).await;
+    }
+
+    /// A reader that takes ~300 bytes/s finishes no block in any useful time:
+    /// it is far under the minimum service rate and loses its slot well before
+    /// the idle timeout.
+    #[tokio::test]
+    async fn a_peer_that_trickles_its_reads_is_dropped_and_its_slot_freed() {
+        scenario(true).await;
+    }
+
+    /// A reader that finishes every block inside the per-write window (one
+    /// 16 KiB block per 20 s, about 800 B/s) is below the minimum rate over a
+    /// window of service and loses its slot.
+    #[tokio::test]
+    async fn a_peer_just_above_the_write_floor_is_dropped_by_the_rate_window() {
+        scenario_rate(Some((20, 8)), true).await;
+    }
+
+    /// A steady reader above the minimum (one block per 8 s, about 2 KiB/s) is
+    /// never dropped, however long it stays: 160 s of tokio time here, almost
+    /// three windows.
+    #[tokio::test]
+    async fn a_steady_slow_reader_above_the_minimum_rate_is_never_dropped() {
+        scenario_rate(Some((8, 20)), false).await;
+    }
+
+    async fn scenario(trickle: bool) {
+        scenario_rate(if trickle { None } else { Some((0, 0)) }, true).await;
+    }
+
+    /// `pace`: `Some((secs, rounds))` = a reader taking one block per `secs` of
+    /// tokio time for `rounds` steps; `Some((0, 0))` = never reads; `None` =
+    /// 64 bytes per 200 ms. `dropped`: whether the sessions must be gone after.
+    async fn scenario_rate(pace: Option<(u64, u32)>, dropped: bool) {
+        let trickle = pace.is_none();
+        let (step, rounds) = pace.unwrap_or((0, 0));
+        let paced = step > 0;
+        const STALLED: usize = 4;
+        let root = std::env::temp_dir().join(format!(
+            "stalled-writer-{}-{trickle}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let (data, resume) = (root.join("data"), root.join("resume"));
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::create_dir_all(&resume).unwrap();
+        let disk = Arc::new(crate::disk::DiskManager::new(16));
+        let mgr = Arc::new(TorrentManager::new(
+            data.to_string_lossy().into_owned(),
+            resume.to_string_lossy().into_owned(),
+            disk.clone(),
+        ));
+        let dir = data.join("audit");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.bin"), vec![0xA5u8; 8192]).unwrap();
+        std::fs::write(dir.join("b.bin"), vec![0xB6u8; 57344]).unwrap();
+        let (ih, _) = mgr
+            .add_torrent_bytes(&torrent_bytes(), data.to_str().unwrap(), false, true)
+            .unwrap();
+        let t = mgr.get(&ih).unwrap();
+        assert_eq!(t.status.load(Ordering::Relaxed), TorrentStatus::Seeding as u8);
+        let limiter = mgr.limiter().clone();
+        let idle = t.policy().idle_timeout();
+
+        // A small send buffer, inherited by every accepted socket, so a write
+        // moves only as fast as the peer reads (no megabytes of slack).
+        let sock = tokio::net::TcpSocket::new_v4().unwrap();
+        sock.set_send_buffer_size(4096).unwrap();
+        sock.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = sock.listen(64).unwrap();
+        let at = listener.local_addr().unwrap();
+        tokio::spawn(tcp_accept_loop(
+            listener,
+            mgr.clone(),
+            disk.clone(),
+            [7u8; 20],
+            None,
+            at.port(),
+        ));
+
+        // Peers that request far more than the socket buffers hold.
+        let mut addrs = Vec::new();
+        let mut held = Vec::new();
+        for n in 0..STALLED {
+            let mut c = dial("127.0.0.66", at).await;
+            assert!(handshake(&mut c, ih).await, "handshake");
+            let mut reqs = Vec::new();
+            for _ in 0..1024 {
+                reqs.extend_from_slice(&request((n % 2) as u32));
+            }
+            let _ = tokio::time::timeout(Duration::from_secs(5), c.write_all(&reqs)).await;
+            addrs.push(c.local_addr().unwrap());
+            if paced {
+                // One block (16397 bytes of Piece message) per `step` s of
+                // tokio time, inside the 30 s write window.
+                held.push(tokio::spawn(async move {
+                    let mut buf = vec![0u8; 16397];
+                    loop {
+                        if c.read_exact(&mut buf).await.is_err() {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_secs(step)).await;
+                    }
+                }));
+            } else if trickle {
+                // Reads 64 bytes every 200 ms, for ever.
+                held.push(tokio::spawn(async move {
+                    let mut buf = [0u8; 64];
+                    loop {
+                        match c.read(&mut buf).await {
+                            Ok(0) | Err(_) => break,
+                            Ok(_) => {}
+                        }
+                        tokio::time::sleep(Duration::from_millis(200)).await;
+                    }
+                }));
+            } else {
+                // Never reads; the connection stays open until the end.
+                held.push(tokio::spawn(async move {
+                    let _c = c;
+                    std::future::pending::<()>().await;
+                }));
+            }
+        }
+        for _ in 0..500 {
+            if addrs.iter().all(|a| registered(&t, a)) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(addrs.iter().all(|a| registered(&t, a)), "fixture: registered");
+        // Let the uploads run into the full socket buffers.
+        tokio::time::sleep(Duration::from_secs(4)).await;
+        assert_eq!(limiter.live_connections(), STALLED, "fixture: slots held");
+
+        // Tokio time goes by while the peers still do not read (or trickle).
+        // The trickle case stays well under the idle timeout: only a service
+        // deadline can end it.
+        if paced {
+            // Steps of `step` s, each followed by real time for the block to
+            // move: none is long enough to trip the per-write deadline.
+            for _ in 0..rounds {
+                tokio::time::pause();
+                tokio::time::advance(Duration::from_secs(step)).await;
+                tokio::time::resume();
+                tokio::time::sleep(Duration::from_millis(400)).await;
+            }
+        } else {
+            let by = if trickle { Duration::from_secs(90) } else { idle * 2 };
+            tokio::time::pause();
+            tokio::time::advance(by).await;
+            tokio::time::resume();
+        }
+        if !dropped {
+            assert!(
+                addrs.iter().all(|a| registered(&t, a)),
+                "a steady reader above the minimum rate was dropped"
+            );
+            assert_eq!(limiter.live_connections(), STALLED);
+            for h in held {
+                h.abort();
+            }
+            let _ = std::fs::remove_dir_all(&root);
+            return;
+        }
+        for _ in 0..250 {
+            if addrs.iter().all(|a| !registered(&t, a)) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let left = addrs.iter().filter(|a| registered(&t, a)).count();
+        assert_eq!(left, 0, "{left}/{STALLED} slow sessions are still registered");
+        assert_eq!(limiter.live_connections(), 0, "their slots are freed");
+        for h in held {
+            h.abort();
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}

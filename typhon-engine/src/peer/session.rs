@@ -295,6 +295,62 @@ fn may_serve(
         && !torrent.is_paused.load(Ordering::Relaxed)
 }
 
+/// Slowest rate, in bytes per second, at which a peer may take a block before
+/// it is dropped: 1 KiB/s, so a 16 KiB block has 16 s, raised to the floor.
+const MIN_SERVE_RATE: u64 = 1024;
+/// Least time any single block write is given, whatever its size: a peer on a
+/// bad link (a few KiB/s, with stalls) still gets through.
+const MIN_WRITE_WINDOW: Duration = Duration::from_secs(30);
+
+/// Time one block write of `len` bytes may take: `len / MIN_SERVE_RATE`, at
+/// least `MIN_WRITE_WINDOW`, at most the idle timeout. A peer that reads
+/// faster than about 550 B/s (16 KiB in 30 s) is never cut off by it.
+fn write_window(len: u32, idle: Duration) -> Duration {
+    Duration::from_secs(len as u64 / MIN_SERVE_RATE)
+        .max(MIN_WRITE_WINDOW)
+        .min(idle)
+}
+
+/// Time a session may spend writing blocks before its service rate is judged.
+const METER_WINDOW: Duration = Duration::from_secs(60);
+/// Least average rate, bytes per second of time spent writing, a session must
+/// have served over a `METER_WINDOW`: 1 KiB/s, below any link that really
+/// downloads pieces. A reader just above the per-write floor (~550 B/s) would
+/// otherwise keep its slot for ever.
+const MIN_AVG_RATE: u64 = 1024;
+
+/// What a session has served, against the time it spent writing. Only time
+/// inside a write counts, so a peer that asks rarely, or one our own upload
+/// limit makes wait, is never charged for the gaps.
+#[derive(Default)]
+struct ServeMeter {
+    busy: Duration,
+    bytes: u64,
+}
+
+impl ServeMeter {
+    /// Account one finished block write. False when the window is full and
+    /// the peer took blocks slower than `MIN_AVG_RATE` over it.
+    fn record(&mut self, took: Duration, bytes: u64) -> bool {
+        self.busy += took;
+        self.bytes += bytes;
+        if self.busy < METER_WINDOW {
+            return true;
+        }
+        let ok = self.bytes as f64 >= MIN_AVG_RATE as f64 * self.busy.as_secs_f64();
+        *self = ServeMeter::default();
+        ok
+    }
+}
+
+fn meter_ok(meter: &mut ServeMeter, t0: tokio::time::Instant, len: u64, addr: SocketAddr) -> bool {
+    let ok = meter.record(t0.elapsed(), len);
+    if !ok {
+        tracing::debug!("[peer-debug] {} BREAK serving below the minimum rate", addr);
+    }
+    ok
+}
+
 /// Read one block and put it on the wire, by sendfile when it can and the
 /// buffered path otherwise. Answers false when the connection is broken and
 /// the session must end. A buffered read that follows the peer's last request
@@ -309,10 +365,16 @@ async fn serve_block(
     serve_zerocopy: bool,
     fast_ext: bool,
     walk: &mut crate::disk::readcache::Walk,
+    meter: &mut ServeMeter,
     index: u32,
     begin: u32,
     length: u32,
 ) -> bool {
+    // A peer that stops reading, or only takes a few bytes at a time, parks
+    // every write below once the socket buffers are full. A block must go out
+    // at no less than `MIN_SERVE_RATE` (floor `MIN_WRITE_WINDOW`, cap the idle
+    // timeout), so a trickling reader loses its slot as a silent one does.
+    let write_deadline = write_window(length, peer_idle_timeout(torrent));
     let in_order = walk.step(index, begin, length);
     // Zero-copy sendfile fast-path: plaintext TCP peer whose
     // block lives in a single file. Splices from the page cache
@@ -321,12 +383,17 @@ async fn serve_block(
     if serve_zerocopy {
         if let Some((file, foff)) = disk.block_file(torrent, index, begin, length) {
             if crate::disk::is_block_resident(&file, foff, length as u64) {
-                if framed.flush().await.is_err() {
-                    tracing::debug!("[peer-debug] {} BREAK flush-before-sendfile failed", addr);
+                let t0 = tokio::time::Instant::now();
+                if !matches!(
+                    tokio::time::timeout(write_deadline, framed.flush()).await,
+                    Ok(Ok(()))
+                ) {
+                    tracing::debug!("[peer-debug] {} BREAK flush-before-sendfile failed or stalled", addr);
                     return false;
                 }
                 let served = match framed.get_ref().plain_tcp() {
-                    Some(sock) => {
+                    Some(sock) => match tokio::time::timeout(
+                        write_deadline,
                         crate::disk::serve_block_sendfile(
                             sock,
                             &file,
@@ -334,9 +401,13 @@ async fn serve_block(
                             index,
                             begin,
                             length as usize,
-                        )
-                        .await
-                    }
+                        ),
+                    )
+                    .await
+                    {
+                        Ok(r) => r,
+                        Err(_) => Err(std::io::Error::from(std::io::ErrorKind::TimedOut)),
+                    },
                     None => Ok(false),
                 };
                 match served {
@@ -345,7 +416,7 @@ async fn serve_block(
                         torrent.total_uploaded.fetch_add(len, Ordering::Relaxed);
                         stats.total_uploaded.fetch_add(len, Ordering::Relaxed);
                         stats.uploaded_last_tick.fetch_add(len, Ordering::Relaxed);
-                        return true;
+                        return meter_ok(meter, t0, len, addr);
                     }
                     Ok(false) => {}
                     Err(_) => {
@@ -362,11 +433,15 @@ async fn serve_block(
                 disk.prefetch_next(walk, torrent, index, begin);
             }
             let len = data.len() as u64;
-            if framed
-                .send(Message::Piece { index, begin, data })
-                .await
-                .is_err()
-            {
+            let t0 = tokio::time::Instant::now();
+            if !matches!(
+                tokio::time::timeout(
+                    write_deadline,
+                    framed.send(Message::Piece { index, begin, data })
+                )
+                .await,
+                Ok(Ok(()))
+            ) {
                 tracing::debug!(
                     "[peer-debug] {} BREAK send-piece failed (idx={}, begin={}, len={})",
                     addr,
@@ -379,6 +454,7 @@ async fn serve_block(
             torrent.total_uploaded.fetch_add(len, Ordering::Relaxed);
             stats.total_uploaded.fetch_add(len, Ordering::Relaxed);
             stats.uploaded_last_tick.fetch_add(len, Ordering::Relaxed);
+            return meter_ok(meter, t0, len, addr);
         }
         Err(_) => {
             if fast_ext {
@@ -499,6 +575,7 @@ pub async fn run(
         !is_encrypted && !crate::disk::path_is_zfs(torrent.save_path.read().as_path());
     // Whether this peer's requests walk a piece in order, for read-ahead.
     let mut walk = crate::disk::readcache::Walk::default();
+    let mut meter = ServeMeter::default();
     let mut local_choking_gen: u32 = stats.choking_gen.load(Ordering::Relaxed);
 
     // Both timers are built once and reset in place. Building them inside the
@@ -655,6 +732,7 @@ pub async fn run(
                             serve_zerocopy,
                             fast_ext,
                             &mut walk,
+                            &mut meter,
                             index,
                             begin,
                             length,
@@ -940,7 +1018,7 @@ pub async fn run(
                                 };
                                 match admit {
                                     Admit::Now => {
-                                        if !serve_block(&mut framed, &torrent, &disk, &stats, addr, serve_zerocopy, fast_ext, &mut walk, index, begin, length).await {
+                                        if !serve_block(&mut framed, &torrent, &disk, &stats, addr, serve_zerocopy, fast_ext, &mut walk, &mut meter, index, begin, length).await {
                                             break;
                                         }
                                     }
