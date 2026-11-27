@@ -479,6 +479,12 @@ impl PiecePicker {
         }
     }
 
+    /// The engine-wide download memory budget this picker counts against
+    /// (0 = unlimited), `None` when it is not attached to an engine.
+    pub fn mem_budget(&self) -> Option<u64> {
+        self.mem.as_ref().map(|m| m.budget())
+    }
+
     /// Count this picker in an engine's totals. Whatever it already holds
     /// moves with it, so attaching twice, or to another engine, stays exact.
     pub fn attach_mem(&mut self, mem: Arc<PieceMem>) {

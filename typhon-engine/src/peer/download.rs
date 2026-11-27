@@ -45,6 +45,17 @@ const MAX_PIPELINE: usize = 32; // max in-flight requests (was 16; bumped — MA
 /// whatever its peers sent.
 pub const PIECE_STALL_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// Most pieces one session may hold started at once. An honest peer needs
+/// about `MAX_PIPELINE` blocks in flight, so even single-block pieces fit; a
+/// peer that answers requests with blocks that are refused (a slot freed
+/// without the piece advancing) stops here instead of reserving a whole
+/// torrent.
+const MAX_STARTED_PIECES: usize = MAX_PIPELINE;
+/// Share of the engine's download memory budget one session may reserve: a
+/// quarter, so that other peers and torrents keep making progress while this
+/// one holds its pieces. One piece is always allowed, however large.
+const SESSION_BUDGET_SHARE: u64 = 4;
+
 /// A piece this peer is fetching.
 struct Started {
     /// When the piece was started or last advanced by this peer.
@@ -492,6 +503,22 @@ impl DownloadState {
                 None => break,
             };
             let piece_size = self.torrent.meta.piece_size(piece);
+            // Not more than a fair share of what this session may hold: the
+            // pieces it already has started stay its own, and no new one
+            // is reserved for it past the cap.
+            if !self.started.is_empty() {
+                let held: u64 = self
+                    .started
+                    .keys()
+                    .map(|&p| self.torrent.meta.piece_size(p) as u64)
+                    .sum();
+                let over_share = picker
+                    .mem_budget()
+                    .is_some_and(|b| b > 0 && held + piece_size as u64 > b / SESSION_BUDGET_SHARE);
+                if self.started.len() >= MAX_STARTED_PIECES || over_share {
+                    break;
+                }
+            }
             // The engine's download memory is spent: start nothing new until
             // pieces in flight finish and their writes return. Joining one
             // already in flight (endgame) costs nothing more.
@@ -553,7 +580,11 @@ impl DownloadState {
             };
             (outcome, piece_data)
         };
-        if matches!(outcome, Block::Stored | Block::Complete | Block::Duplicate) {
+        // Only a block we did not have is progress. A duplicate costs the peer
+        // nothing, so letting it restart the clock would let one connection
+        // keep pieces (and their share of the engine's download memory)
+        // reserved for as long as it likes.
+        if matches!(outcome, Block::Stored | Block::Complete) {
             if let Some(s) = self.started.get_mut(&index) {
                 s.since = Instant::now();
                 s.got += 1;
@@ -1712,6 +1743,90 @@ mod release_tests {
         assert_eq!(in_flight(&t), (0, 0));
         // And the peer can start afresh.
         assert!(!a.get_requests().is_empty());
+    }
+
+    /// A block this peer already sent is not progress: re-sending it must not
+    /// keep the piece (and its share of the engine's download memory) alive
+    /// past the stall delay.
+    #[test]
+    fn a_duplicate_block_does_not_restart_the_stall_clock() {
+        let t = torrent(64, PIECE);
+        let mut a = peer(&t);
+        let start = Instant::now();
+        let reqs = a.get_requests();
+        let p = reqs[0].0;
+        rt().block_on(a.on_piece(p, 0, &block()));
+        std::thread::sleep(Duration::from_millis(300));
+        // The same block again, much later.
+        rt().block_on(a.on_piece(p, 0, &block()));
+        std::thread::sleep(Duration::from_millis(300));
+        // Counted from the genuine block (~0 s) the delay has run out here;
+        // counted from the duplicate (~0.3 s) it would not have.
+        let cancels = a.release_stalled(start + PIECE_STALL_TIMEOUT + Duration::from_millis(200));
+        assert!(!cancels.is_empty());
+        assert_eq!(in_flight(&t), (0, 0), "the duplicate kept the piece alive");
+    }
+
+    /// Answer every request with a refused (empty) block until the session
+    /// asks for nothing more; returns how many pieces it holds.
+    fn drain_with_refused_blocks(a: &mut DownloadState, t: &Arc<TorrentState>) -> usize {
+        for _ in 0..1000 {
+            let reqs = a.get_requests();
+            if reqs.is_empty() {
+                break;
+            }
+            for (i, b, _) in reqs {
+                rt().block_on(a.on_piece(i, b, &[]));
+            }
+        }
+        in_flight(t).0
+    }
+
+    /// One peer cannot reserve more than a share of the engine's download
+    /// memory, so another torrent of the engine keeps starting pieces.
+    #[test]
+    fn one_session_cannot_reserve_the_whole_engine_budget() {
+        let mem = Arc::new(crate::torrent::piece_picker::PieceMem::default());
+        mem.set_budget(40 * PIECE as u64);
+        let attach = |t: &Arc<TorrentState>| {
+            t.picker.get().unwrap().lock().unwrap().attach_mem(mem.clone())
+        };
+        let ta = torrent(128, PIECE);
+        attach(&ta);
+        let tb = torrent(128, PIECE);
+        attach(&tb);
+        let mut a = peer(&ta);
+        let held = drain_with_refused_blocks(&mut a, &ta);
+        assert!(
+            mem.committed() <= mem.budget() / 2,
+            "one session reserved {held} pieces: {} of {} bytes",
+            mem.committed(),
+            mem.budget()
+        );
+        let mut b = peer(&tb);
+        assert!(!b.get_requests().is_empty(), "the other torrent is starved");
+    }
+
+    /// With no engine budget, one session still holds a bounded number of
+    /// pieces, not every piece of the torrent.
+    #[test]
+    fn one_session_cannot_reserve_every_piece_of_a_torrent() {
+        let t = torrent(200, PIECE);
+        let mut a = peer(&t);
+        let held = drain_with_refused_blocks(&mut a, &t);
+        assert!(held <= MAX_STARTED_PIECES, "one session holds {held} of 200 pieces");
+        assert!(held > 0);
+    }
+
+    /// An honest peer is not held back by the cap: it gets a full pipeline.
+    #[test]
+    fn the_cap_leaves_an_honest_pipeline_full() {
+        let mem = Arc::new(crate::torrent::piece_picker::PieceMem::default());
+        mem.set_budget(40 * PIECE as u64);
+        let t = torrent(128, PIECE);
+        t.picker.get().unwrap().lock().unwrap().attach_mem(mem);
+        let mut a = peer(&t);
+        assert_eq!(a.get_requests().len(), MAX_PIPELINE);
     }
 
     /// A paused torrent asks for nothing new; the stall delay is what lets
