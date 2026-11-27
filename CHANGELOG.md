@@ -55,6 +55,7 @@ renames the heading to `## v<major>.<release>.<patch> -- title` and sets
 ### Security
 
 - Hardening: the log file (`hydranos.log`), which carries the first-run setup code, is now created owner-only (0600) by default, whether or not `private_files` is on. Anything that reads the log as another uid (a log collector, a container host, another application) must be given access explicitly, for example by running as the same user or adjusting the file's group and mode after startup. A log left at another mode by an earlier run keeps that mode until `private_files` is turned on.
+- Hardening: a node marked `[daemon] enrolled = true` no longer offers first-run setup: it draws no setup code and `/api/setup` answers 409 instead of creating an account and returning the API key. Access model of such a node: it is managed by its controller through its API key; to open its own web UI, the operator sets a password on the host with `hydranos reset-password <password>`.
 
 ## v4.10.0 -- batches of adds sent straight to hoard, less memory per torrent, and rechecks that no longer fight over the same disk
 

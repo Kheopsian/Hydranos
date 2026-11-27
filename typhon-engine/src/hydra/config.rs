@@ -23,6 +23,12 @@ pub struct Daemon {
     pub api_key: String,
     #[serde(default)]
     pub data_dir: String,
+    /// This node was enrolled into a fleet and is driven through its API key by
+    /// the controller. First-run setup (which would hand that key to whoever
+    /// holds the setup code) is closed on it; the operator sets a password on
+    /// the host with `hydranos reset-password`. Off by default.
+    #[serde(default)]
+    pub enrolled: bool,
     // No `agent_token`: the 3.x agent channel it guarded is gone, and a key
     // still in an old file is named at startup by `deadkeys`.
     #[serde(default)]

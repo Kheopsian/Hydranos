@@ -60,7 +60,7 @@ const SETUP_CODE_ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 /// Draw the setup code and print it, if the instance has no admin account.
 /// Called once at boot, after logging is up.
 pub fn announce_setup_code(config: &crate::config::Config) {
-    if !config.auth.password_hash.is_empty() {
+    if !config.auth.password_hash.is_empty() || config.daemon.enrolled {
         return;
     }
     let code = fresh_setup_code();
@@ -137,6 +137,16 @@ pub async fn setup_password(
         return (
             StatusCode::CONFLICT,
             Json(serde_json::json!({"error": "admin account already configured"})),
+        )
+            .into_response();
+    }
+    if cfg.daemon.enrolled {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "this node is enrolled in a fleet and is managed by its controller; \
+                          run `hydranos reset-password <password>` on the host to set a password"
+            })),
         )
             .into_response();
     }
@@ -567,5 +577,45 @@ mod tests {
         let dir = std::env::temp_dir();
         assert_eq!(network_storage(&dir.to_string_lossy()), "");
         assert_eq!(network_storage("/no/such/data_dir"), "");
+    }
+
+    /// A node enrolled into a fleet is driven by its key, so first-run setup
+    /// must not hand that key out against the setup code, password or not.
+    #[tokio::test]
+    async fn an_enrolled_node_does_not_hand_out_its_key_at_setup() {
+        let key = "feedfacefeedfacefeedfacefeedfacefeedfacefeedface";
+        let s = crate::api::testing::state_from(
+            "enrolled-setup",
+            &format!("[daemon]\napi_key = \"{key}\"\nenrolled = true\n"),
+        );
+        assert!(s.state.cfg().auth.password_hash.is_empty());
+        set_setup_code_for_test("ABCDE-23456");
+        let body = serde_json::json!({
+            "username": "someone",
+            "password": "long-enough-1",
+            "setup_code": "ABCDE-23456",
+        })
+        .to_string();
+        let resp = setup_password(
+            State(s.state.clone()),
+            axum::extract::ConnectInfo("127.0.0.1:50000".parse().unwrap()),
+            HeaderMap::new(),
+            body,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let out = crate::api::testing::body_json(resp).await;
+        assert!(out.get("api_key").is_none(), "no key in the answer: {out}");
+        assert!(s.state.cfg().auth.password_hash.is_empty(), "no account created");
+    }
+
+    #[test]
+    fn an_enrolled_node_draws_no_setup_code() {
+        let cfg: crate::config::Config =
+            toml::from_str("[daemon]\nenrolled = true\n").unwrap();
+        // Another test may have set a code: start from none.
+        *SETUP_CODE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        announce_setup_code(&cfg);
+        assert!(!setup_code_pending());
     }
 }
