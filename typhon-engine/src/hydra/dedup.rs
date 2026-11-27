@@ -183,12 +183,25 @@ impl Layout {
 }
 
 /// A relative path made only of ordinary components.
+///
+/// Pure string logic, the same on every OS: both `/` and `\` split components
+/// (a backslash is a separator on Windows and a stray byte elsewhere, and a
+/// torrent name must not depend on which), so a leading separator (absolute,
+/// UNC) shows up as an empty component. Empty, `.`, `..` and NUL are refused,
+/// as is a Windows drive prefix (`C:`, `c:x`) on the first component.
 fn plain_rel(rel: &str) -> bool {
-    !rel.is_empty()
-        && !rel.contains('\0')
-        && rel
-            .split('/')
-            .all(|c| !c.is_empty() && c != "." && c != "..")
+    if rel.is_empty() || rel.contains('\0') {
+        return false;
+    }
+    let mut parts = rel.split(['/', '\\']);
+    let first = parts.clone().next().unwrap_or("");
+    let fb = first.as_bytes();
+    // Any `X:` first component is a drive prefix to Rust's Path::join on
+    // Windows, whatever follows (`C:`, `c:x`, `X: The Movie`).
+    if fb.len() >= 2 && fb[0].is_ascii_alphabetic() && fb[1] == b':' {
+        return false;
+    }
+    parts.all(|c| !c.is_empty() && c != "." && c != "..")
 }
 
 /// Read the file list out of raw torrent bytes.
@@ -786,18 +799,35 @@ mod tests {
 
     #[test]
     fn a_name_or_path_that_leaves_the_save_root_has_no_location() {
-        for bad in ["/etc/planted", "../climbed", "a/../../b", "..", ""] {
+        for bad in [
+            "/etc/planted", "../climbed", "a/../../b", "..", "", ".", "a/./b", "a//b", "a\0b",
+            // Windows spellings, refused on every OS by string logic alone.
+            "..\\x", "a\\..\\..\\b", "C:\\x", "c:/x", "c:x", "C:", "\\x", "\\\\srv\\share\\x",
+            "//srv/share/x", "a\\\\b", "X: The Movie", "A:B",
+        ] {
             let l = layout(&single(bad, 10, 1)).unwrap();
             assert!(l.on_disk("/save", 0).is_none(), "single {bad:?}");
             let l = layout(&multi(bad, &[("f", 10)])).unwrap();
             assert!(l.on_disk("/save", 0).is_none(), "root {bad:?}");
         }
-        for bad in ["/etc/passwd", "..", "a/../../x"] {
+        for bad in ["/etc/passwd", "..", "a/../../x", "..\\x", "C:\\x", "\\\\srv\\share", "\\x"] {
             let l = layout(&multi("ok", &[(bad, 10)])).unwrap();
             assert!(l.on_disk("/save", 0).is_none(), "file {bad:?}");
         }
         let l = layout(&multi("ok", &[("sub/f", 10)])).unwrap();
-        assert_eq!(l.on_disk("/save", 0), Some(PathBuf::from("/save/ok/sub/f")));
+        assert_eq!(
+            l.on_disk("/save", 0),
+            Some(Path::new("/save").join("ok").join("sub/f"))
+        );
+        // Plain relative names, odd punctuation included, still pass, and
+        // what they resolve to stays under the save root.
+        let root = Path::new("/save");
+        for good in ["a", "a b.mkv", "Re:Zero", "a..b", "dir/f.txt"] {
+            let l = layout(&single(good, 10, 1)).unwrap();
+            let resolved = l.on_disk("/save", 0).expect(good);
+            assert!(resolved.starts_with(root), "{good:?} resolved to {resolved:?}");
+            assert!(resolved.as_path() != root, "{good:?} resolved to the root itself");
+        }
     }
 
     #[test]
@@ -813,6 +843,10 @@ mod tests {
         for name in [
             outside.to_string_lossy().into_owned(),
             "../planted.bin".to_string(),
+            "..\\planted.bin".to_string(),
+            "C:\\planted.bin".to_string(),
+            "\\\\srv\\share\\planted.bin".to_string(),
+            "\\planted.bin".to_string(),
         ] {
             let want = layout(&single(&name, 100, 1)).unwrap();
             let r = plan(&have, &lib.to_string_lossy(), &want, &dl.to_string_lossy());
