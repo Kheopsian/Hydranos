@@ -1499,5 +1499,14 @@
   "{n} isolated": "{n} geïsoleerd",
   "{n} torrents share their path with another torrent whose files there have other bytes. They were added stopped, each in a folder of its own; starting one downloads what is not already there:": "{n} torrents delen hun pad met een andere torrent waarvan de bestanden daar andere bytes hebben. Ze zijn gestopt toegevoegd, elk in een eigen map; er een starten downloadt wat er nog niet is:",
   "Trust this qBittorrent's certificate (self-signed HTTPS)": "Het certificaat van deze qBittorrent vertrouwen (zelfondertekende HTTPS)",
-  "For a WebUI on https:// with a self-signed certificate. Hydranos then accepts the certificate without checking it, for this import only.": "Voor een WebUI op https:// met een zelfondertekend certificaat. Hydranos accepteert het certificaat dan zonder controle, alleen voor deze import."
+  "For a WebUI on https:// with a self-signed certificate. Hydranos then accepts the certificate without checking it, for this import only.": "Voor een WebUI op https:// met een zelfondertekend certificaat. Hydranos accepteert het certificaat dan zonder controle, alleen voor deze import.",
+  "share or speed limits on {n} torrents": "deel- of snelheidslimieten bij {n} torrents",
+  "speed caps on {n} torrents": "snelheidslimieten bij {n} torrents",
+  "sequential or first/last piece download on {n} torrents": "sequentieel downloaden of eerste/laatste stukken eerst bij {n} torrents",
+  "Carried over: {list}.": "Overgenomen: {list}.",
+  "Not carried over: {list}.": "Niet overgenomen: {list}.",
+  "force start ({n})": "geforceerd starten ({n})",
+  "super seeding ({n})": "super seeding ({n})",
+  "automatic torrent management ({n})": "automatisch torrentbeheer ({n})",
+  "queue position ({n})": "wachtrijpositie ({n})"
 }

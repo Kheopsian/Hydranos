@@ -566,6 +566,102 @@ async fn a_qbit_retry_lists_the_library_again_and_takes_a_new_mapping() {
     let _ = std::fs::remove_dir_all(&data);
 }
 
+/// What the source client set on a torrent comes along: share limits, a speed
+/// cap and the download order show on the imported torrent in Hydranos.
+#[tokio::test]
+async fn an_imported_qbit_torrent_keeps_its_share_limits_speed_cap_and_order() {
+    use axum::response::IntoResponse;
+    async fn login() -> axum::response::Response {
+        ([("set-cookie", "SID=1; HttpOnly")], "Ok.").into_response()
+    }
+    async fn info() -> axum::response::Response {
+        // A retry lists the library again: the settings come from this row.
+        axum::Json(serde_json::json!([{
+            "hash": "h1", "name": "alpha", "save_path": "/new", "state": "pausedDL",
+            "ratio_limit": 2.5, "seeding_time_limit": 90, "up_limit": 51200,
+            "seq_dl": true
+        }]))
+        .into_response()
+    }
+    async fn export() -> axum::response::Response {
+        torrent_bytes("alpha").into_response()
+    }
+    let app = axum::Router::new()
+        .route("/api/v2/auth/login", axum::routing::post(login))
+        .route("/api/v2/torrents/info", axum::routing::get(info))
+        .route("/api/v2/torrents/export", axum::routing::get(export));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let s = st("imp-qb-settings");
+    let data = std::env::temp_dir().join(format!("imp-qb-settings-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data);
+    std::fs::create_dir_all(&data).unwrap();
+    let row: crate::importer::QbitTorrent = serde_json::from_value(serde_json::json!({
+        "hash": "h1", "name": "alpha", "save_path": "/new", "state": "pausedDL",
+        "ratio_limit": 2.5, "seeding_time_limit": 90, "up_limit": 51200,
+        "seq_dl": true
+    }))
+    .unwrap();
+    let failed = Arc::new(crate::importer::Progress::default());
+    *failed.retry.lock().unwrap() = Some(crate::importer::RetryKit {
+        cands: vec![crate::importer::Candidate::from_qbit(&row)],
+        creds: Some(crate::importer::QbitCreds {
+            url: format!("http://{addr}"),
+            username: "u".into(),
+            password: "p".into(),
+            insecure: false,
+        }),
+        choices: crate::importer::Choices::default(),
+    });
+    failed
+        .finished
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    s.state
+        .imports
+        .lock()
+        .unwrap()
+        .insert("imp-0".into(), failed.clone());
+
+    let body = serde_json::json!({"path_map": {"/new": data}}).to_string();
+    let resp =
+        super::post_import_retry(State(s.state.clone()), RawQuery(None), keyed(KEY), body).await;
+    assert!(
+        resp.status().is_success(),
+        "retry answered {:?}",
+        resp.status()
+    );
+    let mut status = serde_json::Value::Null;
+    for _ in 0..500 {
+        let (id, p) = latest_import(&s.state).expect("a job");
+        if id != "imp-0" && !p.running() {
+            status = p.as_json();
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(status["phase"], "done", "got {status}");
+    assert_eq!(status["failed"], 0, "got {status}");
+
+    let rows = body_json(
+        super::qbit_torrents_info(
+            State(s.state.clone()),
+            RawQuery(None),
+            keyed(KEY),
+            String::new(),
+        )
+        .await,
+    )
+    .await;
+    let row = &rows.as_array().expect("an array")[0];
+    assert_eq!(row["ratio_limit"].as_f64(), Some(2.5), "got {row}");
+    assert_eq!(row["seeding_time_limit"], 90, "got {row}");
+    assert_eq!(row["up_limit"], 51200, "got {row}");
+    assert_eq!(row["seq_dl"], true, "got {row}");
+    let _ = std::fs::remove_dir_all(&data);
+}
+
 /// The qBittorrent preview answers the URL problem only when there is one.
 #[tokio::test]
 async fn the_qbit_preview_refuses_an_empty_url_and_reports_an_unreachable_one() {
@@ -823,6 +919,7 @@ async fn an_imported_cross_seed_with_other_bytes_is_isolated_stopped_and_said_so
         uploaded: 0,
         downloaded: 0,
         note: None,
+        settings: Default::default(),
     };
     assert_eq!(
         add(req(torrent_over("Pack", &[("E01.mkv", &first)], 16384))),
