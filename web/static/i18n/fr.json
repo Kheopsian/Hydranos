@@ -1570,5 +1570,11 @@
   "{n} isolated": "{n} isolés",
   "{n} torrents share their path with another torrent whose files there have other bytes. They were added stopped, each in a folder of its own; starting one downloads what is not already there:": "{n} torrents partagent leur chemin avec un autre torrent dont les fichiers y ont d'autres octets. Ils ont été ajoutés à l'arrêt, chacun dans un dossier à lui ; en démarrer un télécharge ce qui n'y est pas déjà :",
   "Trust this qBittorrent's certificate (self-signed HTTPS)": "Faire confiance au certificat de ce qBittorrent (HTTPS auto-signé)",
-  "For a WebUI on https:// with a self-signed certificate. Hydranos then accepts the certificate without checking it, for this import only.": "Pour une WebUI en https:// avec un certificat auto-signé. Hydranos accepte alors le certificat sans le vérifier, pour cet import uniquement."
+  "For a WebUI on https:// with a self-signed certificate. Hydranos then accepts the certificate without checking it, for this import only.": "Pour une WebUI en https:// avec un certificat auto-signé. Hydranos accepte alors le certificat sans le vérifier, pour cet import uniquement.",
+  "Upload speed": "Débit d'envoi",
+  "Uploaded / downloaded, all time, by this engine": "Envoyé / téléchargé, depuis toujours, par ce moteur",
+  "{up} uploaded over {base} downloaded, all time, by this engine": "{up} envoyés pour {base} téléchargés, depuis toujours, par ce moteur",
+  "Torrents with at least one connected peer": "Torrents avec au moins un pair connecté",
+  "Our ratio spread over the other seeds in the swarm, averaged over the seeding torrents": "Notre ratio réparti sur les autres seeds du swarm, en moyenne sur les torrents en partage",
+  "Torrents added since the daemon started": "Torrents ajoutés depuis le démarrage du démon"
 }

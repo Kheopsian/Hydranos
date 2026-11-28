@@ -293,6 +293,83 @@ pub struct AppState {
     /// What the engines and nodes a category spreads over measured a moment
     /// ago (`spread`).
     pub spread: Arc<crate::spread::SpreadCache>,
+    /// The Hoard chips, counted once for every connected page.
+    pub chips: Arc<ChipFeed>,
+}
+
+/// The library-wide chips, counted by ONE loop and handed to every stream.
+///
+/// Each stream used to run its own count, and a count walks the whole library
+/// (remote nodes included) under the store lock: N open tabs were N continuous
+/// scans. Now there is one, it runs only while a page is looking at Hoard, and
+/// the streams just listen.
+pub struct ChipFeed {
+    latest: tokio::sync::watch::Sender<Option<serde_json::Value>>,
+    /// Unix seconds of the last time a page showed Hoard.
+    seen: std::sync::atomic::AtomicI64,
+    running: std::sync::atomic::AtomicBool,
+}
+
+impl Default for ChipFeed {
+    fn default() -> Self {
+        Self {
+            latest: tokio::sync::watch::channel(None).0,
+            seen: Default::default(),
+            running: Default::default(),
+        }
+    }
+}
+
+/// A page that has not asked for Hoard in this long is not looking at it.
+const CHIPS_IDLE_SECS: i64 = 60;
+
+impl ChipFeed {
+    pub fn listen(&self) -> tokio::sync::watch::Receiver<Option<serde_json::Value>> {
+        self.latest.subscribe()
+    }
+}
+
+/// A page is showing Hoard: start the shared count if it is not running.
+pub(crate) fn chips_wanted(state: &AppState) {
+    use std::sync::atomic::Ordering;
+    state.chips.seen.store(now_secs(), Ordering::Relaxed);
+    if state.chips.running.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let state = state.clone();
+    tokio::spawn(async move {
+        let mut wait = std::time::Duration::from_secs(1);
+        loop {
+            tokio::time::sleep(wait).await;
+            let idle = now_secs() - state.chips.seen.load(Ordering::Relaxed);
+            if idle > CHIPS_IDLE_SECS || state.chips.latest.receiver_count() == 0 {
+                state.chips.running.store(false, Ordering::Release);
+                // A page may have asked between the check and the store.
+                let again = now_secs() - state.chips.seen.load(Ordering::Relaxed)
+                    <= CHIPS_IDLE_SECS
+                    && state.chips.latest.receiver_count() > 0;
+                if again && !state.chips.running.swap(true, Ordering::AcqRel) {
+                    continue;
+                }
+                return;
+            }
+            let started = std::time::Instant::now();
+            let page = fleet_page(&state, "hoard", "limit=1&facets=1").await;
+            // Never under a second, and at least ten times what it cost.
+            wait = (started.elapsed() * 10).max(std::time::Duration::from_secs(1));
+            let Some(facets) = page.get("facets").filter(|f| !f.is_null()) else {
+                continue;
+            };
+            state.chips.latest.send_if_modified(|cur| {
+                if cur.as_ref() == Some(facets) {
+                    false
+                } else {
+                    *cur = Some(facets.clone());
+                    true
+                }
+            });
+        }
+    });
 }
 
 impl AppState {
@@ -3794,6 +3871,9 @@ pub(crate) async fn engine_page_value(
 
     let torrents = engine.manager.all();
     let total = torrents.len();
+    // Who uploaded within the hold, kept by the engine. The filter, its chip
+    // and the stream's active list all read this one set, so they agree.
+    let active = engine.manager.active_set();
     // The hardlink columns read a summary the link scanner (or a workflow
     // pass) already computed, cf `linkindex::Summary`: one `Arc` clone here,
     // one hash lookup per row below, and only when the sort asks for it or the
@@ -3860,7 +3940,6 @@ pub(crate) async fn engine_page_value(
             let core = typhon_engine::rpc::dispatch::torrent_core(t);
             let f = facts.get(&t.info_hash);
             let row_state = crate::row::derive_state_static(core.state, f.user_paused);
-            let upload_rate = t.upload_rate.get() as i64;
 
             let tracker_id: u16 = {
                 let trackers = t.live_trackers.read();
@@ -3939,7 +4018,8 @@ pub(crate) async fn engine_page_value(
                 "__check_reading__" => row_state == "checking_files" && !check_waiting,
                 "__check_waiting__" => check_waiting,
                 "__active__" => {
-                    (row_state == "seeding" || row_state == "seed_only") && upload_rate > 0
+                    (row_state == "seeding" || row_state == "seed_only")
+                        && active.contains(&t.info_hash)
                 }
                 "__tracker_err__" => tracker_error,
                 "__error__" => torrent_error,
@@ -3967,7 +4047,9 @@ pub(crate) async fn engine_page_value(
                 if m_search && m_cat && m_tag && m_tracker && m_errclass {
                     n_all += 1;
                     *f_state.entry(row_state).or_insert(0) += 1;
-                    if (row_state == "seeding" || row_state == "seed_only") && upload_rate > 0 {
+                    if (row_state == "seeding" || row_state == "seed_only")
+                        && active.contains(&t.info_hash)
+                    {
                         n_active += 1;
                     }
                     if tracker_error {
@@ -4833,6 +4915,8 @@ async fn get_hoard_page(
 ) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
+    // Someone is looking at Hoard: keep the shared chip count alive.
+    chips_wanted(&state);
     get_engine_page(&state, "hoard", &query).await
 }
 
@@ -5069,34 +5153,7 @@ async fn get_hoard_stats(
 ) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
-    let cfg = state.cfg();
-
-    let torrents = state
-        .engines
-        .get("hoard")
-        .map(|e| e.manager.len() as i64)
-        .unwrap_or(0);
-
-    let live = live_stats(&state, "hoard");
-
-    Json(serde_json::json!({
-        "active_download_rate": live.download_rate,
-        "active_peers": live.active_peers,
-        "active_upload_rate": live.upload_rate,
-        "engine": "hoard",
-        "listen_port": cfg.hoard.listen_port,
-        "running": true,
-        "session_downloaded": 0,
-        "session_uploaded": 0,
-        "stagger_complete": true,
-        "swarm_leechers": swarm_leechers_total(&state),
-        "torrents_announced": announced_count(&state, "hoard"),
-        "torrents_uploading": live.torrents_uploading,
-        "torrents_with_peers": live.torrents_with_peers,
-        "total_torrents": torrents,
-        "unseeded_peers": live.unseeded_peers,
-    }))
-    .into_response()
+    Json(hoard_stats_value(&state)).into_response()
 }
 
 /// Hot engines added at runtime. The two built-in engines are NOT listed here:
@@ -5119,8 +5176,14 @@ async fn get_engines(
 ) -> Response {
     let query = query.unwrap_or_default();
     guard!(state, headers, query);
+    Json(engine_payload(&state)).into_response()
+}
+
+/// One card per engine, for `/api/engines` and for the status frame, so the
+/// Overview and the Performance cards follow the stream instead of polling.
+fn engine_payload(state: &AppState) -> Vec<serde_json::Value> {
     let stats = crate::obs::engine_stats(&state.engines);
-    let out: Vec<serde_json::Value> = state
+    state
         .engines
         .engines()
         .iter()
@@ -5139,10 +5202,11 @@ async fn get_engines(
                 // Live figures, so the Overview can draw a card for every
                 // engine and not only the two it knew by name.
                 "stats": s,
+                // All time, over the torrents it holds (`latest_ratio`).
+                "ratio": crate::benchsampler::latest_ratio(&e.id),
             })
         })
-        .collect();
-    Json(out).into_response()
+        .collect()
 }
 
 /// What one engine holds, for the spread of a category on ANOTHER node (and
@@ -6483,15 +6547,31 @@ async fn get_bench_range(
     let Some(bench) = state.bench.as_ref() else {
         return Json(serde_json::json!([])).into_response();
     };
-    let db = match bench.lock() {
-        Ok(db) => db,
-        Err(e) => e.into_inner(),
-    };
     let (start, end) = range_params(&query);
-    match db.samples_in_range(start, end) {
-        Ok(rows) => Json(rows).into_response(),
-        Err(e) => {
+    // The page says how many points its graphs can draw; the window is folded
+    // to that, and a window that already fits stays raw. The engines' rows
+    // beside it use the same bucket, which is how the page lines them up.
+    // `bucket=5` asks for the raw 5 s samples of a window.
+    let bucket = query_param(&query, "bucket")
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or_else(|| bench_bucket(&query, start, end))
+        .max(5.0);
+    // A month of history is a scan of hundreds of thousands of rows: off the
+    // async workers, and the bench database's lock is let go as soon as it is read.
+    let bench = bench.clone();
+    let rows = tokio::task::spawn_blocking(move || {
+        let db = bench.lock().unwrap_or_else(|e| e.into_inner());
+        db.samples_bucketed(start, end, bucket)
+    })
+    .await;
+    match rows {
+        Ok(Ok(rows)) => Json(rows).into_response(),
+        Ok(Err(e)) => {
             tracing::warn!("bench range query failed: {e}");
+            Json(serde_json::json!([])).into_response()
+        }
+        Err(e) => {
+            tracing::warn!("bench range task failed: {e}");
             Json(serde_json::json!([])).into_response()
         }
     }
@@ -6512,7 +6592,7 @@ async fn get_bench_engines_range(
     };
     let (start, end) = range_params(&query);
     // 5 s is the sampling interval: a finer bucket would only repeat rows.
-    let bucket = ((end - start) / 300.0).max(5.0);
+    let bucket = bench_bucket(&query, start, end);
     let db = bench.lock().unwrap_or_else(|e| e.into_inner());
     match db.engine_samples_in_range(start, end, bucket) {
         Ok(rows) => Json(rows).into_response(),
@@ -6569,6 +6649,19 @@ async fn get_tracker_stats_range(
 /// Unparseable values land on a default 24h window rather than an error: the
 /// graph asks for a picture, and an empty one because a parameter was malformed
 /// is indistinguishable from a node that recorded nothing.
+/// Points a graph is sent when the page does not say.
+const BENCH_POINTS: f64 = 1500.0;
+
+/// The bucket, in seconds, that folds `start..end` to the `points` the page
+/// asked for (100 to 4 000), never finer than the 5 s sampling interval.
+fn bench_bucket(query: &str, start: f64, end: f64) -> f64 {
+    let points = query_param(query, "points")
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(BENCH_POINTS)
+        .clamp(100.0, 4_000.0);
+    ((end - start) / points).max(5.0)
+}
+
 fn range_params(query: &str) -> (f64, f64) {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -6887,7 +6980,20 @@ fn status_payload(state: &AppState) -> serde_json::Value {
     });
     let disk = state.engines.catalogue_usage();
 
+    let system = crate::benchsampler::latest_system();
+
     serde_json::json!({
+        "engines": engine_payload(state),
+        "performance": {
+            "measured": system.measured,
+            "zfs": system.zfs,
+            "has_iowait": system.has_iowait,
+            "read_cache": read_cache_json(),
+            "iowait_pct": crate::row::num_json(system.iowait_pct),
+            "arc_hit_rate_pct": crate::row::num_json(system.arc_hit_rate_pct),
+            "arc_miss_per_sec": crate::row::num_json(system.arc_miss_per_sec),
+            "arc_size_bytes": crate::row::num_json(system.arc_size_bytes),
+        },
         "baseline": {
             "global_downloaded": base_down + total_down,
             "global_uploaded": base_up + total_up,
@@ -6905,7 +7011,14 @@ fn status_payload(state: &AppState) -> serde_json::Value {
             "engine": "hoard", "listen_port": cfg.hoard.listen_port,
             "running": true,
             "seed_size": seeded.map(|s| s.0),
+            "avg_share": crate::benchsampler::latest_share("hoard"),
             "session_downloaded": hoard_session.1, "session_uploaded": hoard_session.0,
+            "session_grabbed": state.engines.get("hoard").map(|e| e.manager.added_this_session()).unwrap_or(0),
+            "session_ratio": crate::row::num_json(if hoard_session.1 > 0 { hoard_session.0 as f64 / hoard_session.1 as f64 } else { 0.0 }),
+            // Lifetime, over what the engine holds: see `latest_ratio`.
+            "ratio": crate::benchsampler::latest_ratio("hoard"),
+            "ratio_uploaded": crate::benchsampler::latest_ratio_parts("hoard").map(|p| p.0),
+            "ratio_base": crate::benchsampler::latest_ratio_parts("hoard").map(|p| p.1),
             "stagger_complete": true,
             "swarm_leechers": swarm_leechers_total(state),
             "torrents_announced": announced_count(state, "hoard"),
@@ -6917,12 +7030,17 @@ fn status_payload(state: &AppState) -> serde_json::Value {
         "race": {
             "active_downloads": downloading,
             "active_seeds": seeds,
+            "avg_share": crate::benchsampler::latest_share("race"),
             "seed_size": seeded.map(|s| s.1),
             "session_downloaded": race_session.1,
-            "session_grabbed": 0,
+            "session_grabbed": state.engines.get("race").map(|e| e.manager.added_this_session()).unwrap_or(0),
             "session_ratio": crate::row::num_json(ratio),
+            "ratio": crate::benchsampler::latest_ratio("race"),
+            "ratio_uploaded": crate::benchsampler::latest_ratio_parts("race").map(|p| p.0),
+            "ratio_base": crate::benchsampler::latest_ratio_parts("race").map(|p| p.1),
             "session_uploaded": session_up,
             "torrents": race_torrents,
+            "torrents_announced": announced_count(state, "race"),
             "torrents_with_peers": race_live.torrents_with_peers,
             "total_download_rate": race_live.download_rate,
             "total_peers": race_live.active_peers,
@@ -7056,31 +7174,9 @@ async fn stream_events(
                 axum::response::sse::Event::default()
                     .data(serde_json::to_string(&payload).unwrap_or_default()),
             );
-            let live = live_stats(&state, "hoard");
-            let cfg = state.cfg();
             let hoard = serde_json::json!({
                 "event": "hoard_stats_snapshot",
-                "data": {
-                    "active_download_rate": live.download_rate,
-                    "active_peers": live.active_peers,
-                    "active_upload_rate": live.upload_rate,
-                    "engine": "hoard",
-                    "listen_port": cfg.hoard.listen_port,
-                    "running": true,
-                    "session_downloaded": 0,
-                    "session_uploaded": 0,
-                    "stagger_complete": true,
-                    "swarm_leechers": swarm_leechers_total(&state),
-                    "torrents_announced": announced_count(&state, "hoard"),
-                    "torrents_uploading": live.torrents_uploading,
-                    "torrents_with_peers": live.torrents_with_peers,
-                    "total_torrents": state
-                        .engines
-                        .get("hoard")
-                        .map(|e| e.manager.len() as i64)
-                        .unwrap_or(0),
-                    "unseeded_peers": live.unseeded_peers,
-                },
+                "data": hoard_stats_value(&state),
             });
             yield Ok::<_, std::convert::Infallible>(
                 axum::response::sse::Event::default()
@@ -7183,6 +7279,9 @@ async fn stream_events(
             let mut bus = engine.manager.bus().subscribe();
             let tx = tx.clone();
             let mode = engine.role.clone();
+            let state = state.clone();
+            let manager = engine.manager.clone();
+            let engine_id = engine.id.clone();
             tokio::spawn(async move {
                 // Never waits on the client. A page that stops reading (a dead
                 // socket not yet noticed) would hold this task, and the bus would
@@ -7201,12 +7300,35 @@ async fn stream_events(
                 let removed = |h: String| {
                     serde_json::json!({"event": "torrent_removed", "data": {"mode": mode, "info_hash": h}})
                 };
+                // Who is serving changed. Folded like the rest while the page
+                // cannot take it: a hash added then dropped before it was sent
+                // cancels out, and the last count wins.
+                let mut held_active: Option<(
+                    std::collections::HashMap<String, serde_json::Value>,
+                    std::collections::BTreeSet<String>,
+                    usize,
+                )> = None;
+                // Named by the engine's agent: two engines of one role can hold
+                // the same hash, and one stopping must not drop the other's row.
+                let agent = local_agent(&engine_id);
+                let active_frame = |added: Vec<serde_json::Value>, gone: Vec<String>, count: usize| {
+                    serde_json::json!({"event": "active_changed",
+                        "data": {"mode": mode, "agent": agent, "added": added, "removed": gone, "count": count}})
+                };
                 loop {
-                    let holding = !held_rows.is_empty() || !held_removed.is_empty();
+                    let holding = !held_rows.is_empty()
+                        || !held_removed.is_empty()
+                        || held_active.is_some();
                     tokio::select! {
                         permit = tx.reserve(), if holding => {
                             let Ok(permit) = permit else { return };
-                            if let Some(h) = held_removed.pop_first() {
+                            if let Some((add, gone, count)) = held_active.take() {
+                                permit.send(active_frame(
+                                    add.into_values().collect(),
+                                    gone.into_iter().collect(),
+                                    count,
+                                ));
+                            } else if let Some(h) = held_removed.pop_first() {
                                 permit.send(removed(h));
                             } else {
                                 permit.send(stats(held_rows.drain().map(|(_, r)| r).collect()));
@@ -7229,6 +7351,25 @@ async fn stream_events(
                                     Err(tokio::sync::mpsc::error::TrySendError::Closed(())) => return,
                                 }
                             }
+                            Ok(Event::ActiveChanged { added, removed: gone, count }) => {
+                                let rows = active_rows(&state, &manager, &engine_id, &added);
+                                let (mut add, mut away, _) = held_active.take().unwrap_or_default();
+                                for r in rows {
+                                    if let Some(h) = r.get("info_hash").and_then(|v| v.as_str()) {
+                                        away.remove(h);
+                                        add.insert(h.to_string(), r);
+                                    }
+                                }
+                                for h in gone {
+                                    // Always named: a hash that stopped, restarted
+                                    // and stopped again was added here a moment
+                                    // ago, and the page still holds the first
+                                    // row. Removing an unknown row is a no-op.
+                                    add.remove(&h);
+                                    away.insert(h);
+                                }
+                                held_active = Some((add, away, count));
+                            }
                             Ok(Event::TorrentRemoved { info_hash }) => {
                                 held_rows.remove(&info_hash);
                                 if holding {
@@ -7250,6 +7391,41 @@ async fn stream_events(
                             Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
                             Err(_) => return,
                         },
+                    }
+                }
+            });
+        }
+        // The chips of the list, counted once for the library and pushed when a
+        // figure moves. The page used to learn them by asking for a page, so
+        // they trailed the rows by a poll. Counted by the page's own function
+        // (limit 1, no filter): one definition of every chip, fleet included.
+        // Kept off the status tick so a slow count never holds the header,
+        // and spaced by what it costs: never under a second, and at least ten
+        // times the time it took, so a very large library is not walked
+        // continuously.
+        if state.engines.get("hoard").is_some() {
+            // Only listens: the count itself is one loop for every page (see
+            // `ChipFeed`), started by a page asking for Hoard.
+            let mut chips = state.chips.listen();
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                loop {
+                    let facets = chips.borrow_and_update().clone();
+                    if let Some(facets) = facets {
+                        let frame = serde_json::json!({
+                            "event": "facets_snapshot",
+                            "data": {"mode": "hoard", "facets": facets},
+                        });
+                        // A whole figure, not a delta: a page that cannot take
+                        // it now gets the next one.
+                        if tx.is_closed() {
+                            return;
+                        }
+                        let _ = tx.try_send(frame);
+                    }
+                    tokio::select! {
+                        changed = chips.changed() => if changed.is_err() { return },
+                        _ = tx.closed() => return,
                     }
                 }
             });
@@ -7287,31 +7463,9 @@ async fn stream_events(
             );
             // The hoard header reads its own frame, not the status one.
             if is_status {
-                let live = live_stats(&state, "hoard");
-                let cfg = state.cfg();
                 let hoard = serde_json::json!({
                     "event": "hoard_stats_snapshot",
-                    "data": {
-                        "active_download_rate": live.download_rate,
-                        "active_peers": live.active_peers,
-                        "active_upload_rate": live.upload_rate,
-                        "engine": "hoard",
-                        "listen_port": cfg.hoard.listen_port,
-                        "running": true,
-                        "session_downloaded": 0,
-                        "session_uploaded": 0,
-                        "stagger_complete": true,
-                        "swarm_leechers": swarm_leechers_total(&state),
-                        "torrents_announced": announced_count(&state, "hoard"),
-                        "torrents_uploading": live.torrents_uploading,
-                        "torrents_with_peers": live.torrents_with_peers,
-                        "total_torrents": state
-                            .engines
-                            .get("hoard")
-                            .map(|e| e.manager.len() as i64)
-                            .unwrap_or(0),
-                        "unseeded_peers": live.unseeded_peers,
-                    },
+                    "data": hoard_stats_value(&state),
                 });
                 yield Ok::<_, std::convert::Infallible>(
                     axum::response::sse::Event::default()
@@ -7324,6 +7478,39 @@ async fn stream_events(
     axum::response::Sse::new(stream)
         .keep_alive(axum::response::sse::KeepAlive::default())
         .into_response()
+}
+
+/// The rows of torrents that just began to serve, built like the page's.
+fn active_rows(
+    state: &AppState,
+    manager: &std::sync::Arc<typhon_engine::torrent::TorrentManager>,
+    engine_id: &str,
+    hashes: &[String],
+) -> Vec<serde_json::Value> {
+    if hashes.is_empty() {
+        return Vec::new();
+    }
+    let agent = local_agent(engine_id);
+    let facts = {
+        let store = state.store.read().unwrap();
+        store
+            .facts_for_hashes(hashes, engine_id)
+            .unwrap_or_default()
+    };
+    let empty = crate::row::StoreFacts::default();
+    hashes
+        .iter()
+        .filter_map(|h| {
+            let ih = typhon_engine::torrent::hex_decode(h).ok()?;
+            let t = manager.get(&ih)?;
+            let raw = typhon_engine::rpc::dispatch::torrent_to_json(&t);
+            Some(crate::row::build(
+                &raw,
+                facts.get(h).unwrap_or(&empty),
+                &agent,
+            ))
+        })
+        .collect()
 }
 
 /// The Logs tab's live feed.
@@ -7434,6 +7621,9 @@ async fn get_bench_current(
     let sys = crate::benchsampler::latest_system();
 
     Json(serde_json::json!({
+        "zfs": sys.zfs,
+        "has_iowait": sys.has_iowait,
+        "read_cache": read_cache_json(),
         "arc_demand_hit_rate_pct": crate::row::num_json(if sys.measured { sys.arc_demand_hit_rate_pct } else { arc.demand_hit_rate_pct }),
         // Over the sampler's last interval: the figures above are ratios since
         // the pool was imported, which a busy minute cannot move.
@@ -7476,6 +7666,69 @@ async fn get_bench_current(
         "ts": now,
     }))
     .into_response()
+}
+
+/// The Hoard strip's figures, one definition for the route, the stream's first
+/// frame and its live loop.
+fn hoard_stats_value(state: &AppState) -> serde_json::Value {
+    let live = live_stats(state, "hoard");
+    let cfg = state.cfg();
+    let (up, down) = engine_session(state, "hoard");
+    serde_json::json!({
+        "active_download_rate": live.download_rate,
+        "active_peers": live.active_peers,
+        "active_upload_rate": live.upload_rate,
+        // The mean of ratio over the other seeds, from the 30 s tracker pass;
+        // null before it has run or when no torrent qualifies.
+        "avg_share": crate::benchsampler::latest_share("hoard"),
+        "engine": "hoard",
+        "listen_port": cfg.hoard.listen_port,
+        "running": true,
+        "session_downloaded": down,
+        "session_grabbed": state
+            .engines
+            .get("hoard")
+            .map(|e| e.manager.added_this_session())
+            .unwrap_or(0),
+        "session_ratio": crate::row::num_json(if down > 0 { up as f64 / down as f64 } else { 0.0 }),
+        // What the strip shows: lifetime, over what the engine holds. The
+        // session one divided Hoard's upload by the little it downloaded.
+        "ratio": crate::benchsampler::latest_ratio("hoard"),
+        "ratio_uploaded": crate::benchsampler::latest_ratio_parts("hoard").map(|p| p.0),
+        "ratio_base": crate::benchsampler::latest_ratio_parts("hoard").map(|p| p.1),
+        "session_uploaded": up,
+        "stagger_complete": true,
+        "swarm_leechers": swarm_leechers_total(state),
+        "torrents_announced": announced_count(state, "hoard"),
+        "torrents_uploading": live.torrents_uploading,
+        "torrents_with_peers": live.torrents_with_peers,
+        "total_torrents": state
+            .engines
+            .get("hoard")
+            .map(|e| e.manager.len() as i64)
+            .unwrap_or(0),
+        "unseeded_peers": live.unseeded_peers,
+    })
+}
+
+/// The daemon's own read cache, as counters since start plus what it holds.
+/// Cumulative on purpose: the page differences two frames for a rate, so no
+/// state is kept here and any number of pages can read it.
+fn read_cache_json() -> serde_json::Value {
+    use std::sync::atomic::Ordering::Relaxed;
+    use typhon_engine::disk::readcache as rc;
+    let cache = typhon_engine::disk::ReadCache::process();
+    serde_json::json!({
+        "hits": rc::HIT.load(Relaxed),
+        "reads": rc::MISS.load(Relaxed),
+        "joined": rc::JOINED.load(Relaxed),
+        "bypass": rc::BYPASS.load(Relaxed),
+        "prefetch_issued": rc::PREFETCH_ISSUED.load(Relaxed),
+        "prefetch_hit": rc::PREFETCH_HIT.load(Relaxed),
+        "prefetch_wasted": rc::PREFETCH_WASTED.load(Relaxed),
+        "bytes": cache.bytes(),
+        "budget_bytes": cache.budget(),
+    })
 }
 
 /// The host's ZFS ARC figures, read from kstat.
@@ -18273,6 +18526,7 @@ pub(crate) mod testing {
             bench: None,
             sessions: Default::default(),
             spread: Default::default(),
+            chips: Default::default(),
         };
         TestState { state, dir }
     }

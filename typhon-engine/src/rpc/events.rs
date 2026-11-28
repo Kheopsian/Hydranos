@@ -78,6 +78,13 @@ pub enum Event {
         /// Only torrents with delta since last snapshot tick.
         torrents: Vec<TorrentStatsMini>,
     },
+    /// Who is serving right now changed: torrents that began to upload, torrents
+    /// that stopped for the whole hold (`ACTIVE_HOLD`), and how many serve now.
+    ActiveChanged {
+        added: Vec<String>,
+        removed: Vec<String>,
+        count: usize,
+    },
 }
 
 #[derive(Clone, Debug, Serialize)]

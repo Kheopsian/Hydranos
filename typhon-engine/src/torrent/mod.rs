@@ -133,6 +133,14 @@ pub struct StartupIssue {
 /// other kind apart); the count is not capped.
 pub const MAX_STARTUP_ISSUES: usize = 500;
 
+/// How long a torrent stays "actively seeding" after its last upload.
+pub const ACTIVE_HOLD: std::time::Duration = std::time::Duration::from_secs(5);
+
+#[derive(Default)]
+struct ActiveSet {
+    last: std::collections::HashMap<InfoHash, std::time::Instant>,
+}
+
 // A one-off shape; naming it would add an alias that nothing else uses.
 #[allow(clippy::type_complexity)]
 pub struct TorrentManager {
@@ -154,6 +162,18 @@ pub struct TorrentManager {
     pub cached_active_peers: std::sync::atomic::AtomicUsize,
     pub cached_torrents_with_peers: std::sync::atomic::AtomicUsize,
     pub cached_torrents_uploading: std::sync::atomic::AtomicUsize,
+    /// The torrents that uploaded within `ACTIVE_HOLD`, kept by `update_rates`
+    /// (which already visits every torrent each second). "Actively seeding"
+    /// reads this instead of the rate of the last second, which is zero for a
+    /// torrent that serves in bursts: the filter, its chip and the rows
+    /// disagreed with one another every other tick.
+    active: std::sync::Mutex<ActiveSet>,
+    /// Torrents added to this engine since the daemon started: what the Race
+    /// strip calls Grabbed. Only a fresh add counts; startup restores its
+    /// records through its own loader, and an adoption from another engine is
+    /// a move, not a grab.
+    added_session: std::sync::atomic::AtomicU64,
+    active_view: std::sync::RwLock<Arc<std::collections::HashSet<InfoHash>>>,
     /// Torrents per `TorrentStatus`, indexed by its discriminant, plus the
     /// paused ones at `STATUS_PAUSED`. Counted by the same walk, so /metrics
     /// and the anomaly report read a count instead of scanning a million
@@ -685,6 +705,9 @@ impl TorrentManager {
             cached_active_peers: std::sync::atomic::AtomicUsize::new(0),
             cached_torrents_with_peers: std::sync::atomic::AtomicUsize::new(0),
             cached_torrents_uploading: std::sync::atomic::AtomicUsize::new(0),
+            active: Default::default(),
+            added_session: std::sync::atomic::AtomicU64::new(0),
+            active_view: Default::default(),
             cached_status_counts: Default::default(),
             restore_total: std::sync::atomic::AtomicUsize::new(0),
             restore_done: std::sync::atomic::AtomicUsize::new(0),
@@ -1319,6 +1342,7 @@ impl TorrentManager {
             self.incomplete.insert(ih);
         }
         self.insert_counted(ih, state_arc.clone());
+        self.added_session.fetch_add(1, Ordering::Relaxed);
         // Track in DHT (no-op for private torrents, see dht::track_torrent).
         self.track_in_dht(state_arc);
         // Push event to subscribers (Go hydra cache). Silent if no subscribers.
@@ -2519,6 +2543,7 @@ impl TorrentManager {
         let mut uploading = 0usize;
         let mut moved = (0u64, 0u64);
         let mut by_status = [0usize; STATUS_SLOTS];
+        let mut uploaders: Vec<InfoHash> = Vec::new();
         for entry in self.torrents.iter() {
             let t = entry.value();
             // Two loads per torrent on a walk that already makes several: the
@@ -2548,6 +2573,7 @@ impl TorrentManager {
             }
             if t.upload_rate.get() > 0 {
                 uploading += 1;
+                uploaders.push(t.info_hash);
             }
             // Cold torrents (no peers, rate already 0) moved no bytes since the
             // last tick -> skip the EMA update so per-tick cost tracks the hot
@@ -2582,6 +2608,58 @@ impl TorrentManager {
         for (slot, n) in self.cached_status_counts.iter().zip(by_status) {
             slot.store(n, Ordering::Relaxed);
         }
+        self.refresh_active(&uploaders, std::time::Instant::now());
+    }
+
+    /// Fold this tick's uploaders into the active set and say what changed.
+    /// Public so a test can drive the clock; `update_rates` is the one caller.
+    pub fn refresh_active(&self, uploaders: &[InfoHash], now: std::time::Instant) {
+        let (added, removed, count, snapshot) = {
+            let mut a = self.active.lock().unwrap();
+            let mut added = Vec::new();
+            for ih in uploaders {
+                if a.last.insert(*ih, now).is_none() {
+                    added.push(*ih);
+                }
+            }
+            let mut removed = Vec::new();
+            a.last.retain(|ih, at| {
+                let keep = now.duration_since(*at) < ACTIVE_HOLD;
+                if !keep {
+                    removed.push(*ih);
+                }
+                keep
+            });
+            let snapshot = if added.is_empty() && removed.is_empty() {
+                None
+            } else {
+                Some(Arc::new(
+                    a.last
+                        .keys()
+                        .copied()
+                        .collect::<std::collections::HashSet<_>>(),
+                ))
+            };
+            (added, removed, a.last.len(), snapshot)
+        };
+        if let Some(s) = snapshot {
+            *self.active_view.write().unwrap() = s;
+            self.bus.publish(crate::rpc::events::Event::ActiveChanged {
+                added: added.iter().map(hex_encode).collect(),
+                removed: removed.iter().map(hex_encode).collect(),
+                count,
+            });
+        }
+    }
+
+    /// Torrents added since the daemon started.
+    pub fn added_this_session(&self) -> u64 {
+        self.added_session.load(Ordering::Relaxed)
+    }
+
+    /// Who uploaded within `ACTIVE_HOLD`: one `Arc` clone, no walk.
+    pub fn active_set(&self) -> Arc<std::collections::HashSet<InfoHash>> {
+        self.active_view.read().unwrap().clone()
     }
 
     /// Torrents per state as of the last `update_rates` walk: stopped,
@@ -8033,6 +8111,62 @@ mod manager_tests {
         let counts = mgr.tracker_host_counts();
         assert!(counts.contains_key("a.example"), "got {counts:?}");
         assert!(counts.contains_key("b.example"), "got {counts:?}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Grabbed counts the adds of this run, one each, and nothing else.
+    #[test]
+    fn grabbed_counts_each_fresh_add_of_this_run() {
+        let (mgr, root) = manager("grabbed");
+        assert_eq!(mgr.added_this_session(), 0);
+        add(&mgr, "alpha");
+        add(&mgr, "bravo");
+        assert_eq!(mgr.added_this_session(), 2);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A torrent that serves in bursts stays "active" for the whole hold, joins
+    /// and leaves the set exactly once, and each change is announced once.
+    #[test]
+    fn a_torrent_stays_active_for_the_hold_after_its_last_upload() {
+        use crate::rpc::events::Event;
+        let (mgr, root) = manager("active-hold");
+        let a = add(&mgr, "alpha");
+        let b = add(&mgr, "bravo");
+        let mut rx = mgr.bus().subscribe();
+        let t0 = std::time::Instant::now();
+        let secs = |n| t0 + std::time::Duration::from_secs(n);
+
+        mgr.refresh_active(&[a, b], secs(0));
+        assert!(mgr.active_set().contains(&a) && mgr.active_set().contains(&b));
+        match rx.try_recv() {
+            Ok(Event::ActiveChanged {
+                added,
+                removed,
+                count,
+            }) => {
+                assert_eq!((added.len(), removed.len(), count), (2, 0, 2));
+            }
+            other => panic!("expected the two joins, got {other:?}"),
+        }
+        // Bravo goes quiet, alpha keeps a trickle: bravo is still active inside
+        // the hold, and nothing is announced while nothing changed.
+        mgr.refresh_active(&[a], secs(3));
+        assert!(mgr.active_set().contains(&b), "held for 5 s");
+        assert!(rx.try_recv().is_err(), "no change, no event");
+        // Past the hold bravo leaves, alpha stays.
+        mgr.refresh_active(&[a], secs(6));
+        assert!(mgr.active_set().contains(&a) && !mgr.active_set().contains(&b));
+        match rx.try_recv() {
+            Ok(Event::ActiveChanged {
+                added,
+                removed,
+                count,
+            }) => {
+                assert_eq!((added.len(), removed, count), (0, vec![hex_encode(&b)], 1));
+            }
+            other => panic!("expected bravo's leave, got {other:?}"),
+        }
         let _ = std::fs::remove_dir_all(root);
     }
 

@@ -350,7 +350,8 @@ pub async fn start(
         // The last stamp is the tick the torrent was last seen on: a removed
         // torrent stops being seen, and its entry goes at the next purge
         // instead of staying for the life of the process.
-        let mut last: HashMap<[u8; 20], (u64, u64, u8, usize, usize, u64, u64)> = HashMap::new();
+        let mut last: HashMap<[u8; 20], (u64, u64, u8, usize, usize, u64, u64, bool)> =
+            HashMap::new();
         let mut tick: u64 = 0;
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
@@ -379,16 +380,23 @@ pub async fn start(
                     }
                     None => 0,
                 };
+                let urate = t.upload_rate.get();
+                let drate = t.download_rate.get();
+                let moving = urate > 0 || drate > 0;
                 let moved = match last.get_mut(&ih) {
                     Some(prev) => {
                         prev.5 = tick;
-                        let (pul, pdl, pst, pp, pi, _, pck) = *prev;
+                        let (pul, pdl, pst, pp, pi, _, pck, pmoving) = *prev;
                         ul != pul
                             || dl != pdl
                             || st != pst
                             || peers != pp
                             || interested != pi
                             || ck != pck
+                            // The rate drops to zero a tick after the counters
+                            // stop, so nothing else would say so: the row kept
+                            // its last non-zero rate until a refetch.
+                            || moving != pmoving
                     }
                     None => true, // first-time entry always sent
                 };
@@ -413,15 +421,15 @@ pub async fn start(
                         status: st,
                         total_uploaded: ul,
                         total_downloaded: dl,
-                        upload_rate: t.upload_rate.get(),
-                        download_rate: t.download_rate.get(),
+                        upload_rate: urate,
+                        download_rate: drate,
                         peers_connected: peers as u32,
                         peers_interested: interested as u32,
                         progress,
                         checking_progress: checking.map(|c| c as f32),
                         check_queued,
                     });
-                    last.insert(ih, (ul, dl, st, peers, interested, tick, ck));
+                    last.insert(ih, (ul, dl, st, peers, interested, tick, ck, moving));
                 }
             }
             if tick.is_multiple_of(300) {

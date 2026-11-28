@@ -176,7 +176,7 @@
                         <div class="metric"><span>Download</span><span id="race-download">0</span></div>
                         <div class="metric"><span>Peers</span><span id="race-peers">0</span></div>
                         <div class="metric"><span>Seeding</span><span id="race-seed-size">-</span></div>
-                        <div class="metric"><span>Session ratio</span><span id="race-ov-ratio">0.00</span></div>
+                        <div class="metric"><span>Ratio</span><span id="race-ov-ratio">-</span></div>
                     </div>
                 </div>
 
@@ -190,7 +190,7 @@
                         <div class="metric"><span>Download</span><span id="hoard-download">0</span></div>
                         <div class="metric"><span>Peers</span><span id="hoard-connections">0</span></div>
                         <div class="metric"><span>Seeding</span><span id="hoard-seed-size">-</span></div>
-                        <div class="metric"><span>Session ratio</span><span id="hoard-ov-ratio">0.00</span></div>
+                        <div class="metric"><span>Ratio</span><span id="hoard-ov-ratio">-</span></div>
                     </div>
                 </div>
 
@@ -233,12 +233,16 @@
             <!-- The same strip as Hoard's: one figure per cell, the engine's
                  colour on its edge. -->
             <div class="engine-stats engine-race">
-                <div class="es"><span class="es-label">Downloading</span><strong id="race-active-dl">0</strong></div>
-                <div class="es"><span class="es-label">Uploading</span><strong id="race-active-seeds">0</strong></div>
-                <div class="es"><span class="es-label">Current UL</span><strong id="race-current-ul">0 B/s</strong></div>
-                <div class="es"><span class="es-label">Ratio</span><strong id="race-session-ratio">0.00</strong></div>
-                <div class="es"><span class="es-label">Grabbed</span><strong id="race-session-grabbed">0</strong></div>
-                <div class="es"><span class="es-label">Avg Share</span><strong id="race-avg-share">-</strong></div>
+                <div class="es"><span class="es-label">Torrents</span><strong id="race-st-total">-</strong></div>
+                <div class="es"><span class="es-label">Uploading</span><strong id="race-st-up">-</strong></div>
+                <div class="es"><span class="es-label">Downloading</span><strong id="race-st-down">-</strong></div>
+                <div class="es"><span class="es-label">Upload speed</span><strong id="race-st-ul">-</strong></div>
+                <div class="es"><span class="es-label">Ratio</span><strong id="race-st-ratio">-</strong></div>
+                <div class="es"><span class="es-label">Peers</span><strong id="race-st-peers">-</strong></div>
+                <div class="es"><span class="es-label">With peers</span><strong id="race-st-withpeers">-</strong></div>
+                <div class="es"><span class="es-label">Announced</span><strong id="race-st-ann">-</strong></div>
+                <div class="es"><span class="es-label">Grabbed</span><strong id="race-st-grabbed">-</strong></div>
+                <div class="es"><span class="es-label">Avg Share</span><strong id="race-st-share">-</strong></div>
             </div>
             <!-- One card per VOLUME. The drain acts per filesystem, so the
                  panel is shaped like the thing it commands: a global bar over
@@ -459,9 +463,14 @@
             <div class="engine-stats engine-hoard">
                 <div class="es"><span class="es-label">Torrents</span><strong id="hoard-st-total">-</strong></div>
                 <div class="es"><span class="es-label">Uploading</span><strong id="hoard-st-up">-</strong></div>
-                <div class="es"><span class="es-label">With peers</span><strong id="hoard-st-withpeers">-</strong></div>
+                <div class="es"><span class="es-label">Downloading</span><strong id="hoard-st-down">-</strong></div>
+                <div class="es"><span class="es-label">Upload speed</span><strong id="hoard-st-ul">-</strong></div>
+                <div class="es"><span class="es-label">Ratio</span><strong id="hoard-st-ratio">-</strong></div>
                 <div class="es"><span class="es-label">Peers</span><strong id="hoard-st-peers">-</strong></div>
+                <div class="es"><span class="es-label">With peers</span><strong id="hoard-st-withpeers">-</strong></div>
                 <div class="es"><span class="es-label">Announced</span><strong id="hoard-st-ann">-</strong></div>
+                <div class="es"><span class="es-label">Grabbed</span><strong id="hoard-st-grabbed">-</strong></div>
+                <div class="es"><span class="es-label">Avg Share</span><strong id="hoard-st-share">-</strong></div>
             </div>
             <!-- The progress bar is gone. At 300k torrents "19 uploading" and
                  "945 with peers" are sub-pixel slivers: the bar read as full and
@@ -1411,17 +1420,35 @@
                     <span class="bm-metric-label">IOWait</span>
                     <span class="bm-metric-value" id="bm-iowait">--</span>
                 </div>
-                <div class="bm-metric-card">
+                <div class="bm-metric-card" data-zfs-only>
                     <span class="bm-metric-label">ARC Hit Rate</span>
                     <span class="bm-metric-value" id="bm-arc-hit">--</span>
                 </div>
-                <div class="bm-metric-card">
+                <div class="bm-metric-card" data-zfs-only>
                     <span class="bm-metric-label">ARC Miss/s</span>
                     <span class="bm-metric-value" id="bm-arc-miss">--</span>
                 </div>
-                <div class="bm-metric-card">
+                <div class="bm-metric-card" data-zfs-only>
                     <span class="bm-metric-label">ARC Size</span>
                     <span class="bm-metric-value" id="bm-arc-size">--</span>
+                </div>
+                <!-- The daemon's own read cache: on every host, ZFS or not. Rates
+                     come from two frames' counters (see _renderReadCache). -->
+                <div class="bm-metric-card" title="Peer requests answered from memory instead of the disk">
+                    <span class="bm-metric-label">Read Cache Hit Rate</span>
+                    <span class="bm-metric-value" id="bm-rc-hit">--</span>
+                </div>
+                <div class="bm-metric-card" title="Slices read from disk because the cache did not hold them">
+                    <span class="bm-metric-label">Read Cache Reads/s</span>
+                    <span class="bm-metric-value" id="bm-rc-reads">--</span>
+                </div>
+                <div class="bm-metric-card" title="Bytes held now / budget ([daemon] read_cache_mb)">
+                    <span class="bm-metric-label">Read Cache Size</span>
+                    <span class="bm-metric-value" id="bm-rc-size">--</span>
+                </div>
+                <div class="bm-metric-card" title="Slices read ahead that left the cache unused: a disk read for nothing">
+                    <span class="bm-metric-label">Read-ahead Wasted</span>
+                    <span class="bm-metric-value" id="bm-rc-waste">--</span>
                 </div>
             </div>
 
@@ -1493,7 +1520,7 @@
                     <div class="bm-chart-title">IOWait %</div>
                     <div class="bm-chart-wrap"><canvas id="chart-iowait"></canvas></div>
                 </div>
-                <div class="bm-chart-container">
+                <div class="bm-chart-container" data-zfs-only>
                     <div class="bm-chart-title">ARC Miss / sec</div>
                     <div class="bm-chart-wrap"><canvas id="chart-arc-miss"></canvas></div>
                 </div>

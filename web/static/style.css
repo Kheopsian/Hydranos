@@ -3052,6 +3052,18 @@ footer {
 }
 .col-grip:hover { background: var(--accent-hoard); opacity: 0.5; }
 
+/* The header cells clip like the body cells do. A label wider than its column
+   (a long French word, or a column dragged narrow) ran under the next header
+   and the two overlapped; now it is cut with an ellipsis and the grip's width
+   is kept clear of the text. */
+#race-table thead th,
+#hoard-table thead th {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    padding-right: 12px;
+}
+
 
 /* Truncate overflowing cell text (long torrent names) with an ellipsis when a
    column is resized narrow, instead of spilling into the neighbouring column. */

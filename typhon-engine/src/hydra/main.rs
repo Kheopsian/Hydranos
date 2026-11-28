@@ -1096,6 +1096,7 @@ async fn async_main(workers: usize) -> anyhow::Result<()> {
         bench,
         sessions: Default::default(),
         spread: Default::default(),
+        chips: Default::default(),
     };
     pathclaim::install_claim_probe(&state);
     // Started once the shared config exists, so a changed `[daemon] exit_probe`
